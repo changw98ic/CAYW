@@ -1,47 +1,112 @@
+<div align="center">
+
 # CAYW
 
-**Code As Your Wish — Rust-native modular Agent Runtime**
+**Code As Your Wish — 让模型写代码来调用工具的开源 Agent 运行时**
 
-> 开发初期 / Early development
+*An open-source, Rust-native agent runtime where the model orchestrates tools by writing code, not by calling them one by one.*
+
+![status](https://img.shields.io/badge/status-early%20planning-orange)
+![language](https://img.shields.io/badge/core-Rust-b7410e)
+![scripting](https://img.shields.io/badge/CodeMode-Luau-00a2ff)
+![license](https://img.shields.io/badge/license-Apache--2.0-blue)
+
+</div>
+
+> [!IMPORTANT]
+> **CAYW 目前处于规划阶段，还没有可运行的代码。** 本页描述的是设计目标，不是已有功能。进度以 [GitHub Issues](https://github.com/changw98ic/CAYW/issues) 的验收结果为准。
 >
-> 本项目目前处于规划与初始化阶段。本仓库仅包含项目说明；下述内核、模块和工具策略均为设计目标，尚未实现，也不代表已有可用功能。
->
-> CAYW is in early development. This repository currently contains project documentation only. The runtime, modules, and tool policies below are planned, not implemented features.
+> CAYW is in early planning. Nothing below is implemented yet.
 
-## 项目方向
+## 一句话说明
 
-CAYW 计划构建 Rust 原生、独立的模块化 Agent Runtime 内核，逐步替换 WinWinCode 对 Codex 内核的依赖。内核以 Headless Core 为中心，界面、远程服务和工作流能力按需组合。
+CAYW 是一个**给 AI Agent 用的“操作系统内核”**：你接入任意大模型，它负责让模型安全地读写文件、搜索代码、跑测试、管理进程，并且可以中途取消、断电恢复、限制花费。
 
-项目承接 [WinWinCode](https://github.com/changw98ic/winwincode) 和 [CodePatchBay](https://github.com/changw98ic/codepatchbay) 的后续开发方向。当前初始化不复制旧项目代码，不创建空的架构骨架。
+它不是又一个聊天界面，也不是某个模型的封装，而是界面、IDE 插件、自动化流程都可以接上去的那一层**无界面运行时**。
 
-## 计划中的模块边界
+## 为什么要做
 
-以下是待验证的职责划分，不是当前实现。
+现在大多数编程 Agent 有两个问题：
 
-| 模块 | 规划职责 |
-| --- | --- |
-| Headless Core | 独立运行的 Rust 原生 Agent 内核，不依赖图形界面。 |
-| TUI / WebUI | 可插拔的交互界面，按使用场景选择。 |
-| Server（可选） | 按需提供远程接入与服务能力，不作为本地运行的必选依赖。 |
-| Device | 管理设备侧的执行进程与资源，包括进程生命周期和资源回收。 |
-| StrongFlow / JEv / Fusion / Observer（可选） | 按需接入的扩展模块；具体职责、接口和启用方式待设计验证。 |
+| 常见做法 | 带来的问题 | CAYW 的做法 |
+| --- | --- | --- |
+| 模型一次调用一个工具，每步都要来回一轮 | 慢、费 token，多步任务容易中途走偏 | **CodeMode**：模型写一小段 Luau 脚本，一次编排多个工具调用 |
+| 直接给模型一个 Shell | 权限无边界，跑出去的进程管不住、停不下 | 默认**不给 Shell**，只提供预置的受控能力；真需要时按任务申请、限定范围 |
+| 会话和执行绑死在一个进程里 | 崩溃或断线后无法安全恢复，可能重复执行有副作用的操作 | **会话与执行者分离**；恢复前先核对“不确定是否已执行”的操作，不盲目重放 |
 
-## CodeMode 与工具能力
+## 它怎么工作
 
-CodeMode 作为统一的工具编排入口，优先使用 Luau 进行实现，并优先提供已经做好的标准 CodeMode 能力集（底层由受控 Rust 能力执行）。
+```mermaid
+flowchart LR
+  M["大模型<br/>OpenAI / Anthropic / Gemini / 兼容接口"]
+  subgraph Core["CAYW Headless Core（Rust）"]
+    S["Session<br/>持久会话 · 事件流"]
+    C["CodeMode<br/>Luau 脚本编排"]
+    P["统一管控<br/>权限 · 审批 · 取消 · 预算"]
+  end
+  R["受控 Rust 能力<br/>文件 · 检索 · Git · 构建/测试"]
+  D["Device<br/>进程树 · 资源回收"]
+  UI["接入方<br/>SDK · TUI · WebUI · 远程 Server"]
 
-默认不向 Agent 暴露 Bash、Shell、Node 或 Python 通用执行入口。常规文件、检索、Git 与项目构建/测试需求优先由预置的 CodeMode 标准能力覆盖；出现真实能力缺口时，再按具体任务申请开放所需能力，并限定用途和范围。
+  M <--> S
+  S --> C --> P --> R --> D
+  UI <--> S
+```
 
-这一默认策略针对 Agent 的工具暴露。项目构建和测试所需的工具链仍应按实际任务需要使用；需要额外执行能力时，按任务申请，避免阻塞必要的构建与测试。
+模型拿到的不是一堆零散工具，而是一个可以写脚本的受控环境。下面是一个**设想中的示意**（不是真实 API，接口仍在设计中）：
 
-## 初期工作
+```lua
+-- 示意：模型生成的 CodeMode 脚本，一次完成“找到失败测试并读出相关代码”
+local result = cayw.test.run({ filter = "auth" })
+for _, failure in ipairs(result.failures) do
+  local src = cayw.fs.read(failure.file, { around = failure.line, lines = 30 })
+  cayw.emit({ test = failure.name, snippet = src })
+end
+```
 
-当前优先夯实 Stage A 执行底座（最小 SDK/IPC 契约、三平台验证基线、基于 Luau 的预置 CodeMode 编排与最小 Device 进程树治理），不把流式多轮对话闭环（`#6`）作为第一要务抢跑。实现进度与可运行方式将在对应能力实际完成后补充。
+每一步都经过同一套权限、取消和预算检查；脚本里没有任意执行命令的入口。
 
-## 开发路线图
+## 设计原则
 
-从[开发路线图](docs/development-map.md)查看分阶段交付、18 个计划 Issues、硬依赖与可并行工作。所有功能任务均为计划，完成情况以对应 Issue 的验收证据为准。
+- **Headless 优先**：内核单独就能跑完整的多轮对话和工具执行，界面、远程服务、工作流都是可选插件。
+- **AI Native**：工具接口为“模型写代码来用”而设计，而不是为人点按钮设计。
+- **默认最小权限**：不向 Agent 暴露 Bash / Shell / Node / Python 通用入口，缺什么能力按任务申请。
+- **可恢复、可取消**：任何执行都能被打断；崩溃后能恢复，且不会重复做已经做过的事。
+- **模型无关**：逐个接入 OpenAI、Anthropic、Gemini 及兼容接口，只标注实际验证过的能力。
+- **不依赖 Codex**：CAYW 是 [WinWinCode](https://github.com/changw98ic/winwincode) 与 [CodePatchBay](https://github.com/changw98ic/codepatchbay) 的后续方向，目标是完全替换它们对 Codex 内核的依赖。
+
+## 模块一览
+
+| 模块 | 作用 | 必需？ |
+| --- | --- | --- |
+| Headless Core | 会话、事件、CodeMode、权限与调度 | 必需 |
+| Device | 管理本机执行进程、资源与内容存放 | 必需 |
+| SDK / IPC | 供外部程序接入的公开接口 | 必需 |
+| TUI / WebUI | 终端界面 / 网页界面，可单独安装 | 可选 |
+| Server | 远程接入；设备只需主动连出，不开放端口 | 可选 |
+| StrongFlow / JEv / Fusion / Observer | 强流程、扩展与诊断模块，可插拔 | 可选 |
+
+## 路线图
+
+| 阶段 | 目标 | 状态 |
+| --- | --- | --- |
+| A | 最小 SDK 与 IPC、三平台验证基线、Luau CodeMode 原型、最小进程管理 | 计划中（当前重点） |
+| B | 只用内核跑通第一个真实的流式多轮对话 + 工具执行 | 计划中 |
+| C | 崩溃恢复、按需权限申请、MCP / Skills 接入、多模型、多会话并发 | 计划中 |
+| D | 模块接口、TUI、WebUI、远程 Server、可插拔扩展 | 计划中 |
+| E | CPU / 内存 / GPU 资源策略与内容存放、可选加密同步 | 计划中 |
+
+完整的 18 个任务、依赖关系和验收标准见 [开发路线图](docs/development-map.md)。
+
+## 参与
+
+项目还在早期，现在最有价值的参与方式是：
+
+- 在 [Issues](https://github.com/changw98ic/CAYW/issues) 里讨论设计、指出问题或补充验收场景；
+- 关注 Stage A 的任务（#1–#5），它们是后续一切的基础。
+
+**给 AI 编程助手：** 在本仓库工作前请先读 [`AGENTS.md`](AGENTS.md) 和 [`docs/development-map.md`](docs/development-map.md)。
 
 ## 许可证
 
-许可证尚未选定，当前初始化不添加许可证文件。
+[Apache License 2.0](LICENSE)
