@@ -138,14 +138,14 @@ fn host_control_decisions_require_exact_cursor_and_current_execution_identity() 
             initial.cursor,
             None,
             "host",
-            "module_bound",
-            json!({"module":"workflow"}),
+            "plugin_bound",
+            json!({"plugin":"workflow"}),
         )
         .unwrap();
     assert!(decision.attempt.is_none());
     assert!(
         matches!(decision.event, CoreEvent::Host { ref kind, ref data }
-        if kind == "module_bound" && data["actor"] == "host")
+        if kind == "plugin_bound" && data["actor"] == "host")
     );
     assert!(
         store
@@ -178,7 +178,7 @@ fn host_control_decisions_require_exact_cursor_and_current_execution_identity() 
             snapshot.cursor,
             Some(&lease),
             "host",
-            "module_frozen",
+            "plugin_frozen",
             json!({}),
         )
         .unwrap();

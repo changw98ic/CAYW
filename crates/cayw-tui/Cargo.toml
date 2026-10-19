@@ -23,7 +23,7 @@ async-stream.workspace = true
 cayw-ai.workspace = true
 cayw-agent = { path = "../cayw-agent" }
 cayw-core = { path = "../cayw-core" }
-cayw-modules = { path = "../cayw-modules", default-features = false }
-cayw-runtime = { path = "../cayw-runtime", features = ["modules"] }
+cayw-plugins = { path = "../cayw-plugins", default-features = false }
+cayw-runtime = { path = "../cayw-runtime", features = ["plugins"] }
 tempfile = "3"
 tokio-util.workspace = true
