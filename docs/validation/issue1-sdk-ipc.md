@@ -44,7 +44,7 @@ Requests 在原任务和进程清理期间保持 Closing，禁止继续接纳能
 
 完整 workspace 严格检查还发现 `crates/cayw-runtime/tests/module_lifecycle.rs` 的一个条件导入错误：`Message` 只在 StrongFlow 子模块使用，却放在仅要求 `modules` feature 的外层。补充修复只把这个导入移入 `strongflow` 子模块，随后运行完整测试与全部 Runtime feature 的七项模块测试；没有改变生产逻辑、feature 定义或依赖。
 
-根 Cargo 清单、根锁文件、客户端清单和客户端锁文件未改。客户端 299 个第三方锁条目的包名、版本、来源及校验值都存在于根锁的 374 个第三方条目中。Runtime 默认不启用可选 feature，其实际依赖图没有 UI、可选 Server、Harness、Codex 或代码索引运行依赖。Core/存储/事件协议仍是 v3，外层 IPC 帧仍是 v1。
+根 Cargo 清单、根锁文件、客户端清单和客户端锁文件未改。客户端 299 个第三方锁条目的包名、版本、来源及校验值都存在于根锁的 374 个第三方条目中。Runtime 默认不启用可选 feature，其实际依赖图没有 UI、可选 Server、VerifyTool、Codex 或代码索引运行依赖。Core/存储/事件协议仍是 v3，外层 IPC 帧仍是 v1。
 
 ## 提交前独立副本验证
 
