@@ -9,8 +9,8 @@ description = "Headless runtime integrating durable sessions, bounded Luau tools
 
 [features]
 default = []
-modules = ["dep:cayw-modules"]
-strongflow = ["modules", "cayw-modules/strongflow"]
+plugins = ["dep:cayw-plugins"]
+strongflow = ["plugins", "cayw-plugins/strongflow"]
 remote = ["dep:cayw-remote"]
 
 [dependencies]
@@ -25,7 +25,7 @@ cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }
 cayw-requests = { path = "../cayw-requests", version = "0.1.0" }
-cayw-modules = { path = "../cayw-modules", version = "0.1.0", default-features = false, optional = true }
+cayw-plugins = { path = "../cayw-plugins", version = "0.1.0", default-features = false, optional = true }
 cayw-remote = { path = "../cayw-remote", version = "0.1.0", optional = true }
 futures.workspace = true
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
@@ -50,8 +50,8 @@ test = false
 doc = false
 
 [[bin]]
-name = "cayw-runtime-module-fixture"
+name = "cayw-runtime-plugin-fixture"
 path = "tests/fixtures/external.rs"
-required-features = ["modules"]
+required-features = ["plugins"]
 test = false
 doc = false

@@ -421,7 +421,7 @@ impl SessionView {
                     .ok_or("Fork event is missing messages")?;
             }
             "host" => {
-                // Host extensions can change the module binding or frozen flag.
+                // Host extensions can change the plugin binding or frozen flag.
                 self.synced = false;
             }
             "tool_started" => {

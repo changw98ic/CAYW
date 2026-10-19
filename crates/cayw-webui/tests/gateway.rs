@@ -291,7 +291,7 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
     for method in [
         "tool.execute",
         "session.reconcile",
-        "module.load",
+        "plugin.load",
         "runtime.shutdown",
     ] {
         let result = envelope(

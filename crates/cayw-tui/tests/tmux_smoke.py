@@ -27,7 +27,7 @@ captures = {}
 source_root = Path(__file__).resolve().parents[3]
 source_paths = ["Cargo.lock", "Cargo.toml", "crates/cayw-tui/Cargo.toml"]
 source_paths += ["crates/cayw-tui/" + path for path in ["src/main.rs", "src/lib.rs", "src/state.rs", "src/driver.rs", "src/transport.rs", "src/input.rs", "src/render.rs", "src/config.rs", "src/terminal.rs", "examples/fixture_host.rs", "tests/support/mod.rs", "tests/tmux_smoke.py", "tests/runtime_ipc.rs", "tests/regressions.rs"]]
-source_paths += ["crates/cayw-runtime/src/" + path for path in ["lib.rs", "session.rs", "rpc.rs", "execution.rs", "modules.rs"]]
+source_paths += ["crates/cayw-runtime/src/" + path for path in ["lib.rs", "session.rs", "rpc.rs", "execution.rs", "plugins.rs"]]
 source_paths += ["crates/cayw-ipc/src/client.rs", "crates/cayw-ipc/src/server.rs", "crates/cayw-core/src/store.rs"]
 source_files = [source_root / path for path in source_paths]
 report = {
@@ -89,7 +89,7 @@ try:
     frozen_id = fixture_info["frozen_id"]
     report["initial_frozen_view"] = rpc("session.get", {"session_id":frozen_id})
     assert report["initial_frozen_view"]["frozen"] is True
-    assert report["initial_frozen_view"]["binding"]["module"] == "fixture-binding"
+    assert report["initial_frozen_view"]["binding"]["plugin"] == "fixture-binding"
     assert report["initial_frozen_view"]["binding"]["reason"]
     command = shlex.quote(str(binary_dir / "cayw-tui")) + '; result=$?; printf "\\nTUI_EXIT=%s\\n" "$result"'
     tmux("new-session", "-d", "-s", "smoke", "-x", "110", "-y", "34", command)

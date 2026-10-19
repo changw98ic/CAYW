@@ -175,7 +175,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if session.frozen {
         append(
             &mut lines,
-            "Session frozen: its bound module is unavailable. Ctrl+F opens an explicit chat Fork confirmation.",
+            "Session frozen: its bound plugin is unavailable. Ctrl+F opens an explicit chat Fork confirmation.",
             inner.width,
             Color::Yellow,
         );
