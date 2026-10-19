@@ -1,0 +1,34 @@
+[package]
+name = "cayw-workspace"
+description = "Bounded workspace trees, durable multi-file changes, and read-only archives for a permission-gated CAYW Host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+fault-injection = []
+
+[dependencies]
+cayw-ai.workspace = true
+cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+tokio.workspace = true
+base64 = "0.22.1"
+toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+tar = "0.4.46"
+regex = "=1.13.1"
+ignore = "=0.4.33"
+globset = "=0.4.20"
+syn = { version = "=2.0.119", features = ["full"] }
+proc-macro2 = { version = "=1.0.107", features = ["span-locations"] }
+
+[dev-dependencies]
+tempfile = "3.27"

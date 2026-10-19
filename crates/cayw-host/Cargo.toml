@@ -1,0 +1,33 @@
+[package]
+name = "cayw-host"
+description = "Permission-gated filesystem, named processes, and external host capabilities for CAYW CodeMode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cayw-ai.workspace = true
+cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
+cayw-device = { path = "../cayw-device", version = "0.1.0" }
+cayw-data = { path = "../cayw-data", version = "0.1.0" }
+cayw-workspace = { path = "../cayw-workspace", version = "0.1.0" }
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+tokio.workspace = true
+
+[dev-dependencies]
+cayw-workspace = { path = "../cayw-workspace", version = "0.1.0", features = ["fault-injection"] }
+futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[[bin]]
+name = "cayw-host-test-process"
+path = "tests/fixtures/process.rs"
+test = false
+bench = false
