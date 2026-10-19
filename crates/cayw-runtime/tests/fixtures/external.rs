@@ -1,6 +1,6 @@
 //! Offline child-process fixture for Runtime lifecycle integration tests.
-use cayw_modules::{
-    ExternalMessage, ExternalResult, HostMessage, ModuleKind, ModuleManifest, ToolDefinition,
+use cayw_plugins::{
+    ExternalMessage, ExternalResult, HostMessage, PluginKind, PluginManifest, ToolDefinition,
 };
 use serde_json::json;
 use std::io::{BufRead, Write};
@@ -21,11 +21,11 @@ fn main() {
         }
     ));
     emit(ExternalMessage::Handshake {
-        manifest: ModuleManifest {
+        manifest: PluginManifest {
             name: "process".into(),
             version: "1.0.0".into(),
             protocol_version: 1,
-            kind: ModuleKind::External,
+            kind: PluginKind::External,
             capabilities: vec![ToolDefinition {
                 name: "process.echo".into(),
                 description: "Offline process lifecycle fixture".into(),

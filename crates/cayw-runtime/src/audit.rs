@@ -71,7 +71,7 @@ impl AuditDb {
         // Preserve it for explicit host reconciliation instead of silently thawing.
         let old_bindings: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='runtime_bindings')", [], |row| row.get(0))?;
         if old_bindings {
-            return Err(RuntimeError::InvalidInput("obsolete runtime module bindings require explicit host reconciliation and migration".into()));
+            return Err(RuntimeError::InvalidInput("obsolete runtime plugin bindings require explicit host reconciliation and migration".into()));
         }
         connection.execute_batch(
             "BEGIN IMMEDIATE;

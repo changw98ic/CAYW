@@ -6,20 +6,18 @@ use serde_json::{Value, json};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 static NEXT_ROOT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
+        // Keep the leaf short: macOS sockaddr_un paths must stay under SUN_LEN
+        // (~104). A long "cayw-shared-read-{pid}-{nanos}-…" name plus `.moved/special`
+        // for UnixListener::bind overflowed that limit on GHA macos-latest.
         let path = std::env::temp_dir().join(format!(
-            "cayw-shared-read-{}-{}-{}",
+            "csr-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
             NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();

@@ -304,8 +304,8 @@ pub(crate) struct Backend {
     base: Arc<cayw_host::Host>,
     catalog: Vec<ToolDefinition>,
     requests: Option<Arc<crate::requests::TaskRequests>>,
-    #[cfg(feature = "modules")]
-    modules: Arc<crate::modules::ModuleCatalog>,
+    #[cfg(feature = "plugins")]
+    plugins: Arc<crate::plugins::PluginCatalog>,
 }
 impl Backend {
     pub(crate) fn new(context: Arc<RunContext>) -> Result<Self, RuntimeError> {
@@ -319,18 +319,18 @@ impl Backend {
         let requests = crate::requests::start(&context, &base)?;
         let mut catalog = base.capabilities();
         catalog.extend(crate::requests::definitions(&context.inner));
-        #[cfg(feature = "modules")]
-        let modules = Arc::new(crate::modules::ModuleCatalog::new(&context)?);
-        #[cfg(feature = "modules")]
-        catalog.extend(modules.definitions());
+        #[cfg(feature = "plugins")]
+        let plugins = Arc::new(crate::plugins::PluginCatalog::new(&context)?);
+        #[cfg(feature = "plugins")]
+        catalog.extend(plugins.definitions());
         crate::processes::register(&context, base.clone())?;
         Ok(Self {
             context,
             base,
             catalog,
             requests,
-            #[cfg(feature = "modules")]
-            modules,
+            #[cfg(feature = "plugins")]
+            plugins,
         })
     }
     fn verify(&self, execution: &CellExecution) -> Result<(), CellError> {
@@ -470,14 +470,14 @@ impl CellBackend for Backend {
                 match host {
                     Err(error) => Err(error),
                     Ok(host) => {
-                        #[cfg(feature = "modules")]
+                        #[cfg(feature = "plugins")]
                         let host: Arc<dyn CapabilityHost> =
-                            Arc::new(crate::modules::ModuleHost::new(
+                            Arc::new(crate::plugins::PluginHost::new(
                                 host,
                                 scope.clone(),
-                                self.modules.clone(),
+                                self.plugins.clone(),
                             ));
-                        #[cfg(not(feature = "modules"))]
+                        #[cfg(not(feature = "plugins"))]
                         let host: Arc<dyn CapabilityHost> = Arc::new(host);
                         crate::requests::call(&scope, host, arguments, cancel).await
                     }

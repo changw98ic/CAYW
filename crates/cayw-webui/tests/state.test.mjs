@@ -77,7 +77,7 @@ test('an unrecognized runtime state never enables a new prompt', () => {
 });
 
 test('frozen binding is visible even when runtime returns the durable state as idle', () => {
-  assert.match(sessionBlocked(snapshot({ state:'idle', binding:{ module:'strongflow', frozen:true } })), /冻结/);
+  assert.match(sessionBlocked(snapshot({ state:'idle', binding:{ plugin:'strongflow', frozen:true } })), /冻结/);
 });
 
 test('wrapped durable agent updates drive live text and their terminal clears it', () => {
@@ -143,10 +143,10 @@ test('a late write response cannot use a snapshot fetched before consuming its t
 });
 
 test('an uncertain fork cannot settle on another execution in its source session', () => {
-  let view = beginWrite(initial({binding:{module:'strongflow',frozen:true}}),1,'session.fork');
+  let view = beginWrite(initial({binding:{plugin:'strongflow',frozen:true}}),1,'session.fork');
   view = finishWrite(view,1,{code:'transport_unknown',outcome_unknown:true});
   view = consumeEvents(view,[fact(11,{type:'attempt_started',lease}),fact(12,{type:'attempt_finished',lease})]);
-  view = applySnapshot(view,snapshot({cursor:12,binding:{module:'strongflow',frozen:true}}));
+  view = applySnapshot(view,snapshot({cursor:12,binding:{plugin:'strongflow',frozen:true}}));
   assert.equal(view.writes.length,1);
   assert.match(sessionBlocked(view.snapshot,view),/确认/);
 });

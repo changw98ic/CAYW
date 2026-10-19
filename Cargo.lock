@@ -536,25 +536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cayw-harness"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "cayw-ai",
- "cayw-codemode",
- "cayw-core",
- "cayw-host",
- "cayw-ipc",
- "cayw-runtime",
- "futures",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "cayw-host"
 version = "0.1.0"
 dependencies = [
@@ -587,7 +568,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cayw-modules"
+name = "cayw-plugins"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -669,7 +650,7 @@ dependencies = [
  "cayw-core",
  "cayw-host",
  "cayw-ipc",
- "cayw-modules",
+ "cayw-plugins",
  "cayw-remote",
  "cayw-requests",
  "futures",
@@ -693,7 +674,7 @@ dependencies = [
  "cayw-ai",
  "cayw-core",
  "cayw-ipc",
- "cayw-modules",
+ "cayw-plugins",
  "cayw-runtime",
  "crossterm",
  "futures",
@@ -704,6 +685,25 @@ dependencies = [
  "tokio",
  "tokio-util",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "cayw-verify-tool"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cayw-ai",
+ "cayw-codemode",
+ "cayw-core",
+ "cayw-host",
+ "cayw-ipc",
+ "cayw-runtime",
+ "futures",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

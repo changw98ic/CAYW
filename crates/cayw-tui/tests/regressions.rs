@@ -248,7 +248,7 @@ fn session_frozen_rpc_error_blocks_prompt_and_enables_only_confirmed_fork_after_
     app.request_failed(
         "s1",
         "session.prompt",
-        "session_frozen: module unavailable (outcome_unknown=false)",
+        "session_frozen: plugin unavailable (outcome_unknown=false)",
     );
     assert!(app.selected().unwrap().frozen);
     assert!(!app.selected().unwrap().can_prompt());
