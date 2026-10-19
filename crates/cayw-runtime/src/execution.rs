@@ -64,7 +64,7 @@ impl RunContext {
             return Err(RuntimeError::Frozen(
                 view.binding
                     .and_then(|binding| binding.reason)
-                    .unwrap_or_else(|| "module unavailable".into()),
+                    .unwrap_or_else(|| "plugin unavailable".into()),
             ));
         }
         self.inner.queue.check(&self.task)?;
@@ -743,9 +743,9 @@ pub(crate) fn capabilities(inner: &Arc<Inner>) -> Result<Vec<ToolDefinition>, Ru
     crate::requests::validate(inner, host)?;
     let mut catalog = host.capabilities();
     catalog.extend(crate::requests::definitions(inner));
-    #[cfg(feature = "modules")]
-    for module in inner.registry.list() {
-        catalog.extend(module.manifest.capabilities);
+    #[cfg(feature = "plugins")]
+    for plugin in inner.registry.list() {
+        catalog.extend(plugin.manifest.capabilities);
     }
     Ok(catalog)
 }

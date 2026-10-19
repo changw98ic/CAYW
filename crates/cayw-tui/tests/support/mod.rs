@@ -4,7 +4,7 @@ use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
     ModelRequest, Provider, StopReason, ToolCall,
 };
-use cayw_modules::{Module, ModuleContext, ModuleError, ModuleKind, ModuleManifest};
+use cayw_plugins::{Plugin, PluginContext, PluginError, PluginKind, PluginManifest};
 use cayw_runtime::{Runtime, RuntimeConfig};
 use serde_json::{Value, json};
 use std::{
@@ -75,17 +75,17 @@ impl Provider for OfflineProvider {
     }
 }
 
-struct BindingModule {
-    manifest: ModuleManifest,
+struct BindingPlugin {
+    manifest: PluginManifest,
 }
 #[async_trait]
-impl Module for BindingModule {
-    fn manifest(&self) -> &ModuleManifest {
+impl Plugin for BindingPlugin {
+    fn manifest(&self) -> &PluginManifest {
         &self.manifest
     }
-    async fn call(&self, _: &str, _: Value, _: CancellationToken) -> Result<Value, ModuleError> {
-        Err(ModuleError::Failed(
-            "binding-only offline module has no capabilities".into(),
+    async fn call(&self, _: &str, _: Value, _: CancellationToken) -> Result<Value, PluginError> {
+        Err(PluginError::Failed(
+            "binding-only offline plugin has no capabilities".into(),
         ))
     }
 }
@@ -114,21 +114,21 @@ impl OfflineRuntime {
         )
         .unwrap();
         let frozen = runtime.create(Some("Frozen fixture".into())).unwrap();
-        let module = BindingModule {
-            manifest: ModuleManifest {
+        let plugin = BindingPlugin {
+            manifest: PluginManifest {
                 name: "fixture-binding".into(),
                 version: "1.0.0".into(),
                 protocol_version: 1,
-                kind: ModuleKind::Native,
+                kind: PluginKind::Native,
                 capabilities: vec![],
                 permissions: BTreeMap::new(),
             },
         };
         runtime
-            .load_native(Arc::new(module), ModuleContext::default())
+            .load_native(Arc::new(plugin), PluginContext::default())
             .unwrap();
-        runtime.bind_module(&frozen.id, "fixture-binding").unwrap();
-        runtime.unload_module("fixture-binding").unwrap();
+        runtime.bind_plugin(&frozen.id, "fixture-binding").unwrap();
+        runtime.unload_plugin("fixture-binding").unwrap();
         Self {
             runtime,
             directory,

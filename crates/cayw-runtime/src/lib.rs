@@ -5,9 +5,9 @@ mod cells;
 mod coordination;
 mod execution;
 pub mod fixture;
-#[cfg(feature = "modules")]
-mod modules;
 mod permissions;
+#[cfg(feature = "plugins")]
+mod plugins;
 mod processes;
 mod queue;
 mod recovery;
@@ -193,8 +193,8 @@ pub(crate) struct Inner {
     active: Mutex<BTreeMap<String, ActiveRun>>,
     changed: Notify,
     approvals: Notify,
-    #[cfg(feature = "modules")]
-    registry: Arc<cayw_modules::ModuleRegistry>,
+    #[cfg(feature = "plugins")]
+    registry: Arc<cayw_plugins::PluginRegistry>,
 }
 
 #[derive(Clone)]
@@ -289,8 +289,8 @@ impl Runtime {
                 active: Mutex::new(BTreeMap::new()),
                 changed: Notify::new(),
                 approvals: Notify::new(),
-                #[cfg(feature = "modules")]
-                registry: Arc::new(cayw_modules::ModuleRegistry::new()),
+                #[cfg(feature = "plugins")]
+                registry: Arc::new(cayw_plugins::PluginRegistry::new()),
             }),
         };
         rt.capabilities()?; // Validate actual injected Host configuration before serving.
@@ -482,7 +482,7 @@ impl Runtime {
                     .binding
                     .as_ref()
                     .and_then(|binding| binding.reason.clone())
-                    .unwrap_or_else(|| "module unavailable".into()),
+                    .unwrap_or_else(|| "plugin unavailable".into()),
             ));
         }
         Ok(snapshot)

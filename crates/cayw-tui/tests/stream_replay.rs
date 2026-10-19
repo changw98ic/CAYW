@@ -341,7 +341,7 @@ fn unknown_frozen_cancel_and_prompt_ownership_survive_catchup_and_reconnect() {
     );
     let mut value = snapshot("needs_reconciliation", 2, attempt.clone());
     value["frozen"] = json!(true);
-    value["binding"] = json!({"module":"unavailable","frozen":true});
+    value["binding"] = json!({"plugin":"unavailable","frozen":true});
     value["pending_approvals"] = json!([{"id":"current-approval"}]);
     value["unresolved_calls"] = json!([{"call":{"id":"unknown"},"state":"outcome_unknown"}]);
     app.upsert_snapshot(value.clone(), false).unwrap();
