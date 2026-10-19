@@ -26,7 +26,7 @@ CAYW 定位为 Rust 原生、模块化的 **Agent OS kernel**：这是用户空�
 
 Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW/issues/6) 的目标，需先夯实 Rust pi 内核和 Stage A 的 SDK/IPC、验证、Luau、Device、预置 CodeMode 能力。当前离线实现与有限原型不替代该验收。审批只建设满足主链的必要能力，不先叠加通用框架；身份、权限、调用配对、幂等、取消和预算是必需约束。
 
-本架构不要求先部署 UI、Server、verifyTool 或 plugin，不承诺所有协议、设备和存放档位一次完成，不引入重复 loader、重型内核索引或无约束 Shell。最终运行和依赖不包含 Codex；普通开源依赖允许。可借鉴 WinWinCode/CodePatchBay 的设计与适配经验，代码和许可证不自动继承。项目继续使用 [Apache License 2.0](../LICENSE)。
+本架构不要求先部署 UI、Server、VerifyTool 或 plugin，不承诺所有协议、设备和存放档位一次完成，不引入重复 loader、重型内核索引或无约束 Shell。最终运行和依赖不包含 Codex；普通开源依赖允许。可借鉴 WinWinCode/CodePatchBay 的设计与适配经验，代码和许可证不自动继承。项目继续使用 [Apache License 2.0](../LICENSE)。
 
 ## 组件职责与依赖方向
 
@@ -48,13 +48,13 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 
 依赖从接入方指向公开接口，再由 Runtime 组合运行底座。Host 实现 CodeMode 的能力接口，Runtime 注入实际实现；接口调用不要求 CodeMode 反向依赖具体 UI 或某个 MCP 客户端。可选 Native plugin 由 Cargo feature 决定编译组合，External plugin 由宿主通过 IPC 注入。模型响应中的工具或 plugin 名称不能新增依赖或授予权限。
 
-本地 Agent 循环依赖 Provider，并不依赖 TUI、Server 或 verifyTool。verifyTool 可以依赖真实 Runtime 做验证，这不形成 Runtime 对 verifyTool 的反向依赖。运行数据会往返流动，但不改变这些软件依赖方向。
+本地 Agent 循环依赖 Provider，并不依赖 TUI、Server 或 VerifyTool。VerifyTool 可以依赖真实 Runtime 做验证，这不形成 Runtime 对 VerifyTool 的反向依赖。运行数据会往返流动，但不改变这些软件依赖方向。
 
 ## 部署形态
 
 | 形态 | 必需组成 | 可选接入 | 权威内容与限制 |
 | --- | --- | --- | --- |
-| Core Only | Runtime、持久化 Core、Agent/Provider、Cells/CodeMode、宿主受控能力及所需 Device 底座 | 独立 Rust API 客户端；需要进程边界时使用本地 IPC | 不需要 UI/Server/verifyTool/工作流；Provider 可由宿主注入，真实模型使用另行授权 |
+| Core Only | Runtime、持久化 Core、Agent/Provider、Cells/CodeMode、宿主受控能力及所需 Device 底座 | 独立 Rust API 客户端；需要进程边界时使用本地 IPC | 不需要 UI/Server/VerifyTool/工作流；Provider 可由宿主注入，真实模型使用另行授权 |
 | Local | 同一台设备上的 Core Only | TUI；WebUI + 本地轻网关 | Device 保持权威内容；本地轻网关不依赖可选远程 Server |
 | Remote | Device 上的同一运行底座，外加远程绑定与路由 | 远端 Server、客户端及 TLS 代理 | Device 主动连出，无需对外入站端口；Server 不因转发任务而取得执行或内容权威 |
 
@@ -248,13 +248,13 @@ Device 持有会话、工作区与内容的权威事实。已有 `cayw-content` 
 
 当前 `cayw-ipc` 是认证 loopback TCP、LF 分帧 JSON，外层版本 v1。先 hello 再业务分派；未知版本和错误认证明确拒绝，不自动降级。请求/响应和取消确认分别配对，帧、队列、在途数与期限均有界；断连、超时或协议失败后的在途请求可能结果未知，客户端先查持久事实，不自动重发。它不是远程 TLS 服务。
 
-[#1](https://github.com/changw98ic/CAYW/issues/1) 的独立 SDK/IPC 客户端已交付，并验证离线事件续读、审批、取消、配对和恢复。公开接口要继续通过 TUI 与 verifyTool 的真实消费、版本拒绝和兼容性用例验证；初版运行或编译全部 feature 不代表完整稳定性或全部组合执行完成。详见 [IPC 边界](../crates/cayw-ipc/README.md)、[独立客户端](../examples/issue1-client/README.md)。
+[#1](https://github.com/changw98ic/CAYW/issues/1) 的独立 SDK/IPC 客户端已交付，并验证离线事件续读、审批、取消、配对和恢复。公开接口要继续通过 TUI 与 VerifyTool 的真实消费、版本拒绝和兼容性用例验证；初版运行或编译全部 feature 不代表完整稳定性或全部组合执行完成。详见 [IPC 边界](../crates/cayw-ipc/README.md)、[独立客户端](../examples/issue1-client/README.md)。
 
 ## Native / External plugin、UI 贡献与 StrongFlow
 
 可信 Native plugin 用 Cargo feature 静态链接，升级需重新编译；不承诺热替换 Rust ABI。External plugin 用独立进程、版本化 IPC，宿主限定启动配置、能力、权限、预算和生命周期。plugin manifest、版本/代际与调用关联必须可核对。独立进程并不防止恶意本地代码访问其进程已经拥有的资源，不能把进程隔离当成安全沙箱。
 
-plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡献不取得 Core 私有状态或新的执行权。TUI/WebUI 选择如何展示，用户动作仍经公开接口及原审批/权限路径；模型或 plugin 提供的“批准”只作为数据处理。统一 UI 贡献 Schema、动作协议和兼容策略仍待结合实际消费者明确，不先加入新的 UI 框架或要求所有 plugin 实现某种界面。
+plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡献不取得 Core 私有状态或新的执行权。TUI/WebUI 选择如何展示，用户动作仍经公开接口及原审批/权限路径；模型或 plugin 提供的“批准”只作为数据处理。不先加入新的 UI 框架，也不要求所有 plugin 实现某种界面。
 
 普通 Chat 不依赖 StrongFlow/JEv/Fusion/Observer。StrongFlow Session 持久绑定流程版本、来源与义务：plugin 卸载或缺失时，原 Session 提示不可用并保持冻结，不在原地去掉义务或伪造完成。允许的转换是用户显式确认后，核对原执行已停止且没有未结未知效果，Fork 为新的普通 Session，保存来源会话/游标；原 Session 与证据保持原状，新会话重新获得自己的权限。
 
@@ -274,13 +274,13 @@ Server 负责远程绑定、认证吊销和路由；Device 使用自己主动建
 
 在线/离线吊销必须阻止旧身份继续获准工作，迟到消息不能改变新 attempt 或终态。取消与断连可能产生 unknown，仍回到原 Device 执行事实核对。完整 [#15](https://github.com/changw98ic/CAYW/issues/15) 验收要有两个独立机器的版本、TLS、绑定响应丢失、断连重连、吊销和取消证据；本地回显或 loopback fixture 不替代它。
 
-## TUI、WebUI 与 verifyTool
+## TUI、WebUI 与 VerifyTool
 
 TUI 是可选终端消费者，WebUI 是可选浏览器消费者；WebUI 的本地轻网关通过公开接口连接 Runtime，不强制使用远程 Server。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。当前已有各自实现和部分验证，完整场景仍分别归 [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14)。
 
 本地浏览器轻网关明确监听、来源与鉴权；回环不替代身份校验。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
 
-verifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [verifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
+VerifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [VerifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
 
 ## 测试验收与阶段映射
 
@@ -290,7 +290,7 @@ verifyTool 是开发/验收消费者，不是运行必需服务。它运行真�
 | --- | --- | --- |
 | Rust pi 前置内核 | 消息、流事件、工具循环、取消与配对 | 已有早期离线和有限真实记录；见[原始内核](rust-pi-core.md) |
 | A：[#1](https://github.com/changw98ic/CAYW/issues/1)–[#5](https://github.com/changw98ic/CAYW/issues/5) | 公开接口、macOS 基线、Luau 优先测量、最小 Device、预置能力 | #1 已按 macOS ARM64 离线范围关闭；#2–#5 继续完整验收，Monty 不阻塞 |
-| B：[#6](https://github.com/changw98ic/CAYW/issues/6) | 无 UI/Server/verifyTool 的真实 Provider 流式多轮、权限、工具、持久化、取消全链 | Stage A 稳固后完成，当前尚未验收 |
+| B：[#6](https://github.com/changw98ic/CAYW/issues/6) | 无 UI/Server/VerifyTool 的真实 Provider 流式多轮、权限、工具、持久化、取消全链 | Stage A 稳固后完成，当前尚未验收 |
 | C：[#7](https://github.com/changw98ic/CAYW/issues/7)–[#11](https://github.com/changw98ic/CAYW/issues/11) | 崩溃窗口/unknown、能力申请、宿主桥接、协议与多 Session 队列 | 已有实现与局部用例；不因 #1 完成而结项 |
 | D：[#12](https://github.com/changw98ic/CAYW/issues/12)–[#17](https://github.com/changw98ic/CAYW/issues/17) | plugin 生命周期、UI 消费、远程两机、StrongFlow 冻结/Fork、诊断非阻塞 | 保留统一进程清理等缺口，各项单独验收 |
 | C 补充：[#22](https://github.com/changw98ic/CAYW/issues/22)、[#23](https://github.com/changw98ic/CAYW/issues/23) | 上下文压缩（不拆开调用与结果、不改写原始记录和 unknown）；补齐 Session 分叉、模型配置、工具授权、上下文、预算等公开 API | 新增任务，依赖 #6 |
@@ -299,15 +299,6 @@ verifyTool 是开发/验收消费者，不是运行必需服务。它运行真�
 
 关键故障覆盖包括：副作用前后崩溃、终态提交失败、审批/撤销竞态、跨实例取消、旧 lease/迟到结果、cell 输出分页、共享读取失效、进程清理失败、plugin 卸载与显式 Fork、绑定回执丢失和吊销。语义与状态收敛是断言对象，历史通过数量不是当前新组合的结论。
 
-硬依赖与 Mermaid 图继续由[路线图](development-map.md)维护。本架构不更改 Issue 范围或依赖，不把 TUI、verifyTool、可选 Server、Monty 对照或后续平台反向加为 Core Only 前置条件。
-
-## 未决点与后续决策
-
-- Luau 已优先；Monty 是否值得比较及真实任务首轮成功/修复成本的完整结论，等待同机原始测量和必要授权，不预设速度排名。
-- 两次有效申请阈值、评估体验与授权期限属于可配置、待验证策略；不能替代真实缺口核对。
-- 多 Session 公平性、只读合并范围、共享取消及长会话上下文/读取策略，需按组合故障和任务数据继续验证。
-- 公开 SDK/IPC 的后续兼容窗口、plugin/UI 贡献协议与实例代际迁移，结合 TUI/verifyTool 消费定案，不先承诺稳定 ABI。
-- 复杂 CPU/GPU 硬限制、可选存放档位、密钥分发/轮换和真实远程同步按 #18 逐项定界，不把本地备份对象等同完整同步产品。
-- 当前远程实现的自动重连编排、部署 TLS 代理和独立两机产品证据仍需按 #15 补齐；已经确定的身份、审批、取消、幂等和预算要求不因此放松。
+硬依赖与 Mermaid 图继续由[路线图](development-map.md)维护。本架构不更改 Issue 范围或依赖，不把 TUI、VerifyTool、可选 Server、Monty 对照或后续平台反向加为 Core Only 前置条件。
 
 状态、接口细节或平台范围变化时，同步更新本文件、README 与路线图；实现细节继续链接到源码和专门契约，验收事实留在对应记录和 Issue 中。

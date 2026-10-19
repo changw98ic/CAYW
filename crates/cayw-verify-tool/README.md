@@ -1,4 +1,4 @@
-# CAYW offline verifyTool
+# CAYW offline VerifyTool
 
 The `sdk-ipc` mode exercises the public `cayw_runtime::Runtime` SDK and authenticated `cayw_ipc::Client`/server over loopback TCP. The `luau` mode below retains the direct CodeMode/Host measurement CLI.
 
