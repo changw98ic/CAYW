@@ -7,7 +7,23 @@ use std::{fs, time::Instant};
 use tempfile::TempDir;
 
 fn workspace(temp: &TempDir, limits: Limits) -> Workspace {
-    Workspace::open(temp.path().canonicalize().unwrap(), limits).unwrap()
+    // Host retries this same busy window: a concurrent fork can briefly inherit
+    // unrelated lock fds until exec (see Host::open_workspace). Tests must too.
+    let root = temp.path().canonicalize().unwrap();
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match Workspace::open(&root, limits.clone()) {
+            Ok(workspace) => return workspace,
+            Err(error)
+                if !error.outcome_unknown
+                    && error.message.starts_with("workspace is busy:")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("workspace open failed: {error:?}"),
+        }
+    }
 }
 async fn call(workspace: &Workspace, name: &str, args: Value) -> Result<Value, CapabilityError> {
     workspace
@@ -260,9 +276,6 @@ async fn held_root_search_is_not_redirected_after_rename() {
 
 #[tokio::test]
 async fn search_limits_invalid_patterns_and_cancellation_are_known_failures() {
-    let temp = tempfile::tempdir().unwrap();
-    fs::write(temp.path().join("a"), "12345").unwrap();
-    fs::write(temp.path().join("b"), "12345").unwrap();
     for limits in [
         Limits {
             max_tree_entries: 1,
@@ -277,6 +290,9 @@ async fn search_limits_invalid_patterns_and_cancellation_are_known_failures() {
             ..Limits::default()
         },
     ] {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("a"), "12345").unwrap();
+        fs::write(temp.path().join("b"), "12345").unwrap();
         let ws = workspace(&temp, limits);
         assert!(
             !call(&ws, "fs.grep", json!({"path":".","pattern":"1"}))
@@ -285,6 +301,9 @@ async fn search_limits_invalid_patterns_and_cancellation_are_known_failures() {
                 .outcome_unknown
         );
     }
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("a"), "12345").unwrap();
+    fs::write(temp.path().join("b"), "12345").unwrap();
     let ws = workspace(&temp, Limits::default());
     for pattern in [
         "[".to_string(),
