@@ -1,6 +1,6 @@
 # CAYW 开发路线图
 
-本路线图覆盖 19 个交付型 Issues（原 18 项加后续平台支持 #19）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收，并按用户要求关闭；实现、独立客户端和验收说明随本次提交交付。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2 等早期 Issue 正文中的三平台表述尚未逐项改写，当前平台范围仍以上述用户决定为准。2026-10-18 起先独立实现参考 pi 的 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前根 workspace 有 20 个成员。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。
+本路线图覆盖 19 个交付型 Issues（原 18 项加后续平台支持 #19）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收并关闭；实现、独立客户端和验收说明已由 PR #20 合并到 `main`。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2、#4、#13 正文中原有的三平台要求已于 2026-10-19 收窄为 macOS，Linux/Windows 部分指向 #19。2026-10-18 起先独立实现参考 pi 的 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前根 workspace 有 20 个成员。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。
 
 [返回项目说明](../README.md) · [架构文档](architecture.md) · [查看全部 Issues](https://github.com/changw98ic/CAYW/issues)
 
@@ -17,7 +17,7 @@
 ### A：最小接口、验证底座与统一执行
 
 - [#1](https://github.com/changw98ic/CAYW/issues/1)：先交付可执行的公开 Rust SDK 和版本化 IPC 往返，不先冻结完整接口或铺设空架构。
-- [#2](https://github.com/changw98ic/CAYW/issues/2)：当前建立 macOS 的故障注入与性能记录基线，后续每个任务持续补充其场景；原题中的三平台范围按首发决定收窄。Harness 只用于验证，不是 Core 运行依赖。
+- [#2](https://github.com/changw98ic/CAYW/issues/2)：当前建立 macOS 的故障注入与性能记录基线，后续每个任务持续补充其场景；Issue 标题与正文已改为 macOS 范围。Harness 只用于验证，不是 Core 运行依赖。
 - [#3](https://github.com/changw98ic/CAYW/issues/3) 与 [#4](https://github.com/changw98ic/CAYW/issues/4)：优先使用 Luau 实现同机语言原型（Monty 仅作可选对照，不阻塞主线），与最小进程树治理并行。冷/暖启动、首执行、真实编排、取消与离线样本验证都要有可核对记录。
 - [#5](https://github.com/changw98ic/CAYW/issues/5)：优先提供已经做好的标准 CodeMode 能力集作为统一模型工具编排入口，底层由 Rust 能力执行；所有执行路径共用权限、调用配对、取消和预算。
 
@@ -62,7 +62,7 @@
 
 | Issue / 交付目标 | 阶段 | 硬依赖 | 可并行任务 / 条件依赖 | 状态 |
 | --- | --- | --- | --- | --- |
-| [[Core] 交付 Session/事件契约、最小 Rust SDK 与版本化 IPC 实接](https://github.com/changw98ic/CAYW/issues/1) | A | 无 | — | [已完成 macOS ARM64 首发范围的本地验收](validation/issue1-sdk-ipc.md)；GitHub 已关闭；实现与客户端随本次提交交付 |
+| [[Core] 交付 Session/事件契约、最小 Rust SDK 与版本化 IPC 实接](https://github.com/changw98ic/CAYW/issues/1) | A | 无 | — | [已完成 macOS ARM64 首发范围的本地验收](validation/issue1-sdk-ipc.md)；GitHub 已关闭；实现与客户端已由 PR #20 合并到 `main` |
 | [[验证] 建立 macOS、故障注入与任务性能比较的可重复基线](https://github.com/changw98ic/CAYW/issues/2) | A | [#1](https://github.com/changw98ic/CAYW/issues/1) | — | 计划；按当前首发范围执行 |
 | [[CodeMode] 优先基于 Luau 交付同机原型与测量报告（Monty 可选对照）](https://github.com/changw98ic/CAYW/issues/3) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2) | [#4](https://github.com/changw98ic/CAYW/issues/4) | 计划 |
 | [[Device] 交付最小进程树归属、统一取消与执行预算](https://github.com/changw98ic/CAYW/issues/4) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2) | [#3](https://github.com/changw98ic/CAYW/issues/3) | 计划 |
