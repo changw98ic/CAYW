@@ -94,7 +94,12 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
             .await
     }));
     timeout(Duration::from_secs(8), async {
-        while runtime.get(&blocker_id).unwrap().pending_approvals.is_empty() {
+        while runtime
+            .get(&blocker_id)
+            .unwrap()
+            .pending_approvals
+            .is_empty()
+        {
             tokio::task::yield_now().await;
         }
     })
