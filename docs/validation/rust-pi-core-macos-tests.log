@@ -1,0 +1,124 @@
+   Compiling cayw-ai v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-ai)
+   Compiling cayw-agent v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.54s
+     Running unittests src/lib.rs (target/debug/deps/cayw_agent-268c8018ccb21e56)
+
+running 10 tests
+test execution::tests::truncated_or_duplicate_batches_never_execute ... ok
+test execution::tests::dropped_batch_closes_progress_without_cancelling_its_parent ... ok
+test execution::tests::blocked_calls_run_after_hook_without_executing ... ok
+test execution::tests::before_panics_and_after_errors_produce_paired_results ... ok
+test execution::tests::errors_never_execute_and_still_pair_events ... ok
+test execution::tests::execution_panic_becomes_an_unknown_error_result ... ok
+test execution::tests::sequential_override_applies_to_the_whole_batch ... ok
+test execution::tests::parallel_ends_in_completion_order_and_returns_source_order ... ok
+test execution::tests::completed_progress_is_drained_before_end_and_late_updates_are_rejected ... ok
+test execution::tests::cancellation_distinguishes_started_calls_and_closes_progress ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/agent.rs (target/debug/deps/agent-b9e281f27849abaa)
+
+running 13 tests
+test listener_failures_release_agent_and_reach_other_listeners ... ok
+test host_must_reconcile_unknown_results_before_continuing ... ok
+test empty_continue_does_not_consume_queues_and_assistant_tail_requires_input ... ok
+test abort_and_dropping_prompt_future_release_running_state ... ok
+test listeners_are_awaited_in_order_including_agent_end ... ok
+test per_run_turn_budget_stops_unbounded_continuation ... ok
+test failed_or_incomplete_streams_end_without_executing_tools ... ok
+test duplicate_tool_ids_are_rejected_before_execution ... ok
+test steering_waits_for_tools_and_follow_up_waits_for_natural_stop ... ok
+test finish_end_preserves_queues_and_continue_adds_only_one_request ... ok
+test invalid_unknown_and_truncated_tools_never_execute ... ok
+test model_tool_model_loop_preserves_events_and_history ... ok
+test tool_calls_with_stop_or_reused_ids_are_never_executed ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/hooks.rs (target/debug/deps/hooks-6bc7b8b2aefb68ab)
+
+running 6 tests
+test queue_modes_control_drain_size ... ok
+test hook_failures_and_panics_become_terminal_assistant_errors ... ok
+test steering_added_during_prepare_next_turn_is_polled_again ... ok
+test blocked_terminating_batch_does_not_request_another_model_turn ... ok
+test hooks_observe_committed_state_and_replace_request_and_tool_result ... ok
+test cancelled_or_dropped_running_tool_requires_reconciliation ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/http_loop.rs (target/debug/deps/http_loop-5514fc80987659a2)
+
+running 1 test
+test actual_http_adapter_and_agent_complete_tool_round_trip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/review_regressions.rs (target/debug/deps/review_regressions-c69fa1a30c34d61a)
+
+running 4 tests
+test unknown_effect_in_new_input_must_be_blocked_before_model_request ... ok
+test failed_next_turn_must_not_lose_queued_user_input ... ok
+test cancelling_or_dropping_next_turn_must_not_lose_queued_user_input ... ok
+test unknown_effect_must_stop_current_run_before_another_request ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/cayw_ai-52e437e958835ef0)
+
+running 2 tests
+test providers::sse::tests::arbitrary_utf8_splits_and_line_endings_preserve_data ... ok
+test providers::sse::tests::oversized_event_and_invalid_utf8_are_rejected ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/contracts.rs (target/debug/deps/contracts-1fca379b4f021ffa)
+
+running 4 tests
+test tool_arguments_require_complete_objects ... ok
+test message_wire_format_and_usage_round_trip ... ok
+test transcript_replays_sections_and_tool_changes ... ok
+test validation_is_strict_and_local_only ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/openai.rs (target/debug/deps/openai-210b47e92cf79efc)
+
+running 18 tests
+test invalid_unpaired_tool_history_is_rejected_before_network_io ... ok
+test dropping_a_pending_stream_closes_its_http_connection ... ok
+test http_failure_is_an_error_without_retry ... ok
+test incomplete_tool_json_is_reported_in_the_call ... ok
+test cancelling_after_a_delta_cannot_be_reported_as_success ... ok
+test cache_details_arriving_after_prompt_usage_do_not_inflate_total ... ok
+test cancellation_while_waiting_for_headers_or_body_ends_the_stream ... ok
+test unknown_tool_effect_cannot_be_replayed_as_an_ordinary_result ... ok
+test tool_calls_keep_source_order_when_deltas_arrive_in_reverse ... ok
+test system_tool_changes_and_tool_result_ids_are_preserved_in_request ... ok
+test response_identity_cannot_change_between_chunks ... ok
+test tool_identity_can_arrive_before_its_function_fields ... ok
+test user_images_follow_model_capability_and_reasoning_is_explicit ... ok
+test fragmented_tool_arguments_are_only_executable_after_complete_json ... ok
+test malformed_and_incomplete_streams_have_one_error_terminal ... ok
+test streamed_unicode_text_and_usage_match_the_actual_request ... ok
+test creating_but_not_polling_stream_does_not_make_a_request ... ok
+test already_cancelled_request_never_connects ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests cayw_agent
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cayw_ai
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.17s
+
+[exited with code 0]
