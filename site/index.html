@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CAYW — Code As You Wish</title>
+  <meta name="description" content="CAYW：Rust 原生开源 Agent 运行时。用代码组织工具（CodeMode / Luau），用户始终掌控权限、审批与资源边界。" />
+  <meta name="theme-color" content="#0a0c10" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+  <meta property="og:title" content="CAYW — Code As You Wish" />
+  <meta property="og:description" content="让你的想法变成可靠的行动，让你始终掌控过程。" />
+  <meta property="og:type" content="website" />
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="#top" aria-label="CAYW 首页">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">CAYW</span>
+      </a>
+      <button class="nav-toggle" type="button" data-nav-toggle aria-expanded="false" aria-controls="site-nav">
+        <span class="sr-only">打开导航</span>
+        <span aria-hidden="true"></span>
+      </button>
+      <nav id="site-nav" class="site-nav" data-nav aria-label="页面导航">
+        <a href="#ideas">核心思路</a>
+        <a href="#how">怎么工作</a>
+        <a href="#try">本地体验</a>
+        <a href="#docs">文档</a>
+        <a class="nav-cta" href="https://github.com/changw98ic/CAYW" rel="noopener noreferrer">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section id="top" class="hero">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            <span class="pill rust">Rust</span>
+            <span class="pill luau">CodeMode · Luau</span>
+            <span class="pill">Apache-2.0</span>
+          </p>
+          <h1>
+            <span class="hero-name">CAYW</span>
+            <span class="hero-tag">Code As You Wish</span>
+          </h1>
+          <p class="vision">让你的想法变成可靠的行动，让你始终掌控过程。</p>
+          <p class="lede">
+            Rust 原生开源 Agent 运行时：模型通过短段 Luau 代码编排工具，
+            权限、审批、取消与资源预算由你界定。无头核心可独立运行，会话不绑死在进程上。
+          </p>
+          <p class="hero-note">首发面向 macOS · 项目正在开发中</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/changw98ic/CAYW" rel="noopener noreferrer">查看源码</a>
+            <a class="btn btn-ghost" href="#try">本地体验</a>
+            <a class="btn btn-ghost" href="https://github.com/changw98ic/CAYW/blob/main/docs/architecture.md" rel="noopener noreferrer">架构文档</a>
+          </div>
+        </div>
+        <aside class="hero-panel" aria-label="产品要点">
+          <div class="panel-card">
+            <h2 class="panel-title">你掌控什么</h2>
+            <ul class="panel-list">
+              <li>文件与工具访问边界</li>
+              <li>哪些操作需要确认</li>
+              <li>资源与预算上限</li>
+              <li>中断后是否核对再继续</li>
+            </ul>
+          </div>
+          <div class="panel-card accent">
+            <h2 class="panel-title">运行时承诺</h2>
+            <ul class="panel-list">
+              <li>执行有记录</li>
+              <li>操作能取消</li>
+              <li>恢复先核对，不盲目重做</li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="ideas" class="section">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Principles</p>
+          <h2>核心思路</h2>
+          <p class="lede">五个原则贯穿设计：编排用代码，边界留给人，核心不依赖界面。</p>
+        </header>
+        <div class="idea-grid">
+          <article class="idea-card">
+            <h3>用代码组织工具</h3>
+            <p>模型写短段 Luau 脚本，把读取、分析、修改和验证组织起来——这就是 <strong>CodeMode</strong>。</p>
+          </article>
+          <article class="idea-card">
+            <h3>控制权留给用户</h3>
+            <p>文件访问、工具调用、操作确认和资源预算都有明确边界；一段脚本获准，不等于放行其中每一步。</p>
+          </article>
+          <article class="idea-card">
+            <h3>核心独立运行</h3>
+            <p>对话与工具执行不依赖终端、网页或插件。界面是入口，不是核心运行的前提。</p>
+          </article>
+          <article class="idea-card">
+            <h3>会话不绑死在进程上</h3>
+            <p>保存任务与执行记录；恢复时先核对已经发生的操作，不盲目重复执行。</p>
+          </article>
+          <article class="idea-card idea-wide">
+            <h3>按需组合能力</h3>
+            <p>通过公开接口接入模型、工具和插件，让开发者构建适合自己工作方式的 Agent 应用——终端、网页与自动化程序共用同一套可独立运行的核心。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="how" class="section section-alt">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">How it works</p>
+          <h2>怎么工作</h2>
+          <p class="lede">模型负责组织步骤，CAYW 负责检查并执行每一次工具调用。</p>
+        </header>
+
+        <ol class="flow-steps">
+          <li>
+            <span class="step-num">1</span>
+            <div>
+              <h3>模型服务</h3>
+              <p>理解任务，产出编排步骤与 Luau 脚本。</p>
+            </div>
+          </li>
+          <li>
+            <span class="step-num">2</span>
+            <div>
+              <h3>会话与事件</h3>
+              <p>记录对话、尝试与执行事实，支撑恢复与核对。</p>
+            </div>
+          </li>
+          <li>
+            <span class="step-num">3</span>
+            <div>
+              <h3>CodeMode</h3>
+              <p>在受控环境中运行 Luau，把多次工具调用组织成可验证流程。</p>
+            </div>
+          </li>
+          <li>
+            <span class="step-num">4</span>
+            <div>
+              <h3>统一管控</h3>
+              <p>权限 · 审批 · 取消 · 预算——每次 <code>cayw.call</code> 独立过检。</p>
+            </div>
+          </li>
+          <li>
+            <span class="step-num">5</span>
+            <div>
+              <h3>受控工具与本机执行</h3>
+              <p>文件、检索、Git、构建/测试等能力在边界内执行，进程可回收。</p>
+            </div>
+          </li>
+        </ol>
+
+        <figure class="flow-diagram" aria-label="架构示意">
+          <svg viewBox="0 0 920 220" role="img" aria-labelledby="flow-title flow-desc">
+            <title id="flow-title">CAYW 执行链路</title>
+            <desc id="flow-desc">模型服务与用户应用连接会话层，再经 CodeMode、统一管控到受控工具与本机执行。</desc>
+            <defs>
+              <linearGradient id="g-rust" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#b7410e"/>
+                <stop offset="100%" stop-color="#d4570f"/>
+              </linearGradient>
+              <linearGradient id="g-blue" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#00a2ff"/>
+                <stop offset="100%" stop-color="#3dbfff"/>
+              </linearGradient>
+            </defs>
+            <rect x="20" y="70" width="120" height="64" rx="12" class="svg-box"/>
+            <text x="80" y="107" text-anchor="middle" class="svg-label">模型服务</text>
+
+            <rect x="180" y="28" width="420" height="164" rx="16" class="svg-core"/>
+            <text x="390" y="52" text-anchor="middle" class="svg-core-title">CAYW 核心（Rust）</text>
+
+            <rect x="200" y="72" width="110" height="56" rx="10" class="svg-inner"/>
+            <text x="255" y="105" text-anchor="middle" class="svg-label-sm">会话与事件</text>
+
+            <rect x="335" y="72" width="110" height="56" rx="10" class="svg-inner luau"/>
+            <text x="390" y="105" text-anchor="middle" class="svg-label-sm">CodeMode</text>
+
+            <rect x="470" y="72" width="110" height="56" rx="10" class="svg-inner rust"/>
+            <text x="525" y="98" text-anchor="middle" class="svg-label-sm">统一管控</text>
+            <text x="525" y="116" text-anchor="middle" class="svg-label-xs">权限 · 审批 · 取消</text>
+
+            <rect x="640" y="40" width="120" height="56" rx="10" class="svg-box"/>
+            <text x="700" y="73" text-anchor="middle" class="svg-label-sm">受控工具</text>
+
+            <rect x="640" y="124" width="120" height="56" rx="10" class="svg-box"/>
+            <text x="700" y="157" text-anchor="middle" class="svg-label-sm">本机执行</text>
+
+            <rect x="800" y="70" width="100" height="64" rx="12" class="svg-box"/>
+            <text x="850" y="100" text-anchor="middle" class="svg-label-sm">你的应用</text>
+            <text x="850" y="118" text-anchor="middle" class="svg-label-xs">终端 · 网页</text>
+
+            <path d="M140 102 H180" class="svg-edge"/>
+            <path d="M310 100 H335" class="svg-edge"/>
+            <path d="M445 100 H470" class="svg-edge"/>
+            <path d="M580 100 H640" class="svg-edge"/>
+            <path d="M700 96 V124" class="svg-edge"/>
+            <path d="M760 102 H800" class="svg-edge muted"/>
+            <path d="M850 70 V40 H255 V72" class="svg-edge muted" fill="none"/>
+          </svg>
+        </figure>
+
+        <div class="code-block">
+          <div class="code-toolbar">
+            <span>CodeMode · Luau 示例</span>
+            <button type="button" class="copy-btn" data-copy="luau-sample">复制</button>
+          </div>
+          <pre id="luau-sample" class="code"><code>local files = cayw.call('fs.glob', {
+  path = '.', pattern = '**/*.rs'
+})
+local matches = cayw.call('fs.grep', {
+  path = '.', pattern = '^pub fn', multiline = true,
+  max_matches = 20
+})
+return { files = files, matches = matches }</code></pre>
+          <p class="code-note">每个 <code>cayw.call</code> 都独立经过参数检查、授权、预算检查和结果记录。</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="try" class="section">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Try locally</p>
+          <h2>本地体验</h2>
+          <p class="lede">需要 <strong>Rust 1.95+</strong>。离线示例不连接模型服务，也不需要 API Key。</p>
+        </header>
+
+        <div class="code-block">
+          <div class="code-toolbar">
+            <span>仓库根目录</span>
+            <button type="button" class="copy-btn" data-copy="try-cmd">复制</button>
+          </div>
+          <pre id="try-cmd" class="code"><code>cargo run -p cayw-agent --example offline --locked</code></pre>
+        </div>
+
+        <div class="code-block">
+          <div class="code-toolbar">
+            <span>示例输出</span>
+            <button type="button" class="copy-btn" data-copy="try-out">复制</button>
+          </div>
+          <pre id="try-out" class="code"><code>tool start: add {"a":2,"b":3}
+tool result: 5
+assistant: 2 + 3 = 5
+completed: 5 messages, running=false</code></pre>
+        </div>
+
+        <p class="try-links">
+          完整说明见
+          <a href="https://github.com/changw98ic/CAYW/blob/main/README.md" rel="noopener noreferrer">README</a>
+          与
+          <a href="https://github.com/changw98ic/CAYW/blob/main/CONTRIBUTING.md" rel="noopener noreferrer">贡献指南</a>。
+        </p>
+      </div>
+    </section>
+
+    <section id="docs" class="section section-alt">
+      <div class="wrap">
+        <header class="section-head">
+          <p class="eyebrow">Docs &amp; community</p>
+          <h2>文档与参与</h2>
+          <p class="lede">设计文档、路线图与贡献方式都在仓库里。</p>
+        </header>
+        <div class="docs-grid">
+          <a class="doc-card" href="https://github.com/changw98ic/CAYW/blob/main/docs/architecture.md" rel="noopener noreferrer">
+            <h3>架构设计</h3>
+            <p>组件职责、执行流程与恢复规则。</p>
+          </a>
+          <a class="doc-card" href="https://github.com/changw98ic/CAYW/blob/main/docs/development-map.md" rel="noopener noreferrer">
+            <h3>开发路线图</h3>
+            <p>交付计划、当前进度与验收记录。</p>
+          </a>
+          <a class="doc-card" href="https://github.com/changw98ic/CAYW/blob/main/CONTRIBUTING.md" rel="noopener noreferrer">
+            <h3>贡献指南</h3>
+            <p>开发环境、构建、测试与提交要求。</p>
+          </a>
+          <a class="doc-card" href="https://github.com/changw98ic/CAYW" rel="noopener noreferrer">
+            <h3>GitHub 仓库</h3>
+            <p>源码、Issues 与讨论。</p>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <div>
+        <p class="footer-brand">CAYW · Code As You Wish</p>
+        <p class="footer-copy">开源 Agent 运行时 · 以 Apache License 2.0 发布</p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/changw98ic/CAYW" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/changw98ic/CAYW/blob/main/LICENSE" rel="noopener noreferrer">LICENSE</a>
+        <a href="https://github.com/changw98ic/CAYW/blob/main/docs/architecture.md" rel="noopener noreferrer">架构</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/script.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# CAYW official site — Cloudflare Workers Static Assets
+# Service name must match existing Workers Builds target: cayw
+name = "cayw"
+compatibility_date = "2026-10-19"
+
+# Assets-only Worker: no application Worker script required.
+# Wrangler uploads ./site and serves files at the edge.
+# Docs: https://developers.cloudflare.com/workers/static-assets/
+[assets]
+directory = "./site"
+html_handling = "auto-trailing-slash"
+not_found_handling = "404-page"
