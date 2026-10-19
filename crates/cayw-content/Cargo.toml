@@ -1,0 +1,31 @@
+[package]
+name = "cayw-content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Device-owned local content with explicit encrypted backup and restore"
+
+[features]
+default = ["encryption"]
+encryption = ["dep:chacha20poly1305", "dep:zeroize"]
+
+[dependencies]
+cap-std = "3.4.5"
+cap-fs-ext = "3.4.5"
+fs2 = "0.4.3"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+thiserror.workspace = true
+chacha20poly1305 = { version = "0.10.1", optional = true }
+zeroize = { version = "1.8.2", optional = true }
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[[example]]
+name = "offline"
+required-features = ["encryption"]

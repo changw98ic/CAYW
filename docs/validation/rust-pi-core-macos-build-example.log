@@ -1,0 +1,13 @@
+    Checking cayw-ai v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-ai)
+    Checking cayw-agent v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.30s
+   Compiling cayw-ai v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-ai)
+   Compiling cayw-agent v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.15s
+     Running `target/debug/examples/offline`
+tool start: add {"a":2,"b":3}
+tool result: 5
+assistant: 2 + 3 = 5
+completed: 5 messages, running=false
+
+[exited with code 0]
