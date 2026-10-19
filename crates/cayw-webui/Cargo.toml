@@ -1,0 +1,21 @@
+[package]
+name = "cayw-webui"
+description = "Optional loopback browser interface for the CAYW runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "tokio"] }
+cayw-ipc = { path = "../cayw-ipc" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["io-util"] }

@@ -1,0 +1,29 @@
+[package]
+name = "cayw-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional terminal UI that connects directly to the CAYW runtime IPC"
+
+[dependencies]
+cayw-ipc = { path = "../cayw-ipc" }
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures.workspace = true
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal"] }
+unicode-segmentation = "1.12"
+
+[dev-dependencies]
+async-trait.workspace = true
+async-stream.workspace = true
+cayw-ai.workspace = true
+cayw-agent = { path = "../cayw-agent" }
+cayw-core = { path = "../cayw-core" }
+cayw-modules = { path = "../cayw-modules", default-features = false }
+cayw-runtime = { path = "../cayw-runtime", features = ["modules"] }
+tempfile = "3"
+tokio-util.workspace = true

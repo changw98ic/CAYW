@@ -1,0 +1,103 @@
+Device interactive process — Phase 1 with shared admission repair
+
+Roots and scope
+Fixed source: /Volumes/ORICO/cayw-device-shared-admission-20261019-b86c2e70
+Evidence: /Volumes/ORICO/cayw-device-admission-evidence-20261019-b86c2e70
+Evidence tools: /Volumes/ORICO/cayw-device-admission-tools-20261019-b86c2e70
+Immutable Phase 1 input: /Volumes/ORICO/cayw-device-interactive-phase1-20261019-1f7b4a6d
+Original writer evidence: /Volumes/ORICO/cayw-device-interactive-evidence-20261019-1f7b4a6d
+Review probe: /Volumes/ORICO/cayw-device-independent-review-20261019-a47e29c1
+Live repository /Volumes/ORICO/CAYW is read only. This repair does not integrate
+Device into the live tree, migrate Modules, write Git state, call a provider,
+change dependencies/configuration/permissions/license, or publish externally.
+Independent verification of this exact fixed output remains pending.
+
+Exact input and dependency contract
+The original final-manifest.json supplies all 16 copied paths and byte hashes.
+The narrowed root Cargo.toml and Cargo.lock are copied unchanged. No source
+path discovery or repeated CodeGraph query is used. Every original test target
+and fixture remains in the copy. copy-baseline-manifest.json binds these bytes.
+The original dependency-input-manifest.json declares 18 registry packages and
+1,817 files; preparation checks their exact hashes and cached archive checksums
+without modifying the registry. nonmutation-before.json and the final check
+compare named original source/evidence, the review probe and named live inputs.
+The final manifest binds all fixed files, command inputs, raw logs, tool scripts,
+dependencies, generated patches, replay results and before/after observations.
+
+Confirmed existing ordinary-run defect
+This is an existing normal-run defect missed by the common Phase 1 requirement,
+not an introduced regression. The earlier findings=[] did not cover the later
+independent real OS probe. ProcessGroup's admission flag was obtained only from
+InteractiveShared, so ordinary supervision had no flag to close on cleanup error.
+The independent regression was first transplanted into this new copy unchanged.
+001-red-independent-denial exited 101 after cleanup of its owned children:
+closed=false, reserved=1, next ordinary run succeeded with OutputLimit.
+002-red-shared-modes then exercised both public entry modes and sticky closure:
+both modes were admitted during denied cleanup and after eventual cleanup.
+Both red stdout/stderr and input hashes remain as separate evidence records.
+The first red source is retained as red-independent-process.rs in evidence.
+
+Repair and observed focused result
+launch_inner passes the original Scope's Arc<AtomicBool> explicitly into common
+supervise_mode for every real launch. ProcessGroup requires that flag. The
+optional field and assignment in InteractiveShared are removed. Pure supervisor
+unit helpers use explicit isolated flags. No public API changed and no second
+lifecycle/cleanup path was added.
+ProcessGroup Drop sets the flag before its existing cleanup retries and never
+clears it. Child/group cleanup, nonblocking identity observation and reaping,
+ECHILD signal revocation, pipes, true supervisor join/TLS completion, resource
+ledger and reservation handling retain their existing ownership paths. The flag
+is owned before the existing post-spawn panic point; rejected admission and
+thread-creation failure continue to use the same prepared-resource/join owners.
+003-green-shared-modes exited 0: the original reservation stayed held while
+cleanup was paused, both modes on a runner clone returned RunnerClosed, both
+remained rejected after real cleanup before drain, and a separate Scope ran
+ordinary and interactive processes. The probe released its own injection before
+assertions and verified the leader and injected survivor had been reaped.
+The existing interactive-denial test also now exercises both public admission
+modes through a clone, including released permits for rejected interactive starts.
+
+Final validation commands
+Use /Users/chengwen/.cargo/bin/cargo +1.95.0 and this copy's absolute manifest.
+CARGO_TARGET_DIR=/Volumes/ORICO/cayw-device-admission-evidence-20261019-b86c2e70/target
+TMPDIR=/Volumes/ORICO/cayw-device-admission-evidence-20261019-b86c2e70/tmp
+CARGO_NET_OFFLINE=true; RUST_BACKTRACE=1.
+The command recorder runs from the evidence directory and stores exact argv,
+cwd, overrides, real process exit code, before/after input hashes and raw logs.
+  fmt --all --manifest-path <copy>/Cargo.toml -- --check
+  check --offline --locked --all-targets --all-features --manifest-path <copy>/Cargo.toml
+  test --offline --locked --all-targets --all-features --manifest-path <copy>/Cargo.toml
+  test --offline --locked --doc --manifest-path <copy>/Cargo.toml
+  clippy --offline --locked --all-targets --all-features --manifest-path <copy>/Cargo.toml -- -D warnings
+Final records and final-manifest.json are authoritative for completed results.
+The suite retains the delivered 80 tests and adds the independent ordinary-run
+regression (81 total); the original pre-Phase 1 55-test run is not repeated as a
+separate baseline. Final focused testing repeats the repaired behavioral probe
+against the same frozen bytes used by the full suite. All first failures remain.
+
+Phase 1 behavior retained
+InteractiveLimits bounds one pending write and unread stdout. Unique stdin/stdout
+endpoints request stop on Drop; cloned ProcessControl can observe/close/wait.
+The original supervisor owns Child/group, OS pipes, open cwd and lifetime raw
+stdout+stderr output budget. stdin uses nonblocking writes and validates before
+copying. Dropping an unfinished write requests stop. stdout backpressure does not
+block cancellation, deadlines or stderr draining; stderr counts against budget
+and read errors are reported. Cleanup does not wait for a consumer. EOF alone
+cannot release a reservation. The join owner publishes outcomes only after a
+real join including TLS destruction and resource cleanup. Waiting is repeatable,
+supports multiple waiters and can be cancelled without losing cleanup ownership.
+The delivered suite also covers literal argv/env, renamed/replaced open cwd,
+exact and exceeded output budgets across exchanges, pipe/backpressure errors,
+endpoint/control/runner/start-future Drop, supervisor panic, failed supervisor or
+join-owner startup, resource refusal, descendant cleanup and Tokio shutdown.
+No numeric signal after observed ECHILD or identity loss is permitted; hosts must
+not reap Device-owned children themselves. Unknown cleanup retains reservations.
+
+Limits
+Execution evidence is local macOS/aarch64 with Rust 1.95.0. Linux and Windows
+execution are unverified. Windows returns UnsupportedPlatform; Job Objects and
+PTY are absent. Unix process groups are not a sandbox, cannot contain setsid
+escapees and do not prove cleanup after the host OS process crashes. This work
+does not prove Runtime reservation release, External Module migration, Issue
+completion, a full workspace build, or acceptance on three platforms. The live
+source and independent review output are unchanged by this implementation.

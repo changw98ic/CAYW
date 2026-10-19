@@ -1,0 +1,27 @@
+[package]
+name = "cayw-device"
+description = "Host-controlled local processes and resource admission for CAYW"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+# Cargo builds this helper from source alongside integration tests, including
+# when only --test process is selected. No feature or prior build is required.
+[[bin]]
+name = "cayw-device-test-process"
+path = "tests/fixtures/process.rs"
+test = false
+bench = false
