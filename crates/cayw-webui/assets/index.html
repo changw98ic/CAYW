@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>CAYW 本机会话</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#conversation">跳到会话内容</a>
+  <header class="topbar">
+    <div class="identity"><span class="mark" aria-hidden="true">C</span><div><strong>CAYW</strong><span class="muted">本机会话</span></div></div>
+    <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="logout" class="quiet" hidden>断开</button></div>
+  </header>
+
+  <section id="login-panel" class="login-panel" aria-labelledby="login-heading">
+    <p class="eyebrow">从这里开始</p>
+    <h1 id="login-heading">连接本机会话</h1>
+    <p class="muted">输入启动网页服务时设置的网页访问令牌。令牌只保留在此页面的内存中，刷新页面后需要重新输入。</p>
+    <form id="login-form">
+      <label for="web-token">网页访问令牌 <span class="muted">CAYW_WEB_TOKEN</span></label>
+      <div class="login-row"><input id="web-token" type="password" autocomplete="off" spellcheck="false" required placeholder="输入网页访问令牌"><button id="login-button" type="submit">连接</button></div>
+    </form>
+    <p id="login-error" class="error" role="alert"></p>
+    <p class="small muted">IPC 令牌仅由本机网关使用，无需在网页中输入。</p>
+  </section>
+
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar" aria-labelledby="sessions-heading">
+      <details id="session-picker" class="session-picker" open>
+      <summary class="session-picker-summary"><span>会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
+      <div class="session-picker-content">
+      <div class="section-heading"><h2 id="sessions-heading">会话</h2><button id="refresh-sessions" class="quiet" type="button">刷新</button></div>
+      <form id="create-form" class="create-form">
+        <label for="session-label" class="small">新会话名称</label>
+        <div class="create-row"><input id="session-label" type="text" maxlength="160" required placeholder="今天想做什么？"><button id="create-button" type="submit" aria-label="创建会话">新建</button></div>
+      </form>
+      <p id="list-status" class="small muted" role="status"></p>
+      <nav id="session-list" class="session-list" aria-label="选择会话"></nav>
+      <details class="capabilities"><summary>宿主能力</summary><button id="refresh-capabilities" class="quiet" type="button">读取能力</button><pre id="capability-content" class="small muted">读取后显示当前宿主公开的能力。</pre></details>
+      <p class="sidebar-note small muted">对话保存在本机。断线后继续接收结果，消息不会自动重发。</p>
+      </div>
+      </details>
+    </aside>
+
+    <main id="conversation" class="conversation" tabindex="-1">
+      <div class="conversation-heading"><div><p class="eyebrow">工作空间</p><h1 id="session-title">选择或创建会话</h1></div><span id="session-state" class="state-label">等待选择</span></div>
+      <p id="global-error" class="error" role="alert" hidden></p>
+      <p id="poll-status" class="small muted" role="status"></p>
+      <section id="blocked-notice" class="notice" hidden aria-labelledby="blocked-title"><h2 id="blocked-title">会话暂时不能继续</h2><p id="blocked-text"></p><button id="open-fork" type="button" hidden>确认后 Fork 为普通聊天</button></section>
+      <section id="approvals" class="approval-section" aria-label="待审批请求" hidden></section>
+      <section aria-label="会话历史" class="history-section"><p id="history-note" class="small muted"></p><div id="messages" class="messages"><div class="empty"><h2>继续一段对话</h2><p>从左侧选择已有会话，或创建新会话。</p></div></div></section>
+      <section id="live-section" class="live-section" aria-labelledby="live-heading" hidden><h2 id="live-heading" class="small">正在接收</h2><pre id="live-text" aria-live="off"></pre></section>
+      <details class="event-details"><summary>事件记录 <span id="event-count" class="muted">0</span></summary><p class="small muted">最近 120 条已消费事件；无法识别的事件按原始记录展示。</p><div id="event-log"></div></details>
+      <form id="prompt-form" class="composer">
+        <label for="prompt">发送消息</label>
+        <textarea id="prompt" rows="3" maxlength="64000" placeholder="输入你想完成的事情…" disabled></textarea>
+        <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选择会话后即可输入。Enter 换行，Ctrl / ⌘ + Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止运行</button><button id="send-button" type="submit" disabled>发送</button></div></div>
+      </form>
+    </main>
+  </div>
+
+  <dialog id="fork-dialog" aria-labelledby="fork-heading">
+    <h2 id="fork-heading">创建普通聊天分支</h2>
+    <p>强流程绑定的会话将保持冻结。确认后，Runtime 会创建新的普通聊天会话；原会话及其记录继续保留。</p>
+    <p>尚未核对的工具副作用不能通过 Fork 清除。</p>
+    <form id="fork-form"><label for="fork-label">新会话名称</label><input id="fork-label" maxlength="160" required><label class="confirm-label"><input id="fork-confirm" type="checkbox" required>我确认新建普通聊天分支，并理解原会话仍被冻结。</label><p id="fork-error" class="error" role="alert"></p><div class="dialog-actions"><button id="close-fork" class="secondary" type="button">返回</button><button id="fork-button" type="submit">确认 Fork</button></div></form>
+  </dialog>
+  <noscript><p class="notice">此界面需要 JavaScript 来读取本机会话和事件。请启用 JavaScript 后刷新。</p></noscript>
+</body>
+</html>

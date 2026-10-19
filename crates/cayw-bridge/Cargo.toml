@@ -1,0 +1,28 @@
+[package]
+name = "cayw-bridge"
+description = "Host-owned, generation-fenced MCP and Skill source registry for CAYW"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cayw-ai.workspace = true
+cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
+cayw-host = { path = "../cayw-host", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+tokio.workspace = true
+
+[dev-dependencies]
+cayw-core = { path = "../cayw-core", version = "0.1.0" }
+cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
+futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "io-util"] }
+
+[[bin]]
+name = "cayw-bridge-local-fixture"
+path = "src/bin/local_mcp_fixture.rs"
