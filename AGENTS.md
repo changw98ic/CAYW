@@ -4,7 +4,7 @@
 
 ## 仓库概况
 
-CAYW（Code As Your Wish）是正在开发的 Rust 原生、模块化 Agent Runtime，用来逐步替换 WinWinCode 对 Codex 内核的依赖。最初参考 pi 1.3.0 独立编写 `cayw-ai` 和 `cayw-agent`，其上是持久化 Core、公开 Runtime/IPC、Luau/Cells、Host、Device 及可选 plugin。workspace 成员和 feature 以 Cargo 清单为准。
+CAYW（Code As You Wish）是正在开发的开源、Rust 原生、模块化 Agent 运行时。项目愿景是让模型通过代码组织工具，在用户明确的权限和预算内完成任务，让用户始终掌控执行过程。核心可独立运行，模型、工具、设备、界面与插件按需组合；建设目标是让任务执行可追溯、可取消，并在中断后核对记录再恢复。workspace 成员和 feature 以 Cargo 清单为准。
 
 **首发只面向 macOS。** 不为 Windows、Linux 做适配、探针、环境排查或测试，也不以其缺口阻塞首发；后续支持由 [Issue #19](https://github.com/changw98ic/CAYW/issues/19) 跟踪。macOS 内未实际执行的架构或场景标为“未验证”，不外推。
 
@@ -49,7 +49,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 
 ## 文档分工
 
-- `README.md`：项目方向、计划中的组件边界、CodeMode 工具策略、当前优先事项。
+- `README.md`：面向使用者与开发者，介绍项目自身的愿景、核心思路、运行示例与文档入口；不堆放项目来源或替代关系、Issue/PR 流水账、内部验收细节或具体模型测试结果。
 - `docs/architecture.md`：组件职责与依赖方向、部署形态、身份与生命周期、执行/恢复/权限约束。改动组件边界或执行语义前先读它。
 - `docs/issue1-sdk-ipc-contract.md`：公开 SDK 与 IPC 的身份、事件游标、错误、版本和断连约定；各包边界见 `crates/*/README.md`。
 - `docs/development-map.md`：21 个 GitHub Issues 的分阶段路线图（A–E 及后续平台支持）、硬依赖表和 mermaid 依赖图。
@@ -61,7 +61,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 - 依赖表和 mermaid 图必须同步更新；新增依赖前确认目标 Issue 存在且不形成环。
 - 取消或拆分任务时同步修正所有相关链接，不留悬空引用。
 - 状态只有在对应交付和可复跑验收证据完成后才能从“计划”改为“已完成”。
-- `README.md` 与路线图中重复出现的优先级描述（先做 Rust pi 内核，再推进 Stage A；#6 全链不抢跑）要保持一致。
+- `README.md` 只提供路线图入口，不重复维护 Issue 状态和内部推进顺序；交付优先级与依赖关系在路线图中说明。
 
 ## 架构约束与后续方向
 
