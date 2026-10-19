@@ -1,5 +1,7 @@
 # SDK / IPC 离线验证记录
 
+> 2026-10-19 起测试工具改名为 verifyTool，代码包 `cayw-harness` 改为 `cayw-verify-tool`，`cayw-modules` 改为 `cayw-plugins`。本记录保留当时的原始命令和路径，复跑时请换用新包名。
+
 2026-10-19，`cayw-harness` 已通过公开 Rust SDK 和需要认证的本地 TCP IPC 执行离线场景。本记录只覆盖冻结源码、macOS ARM64、Rust 1.95.0、debug 构建和固定本地 Provider；不代表 Issue #2、三平台或真实模型任务已经验收。
 
 ## 实际执行路径

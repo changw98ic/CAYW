@@ -22,7 +22,7 @@
 
 CAYW 是让 AI Agent 通过短段 Luau 代码编排工具的**开源 Rust 运行时**：接入模型，由宿主决定能读写哪些文件、调用哪些服务、运行哪些构建或测试，并保存每次授权和执行结果。遇到无法确认的副作用时停止，核对原记录后再恢复。
 
-SDK、终端界面、网页和自动化流程都可以接到同一个**无界面运行时**上。普通对话可独立运行，可选模块按需接入。
+SDK、终端界面、网页和自动化流程都可以接到同一个**无界面运行时**上。普通对话可独立运行，plugin 按需接入。
 
 ## 现在可以运行什么
 
@@ -35,7 +35,7 @@ SDK、终端界面、网页和自动化流程都可以接到同一个**无界面
 | `cayw-codemode` / `cayw-cells` | 有内存、调用次数和输出限制的 Luau，分段执行/等待、独立调用记录与恢复核对 |
 | `cayw-host` / `cayw-workspace` / `cayw-data` | 授权后执行文件读写、正则/通配检索、Rust 单文件大纲、diff 定位、变更批次、归档读取及固定 Git/构建/测试能力 |
 | `cayw-device` / `cayw-requests` / `cayw-bridge` | 进程资源归属和清理、任务能力申请、宿主已有 MCP/Skills 的按需接入；各自完整验收仍有缺口 |
-| Provider、模块、内容存放、远程与 TUI/WebUI | 已有包和局部实现；实际边界以各包说明及验收记录为准，不能据包名认定全部功能已完成 |
+| Provider、plugin、内容存放、远程与 TUI/WebUI | 已有包和局部实现；实际边界以各包说明及验收记录为准，不能据包名认定全部功能已完成 |
 
 需要 Rust 1.95+。离线示例不需要 API Key，也不访问模型服务：
 
@@ -123,16 +123,17 @@ return { files = files, matches = matches }
 - **模型无关**：逐个接入 OpenAI、Anthropic、Gemini 及兼容接口，只标注实际验证过的能力。
 - **不依赖 Codex**：CAYW 是 [WinWinCode](https://github.com/changw98ic/winwincode) 与 [CodePatchBay](https://github.com/changw98ic/codepatchbay) 的后续方向，目标是完全替换它们对 Codex 内核的依赖。
 
-## 模块一览
+## 组件一览
 
-| 模块 | 作用 | 必需？ |
+| 组件 | 作用 | 必需？ |
 | --- | --- | --- |
 | Headless Core | 会话、事件、CodeMode、权限与调度 | 必需 |
 | Device | 管理本机执行进程、资源与内容存放 | 必需 |
 | SDK / IPC | 供外部程序接入的公开接口 | 必需 |
 | TUI / WebUI | 终端界面 / 网页界面，可单独安装 | 可选 |
 | Server | 远程接入；设备只需主动连出，不开放端口 | 可选 |
-| StrongFlow / JEv / Fusion / Observer | 强流程、扩展与诊断模块，可插拔 | 可选 |
+| plugin：StrongFlow / JEv / Fusion / Observer 及第三方扩展 | 强流程、评估与压缩、多模型协作、诊断等增强功能；Native plugin 编译进程序，External plugin 独立进程运行 | 可选 |
+| verifyTool | 测试工具：故障注入、性能与 A/B 对比记录 | 开发验证用 |
 
 ## 路线图
 
@@ -142,10 +143,10 @@ return { files = files, matches = matches }
 | A | 最小 SDK 与 IPC、macOS 验证基线、Luau CodeMode 原型、最小进程管理 | #1 已完成 macOS ARM64 首发范围的本地验收；验证底座及其他交付继续推进 |
 | B | 只用内核跑通第一个真实的流式多轮对话 + 工具执行 | 离线运行链已有；当前持久化 Runtime 真实模型验收待补 |
 | C | 崩溃恢复、按需权限申请、MCP / Skills 接入、多模型、多会话并发 | 已有实现；组合故障、真实服务和并发验收继续推进 |
-| D | 模块接口、TUI、WebUI、远程 Server、可插拔扩展 | 已有包与局部实现；统一进程清理、两机等验收待补 |
+| D | plugin 接口、TUI、WebUI、远程 Server、可插拔扩展 | 已有包与局部实现；统一进程清理、两机等验收待补 |
 | E | CPU / 内存 / GPU 资源策略与内容存放、可选加密同步 | 部分本地存放/资源记账已有；硬限制和远程同步未完成 |
 
-完整的 19 个任务（原 18 项加 Linux/Windows 后续支持 #19）、依赖关系和验收标准见 [开发路线图](docs/development-map.md)。
+完整的 21 个任务（原 18 项、Linux/Windows 后续支持 #19，以及上下文压缩 #22、公开 API 补齐 #23）、依赖关系和验收标准见 [开发路线图](docs/development-map.md)。
 
 ## 参与
 
