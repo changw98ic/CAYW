@@ -67,7 +67,11 @@ fn attached(value: Value) -> App {
 
 #[tokio::test]
 async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
-    let fixture = support::OfflineRuntime::new();
+    // One held run is enough: filling default concurrency=4 races with admit
+    // between "task appears" and "attempt still none" on loaded CI runners.
+    let mut config = RuntimeConfig::default();
+    config.max_concurrent_runs = 1;
+    let fixture = support::OfflineRuntime::with_config(config, None);
     let runtime = fixture.runtime.clone();
     assert!(runtime.get(&fixture.frozen_id).unwrap().frozen);
     assert!(!fixture.directory.path().join("fixture-output.txt").exists());
@@ -77,30 +81,26 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
         .unwrap();
     let mut blockers = Vec::new();
     let mut ids = Vec::new();
-    for index in 0..4 {
-        let id = runtime.create(Some(format!("blocker {index}"))).unwrap().id;
-        let client = owner.clone();
-        let run_id = id.clone();
-        ids.push(id);
-        blockers.push(tokio::spawn(async move {
-            client
-                .request(
-                    "session.prompt",
-                    json!({"session_id":run_id,"text":"hold concurrency slot"}),
-                )
-                .await
-        }));
-    }
+    let blocker_id = runtime.create(Some("blocker 0".into())).unwrap().id;
+    let client = owner.clone();
+    let run_id = blocker_id.clone();
+    ids.push(blocker_id.clone());
+    blockers.push(tokio::spawn(async move {
+        client
+            .request(
+                "session.prompt",
+                json!({"session_id":run_id,"text":"hold concurrency slot"}),
+            )
+            .await
+    }));
     timeout(Duration::from_secs(8), async {
-        while !ids
-            .iter()
-            .all(|id| !runtime.get(id).unwrap().pending_approvals.is_empty())
-        {
+        while runtime.get(&blocker_id).unwrap().pending_approvals.is_empty() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    assert_eq!(runtime.health().unwrap().running, 1);
     let session = runtime.create(Some("queued TUI".into())).unwrap();
     let id = session.id.clone();
     let mut app = attached(serde_json::to_value(session).unwrap());
@@ -114,13 +114,26 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     let commands = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     driver.dispatch(&mut app, &transport, commands);
     timeout(Duration::from_secs(8), async {
-        while runtime.tasks(&id).unwrap().is_empty() {
+        loop {
+            let tasks = runtime.tasks(&id).unwrap();
+            let view = runtime.get(&id).unwrap();
+            let health = runtime.health().unwrap();
+            if let Some(task) = tasks.first() {
+                assert_eq!(
+                    health.running, 1,
+                    "blocker must keep the only concurrency slot"
+                );
+                if task.state == TaskState::Queued && view.attempt.is_none() && health.queued >= 1 {
+                    break;
+                }
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert!(runtime.get(&id).unwrap().attempt.is_none());
+    assert_eq!(runtime.tasks(&id).unwrap()[0].state, TaskState::Queued);
     let commands = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert_eq!(
         commands,
