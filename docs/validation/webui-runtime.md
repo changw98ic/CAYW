@@ -1,6 +1,6 @@
 # WebUI 本地运行与恢复验证
 
-> 2026-10-19 起测试工具改名为 verifyTool，代码包 `cayw-harness` 改为 `cayw-verify-tool`，`cayw-modules` 改为 `cayw-plugins`。本记录保留当时的原始命令和路径，复跑时请换用新包名。
+> 2026-10-19 起测试工具改名为 VerifyTool，代码包 `cayw-harness` 改为 `cayw-verify-tool`，`cayw-modules` 改为 `cayw-plugins`。本记录保留当时的原始命令和路径，复跑时请换用新包名。
 
 2026-10-19 在 macOS 27.0.1 / ARM64 上验证了网页和本地网关：工具结果先显示实际状态与文件内容，完整执行记录默认折叠；正常运行和等待审批不显示异常警告。手机宽度下会话选择可收起，输入区不遮住历史，新建会话会更新数量。折叠记录的展开状态在下一次轮询后保留。
 

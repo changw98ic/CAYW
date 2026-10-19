@@ -1,6 +1,6 @@
 # Session SDK and IPC contract
 
-This is the local Issue [#1](https://github.com/changw98ic/CAYW/issues/1) delivery contract. The executable downstream examples are in [`examples/issue1-client`](../examples/issue1-client/README.md). They use the public `cayw_runtime::Runtime`, `cayw_core::SessionStore` and `cayw_ipc::Client` interfaces. The runtime graph needs no UI, optional Server, Harness, Codex or external code index. All model responses in these examples are fixed local fixtures; real Host file operations, SQLite commits and loopback TCP remain in the execution path.
+This is the local Issue [#1](https://github.com/changw98ic/CAYW/issues/1) delivery contract. The executable downstream examples are in [`examples/issue1-client`](../examples/issue1-client/README.md). They use the public `cayw_runtime::Runtime`, `cayw_core::SessionStore` and `cayw_ipc::Client` interfaces. The runtime graph needs no UI, optional Server, VerifyTool, Codex or external code index. All model responses in these examples are fixed local fixtures; real Host file operations, SQLite commits and loopback TCP remain in the execution path.
 
 ## Identity and persistence
 

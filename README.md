@@ -76,7 +76,7 @@ CAYW 希望改善编程 Agent 的这些使用方式：
 
 ## 架构文档
 
-完整的用户空间 Agent OS kernel 职责、部署形态、执行与恢复约束见[架构文档](docs/architecture.md)。文档区分已有实现、待验收目标和未决项；交付顺序见[开发路线图](docs/development-map.md)。
+完整的用户空间 Agent OS kernel 职责、部署形态、执行与恢复约束见[架构文档](docs/architecture.md)。文档区分已有实现与待验收目标；交付顺序见[开发路线图](docs/development-map.md)。
 
 ## 它怎么工作
 
@@ -133,7 +133,7 @@ return { files = files, matches = matches }
 | TUI / WebUI | 终端界面 / 网页界面，可单独安装 | 可选 |
 | Server | 远程接入；设备只需主动连出，不开放端口 | 可选 |
 | plugin：StrongFlow / JEv / Fusion / Observer 及第三方扩展 | 强流程、评估与压缩、多模型协作、诊断等增强功能；Native plugin 编译进程序，External plugin 独立进程运行 | 可选 |
-| verifyTool | 测试工具：故障注入、性能与 A/B 对比记录 | 开发验证用 |
+| VerifyTool | 测试工具：故障注入、性能与 A/B 对比记录 | 开发验证用 |
 
 ## 路线图
 
@@ -155,7 +155,7 @@ return { files = files, matches = matches }
 - 在 [Issues](https://github.com/changw98ic/CAYW/issues) 里讨论设计、指出问题或补充验收场景；
 - 首发只面向 macOS。#1 已完成 [macOS ARM64 本地验收](docs/validation/issue1-sdk-ipc.md)，当前推进 [#2](https://github.com/changw98ic/CAYW/issues/2) 的 macOS 验证基线；之后按 #3/#4 → #5 → #6 推进，详细状态见[开发路线图](docs/development-map.md)。局部测试不代表对应 Issue 已完整验收。
 
-**给 AI 编程助手：** 在本仓库工作前请先读 [`AGENTS.md`](AGENTS.md) 和 [`docs/development-map.md`](docs/development-map.md)。
+构建、测试、**VerifyTool** 命名与 PR 期望见 [CONTRIBUTING.md](CONTRIBUTING.md)。**给 AI 编程助手：** 在本仓库工作前请先读 [`AGENTS.md`](AGENTS.md) 和 [`docs/development-map.md`](docs/development-map.md)。
 
 ## 许可证
 

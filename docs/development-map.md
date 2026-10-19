@@ -1,6 +1,6 @@
 # CAYW 开发路线图
 
-本路线图覆盖 21 个交付型 Issues（原 18 项、后续平台支持 #19，以及 2026-10-19 新增的上下文压缩 [#22](https://github.com/changw98ic/CAYW/issues/22) 和公开 API 补齐 [#23](https://github.com/changw98ic/CAYW/issues/23)）。2026-10-19 起统一用词：测试工具称 verifyTool（代码包 `cayw-verify-tool`），StrongFlow/JEv/Fusion/Observer 及第三方扩展统一称 plugin，分 Native plugin 与 External plugin（代码包 `cayw-plugins`）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收并关闭；实现、独立客户端和验收说明已由 PR #20 合并到 `main`。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2、#4、#13 正文中原有的三平台要求已于 2026-10-19 收窄为 macOS，Linux/Windows 部分指向 #19。2026-10-18 起先独立实现参考 pi 的 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前根 workspace 有 20 个成员。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。
+本路线图覆盖 21 个交付型 Issues（原 18 项、后续平台支持 #19，以及 2026-10-19 新增的上下文压缩 [#22](https://github.com/changw98ic/CAYW/issues/22) 和公开 API 补齐 [#23](https://github.com/changw98ic/CAYW/issues/23)）。2026-10-19 起统一用词：测试工具称 VerifyTool（代码包 `cayw-verify-tool`），StrongFlow/JEv/Fusion/Observer 及第三方扩展统一称 plugin，分 Native plugin 与 External plugin（代码包 `cayw-plugins`）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收并关闭；实现、独立客户端和验收说明已由 PR #20 合并到 `main`。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2、#4、#13 正文中原有的三平台要求已于 2026-10-19 收窄为 macOS，Linux/Windows 部分指向 #19。2026-10-18 起先独立实现参考 pi 的 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前根 workspace 有 20 个成员。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。
 
 [返回项目说明](../README.md) · [架构文档](architecture.md) · [查看全部 Issues](https://github.com/changw98ic/CAYW/issues)
 
@@ -17,13 +17,13 @@
 ### A：最小接口、验证底座与统一执行
 
 - [#1](https://github.com/changw98ic/CAYW/issues/1)：先交付可执行的公开 Rust SDK 和版本化 IPC 往返，不先冻结完整接口或铺设空架构。
-- [#2](https://github.com/changw98ic/CAYW/issues/2)：当前建立 macOS 的故障注入与性能记录基线，后续每个任务持续补充其场景；Issue 标题与正文已改为 macOS 范围。verifyTool 只用于验证，不是 Core 运行依赖；A/B 对比记录格式先用离线固定数据跑通，真实对比在 #6 后经授权运行。
+- [#2](https://github.com/changw98ic/CAYW/issues/2)：当前建立 macOS 的故障注入与性能记录基线，后续每个任务持续补充其场景；Issue 标题与正文已改为 macOS 范围。VerifyTool 只用于验证，不是 Core 运行依赖；A/B 对比记录格式先用离线固定数据跑通，真实对比在 #6 后经授权运行。
 - [#3](https://github.com/changw98ic/CAYW/issues/3) 与 [#4](https://github.com/changw98ic/CAYW/issues/4)：优先使用 Luau 实现同机语言原型（Monty 仅作可选对照，不阻塞主线），与最小进程树治理并行。冷/暖启动、首执行、真实编排、取消与离线样本验证都要有可核对记录。
 - [#5](https://github.com/changw98ic/CAYW/issues/5)：优先提供已经做好的标准 CodeMode 能力集作为统一模型工具编排入口，底层由 Rust 能力执行；所有执行路径共用权限、调用配对、取消和预算。
 
 ### B：首个 Core Only 真实闭环
 
-[#6](https://github.com/changw98ic/CAYW/issues/6) 在 Stage A 执行底座与预置 CodeMode 稳固后推进（非首阶段第一要务）：不安装或启动 UI、Server、verifyTool 或任何 plugin，通过 API 完成流式多轮 Chat、真实工具执行、取消和持久化恢复。模型协议先选一个完成真实闭环，再逐步扩展。
+[#6](https://github.com/changw98ic/CAYW/issues/6) 在 Stage A 执行底座与预置 CodeMode 稳固后推进（非首阶段第一要务）：不安装或启动 UI、Server、VerifyTool 或任何 plugin，通过 API 完成流式多轮 Chat、真实工具执行、取消和持久化恢复。模型协议先选一个完成真实闭环，再逐步扩展。
 
 事件游标、审批、取消、工具 call/result 配对、Session/Worker 解耦、最小持久化与副作用 unknown 核对必须在此切片中存在。[#7](https://github.com/changw98ic/CAYW/issues/7) 负责扩展故障覆盖，不能把这些基本语义推迟到后续。审批先做可用最小路径，不以复杂框架阻塞主链。
 
@@ -44,7 +44,7 @@
 [#12](https://github.com/changw98ic/CAYW/issues/12) 在真实 SDK/IPC 上交付 plugin 接口与完整生命周期（发现、校验、授权、初始化、启用、停止/升级/卸载）、plugin 模板和 plugin 自检；其后的 [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14)、[#15](https://github.com/changw98ic/CAYW/issues/15)、[#16](https://github.com/changw98ic/CAYW/issues/16)、[#17](https://github.com/changw98ic/CAYW/issues/17) 可并行推进，不把全部 Provider 或所有 UI 变成 Core 前置条件。
 
 - 可信 Native plugin 通过 Cargo feature 静态链接，升级需重新编译。External plugin 通过独立进程 IPC 接入，管理权限与生命周期；进程隔离不等同安全沙箱。plugin 不能直接读写 Core 数据库，不能绕过审批。
-- 公开接口先有最小真实往返，再由 [#2](https://github.com/changw98ic/CAYW/issues/2) 的 verifyTool 与 [#13](https://github.com/changw98ic/CAYW/issues/13) 的真实消费共同验证。[#12](https://github.com/changw98ic/CAYW/issues/12) 完成初版不代表 SDK 已稳定；稳定版本需相应消费与兼容性证据。
+- 公开接口先有最小真实往返，再由 [#2](https://github.com/changw98ic/CAYW/issues/2) 的 VerifyTool 与 [#13](https://github.com/changw98ic/CAYW/issues/13) 的真实消费共同验证。[#12](https://github.com/changw98ic/CAYW/issues/12) 完成初版不代表 SDK 已稳定；稳定版本需相应消费与兼容性证据。
 - TUI 与 WebUI 可拆。TUI 增加只读的文件、Diff 和日志查看；WebUI 增加多项目管理和 plugin 管理页面，多设备管理暂不做。WebUI 的本地轻网关消费公开接口，不依赖可选远程 Server。
 - 可选 Server 管远程绑定、认证吊销、路由与重连；Device 仅出站连接，无需入站端口。监听地址、公开 URL、TLS/代理、绑定成功响应丢失、断线与吊销恢复必须明确，并提供独立两机证据。
 - StrongFlow/JEv/Fusion/Observer 都可插拔，普通 Chat 不依赖它们。已有 StrongFlow 任务在该 plugin 卸载后仍不能静默绕过已绑定流程：原 Session 直接提示不可用并保持原绑定冻结，同时提供显式 Fork 转换选项（由用户确认后分叉为新的普通 Session 并记录来源关系）；Observer 诊断失败、缓慢或队列饱和不阻塞主链。

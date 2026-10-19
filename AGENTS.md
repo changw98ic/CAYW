@@ -50,7 +50,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 ## 文档分工
 
 - `README.md`：项目方向、计划中的组件边界、CodeMode 工具策略、当前优先事项。
-- `docs/architecture.md`：组件职责与依赖方向、部署形态、身份与生命周期、执行/恢复/权限约束及未决点。改动组件边界或执行语义前先读它。
+- `docs/architecture.md`：组件职责与依赖方向、部署形态、身份与生命周期、执行/恢复/权限约束。改动组件边界或执行语义前先读它。
 - `docs/issue1-sdk-ipc-contract.md`：公开 SDK 与 IPC 的身份、事件游标、错误、版本和断连约定；各包边界见 `crates/*/README.md`。
 - `docs/development-map.md`：21 个 GitHub Issues 的分阶段路线图（A–E 及后续平台支持）、硬依赖表和 mermaid 依赖图。
 - GitHub Issues（https://github.com/changw98ic/CAYW/issues）：每个任务功能范围、交付和验收的权威来源；平台范围以本文件的首发决定为准。路线图维护依赖、阶段、入口及本地状态，远端 Issue 未同步时须明确说明。
@@ -65,13 +65,13 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 
 ## 架构约束与后续方向
 
-- **Headless Core 为中心**：Core 独立运行，不依赖 UI、Server、verifyTool 或任何 plugin。TUI / WebUI / Server 可单独安装；StrongFlow / JEv / Fusion / Observer 及第三方扩展统一称为 plugin，都可插拔，普通 Chat 不依赖它们。
+- **Headless Core 为中心**：Core 独立运行，不依赖 UI、Server、VerifyTool 或任何 plugin。TUI / WebUI / Server 可单独安装；StrongFlow / JEv / Fusion / Observer 及第三方扩展统一称为 plugin，都可插拔，普通 Chat 不依赖它们。
 - **先夯实 Stage A，#6 全链不抢跑**：先按路线图补齐 Stage A 底座（SDK/IPC、验证基线、Luau、Device、预置 CodeMode）的验收，再做 #6 的真实模型、统一权限、持久化和取消全链；早期原型或单项测试不能替代这些交付。
 - **CodeMode 是统一工具编排入口**：优先用 Luau 实现（Monty 只作可选对照），底层由受控的 Rust 能力执行；所有执行路径共用权限、调用配对、取消和预算。
 - **默认不向 Agent 暴露 Bash/Shell/Node/Python 通用执行入口**。常规文件、检索、Git、构建/测试需求由预置 CodeMode 能力覆盖；真实缺口按任务申请开放（#8），申请次数不能自动授权。这条限制只针对 Agent 的工具暴露，不限制开发本项目时使用的工具链。
 - **Session 与 Worker 解耦**：Session 是持久逻辑，Worker 是可更换的执行者。恢复时先核对 unknown 副作用，不能盲目重放。
 - **plugin 接入两种方式**：可信 Native plugin 通过 Cargo feature 静态链接（`cayw-plugins`）；External plugin 通过独立进程 IPC 接入（进程隔离不等于安全沙箱）。plugin 不能直接读写 Core 数据库，不能绕过审批、调用配对、取消和预算。
-- **verifyTool 是测试工具**（`cayw-verify-tool`），运行真实 SDK/IPC/Host 路径做验证，不是 Core 运行依赖。
+- **VerifyTool 是测试工具**（`cayw-verify-tool`），运行真实 SDK/IPC/Host 路径做验证，不是 Core 运行依赖。
 - **MCP / Skills 由宿主统一接入**，Core 不重复创建 loader 或 MCP 连接；CodeGraph 等持久代码索引、跨文件语义分析和外部 search 由宿主提供。Workspace 已有有界文本检索与 Rust 单文件语法大纲，不能把它们称为完整语义索引，也不能在 Core 再建一份。
 - **StrongFlow plugin 卸载后**：已绑定的 Session 提示不可用并保持冻结，只提供由用户确认的显式 Fork 转换，不能静默绕过。
 - **Device 持有权威内容**；可选 Server 下 Device 只出站连接，无需入站端口。
