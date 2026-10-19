@@ -201,7 +201,7 @@ fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
         value["messages"] = json!([completed.clone()]);
         value["frozen"] = json!(true);
         value["binding"] =
-            json!({"module":"unavailable","frozen":true,"reason":"host unloaded module"});
+            json!({"plugin":"unavailable","frozen":true,"reason":"host unloaded plugin"});
         let approval = json!({"id":"current-approval","session_id":"s1","attempt_id":"current",
             "input":{"task_id":"fixture-task","target":{"type":"tool_call","call_id":"current-call"},
                 "capability":"write","scope":"fixture.txt","reason":"fixture permission"},
@@ -227,7 +227,7 @@ fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
                 ),
                 100 => record(
                     cursor,
-                    json!({"type":"host","kind":"module_resumed","data":{}}),
+                    json!({"type":"host","kind":"plugin_resumed","data":{}}),
                 ),
                 101 => record(
                     cursor,

@@ -69,7 +69,7 @@ async fn canonical_frozen_view_and_confirmed_fork_use_runtime_not_invented_fixtu
         .await
         .unwrap();
     assert_eq!(value["frozen"], true);
-    assert_eq!(value["binding"]["module"], "fixture-binding");
+    assert_eq!(value["binding"]["plugin"], "fixture-binding");
     assert_eq!(value["binding"]["frozen"], true);
     assert!(value["binding"]["registry_id"].is_string());
     assert!(
@@ -78,7 +78,7 @@ async fn canonical_frozen_view_and_confirmed_fork_use_runtime_not_invented_fixtu
             .unwrap()
             .contains("unloaded")
     );
-    assert!(value["binding"].get("module_id").is_none());
+    assert!(value["binding"].get("plugin_id").is_none());
     assert!(value["binding"].get("available").is_none());
     let baseline = runtime.get(&source).unwrap();
     let mut app = App::default();

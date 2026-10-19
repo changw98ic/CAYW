@@ -113,7 +113,7 @@ fn frozen_session_requires_explicit_confirmation_before_fork() {
     let mut app = app("idle");
     let mut value = snapshot("idle", 0);
     value["frozen"] = json!(true);
-    value["binding"] = json!({"module":"fixture-binding", "version":"1.0.0", "registry_id":"f4d8cc10-9530-4536-ac3c-1cf08e8d980d", "generation":1, "manifest":{}, "frozen":true, "reason":"host unloaded module", "workflow_state":null});
+    value["binding"] = json!({"plugin":"fixture-binding", "version":"1.0.0", "registry_id":"f4d8cc10-9530-4536-ac3c-1cf08e8d980d", "generation":1, "manifest":{}, "frozen":true, "reason":"host unloaded plugin", "workflow_state":null});
     app.upsert_snapshot(value, true).unwrap();
     assert!(
         app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
@@ -369,7 +369,7 @@ fn runtime_extensions_are_refreshed_and_empty_binding_can_only_fork_when_frozen(
     let mut app = app("idle");
     app.apply_events(
         "s1",
-        json!([{"cursor":1,"event":{"type":"host","kind":"module_frozen","data":{}}}]),
+        json!([{"cursor":1,"event":{"type":"host","kind":"plugin_frozen","data":{}}}]),
     )
     .unwrap();
     assert!(!app.selected().unwrap().can_prompt());
