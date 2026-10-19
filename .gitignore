@@ -1,0 +1,7 @@
+target/
+/target-*/
+/.local/
+/.playwright-mcp/
+.DS_Store
+__pycache__/
+*.pyc

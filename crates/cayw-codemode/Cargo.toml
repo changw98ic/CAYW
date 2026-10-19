@@ -1,0 +1,22 @@
+[package]
+name = "cayw-codemode"
+description = "CAYW bounded Luau orchestration over host-owned Rust capabilities"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
+cayw-ai.workspace = true
+async-trait.workspace = true
+mlua = { version = "0.12.2", features = ["luau", "async", "send", "serde"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
