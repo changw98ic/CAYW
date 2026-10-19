@@ -90,7 +90,7 @@ fn history_can_scroll_to_older_messages_and_new_stream_does_not_jump_back_to_bot
 fn frozen_fork_dialog_explains_source_binding_and_requires_a_deliberate_key() {
     let mut app = App::default();
     app.set_connected();
-    app.upsert_snapshot(json!({"id":"s1","label":"flow","cursor":0,"state":"idle","frozen":true,"binding":{"module":"fixture-binding","version":"1.0.0","registry_id":"f4d8cc10-9530-4536-ac3c-1cf08e8d980d","generation":1,"manifest":{},"frozen":true,"reason":"host unloaded module","workflow_state":null},"messages":[],"pending_approvals":[],"unresolved_calls":[]}),true).unwrap();
+    app.upsert_snapshot(json!({"id":"s1","label":"flow","cursor":0,"state":"idle","frozen":true,"binding":{"plugin":"fixture-binding","version":"1.0.0","registry_id":"f4d8cc10-9530-4536-ac3c-1cf08e8d980d","generation":1,"manifest":{},"frozen":true,"reason":"host unloaded plugin","workflow_state":null},"messages":[],"pending_approvals":[],"unresolved_calls":[]}),true).unwrap();
     app.handle_key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('f'),
         crossterm::event::KeyModifiers::CONTROL,

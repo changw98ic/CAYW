@@ -155,7 +155,7 @@ test('session_frozen error survives bare Core idle snapshots and offers explicit
 });
 
 test('needs_reconciliation error cannot be cleared by an idle refresh or bypassed with fork', async t => {
-  const current = snapshot({ binding: { module: 'strongflow', frozen: true } });
+  const current = snapshot({ binding: { plugin: 'strongflow', frozen: true } });
   let initialRead = true;
   const app = await page(t, async method => {
     if (method === 'session.list') return [snapshot()];
@@ -190,7 +190,7 @@ test('binding metadata and plain approval scope are consumed without showing sys
 });
 
 test('frozen Runtime binding locks both prompt and fork until the active attempt settles', async t => {
-  let current = snapshot({ state:'running', attempt:lease(), binding:{module:'strongflow',generation:4,frozen:true} });
+  let current = snapshot({ state:'running', attempt:lease(), binding:{plugin:'strongflow',generation:4,frozen:true} });
   const app = await page(t, async method => {
     if (method === 'session.list') return [current];
     if (method === 'session.get') return current;
@@ -199,7 +199,7 @@ test('frozen Runtime binding locks both prompt and fork until the active attempt
   assert.equal(app.ui.prompt.disabled,true);
   assert.equal(app.ui['open-fork'].hidden,false);
   assert.equal(app.ui['open-fork'].disabled,true);
-  current = snapshot({cursor:11,binding:{module:'strongflow',generation:4,frozen:true}});
+  current = snapshot({cursor:11,binding:{plugin:'strongflow',generation:4,frozen:true}});
   await app.poll();
   assert.equal(app.ui['open-fork'].disabled,true, 'active attempt needs its durable terminal, not just a newer idle');
 });
@@ -253,7 +253,7 @@ test('cancel response is not execution settlement and cannot unlock a pending pr
 });
 
 test('an incomplete fork receipt cannot enable a second fork', async t => {
-  const current=snapshot({binding:{module:'strongflow',generation:1,frozen:true}});
+  const current=snapshot({binding:{plugin:'strongflow',generation:1,frozen:true}});
   const app=await page(t,async method=>{
     if(method==='session.list') return [current];
     if(method==='session.get') return current;
@@ -401,7 +401,7 @@ for (const order of ['receipt-first', 'events-first', 'cancel-receipt-last']) {
     await app.poll();
     assert.equal(app.ui.prompt.disabled, false, 'known early cancel must settle on the original request completion');
     assert.equal(app.ui['cancel-button'].disabled, true);
-    current = {...complete, binding:{module:'strongflow', frozen:true}};
+    current = {...complete, binding:{plugin:'strongflow', frozen:true}};
     await app.poll();
     assert.equal(app.ui['open-fork'].disabled, false, 'the settled cancel must not strand a later frozen session');
     assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);

@@ -126,12 +126,44 @@ fn obsolete_side_bindings_are_preserved_for_explicit_host_reconciliation() {
     assert_eq!(unchanged, ("strongflow".into(), false));
 }
 
+#[test]
+fn pre_rename_binding_decisions_require_explicit_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Runtime::open(
+        dir.path().join("sessions.db"),
+        dir.path(),
+        Arc::new(Chat),
+        Model::new("fixture", "pre-rename"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    let snapshot = rt.store().snapshot(&id).unwrap();
+    rt.store()
+        .append_control_event(
+            &id,
+            snapshot.cursor,
+            None,
+            "host",
+            "module_frozen",
+            json!({"binding":{"reason":"strongflow unavailable"}}),
+        )
+        .unwrap();
+    // A frozen decision under the old event name must not read as an unbound session.
+    assert!(matches!(
+        rt.get(&id),
+        Err(cayw_runtime::RuntimeError::Core(cayw_core::CoreError::MigrationRequired(reason)))
+            if reason.contains("module_frozen")
+    ));
+    assert!(rt.list().is_err());
+}
+
 #[cfg(feature = "strongflow")]
 #[tokio::test]
 async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor() {
     use cayw_core::CoreEvent;
-    use cayw_modules::{
-        ModuleContext,
+    use cayw_plugins::{
+        PluginContext,
         strongflow::{PlanStep, StrongFlow, WorkflowPlan},
     };
     use std::collections::BTreeSet;
@@ -141,7 +173,7 @@ async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor
             dir.path().join("sessions.db"),
             dir.path(),
             Arc::new(Chat),
-            Model::new("fixture", "module-view"),
+            Model::new("fixture", "plugin-view"),
             RuntimeConfig::default(),
         )
         .unwrap()
@@ -157,7 +189,7 @@ async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor
         }],
     })
     .unwrap();
-    let description = rt.load_native(flow, ModuleContext::new([], [])).unwrap();
+    let description = rt.load_native(flow, PluginContext::new([], [])).unwrap();
     let created = rt.create(None).unwrap();
     rt.bind_strongflow(&created.id).unwrap();
     let bound = serde_json::to_value(rt.get(&created.id).unwrap()).unwrap();
@@ -170,7 +202,7 @@ async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor
         json!(["actual-tests"])
     );
     let before = bound["cursor"].as_u64().unwrap();
-    rt.unload_module("strongflow").unwrap();
+    rt.unload_plugin("strongflow").unwrap();
     let changes = rt
         .wait_events(
             &created.id,
@@ -181,7 +213,7 @@ async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor
         )
         .await
         .unwrap();
-    assert!(changes.iter().any(|record| matches!(&record.event, CoreEvent::Host {kind, data} if kind == "module_frozen" && data["actor"].is_string() && data["decision"]["binding"].is_object())));
+    assert!(changes.iter().any(|record| matches!(&record.event, CoreEvent::Host {kind, data} if kind == "plugin_frozen" && data["actor"].is_string() && data["decision"]["binding"].is_object())));
     let frozen = serde_json::to_value(rt.get(&created.id).unwrap()).unwrap();
     assert!(frozen["cursor"].as_u64().unwrap() > before);
     assert_eq!(frozen["frozen"], true);

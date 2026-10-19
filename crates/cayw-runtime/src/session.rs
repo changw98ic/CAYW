@@ -1,4 +1,4 @@
-//! Runtime session state is a projection of the Core log. Module liveness can
+//! Runtime session state is a projection of the Core log. Plugin liveness can
 //! freeze a binding, but a newly loaded instance can never revive it implicitly.
 use crate::{Runtime, RuntimeError, lock};
 use cayw_core::{
@@ -28,7 +28,7 @@ pub struct SessionView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBindingView {
-    pub module: String,
+    pub plugin: String,
     pub version: String,
     pub registry_id: String,
     pub generation: u64,
@@ -39,7 +39,7 @@ pub struct SessionBindingView {
     pub workflow_state: Option<Value>,
 }
 
-/// Portable even when optional module support is disabled. The module's complete
+/// Portable even when optional plugin support is disabled. The plugin's complete
 /// SessionBinding is preserved as data, never reconstructed from a name/version.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,11 +51,11 @@ pub(crate) struct BindingRecord {
     pub strongflow: Option<Value>,
 }
 impl BindingRecord {
-    pub(crate) fn module(&self) -> &str {
+    pub(crate) fn plugin(&self) -> &str {
         self.manifest["name"].as_str().unwrap_or_default()
     }
     fn validate(&self, session: &str) -> Result<(), RuntimeError> {
-        if self.module().is_empty()
+        if self.plugin().is_empty()
             || self.manifest["version"]
                 .as_str()
                 .is_none_or(|v| v.trim().is_empty())
@@ -65,15 +65,15 @@ impl BindingRecord {
                 .reason
                 .as_ref()
                 .is_some_and(|reason| reason.trim().is_empty())
-            || (self.module() == "strongflow") != self.strongflow.is_some()
+            || (self.plugin() == "strongflow") != self.strongflow.is_some()
         {
-            return Err(CoreError::CorruptStore("invalid canonical module binding".into()).into());
+            return Err(CoreError::CorruptStore("invalid canonical plugin binding".into()).into());
         }
         if let Some(binding) = &self.strongflow
             && (binding["session_id"] != session
-                || binding["module_manifest"] != self.manifest
-                || binding["bound_module_version"]["registry_id"] != self.registry_id
-                || binding["bound_module_version"]["generation"] != self.generation
+                || binding["plugin_manifest"] != self.manifest
+                || binding["bound_plugin_version"]["registry_id"] != self.registry_id
+                || binding["bound_plugin_version"]["generation"] != self.generation
                 || binding["frozen_reason"] != serde_json::to_value(&self.reason)?
                 || !binding["workflow_state"].is_object())
         {
@@ -97,7 +97,7 @@ impl BindingRecord {
     }
     fn view(&self) -> SessionBindingView {
         SessionBindingView {
-            module: self.module().into(),
+            plugin: self.plugin().into(),
             version: self.manifest["version"].as_str().unwrap_or_default().into(),
             registry_id: self.registry_id.clone(),
             generation: self.generation,
@@ -110,9 +110,9 @@ impl BindingRecord {
                 .map(|state| state["workflow_state"].clone()),
         }
     }
-    #[cfg(feature = "modules")]
-    pub(crate) fn description(&self) -> Result<cayw_modules::ModuleDescription, RuntimeError> {
-        Ok(cayw_modules::ModuleDescription {
+    #[cfg(feature = "plugins")]
+    pub(crate) fn description(&self) -> Result<cayw_plugins::PluginDescription, RuntimeError> {
+        Ok(cayw_plugins::PluginDescription {
             manifest: serde_json::from_value(self.manifest.clone())?,
             registry_id: self.registry_id.clone(),
             generation: self.generation,
@@ -121,7 +121,7 @@ impl BindingRecord {
     #[cfg(feature = "strongflow")]
     pub(crate) fn strongflow_binding(
         &self,
-    ) -> Result<cayw_modules::strongflow::SessionBinding, RuntimeError> {
+    ) -> Result<cayw_plugins::strongflow::SessionBinding, RuntimeError> {
         serde_json::from_value(self.strongflow.clone().ok_or_else(|| {
             RuntimeError::InvalidInput("session has no StrongFlow binding".into())
         })?)
@@ -131,9 +131,9 @@ impl BindingRecord {
         if self.reason.is_some() {
             return None;
         }
-        #[cfg(feature = "modules")]
+        #[cfg(feature = "plugins")]
         {
-            let result = runtime.inner.registry.check_available(self.module());
+            let result = runtime.inner.registry.check_available(self.plugin());
             let expected = self.description();
             match (result, expected) {
                 (Ok(actual), Ok(expected)) if actual == expected => {
@@ -143,19 +143,19 @@ impl BindingRecord {
                     }
                     None
                 }
-                (Err(error), _) => Some(format!("{} is unavailable: {error}", self.module())),
+                (Err(error), _) => Some(format!("{} is unavailable: {error}", self.plugin())),
                 _ => Some(format!(
                     "{} registry identity, generation or manifest changed",
-                    self.module()
+                    self.plugin()
                 )),
             }
         }
-        #[cfg(not(feature = "modules"))]
+        #[cfg(not(feature = "plugins"))]
         {
             let _ = runtime;
             Some(format!(
-                "{} module support is disabled in this runtime",
-                self.module()
+                "{} plugin support is disabled in this runtime",
+                self.plugin()
             ))
         }
     }
@@ -191,10 +191,21 @@ impl Runtime {
             let limit = (snapshot.cursor - cursor).min(cayw_core::MAX_EVENT_PAGE as u64) as usize;
             for record in self.inner.store.events(&snapshot.id, cursor, limit)? {
                 cursor = record.cursor;
+                // Decisions recorded before the module -> plugin rename are not
+                // replayed; skipping them would silently thaw a frozen session.
+                if let CoreEvent::Host { kind, .. } = &record.event
+                    && kind.starts_with("module_")
+                {
+                    return Err(CoreError::MigrationRequired(format!(
+                        "session {} has a pre-rename {kind} binding decision; explicit host migration is required",
+                        snapshot.id
+                    ))
+                    .into());
+                }
                 if let CoreEvent::Host { kind, data } = record.event
                     && matches!(
                         kind.as_str(),
-                        "module_bound" | "module_checkpoint" | "module_frozen" | "module_resumed"
+                        "plugin_bound" | "plugin_checkpoint" | "plugin_frozen" | "plugin_resumed"
                     )
                 {
                     if data["actor"]
@@ -202,7 +213,7 @@ impl Runtime {
                         .is_none_or(|actor| actor.trim().is_empty())
                     {
                         return Err(CoreError::CorruptStore(
-                            "module decision has no host actor".into(),
+                            "plugin decision has no host actor".into(),
                         )
                         .into());
                     }
@@ -239,7 +250,7 @@ impl Runtime {
             }
             Err(error) => {
                 // A failed lifecycle write cannot allow an active worker to keep
-                // spending an approval against an unrecorded module decision.
+                // spending an approval against an unrecorded plugin decision.
                 if !cursor_conflict(&error) && !matches!(error, CoreError::StaleLease) {
                     self.control_failed(&snapshot.id);
                 }
@@ -266,7 +277,7 @@ impl Runtime {
         self.inner.queue.cancel(session)?;
         self.inner
             .journal
-            .revoke_session(session, "module binding frozen")?;
+            .revoke_session(session, "plugin binding frozen")?;
         self.inner.approvals.notify_waiters();
         self.inner.changed.notify_waiters();
         Ok(())
@@ -284,9 +295,9 @@ impl Runtime {
                 current.freeze(reason);
                 match self.record_binding(
                     &snapshot,
-                    "module_frozen",
+                    "plugin_frozen",
                     current,
-                    "runtime-module-lifecycle",
+                    "runtime-plugin-lifecycle",
                 ) {
                     Ok(()) => {
                         self.cancel_frozen(id)?;

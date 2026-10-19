@@ -51,9 +51,9 @@ async fn remote_device_forwards_versioned_calls_into_the_same_rpc_handler() {
 
 #[cfg(feature = "strongflow")]
 #[tokio::test]
-async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_chat() {
-    use cayw_modules::{
-        ModuleContext,
+async fn actual_plugin_binding_freezes_on_unload_and_only_confirmed_fork_runs_chat() {
+    use cayw_plugins::{
+        PluginContext,
         strongflow::{PlanStep, StrongFlow, WorkflowPlan},
     };
     use cayw_runtime::{RuntimeError, ScopedPermission};
@@ -61,8 +61,8 @@ async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
     use std::collections::BTreeSet;
     let dir = tempfile::tempdir().unwrap();
     let rt = runtime(&dir);
-    let module = Arc::new(StrongFlow::new());
-    module
+    let plugin = Arc::new(StrongFlow::new());
+    plugin
         .create_plan(WorkflowPlan {
             id: "plan".into(),
             steps: vec![PlanStep {
@@ -73,8 +73,8 @@ async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
         })
         .unwrap();
     rt.load_native(
-        module,
-        ModuleContext::new(
+        plugin,
+        PluginContext::new(
             ["strongflow.describe".into(), "strongflow.ready".into()],
             [],
         ),
@@ -92,8 +92,8 @@ async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
         .await
         .unwrap();
     assert_eq!(before["frozen"], false);
-    assert_eq!(before["binding"]["module"], "strongflow");
-    rt.unload_module("strongflow").unwrap();
+    assert_eq!(before["binding"]["plugin"], "strongflow");
+    rt.unload_plugin("strongflow").unwrap();
     let frozen = rt
         .call(
             "session.get",
@@ -120,7 +120,7 @@ async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
         rt.prompt(&id, "blocked", CancellationToken::new()).await,
         Err(RuntimeError::Frozen(_))
     ));
-    rt.load_native(Arc::new(StrongFlow::new()), ModuleContext::new([], []))
+    rt.load_native(Arc::new(StrongFlow::new()), PluginContext::new([], []))
         .unwrap();
     assert!(matches!(
         rt.prompt(&id, "still blocked", CancellationToken::new())
@@ -133,7 +133,7 @@ async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
     // A frozen source can still be inspected, and stays frozen after a fork.
     assert_eq!(rt.get(&id).unwrap().label, "Chat");
     assert!(rt.enqueue(&id, "source stays frozen").is_err());
-    // Plain chat is available with no modules loaded in a separate runtime.
+    // Plain chat is available with no plugins loaded in a separate runtime.
     drop(rt);
     let config = RuntimeConfig {
         permissions: vec![
@@ -167,7 +167,7 @@ async fn actual_module_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
 
 #[cfg(not(any(feature = "remote", feature = "strongflow")))]
 #[tokio::test]
-async fn ordinary_chat_opens_without_optional_modules_or_relay() {
+async fn ordinary_chat_opens_without_optional_plugins_or_relay() {
     let dir = tempfile::tempdir().unwrap();
     let rt = runtime(&dir);
     let id = rt.create(None).unwrap().id;
