@@ -14,9 +14,9 @@
 </div>
 
 > [!IMPORTANT]
-> **首发面向 macOS，已能离线运行“模型输出 → Luau → 受控工具”的持久化运行链。** 当前 workspace 有 20 个 Rust 包，包含 Core、Runtime/IPC、Luau/Cells、Host、Device，以及界面和可选组件。[Issue #1 的独立 SDK/IPC 客户端与取消修复](docs/validation/issue1-sdk-ipc.md)已完成 macOS ARM64 首发范围的本地验收，完整默认测试通过，GitHub #1 已按用户要求关闭。Windows、Linux 后续支持由 [#19](https://github.com/changw98ic/CAYW/issues/19) 单独跟踪，不阻塞首发；其余任务和持久化 Runtime 真实模型验收继续推进。
+> **首发面向 macOS，已能离线运行“模型输出 → Luau → 受控工具”的持久化运行链。** 当前 workspace 有 20 个 Rust 包，包含 Core、Runtime/IPC、Luau/Cells、Host、Device，以及界面和可选组件。[Issue #1 的独立 SDK/IPC 客户端与取消修复](docs/validation/issue1-sdk-ipc.md)已完成 macOS ARM64 首发范围的本地验收，完整默认测试通过，已经由 PR #20 合并到 `main`，GitHub #1 已关闭。Windows、Linux 后续支持由 [#19](https://github.com/changw98ic/CAYW/issues/19) 单独跟踪，不阻塞首发；其余任务和持久化 Runtime 真实模型验收继续推进。
 >
-> The first release targets macOS only. The persistent Rust runtime can execute offline model fixtures through Luau and authorized Host capabilities. Issue #1's independent SDK/IPC client and cancellation repair have passed local acceptance on macOS ARM64, including the default workspace suite. GitHub #1 is closed at the user's request; its implementation and independent client are delivered together on the `pi-core-rust` branch. Linux and Windows support is tracked separately in #19 and does not block this release. Earlier live Magpie + DeepSeek Flash results cover the original agent core, not the current persistent runtime.
+> The first release targets macOS only. The persistent Rust runtime can execute offline model fixtures through Luau and authorized Host capabilities. Issue #1's independent SDK/IPC client and cancellation repair have passed local acceptance on macOS ARM64, including the default workspace suite. GitHub #1 is closed; its implementation and independent client were merged into `main` through PR #20. Linux and Windows support is tracked separately in #19 and does not block this release. Earlier live Magpie + DeepSeek Flash results cover the original agent core, not the current persistent runtime.
 
 ## 一句话说明
 
@@ -52,7 +52,15 @@ assistant: 2 + 3 = 5
 completed: 5 messages, running=false
 ```
 
-上面的离线示例使用固定模型数据；HTTP 适配另有本地服务的完整往返测试。另已通过 Magpie + DS Flash 完成 4 项真实检查，实际响应模型为 `deepseek-v4.1-flash`：流式文本、Rust 工具调用后回答、下一轮记住工具值、收到文本后的取消。真实入口是 `cargo run -p cayw-agent --example magpie --locked`，需显式设置 `MAGPIE_API_KEY`；会发送真实请求，可能计费，不属于普通测试。
+Issue #1 的独立客户端从仓库外部调用公开 SDK 和本机 IPC，离线跑完六个场景：请求、边执行边读事件、审批、取消、断线续读和进程退出后恢复同一会话。输出目录需是一个尚不存在的绝对路径：
+
+```sh
+cargo run --manifest-path examples/issue1-client/Cargo.toml --locked -- all /tmp/cayw-issue1-run
+```
+
+全部场景通过后才会生成 `acceptance.json`。场景说明见[客户端说明](examples/issue1-client/README.md)。
+
+上面两个离线示例都使用固定模型数据；HTTP 适配另有本地服务的完整往返测试。另已通过 Magpie + DS Flash 完成 4 项真实检查，实际响应模型为 `deepseek-v4.1-flash`：流式文本、Rust 工具调用后回答、下一轮记住工具值、收到文本后的取消。真实入口是 `cargo run -p cayw-agent --example magpie --locked`，需显式设置 `MAGPIE_API_KEY`；会发送真实请求，可能计费，不属于普通测试。
 
 开发与验证命令见 [AGENTS.md](AGENTS.md)，原始内核接口见 [内核说明](docs/rust-pi-core.md)，新增读取能力见 [Workspace 说明](crates/cayw-workspace/README.md)。[早期离线验收](docs/validation/rust-pi-core.md)、[有限真实模型记录](docs/validation/rust-pi-core-magpie.md)、[Core 修复验收](docs/validation/core-boundary-repairs.md)、[Runtime 宿主接入](docs/validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](docs/validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](docs/validation/issue1-sdk-ipc.md)、[diff 文件结束标记修复](docs/validation/workspace-diff-eof.md)、[共享读取接线复核](docs/validation/shared-read-runtime.md)、[Device 交互进程验证](docs/validation/device-interactive-process.md) 和 [网页本地运行验证](docs/validation/webui-runtime.md) 分别记录自己的源码和范围；这些结果只覆盖各自记录的 macOS 架构、源码和场景，不能代替最新组合或全部 Issue 的验收，也不提供普遍的性能或模型质量结论。
 
@@ -144,7 +152,7 @@ return { files = files, matches = matches }
 项目还在早期，现在最有价值的参与方式是：
 
 - 在 [Issues](https://github.com/changw98ic/CAYW/issues) 里讨论设计、指出问题或补充验收场景；
-- 首发只面向 macOS；#1 的公开 Rust SDK/IPC、独立客户端、事件续订、审批与取消、工具结果配对和同一会话重开恢复已完成 [macOS ARM64 本地验收](docs/validation/issue1-sdk-ipc.md)。接下来推进 #2 的 macOS 验证基线，继续按 #1 → #2 → #3/#4 → #5 夯实验证、Luau、进程清理和预置工具，再完成 #6 的真实模型、权限、持久化与取消全链。共享读取与 Device 交互进程已分别验证；External Module 统一进程清理的独立交付仍有测试失败，长会话读取优化已交回但尚未接主树。有限真实模型或局部测试不代表这些 Issue 已完整验收。
+- 首发只面向 macOS。#1 已完成 [macOS ARM64 本地验收](docs/validation/issue1-sdk-ipc.md)，当前推进 [#2](https://github.com/changw98ic/CAYW/issues/2) 的 macOS 验证基线；之后按 #3/#4 → #5 → #6 推进，详细状态见[开发路线图](docs/development-map.md)。局部测试不代表对应 Issue 已完整验收。
 
 **给 AI 编程助手：** 在本仓库工作前请先读 [`AGENTS.md`](AGENTS.md) 和 [`docs/development-map.md`](docs/development-map.md)。
 
