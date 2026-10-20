@@ -649,15 +649,82 @@ async fn transport(root: &Path) -> Result<Value> {
         "incompatible connection left open",
     )?;
     save(&root.join("incompatible-wire-version.json"), &version)?;
+    let auth_state = || -> Result<Value> {
+        Ok(json!({"sessions":rt.list()?,"health":rt.health()?,
+            "provider_requests":provider.requests.load(Ordering::SeqCst),
+            "file_exists":root.join("workspace/result.txt").exists()}))
+    };
+    let before = auth_state()?;
     let rejected = Client::connect(server.address, "wrong-public-fixture-token").await;
+    let after = auth_state()?;
+    save(
+        &root.join("authentication-rejection.json"),
+        &json!({"error":rejected.as_ref().err(),"before":before,"after":after,
+            "provider_requests":provider.requests.load(Ordering::SeqCst),"sessions":rt.list()?}),
+    )?;
     require(
         matches!(rejected,Err(ref error) if error.code == "unauthorized" && !error.outcome_unknown),
         "authentication was bypassed",
+    )?;
+    require(
+        before == after && rt.list()?.is_empty() && provider.requests.load(Ordering::SeqCst) == 0,
+        "rejected authentication changed business state",
     )?;
     let client = Client::connect(server.address, TOKEN).await?;
     let control = Client::connect(server.address, TOKEN).await?;
     let api = Api::Ipc(control.clone());
     let session = api.create("backpressure and disconnect").await?;
+    let state = || -> Result<Value> {
+        Ok(json!({"session":rt.get(&session.id)?,"sessions":rt.list()?,
+            "events":rt.events(&session.id,0,1000)?,"tasks":rt.tasks(&session.id)?,
+            "grants":rt.grants(&session.id)?,"audit":rt.audit(&session.id,0,1000)?,
+            "health":rt.health()?,"provider_requests":provider.requests.load(Ordering::SeqCst),
+            "file_exists":root.join("workspace/result.txt").exists()}))
+    };
+    let initial = state()?;
+    let mut rejections = Vec::new();
+    for (case, method, params, code) in [
+        (
+            "prompt-extra-field",
+            "session.prompt",
+            json!({"session_id":session.id,"text":"must not execute","extra":true}),
+            "invalid_params",
+        ),
+        (
+            "prompt-missing-text",
+            "session.prompt",
+            json!({"session_id":session.id}),
+            "invalid_params",
+        ),
+        (
+            "events-zero-limit",
+            "session.events",
+            json!({"session_id":session.id,"after":0,"limit":0,"wait_ms":0}),
+            "session_error",
+        ),
+    ] {
+        let before = state()?;
+        let response = control.request(method, params.clone()).await;
+        let after = state()?;
+        rejections.push(
+            json!({"case":case,"request":{"method":method,"params":params},
+            "error":response.as_ref().err(),"unexpected_response":response.as_ref().ok(),
+            "before":before,"after":after}),
+        );
+        save(
+            &root.join(format!("parameter-rejection-{case}.json")),
+            rejections.last().ok_or("rejection observation missing")?,
+        )?;
+        require(
+            response.is_err_and(|error| error.code == code && !error.outcome_unknown),
+            "invalid parameters were not explicitly rejected",
+        )?;
+        require(
+            before == initial && before == after,
+            "invalid parameters changed session, tasks, events, permissions or effects",
+        )?;
+    }
+    save(&root.join("parameter-rejections.json"), &rejections)?;
     let run_client = client.clone();
     let id = session.id.clone();
     let run = tokio::spawn(async move {
@@ -1143,4 +1210,57 @@ async fn main() -> Result<()> {
     save(&root.join("acceptance.json"), &result)?;
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_rejections_retain_requests_errors_and_unchanged_state() {
+        let root = std::env::temp_dir().join(format!(
+            "cw-client-rejections-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        transport(&root).await.unwrap();
+        let read = |name: &str| -> Value {
+            serde_json::from_slice(&std::fs::read(root.join(name)).unwrap()).unwrap()
+        };
+        let auth = read("authentication-rejection.json");
+        assert_eq!(auth["error"]["code"], "unauthorized");
+        assert_eq!(auth["error"]["outcome_unknown"], false);
+        assert_eq!(auth["provider_requests"], 0);
+        assert_eq!(auth["sessions"], json!([]));
+        assert_eq!(auth["before"], auth["after"]);
+        let rejected = read("parameter-rejections.json");
+        let cases = rejected.as_array().unwrap();
+        assert_eq!(cases.len(), 3);
+        for (case, (name, method, code)) in cases.iter().zip([
+            ("prompt-extra-field", "session.prompt", "invalid_params"),
+            ("prompt-missing-text", "session.prompt", "invalid_params"),
+            ("events-zero-limit", "session.events", "session_error"),
+        ]) {
+            assert_eq!(case["case"], name);
+            assert_eq!(case["request"]["method"], method);
+            assert_eq!(
+                case["request"]["params"]["session_id"],
+                case["before"]["session"]["id"]
+            );
+            assert_eq!(case["error"]["code"], code);
+            assert_eq!(case["error"]["outcome_unknown"], false);
+            assert_eq!(case["before"], case["after"]);
+            assert_eq!(case["after"]["provider_requests"], 0);
+            assert_eq!(case["after"]["file_exists"], false);
+            assert_eq!(case["after"]["tasks"], json!([]));
+            assert!(case["unexpected_response"].is_null());
+        }
+        assert_eq!(cases[0]["request"]["params"]["extra"], true);
+        assert!(cases[1]["request"]["params"].get("text").is_none());
+        assert_eq!(cases[2]["request"]["params"]["limit"], 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

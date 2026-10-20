@@ -1,11 +1,16 @@
 //! Reusable public-SDK and actual-IPC validation with deterministic offline faults.
+mod access_scenarios;
+mod access_validation;
 mod children;
+mod fault_validation;
 mod provider;
 mod report;
 mod scenarios;
 mod transport;
+mod validation;
+pub use report::local_binding;
+pub(crate) use validation::validate_recorded_sample;
 
-use crate::measurement::sha256;
 use async_trait::async_trait;
 pub use report::{Check, EventPage, Observation, ScenarioReport, contiguous_events};
 pub use scenarios::{BuiltinScenario, NegativeControl};
@@ -22,7 +27,7 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 pub const DEADLINE: Duration = Duration::from_secs(30);
-pub const USAGE: &str = "cayw-verify-tool sdk-ipc --out NEW_DIRECTORY --samples N [--scenario NAME] [--negative-control wrong-script|skip-cursor]\nNames: cold-sdk, sdk-lifecycle, ipc-lifecycle, ipc-reconnect, ipc-cancel, host-restart-before-dispatch, host-restart-unknown.\nOffline synthetic inputs only. Loopback TCP is used for IPC; no remote services or real model calls.\nOutput directory must not exist. N is 1..=1000. A source digest is caller-declared, never self-verified.";
+pub const USAGE: &str = "cayw-verify-tool sdk-ipc --out NEW_DIRECTORY --samples N [--scenario NAME] [--build-receipt FILE] [--negative-control wrong-script|skip-cursor]\nNames: cold-sdk, sdk-lifecycle, ipc-lifecycle, ipc-approval, ipc-rejections, ipc-event-reconnect, ipc-reconnect, ipc-cancel, host-restart-before-dispatch, host-restart-unknown.\nOffline synthetic inputs only. Loopback TCP is used for IPC; no remote services or real model calls.\nOutput directory must not exist. N is 1..=1000. Build-time listed file measurements and optional Cargo receipts retain untraced inputs as pending.";
 
 /// A new scenario supplies concrete inputs, permission policy and fault points,
 /// executes the public API, and appends raw observations and semantic checks.
@@ -42,6 +47,7 @@ pub struct ScenarioContext {
 #[derive(Debug)]
 pub struct Options {
     pub out: PathBuf,
+    pub build_receipt: Option<PathBuf>,
     pub samples: u32,
     pub scenarios: Vec<BuiltinScenario>,
     pub negative_control: NegativeControl,
@@ -66,12 +72,16 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     Ok(result)
 }
 pub fn parse_options(args: Vec<OsString>) -> Result<Options> {
-    let (mut out, mut samples, mut scenario, mut control) = (None, None, None, None);
+    let (mut out, mut samples, mut scenario, mut control, mut build_receipt) =
+        (None, None, None, None, None);
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("each sdk-ipc option needs a value")?;
         match flag.to_str() {
             Some("--out") if out.is_none() => out = Some(absolute(Path::new(&value))?),
+            Some("--build-receipt") if build_receipt.is_none() => {
+                build_receipt = Some(absolute(Path::new(&value))?)
+            }
             Some("--samples") if samples.is_none() => {
                 let n: u32 = value.to_str().ok_or("samples must be digits")?.parse()?;
                 if !(1..=1000).contains(&n) {
@@ -108,6 +118,7 @@ pub fn parse_options(args: Vec<OsString>) -> Result<Options> {
     }
     Ok(Options {
         out: out.ok_or("--out is required")?,
+        build_receipt,
         samples: samples.ok_or("--samples is required")?,
         scenarios,
         negative_control,
@@ -138,6 +149,9 @@ pub async fn run_scenarios(options: Options, scenarios: &[&dyn Scenario]) -> Res
     if !(1..=1000).contains(&options.samples) || scenarios.is_empty() {
         return Err("run needs 1..=1000 samples and at least one scenario".into());
     }
+    if crate::child::cleanup_unknown() {
+        return Err("previous child cleanup unconfirmed; sampling stopped".into());
+    }
     let mut names = std::collections::BTreeSet::new();
     for scenario in scenarios {
         let name = scenario.name();
@@ -155,6 +169,7 @@ pub async fn run_scenarios(options: Options, scenarios: &[&dyn Scenario]) -> Res
     }
     let out = absolute(&options.out)?;
     let options = Options { out, ..options };
+    let receipt = crate::evidence::load_build_receipt(options.build_receipt.as_deref())?;
     create_root(&options.out)?;
     let run_id = format!(
         "{}-{}",
@@ -162,7 +177,7 @@ pub async fn run_scenarios(options: Options, scenarios: &[&dyn Scenario]) -> Res
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
     let binding = report::local_binding()?;
-    let meta = json!({"schema_version":1,"run_id":run_id,"source":"offline synthetic", "binding":binding,
+    let meta = json!({"schema_version":2,"run_id":run_id,"source":"offline synthetic", "binding":binding,
         "samples_per_scenario":options.samples,"out":options.out,
         "scenarios":scenarios.iter().map(|s|json!({"name":s.name(),"specification":s.specification(options.negative_control)})).collect::<Vec<_>>(),
         "measurement":{"clock":"std::time::Instant monotonic elapsed","duration_unit":"ns","sampling":"serial fixed scenarios, one independent directory per sample; cold uses a fresh process; warm uses the same Runtime",
@@ -176,34 +191,20 @@ pub async fn run_scenarios(options: Options, scenarios: &[&dyn Scenario]) -> Res
         "scenario_watchdog_seconds":180,
         "platform_scope":"Only this recorded OS/architecture was executed. Other platforms remain unverified.",
         "artifacts":{"samples":"samples.jsonl","summary":"summary.json","workspaces":"samples/<iteration>/<scenario>/"},
-        "source_evidence":"caller digest and observed executable hash; no caller digest is promoted to self-verified source",
+        "source_evidence":"build-time listed file measurements, executable hash and optional Cargo receipt; untraced build inputs remain pending",
         "instrumentation":"SDK observations and IPC relay frames are synchronously fsynced inside measured spans; these durations include evidence-writing overhead and are not bare-runtime benchmarks",
     });
-    provider::write_new(&options.out.join("meta.json"), &meta)?;
-    fs::create_dir(options.out.join("samples"))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(options.out.join("samples.jsonl"))?;
-    let mut records = Vec::new();
-    for iteration in 1..=options.samples {
-        let root = options.out.join("samples").join(format!("{iteration:04}"));
-        fs::create_dir(&root)?;
+    let mut writer = crate::evidence::BundleWriter::new(&options.out, meta, receipt.as_ref())?;
+    let mut sampling_stopped = false;
+    'sampling: for iteration in 1..=options.samples {
         for scenario in scenarios {
             let context = ScenarioContext {
-                root: root.join(scenario.name()),
+                root: writer.sample_root(scenario.name(), iteration),
                 iteration,
                 negative_control: options.negative_control,
                 binding: binding.clone(),
             };
-            fs::create_dir(&context.root)?;
-            let mut sample = ScenarioReport::new(
-                scenario.name(),
-                iteration,
-                scenario.specification(options.negative_control),
-                binding.clone(),
-            );
-            sample.attach_records(&context.root.join("records.jsonl"))?;
+            let mut sample = writer.start_sample(scenario.name(), iteration)?;
             let outcome =
                 tokio::time::timeout(DEADLINE * 6, scenario.execute(&context, &mut sample)).await;
             match outcome {
@@ -225,53 +226,21 @@ pub async fn run_scenarios(options: Options, scenarios: &[&dyn Scenario]) -> Res
                     );
                 }
             }
-            sample.finish();
-            sample.persist_terminal()?;
-            sample.bind_records(&context.root.join("records.jsonl"))?;
-            let mut value = serde_json::to_value(&sample)?;
-            value["run_id"] = json!(run_id);
-            value["meta"] = json!("meta.json");
-            let mut bytes = serde_json::to_vec(&value)?;
-            bytes.push(b'\n');
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            provider::write_new(&context.root.join("report.json"), &sample)?;
-            records.push(sample);
+            if crate::child::cleanup_unknown() {
+                sample.check("original_child_cleanup_confirmed", false,
+                    "Child cleanup or its durable receipt is unconfirmed; no further samples may run");
+                sampling_stopped = true;
+            }
+            if context.root.join("provider.jsonl").is_file() {
+                sample.bind_attachment("provider", &context.root, "provider.jsonl")?;
+            }
+            writer.complete_sample(sample)?;
+            if sampling_stopped {
+                break 'sampling;
+            }
         }
     }
-    let passed = records.iter().all(|s| s.status == "passed");
-    let source_bound = !env!("CAYW_VERIFY_TOOL_SOURCE_MANIFEST_SHA256").is_empty();
-    let platforms:[Value;3]=["macos","windows","linux"].map(|os|json!({"os":os,"status":if os==env::consts::OS { if passed { "observed_passed" } else { "observed_failed_or_unsupported" } } else { "unverified" }}));
-    let mut phases = std::collections::BTreeMap::<&str, Vec<u64>>::new();
-    for record in &records {
-        for (phase, value) in &record.timing_ns {
-            phases.entry(phase).or_default().push(*value);
-        }
-    }
-    let timing_summary:Vec<Value>=phases.into_iter().map(|(phase,mut values)| {
-        values.sort_unstable();
-        let percentile=|percent:usize|values.get((values.len()*percent).div_ceil(100).saturating_sub(1)).copied();
-        json!({"phase":phase,"unit":"ns","measured_count":values.len(),"min":values.first(),"median":percentile(50),"p95":percentile(95),"max":values.last()})
-    }).collect();
-    let summary = json!({"schema_version":1,"run_id":run_id,"source":"offline synthetic","sample_count":records.len(),
-        "semantic_passed":passed,"failed_samples":records.iter().filter(|s|s.status=="failed").count(),
-        "unsupported_samples":records.iter().filter(|s|s.status=="unsupported").count(),
-        "unverified_samples":records.iter().filter(|s|s.status=="unverified").count(),
-        "source_bound":source_bound,"self_verified_source":false,
-        "issue_2_complete":false,"real_provider":"unverified","platforms":platforms,
-        "bound_offline_semantics_passed":passed&&source_bound,
-        "statuses":records.iter().map(|s|json!({"sample_id":s.sample_id,"status":s.status,"timing_ns":s.timing_ns,
-            "failed_checks":s.checks.iter().filter(|c|!c.passed).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-        "artifacts":{"meta_sha256":sha256(&fs::read(options.out.join("meta.json"))?),"samples_sha256":sha256(&fs::read(options.out.join("samples.jsonl"))?)},
-        "binding":binding,"timing_summary":timing_summary,"performance_thresholds":null});
-    provider::write_new(&options.out.join("summary.json"), &summary)?;
-    println!(
-        "{}",
-        serde_json::to_string(
-            &json!({"out":options.out,"sample_count":records.len(),"semantic_passed":passed,"issue_2_complete":false})
-        )?
-    );
-    Ok(passed)
+    writer.finish(sampling_stopped)
 }
 pub(crate) fn write_bytes_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;

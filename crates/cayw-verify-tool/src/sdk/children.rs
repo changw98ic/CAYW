@@ -5,13 +5,13 @@ use super::{
     report::{contiguous_events, local_binding},
     scenarios::{self, BuiltinScenario},
 };
+use crate::child::ManagedChild;
 use crate::measurement::{elapsed_ns, sha256};
 use cayw_ai::CancellationToken;
 use cayw_core::{CapabilityOutcome, CoreEvent, SessionState};
 use cayw_runtime::{RuntimeError, SessionView, TaskState};
 use serde_json::{Value, json};
-use std::{env, ffi::OsString, fs, path::Path, process::Stdio, sync::Arc, time::Instant};
-use tokio::process::{Child, Command};
+use std::{env, ffi::OsString, fs, path::Path, process::Command, sync::Arc, time::Instant};
 
 pub async fn dispatch(mode: &str, args: Vec<OsString>, entry: Instant) -> Result<bool> {
     if args.len() != 3 {
@@ -76,24 +76,25 @@ pub async fn cold(context: &ScenarioContext, report: &mut ScenarioReport) -> Res
         _ => "none",
     };
     let start = Instant::now();
-    let output = tokio::time::timeout(
+    let mut command = Command::new(env::current_exe()?);
+    command
+        .arg("__sdk_cold")
+        .arg(&context.root)
+        .arg(context.iteration.to_string())
+        .arg(control);
+    let mut child = ManagedChild::spawn(
+        command,
         DEADLINE * 3,
-        Command::new(env::current_exe()?)
-            .arg("__sdk_cold")
-            .arg(&context.root)
-            .arg(context.iteration.to_string())
-            .arg(control)
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await??;
+        1024 * 1024,
+        context.root.join("child-exit.json"),
+    )?;
+    let output = child.wait().await?;
     report
         .timing_ns
         .insert("parent_spawn_to_exit".into(), elapsed_ns(start));
     super::write_bytes_new(&context.root.join("cold.stdout"), &output.stdout)?;
     super::write_bytes_new(&context.root.join("cold.stderr"), &output.stderr)?;
-    report.observe("child_process_terminal", json!({"exit_code":output.status.code(),
-        "success":output.status.success(),"stdout_sha256":sha256(&output.stdout),"stderr_sha256":sha256(&output.stderr)}))?;
+    report.observe("child_process_terminal", &output)?;
     let child: ScenarioReport =
         serde_json::from_slice(&fs::read(context.root.join("cold-report.json"))?)?;
     report.observe("cold_child_report", &child)?;
@@ -107,9 +108,9 @@ pub async fn cold(context: &ScenarioContext, report: &mut ScenarioReport) -> Res
         child.binding == context.binding,
         "The fresh process retains the same executable hash, protocol versions and caller-declared build binding",
     );
-    report.check(
+    report.task_check(
         "cold_child_semantics",
-        child.status == "passed" && output.status.success() && output.stderr.is_empty(),
+        child.status == "passed" && output.success && !output.timed_out && output.stderr_bytes == 0,
         "Child exit, semantic checks and diagnostic stream must all agree",
     );
     for check in child.checks {
@@ -120,6 +121,14 @@ pub async fn cold(context: &ScenarioContext, report: &mut ScenarioReport) -> Res
     }
     for page in child.event_pages {
         report.event_page(page)?;
+    }
+    for (name, path) in [
+        ("cold_report", "cold-report.json"),
+        ("child_exit", "child-exit.json"),
+        ("child_stdout", "cold.stdout"),
+        ("child_stderr", "cold.stderr"),
+    ] {
+        report.bind_attachment(name, &context.root, path)?;
     }
     Ok(())
 }
@@ -164,11 +173,11 @@ async fn host(root: &Path, effect: bool) -> Result<bool> {
     Err("fixture host completed before parent terminated it".into())
 }
 
-async fn wait_file(child: &mut Child, path: &Path) -> Result<()> {
+async fn wait_file(child: &ManagedChild, path: &Path) -> Result<()> {
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Err(format!("fixture child exited before fault point: {status}").into());
+        if child.finished() {
+            return Err("fixture child exited before fault point".into());
         }
         if path.is_file() {
             // The writer fsyncs before waiting. Require valid, complete JSON too.
@@ -197,7 +206,8 @@ pub async fn restart(
     } else {
         "before-dispatch.json"
     });
-    let mut child = Command::new(env::current_exe()?)
+    let mut command = Command::new(env::current_exe()?);
+    command
         .arg("__sdk_host")
         .arg(&context.root)
         .arg(context.iteration.to_string())
@@ -205,20 +215,22 @@ pub async fn restart(
             "unknown-effect"
         } else {
             "before-dispatch"
-        })
-        .kill_on_drop(true)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let child_pid = child.id();
+        });
+    let mut child = ManagedChild::spawn(
+        command,
+        DEADLINE * 3,
+        1024 * 1024,
+        context.root.join("child-exit.json"),
+    )?;
+    let child_pid = child.id;
     let ready_point = if effect {
         context.root.join("effect-ready.json")
     } else {
         point.clone()
     };
-    if let Err(error) = wait_file(&mut child, &ready_point).await {
-        let _ = child.start_kill();
-        let output = child.wait_with_output().await?;
+    if let Err(error) = wait_file(&child, &ready_point).await {
+        child.stop();
+        let output = child.wait().await?;
         super::write_bytes_new(&context.root.join("host.stdout"), &output.stdout)?;
         super::write_bytes_new(&context.root.join("host.stderr"), &output.stderr)?;
         return Err(error);
@@ -240,8 +252,8 @@ pub async fn restart(
     )?;
     report.check(
         "original_host_identity",
-        child_pid.map(u64::from) == ready["process_id"].as_u64()
-            && child_pid != Some(std::process::id()),
+        Some(u64::from(child_pid)) == ready["process_id"].as_u64()
+            && child_pid != std::process::id(),
         "Observed process must be the exact child owned by this scenario",
     );
     let provider = Arc::new(FixedProvider::new(
@@ -305,24 +317,24 @@ pub async fn restart(
         );
     }
     drop(observer);
-    report.observe("fault_injected",json!({"operation":"Child::start_kill then wait_with_output", "process_id":child_pid,
+    report.observe("fault_injected",json!({"operation":"stop and wait on the original owned child", "process_id":child_pid,
         "point":if effect {"after durable synthetic local effect"} else {"before script dispatch"}}))?;
     let killed = Instant::now();
-    child.start_kill()?;
-    let output = tokio::time::timeout(DEADLINE, child.wait_with_output()).await??;
+    child.stop();
+    let output = child.wait().await?;
     report
         .timing_ns
         .insert("kill_to_confirmed_exit".into(), elapsed_ns(killed));
     super::write_bytes_new(&context.root.join("host.stdout"), &output.stdout)?;
     super::write_bytes_new(&context.root.join("host.stderr"), &output.stderr)?;
-    report.observe(
-        "host_exit",
-        json!({"exit_code":output.status.code(),"success":output.status.success(),
-        "stdout_sha256":sha256(&output.stdout),"stderr_sha256":sha256(&output.stderr)}),
-    )?;
+    report.observe("host_exit", &output)?;
     report.check(
         "killed_host_exited_before_recovery",
-        !output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+        output.stopped
+            && !output.success
+            && !output.timed_out
+            && output.stdout_bytes == 0
+            && output.stderr_bytes == 0,
         "The original host has exited; explicit recovery cannot race its old owner",
     );
     let provider_log = fs::read(context.root.join("provider.jsonl"))?;
@@ -396,7 +408,7 @@ pub async fn restart(
         report.check("unknown_survives_another_reopen",view==recovered && provider.calls()==0,
             "Reopen cannot clear unknown outcomes; no host reconciliation is fabricated by this fixture");
     } else {
-        report.check("before_dispatch_recovery_is_known",scenarios::clean(&recovered) && recovered.executions.is_empty()
+        report.task_check("before_dispatch_recovery_is_known",scenarios::clean(&recovered) && recovered.executions.is_empty()
             && !context.root.join("workspace/result.txt").exists(),"No capability started, so explicit recovery reaches known idle without executing the queued script");
     }
     report.check(
@@ -406,6 +418,30 @@ pub async fn restart(
             && !context.root.join("reopened-provider.jsonl").exists(),
         "Original raw Provider journal is unchanged and reopened Provider was never called",
     );
+    for (name, path) in [
+        ("host_identity", "host.json"),
+        ("child_exit", "child-exit.json"),
+        ("child_stdout", "host.stdout"),
+        ("child_stderr", "host.stderr"),
+        (
+            "fault_marker",
+            if effect {
+                "effect.json"
+            } else {
+                "before-dispatch.json"
+            },
+        ),
+        (
+            "fault_ready",
+            if effect {
+                "effect-ready.json"
+            } else {
+                "before-dispatch.json"
+            },
+        ),
+    ] {
+        report.bind_attachment(name, &context.root, path)?;
+    }
     Ok(())
 }
 
@@ -415,7 +451,7 @@ fn check_unknown(
     report: &mut ScenarioReport,
 ) {
     let unknown = &view.unresolved_capabilities;
-    report.check("recovered_effect_is_unknown_and_frozen",view.state==SessionState::NeedsReconciliation
+    report.task_check("recovered_effect_is_unknown_and_frozen",view.state==SessionState::NeedsReconciliation
         && view.attempt.is_none() && unknown.len()==1 && original.len()==1
         && unknown[0].key==original[0].key && unknown[0].lease==original[0].lease
         && unknown[0].task_id==original[0].task_id && unknown[0].source_hash==original[0].source_hash

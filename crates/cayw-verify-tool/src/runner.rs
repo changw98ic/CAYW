@@ -73,6 +73,16 @@ pub struct Sample {
     pub semantic_passed: bool,
 }
 impl Sample {
+    pub fn repair_record(&self) -> Option<Value> {
+        self.repair.as_ref().map(|repair|json!({
+            "repair":repair,"sample_id":self.sample_id,"iteration":self.iteration,
+            "execution_status":self.execution_status,"error":self.error,
+            "case_execute_ns":self.timing.case_execute_ns,"case_total_ns":self.timing.case_total_ns,
+            "usage":{"status":"not_measured","total_tokens":null},
+            "cost":{"status":"not_measured","amount":null,"currency":null},
+            "source":"offline fixed syntax repair; no model call or price observation"
+        }))
+    }
     pub fn check(&mut self, name: &str, passed: bool, detail: impl Into<String>) {
         self.semantic_checks.push(Check {
             name: name.into(),
@@ -161,7 +171,7 @@ pub fn empty_sample(case: Case, iteration: u32, workspace: &Path, audit_path: &P
         _ => None,
     };
     Sample {
-        schema_version: 1,
+        schema_version: 2,
         sample_id: sample_id(case, iteration),
         case: case.name().into(),
         iteration,
@@ -316,6 +326,22 @@ pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: 
     sample.timing.case_total_ns = Some(elapsed_ns(start));
     sample.process_peak_rss = process_peak_rss();
     sample
+}
+
+pub fn revalidate(sample: &mut Sample) -> crate::sdk::Result<()> {
+    let case = crate::cases::CASES
+        .into_iter()
+        .find(|case| case.name() == sample.case)
+        .ok_or("unknown Luau case")?;
+    let kind = sample
+        .error
+        .as_ref()
+        .map(|error| serde_json::from_value::<ErrorKind>(json!(error.kind)))
+        .transpose()?;
+    sample.semantic_checks.clear();
+    sample.semantic_passed = false;
+    validate(sample, case, kind);
+    Ok(())
 }
 
 fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {

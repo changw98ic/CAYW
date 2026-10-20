@@ -1,21 +1,13 @@
-mod cases;
-mod fixtures;
-mod runner;
-
 use cayw_verify_tool::{
-    measurement,
-    provenance::{build_binding, platform},
-    sdk,
+    OFFLINE_SOURCE as SOURCE, cases, evidence::BundleWriter, measurement, runner, sdk,
 };
 
 use cases::{CASES, Case};
-use fixtures::SOURCE;
-use measurement::{elapsed_ns, process_peak_rss, sha256};
+use measurement::{elapsed_ns, sha256};
 use runner::{Sample, empty_sample, run_case, sample_id};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
-    collections::BTreeMap,
     env,
     ffi::OsString,
     fs::{self, OpenOptions},
@@ -26,11 +18,12 @@ use std::{
 };
 
 type Result<T> = sdk::Result<T>;
-const USAGE: &str = "cayw-verify-tool luau --out NEW_DIRECTORY --samples N [--workspace NEW_DIRECTORY]\nN must be 1..=1000; default workspace is OUT/workspace. All fixture inputs are offline synthetic.\nBuild with an explicit CAYW_SOURCE_MANIFEST_SHA256 to bind acceptance evidence.\nWithout it, measurements are unbound and cannot constitute acceptance evidence.";
+const USAGE: &str = "cayw-verify-tool luau --out NEW_DIRECTORY --samples N [--workspace NEW_DIRECTORY] [--build-receipt FILE]\ncayw-verify-tool read BUNDLE_DIRECTORY\ncayw-verify-tool compare LEFT_DIRECTORY RIGHT_DIRECTORY\nN must be 1..=1000; default workspace is OUT/workspace. All fixture inputs are offline synthetic.\nBuild with CAYW_SOURCE_MANIFEST_PATH to measure explicitly listed source files. An optional post-build receipt checks recorded Cargo inputs and this executable.\nBuild input completeness remains pending; a source digest alone cannot establish it.";
 
 struct Options {
     out: PathBuf,
     workspace: PathBuf,
+    build_receipt: Option<PathBuf>,
     samples: u32,
 }
 
@@ -52,6 +45,98 @@ fn dispatch(entry: Instant) -> Result<bool> {
         Some("--help") => {
             println!("{USAGE}\n\n{}", sdk::USAGE);
             Ok(true)
+        }
+        Some("__child_fixture") => {
+            let mode = args.next().ok_or("child fixture mode")?;
+            if mode == "normal" {
+                std::io::stdout().write_all(b"fixture\n")?;
+                Ok(true)
+            } else if mode == "failure" {
+                Ok(false)
+            } else {
+                let data = [b'x'; 8192];
+                loop {
+                    std::io::stdout().write_all(&data)?;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+        Some("child-probe") => {
+            let root = PathBuf::from(args.next().ok_or("child-probe EXISTING_DIRECTORY")?);
+            if args.next().is_some() {
+                return Err("child-probe takes one directory".into());
+            }
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    for mode in ["normal", "failure", "timeout", "drop"] {
+                        let mut command = Command::new(env::current_exe()?);
+                        command.arg("__child_fixture").arg(mode);
+                        let mut child = cayw_verify_tool::child::ManagedChild::spawn(
+                            command,
+                            std::time::Duration::from_secs(1),
+                            4096,
+                            root.join(format!("{mode}.json")),
+                        )?;
+                        if mode == "drop" {
+                            let future = child.wait();
+                            tokio::pin!(future);
+                            assert!(futures::poll!(&mut future).is_pending());
+                        } else {
+                            child.wait().await?;
+                        }
+                        drop(child);
+                    }
+                    Ok(!cayw_verify_tool::child::cleanup_unknown())
+                })
+        }
+        Some("read") => {
+            let root = args.next().ok_or("read BUNDLE_DIRECTORY")?;
+            if args.next().is_some() {
+                return Err("read takes one directory".into());
+            }
+            match cayw_verify_tool::evidence::Bundle::read(Path::new(&root)) {
+                Ok(bundle) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json!({"status":"valid","summary":bundle.summary}))?
+                    );
+                    Ok(true)
+                }
+                Err(error) => {
+                    println!("{}", json!({"status":"invalid","reason":error.to_string()}));
+                    Ok(false)
+                }
+            }
+        }
+        Some("compare") => {
+            let left = args
+                .next()
+                .ok_or("compare LEFT_DIRECTORY RIGHT_DIRECTORY")?;
+            let right = args
+                .next()
+                .ok_or("compare LEFT_DIRECTORY RIGHT_DIRECTORY")?;
+            if args.next().is_some() {
+                return Err("compare takes two directories".into());
+            }
+            match (
+                cayw_verify_tool::evidence::Bundle::read(Path::new(&left)),
+                cayw_verify_tool::evidence::Bundle::read(Path::new(&right)),
+            ) {
+                (Ok(left), Ok(right)) => {
+                    let result = cayw_verify_tool::evidence::compare(&left, &right);
+                    println!("{}", serde_json::to_string(&result)?);
+                    Ok(result.status == "comparable")
+                }
+                (left, right) => {
+                    println!(
+                        "{}",
+                        json!({"status":"invalid","left":left.err().map(|e|e.to_string()),"right":right.err().map(|e|e.to_string())})
+                    );
+                    Ok(false)
+                }
+            }
         }
         Some("luau") => {
             let rest: Vec<_> = args.collect();
@@ -95,12 +180,16 @@ fn dispatch(entry: Instant) -> Result<bool> {
 fn parse_options(args: Vec<OsString>) -> Result<Options> {
     let mut out = None;
     let mut workspace = None;
+    let mut build_receipt = None;
     let mut samples = None;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("each option needs a value")?;
         match flag.to_str() {
             Some("--out") if out.is_none() => out = Some(absolute_path(Path::new(&value))?),
+            Some("--build-receipt") if build_receipt.is_none() => {
+                build_receipt = Some(absolute_path(Path::new(&value))?)
+            }
             Some("--workspace") if workspace.is_none() => {
                 workspace = Some(absolute_path(Path::new(&value))?)
             }
@@ -131,6 +220,7 @@ fn parse_options(args: Vec<OsString>) -> Result<Options> {
     Ok(Options {
         out,
         workspace,
+        build_receipt,
         samples: samples.ok_or("--samples is required")?,
     })
 }
@@ -196,18 +286,25 @@ async fn run(
     runtime_setup_ns: u64,
     entry_to_runtime_ready_ns: u64,
 ) -> Result<bool> {
+    if cayw_verify_tool::child::cleanup_unknown() {
+        return Err("previous child cleanup unconfirmed; sampling stopped".into());
+    }
+    let receipt = cayw_verify_tool::evidence::load_build_receipt(options.build_receipt.as_deref())?;
     prepare(&options)?;
     let run_id = format!(
         "{}-{}",
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
-    let binary = env::current_exe()?;
+    let binding = sdk::local_binding()?;
+    let specifications: Vec<_> = CASES.iter().map(|case| {
+        let sample = empty_sample(*case, 1, Path::new("<workspace>"), Path::new("<audit>"));
+        json!({"name":case.name(),"specification":{"input":sample.input,"permissions":sample.permission,"configuration":sample.config}})
+    }).collect();
     let meta = json!({
-        "schema_version":1,"run_id":run_id,"source":SOURCE,
-        "build":build_binding(),
-        "executable":{"path":binary,"sha256":sha256(&fs::read(&binary)?)},
-        "platform":platform(),
+        "schema_version":2,"run_id":run_id,"source":SOURCE,"binding":binding,
+        "samples_per_scenario":options.samples,"scenarios":specifications,
+        "real_provider":{"status":"unverified","calls":0,"credentials_read":false},
         "configuration":{"samples_per_case":options.samples,"fixed_cases":CASES.len(),
             "expected_sample_count":options.samples as usize * CASES.len(),"out":options.out,"workspace":options.workspace,
             "cases":CASES.iter().map(|case| json!({"case":case.name(),"config":runner::config_json(*case),
@@ -223,27 +320,24 @@ async fn run(
             "codemode_setup":"CodeMode::new catalog/schema setup; no Lua VM exists yet",
             "vm_setup_only_ns":null,
             "first_execute":"first CodeMode::execute includes VM setup, compilation, running script and VM destruction; cannot split internal phases through the public API",
-            "parent_runtime_setup_ns":runtime_setup_ns,"parent_entry_to_runtime_ready_ns":entry_to_runtime_ready_ns,
             "not_measured":["complete Agent/model latency","OS boot-to-entry time","per-task RSS","Monty comparison"],
             "rss":"getrusage(RUSAGE_SELF).ru_maxrss where supported (macOS bytes, Linux KiB); cumulative process lifetime high-water mark, not a task or allocation delta; otherwise null",
             "performance_thresholds":null,
             "unmeasured_phase":"null, including phases skipped by setup failures",
         },
+        "run_observations":{"parent_runtime_setup_ns":runtime_setup_ns,"parent_entry_to_runtime_ready_ns":entry_to_runtime_ready_ns},
         "artifacts":{"samples":"samples.jsonl","summary":"summary.json","audit":"audits/<iteration>-<case>.jsonl"},
-        "acceptance":"unbound builds cannot be acceptance evidence; a bound run is limited to the recorded offline platform and fixture semantics",
+        "acceptance":"offline task checks are limited to this recorded macOS host and fixture; source and optional build receipt retain remaining completeness gaps; no run declares whole-Issue acceptance",
     });
-    let meta_bytes = write_json_new(&options.out.join("meta.json"), &meta)?;
-    let mut samples_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(options.out.join("samples.jsonl"))?;
+    let mut writer = BundleWriter::new(&options.out, meta, receipt.as_ref())?;
     let mut samples = Vec::with_capacity(options.samples as usize * CASES.len());
-    let mut sample_digest = sha2::Sha256::default();
-    use sha2::Digest;
-    for iteration in 1..=options.samples {
+    let mut sampling_stopped = false;
+    'sampling: for iteration in 1..=options.samples {
         let iteration_root = options.workspace.join(format!("iteration-{iteration:04}"));
         let iteration_setup = fs::create_dir(&iteration_root);
         for case in CASES {
+            let mut report = writer.start_sample(case.name(), iteration)?;
+            let sample_root = writer.sample_root(case.name(), iteration);
             let workspace = iteration_root.join(case.workspace_name());
             let setup = if let Err(error) = &iteration_setup {
                 Err(io::Error::new(error.kind(), error.to_string()))
@@ -262,7 +356,7 @@ async fn run(
                     sample.fail("workspace_setup", error.to_string());
                     sample
                 }
-                Ok(()) if case == Case::Cold => cold_case(iteration, &workspace, &audit_path),
+                Ok(()) if case == Case::Cold => cold_case(iteration, &workspace, &audit_path).await,
                 Ok(()) => run_case(case, iteration, &workspace, &audit_path).await,
             };
             if case == Case::SyntaxRepair {
@@ -277,38 +371,51 @@ async fn run(
                 sample.check("paired_after_observed_syntax_failure", previous,
                     "The immediately preceding sample is the actual syntax failure in this same iteration and workspace.");
             }
-            let mut record = serde_json::to_value(&sample)?;
-            record["run_id"] = run_id.clone().into();
-            record["meta"] = "meta.json".into();
-            let mut bytes = serde_json::to_vec(&record)?;
-            bytes.push(b'\n');
-            samples_file.write_all(&bytes)?;
-            samples_file.sync_all()?;
-            sample_digest.update(&bytes);
+            report.process_id = sample.process_id;
+            if let Some(repair) = sample.repair_record() {
+                report.observe("repair_attempt", repair)?;
+            }
+            for check in &sample.semantic_checks {
+                report.task_check(&check.name, check.passed, &check.detail);
+            }
+            for (phase, value) in serde_json::to_value(&sample.timing)?.as_object().unwrap() {
+                if let Some(value) = value.as_u64() {
+                    report.timing_ns.insert(phase.clone(), value);
+                }
+            }
+            if cayw_verify_tool::child::cleanup_unknown() {
+                report.check(
+                    "original_child_cleanup_confirmed",
+                    false,
+                    "Cleanup or its durable receipt is unconfirmed",
+                );
+                sampling_stopped = true;
+            }
+            write_json_new(&sample_root.join("luau.json"), &sample)?;
+            report.bind_attachment("luau", &sample_root, "luau.json")?;
+            if audit_path.is_file() {
+                let bytes = fs::read(&audit_path)?;
+                fs::write(sample_root.join("audit.jsonl"), bytes)?;
+                report.bind_attachment("audit", &sample_root, "audit.jsonl")?;
+            }
+            if case == Case::Cold && audit_path.with_extension("child.json").is_file() {
+                fs::copy(
+                    audit_path.with_extension("child.json"),
+                    sample_root.join("child.json"),
+                )?;
+                report.bind_attachment("child", &sample_root, "child.json")?;
+            }
+            writer.complete_sample(report)?;
             samples.push(sample);
+            if sampling_stopped {
+                break 'sampling;
+            }
         }
     }
-    let samples_sha256 = format!("{:x}", sample_digest.finalize());
-    let passed = samples.iter().all(|sample| sample.semantic_passed);
-    let bound = !env!("CAYW_VERIFY_TOOL_SOURCE_MANIFEST_SHA256").is_empty();
-    let summary = summary(
-        &samples,
-        passed,
-        bound,
-        &run_id,
-        &meta_bytes,
-        &samples_sha256,
-    );
-    write_json_new(&options.out.join("summary.json"), &summary)?;
-    println!(
-        "{}",
-        serde_json::to_string(&json!({"out":options.out,"sample_count":samples.len(),
-        "semantic_passed":passed,"acceptance_eligible":passed && bound,"binding":build_binding()["status"]}))?
-    );
-    Ok(passed)
+    writer.finish(sampling_stopped)
 }
 
-fn cold_case(iteration: u32, workspace: &Path, audit_path: &Path) -> Sample {
+async fn cold_case(iteration: u32, workspace: &Path, audit_path: &Path) -> Sample {
     let mut sample = empty_sample(Case::Cold, iteration, workspace, audit_path);
     let executable = match env::current_exe() {
         Ok(path) => path,
@@ -318,12 +425,21 @@ fn cold_case(iteration: u32, workspace: &Path, audit_path: &Path) -> Sample {
         }
     };
     let start = Instant::now();
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("__cold_case")
         .arg(iteration.to_string())
         .arg(workspace)
-        .arg(audit_path)
-        .output();
+        .arg(audit_path);
+    let output = match cayw_verify_tool::child::ManagedChild::spawn(
+        command,
+        sdk::DEADLINE * 3,
+        1024 * 1024,
+        audit_path.with_extension("child.json"),
+    ) {
+        Ok(mut child) => child.wait().await,
+        Err(error) => Err(error),
+    };
     let duration = elapsed_ns(start);
     match output {
         Ok(output) => {
@@ -339,7 +455,7 @@ fn cold_case(iteration: u32, workspace: &Path, audit_path: &Path) -> Sample {
             }
             sample.check(
                 "fresh_child_process",
-                sample.process_id != std::process::id(),
+                sample.process_id != std::process::id() && sample.process_id == output.process_id,
                 format!(
                     "parent pid {}; child pid {}",
                     std::process::id(),
@@ -348,10 +464,13 @@ fn cold_case(iteration: u32, workspace: &Path, audit_path: &Path) -> Sample {
             );
             sample.check(
                 "child_exit_status",
-                output.status.success(),
-                format!("{}", output.status),
+                output.success && !output.timed_out && output.cleanup_confirmed,
+                format!(
+                    "exit code {:?}; timed out {}",
+                    output.exit_code, output.timed_out
+                ),
             );
-            if !output.stderr.is_empty() {
+            if output.stderr_bytes != 0 {
                 sample.check(
                     "child_stderr_empty",
                     false,
@@ -384,42 +503,4 @@ fn internal_case(args: Vec<OsString>, entry: Instant) -> Result<bool> {
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(sample.semantic_passed)
-}
-
-fn summary(
-    samples: &[Sample],
-    passed: bool,
-    bound: bool,
-    run_id: &str,
-    meta_bytes: &[u8],
-    samples_sha256: &str,
-) -> Value {
-    let mut grouped: BTreeMap<&str, Vec<&Sample>> = BTreeMap::new();
-    for sample in samples {
-        grouped.entry(&sample.case).or_default().push(sample);
-    }
-    let cases: Vec<_> = grouped.into_iter().map(|(case, records)| {
-        let cold = case == Case::Cold.name();
-        let mut durations: Vec<_> = records.iter().filter_map(|sample|
-            if cold { sample.timing.parent_spawn_to_exit_ns } else { sample.timing.case_execute_ns }).collect();
-        durations.sort_unstable();
-        let percentile = |percent: usize| durations.get((durations.len() * percent).div_ceil(100).saturating_sub(1)).copied();
-        json!({"case":case,"samples":records.len(),"semantic_passed":records.iter().all(|sample| sample.semantic_passed),
-            "measurement":if cold { "parent_spawn_to_exit_ns" } else { "case_execute_ns" },
-            "duration_ns":{"measured_count":durations.len(),"min":durations.first(),"median":percentile(50),"p95":percentile(95),"max":durations.last()},
-            "errors_observed":records.iter().filter(|sample| sample.error.is_some()).count(),
-            "outcome_unknown_observed":records.iter().filter(|sample| sample.report.outcome_unknown).count(),
-            "failed_sample_ids":records.iter().filter(|sample| !sample.semantic_passed).map(|sample| &sample.sample_id).collect::<Vec<_>>()})
-    }).collect();
-    json!({"schema_version":1,"run_id":run_id,"source":SOURCE,
-        "sample_count":samples.len(),"semantic_passed":passed,
-        "failed_samples":samples.iter().filter(|sample| !sample.semantic_passed).count(),
-        "binding":build_binding(),"acceptance_eligible":bound && passed,
-        "acceptance_status":if !passed { "semantic_failure" } else if !bound { "unbound_not_acceptance" } else { "bound_offline_semantics_passed" },
-        "artifacts":{"meta":{"path":"meta.json","sha256":sha256(meta_bytes)},
-            "samples":{"path":"samples.jsonl","sha256":samples_sha256}},
-        "cases":cases,"parent_process_peak_rss":process_peak_rss(),
-        "scope":"Only the measured local platform and synthetic fixed cases; no real Provider or full Agent validation, no Monty comparison or fastest-runtime claim.",
-        "performance_thresholds":null,
-    })
 }
