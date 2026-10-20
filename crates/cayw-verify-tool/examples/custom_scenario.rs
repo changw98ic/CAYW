@@ -38,7 +38,7 @@ impl Scenario for CreateReopen {
         let reopened = open()?;
         let after = reopened.get(&before.id)?;
         report.observe("reopened_session", &after)?;
-        report.check("custom_public_sdk_roundtrip",before==after&&after.messages.is_empty()&&after.attempt.is_none(),
+        report.task_check("custom_public_sdk_roundtrip",before==after&&after.messages.is_empty()&&after.attempt.is_none(),
             "A user-defined scenario can persist and reopen a real SDK session without modifying verifyTool");
         Ok(())
     }
@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
         Options {
             out,
             samples: 1,
+            build_receipt: None,
             scenarios: vec![],
             negative_control: NegativeControl::None,
         },
