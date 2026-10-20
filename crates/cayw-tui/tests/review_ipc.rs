@@ -49,11 +49,13 @@ async fn server(
     (address, stop, task)
 }
 
-async fn next(transport: &mut Transport) -> Update {
-    timeout(Duration::from_secs(8), transport.next())
+async fn next(transport: &mut Transport, stage: &str) -> Update {
+    let update = timeout(Duration::from_secs(8), transport.next())
         .await
-        .unwrap()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{stage}: waiting for transport update: {error}"))
+        .unwrap_or_else(|| panic!("{stage}: transport updates closed"));
+    eprintln!("TRANSPORT_UPDATE stage={stage} update={update:?}");
+    update
 }
 
 fn attached(value: Value) -> App {
@@ -105,7 +107,10 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     app.input.insert("queued draft 你好");
     let mut driver = Driver::default();
     let mut transport = Transport::start(address, "review-offline-token".into());
-    while !matches!(next(&mut transport).await, Update::Connected) {}
+    while !matches!(
+        next(&mut transport, "connect queued session").await,
+        Update::Connected
+    ) {}
     let commands = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     driver.dispatch(&mut app, &transport, commands);
     timeout(Duration::from_secs(8), async {
@@ -125,7 +130,7 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     );
     driver.dispatch(&mut app, &transport, commands);
     let error = loop {
-        let update = next(&mut transport).await;
+        let update = next(&mut transport, "cancel queued prompt").await;
         let error = match &update {
             Update::Response {
                 request,
@@ -143,7 +148,7 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     assert!(error.ends_with(" (outcome_unknown=false)"), "{error}");
     assert!(!app.selected().unwrap().can_prompt());
     loop {
-        let update = next(&mut transport).await;
+        let update = next(&mut transport, "refresh cancelled session").await;
         let got = matches!(&update, Update::Response { request, result: Ok(_) } if request.method == "session.get");
         let commands = driver.update(&mut app, update);
         driver.dispatch(&mut app, &transport, commands);
@@ -228,14 +233,20 @@ impl Provider for PagedStream {
 }
 
 async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
+    let mut stage = "session.get";
+    let mut cursor = 0;
+    let mut last_event = None;
     timeout(Duration::from_secs(8), async {
         loop {
+            stage = "session.get";
             let snapshot = client
                 .request("session.get", json!({"session_id":id}))
                 .await
                 .unwrap();
+            cursor = snapshot["cursor"].as_u64().unwrap();
             let mut after = 0;
             loop {
+                stage = "session.events";
                 let page = client
                     .request(
                         "session.events",
@@ -244,10 +255,14 @@ async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
                     .await
                     .unwrap();
                 let records = page.as_array().unwrap();
+                if let Some(record) = records.last() {
+                    last_event = Some(record.clone());
+                }
                 if records
                     .iter()
                     .any(|record| record["event"]["event"]["message"]["content"][0]["text"] == text)
                 {
+                    stage = "session.get after matching partial";
                     return client
                         .request("session.get", json!({"session_id":id}))
                         .await
@@ -265,7 +280,11 @@ async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
         }
     })
     .await
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!(
+            "waiting for {text:?} in {id} at {stage}, snapshot cursor={cursor}, last event={last_event:?}: {error}"
+        )
+    })
 }
 
 async fn catch_up(client: &Client, app: &mut App) -> Vec<(u64, usize)> {
