@@ -47,6 +47,7 @@ pub struct ScenarioReport {
     pub observations: Vec<Observation>,
     pub event_pages: Vec<EventPage>,
     pub checks: Vec<Check>,
+    pub task_checks: Vec<String>,
     pub timing_ns: BTreeMap<String, u64>,
     pub process_peak_rss: Option<ProcessPeakRss>,
     pub limitations: Vec<String>,
@@ -61,7 +62,7 @@ pub struct ScenarioReport {
 impl ScenarioReport {
     pub fn new(name: &str, iteration: u32, specification: Value, binding: Value) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             sample_id: format!("{iteration:04}/{name}"),
             scenario: name.into(),
             iteration,
@@ -73,6 +74,7 @@ impl ScenarioReport {
             observations: vec![],
             event_pages: vec![],
             checks: vec![],
+            task_checks: vec![],
             timing_ns: BTreeMap::new(),
             process_peak_rss: None,
             limitations: vec![],
@@ -109,8 +111,8 @@ impl ScenarioReport {
     pub(crate) fn persist_terminal(&mut self) -> super::Result<()> {
         self.observe(
             "scenario_terminal",
-            json!({"status":self.status,"checks":self.checks,"timing_ns":self.timing_ns,
-            "process_peak_rss":self.process_peak_rss}),
+            json!({"status":self.status,"checks":self.checks,"task_checks":self.task_checks,"timing_ns":self.timing_ns,
+            "process_peak_rss":self.process_peak_rss,"artifacts":self.artifacts}),
         )?;
         Ok(())
     }
@@ -136,6 +138,38 @@ impl ScenarioReport {
             detail: detail.into(),
         });
     }
+    /// A scenario must check its concrete task result, separately from cleanup.
+    /// The caller is responsible for the task-specific meaning of this check.
+    pub fn task_check(&mut self, name: &str, passed: bool, detail: impl Into<String>) {
+        self.task_checks.push(name.into());
+        self.check(name, passed, detail);
+    }
+    pub fn has_task_checks(&self) -> bool {
+        let mut names = std::collections::BTreeSet::new();
+        !self.task_checks.is_empty()
+            && self.task_checks.iter().all(|name| {
+                names.insert(name)
+                    && self
+                        .checks
+                        .iter()
+                        .filter(|check| check.name == *name && check.passed)
+                        .count()
+                        == 1
+            })
+    }
+    pub fn bind_attachment(
+        &mut self,
+        name: &str,
+        root: &Path,
+        relative: &str,
+    ) -> super::Result<()> {
+        if name.is_empty() || name == "records" || self.artifacts.get(name).is_some() {
+            return Err("attachment name is empty, reserved or already registered".into());
+        }
+        let bytes = crate::evidence::attachment(root, relative)?;
+        self.artifacts[name] = json!({"path":relative,"sha256":crate::measurement::sha256(&bytes)});
+        Ok(())
+    }
     pub fn finish(&mut self) {
         self.timing_ns
             .insert("scenario_total".into(), elapsed_ns(self.start));
@@ -144,7 +178,7 @@ impl ScenarioReport {
             "failed"
         } else if let Some(disposition) = &self.disposition {
             disposition.as_str()
-        } else if self.checks.is_empty() {
+        } else if !self.has_task_checks() {
             "unverified"
         } else {
             "passed"
@@ -156,7 +190,7 @@ impl ScenarioReport {
 pub fn local_binding() -> super::Result<Value> {
     Ok(
         json!({"build":provenance::build_binding(), "executable":provenance::executable()?,
-        "platform":provenance::platform(), "source_evidence":"compile-time caller digest only; not self-verified",
+        "platform":provenance::platform(), "source_evidence":"listed file bytes measured by the build script; optional post-build receipt checks recorded inputs; build input completeness remains pending",
         "protocol":{"core":cayw_core::PROTOCOL_VERSION,"ipc":cayw_ipc::PROTOCOL_VERSION}}),
     )
 }
