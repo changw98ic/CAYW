@@ -69,8 +69,10 @@ fn attached(value: Value) -> App {
 async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     // One held run is enough: filling default concurrency=4 races with admit
     // between "task appears" and "attempt still none" on loaded CI runners.
-    let mut config = RuntimeConfig::default();
-    config.max_concurrent_runs = 1;
+    let config = RuntimeConfig {
+        max_concurrent_runs: 1,
+        ..Default::default()
+    };
     let fixture = support::OfflineRuntime::with_config(config, None);
     let runtime = fixture.runtime.clone();
     assert!(runtime.get(&fixture.frozen_id).unwrap().frozen);
