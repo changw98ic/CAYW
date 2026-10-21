@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig};
-use cayw_webui::{GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, serve_with_limits};
+use cayw_webui::{
+    GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, ProjectEndpoint, serve_projects_with_limits,
+    serve_with_limits,
+};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde_json::{Value, json};
 use std::{
@@ -777,4 +780,126 @@ async fn slow_request_bodies_cannot_hold_all_admission_slots() {
     )
     .await;
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn projects_list_and_project_routing_isolate_configured_endpoints() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let list = envelope(
+        fixture
+            .rpc("projects.list", json!({}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(list["result"].as_array().unwrap().len(), 1);
+    assert_eq!(list["result"][0]["id"], "default");
+    assert_eq!(list["result"][0]["default"], true);
+    assert!(!list.to_string().contains(IPC_TOKEN));
+    assert!(!list.to_string().contains(WEB_TOKEN));
+
+    let bad_project = fixture
+        .http
+        .post(format!("http://{}/api/rpc", fixture.addr))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method": "runtime.health", "params": {}, "project": "missing-project"}))
+        .send()
+        .await
+        .unwrap();
+    let err = envelope(bad_project, StatusCode::BAD_REQUEST).await;
+    assert_eq!(err["error"]["code"], "invalid_params");
+    assert_eq!(err["error"]["outcome_unknown"], false);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn multi_project_gateway_routes_to_selected_endpoint_and_redacts_all_project_tokens() {
+    const SECOND_IPC_TOKEN: &str = "abcdef0123456789abcdef0123456789";
+    let stop = CancellationToken::new();
+    let runtime1 = Arc::new(RuntimeFixture::default());
+    let runtime2 = Arc::new(RuntimeFixture::default());
+
+    let ipc1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = ipc1.local_addr().unwrap();
+    let task1 = tokio::spawn(cayw_ipc::serve(
+        ipc1,
+        runtime1,
+        ServerConfig::new(IPC_TOKEN),
+        stop.clone(),
+    ));
+
+    let ipc2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = ipc2.local_addr().unwrap();
+    let task2 = tokio::spawn(cayw_ipc::serve(
+        ipc2,
+        runtime2,
+        ServerConfig::new(SECOND_IPC_TOKEN),
+        stop.clone(),
+    ));
+
+    let projects = vec![
+        ProjectEndpoint::new(
+            "default",
+            "默认项目",
+            IpcEndpoint::new(addr1, IPC_TOKEN).unwrap(),
+        )
+        .unwrap(),
+        ProjectEndpoint::new(
+            "docs",
+            "文档项目",
+            IpcEndpoint::new(addr2, SECOND_IPC_TOKEN).unwrap(),
+        )
+        .unwrap(),
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_projects_with_limits(
+        listener,
+        projects,
+        WEB_TOKEN,
+        GatewayLimits::default(),
+        stop.clone(),
+    ));
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let list = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({"method": "projects.list", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(list["result"].as_array().unwrap().len(), 2);
+    assert_eq!(list["result"][1]["id"], "docs");
+    assert_eq!(list["result"][1]["label"], "文档项目");
+
+    let routed = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({"method": "session.create", "params": {"label": "第二项目会话"}, "project": "docs"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(routed["result"]["params"]["label"], "第二项目会话");
+
+    stop.cancel();
+    for task in [task1, task2, web_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 }

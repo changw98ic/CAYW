@@ -23,6 +23,7 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
+    "projects.list",
     "session.create",
     "session.list",
     "session.get",
@@ -134,8 +135,69 @@ impl fmt::Debug for IpcEndpoint {
     }
 }
 
-struct Gateway {
+/// Named local runtime project served by the loopback gateway.
+pub struct ProjectEndpoint {
+    id: String,
+    label: String,
     ipc: IpcEndpoint,
+}
+
+impl ProjectEndpoint {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        ipc: IpcEndpoint,
+    ) -> io::Result<Self> {
+        let id = id.into();
+        let label = label.into();
+        let trimmed_label = label.trim();
+        if id.is_empty()
+            || id.len() > 64
+            || !id.is_ascii()
+            || id
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+            || trimmed_label.is_empty()
+            || trimmed_label.len() > 160
+            || trimmed_label.chars().any(char::is_control)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "project requires a 1..64 ASCII id and 1..160 label without control characters",
+            ));
+        }
+        Ok(Self {
+            id,
+            label: trimmed_label.to_owned(),
+            ipc,
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn address(&self) -> SocketAddr {
+        self.ipc.address
+    }
+}
+
+impl fmt::Debug for ProjectEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProjectEndpoint")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("ipc", &self.ipc)
+            .finish()
+    }
+}
+
+struct Gateway {
+    projects: Vec<ProjectEndpoint>,
     web_token: String,
     authorities: Vec<String>,
     limits: GatewayLimits,
@@ -175,12 +237,41 @@ pub async fn serve_with_limits(
     limits: GatewayLimits,
     cancel: CancellationToken,
 ) -> io::Result<()> {
+    let project = ProjectEndpoint::new("default", "默认项目", ipc_client)?;
+    serve_projects_with_limits(listener, vec![project], web_token, limits, cancel).await
+}
+
+/// Serve one or more local runtime projects on an already-bound loopback listener.
+pub async fn serve_projects_with_limits(
+    listener: TcpListener,
+    projects: Vec<ProjectEndpoint>,
+    web_token: impl Into<String>,
+    limits: GatewayLimits,
+    cancel: CancellationToken,
+) -> io::Result<()> {
     let address = listener.local_addr()?;
     if !address.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "WebUI must bind to a loopback address",
         ));
+    }
+    if projects.is_empty() || projects.len() > 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "WebUI requires 1..32 configured local projects",
+        ));
+    }
+    for (index, project) in projects.iter().enumerate() {
+        if projects[..index]
+            .iter()
+            .any(|earlier| earlier.id == project.id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Project ids must be unique",
+            ));
+        }
     }
     let web_token = web_token.into();
     if !valid_token(&web_token) {
@@ -189,7 +280,10 @@ pub async fn serve_with_limits(
             "Web token must contain 32..4096 ASCII bytes without whitespace",
         ));
     }
-    if web_token == ipc_client.token {
+    if projects
+        .iter()
+        .any(|project| web_token == project.ipc.token)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Web and IPC access tokens must differ",
@@ -197,7 +291,7 @@ pub async fn serve_with_limits(
     }
     limits.validate()?;
     let state = Arc::new(Gateway {
-        ipc: ipc_client,
+        projects,
         web_token,
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
@@ -359,6 +453,8 @@ fn secure_headers(mut response: Response) -> Response {
 struct BrowserRequest {
     method: String,
     params: Value,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 async fn rpc(
@@ -397,6 +493,20 @@ async fn rpc(
             false,
         );
     }
+    let project = match request.project.as_deref() {
+        None => &state.projects[0],
+        Some(id) => {
+            let Some(project) = state.projects.iter().find(|project| project.id == id) else {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_params",
+                    "Unknown project id",
+                    false,
+                );
+            };
+            project
+        }
+    };
     let prompt = request.method == "session.prompt";
     let _prompt_pending = if prompt {
         match state.pending_prompts.try_acquire() {
@@ -429,6 +539,34 @@ async fn rpc(
             Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "queue_timeout", "Gateway queue wait timed out; request was not dispatched", false),
         }
     };
+    if request.method == "projects.list" {
+        if !request
+            .params
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_params",
+                "projects.list takes an empty params object",
+                false,
+            );
+        }
+        let list: Vec<Value> = state
+            .projects
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                json!({
+                    "id": item.id,
+                    "label": item.label,
+                    "address": item.ipc.address.to_string(),
+                    "default": index == 0,
+                })
+            })
+            .collect();
+        return Json(json!({ "result": list })).into_response();
+    }
     let budget = if prompt {
         state.limits.prompt_timeout
     } else {
@@ -436,7 +574,7 @@ async fn rpc(
     };
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
-        result = state.ipc.connect(budget) => match result {
+        result = project.ipc.connect(budget) => match result {
             Ok(client) => client,
             Err(error) => return upstream_error(&state, error),
         }
@@ -471,12 +609,19 @@ fn side_effecting(method: &str) -> bool {
 }
 
 fn redact(text: &str, state: &Gateway) -> String {
-    text.replace(&state.ipc.token, "[redacted]")
-        .replace(&state.web_token, "[redacted]")
+    let mut out = text.replace(&state.web_token, "[redacted]");
+    for project in &state.projects {
+        out = out.replace(&project.ipc.token, "[redacted]");
+    }
+    out
 }
 
 fn contains_token(text: &str, state: &Gateway) -> bool {
-    text.contains(&state.ipc.token) || text.contains(&state.web_token)
+    text.contains(&state.web_token)
+        || state
+            .projects
+            .iter()
+            .any(|project| text.contains(&project.ipc.token))
 }
 
 fn contains_credential(value: &Value, state: &Gateway) -> bool {

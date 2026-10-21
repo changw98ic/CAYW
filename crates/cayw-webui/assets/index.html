@@ -29,6 +29,11 @@
 
   <div id="workspace" class="workspace" hidden>
     <aside class="sidebar" aria-labelledby="sessions-heading">
+      <nav class="page-nav" aria-label="界面视图">
+        <button id="nav-conversation" class="page-tab" type="button" aria-current="true">会话</button>
+        <button id="nav-projects" class="page-tab" type="button" aria-current="false">项目管理</button>
+        <button id="nav-plugins" class="page-tab" type="button" aria-current="false">插件管理</button>
+      </nav>
       <details id="session-picker" class="session-picker" open>
       <summary class="session-picker-summary"><span>会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
       <div class="session-picker-content">
@@ -46,6 +51,7 @@
     </aside>
 
     <main id="conversation" class="conversation" tabindex="-1">
+      <div id="conversation-view">
       <div class="conversation-heading"><div><p class="eyebrow">工作空间</p><h1 id="session-title">选择或创建会话</h1></div><span id="session-state" class="state-label">等待选择</span></div>
       <p id="global-error" class="error" role="alert" hidden></p>
       <p id="poll-status" class="small muted" role="status"></p>
@@ -59,6 +65,21 @@
         <textarea id="prompt" rows="3" maxlength="64000" placeholder="输入你想完成的事情…" disabled></textarea>
         <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选择会话后即可输入。Enter 换行，Ctrl / ⌘ + Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止运行</button><button id="send-button" type="submit" disabled>发送</button></div></div>
       </form>
+      </div>
+
+      <section id="projects-page" class="management-page" hidden aria-labelledby="projects-heading">
+        <div class="conversation-heading"><div><p class="eyebrow">多项目管理</p><h1 id="projects-heading">本机项目</h1></div><button id="refresh-projects" class="secondary" type="button">刷新项目</button></div>
+        <p class="small muted">管理当前本机轻网关接入的多个 Runtime 项目，各项目会话与事件游标相互独立。多设备管理暂不提供。</p>
+        <p id="projects-status" class="small muted" role="status"></p>
+        <div id="project-list" class="management-grid"></div>
+      </section>
+
+      <section id="plugins-page" class="management-page" hidden aria-labelledby="plugins-heading">
+        <div class="conversation-heading"><div><p class="eyebrow">插件管理</p><h1 id="plugins-heading">插件与会话绑定</h1></div><button id="refresh-plugins" class="secondary" type="button">刷新插件状态</button></div>
+        <p class="small muted">查看当前项目的已绑定 plugin、版本代际、公开能力与冻结状态。plugin 启停由本机宿主控制；若已绑定 plugin 卸载导致会话冻结，可在确认无未决副作用后显式 Fork 为普通聊天。</p>
+        <p id="plugins-status" class="small muted" role="status"></p>
+        <div id="plugin-list" class="management-grid"></div>
+      </section>
     </main>
   </div>
 

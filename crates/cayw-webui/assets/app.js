@@ -81,7 +81,7 @@ const attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-const readMethods = new Set(['runtime.health', 'session.list', 'session.get', 'session.events', 'capabilities.list']);
+const readMethods = new Set(['runtime.health', 'projects.list', 'session.list', 'session.get', 'session.events', 'capabilities.list']);
 const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'cancelled']);
 
 export class RpcError extends Error {
@@ -317,12 +317,133 @@ function stateLabel(snapshot, view) {
   return ({ idle: '就绪', ready: '就绪', running: '运行中', cancelled: '已取消', failed: '执行失败', completed: '已完成', unknown: '状态待确认' })[name] ?? clip(name, 60);
 }
 
+export function summarizeProjects(projects = [], projectSessions = {}, projectViews = {}) {
+  const list = Array.isArray(projects) && projects.length
+    ? projects.filter(item => object(item) && typeof item.id === 'string' && item.id)
+    : [{ id: 'default', label: '默认项目', address: '本机 IPC', default: true }];
+  return list.slice(0, 32).map((project, index) => {
+    const id = clip(project.id, 64);
+    const sessions = array(projectSessions[id]);
+    const views = projectViews[id] instanceof Map ? projectViews[id] : new Map(Object.entries(projectViews[id] ?? {}));
+    let runningCount = 0;
+    let approvalCount = 0;
+    let frozenCount = 0;
+    let unresolvedCount = 0;
+    let uncertainCount = 0;
+    for (const session of sessions) {
+      const view = views.get(session?.id);
+      const snap = view?.snapshot ?? session;
+      if (unresolved(snap) || view?.faults?.reconciliation) unresolvedCount++;
+      if (view?.writes?.some(write => write.phase === 'uncertain')) uncertainCount++;
+      if (frozen(snap, view)) frozenCount++;
+      if (array(snap?.pending_approvals).length) approvalCount++;
+      if (sessionRunning(snap)) runningCount++;
+    }
+    for (const [sessionId, view] of views.entries()) {
+      if (sessions.some(session => session?.id === sessionId)) continue;
+      if (view?.faults?.reconciliation) unresolvedCount++;
+      if (view?.writes?.some(write => write.phase === 'uncertain')) uncertainCount++;
+      if (view?.faults?.frozen) frozenCount++;
+    }
+    const statusLabel = unresolvedCount
+      ? `${unresolvedCount} 个会话待核对副作用`
+      : uncertainCount
+        ? `${uncertainCount} 个会话连接结果待确认`
+        : approvalCount
+          ? `${approvalCount} 个会话等待审批`
+          : runningCount
+            ? `${runningCount} 个会话运行中`
+            : frozenCount
+              ? `${frozenCount} 个会话已冻结`
+              : '就绪';
+    return {
+      id,
+      label: clip(project.label || id, 160),
+      address: clip(project.address || '本机 loopback IPC', 120),
+      default: Boolean(project.default ?? index === 0),
+      sessionCount: sessions.length,
+      runningCount,
+      approvalCount,
+      frozenCount,
+      unresolvedCount,
+      uncertainCount,
+      statusLabel,
+    };
+  });
+}
+
+export function summarizePlugins(sessions = [], capabilities = [], views = new Map()) {
+  const viewMap = views instanceof Map ? views : new Map(Object.entries(views ?? {}));
+  const byName = new Map();
+  for (const session of array(sessions)) {
+    if (!object(session) || typeof session.id !== 'string') continue;
+    const view = viewMap.get(session.id);
+    const snap = view?.snapshot ?? session;
+    const binding = object(snap?.binding) ? snap.binding : null;
+    const isFrozen = frozen(snap, view);
+    if (!binding && !isFrozen) continue;
+    const name = clip(binding?.plugin || '未知插件绑定', 120);
+    const entry = byName.get(name) ?? {
+      name,
+      version: clip(binding?.version || binding?.manifest?.version || '未标注版本', 64),
+      registryId: clip(binding?.registry_id || '未记录实例 ID', 80),
+      generation: safeCursor(binding?.generation) ? binding.generation : null,
+      frozen: false,
+      reasons: [],
+      capabilities: [],
+      boundSessions: [],
+    };
+    if (isFrozen) entry.frozen = true;
+    if (typeof binding?.reason === 'string' && binding.reason.trim() && !entry.reasons.includes(binding.reason.trim())) {
+      entry.reasons.push(clip(binding.reason.trim(), 400));
+    }
+    for (const cap of array(binding?.manifest?.capabilities)) {
+      const capName = typeof cap?.name === 'string' ? clip(cap.name, 120) : '';
+      if (capName && !entry.capabilities.includes(capName)) entry.capabilities.push(capName);
+    }
+    const candidateView = view ?? { snapshot: snap, faults: {}, writes: [], activeAttempt: null };
+    entry.boundSessions.push({
+      id: session.id,
+      label: clip(snap?.label || session.label || '未命名会话', 160),
+      stateLabel: stateLabel(snap, view),
+      frozen: isFrozen,
+      needsReconciliation: Boolean(unresolved(snap) || view?.faults?.reconciliation),
+      canFork: canFork(candidateView),
+    });
+    byName.set(name, entry);
+  }
+  for (const cap of array(capabilities)) {
+    if (!object(cap) || typeof cap.name !== 'string') continue;
+    const prefix = cap.name.includes('.') ? cap.name.split('.')[0] : '';
+    if (!prefix || ['fs', 'search', 'code', 'data', 'git', 'build', 'test', 'exec_command', 'write_stdin', 'mcp', 'skills'].includes(prefix)) continue;
+    const entry = byName.get(prefix) ?? {
+      name: clip(prefix, 120),
+      version: '宿主当前目录',
+      registryId: '宿主公开能力',
+      generation: null,
+      frozen: false,
+      reasons: [],
+      capabilities: [],
+      boundSessions: [],
+    };
+    const capName = clip(cap.name, 120);
+    if (!entry.capabilities.includes(capName)) entry.capabilities.push(capName);
+    byName.set(prefix, entry);
+  }
+  return [...byName.values()].map(entry => ({
+    ...entry,
+    statusLabel: entry.frozen ? '已冻结 · 不可用' : '正常启用',
+  }));
+}
+
 if (typeof document !== 'undefined') boot();
 
 function boot() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
     'login-panel', 'login-form', 'login-error', 'login-button', 'web-token', 'workspace', 'logout', 'connection-status',
+    'nav-conversation', 'nav-projects', 'nav-plugins', 'conversation-view', 'projects-page', 'plugins-page',
+    'refresh-projects', 'projects-status', 'project-list', 'refresh-plugins', 'plugins-status', 'plugin-list',
     'create-form', 'session-label', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
@@ -336,6 +457,11 @@ function boot() {
   let views = new Map();
   let promptPending = new Set();
   let approvalPending = new Set();
+  let activePage = 'conversation';
+  let activeProject = null;
+  let projects = [{ id: 'default', label: '默认项目', address: '本机 IPC', default: true }];
+  let projectStates = new Map();
+  let cachedCapabilities = [];
   let selectionGeneration = 0;
   let listGeneration = 0;
   let timer;
@@ -357,18 +483,41 @@ function boot() {
     ui['global-error'].hidden = !error;
   };
   const activeView = () => selected ? views.get(selected) : undefined;
+  const currentProjectId = () => activeProject ?? projects[0]?.id ?? 'default';
+
+  function saveProjectState() {
+    projectStates.set(currentProjectId(), {
+      selected,
+      sessions,
+      views,
+      promptPending,
+      approvalPending,
+      cachedCapabilities,
+    });
+  }
+
+  function loadProjectState(projectId) {
+    const state = projectStates.get(projectId);
+    selected = state?.selected ?? null;
+    sessions = state?.sessions ?? [];
+    views = state?.views ?? new Map();
+    promptPending = state?.promptPending ?? new Set();
+    approvalPending = state?.approvalPending ?? new Set();
+    cachedCapabilities = state?.cachedCapabilities ?? [];
+  }
 
   async function rpc(method, params = {}) {
     const controller = new AbortController();
     controllers.add(controller);
     const requestToken = token;
+    const requestBody = activeProject ? { method, params, project: activeProject } : { method, params };
     let timeout;
     if (method !== 'session.prompt') timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch('/api/rpc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
-        body: JSON.stringify({ method, params }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
         cache: 'no-store',
         credentials: 'omit',
@@ -392,6 +541,7 @@ function boot() {
   }
 
   function disconnect(reason = '') {
+    saveProjectState();
     loginGeneration++;
     selectionGeneration++;
     listGeneration++;
@@ -403,9 +553,14 @@ function boot() {
     sessions = [];
     // Keep unresolved operation evidence in this page's memory across
     // reauthentication. Aborting a connection never proves execution stopped.
-    views = new Map([...views].filter(([,view]) => view.writes.length || view.activeAttempt || Object.keys(view.faults).length).map(([id,view]) => [id,{ ...view, writes:view.writes.map(write => ({ ...write, phase:'uncertain' })) }]));
+    for (const [projectId, state] of projectStates.entries()) {
+      const retained = new Map([...state.views].filter(([,view]) => view.writes.length || view.activeAttempt || Object.keys(view.faults).length).map(([id,view]) => [id,{ ...view, writes:view.writes.map(write => ({ ...write, phase:'uncertain' })) }]));
+      projectStates.set(projectId, { selected: null, sessions: [], views: retained, promptPending: new Set(), approvalPending: new Set(), cachedCapabilities: [] });
+    }
+    views = projectStates.get(currentProjectId())?.views ?? new Map();
     promptPending = new Set();
     approvalPending = new Set();
+    activePage = 'conversation';
     ui['workspace'].hidden = true;
     ui['logout'].hidden = true;
     ui['login-panel'].hidden = false;
@@ -419,6 +574,9 @@ function boot() {
     ui['session-list'].replaceChildren();
     ui['session-picker'].open = true;
     ui['prompt'].value = '';
+    if (ui['project-list']) ui['project-list'].replaceChildren();
+    if (ui['plugin-list']) ui['plugin-list'].replaceChildren();
+    renderPageTabs();
     ui['fork-dialog'].close();
     ui['web-token'].focus();
   }
@@ -537,6 +695,183 @@ function boot() {
     renderMessages(view);
     renderEvents(view);
     renderComposer();
+    renderProjectsPage();
+    renderPluginsPage();
+  }
+
+  function renderPageTabs() {
+    if (!ui['nav-conversation']) return;
+    ui['nav-conversation'].setAttribute('aria-current', String(activePage === 'conversation'));
+    ui['nav-projects'].setAttribute('aria-current', String(activePage === 'projects'));
+    ui['nav-plugins'].setAttribute('aria-current', String(activePage === 'plugins'));
+    if (ui['conversation-view']) ui['conversation-view'].hidden = activePage !== 'conversation';
+    if (ui['projects-page']) ui['projects-page'].hidden = activePage !== 'projects';
+    if (ui['plugins-page']) ui['plugins-page'].hidden = activePage !== 'plugins';
+  }
+
+  function switchPage(page) {
+    activePage = page;
+    renderPageTabs();
+    if (page === 'projects') renderProjectsPage();
+    if (page === 'plugins') renderPluginsPage();
+  }
+
+  function renderProjectsPage() {
+    if (!ui['project-list']) return;
+    saveProjectState();
+    const sessionMap = Object.fromEntries([...projectStates.entries()].map(([id, state]) => [id, state.sessions]));
+    const viewMap = Object.fromEntries([...projectStates.entries()].map(([id, state]) => [id, state.views]));
+    const summaries = summarizeProjects(projects, sessionMap, viewMap);
+    const fragment = document.createDocumentFragment();
+    for (const item of summaries) {
+      const card = el('article', 'management-card');
+      const isCurrent = item.id === currentProjectId();
+      card.append(
+        el('div', 'card-header', ''),
+        el('p', 'small muted', `地址：${item.address}`),
+        el('p', 'small', `状态：${item.statusLabel} · 已缓存 ${item.sessionCount} 个会话`),
+      );
+      card.children[0].append(
+        el('strong', '', item.label),
+        el('span', 'state-label', isCurrent ? '当前项目' : item.id),
+      );
+      const actions = el('div', 'approval-actions');
+      const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看该项目会话' : '切换到此项目');
+      button.type = 'button';
+      button.addEventListener('click', () => selectProject(item.id));
+      actions.append(button);
+      card.append(actions);
+      fragment.append(card);
+    }
+    ui['project-list'].replaceChildren(fragment);
+    if (ui['projects-status']) {
+      ui['projects-status'].textContent = `共 ${summaries.length} 个本机项目 · 当前项目：${summaries.find(item => item.id === currentProjectId())?.label ?? currentProjectId()}`;
+    }
+  }
+
+  async function selectProject(projectId) {
+    if (!token) return;
+    saveProjectState();
+    const isDefault = projects[0]?.id === projectId || (!projects.length && projectId === 'default');
+    activeProject = isDefault ? null : projectId;
+    loadProjectState(projectId);
+    selectionGeneration++;
+    clearTimeout(timer);
+    switchPage('conversation');
+    renderSessionList();
+    renderView();
+    await refreshSessions();
+    if (sessions.length) {
+      const target = selected && sessions.some(s => s.id === selected) ? selected : sessions[0].id;
+      selected = null;
+      await selectSession(target);
+    }
+  }
+
+  async function refreshProjects() {
+    if (!token || !ui['refresh-projects']) return;
+    const login = loginGeneration;
+    ui['refresh-projects'].disabled = true;
+    ui['projects-status'].textContent = '正在读取本机项目…';
+    try {
+      const list = await rpc('projects.list');
+      if (login !== loginGeneration) return;
+      if (Array.isArray(list) && list.length) projects = list;
+      await refreshSessions();
+      if (login === loginGeneration) renderProjectsPage();
+    } catch (error) {
+      if (login === loginGeneration) {
+        ui['projects-status'].textContent = errorText(error);
+        handleError(error);
+      }
+    } finally {
+      if (ui['refresh-projects']) ui['refresh-projects'].disabled = false;
+    }
+  }
+
+  function renderPluginsPage() {
+    if (!ui['plugin-list']) return;
+    const items = summarizePlugins(sessions, cachedCapabilities, views);
+    const fragment = document.createDocumentFragment();
+    if (!items.length) {
+      const empty = el('div', 'empty');
+      empty.append(
+        el('h2', '', '当前项目暂无已绑定或公开的插件'),
+        el('p', '', '当会话绑定 StrongFlow 或其他 plugin，或宿主公开插件能力后，可在此查看版本、状态与关联会话。'),
+      );
+      fragment.append(empty);
+    }
+    for (const plugin of items) {
+      const card = el('article', 'management-card');
+      const header = el('div', 'card-header');
+      header.append(el('strong', '', plugin.name), el('span', 'state-label', plugin.statusLabel));
+      card.append(
+        header,
+        el('p', 'small muted', `版本：${plugin.version} · 实例：${plugin.registryId}${plugin.generation !== null ? ` · 代际 #${plugin.generation}` : ''}`),
+      );
+      if (plugin.reasons.length) {
+        card.append(el('p', 'effect-warning', `冻结原因：${plugin.reasons.join('；')}`));
+      }
+      if (plugin.capabilities.length) {
+        card.append(el('p', 'small', `提供能力：${plugin.capabilities.join('、')}`));
+      }
+      for (const bound of plugin.boundSessions) {
+        const row = el('div', 'bound-session-row');
+        row.append(
+          el('span', 'small', `${bound.label}（${bound.stateLabel}）`),
+        );
+        const actions = el('div', 'approval-actions');
+        const openBtn = el('button', 'secondary', '打开会话');
+        openBtn.type = 'button';
+        openBtn.addEventListener('click', async () => {
+          switchPage('conversation');
+          await selectSession(bound.id);
+        });
+        actions.append(openBtn);
+        if (bound.frozen) {
+          const forkBtn = el('button', '', '确认后 Fork 为普通聊天');
+          forkBtn.type = 'button';
+          forkBtn.disabled = !bound.canFork;
+          forkBtn.addEventListener('click', async () => {
+            switchPage('conversation');
+            await selectSession(bound.id);
+            if (canFork(activeView())) ui['open-fork'].dispatch('click');
+          });
+          actions.append(forkBtn);
+        }
+        row.append(actions);
+        card.append(row);
+      }
+      fragment.append(card);
+    }
+    ui['plugin-list'].replaceChildren(fragment);
+    if (ui['plugins-status']) {
+      ui['plugins-status'].textContent = items.length ? `已识别 ${items.length} 个插件绑定或能力组` : '暂无已绑定的插件记录';
+    }
+  }
+
+  async function refreshPlugins() {
+    if (!token || !ui['refresh-plugins']) return;
+    const login = loginGeneration;
+    ui['refresh-plugins'].disabled = true;
+    ui['plugins-status'].textContent = '正在同步会话绑定与宿主能力…';
+    try {
+      await refreshSessions();
+      const capabilities = await rpc('capabilities.list');
+      if (login !== loginGeneration) return;
+      if (Array.isArray(capabilities)) {
+        cachedCapabilities = capabilities;
+        if (ui['capability-content']) ui['capability-content'].textContent = recordText(capabilities);
+      }
+      renderPluginsPage();
+    } catch (error) {
+      if (login === loginGeneration) {
+        ui['plugins-status'].textContent = errorText(error);
+        handleError(error);
+      }
+    } finally {
+      if (ui['refresh-plugins']) ui['refresh-plugins'].disabled = false;
+    }
   }
 
   function renderMessages(view) {
@@ -958,7 +1293,11 @@ function boot() {
     ui['capability-content'].textContent = '正在读取…';
     try {
       const capabilities = await rpc('capabilities.list');
-      if (login === loginGeneration) ui['capability-content'].textContent = recordText(capabilities);
+      if (login === loginGeneration) {
+        if (Array.isArray(capabilities)) cachedCapabilities = capabilities;
+        ui['capability-content'].textContent = recordText(capabilities);
+        renderPluginsPage();
+      }
     } catch (error) {
       if (login === loginGeneration) {
         ui['capability-content'].textContent = errorText(error);
@@ -966,6 +1305,12 @@ function boot() {
       }
     } finally { ui['refresh-capabilities'].disabled = false; }
   });
+
+  if (ui['nav-conversation']) ui['nav-conversation'].addEventListener('click', () => switchPage('conversation'));
+  if (ui['nav-projects']) ui['nav-projects'].addEventListener('click', () => switchPage('projects'));
+  if (ui['nav-plugins']) ui['nav-plugins'].addEventListener('click', () => switchPage('plugins'));
+  if (ui['refresh-projects']) ui['refresh-projects'].addEventListener('click', refreshProjects);
+  if (ui['refresh-plugins']) ui['refresh-plugins'].addEventListener('click', refreshPlugins);
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && token && selected) schedulePoll(0);

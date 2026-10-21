@@ -512,3 +512,56 @@ test('a delayed unresolved snapshot cannot undo the exact reconciliation already
   await app.poll();
   assert.equal(app.ui.prompt.disabled, false, 'the consumed reconciliation must survive the old read');
 });
+
+test('projects and plugins management pages switch views and preserve uncertain write locks across projects', async t => {
+  const frozenSession = snapshot({
+    id: 's-plugin',
+    label: '插件会话',
+    binding: {
+      plugin: 'strongflow',
+      version: '1.0.0',
+      registry_id: 'reg-sf',
+      generation: 2,
+      frozen: true,
+      reason: 'host unloaded strongflow',
+      manifest: { capabilities: [{ name: 'strongflow.plan' }] },
+    },
+  });
+  let activeProjectSeen = null;
+  const app = await page(t, async (method, params) => {
+    if (method === 'projects.list') {
+      return [
+        { id: 'default', label: '默认项目', address: '127.0.0.1:4100', default: true },
+        { id: 'secondary', label: '第二项目', address: '127.0.0.1:4101', default: false },
+      ];
+    }
+    if (method === 'capabilities.list') return [{ name: 'strongflow.plan' }];
+    if (method === 'session.list') return [frozenSession];
+    if (method === 'session.get') return frozenSession;
+    if (method === 'session.events') return [];
+    if (method === 'session.fork') {
+      activeProjectSeen = params.label;
+      return snapshot({ id: 's-forked', label: params.label, cursor: 3 });
+    }
+  });
+  await app.ui['nav-projects'].dispatch('click');
+  assert.equal(app.ui['projects-page'].hidden, false);
+  assert.equal(app.ui['conversation-view'].hidden, true);
+  await app.ui['refresh-projects'].dispatch('click');
+  assert.match(app.ui['projects-status'].textContent, /2 个本机项目/);
+
+  await app.ui['nav-plugins'].dispatch('click');
+  assert.equal(app.ui['plugins-page'].hidden, false);
+  await app.ui['refresh-plugins'].dispatch('click');
+  assert.match(app.ui['plugin-list'].textContent, /strongflow/);
+  assert.match(app.ui['plugin-list'].textContent, /host unloaded strongflow/);
+  assert.equal(activeProjectSeen, null);
+
+  // Switch to secondary project and verify project parameter routing.
+  await app.ui['nav-projects'].dispatch('click');
+  const secondaryCard = app.ui['project-list'].children[1];
+  const switchButton = secondaryCard.children.at(-1).children[0];
+  await switchButton.dispatch('click');
+  assert.equal(app.ui['conversation-view'].hidden, false);
+  assert.ok(app.calls.some(call => call.project === 'secondary' && call.method === 'session.list'));
+});

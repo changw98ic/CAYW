@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../assets/app.js', import.meta.url), 'utf8');
-const { createView, consumeEvents, applySnapshot, sessionBlocked, messageText } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { createView, consumeEvents, applySnapshot, sessionBlocked, messageText, summarizeProjects, summarizePlugins } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 7, state: 'idle', pending_approvals: [], unresolved_calls: [], ...extra });
 
@@ -61,4 +61,60 @@ test('unknown side effects and unavailable workflow block prompts without cleari
   assert.match(sessionBlocked(snapshot({ unresolved_calls: [{ id: 'tool-1', outcome_unknown: true }] })), /核对/);
   assert.match(sessionBlocked(snapshot({ state: 'frozen' })), /冻结/);
   assert.equal(sessionBlocked(snapshot()), '');
+});
+
+test('summarizeProjects aggregates per-project session and safety states', () => {
+  const projects = [
+    { id: 'default', label: '主项目', address: '127.0.0.1:4100', default: true },
+    { id: 'docs', label: '文档项目', address: '127.0.0.1:4101', default: false },
+  ];
+  const sessions = {
+    default: [snapshot({ id: 's1', state: 'running', attempt: { attempt_id: 'a1' } })],
+    docs: [snapshot({ id: 's2', state: 'needs_reconciliation', unresolved_calls: [{ id: 'c1', state: 'outcome_unknown' }] })],
+  };
+  const result = summarizeProjects(projects, sessions, {});
+  assert.equal(result.length, 2);
+  assert.equal(result[0].sessionCount, 1);
+  assert.match(result[0].statusLabel, /运行中/);
+  assert.equal(result[1].unresolvedCount, 1);
+  assert.match(result[1].statusLabel, /待核对副作用/);
+});
+
+test('summarizePlugins reports bound plugins and blocks fork when reconciliation is required', () => {
+  const frozenSession = snapshot({
+    id: 's-frozen',
+    label: '强流程会话',
+    binding: {
+      plugin: 'strongflow',
+      version: '1.2.0',
+      registry_id: 'reg-1',
+      generation: 3,
+      frozen: true,
+      reason: 'plugin strongflow was unloaded by the host',
+      manifest: { capabilities: [{ name: 'strongflow.step' }] },
+    },
+  });
+  const unknownSession = snapshot({
+    id: 's-unknown',
+    label: '待核对会话',
+    state: 'needs_reconciliation',
+    unresolved_calls: [{ call: { id: 'c1' }, state: 'outcome_unknown' }],
+    binding: {
+      plugin: 'strongflow',
+      version: '1.2.0',
+      registry_id: 'reg-1',
+      generation: 3,
+      frozen: true,
+      reason: 'plugin unloaded',
+      manifest: { capabilities: [] },
+    },
+  });
+  const plugins = summarizePlugins([frozenSession, unknownSession], [{ name: 'jev.evaluate' }]);
+  assert.equal(plugins.length, 2);
+  const sf = plugins.find(item => item.name === 'strongflow');
+  assert.equal(sf.frozen, true);
+  assert.equal(sf.generation, 3);
+  assert.deepEqual(sf.capabilities, ['strongflow.step']);
+  assert.equal(sf.boundSessions.find(s => s.id === 's-frozen').canFork, true);
+  assert.equal(sf.boundSessions.find(s => s.id === 's-unknown').canFork, false);
 });
