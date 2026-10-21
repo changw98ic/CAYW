@@ -1,6 +1,6 @@
 //! Responsive rendering using the same App projection as the interactive client.
 use crate::{
-    App, Dialog, Focus, sanitize,
+    App, Dialog, Focus, ViewTab, sanitize,
     state::{message_text, string},
 };
 use ratatui::{
@@ -56,7 +56,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     draw_history(frame, app, panes[0]);
     draw_composer(frame, app, panes[1]);
     let status = format!(
-        "{}\nTab focus · Ctrl+N new · Enter send · Alt+Enter newline · Ctrl+X cancel · Ctrl+F fork · Ctrl+Q quit",
+        "{}\nTab focus · Alt+1..4 Chat/Files/Diff/Logs · Ctrl+N new · Enter send · Ctrl+X cancel · Ctrl+F fork · Ctrl+Q quit",
         sanitize(&app.status)
     );
     frame.render_widget(
@@ -119,8 +119,23 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let view_label = match app.view {
+        ViewTab::Chat => "Chat".to_owned(),
+        ViewTab::Files => format!(
+            "Files ({}) [read-only]",
+            app.selected().map_or(0, |s| s.files.len())
+        ),
+        ViewTab::Diff => format!(
+            "Diff ({}) [read-only]",
+            app.selected().map_or(0, |s| s.diffs.len())
+        ),
+        ViewTab::Logs => format!(
+            "Logs ({}) [read-only]",
+            app.selected().map_or(0, |s| s.logs.len())
+        ),
+    };
     let title = app.selected().map_or_else(
-        || "History".into(),
+        || format!("History · {view_label}"),
         |session| {
             let flag = if session.frozen {
                 " · frozen"
@@ -130,7 +145,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ""
             };
             format!(
-                "{} · {}{flag}  PgUp/PgDn",
+                "{} · {}{flag} · {view_label}  Alt+1..4 / PgUp/PgDn",
                 sanitize(&session.label).replace('\n', " "),
                 session.state
             )
@@ -188,77 +203,165 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
             );
         }
     }
-    for message in &session.messages {
-        let role = string(message, "role");
-        let label = if role == "toolResult" {
-            format!("tool · {}", string(message, "tool_name"))
-        } else {
-            role.to_owned()
-        };
-        append(&mut lines, &label, inner.width, Color::Cyan);
-        append(
-            &mut lines,
-            &message_text(message),
-            inner.width,
-            Color::Reset,
-        );
-        if let Some(error) = message["error_message"].as_str() {
-            append(&mut lines, error, inner.width, Color::Red);
+    match app.view {
+        ViewTab::Chat => {
+            for message in &session.messages {
+                let role = string(message, "role");
+                let label = if role == "toolResult" {
+                    format!("tool · {}", string(message, "tool_name"))
+                } else {
+                    role.to_owned()
+                };
+                append(&mut lines, &label, inner.width, Color::Cyan);
+                append(
+                    &mut lines,
+                    &message_text(message),
+                    inner.width,
+                    Color::Reset,
+                );
+                if let Some(error) = message["error_message"].as_str() {
+                    append(&mut lines, error, inner.width, Color::Red);
+                }
+                lines.push(Line::default());
+            }
+            if let Some(text) = &session.streaming_text {
+                append(
+                    &mut lines,
+                    "assistant · streaming",
+                    inner.width,
+                    Color::Green,
+                );
+                append(&mut lines, text, inner.width, Color::Reset);
+            }
+            if let Some(status) = &session.tool_status {
+                append(&mut lines, status, inner.width, Color::Gray);
+            }
+            for approval in &session.approvals {
+                let details = if approval["input"].is_object() {
+                    &approval["input"]
+                } else {
+                    approval
+                };
+                append(
+                    &mut lines,
+                    &format!(
+                        "Approval {} · {}",
+                        string(approval, "id"),
+                        string(details, "capability")
+                    ),
+                    inner.width,
+                    Color::Yellow,
+                );
+                append(
+                    &mut lines,
+                    &format!(
+                        "Scope: {}\nReason: {}",
+                        string(details, "scope"),
+                        string(details, "reason")
+                    ),
+                    inner.width,
+                    Color::Reset,
+                );
+                append(
+                    &mut lines,
+                    "Alt+O allow once · Alt+T allow this task · Alt+D deny",
+                    inner.width,
+                    Color::Yellow,
+                );
+            }
+            if lines.is_empty() {
+                append(
+                    &mut lines,
+                    "No messages yet. Enter a prompt below.",
+                    inner.width,
+                    Color::Gray,
+                );
+            }
         }
-        lines.push(Line::default());
-    }
-    if let Some(text) = &session.streaming_text {
-        append(
-            &mut lines,
-            "assistant · streaming",
-            inner.width,
-            Color::Green,
-        );
-        append(&mut lines, text, inner.width, Color::Reset);
-    }
-    if let Some(status) = &session.tool_status {
-        append(&mut lines, status, inner.width, Color::Gray);
-    }
-    for approval in &session.approvals {
-        let details = if approval["input"].is_object() {
-            &approval["input"]
-        } else {
-            approval
-        };
-        append(
-            &mut lines,
-            &format!(
-                "Approval {} · {}",
-                string(approval, "id"),
-                string(details, "capability")
-            ),
-            inner.width,
-            Color::Yellow,
-        );
-        append(
-            &mut lines,
-            &format!(
-                "Scope: {}\nReason: {}",
-                string(details, "scope"),
-                string(details, "reason")
-            ),
-            inner.width,
-            Color::Reset,
-        );
-        append(
-            &mut lines,
-            "Alt+O allow once · Alt+T allow this task · Alt+D deny",
-            inner.width,
-            Color::Yellow,
-        );
-    }
-    if lines.is_empty() {
-        append(
-            &mut lines,
-            "No messages yet. Enter a prompt below.",
-            inner.width,
-            Color::Gray,
-        );
+        ViewTab::Files => {
+            if session.files.is_empty() {
+                append(
+                    &mut lines,
+                    "No file records in this session yet (read-only view).",
+                    inner.width,
+                    Color::Gray,
+                );
+            } else {
+                for file in &session.files {
+                    let color = if file.status == "outcome_unknown" || file.status == "failed" {
+                        Color::Red
+                    } else if file.status == "awaiting_approval" {
+                        Color::Yellow
+                    } else {
+                        Color::Cyan
+                    };
+                    append(
+                        &mut lines,
+                        &format!("{} [{} · {}]", file.path, file.action, file.status),
+                        inner.width,
+                        color,
+                    );
+                    append(&mut lines, &file.preview, inner.width, Color::Reset);
+                    lines.push(Line::default());
+                }
+            }
+        }
+        ViewTab::Diff => {
+            if session.diffs.is_empty() {
+                append(
+                    &mut lines,
+                    "No diff records in this session yet (read-only view).",
+                    inner.width,
+                    Color::Gray,
+                );
+            } else {
+                for entry in &session.diffs {
+                    append(
+                        &mut lines,
+                        &format!("diff · {} [{}]", entry.path, entry.status),
+                        inner.width,
+                        Color::Cyan,
+                    );
+                    for raw_line in entry.diff.lines() {
+                        let color = if raw_line.starts_with('+') && !raw_line.starts_with("+++") {
+                            Color::Green
+                        } else if raw_line.starts_with('-') && !raw_line.starts_with("---") {
+                            Color::Red
+                        } else if raw_line.starts_with("@@") {
+                            Color::Yellow
+                        } else {
+                            Color::Reset
+                        };
+                        append(&mut lines, raw_line, inner.width, color);
+                    }
+                    lines.push(Line::default());
+                }
+            }
+        }
+        ViewTab::Logs => {
+            if session.logs.is_empty() {
+                append(
+                    &mut lines,
+                    "No log entries in this session yet (read-only view).",
+                    inner.width,
+                    Color::Gray,
+                );
+            } else {
+                for entry in &session.logs {
+                    let color = if entry.contains("outcome_unknown")
+                        || entry.contains("failed")
+                        || entry.contains("error")
+                    {
+                        Color::Red
+                    } else if entry.contains("approval") || entry.contains("recovered") {
+                        Color::Yellow
+                    } else {
+                        Color::Reset
+                    };
+                    append(&mut lines, entry, inner.width, color);
+                }
+            }
+        }
     }
     let bottom = lines.len().saturating_sub(inner.height as usize);
     let top = bottom.saturating_sub(session.scroll as usize);

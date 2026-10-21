@@ -1,4 +1,5 @@
-use cayw_tui::{App, draw};
+use cayw_tui::{App, Focus, ViewTab, draw};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 
@@ -107,4 +108,104 @@ fn frozen_fork_dialog_explains_source_binding_and_requires_a_deliberate_key() {
     assert!(text.contains("Confirm chat Fork"));
     assert!(text.contains("source session stays frozen"));
     assert!(text.contains("y confirms"));
+}
+
+#[test]
+fn read_only_files_diff_and_logs_views_render_projected_data_and_preserve_unknown_warnings() {
+    let mut app = App::default();
+    app.set_connected();
+    app.upsert_snapshot(
+        json!({
+            "id": "s1",
+            "label": "inspect",
+            "cursor": 2,
+            "state": "idle",
+            "frozen": false,
+            "binding": null,
+            "executions": [{"cell_id": "cell-1", "state": "completed"}],
+            "messages": [
+                {
+                    "role": "toolResult",
+                    "tool_call_id": "call-1",
+                    "tool_name": "execute_code",
+                    "outcome_unknown": false,
+                    "is_error": false,
+                    "content": [{"type": "text", "text": "done"}],
+                    "structured_content": {
+                        "status": "completed",
+                        "outputs": [
+                            {"output": {"type": "json", "value": {"path": "src/lib.rs", "action": "read", "content": "pub fn ready() {}"}}},
+                            {"output": {"type": "json", "value": {"path": "src/lib.rs", "old": "fn old() {}", "new": "pub fn ready() {}"}}}
+                        ]
+                    }
+                }
+            ],
+            "pending_approvals": [],
+            "unresolved_calls": []
+        }),
+        true,
+    )
+    .unwrap();
+    app.apply_events(
+        "s1",
+        json!([
+            {"cursor": 1, "event": {"type": "attempt_started", "lease": {}}},
+            {"cursor": 2, "event": {"type": "attempt_finished", "lease": {}}}
+        ]),
+    )
+    .unwrap();
+
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT))
+            .is_empty()
+    );
+    assert_eq!(app.view, ViewTab::Files);
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &app)).unwrap();
+    let files_text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(files_text.contains("Files (1) [read-only]"));
+    assert!(files_text.contains("src/lib.rs"));
+    assert!(files_text.contains("pub fn ready() {}"));
+
+    app.focus = Focus::History;
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .is_empty()
+    );
+    assert_eq!(app.view, ViewTab::Diff);
+    terminal.draw(|frame| draw(frame, &app)).unwrap();
+    let diff_text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(diff_text.contains("Diff (1) [read-only]"));
+    assert!(diff_text.contains("-fn old() {}"));
+    assert!(diff_text.contains("+pub fn ready() {}"));
+
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT))
+            .is_empty()
+    );
+    assert_eq!(app.view, ViewTab::Logs);
+    terminal.draw(|frame| draw(frame, &app)).unwrap();
+    let logs_text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(logs_text.contains("Logs (3) [read-only]"));
+    assert!(logs_text.contains("cell cell-1"));
+    assert!(logs_text.contains("attempt_started"));
+    assert!(logs_text.contains("attempt_finished"));
 }
