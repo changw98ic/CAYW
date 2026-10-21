@@ -24478,7 +24478,7 @@ function of({ size: n = 24, className: i }) {
   return f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true", children: [f.jsx("rect", { x: "2.25", y: "2.25", width: "19.5", height: "19.5", rx: "5.5", stroke: "currentColor", strokeWidth: "1.8" }), f.jsx("path", { d: "M8 8.75L11.75 12L8 15.25", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round", strokeLinejoin: "round" }), f.jsx("path", { d: "M13.25 15.25H16.5", stroke: "currentColor", strokeWidth: "1.9", strokeLinecap: "round" })] });
 }
 function lf({ size: n = 24, className: i }) {
-  return f.jsxs("span", { className: i, style: { display: "inline-flex", alignItems: "center", gap: "6px", height: n }, children: [f.jsx("span", { className: "hHd-Xa_fallbackBrandName", children: "CAYW" }), f.jsx("span", { className: "hHd-Xa_buildRevision", children: "v3" })] });
+  return f.jsx("span", { className: i, style: { display: "inline-flex", alignItems: "center", height: n }, children: f.jsx("span", { className: "hHd-Xa_fallbackBrandName", children: "CAYW" }) });
 }
 function sf({ label: n, side: i = "right", delayMs: l = 0, disabled: u = false, maxWidth: c, children: d }) {
   const h = R.useRef(null), C = d.props?.ref, m = R.useCallback((q) => {
@@ -24626,19 +24626,19 @@ function HeroGlow({ className }) {
 var PERMISSION_PRESETS = [
   {
     id: "standard",
-    label: "Read Only",
-    zhLabel: "\u53EA\u8BFB\u4E0E\u6309\u9700\u5BA1\u6279",
+    label: "\u6309\u9700\u5BA1\u6279",
+    zhLabel: "\u6309\u9700\u5BA1\u6279",
     desc: "\u53EA\u8BFB\u64CD\u4F5C\u76F4\u63A5\u6267\u884C\uFF1B\u6587\u4EF6\u5199\u5165\u3001\u4FEE\u6539\u3001\u6784\u5EFA\u4E0E\u5916\u90E8\u5DE5\u5177\u9700\u6BCF\u6B21\u6216\u6309\u4EFB\u52A1\u660E\u786E\u6388\u6743\u3002"
   },
   {
     id: "workspace-write",
-    label: "Workspace Write",
+    label: "\u5DE5\u4F5C\u533A\u8BFB\u5199",
     zhLabel: "\u5DE5\u4F5C\u533A\u8BFB\u5199",
-    desc: "\u5F53\u524D\u5DE5\u4F5C\u533A\u5185\u6587\u4EF6\u8BFB\u5199\u4F18\u5148\u4F7F\u7528\u4EFB\u52A1\u6388\u6743\uFF0C\u8DE8\u76EE\u5F55\u6216\u5916\u90E8\u547D\u4EE4\u4ECD\u9700\u5BA1\u6279\u3002"
+    desc: "\u5F53\u524D\u5DE5\u4F5C\u533A\u5185\u6587\u4EF6\u8BFB\u5199\u4F18\u5148\u4F7F\u7528\u4EFB\u52A1\u6388\u6743\uFF0C\u8DE8\u76EE\u5F55\u6216\u5916\u90E8\u64CD\u4F5C\u4ECD\u9700\u5BA1\u6279\u3002"
   },
   {
     id: "danger-full-access",
-    label: "Full access",
+    label: "\u5B8C\u5168\u8BBF\u95EE",
     zhLabel: "\u5B8C\u5168\u8BBF\u95EE",
     desc: "\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5141\u8BB8\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF1B\u4EC5\u5EFA\u8BAE\u5728\u5B8C\u5168\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u542F\u7528\u3002"
   }
@@ -24646,58 +24646,58 @@ var PERMISSION_PRESETS = [
 var AGENT_PRESETS = [
   {
     id: "code",
-    name: "PTC \u6A21\u5F0F",
+    name: "\u4EE3\u7801\u7F16\u6392",
     badge: "\u5185\u7F6E \xB7 \u9ED8\u8BA4",
-    desc: "\u901A\u8FC7 Luau CodeMode \u5448\u73B0\u53D7\u63A7\u80FD\u529B\uFF0C\u8BA9\u6A21\u578B\u7528\u4EE3\u7801\u5355\u5143\u7EC4\u5408\u591A\u6B65\u64CD\u4F5C\u5E76\u7EDF\u4E00\u7ECF\u8FC7\u6743\u9650\u4E0E\u9884\u7B97\u8FB9\u754C\u3002"
+    desc: "\u901A\u8FC7\u53D7\u63A7\u4EE3\u7801\u5355\u5143\u5448\u73B0\u5BBF\u4E3B\u80FD\u529B\uFF0C\u8BA9\u6A21\u578B\u7EC4\u5408\u591A\u6B65\u64CD\u4F5C\u5E76\u7EDF\u4E00\u7ECF\u8FC7\u6743\u9650\u4E0E\u9884\u7B97\u8FB9\u754C\u3002"
   },
   {
     id: "standard",
     name: "\u6807\u51C6\u6A21\u5F0F",
     badge: "\u5185\u7F6E",
-    desc: "\u5B8C\u6574\u7F16\u7801 Agent\uFF0C\u652F\u6301\u6587\u4EF6\u8BFB\u5199\u3001\u68C0\u7D22\u3001Git \u68C0\u89C6\u3001\u9884\u8BBE\u6784\u5EFA\u6D4B\u8BD5\u4E0E\u5BBF\u4E3B\u8FDE\u63A5\u5DE5\u5177\u3002"
+    desc: "\u5B8C\u6574\u7F16\u7801\u667A\u80FD\u4F53\uFF0C\u652F\u6301\u6587\u4EF6\u8BFB\u5199\u3001\u4EE3\u7801\u68C0\u7D22\u3001\u7248\u672C\u7BA1\u7406\u3001\u9884\u8BBE\u6784\u5EFA\u6D4B\u8BD5\u4E0E\u5BBF\u4E3B\u8FDE\u63A5\u5DE5\u5177\u3002"
   },
   {
     id: "strongflow",
-    name: "StrongFlow \u5F3A\u6D41\u7A0B",
-    badge: "\u63D2\u4EF6",
-    desc: "\u4E3A\u590D\u6742\u4EFB\u52A1\u63D0\u4F9B\u9636\u6BB5\u95E8\u7981\u4E0E\u68C0\u67E5\u70B9\uFF1B\u63D2\u4EF6\u5378\u8F7D\u540E\u5DF2\u7ED1\u5B9A\u4F1A\u8BDD\u4FDD\u6301\u51BB\u7ED3\uFF0C\u652F\u6301\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929\u3002"
+    name: "\u5F3A\u6D41\u7A0B\u7F16\u6392",
+    badge: "\u6269\u5C55",
+    desc: "\u4E3A\u590D\u6742\u4EFB\u52A1\u63D0\u4F9B\u9636\u6BB5\u95E8\u7981\u4E0E\u68C0\u67E5\u70B9\uFF1B\u6269\u5C55\u5378\u8F7D\u540E\u5DF2\u7ED1\u5B9A\u4F1A\u8BDD\u4FDD\u6301\u51BB\u7ED3\uFF0C\u652F\u6301\u786E\u8BA4\u540E\u8F6C\u4E3A\u666E\u901A\u804A\u5929\u5206\u652F\u3002"
   }
 ];
 var BUILTIN_CAPABILITY_GROUPS = [
   {
-    title: "\u6587\u4EF6\u4E0E\u76EE\u5F55\uFF08fs.*\uFF09",
+    title: "\u6587\u4EF6\u4E0E\u76EE\u5F55",
     badge: "\u5DF2\u6302\u8F7D",
     items: [
-      ["fs.read", "\u8BFB\u53D6\u6587\u4EF6\u5185\u5BB9\u4E0E SHA-256"],
-      ["fs.write", "\u539F\u5B50\u521B\u5EFA\u6216\u51ED\u6458\u8981\u8986\u76D6\u6587\u4EF6"],
-      ["fs.patch", "\u6309\u7CBE\u786E\u4E0A\u4E0B\u6587\u66FF\u6362\u6587\u4EF6\u7247\u6BB5"],
-      ["fs.list / fs.stat", "\u5217\u51FA\u76EE\u5F55\u9879\u4E0E\u8BFB\u53D6\u6587\u4EF6\u5143\u6570\u636E"]
+      ["\u8BFB\u53D6\u6587\u4EF6", "\u8BFB\u53D6\u6587\u4EF6\u5185\u5BB9\u4E0E\u6821\u9A8C\u6458\u8981"],
+      ["\u5199\u5165\u6587\u4EF6", "\u521B\u5EFA\u65B0\u6587\u4EF6\u6216\u6309\u6458\u8981\u5B89\u5168\u66F4\u65B0\u6587\u4EF6"],
+      ["\u4FEE\u6539\u6587\u4EF6", "\u6309\u7CBE\u786E\u4E0A\u4E0B\u6587\u66FF\u6362\u6587\u4EF6\u7247\u6BB5"],
+      ["\u76EE\u5F55\u4E0E\u5C5E\u6027", "\u5217\u51FA\u76EE\u5F55\u9879\u4E0E\u8BFB\u53D6\u6587\u4EF6\u57FA\u7840\u4FE1\u606F"]
     ]
   },
   {
-    title: "\u4EE3\u7801\u68C0\u7D22\u4E0E\u8BED\u6CD5\uFF08fs / code\uFF09",
+    title: "\u4EE3\u7801\u68C0\u7D22\u4E0E\u8BED\u6CD5\u5927\u7EB2",
     badge: "\u5DF2\u6302\u8F7D",
     items: [
-      ["fs.grep / fs.glob", "\u5DE5\u4F5C\u533A\u6709\u754C\u6587\u672C\u68C0\u7D22\u4E0E\u8DEF\u5F84\u5339\u914D"],
-      ["code.outline", "\u63D0\u53D6\u6E90\u7801\u7ED3\u6784\u4E0E\u7B26\u53F7\u5927\u7EB2"],
-      ["code.diff_hunks", "\u8BA1\u7B97\u6587\u4EF6\u6539\u52A8\u5DEE\u5F02\u7247\u6BB5"]
+      ["\u6587\u672C\u4E0E\u8DEF\u5F84\u68C0\u7D22", "\u5728\u5DE5\u4F5C\u533A\u5185\u68C0\u7D22\u6587\u672C\u5185\u5BB9\u4E0E\u6587\u4EF6\u8DEF\u5F84"],
+      ["\u6E90\u7801\u7ED3\u6784\u5927\u7EB2", "\u63D0\u53D6\u6E90\u7801\u6587\u4EF6\u7684\u7ED3\u6784\u4E0E\u7B26\u53F7\u5217\u8868"],
+      ["\u6539\u52A8\u7247\u6BB5\u5BF9\u6BD4", "\u8BA1\u7B97\u6587\u4EF6\u4FEE\u6539\u524D\u540E\u7684\u5DEE\u5F02\u7247\u6BB5"]
     ]
   },
   {
-    title: "Git \u7248\u672C\u63A7\u5236\uFF08git.*\uFF09",
+    title: "\u7248\u672C\u7BA1\u7406",
     badge: "\u5DF2\u6302\u8F7D",
     items: [
-      ["git.status", "\u67E5\u770B\u5DE5\u4F5C\u533A\u5F53\u524D\u53D8\u66F4\u72B6\u6001"],
-      ["git.diff", "\u67E5\u770B\u672A\u63D0\u4EA4\u6216\u6307\u5B9A\u8303\u56F4\u7684\u4EE3\u7801\u5DEE\u5F02"],
-      ["git.log / git.show", "\u67E5\u770B\u63D0\u4EA4\u5386\u53F2\u4E0E\u5355\u6B21\u63D0\u4EA4\u8BE6\u60C5"]
+      ["\u5DE5\u4F5C\u533A\u72B6\u6001", "\u67E5\u770B\u5F53\u524D\u672A\u63D0\u4EA4\u7684\u6587\u4EF6\u53D8\u66F4\u72B6\u6001"],
+      ["\u4EE3\u7801\u6539\u52A8\u5BF9\u6BD4", "\u67E5\u770B\u672A\u63D0\u4EA4\u6216\u6307\u5B9A\u8303\u56F4\u7684\u4EE3\u7801\u6539\u52A8"],
+      ["\u63D0\u4EA4\u8BB0\u5F55\u4E0E\u8BE6\u60C5", "\u67E5\u770B\u63D0\u4EA4\u5386\u53F2\u4E0E\u5355\u6B21\u63D0\u4EA4\u5185\u5BB9"]
     ]
   },
   {
-    title: "\u9884\u8BBE\u6784\u5EFA\u4E0E\u6D4B\u8BD5\uFF08build / test\uFF09",
+    title: "\u9884\u8BBE\u6784\u5EFA\u4E0E\u6D4B\u8BD5",
     badge: "\u5DF2\u6302\u8F7D",
     items: [
-      ["build.run", "\u8FD0\u884C\u5BBF\u4E3B\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1"],
-      ["test.run", "\u8FD0\u884C\u5BBF\u4E3B\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1"]
+      ["\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1", "\u8FD0\u884C\u5DF2\u914D\u7F6E\u7684\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1"],
+      ["\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1", "\u8FD0\u884C\u5DF2\u914D\u7F6E\u7684\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1"]
     ]
   }
 ];
@@ -26398,11 +26398,9 @@ function CAYWApp({ env } = {}) {
             ) : null, presentation.calls.map((call, callIndex) => {
               const callKey = `${key}/${callIndex}`;
               const isOpen2 = expandedSet.has(callKey);
-              const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "Wait" : "Execute Code" : clip(call.name, 60);
-              const summary = call.name === "execute_code" ? clip(
-                call.arguments?.code ?? call.arguments?.action ?? "\u8FD0\u884C Luau \u4EE3\u7801\u5355\u5143",
-                80
-              ) : clip(JSON.stringify(call.arguments ?? {}), 80);
+              const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "\u7B49\u5F85\u4EFB\u52A1\u7ED3\u679C" : "\u8FD0\u884C\u4EE3\u7801\u5355\u5143" : CAPABILITY_LABELS[call.name] ?? "\u8C03\u7528\u80FD\u529B";
+              const rawCode = typeof call.arguments?.code === "string" ? call.arguments.code.replace(/\s+/g, " ").trim() : "";
+              const summary = call.name === "execute_code" ? rawCode ? clip(rawCode, 80) : call.arguments?.action === "wait" ? "\u7B49\u5F85\u5F53\u524D\u4EE3\u7801\u5355\u5143\u5B8C\u6210" : "\u6267\u884C\u53D7\u63A7\u4EE3\u7801\u5355\u5143" : clip(JSON.stringify(call.arguments ?? {}), 80);
               return /* @__PURE__ */ import_react.default.createElement("div", { key: callKey, className: "Md3f7G_callRow" }, /* @__PURE__ */ import_react.default.createElement(
                 "div",
                 {
@@ -26609,7 +26607,7 @@ function CAYWApp({ env } = {}) {
             isHero && "wSkVaW_composerHero"
           )
         },
-        isHero ? /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, null, /* @__PURE__ */ import_react.default.createElement(HeroGlow, { className: "wSkVaW_heroGlow" }), /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_root" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_stack" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_headline" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_fishHitbox" }, /* @__PURE__ */ import_react.default.createElement(of, { size: 34, className: "pXSMma_fish" })), /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_headlineText" }, "Code As You Wish"), /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_previewBadge" }, "Core v3")), /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_body" }))), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_heroWorkspaceRow" }, /* @__PURE__ */ import_react.default.createElement(
+        isHero ? /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, null, /* @__PURE__ */ import_react.default.createElement(HeroGlow, { className: "wSkVaW_heroGlow" }), /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_root" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_stack" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_headline" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_fishHitbox" }, /* @__PURE__ */ import_react.default.createElement(of, { size: 34, className: "pXSMma_fish" })), /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_headlineText" }, "\u6240\u60F3\u5373\u6240\u7801\uFF0C\u5168\u7A0B\u53EF\u638C\u63A7"), /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_previewBadge" }, "\u672C\u5730\u7248")), /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_body" }))), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_heroWorkspaceRow" }, /* @__PURE__ */ import_react.default.createElement(
           Vu,
           {
             open: s.heroWsMenuOpen,
@@ -27197,10 +27195,10 @@ function CAYWApp({ env } = {}) {
       },
       /* @__PURE__ */ import_react.default.createElement("nav", { className: "VOzbGW_nav" }, /* @__PURE__ */ import_react.default.createElement("div", { id: "settings-title", className: "VOzbGW_navTitle" }, "\u8BBE\u7F6E"), /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_navList" }, [
         ["general", "\u901A\u7528\u8BBE\u7F6E", A9],
-        ["models", "\u6A21\u578B", I7],
-        ["agent-presets", "Agent \u9884\u8BBE", s7],
+        ["models", "\u6A21\u578B\u670D\u52A1", I7],
+        ["agent-presets", "\u4F1A\u8BDD\u6A21\u5F0F", s7],
         ["permissions", "\u6743\u9650\u4E0E\u5BA1\u8BA1", E7],
-        ["plugins", "\u63D2\u4EF6", E7]
+        ["plugins", "\u6269\u5C55\u80FD\u529B", E7]
       ].map(([tabId, label, IconComp]) => /* @__PURE__ */ import_react.default.createElement(
         "button",
         {
@@ -27261,7 +27259,7 @@ function CAYWApp({ env } = {}) {
         },
         /* @__PURE__ */ import_react.default.createElement("span", null, currentPresetObj.label),
         /* @__PURE__ */ import_react.default.createElement(hs, { className: "oY77xG_chevron" })
-      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_row" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_rowText" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_title" }, "\u53D1\u9001\u5FEB\u6377\u952E"), /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_desc" }, "\u914D\u7F6E\u8F93\u5165\u6846\u6309\u4E0B Enter \u952E\u65F6\u7684\u9ED8\u8BA4\u53D1\u9001\u65B9\u5F0F\u3002")), /* @__PURE__ */ import_react.default.createElement(
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_row" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_rowText" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_title" }, "\u53D1\u9001\u5FEB\u6377\u952E"), /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_desc" }, "\u914D\u7F6E\u8F93\u5165\u6846\u6309\u4E0B\u56DE\u8F66\u952E\u65F6\u7684\u9ED8\u8BA4\u53D1\u9001\u65B9\u5F0F\u3002")), /* @__PURE__ */ import_react.default.createElement(
         "button",
         {
           type: "button",
@@ -27271,9 +27269,9 @@ function CAYWApp({ env } = {}) {
             forceRender();
           }
         },
-        /* @__PURE__ */ import_react.default.createElement("span", null, s.enterBehavior === "enter" ? "Enter \u76F4\u63A5\u53D1\u9001" : "Cmd/Ctrl + Enter \u53D1\u9001"),
+        /* @__PURE__ */ import_react.default.createElement("span", null, s.enterBehavior === "enter" ? "\u6309\u56DE\u8F66\u76F4\u63A5\u53D1\u9001" : "\u6309\u7EC4\u5408\u952E\u53D1\u9001"),
         /* @__PURE__ */ import_react.default.createElement(hs, { className: "T1PP_q_chevron" })
-      ))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u672C\u673A Runtime \u5DF2\u63A5\u5165\u771F\u5B9E\u6A21\u578B\u63D0\u4F9B\u65B9\uFF0CAPI \u5BC6\u94A5\u7531\u672C\u673A\u8FDB\u7A0B\u5B89\u5168\u6301\u6709\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "DeepSeek / Magpie OpenAI \u517C\u5BB9\u63D0\u4F9B\u65B9"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "API \u5BC6\u94A5\u5DF2\u914D\u7F6E"))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalog" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalogHeading" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogTitle" }, "\u6A21\u578B\u76EE\u5F55"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogMeta" }, "http://127.0.0.1:3425/v1")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelList" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelEntry" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelRow" }, /* @__PURE__ */ import_react.default.createElement("strong", null, "auto/deepseek-v4.1-flash"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "\u5F53\u524D\u4F7F\u7528")))))))) : null, s.settingsTab === "agent-presets" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "Agent \u9884\u8BBE"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u9884\u8BBE\u51B3\u5B9A\u4F1A\u8BDD\u7684 Agent \u6240\u4F7F\u7528\u7684\u5DE5\u5177\u7F16\u6392\u65B9\u5F0F\u4E0E\u80FD\u529B\u96C6\u5408\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, AGENT_PRESETS.map((ap) => /* @__PURE__ */ import_react.default.createElement("div", { key: ap.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, ap.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, ap.badge)), /* @__PURE__ */ import_react.default.createElement(
+      ))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u672C\u673A\u8FD0\u884C\u65F6\u5DF2\u63A5\u5165\u6A21\u578B\u670D\u52A1\uFF0C\u63A5\u53E3\u5BC6\u94A5\u7531\u672C\u673A\u8FDB\u7A0B\u5B89\u5168\u6301\u6709\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "\u672C\u673A\u6A21\u578B\u670D\u52A1"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "\u5BC6\u94A5\u5DF2\u914D\u7F6E"))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalog" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalogHeading" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogTitle" }, "\u6A21\u578B\u76EE\u5F55"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogMeta" }, "http://127.0.0.1:3425/v1")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelList" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelEntry" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelRow" }, /* @__PURE__ */ import_react.default.createElement("strong", null, "auto/deepseek-v4.1-flash"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "\u5F53\u524D\u4F7F\u7528")))))))) : null, s.settingsTab === "agent-presets" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u4F1A\u8BDD\u6A21\u5F0F"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u9009\u62E9\u65B0\u5EFA\u4F1A\u8BDD\u9ED8\u8BA4\u4F7F\u7528\u7684\u5DE5\u5177\u7F16\u6392\u4E0E\u6267\u884C\u65B9\u5F0F\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, AGENT_PRESETS.map((ap) => /* @__PURE__ */ import_react.default.createElement("div", { key: ap.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, ap.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, ap.badge)), /* @__PURE__ */ import_react.default.createElement(
         ps,
         {
           variant: s.selectedAgentPreset === ap.id ? "primary" : "outline",
@@ -27317,7 +27315,7 @@ function CAYWApp({ env } = {}) {
           },
           "\u64A4\u9500\u6388\u6743"
         )));
-      }))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "pbvGtq_heading" }, "\u63D2\u4EF6\u5217\u8868"), /* @__PURE__ */ import_react.default.createElement("p", { className: "pbvGtq_intro" }, "\u67E5\u770B\u5F53\u524D Runtime \u5DF2\u6302\u8F7D\u7684\u53D7\u63A7\u80FD\u529B\u7EC4\u4E0E\u4F1A\u8BDD\u63D2\u4EF6\u72B6\u6001\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cards" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react.default.createElement("div", { key: group.title, className: "qSYn7G_card" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardContent" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTitle" }, group.title), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTrailing" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_status" }, /* @__PURE__ */ import_react.default.createElement(
+      }))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "pbvGtq_heading" }, "\u6269\u5C55\u80FD\u529B\u5217\u8868"), /* @__PURE__ */ import_react.default.createElement("p", { className: "pbvGtq_intro" }, "\u67E5\u770B\u5F53\u524D\u5DF2\u6302\u8F7D\u7684\u53D7\u63A7\u80FD\u529B\u7EC4\u4E0E\u4F1A\u8BDD\u6269\u5C55\u72B6\u6001\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cards" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react.default.createElement("div", { key: group.title, className: "qSYn7G_card" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardContent" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTitle" }, group.title), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTrailing" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_status" }, /* @__PURE__ */ import_react.default.createElement(
         Pu,
         {
           state: "done",
@@ -27576,11 +27574,11 @@ function CAYWApp({ env } = {}) {
       nf,
       {
         open: s.fullAccessConfirmOpen,
-        title: "\u786E\u8BA4\u542F\u7528 Full access\uFF1F",
-        description: "\u542F\u7528 Full access \u540E\uFF0Cagent \u5C06\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5E76\u4E14\u53EF\u4EE5\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF0C\u5305\u62EC\u654F\u611F\u64CD\u4F5C\u3001\u6587\u4EF6\u4FEE\u6539\u6216\u5916\u90E8\u547D\u4EE4\u3002\u4EC5\u5EFA\u8BAE\u5728\u4F60\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u4F7F\u7528\u3002",
+        title: "\u786E\u8BA4\u5F00\u542F\u201C\u5B8C\u5168\u8BBF\u95EE\u201D\u6A21\u5F0F\uFF1F",
+        description: "\u5F00\u542F\u201C\u5B8C\u5168\u8BBF\u95EE\u201D\u540E\uFF0C\u667A\u80FD\u4F53\u5C06\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5E76\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF0C\u5305\u62EC\u6587\u4EF6\u4FEE\u6539\u4E0E\u6784\u5EFA\u4EFB\u52A1\u3002\u4EC5\u5EFA\u8BAE\u5728\u4F60\u5B8C\u5168\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u4F7F\u7528\u3002",
         acknowledgeLabel: "\u6211\u5DF2\u4E86\u89E3\u98CE\u9669\uFF0C\u5E76\u613F\u610F\u7EE7\u7EED",
         cancelLabel: "\u53D6\u6D88",
-        confirmLabel: "\u542F\u7528 Full access",
+        confirmLabel: "\u5F00\u542F\u5B8C\u5168\u8BBF\u95EE",
         acknowledged: s.fullAccessAcknowledged,
         onAcknowledgedChange: (checked) => {
           s.fullAccessAcknowledged = checked;

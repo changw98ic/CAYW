@@ -171,19 +171,19 @@ function HeroGlow({ className }) {
 const PERMISSION_PRESETS = [
   {
     id: 'standard',
-    label: 'Read Only',
-    zhLabel: '只读与按需审批',
+    label: '按需审批',
+    zhLabel: '按需审批',
     desc: '只读操作直接执行；文件写入、修改、构建与外部工具需每次或按任务明确授权。',
   },
   {
     id: 'workspace-write',
-    label: 'Workspace Write',
+    label: '工作区读写',
     zhLabel: '工作区读写',
-    desc: '当前工作区内文件读写优先使用任务授权，跨目录或外部命令仍需审批。',
+    desc: '当前工作区内文件读写优先使用任务授权，跨目录或外部操作仍需审批。',
   },
   {
     id: 'danger-full-access',
-    label: 'Full access',
+    label: '完全访问',
     zhLabel: '完全访问',
     desc: '减少确认步骤，允许直接执行更多操作；仅建议在完全信任当前任务时启用。',
   },
@@ -192,59 +192,59 @@ const PERMISSION_PRESETS = [
 const AGENT_PRESETS = [
   {
     id: 'code',
-    name: 'PTC 模式',
+    name: '代码编排',
     badge: '内置 · 默认',
-    desc: '通过 Luau CodeMode 呈现受控能力，让模型用代码单元组合多步操作并统一经过权限与预算边界。',
+    desc: '通过受控代码单元呈现宿主能力，让模型组合多步操作并统一经过权限与预算边界。',
   },
   {
     id: 'standard',
     name: '标准模式',
     badge: '内置',
-    desc: '完整编码 Agent，支持文件读写、检索、Git 检视、预设构建测试与宿主连接工具。',
+    desc: '完整编码智能体，支持文件读写、代码检索、版本管理、预设构建测试与宿主连接工具。',
   },
   {
     id: 'strongflow',
-    name: 'StrongFlow 强流程',
-    badge: '插件',
-    desc: '为复杂任务提供阶段门禁与检查点；插件卸载后已绑定会话保持冻结，支持确认后 Fork 为普通聊天。',
+    name: '强流程编排',
+    badge: '扩展',
+    desc: '为复杂任务提供阶段门禁与检查点；扩展卸载后已绑定会话保持冻结，支持确认后转为普通聊天分支。',
   },
 ];
 
 const BUILTIN_CAPABILITY_GROUPS = [
   {
-    title: '文件与目录（fs.*）',
+    title: '文件与目录',
     badge: '已挂载',
     items: [
-      ['fs.read', '读取文件内容与 SHA-256'],
-      ['fs.write', '原子创建或凭摘要覆盖文件'],
-      ['fs.patch', '按精确上下文替换文件片段'],
-      ['fs.list / fs.stat', '列出目录项与读取文件元数据'],
+      ['读取文件', '读取文件内容与校验摘要'],
+      ['写入文件', '创建新文件或按摘要安全更新文件'],
+      ['修改文件', '按精确上下文替换文件片段'],
+      ['目录与属性', '列出目录项与读取文件基础信息'],
     ],
   },
   {
-    title: '代码检索与语法（fs / code）',
+    title: '代码检索与语法大纲',
     badge: '已挂载',
     items: [
-      ['fs.grep / fs.glob', '工作区有界文本检索与路径匹配'],
-      ['code.outline', '提取源码结构与符号大纲'],
-      ['code.diff_hunks', '计算文件改动差异片段'],
+      ['文本与路径检索', '在工作区内检索文本内容与文件路径'],
+      ['源码结构大纲', '提取源码文件的结构与符号列表'],
+      ['改动片段对比', '计算文件修改前后的差异片段'],
     ],
   },
   {
-    title: 'Git 版本控制（git.*）',
+    title: '版本管理',
     badge: '已挂载',
     items: [
-      ['git.status', '查看工作区当前变更状态'],
-      ['git.diff', '查看未提交或指定范围的代码差异'],
-      ['git.log / git.show', '查看提交历史与单次提交详情'],
+      ['工作区状态', '查看当前未提交的文件变更状态'],
+      ['代码改动对比', '查看未提交或指定范围的代码改动'],
+      ['提交记录与详情', '查看提交历史与单次提交内容'],
     ],
   },
   {
-    title: '预设构建与测试（build / test）',
+    title: '预设构建与测试',
     badge: '已挂载',
     items: [
-      ['build.run', '运行宿主显式配置的预设构建任务'],
-      ['test.run', '运行宿主显式配置的预设测试任务'],
+      ['预设构建任务', '运行已配置的预设构建任务'],
+      ['预设测试任务', '运行已配置的预设测试任务'],
     ],
   },
 ];
@@ -2312,17 +2312,20 @@ export function CAYWApp({ env } = {}) {
                               const title =
                                 call.name === 'execute_code'
                                   ? call.arguments?.action === 'wait'
-                                    ? 'Wait'
-                                    : 'Execute Code'
-                                  : clip(call.name, 60);
+                                    ? '等待任务结果'
+                                    : '运行代码单元'
+                                  : CAPABILITY_LABELS[call.name] ?? '调用能力';
+                              const rawCode =
+                                typeof call.arguments?.code === 'string'
+                                  ? call.arguments.code.replace(/\s+/g, ' ').trim()
+                                  : '';
                               const summary =
                                 call.name === 'execute_code'
-                                  ? clip(
-                                      call.arguments?.code ??
-                                        call.arguments?.action ??
-                                        '运行 Luau 代码单元',
-                                      80,
-                                    )
+                                  ? rawCode
+                                    ? clip(rawCode, 80)
+                                    : call.arguments?.action === 'wait'
+                                      ? '等待当前代码单元完成'
+                                      : '执行受控代码单元'
                                   : clip(JSON.stringify(call.arguments ?? {}), 80);
                               return (
                                 <div key={callKey} className="Md3f7G_callRow">
@@ -2622,9 +2625,9 @@ export function CAYWApp({ env } = {}) {
                             <FishLogo size={34} className="pXSMma_fish" />
                           </span>
                           <span className="pXSMma_headlineText">
-                            Code As You Wish
+                            所想即所码，全程可掌控
                           </span>
-                          <span className="pXSMma_previewBadge">Core v3</span>
+                          <span className="pXSMma_previewBadge">本地版</span>
                         </div>
                         <div className="pXSMma_body" />
                       </div>
@@ -3313,10 +3316,10 @@ export function CAYWApp({ env } = {}) {
               <div className="VOzbGW_navList">
                 {[
                   ['general', '通用设置', IconSettingsOutline16],
-                  ['models', '模型', IconDataOutline16],
-                  ['agent-presets', 'Agent 预设', IconAgentPresetOutline16],
+                  ['models', '模型服务', IconDataOutline16],
+                  ['agent-presets', '会话模式', IconAgentPresetOutline16],
                   ['permissions', '权限与审计', IconPersonalizationOutline16],
-                  ['plugins', '插件', IconPersonalizationOutline16],
+                  ['plugins', '扩展能力', IconPersonalizationOutline16],
                 ].map(([tabId, label, IconComp]) => (
                   <button
                     key={tabId}
@@ -3409,7 +3412,7 @@ export function CAYWApp({ env } = {}) {
                       <div className="T1PP_q_rowText">
                         <div className="T1PP_q_title">发送快捷键</div>
                         <div className="T1PP_q_desc">
-                          配置输入框按下 Enter 键时的默认发送方式。
+                          配置输入框按下回车键时的默认发送方式。
                         </div>
                       </div>
                       <button
@@ -3423,8 +3426,8 @@ export function CAYWApp({ env } = {}) {
                       >
                         <span>
                           {s.enterBehavior === 'enter'
-                            ? 'Enter 直接发送'
-                            : 'Cmd/Ctrl + Enter 发送'}
+                            ? '按回车直接发送'
+                            : '按组合键发送'}
                         </span>
                         <IconChevronDownOutline14 className="T1PP_q_chevron" />
                       </button>
@@ -3436,7 +3439,7 @@ export function CAYWApp({ env } = {}) {
                   <div className="zGbnIq_section">
                     <h3 className="zGbnIq_title">模型</h3>
                     <p className="zGbnIq_intro">
-                      本机 Runtime 已接入真实模型提供方，API 密钥由本机进程安全持有。
+                      本机运行时已接入模型服务，接口密钥由本机进程安全持有。
                     </p>
                     <div className="zGbnIq_rows">
                       <div className="zGbnIq_rowCard">
@@ -3444,9 +3447,9 @@ export function CAYWApp({ env } = {}) {
                           <div className="zGbnIq_rowIdentity">
                             <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
                             <span className="zGbnIq_rowName">
-                              DeepSeek / Magpie OpenAI 兼容提供方
+                              本机模型服务
                             </span>
-                            <span className="zGbnIq_rowTag">API 密钥已配置</span>
+                            <span className="zGbnIq_rowTag">密钥已配置</span>
                           </div>
                         </div>
                         <div className="zGbnIq_modelCatalog">
@@ -3474,9 +3477,9 @@ export function CAYWApp({ env } = {}) {
 
                 {s.settingsTab === 'agent-presets' ? (
                   <div className="zGbnIq_section">
-                    <h3 className="zGbnIq_title">Agent 预设</h3>
+                    <h3 className="zGbnIq_title">会话模式</h3>
                     <p className="zGbnIq_intro">
-                      预设决定会话的 Agent 所使用的工具编排方式与能力集合。
+                      选择新建会话默认使用的工具编排与执行方式。
                     </p>
                     <div className="zGbnIq_rows">
                       {AGENT_PRESETS.map(ap => (
@@ -3582,9 +3585,9 @@ export function CAYWApp({ env } = {}) {
 
                 {s.settingsTab === 'plugins' ? (
                   <div className="pbvGtq_section">
-                    <h3 className="pbvGtq_heading">插件列表</h3>
+                    <h3 className="pbvGtq_heading">扩展能力列表</h3>
                     <p className="pbvGtq_intro">
-                      查看当前 Runtime 已挂载的受控能力组与会话插件状态。
+                      查看当前已挂载的受控能力组与会话扩展状态。
                     </p>
                     <div className="qSYn7G_cards">
                       {BUILTIN_CAPABILITY_GROUPS.map(group => (
@@ -3899,11 +3902,11 @@ export function CAYWApp({ env } = {}) {
       {/* Official DSH Risk Confirmation Modal (@deepseek-ai/dsh-client-ui-primitives) */}
       <RiskConfirmation
         open={s.fullAccessConfirmOpen}
-        title="确认启用 Full access？"
-        description="启用 Full access 后，agent 将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。"
+        title="确认开启“完全访问”模式？"
+        description="开启“完全访问”后，智能体将减少确认步骤，并直接执行更多操作，包括文件修改与构建任务。仅建议在你完全信任当前任务时使用。"
         acknowledgeLabel="我已了解风险，并愿意继续"
         cancelLabel="取消"
-        confirmLabel="启用 Full access"
+        confirmLabel="开启完全访问"
         acknowledged={s.fullAccessAcknowledged}
         onAcknowledgedChange={checked => {
           s.fullAccessAcknowledged = checked;
