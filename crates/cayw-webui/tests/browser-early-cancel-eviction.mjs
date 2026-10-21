@@ -29,9 +29,7 @@ async (page) => {
   let proof;
   try {
     session = await control('session/early-cancel');
-    const {token} = await (await page.request.get(new URL('/__test__/login', page.url()).href)).json();
-    await page.locator('#web-token').fill(token);
-    await page.locator('#login-button').click();
+    await page.locator('#reconnect').click();
     await until(() => page.locator('#prompt').isEnabled(), 'session did not load');
     check(await page.locator('#session-list [aria-current="true"]').count() === 1, 'selected session missing');
     check((await page.locator('#session-list [aria-current="true"]').textContent()).includes(session.id.slice(0, 20)), 'runner requires a fresh service with its own session selected');

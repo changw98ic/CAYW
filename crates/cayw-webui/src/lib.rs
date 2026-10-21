@@ -198,7 +198,6 @@ impl fmt::Debug for ProjectEndpoint {
 
 struct Gateway {
     projects: Vec<ProjectEndpoint>,
-    web_token: String,
     authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
@@ -209,21 +208,12 @@ struct Gateway {
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
-/// The web token is explicit, independent from IPC, and never embedded in HTML.
 pub async fn serve(
     listener: TcpListener,
     ipc_client: IpcEndpoint,
-    web_token: impl Into<String>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
-    serve_with_limits(
-        listener,
-        ipc_client,
-        web_token,
-        GatewayLimits::default(),
-        cancel,
-    )
-    .await
+    serve_with_limits(listener, ipc_client, GatewayLimits::default(), cancel).await
 }
 
 /// Serve with explicit resource budgets. Dropping a timed-out IPC request
@@ -233,19 +223,17 @@ pub async fn serve(
 pub async fn serve_with_limits(
     listener: TcpListener,
     ipc_client: IpcEndpoint,
-    web_token: impl Into<String>,
     limits: GatewayLimits,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     let project = ProjectEndpoint::new("default", "默认项目", ipc_client)?;
-    serve_projects_with_limits(listener, vec![project], web_token, limits, cancel).await
+    serve_projects_with_limits(listener, vec![project], limits, cancel).await
 }
 
 /// Serve one or more local runtime projects on an already-bound loopback listener.
 pub async fn serve_projects_with_limits(
     listener: TcpListener,
     projects: Vec<ProjectEndpoint>,
-    web_token: impl Into<String>,
     limits: GatewayLimits,
     cancel: CancellationToken,
 ) -> io::Result<()> {
@@ -273,26 +261,9 @@ pub async fn serve_projects_with_limits(
             ));
         }
     }
-    let web_token = web_token.into();
-    if !valid_token(&web_token) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Web token must contain 32..4096 ASCII bytes without whitespace",
-        ));
-    }
-    if projects
-        .iter()
-        .any(|project| web_token == project.ipc.token)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Web and IPC access tokens must differ",
-        ));
-    }
     limits.validate()?;
     let state = Arc::new(Gateway {
         projects,
-        web_token,
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
@@ -361,21 +332,6 @@ fn same_origin(headers: &HeaderMap, state: &Gateway) -> bool {
     true
 }
 
-fn authorized(headers: &HeaderMap, token: &str) -> bool {
-    let Some(received) =
-        one_header(headers, "authorization").and_then(|s| s.strip_prefix("Bearer "))
-    else {
-        return false;
-    };
-    received.len() == token.len()
-        && received
-            .as_bytes()
-            .iter()
-            .zip(token.as_bytes())
-            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-            == 0
-}
-
 async fn guard(State(state): State<Arc<Gateway>>, request: Request, next: Next) -> Response {
     secure_headers(guarded_request(&state, request, next).await)
 }
@@ -392,19 +348,11 @@ async fn guarded_request(state: &Gateway, request: Request, next: Next) -> Respo
     if request.uri().path() != "/api/rpc" {
         return next.run(request).await;
     }
-    if !authorized(request.headers(), &state.web_token) {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "A valid web Bearer token is required",
-            false,
-        );
-    }
     if request.uri().query().is_some() {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "RPC parameters and credentials must not appear in a URL",
+            "RPC parameters must not appear in a URL",
             false,
         );
     }
@@ -610,7 +558,7 @@ fn side_effecting(method: &str) -> bool {
 }
 
 fn redact(text: &str, state: &Gateway) -> String {
-    let mut out = text.replace(&state.web_token, "[redacted]");
+    let mut out = text.to_owned();
     for project in &state.projects {
         out = out.replace(&project.ipc.token, "[redacted]");
     }
@@ -618,11 +566,10 @@ fn redact(text: &str, state: &Gateway) -> String {
 }
 
 fn contains_token(text: &str, state: &Gateway) -> bool {
-    text.contains(&state.web_token)
-        || state
-            .projects
-            .iter()
-            .any(|project| text.contains(&project.ipc.token))
+    state
+        .projects
+        .iter()
+        .any(|project| text.contains(&project.ipc.token))
 }
 
 fn contains_credential(value: &Value, state: &Gateway) -> bool {

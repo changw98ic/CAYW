@@ -61,10 +61,8 @@ async function page(t, handler) {
     setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout: id => timers.delete(id),
   });
-  vm.runInContext(source.replaceAll('export ', ''), context, { filename: 'app.js' });
-  elements['web-token'].value = '0123456789abcdef0123456789abcdef';
-  await elements['login-form'].dispatch('submit');
-  assert.equal(elements['login-error'].textContent, '', 'fixture must connect to the real fetch endpoint');
+  await vm.runInContext(source.replaceAll('export ', ''), context, { filename: 'app.js' });
+  assert.equal(elements['global-error'].textContent, '', 'fixture must connect to the real fetch endpoint');
   assert.equal(elements.workspace.hidden, false);
   const poll = async () => {
     const entry = [...timers].find(([, timer]) => timer.delay < 15000);
@@ -215,10 +213,8 @@ test('a dropped HTTP write retains an uncertain lock even after disconnect and r
   await app.send();
   assert.equal(app.ui.prompt.disabled,true);
   assert.match(app.ui['prompt-status'].textContent,/确认/);
-  await app.ui.logout.dispatch('click');
-  app.ui['web-token'].value = '0123456789abcdef0123456789abcdef';
-  await app.ui['login-form'].dispatch('submit');
-  assert.equal(app.ui.prompt.disabled,true,'reauthentication is not settlement');
+  await app.ui.reconnect.dispatch('click');
+  assert.equal(app.ui.prompt.disabled,true,'reconnection is not settlement');
   await app.poll();
   assert.equal(app.ui.prompt.disabled,true);
   assert.equal(app.calls.filter(call=>call.method==='session.prompt').length,1);

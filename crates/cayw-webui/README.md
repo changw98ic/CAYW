@@ -4,7 +4,7 @@
 
 ## 职责与边界
 
-- **本地轻网关**：仅绑定 loopback 地址，校验 `Host`、`Origin`、`Sec-Fetch-Site` 与独立的 `Bearer` 网页令牌（`CAYW_WEB_TOKEN`），网页令牌与 IPC 令牌（`CAYW_IPC_TOKEN`）必须不同且互不泄露。
+- **本地轻网关**：仅绑定 loopback 地址，打开网页直接连接本机工作空间，无需手动输入网页令牌；网关严格校验 `Host`、`Origin`、`Sec-Fetch-Site`，并在本机持有 IPC 令牌（`CAYW_IPC_TOKEN`）防止向浏览器泄露。
 - **会话与恢复安全语义**：支持流式对话、工具输出折叠查看、审批决定、取消请求、游标续读，以及未知副作用（`outcome_unknown`）与冻结会话的显式确认 Fork。
 - **多项目管理与插件管理**：支持在同一本机网关下配置和切换多个本地 Runtime 项目（各项目会话、事件游标与未决写入锁彼此隔离），并提供插件管理页面查看会话绑定的 plugin、版本代际、公开能力与冻结转换入口。暂不包含多设备管理。
 
@@ -15,7 +15,6 @@
 ```sh
 CAYW_IPC_ADDR=127.0.0.1:4100 \
 CAYW_IPC_TOKEN=fedcba9876543210fedcba9876543210 \
-CAYW_WEB_TOKEN=0123456789abcdef0123456789abcdef \
 cargo run -p cayw-webui --locked
 ```
 
@@ -24,7 +23,6 @@ cargo run -p cayw-webui --locked
 ```sh
 CAYW_IPC_ADDR=127.0.0.1:4100 \
 CAYW_IPC_TOKEN=fedcba9876543210fedcba9876543210 \
-CAYW_WEB_TOKEN=0123456789abcdef0123456789abcdef \
 cargo run -p cayw-webui --locked -- --project docs=文档项目@127.0.0.1:4101
 ```
 

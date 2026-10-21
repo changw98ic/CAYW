@@ -17,36 +17,12 @@ fn endpoint() -> IpcEndpoint {
 }
 
 #[tokio::test]
-async fn refuses_public_listener_and_invalid_or_shared_web_credentials() {
+async fn refuses_public_listener() {
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let error = serve(
-        listener,
-        endpoint(),
-        "0123456789abcdef0123456789abcdef",
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap_err();
+    let error = serve(listener, endpoint(), CancellationToken::new())
+        .await
+        .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-    for token in [
-        "",
-        "ok",
-        "id",
-        "with space",
-        "秘密",
-        "fedcba9876543210fedcba9876543210",
-    ] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let error = serve(listener, endpoint(), token, CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            !error
-                .to_string()
-                .contains("fedcba9876543210fedcba9876543210")
-        );
-    }
 }
 
 #[tokio::test]
@@ -70,15 +46,9 @@ async fn startup_rejects_budgets_that_could_starve_control_requests() {
         },
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let error = serve_with_limits(
-            listener,
-            endpoint(),
-            "0123456789abcdef0123456789abcdef",
-            limits,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
+        let error = serve_with_limits(listener, endpoint(), limits, CancellationToken::new())
+            .await
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 }
@@ -104,13 +74,12 @@ fn ipc_configuration_requires_an_explicit_loopback_and_debug_redacts_credentials
 }
 
 #[tokio::test]
-async fn multi_project_startup_rejects_empty_duplicate_ids_and_reused_web_token() {
+async fn multi_project_startup_rejects_empty_and_duplicate_ids() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     assert!(
         serve_projects_with_limits(
             listener,
             vec![],
-            "0123456789abcdef0123456789abcdef",
             GatewayLimits::default(),
             CancellationToken::new(),
         )
@@ -125,7 +94,6 @@ async fn multi_project_startup_rejects_empty_duplicate_ids_and_reused_web_token(
                 ProjectEndpoint::new("dup", "一", endpoint()).unwrap(),
                 ProjectEndpoint::new("dup", "二", endpoint()).unwrap(),
             ],
-            "0123456789abcdef0123456789abcdef",
             GatewayLimits::default(),
             CancellationToken::new(),
         )

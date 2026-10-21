@@ -3,13 +3,12 @@ use std::{collections::HashMap, env, net::SocketAddr, process::ExitCode};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--project ID=名称@127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机默认 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供网关使用\n  CAYW_WEB_TOKEN  独立的网页访问令牌，打开网页后手动输入\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_PROJECTS   额外本机项目列表（格式：id=名称@127.0.0.1:PORT，用分号分隔）\n\n只接受 loopback 地址；令牌不支持 URL 或命令行参数。两枚令牌必须独立随机生成，至少包含 128 bit 随机数据（例如 16 个随机字节编码为 32 位十六进制）；统一接受 32..4096 个不含空白或控制字符的 ASCII 字节，长度校验不代替随机生成。Ctrl+C 停止网关。\n";
+const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--project ID=名称@127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机默认 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供本机网关使用\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_PROJECTS   额外本机项目列表（格式：id=名称@127.0.0.1:PORT，用分号分隔）\n\n只接受 loopback 地址；打开本机网页后直接连接会话，无需手动输入网页令牌。Ctrl+C 停止网关。\n";
 
 struct Config {
     ipc_addr: SocketAddr,
     web_addr: SocketAddr,
     ipc_token: String,
-    web_token: String,
     extra_projects: Vec<(String, String, SocketAddr)>,
 }
 
@@ -63,10 +62,6 @@ impl Config {
             Ok(value)
         };
         let ipc_token = token("CAYW_IPC_TOKEN")?;
-        let web_token = token("CAYW_WEB_TOKEN")?;
-        if ipc_token == web_token {
-            return Err("CAYW_WEB_TOKEN 必须与 CAYW_IPC_TOKEN 不同".to_owned());
-        }
         let mut extra_projects = Vec::new();
         for spec in project_specs {
             let (left, addr_str) = spec
@@ -90,7 +85,6 @@ impl Config {
             ipc_addr,
             web_addr,
             ipc_token,
-            web_token,
             extra_projects,
         })
     }
@@ -140,7 +134,6 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         .local_addr()
         .map_err(|_| "无法读取网页监听地址".to_owned())?;
     println!("网页界面：http://{address}/");
-    println!("在网页中输入 CAYW_WEB_TOKEN 的值；令牌不会写入网页地址或浏览器存储。");
     let cancel = CancellationToken::new();
     let signal_cancel = cancel.clone();
     let signal = tokio::spawn(async move {
@@ -151,7 +144,6 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let result = cayw_webui::serve_projects_with_limits(
         listener,
         projects,
-        config.web_token,
         GatewayLimits::default(),
         cancel,
     )
@@ -169,7 +161,6 @@ mod tests {
         [
             ("CAYW_IPC_ADDR", "127.0.0.1:4100"),
             ("CAYW_IPC_TOKEN", "fedcba9876543210fedcba9876543210"),
-            ("CAYW_WEB_TOKEN", "0123456789abcdef0123456789abcdef"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -193,10 +184,8 @@ mod tests {
         for (key, value) in [
             ("CAYW_WEB_ADDR", "0.0.0.0:9999"),
             ("CAYW_IPC_ADDR", "10.0.0.1:10"),
-            ("CAYW_WEB_TOKEN", "secret token"),
-            ("CAYW_WEB_TOKEN", "ok"),
             ("CAYW_IPC_TOKEN", "id"),
-            ("CAYW_WEB_TOKEN", "fedcba9876543210fedcba9876543210"),
+            ("CAYW_IPC_TOKEN", "secret token"),
         ] {
             let mut values = environment();
             values.insert(key.to_owned(), value.to_owned());
@@ -205,7 +194,7 @@ mod tests {
         }
         assert!(
             Config::parse(
-                ["--web-token".to_owned(), "private".to_owned()],
+                ["--ipc-token".to_owned(), "private".to_owned()],
                 environment()
             )
             .is_err()

@@ -32,9 +32,7 @@ async (page) => {
   };
   try {
     const session = await control('session/early-cancel');
-    const {token} = await (await page.request.get(new URL('/__test__/login', page.url()).href)).json();
-    await page.locator('#web-token').fill(token);
-    await page.locator('#login-button').click();
+    await page.locator('#reconnect').click();
     await until(() => page.locator('#prompt').isEnabled(), 'session did not load');
     check((await page.locator('#session-title').innerText()).includes('early-cancel'), 'wrong selected session');
     await page.locator('#prompt').fill('Stop this offline task before its attempt facts reach the browser');

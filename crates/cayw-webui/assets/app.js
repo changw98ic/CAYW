@@ -443,12 +443,10 @@ export function summarizePlugins(sessions = [], capabilities = [], views = new M
   }));
 }
 
-if (typeof document !== 'undefined') boot();
-
-function boot() {
+async function boot() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
-    'login-panel', 'login-form', 'login-error', 'login-button', 'web-token', 'workspace', 'logout', 'connection-status',
+    'workspace', 'reconnect', 'connection-status',
     'nav-conversation', 'nav-projects', 'nav-plugins', 'conversation-view', 'projects-page', 'plugins-page',
     'refresh-projects', 'projects-status', 'project-list', 'refresh-plugins', 'plugins-status', 'plugin-list',
     'create-form', 'session-label', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
@@ -457,7 +455,6 @@ function boot() {
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork', 'refresh-capabilities', 'capability-content',
   ].map(id => [id, $(id)]));
-  let token = '';
   let loginGeneration = 0;
   let selected = null;
   let sessions = [];
@@ -517,14 +514,13 @@ function boot() {
   async function rpc(method, params = {}) {
     const controller = new AbortController();
     controllers.add(controller);
-    const requestToken = token;
     const requestBody = activeProject ? { method, params, project: activeProject } : { method, params };
     let timeout;
     if (method !== 'session.prompt') timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch('/api/rpc', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
         cache: 'no-store',
@@ -534,7 +530,7 @@ function boot() {
       try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '网关返回了无效 JSON；当前请求不会自动重发。', !readMethods.has(method), response.status); }
       if (!response.ok || payload?.error) {
         const detail = payload?.error;
-        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '网页访问令牌无效或已失效，请重新连接。' : detail?.message ?? `请求失败（HTTP ${response.status}）。`, typeof detail?.outcome_unknown === 'boolean' ? detail.outcome_unknown : !readMethods.has(method), response.status);
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.message ?? `请求失败（HTTP ${response.status}）。`, typeof detail?.outcome_unknown === 'boolean' ? detail.outcome_unknown : !readMethods.has(method), response.status);
       }
       if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '网关响应缺少 result；当前请求不会自动重发。', !readMethods.has(method), response.status);
       return payload.result;
@@ -548,19 +544,18 @@ function boot() {
     }
   }
 
-  function disconnect(reason = '') {
+  async function connectLocal() {
     saveProjectState();
-    loginGeneration++;
+    const login = ++loginGeneration;
     selectionGeneration++;
     listGeneration++;
     clearTimeout(timer);
     for (const controller of controllers) controller.abort();
     controllers.clear();
-    token = '';
     selected = null;
     sessions = [];
     // Keep unresolved operation evidence in this page's memory across
-    // reauthentication. Aborting a connection never proves execution stopped.
+    // reconnection. Aborting a connection never proves execution stopped.
     for (const [projectId, state] of projectStates.entries()) {
       const retained = new Map([...state.views].filter(([,view]) => view.writes.length || view.activeAttempt || Object.keys(view.faults).length).map(([id,view]) => [id,{ ...view, writes:view.writes.map(write => ({ ...write, phase:'uncertain' })) }]));
       projectStates.set(projectId, { selected: null, sessions: [], views: retained, promptPending: new Set(), approvalPending: new Set(), cachedCapabilities: [] });
@@ -568,30 +563,32 @@ function boot() {
     views = projectStates.get(currentProjectId())?.views ?? new Map();
     promptPending = new Set();
     approvalPending = new Set();
-    activePage = 'conversation';
-    ui['workspace'].hidden = true;
-    ui['logout'].hidden = true;
-    ui['login-panel'].hidden = false;
-    ui['login-error'].textContent = reason;
-    ui['connection-status'].textContent = '尚未连接';
-    ui['web-token'].value = '';
-    ui['messages'].replaceChildren();
-    ui['event-log'].replaceChildren();
-    ui['approvals'].replaceChildren();
-    ui['live-text'].textContent = '';
-    ui['session-list'].replaceChildren();
-    ui['session-picker'].open = true;
-    ui['prompt'].value = '';
-    if (ui['project-list']) ui['project-list'].replaceChildren();
-    if (ui['plugin-list']) ui['plugin-list'].replaceChildren();
-    renderPageTabs();
     ui['fork-dialog'].close();
-    ui['web-token'].focus();
+    if (ui['reconnect']) ui['reconnect'].disabled = true;
+    ui['connection-status'].textContent = '正在连接本机…';
+    try {
+      const health = await rpc('runtime.health');
+      if (login !== loginGeneration) return;
+      if (health?.status !== 'ok' || health?.protocol_version !== CORE_PROTOCOL_VERSION) {
+        throw new Error('本机运行服务的版本不匹配，请同步更新运行服务和网页界面。');
+      }
+      ui['connection-status'].textContent = '已连接本机';
+      report(null);
+      renderView();
+      await refreshSessions();
+      if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
+      else if (ui['session-label']) ui['session-label'].focus();
+    } catch (error) {
+      if (login !== loginGeneration) return;
+      ui['connection-status'].textContent = '未连接本机';
+      report(error);
+    } finally {
+      if (login === loginGeneration && ui['reconnect']) ui['reconnect'].disabled = false;
+    }
   }
 
   function handleError(error) {
-    if (error.auth) disconnect(error.message);
-    else report(error);
+    report(error);
   }
 
   function rememberView(view) {
@@ -657,7 +654,7 @@ function boot() {
   }
 
   async function selectSession(id) {
-    if (!token || id === selected) return;
+    if (id === selected) return;
     const generation = ++selectionGeneration;
     const login = loginGeneration;
     clearTimeout(timer);
@@ -721,8 +718,14 @@ function boot() {
   function switchPage(page) {
     activePage = page;
     renderPageTabs();
-    if (page === 'projects') renderProjectsPage();
-    if (page === 'plugins') renderPluginsPage();
+    if (page === 'projects') {
+      renderProjectsPage();
+      if (projects.length === 1 && projects[0]?.address === '本机 IPC') void refreshProjects();
+    }
+    if (page === 'plugins') {
+      renderPluginsPage();
+      if (!cachedCapabilities.length) void refreshPlugins();
+    }
   }
 
   function renderProjectsPage() {
@@ -774,7 +777,6 @@ function boot() {
   }
 
   async function selectProject(projectId) {
-    if (!token) return;
     saveProjectState();
     const isDefault = projects[0]?.id === projectId || (!projects.length && projectId === 'default');
     activeProject = isDefault ? null : projectId;
@@ -793,7 +795,7 @@ function boot() {
   }
 
   async function refreshProjects() {
-    if (!token || !ui['refresh-projects']) return;
+    if (!ui['refresh-projects']) return;
     const login = loginGeneration;
     ui['refresh-projects'].disabled = true;
     ui['projects-status'].textContent = '正在读取本机项目…';
@@ -907,7 +909,7 @@ function boot() {
   }
 
   async function refreshPlugins() {
-    if (!token || !ui['refresh-plugins']) return;
+    if (!ui['refresh-plugins']) return;
     const login = loginGeneration;
     ui['refresh-plugins'].disabled = true;
     ui['plugins-status'].textContent = '正在同步会话绑定与宿主能力…';
@@ -1092,13 +1094,13 @@ function boot() {
 
   function schedulePoll(delay, generation = selectionGeneration) {
     clearTimeout(timer);
-    if (token && selected && generation === selectionGeneration) timer = setTimeout(() => poll(generation), delay);
+    if (selected && generation === selectionGeneration) timer = setTimeout(() => poll(generation), delay);
   }
 
   async function poll(generation) {
     const id = selected;
     const login = loginGeneration;
-    if (!id || !token || generation !== selectionGeneration) return;
+    if (!id || generation !== selectionGeneration) return;
     let delay = 1000;
     try {
       let view = views.get(id);
@@ -1139,7 +1141,6 @@ function boot() {
       if (records.length === 100) delay = 0;
     } catch (error) {
       if (login !== loginGeneration || generation !== selectionGeneration) return;
-      if (error.auth) { disconnect(error.message); return; }
       rememberError(id, error);
       pollFailures++;
       delay = Math.min(1000 * 2 ** Math.min(pollFailures, 4), 15000);
@@ -1208,38 +1209,7 @@ function boot() {
     }
   }
 
-  ui['login-form'].addEventListener('submit', async event => {
-    event.preventDefault();
-    if (ui['login-button'].disabled) return;
-    token = ui['web-token'].value;
-    ui['web-token'].value = '';
-    ui['login-button'].disabled = true;
-    ui['login-button'].textContent = '连接中…';
-    ui['login-error'].textContent = '';
-    const login = ++loginGeneration;
-    try {
-      const health = await rpc('runtime.health');
-      if (login !== loginGeneration) return;
-      if (health?.status !== 'ok' || health?.protocol_version !== CORE_PROTOCOL_VERSION) throw new Error('本机运行服务的版本不匹配，请同步更新运行服务和网页界面。');
-      ui['login-panel'].hidden = true;
-      ui['workspace'].hidden = false;
-      ui['logout'].hidden = false;
-      ui['connection-status'].textContent = '已连接本机';
-      report(null);
-      renderView();
-      await refreshSessions();
-      if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
-      else ui['session-label'].focus();
-    } catch (error) {
-      if (login !== loginGeneration) return;
-      disconnect(errorText(error));
-    } finally {
-      ui['login-button'].disabled = false;
-      ui['login-button'].textContent = '连接';
-    }
-  });
-
-  ui['logout'].addEventListener('click', () => disconnect());
+  if (ui['reconnect']) ui['reconnect'].addEventListener('click', () => connectLocal());
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
   ui['create-form'].addEventListener('submit', async event => {
     event.preventDefault();
@@ -1360,8 +1330,7 @@ function boot() {
         const source = views.get(id);
         if (source) rememberView({ ...source, writes:source.writes.map(write => write.method === 'session.fork' ? { ...write,phase:'uncertain' } : write) });
         renderView();
-        if (error.auth) disconnect(error.message);
-        else ui['fork-error'].textContent = errorText(error);
+        ui['fork-error'].textContent = errorText(error);
       }
     } finally {
       ui['fork-button'].disabled = false;
@@ -1383,7 +1352,6 @@ function boot() {
     } catch (error) {
       if (login === loginGeneration) {
         ui['capability-content'].textContent = errorText(error);
-        if (error.auth) disconnect(error.message);
       }
     } finally { ui['refresh-capabilities'].disabled = false; }
   });
@@ -1395,7 +1363,7 @@ function boot() {
   if (ui['refresh-plugins']) ui['refresh-plugins'].addEventListener('click', refreshPlugins);
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && token && selected) schedulePoll(0);
+    if (!document.hidden && selected) schedulePoll(0);
   });
   document.addEventListener('click', event => {
     if (typeof document.querySelectorAll !== 'function') return;
@@ -1447,6 +1415,9 @@ function boot() {
     const rx = tilt && rect.height > 0 ? `${(((0.5 - (y / rect.height)) * 2.6)).toFixed(2)}deg` : '0deg';
     updateSpotlightRule(`${Math.round(x)}px`, `${Math.round(y)}px`, rx, ry);
   });
-  window.addEventListener('online', () => { if (token && selected) schedulePoll(0); });
-  window.addEventListener('pagehide', () => { token = ''; for (const controller of controllers) controller.abort(); });
+  window.addEventListener('online', () => { if (selected) schedulePoll(0); });
+  window.addEventListener('pagehide', () => { for (const controller of controllers) controller.abort(); });
+  await connectLocal();
 }
+
+if (typeof document !== 'undefined') boot();

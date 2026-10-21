@@ -19,28 +19,10 @@
   <a class="skip" href="#conversation">跳到会话内容</a>
   <header class="topbar">
     <div class="identity"><span class="mark" aria-hidden="true">C</span><div><strong>CAYW</strong><span class="muted">本机会话</span></div></div>
-    <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="logout" class="quiet" hidden>断开</button></div>
+    <div class="connection"><span id="connection-status" role="status">正在连接本机…</span><button id="reconnect" class="quiet" type="button">重连</button></div>
   </header>
 
-  <section id="login-panel" class="login-panel bits-spotlight bits-tilt bits-border" aria-labelledby="login-heading">
-    <div class="heading-with-hint">
-      <div>
-        <p class="eyebrow bits-shiny">从这里开始</p>
-        <h1 id="login-heading" class="bits-gradient-text">连接本机会话</h1>
-      </div>
-      <details class="hint-popover">
-        <summary class="hint-trigger" aria-label="查看令牌说明">?</summary>
-        <div class="hint-bubble">输入启动网页服务时设置的 <code>CAYW_WEB_TOKEN</code>。网页令牌仅保存在当前页面内存中，刷新后需重新输入；<code>CAYW_IPC_TOKEN</code> 仅由本机网关持有。</div>
-      </details>
-    </div>
-    <form id="login-form">
-      <label for="web-token">网页访问令牌 <span class="muted">CAYW_WEB_TOKEN</span></label>
-      <div class="login-row"><input id="web-token" type="password" autocomplete="off" spellcheck="false" required placeholder="输入网页访问令牌"><button id="login-button" type="submit">连接</button></div>
-    </form>
-    <p id="login-error" class="error" role="alert"></p>
-  </section>
-
-  <div id="workspace" class="workspace" hidden>
+  <div id="workspace" class="workspace">
     <aside class="sidebar" aria-labelledby="sessions-heading">
       <nav class="page-nav" aria-label="界面视图">
         <button id="nav-conversation" class="page-tab" type="button" aria-current="true">会话</button>

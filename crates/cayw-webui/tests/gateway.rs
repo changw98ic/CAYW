@@ -22,7 +22,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-const WEB_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 const IPC_TOKEN: &str = "fedcba9876543210fedcba9876543210";
 
 struct RuntimeFixture {
@@ -52,7 +51,7 @@ impl RpcHandler for RuntimeFixture {
         match method {
             "runtime.health" => Ok(json!({"status":"ok", "protocol_version":3})),
             "session.prompt" if params["text"] == "secret_receipt" => Ok(
-                json!({"id":"s1","status":"ok","messages":[{"role":"assistant","content":WEB_TOKEN}]}),
+                json!({"id":"s1","status":"ok","messages":[{"role":"assistant","content":IPC_TOKEN}]}),
             ),
             "session.prompt" => {
                 self.prompt_started.add_permits(1);
@@ -80,11 +79,11 @@ impl RpcHandler for RuntimeFixture {
             )),
             "session.get" if params["session_id"] == "secrets" => Err(RpcError::new(
                 "fixture_error",
-                format!("do not expose {IPC_TOKEN} or {WEB_TOKEN}"),
+                format!("do not expose {IPC_TOKEN}"),
             )),
-            "session.get" if params["session_id"] == "secret_result" => Ok(
-                json!({"tool_output":format!("{IPC_TOKEN} / {WEB_TOKEN}"),"content":[IPC_TOKEN]}),
-            ),
+            "session.get" if params["session_id"] == "secret_result" => {
+                Ok(json!({"tool_output":format!("{IPC_TOKEN}"),"content":[IPC_TOKEN]}))
+            }
             "session.get" if params["session_id"] == "secret_key" => {
                 Ok(json!({IPC_TOKEN: "must not rename keys or disclose the credential"}))
             }
@@ -129,13 +128,7 @@ impl Fixture {
         let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let web_task = tokio::spawn(serve_with_limits(
-            listener,
-            ipc,
-            WEB_TOKEN,
-            limits,
-            stop.clone(),
-        ));
+        let web_task = tokio::spawn(serve_with_limits(listener, ipc, limits, stop.clone()));
         Self {
             addr,
             http: HttpClient::builder()
@@ -151,7 +144,6 @@ impl Fixture {
     fn rpc(&self, method: &str, params: Value) -> reqwest::RequestBuilder {
         self.http
             .post(format!("http://{}/api/rpc", self.addr))
-            .bearer_auth(WEB_TOKEN)
             .json(&json!({"method":method,"params":params}))
     }
     async fn close(self) {
@@ -211,23 +203,14 @@ async fn static_assets_load_before_login_and_never_contain_credentials() {
         );
         let text = response.text().await.unwrap();
         assert!(!text.contains(IPC_TOKEN));
-        assert!(!text.contains(WEB_TOKEN));
     }
     fixture.close().await;
 }
 
 #[tokio::test]
-async fn bearer_host_origin_and_fetch_site_are_checked_before_forwarding() {
+async fn host_origin_and_fetch_site_are_checked_before_forwarding() {
     let fixture = Fixture::start(GatewayLimits::default()).await;
-    let endpoint = format!("http://{}/api/rpc", fixture.addr);
-    let payload = json!({"method":"runtime.health","params":{}});
     for request in [
-        fixture.http.post(&endpoint).json(&payload),
-        fixture
-            .http
-            .post(&endpoint)
-            .bearer_auth("wrong")
-            .json(&payload),
         fixture
             .rpc("runtime.health", json!({}))
             .header("host", "attacker.example:80"),
@@ -244,9 +227,6 @@ async fn bearer_host_origin_and_fetch_site_are_checked_before_forwarding() {
             .rpc("runtime.health", json!({}))
             .header("origin", format!("http://{}", fixture.addr))
             .header("origin", format!("http://{}", fixture.addr)),
-        fixture
-            .rpc("runtime.health", json!({}))
-            .header("authorization", "Bearer second-token"),
         fixture
             .rpc("runtime.health", json!({}))
             .header("host", "127.0.0.1:1"),
@@ -306,13 +286,7 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
     }
     let endpoint = format!("http://{}/api/rpc", fixture.addr);
     envelope(
-        fixture
-            .http
-            .get(&endpoint)
-            .bearer_auth(WEB_TOKEN)
-            .send()
-            .await
-            .unwrap(),
+        fixture.http.get(&endpoint).send().await.unwrap(),
         StatusCode::METHOD_NOT_ALLOWED,
     )
     .await;
@@ -320,7 +294,6 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
         fixture
             .http
             .post(format!("{endpoint}?token=secret"))
-            .bearer_auth(WEB_TOKEN)
             .json(&json!({"method":"runtime.health","params":{}}))
             .send()
             .await
@@ -332,7 +305,6 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
         fixture
             .http
             .post(&endpoint)
-            .bearer_auth(WEB_TOKEN)
             .header("content-type", "application/json")
             .body("{")
             .send()
@@ -366,7 +338,6 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
         fixture
             .http
             .request(reqwest::Method::OPTIONS, &endpoint)
-            .bearer_auth(WEB_TOKEN)
             .send()
             .await
             .unwrap(),
@@ -432,7 +403,6 @@ async fn upstream_error_messages_cannot_disclose_gateway_credentials() {
     .await;
     let text = value.to_string();
     assert!(!text.contains(IPC_TOKEN));
-    assert!(!text.contains(WEB_TOKEN));
     assert!(text.contains("[redacted]"));
     for id in ["secret_result", "secret_key"] {
         let result = envelope(
@@ -446,7 +416,6 @@ async fn upstream_error_messages_cannot_disclose_gateway_credentials() {
         .await;
         let text = result.to_string();
         assert!(!text.contains(IPC_TOKEN));
-        assert!(!text.contains(WEB_TOKEN));
         assert_eq!(result["error"]["code"], "credential_in_result");
         assert_eq!(result["error"]["outcome_unknown"], false);
     }
@@ -470,7 +439,6 @@ async fn withheld_write_result_keeps_its_effect_unknown_instead_of_fabricating_s
     .await;
     assert_eq!(value["error"]["code"], "credential_in_result");
     assert_eq!(value["error"]["outcome_unknown"], true);
-    assert!(!value.to_string().contains(WEB_TOKEN));
     assert!(!value.to_string().contains(IPC_TOKEN));
     fixture.close().await;
 }
@@ -593,7 +561,7 @@ async fn disconnected_browser_cancels_only_its_own_dispatched_prompt() {
     let mut browser = TcpStream::connect(fixture.addr).await.unwrap();
     let body =
         json!({"method":"session.prompt","params":{"session_id":"s1","text":"执行"}}).to_string();
-    browser.write_all(format!("POST /api/rpc HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {WEB_TOKEN}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", fixture.addr, body.len()).as_bytes()).await.unwrap();
+    browser.write_all(format!("POST /api/rpc HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", fixture.addr, body.len()).as_bytes()).await.unwrap();
     tokio::time::timeout(
         Duration::from_secs(5),
         fixture.runtime.prompt_started.acquire(),
@@ -762,7 +730,7 @@ async fn slow_request_bodies_cannot_hold_all_admission_slots() {
     };
     let fixture = Fixture::start(limits).await;
     let mut slow = TcpStream::connect(fixture.addr).await.unwrap();
-    slow.write_all(format!("POST /api/rpc HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {WEB_TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{", fixture.addr).as_bytes()).await.unwrap();
+    slow.write_all(format!("POST /api/rpc HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{", fixture.addr).as_bytes()).await.unwrap();
     let mut response = String::new();
     tokio::time::timeout(Duration::from_secs(5), slow.read_to_string(&mut response))
         .await
@@ -798,12 +766,10 @@ async fn projects_list_and_project_routing_isolate_configured_endpoints() {
     assert_eq!(list["result"][0]["id"], "default");
     assert_eq!(list["result"][0]["default"], true);
     assert!(!list.to_string().contains(IPC_TOKEN));
-    assert!(!list.to_string().contains(WEB_TOKEN));
 
     let bad_project = fixture
         .http
         .post(format!("http://{}/api/rpc", fixture.addr))
-        .bearer_auth(WEB_TOKEN)
         .json(&json!({"method": "runtime.health", "params": {}, "project": "missing-project"}))
         .send()
         .await
@@ -858,7 +824,6 @@ async fn multi_project_gateway_routes_to_selected_endpoint_and_redacts_all_proje
     let web_task = tokio::spawn(serve_projects_with_limits(
         listener,
         projects,
-        WEB_TOKEN,
         GatewayLimits::default(),
         stop.clone(),
     ));
@@ -870,7 +835,6 @@ async fn multi_project_gateway_routes_to_selected_endpoint_and_redacts_all_proje
 
     let list = envelope(
         http.post(format!("http://{addr}/api/rpc"))
-            .bearer_auth(WEB_TOKEN)
             .json(&json!({"method": "projects.list", "params": {}}))
             .send()
             .await
@@ -884,7 +848,6 @@ async fn multi_project_gateway_routes_to_selected_endpoint_and_redacts_all_proje
 
     let routed = envelope(
         http.post(format!("http://{addr}/api/rpc"))
-            .bearer_auth(WEB_TOKEN)
             .json(&json!({"method": "session.create", "params": {"label": "第二项目会话"}, "project": "docs"}))
             .send()
             .await
