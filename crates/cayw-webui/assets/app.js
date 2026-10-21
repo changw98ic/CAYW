@@ -372,6 +372,13 @@ export function summarizeProjects(projects = [], projectSessions = {}, projectVi
   });
 }
 
+const hostCapabilityNamespaces = new Set([
+  'fs', 'search', 'code', 'data', 'git', 'build', 'test',
+  'exec_command', 'write_stdin', 'mcp', 'skills',
+  'archive', 'batch', 'codec', 'csv', 'diff', 'hash', 'text',
+  'json', 'query', 'toml', 'xml', 'yaml', 'workspace', 'process', 'request', 'task',
+]);
+
 export function summarizePlugins(sessions = [], capabilities = [], views = new Map()) {
   const viewMap = views instanceof Map ? views : new Map(Object.entries(views ?? {}));
   const byName = new Map();
@@ -415,7 +422,7 @@ export function summarizePlugins(sessions = [], capabilities = [], views = new M
   for (const cap of array(capabilities)) {
     if (!object(cap) || typeof cap.name !== 'string') continue;
     const prefix = cap.name.includes('.') ? cap.name.split('.')[0] : '';
-    if (!prefix || ['fs', 'search', 'code', 'data', 'git', 'build', 'test', 'exec_command', 'write_stdin', 'mcp', 'skills'].includes(prefix)) continue;
+    if (!prefix || hostCapabilityNamespaces.has(prefix)) continue;
     const entry = byName.get(prefix) ?? {
       name: clip(prefix, 120),
       version: '宿主当前目录',
@@ -604,7 +611,8 @@ function boot() {
       const button = el('button', 'session-item');
       button.type = 'button';
       button.setAttribute('aria-current', String(session.id === selected));
-      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${clip(session.id, 20)}`));
+      const shortId = String(session.id ?? '').slice(0, 8);
+      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${shortId}`));
       button.addEventListener('click', () => selectSession(session.id));
       fragment.append(button);
     }
@@ -726,14 +734,24 @@ function boot() {
     for (const item of summaries) {
       const card = el('article', 'management-card');
       const isCurrent = item.id === currentProjectId();
-      card.append(
-        el('div', 'card-header', ''),
-        el('p', 'small muted', `地址：${item.address}`),
-        el('p', 'small', `状态：${item.statusLabel} · 已缓存 ${item.sessionCount} 个会话`),
-      );
-      card.children[0].append(
+      if (isCurrent) card.classList.add('is-active');
+      const header = el('div', 'card-header');
+      header.append(
         el('strong', '', item.label),
         el('span', 'state-label', isCurrent ? '当前项目' : item.id),
+      );
+      const pills = el('div', 'stat-pills');
+      pills.append(
+        el('span', 'stat-pill', `${item.sessionCount} 个会话`),
+        el('span', 'stat-pill', item.statusLabel),
+        el('span', 'stat-pill mono', item.address),
+      );
+      if (item.frozenCount) pills.append(el('span', 'stat-pill warn', `${item.frozenCount} 已冻结`));
+      if (item.unresolvedCount) pills.append(el('span', 'stat-pill danger', `${item.unresolvedCount} 待核对`));
+      card.append(
+        header,
+        pills,
+        el('p', 'small muted', `地址：${item.address} · 状态：${item.statusLabel}`),
       );
       const actions = el('div', 'approval-actions');
       const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看该项目会话' : '切换到此项目');
@@ -803,17 +821,28 @@ function boot() {
     }
     for (const plugin of items) {
       const card = el('article', 'management-card');
+      if (plugin.frozen) card.classList.add('is-frozen');
       const header = el('div', 'card-header');
       header.append(el('strong', '', plugin.name), el('span', 'state-label', plugin.statusLabel));
+      const pills = el('div', 'stat-pills');
+      pills.append(
+        el('span', 'stat-pill', `版本 ${plugin.version}`),
+        el('span', 'stat-pill mono', plugin.registryId),
+      );
+      if (plugin.generation !== null) pills.append(el('span', 'stat-pill', `代际 #${plugin.generation}`));
+      pills.append(el('span', 'stat-pill', `${plugin.boundSessions.length} 个绑定会话`));
       card.append(
         header,
+        pills,
         el('p', 'small muted', `版本：${plugin.version} · 实例：${plugin.registryId}${plugin.generation !== null ? ` · 代际 #${plugin.generation}` : ''}`),
       );
       if (plugin.reasons.length) {
         card.append(el('p', 'effect-warning', `冻结原因：${plugin.reasons.join('；')}`));
       }
       if (plugin.capabilities.length) {
-        card.append(el('p', 'small', `提供能力：${plugin.capabilities.join('、')}`));
+        const capRow = el('div', 'stat-pills');
+        for (const cap of plugin.capabilities) capRow.append(el('span', 'stat-pill mono', cap));
+        card.append(el('p', 'small', `提供能力：${plugin.capabilities.join('、')}`), capRow);
       }
       for (const bound of plugin.boundSessions) {
         const row = el('div', 'bound-session-row');
@@ -835,7 +864,7 @@ function boot() {
           forkBtn.addEventListener('click', async () => {
             switchPage('conversation');
             await selectSession(bound.id);
-            if (canFork(activeView())) ui['open-fork'].dispatch('click');
+            openForkDialog();
           });
           actions.append(forkBtn);
         }
@@ -1244,13 +1273,15 @@ function boot() {
     }
   });
 
-  ui['open-fork'].addEventListener('click', () => {
+  function openForkDialog() {
     if (!canFork(activeView())) return;
     ui['fork-label'].value = `${activeView()?.snapshot?.label ?? '会话'} · 普通聊天`.slice(0, 160);
     ui['fork-confirm'].checked = false;
     ui['fork-error'].textContent = '';
     ui['fork-dialog'].showModal();
-  });
+  }
+
+  ui['open-fork'].addEventListener('click', openForkDialog);
   ui['close-fork'].addEventListener('click', () => ui['fork-dialog'].close());
   ui['fork-form'].addEventListener('submit', async event => {
     event.preventDefault();
