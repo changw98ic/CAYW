@@ -234,7 +234,8 @@ async fn plugin_crash_mid_call_is_reported_and_host_keeps_working() {
 
     // The host process and other sessions are unaffected.
     ordinary_chat_still_works(&rt, &script).await;
-    // The dead instance can be unloaded and a fresh one loaded and used.
+    // The dead instance can be unloaded and a fresh process loaded and bound
+    // (binding checks that the new process is alive).
     rt.unload_plugin("fusion").unwrap();
     rt.load_external(external(&[]), context(), CancellationToken::new())
         .await
@@ -242,13 +243,20 @@ async fn plugin_crash_mid_call_is_reported_and_host_keeps_working() {
     *script.lock().unwrap() = luau(ANSWERS);
     let fresh = rt.create(None).unwrap().id;
     rt.bind_plugin(&fresh, "fusion").unwrap();
+    // The crashed call's effects are unknown, so the host keeps refusing new
+    // plugin effects in this workspace until the original owner is
+    // reconciled. Reloading the plugin must not bypass that guard, and the
+    // new call must never be reported as completed.
     let view = rt
         .prompt(&fresh, "collect again", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(view.state, SessionState::Idle, "{view:?}");
-    assert!(matches!(
-        settled(&rt, &fresh).as_slice(),
-        [CapabilityOutcome::Completed { .. }]
-    ));
+    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    let outcomes = settled(&rt, &fresh);
+    assert!(
+        matches!(outcomes.as_slice(), [CapabilityOutcome::OutcomeUnknown { error }] if error.contains("original owner recovery")),
+        "{outcomes:?}"
+    );
+    // Ordinary chat in yet another session is still unaffected.
+    ordinary_chat_still_works(&rt, &script).await;
 }

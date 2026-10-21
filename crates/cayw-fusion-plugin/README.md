@@ -53,6 +53,6 @@ cargo clippy -p cayw-fusion-plugin --all-targets --all-features --locked -- -D w
 ```
 
 - `tests/protocol.rs`：通过 `PluginRegistry::load_external` 启动真实子进程，比对进程报告与进程内 `collect_fusion` 完全一致；超时、panic、无效调用、报告超限后进程仍可继续调用；直接驱动 stdin/stdout 验证错误响应；关闭输入取消进行中的收集；错误协议版本被拒绝。
-- `tests/runtime_host.rs`：`cayw-runtime`（`plugins` feature）加载并绑定本进程，经 CodeMode 调用 `fusion.collect` 并核对报告；能力名不与宿主目录冲突、同名重复加载被拒；卸载后已绑定 Session 冻结、普通 Chat 照常完成；调用中途进程崩溃记为 `outcome_unknown` 且 Session 冻结，宿主与其他 Session 不受影响，可卸载并重新加载新实例。
+- `tests/runtime_host.rs`：`cayw-runtime`（`plugins` feature）加载并绑定本进程，经 CodeMode 调用 `fusion.collect` 并核对报告；能力名不与宿主目录冲突、同名重复加载被拒；卸载后已绑定 Session 冻结、普通 Chat 照常完成；调用中途进程崩溃记为 `outcome_unknown` 且 Session 冻结，宿主与其他普通 Session 不受影响；死实例可卸载并重新加载、绑定新进程，但原未知结果核对前，宿主的 owner-recovery 守卫继续拒绝同一工作区内新的 plugin 调用，重载不能绕过该守卫。
 
 所有测试只用离线 provider，不访问网络、不需要凭据。`runtime_host.rs` 经 Luau 执行能力，属于仓库现有的 macOS 范围；Linux 上 Runtime 的能力执行路径本身存在已知 EBADF 失败（与本包无关，见 [#19](https://github.com/changw98ic/CAYW/issues/19)），未在 Linux 验证。
