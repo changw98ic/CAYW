@@ -469,6 +469,7 @@ function boot() {
   let projects = [{ id: 'default', label: '默认项目', address: '本机 IPC', default: true }];
   let projectStates = new Map();
   let cachedCapabilities = [];
+  let openPluginHints = new Set();
   let selectionGeneration = 0;
   let listGeneration = 0;
   let timer;
@@ -741,17 +742,22 @@ function boot() {
         el('span', 'state-label', isCurrent ? '当前项目' : item.id),
       );
       const pills = el('div', 'stat-pills');
+      const sessionPill = el('span', 'stat-pill', `${item.sessionCount} 个会话`);
+      sessionPill.setAttribute('data-tip', `该项目当前共有 ${item.sessionCount} 个会话`);
+      const statusPill = el('span', 'stat-pill', item.statusLabel);
+      statusPill.setAttribute('data-tip', `项目运行状态：${item.statusLabel}`);
+      const addrPill = el('span', 'stat-pill mono', item.address);
+      addrPill.setAttribute('data-tip', `本机 IPC 端点：${item.address}`);
       pills.append(
-        el('span', 'stat-pill', `${item.sessionCount} 个会话`),
-        el('span', 'stat-pill', item.statusLabel),
-        el('span', 'stat-pill mono', item.address),
+        sessionPill,
+        statusPill,
+        addrPill,
       );
       if (item.frozenCount) pills.append(el('span', 'stat-pill warn', `${item.frozenCount} 已冻结`));
       if (item.unresolvedCount) pills.append(el('span', 'stat-pill danger', `${item.unresolvedCount} 待核对`));
       card.append(
         header,
         pills,
-        el('p', 'small muted', `地址：${item.address} · 状态：${item.statusLabel}`),
       );
       const actions = el('div', 'approval-actions');
       const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看该项目会话' : '切换到此项目');
@@ -813,10 +819,12 @@ function boot() {
     const fragment = document.createDocumentFragment();
     if (!items.length) {
       const empty = el('div', 'empty');
-      empty.append(
-        el('h2', '', '当前项目暂无已绑定或公开的插件'),
-        el('p', '', '当会话绑定 StrongFlow 或其他 plugin，或宿主公开插件能力后，可在此查看版本、状态与关联会话。'),
-      );
+      const row = el('div', 'empty-heading');
+      const hint = el('span', 'hint-trigger', '?');
+      hint.tabIndex = 0;
+      hint.setAttribute('data-tip', '当会话绑定 StrongFlow 或其他 plugin，或宿主公开插件能力后，可在此查看版本、状态与关联会话。');
+      row.append(el('h2', '', '当前项目暂无插件记录'), hint);
+      empty.append(row);
       fragment.append(empty);
     }
     for (const plugin of items) {
@@ -825,24 +833,43 @@ function boot() {
       const header = el('div', 'card-header');
       header.append(el('strong', '', plugin.name), el('span', 'state-label', plugin.statusLabel));
       const pills = el('div', 'stat-pills');
+      const versionPill = el('span', 'stat-pill', `版本 ${plugin.version}`);
+      versionPill.setAttribute('data-tip', `插件版本：${plugin.version}`);
+      const shortReg = plugin.registryId.length > 14 ? `${plugin.registryId.slice(0, 8)}…` : plugin.registryId;
+      const regPill = el('span', 'stat-pill mono', shortReg);
+      regPill.setAttribute('data-tip', `实例标识：${plugin.registryId}`);
       pills.append(
-        el('span', 'stat-pill', `版本 ${plugin.version}`),
-        el('span', 'stat-pill mono', plugin.registryId),
+        versionPill,
+        regPill,
       );
       if (plugin.generation !== null) pills.append(el('span', 'stat-pill', `代际 #${plugin.generation}`));
       pills.append(el('span', 'stat-pill', `${plugin.boundSessions.length} 个绑定会话`));
+      if (plugin.reasons.length) {
+        const reasonDetails = el('details', 'hint-popover');
+        reasonDetails.open = openPluginHints.has(plugin.name);
+        reasonDetails.append(
+          el('summary', 'hint-chip warn', '冻结原因 ?'),
+          el('div', 'hint-bubble', plugin.reasons.join('；')),
+        );
+        reasonDetails.addEventListener('toggle', () => {
+          if (!reasonDetails.isConnected) return;
+          if (reasonDetails.open) openPluginHints.add(plugin.name);
+          else openPluginHints.delete(plugin.name);
+        });
+        pills.append(reasonDetails);
+      }
       card.append(
         header,
         pills,
-        el('p', 'small muted', `版本：${plugin.version} · 实例：${plugin.registryId}${plugin.generation !== null ? ` · 代际 #${plugin.generation}` : ''}`),
       );
-      if (plugin.reasons.length) {
-        card.append(el('p', 'effect-warning', `冻结原因：${plugin.reasons.join('；')}`));
-      }
       if (plugin.capabilities.length) {
         const capRow = el('div', 'stat-pills');
-        for (const cap of plugin.capabilities) capRow.append(el('span', 'stat-pill mono', cap));
-        card.append(el('p', 'small', `提供能力：${plugin.capabilities.join('、')}`), capRow);
+        for (const cap of plugin.capabilities) {
+          const capPill = el('span', 'stat-pill mono', cap);
+          capPill.setAttribute('data-tip', `插件公开能力：${cap}`);
+          capRow.append(capPill);
+        }
+        card.append(capRow);
       }
       for (const bound of plugin.boundSessions) {
         const row = el('div', 'bound-session-row');
@@ -908,7 +935,12 @@ function boot() {
     const messages = array(view?.snapshot?.messages).filter(message => message.role !== 'system' && messageText(message).trim());
     if (!messages.length) {
       const empty = el('div', 'empty');
-      empty.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '继续一段对话'), el('p', '', view?.snapshot ? '输入任务，Runtime 会在这里保留对话和工具记录。' : '从左侧选择已有会话，或创建新会话。'));
+      const row = el('div', 'empty-heading');
+      const hint = el('span', 'hint-trigger', '?');
+      hint.tabIndex = 0;
+      hint.setAttribute('data-tip', view?.snapshot ? '输入任务后，Runtime 会在此保留对话和工具记录。' : '从左侧选择已有会话，或创建新会话。');
+      row.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '继续一段对话'), hint);
+      empty.append(row);
       fragment.append(empty);
     }
     const expanded = new Set(view?.expandedRecords ?? []);
@@ -985,7 +1017,22 @@ function boot() {
     ui['send-button'].disabled = ui['prompt'].disabled || !ui['prompt'].value.trim();
     ui['send-button'].textContent = pending ? '等待完成…' : '发送';
     ui['cancel-button'].disabled = !snapshot || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
-    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !unresolved(snapshot) && !view?.writes.some(write => write.phase === 'uncertain') ? '请确认上方的操作请求，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
+    const statusText = !snapshot
+      ? ''
+      : view?.writes.some(write => write.phase === 'uncertain')
+        ? '连接结果待确认'
+        : unresolved(snapshot) || view?.faults.reconciliation
+          ? '待宿主核对副作用'
+          : frozen(snapshot, view)
+            ? '会话已冻结'
+            : array(snapshot?.pending_approvals).length
+              ? '等待上方授权确认'
+              : busy
+                ? '正在处理…'
+                : decisionBusy
+                  ? '正在记录审批…'
+                  : '';
+    ui['prompt-status'].textContent = statusText;
   }
 
   function renderApprovals(snapshot) {
@@ -999,7 +1046,12 @@ function boot() {
       let scope;
       try { scope = JSON.parse(input.scope); } catch { scope = null; }
       const operation = ({ 'fs.read': '读取文件', 'fs.write': '写入文件', 'fs.patch': '修改文件', 'fs.list': '列出文件', 'fs.stat': '查看文件信息', 'search.query': '检索内容', 'git.status': '查看 Git 状态', 'git.diff': '查看代码改动', 'git.log': '查看提交记录', 'git.show': '查看指定提交', 'build.run': '运行预设构建', 'test.run': '运行预设测试', 'mcp.call': '调用宿主连接的工具', 'mcp.discover': '查看宿主连接的工具', 'mcp.describe': '读取工具说明', 'skills.list': '查看可用技能', 'skills.read': '读取指定技能' })[capability] ?? `使用能力：${clip(capability || '宿主未说明', 100)}`;
-      card.append(el('h3', '', '请求你的授权'), el('p', '', `操作：${operation}`));
+      const head = el('div', 'card-header');
+      const scopeHint = el('span', 'hint-badge', '精确参数范围 ?');
+      scopeHint.tabIndex = 0;
+      scopeHint.setAttribute('data-tip', '仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。');
+      head.append(el('h3', '', '请求你的授权'), scopeHint);
+      card.append(head, el('p', '', `操作：${operation}`));
       const scopeLine = (label, value, limit = 400) => card.append(el('p', 'small', `${label}：${clip(value, limit)}`));
       if (object(scope)) {
         if (scope.path !== undefined) scopeLine('文件', scope.path);
@@ -1010,12 +1062,11 @@ function boot() {
         if (scope.tool !== undefined) scopeLine('工具', scope.tool);
         if (scope.name !== undefined) scopeLine('名称', scope.name);
         if (scope.commit !== undefined) scopeLine('提交', scope.commit);
-        if (scope.overwrite === true) scopeLine('文件操作', '覆盖现有文件，并核对原内容摘要。');
+        if (scope.overwrite === true) scopeLine('文件操作', '覆盖现有文件');
         if (typeof scope.content === 'string') scopeLine('写入内容', scope.content, 600);
         if (typeof scope.old === 'string') scopeLine('替换原文', scope.old, 400);
         if (typeof scope.new === 'string') scopeLine('替换为', scope.new, 400);
       }
-      scopeLine('授权范围', '仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。');
       const details = el('details');
       details.append(el('summary', '', '查看完整授权参数'), el('pre', '', recordText(approval)));
       card.append(details);
@@ -1345,6 +1396,20 @@ function boot() {
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && token && selected) schedulePoll(0);
+  });
+  document.addEventListener('click', event => {
+    if (typeof document.querySelectorAll !== 'function') return;
+    for (const pop of document.querySelectorAll('details.hint-popover[open]')) {
+      if (event?.target && typeof pop.contains === 'function' && !pop.contains(event.target)) {
+        pop.open = false;
+        openPluginHints.clear();
+      }
+    }
+  });
+  document.addEventListener('keydown', event => {
+    if (event?.key !== 'Escape' || typeof document.querySelectorAll !== 'function') return;
+    for (const pop of document.querySelectorAll('details.hint-popover[open]')) pop.open = false;
+    openPluginHints.clear();
   });
   window.addEventListener('online', () => { if (token && selected) schedulePoll(0); });
   window.addEventListener('pagehide', () => { token = ''; for (const controller of controllers) controller.abort(); });
