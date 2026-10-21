@@ -1153,11 +1153,14 @@ impl App {
             }
             Dialog::Create(mut editor) => {
                 if key.code == KeyCode::Enter && self.connected {
-                    let label = editor.text().trim();
-                    if !label.is_empty() && label.len() <= 1024 {
-                        return vec![Command::Create {
-                            label: label.into(),
-                        }];
+                    let trimmed = editor.text().trim();
+                    let label = if trimmed.is_empty() {
+                        format!("Session {}", self.sessions.len() + 1)
+                    } else {
+                        trimmed.to_owned()
+                    };
+                    if label.len() <= 1024 {
+                        return vec![Command::Create { label }];
                     }
                     self.status = "Session label requires 1–1024 bytes.".into();
                 } else {

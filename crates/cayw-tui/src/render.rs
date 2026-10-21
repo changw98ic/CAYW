@@ -417,7 +417,10 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
     let (title, text) = match dialog {
         Dialog::Create(editor) => (
             "Create session",
-            format!("Label:\n{}\n\nEnter create · Esc back", editor.text()),
+            format!(
+                "Label (optional, Enter for default):\n{}\n\nEnter create · Esc back",
+                editor.text()
+            ),
         ),
         Dialog::Fork { label, .. } => (
             "Confirm chat Fork",
