@@ -24145,7 +24145,8 @@ function sessionSummary(snapshot) {
     attempt,
     pending_approvals,
     unresolved_calls,
-    binding
+    binding,
+    messages
   } = snapshot;
   return {
     id,
@@ -24155,7 +24156,8 @@ function sessionSummary(snapshot) {
     attempt,
     pending_approvals,
     unresolved_calls,
-    binding
+    binding,
+    ...Array.isArray(messages) ? { messages: messages.slice(0, 4) } : {}
   };
 }
 function trackAsync(promise) {
@@ -24249,7 +24251,22 @@ function CAYWApp({ env } = {}) {
     if (id && s.sessionTitleOverrides.has(id)) {
       return s.sessionTitleOverrides.get(id);
     }
-    return clip(sessionOrSnap?.label || "\u65B0\u4F1A\u8BDD", 160);
+    const rawLabel = sessionOrSnap?.label || "\u65B0\u4F1A\u8BDD";
+    if (/^(新会话|Session)(\s+\d+)?$/.test(rawLabel)) {
+      const msgs = sessionOrSnap?.messages ?? (id ? s.views.get(id)?.snapshot?.messages : void 0);
+      const firstUser = array(msgs).find(
+        (m) => m?.role === "user" && messageText(m).trim()
+      );
+      if (firstUser) {
+        const derived = clip(
+          messageText(firstUser).trim().replace(/\s+/g, " "),
+          36
+        );
+        if (id) s.sessionTitleOverrides.set(id, derived);
+        return derived;
+      }
+    }
+    return clip(rawLabel, 160);
   };
   const report = (error) => {
     s.globalError = error ? errorText(error) : "";
