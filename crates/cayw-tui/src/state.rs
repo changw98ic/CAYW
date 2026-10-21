@@ -282,6 +282,7 @@ pub struct SessionView {
     stream_replay: StreamReplay,
     refresh_after: Option<u64>,
     snapshot_executions: Vec<Value>,
+    settled_capabilities: Vec<Value>,
 }
 
 impl SessionView {
@@ -350,6 +351,7 @@ impl SessionView {
             stream_replay: StreamReplay::default(),
             refresh_after: None,
             snapshot_executions,
+            settled_capabilities: Vec::new(),
         };
         view.protect_unknown();
         view.rebuild_inspectors();
@@ -397,13 +399,20 @@ impl SessionView {
     }
 
     fn rebuild_inspectors(&mut self) {
-        let (files, diffs) =
-            project_files_and_diffs(&self.messages, &self.approvals, &self.unresolved_calls);
+        let (files, diffs) = project_files_and_diffs(
+            &self.messages,
+            &self.approvals,
+            &self.unresolved_calls,
+            &self.settled_capabilities,
+        );
         self.files = files;
         self.diffs = diffs;
         if self.logs.is_empty() {
             for execution in &self.snapshot_executions {
-                let cell = string(execution, "cell_id");
+                let cell = execution["cell_id"]
+                    .as_str()
+                    .or_else(|| execution["execution_id"].as_str())
+                    .unwrap_or("");
                 let state = string(execution, "state");
                 if !cell.is_empty() {
                     push_log(&mut self.logs, format!("cell {cell} · {state}"));
@@ -427,6 +436,19 @@ impl SessionView {
                 event.get("event").ok_or("Agent wrapper is missing event")?,
                 project,
             );
+        }
+        if kind == "capability_settled"
+            && let Some(call) = event.get("call").filter(|value| value.is_object())
+        {
+            let key = &call["key"];
+            self.settled_capabilities
+                .retain(|existing| existing["key"] != *key || key.is_null());
+            self.settled_capabilities.push(call.clone());
+            if self.settled_capabilities.len() > MAX_INSPECTOR_ITEMS {
+                let drain = self.settled_capabilities.len() - MAX_INSPECTOR_ITEMS;
+                self.settled_capabilities.drain(0..drain);
+            }
+            self.rebuild_inspectors();
         }
         // Already represented by the snapshot: consume its envelope without
         // duplicating history or rewinding approvals, bindings or effect state.
@@ -646,6 +668,7 @@ impl App {
             incoming.scroll = old.scroll;
             incoming.cursor = old.cursor;
             incoming.logs = old.logs.clone();
+            incoming.settled_capabilities = old.settled_capabilities.clone();
             incoming.stream_replay = old.stream_replay.clone();
             incoming.project_stream();
             if matches!(incoming.state.as_str(), "running" | "awaiting_approval") {
@@ -1252,6 +1275,7 @@ fn format_event_log(cursor: u64, attempt: Option<&Value>, event: &Value) -> Stri
     let kind = string(event, "type");
     let attempt_id = attempt
         .and_then(|value| value["attempt_id"].as_str())
+        .map(short_id)
         .unwrap_or("-");
     let detail = match kind {
         "agent" => {
@@ -1278,8 +1302,30 @@ fn format_event_log(cursor: u64, attempt: Option<&Value>, event: &Value) -> Stri
             }
         }
         "approval_requested" | "approval_decided" => {
-            let id = string(&event["approval"], "id");
+            let id = short_id(string(&event["approval"], "id"));
             format!("{kind} · {id}")
+        }
+        "capability_planned" | "capability_started" | "capability_settled" => {
+            let call = &event["call"];
+            let name = string(call, "name");
+            let path = string(&call["arguments"], "path");
+            let outcome = call["outcome"]["type"].as_str().unwrap_or("");
+            let mut parts = vec![kind.to_owned()];
+            if !name.is_empty() {
+                parts.push(name.to_owned());
+            }
+            if !path.is_empty() {
+                parts.push(path.to_owned());
+            }
+            if !outcome.is_empty() {
+                parts.push(format!("({outcome})"));
+            }
+            parts.join(" · ")
+        }
+        "execution_started" | "execution_finished" => {
+            let exec_id = short_id(string(&event["execution"], "execution_id"));
+            let state = string(&event["execution"], "state");
+            format!("{kind} · {exec_id} ({state})")
         }
         "tool_started" => format!("tool_started · {}", string(event, "call_id")),
         "host" => format!("host · {}", string(event, "kind")),
@@ -1292,13 +1338,21 @@ fn format_event_log(cursor: u64, attempt: Option<&Value>, event: &Value) -> Stri
     format!("#{cursor} [{attempt_id}] {detail}")
 }
 
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 fn project_files_and_diffs(
     messages: &[Value],
     approvals: &[Value],
     unresolved_calls: &[Value],
+    settled_capabilities: &[Value],
 ) -> (Vec<FileEntry>, Vec<DiffEntry>) {
     let mut files = Vec::new();
     let mut diffs = Vec::new();
+    for call in settled_capabilities {
+        collect_from_settled_capability(call, &mut files, &mut diffs);
+    }
     for message in messages {
         if message["role"] == "toolResult" {
             collect_from_tool_result(message, &mut files, &mut diffs);
@@ -1369,6 +1423,89 @@ fn project_files_and_diffs(
         diffs.drain(0..diffs.len() - MAX_INSPECTOR_ITEMS);
     }
     (files, diffs)
+}
+
+fn collect_from_settled_capability(
+    call: &Value,
+    files: &mut Vec<FileEntry>,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    let name = string(call, "name");
+    let args = &call["arguments"];
+    let path = args["path"]
+        .as_str()
+        .or_else(|| args["file"].as_str())
+        .unwrap_or("");
+    let outcome_type = call["outcome"]["type"].as_str().unwrap_or("settled");
+    let result = &call["outcome"]["result"];
+    if outcome_type == "outcome_unknown" {
+        files.push(FileEntry {
+            path: clip_text(if path.is_empty() { name } else { path }, 240),
+            action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
+            status: "outcome_unknown".into(),
+            preview: "Outcome unknown — host reconciliation required; unverified output hidden."
+                .into(),
+        });
+        return;
+    }
+    if outcome_type != "completed" {
+        if !path.is_empty() {
+            let reason = call["outcome"]["reason"]
+                .as_str()
+                .or_else(|| call["outcome"]["error"].as_str())
+                .unwrap_or("not executed");
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
+                status: clip_text(outcome_type, 64),
+                preview: clip_text(reason, MAX_PREVIEW_BYTES),
+            });
+        }
+        return;
+    }
+    if !path.is_empty() {
+        if let (Some(old), Some(new)) = (args["old"].as_str(), args["new"].as_str()) {
+            diffs.push(DiffEntry {
+                path: clip_text(path, 240),
+                status: format!("{name} · completed"),
+                diff: format_unified_diff(path, Some(old), new),
+            });
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(name, 64),
+                status: "completed".into(),
+                preview: format_numbered_lines(new),
+            });
+        } else if let Some(content) = args["content"].as_str() {
+            let bytes = result["bytes"].as_u64();
+            let status = match bytes {
+                Some(b) => format!("completed · {b} B"),
+                None => "completed".into(),
+            };
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "write" } else { name }, 64),
+                status: status.clone(),
+                preview: format_numbered_lines(content),
+            });
+            diffs.push(DiffEntry {
+                path: clip_text(path, 240),
+                status: format!(
+                    "{} · {status}",
+                    if name.is_empty() { "write" } else { name }
+                ),
+                diff: format_unified_diff(path, None, content),
+            });
+        } else if let Some(content) = result["content"].as_str() {
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "read" } else { name }, 64),
+                status: "completed".into(),
+                preview: format_numbered_lines(content),
+            });
+        }
+    }
+    collect_value_entry(result, "completed", files, diffs);
 }
 
 fn collect_from_tool_result(
@@ -1515,6 +1652,52 @@ fn format_replacement_diff(old: &str, new: &str) -> String {
         out.push(format!("+{line}"));
     }
     clip_text(&out.join("\n"), MAX_PREVIEW_BYTES)
+}
+
+fn format_unified_diff(path: &str, old: Option<&str>, new: &str) -> String {
+    let clean_path = sanitize(path);
+    let new_clean = sanitize(new);
+    let new_lines: Vec<&str> = new_clean.lines().collect();
+    let mut out = Vec::new();
+    match old {
+        Some(old_text) => {
+            let old_clean = sanitize(old_text);
+            let old_lines: Vec<&str> = old_clean.lines().collect();
+            out.push(format!("--- a/{clean_path}"));
+            out.push(format!("+++ b/{clean_path}"));
+            out.push(format!(
+                "@@ -1,{} +1,{} @@",
+                old_lines.len().max(1),
+                new_lines.len().max(1)
+            ));
+            for line in old_lines {
+                out.push(format!("-{line}"));
+            }
+        }
+        None => {
+            out.push("--- /dev/null".into());
+            out.push(format!("+++ b/{clean_path}"));
+            out.push(format!("@@ -0,0 +1,{} @@", new_lines.len().max(1)));
+        }
+    }
+    for line in new_lines {
+        out.push(format!("+{line}"));
+    }
+    clip_text(&out.join("\n"), MAX_PREVIEW_BYTES)
+}
+
+fn format_numbered_lines(content: &str) -> String {
+    let clean = sanitize(content);
+    let lines: Vec<String> = clean
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| format!("{:>3} │ {line}", idx + 1))
+        .collect();
+    if lines.is_empty() {
+        "  1 │ ".into()
+    } else {
+        clip_text(&lines.join("\n"), MAX_PREVIEW_BYTES)
+    }
 }
 
 fn looks_like_diff(text: &str) -> bool {
