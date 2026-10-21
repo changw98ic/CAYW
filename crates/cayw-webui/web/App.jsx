@@ -2622,9 +2622,9 @@ export function CAYWApp({ env } = {}) {
                             <FishLogo size={34} className="pXSMma_fish" />
                           </span>
                           <span className="pXSMma_headlineText">
-                            探索未至之境
+                            Code As You Wish
                           </span>
-                          <span className="pXSMma_previewBadge">预览版</span>
+                          <span className="pXSMma_previewBadge">Core v3</span>
                         </div>
                         <div className="pXSMma_body" />
                       </div>
