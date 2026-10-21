@@ -567,3 +567,43 @@ test('projects and plugins management pages switch views and preserve uncertain 
   assert.equal(app.ui['conversation-view'].hidden, false);
   assert.ok(app.calls.some(call => call.project === 'secondary' && call.method === 'session.list'));
 });
+
+test('dsh settings modal, permissions page grants revocation, and new project directory browser work end-to-end', async t => {
+  let grants = [{ capability: 'fs.read', scope: '{"path":"README.md"}', task_id: 't1' }];
+  const app = await page(t, async (method, params) => {
+    if (method === 'session.list') return [snapshot()];
+    if (method === 'session.get') return snapshot();
+    if (method === 'session.events') return [];
+    if (method === 'session.grants') return grants;
+    if (method === 'session.audit') return [{ kind: 'grant_added', capability: 'fs.read' }];
+    if (method === 'approval.revoke') {
+      grants = [];
+      return { revoked: true };
+    }
+    if (method === 'projects.browse') {
+      return {
+        path: '/Volumes/ORICO',
+        parent: '/Volumes',
+        entries: [{ name: 'CAYW', path: '/Volumes/ORICO/CAYW', hidden: false }],
+      };
+    }
+  });
+  // Open Permissions page and verify grants + audit loaded
+  await app.ui['nav-permissions'].dispatch('click');
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(app.ui['permissions-page'].hidden, false);
+  assert.match(app.ui['permissions-page'].textContent, /README\.md/);
+  assert.ok(app.calls.some(c => c.method === 'session.grants'));
+  assert.ok(app.calls.some(c => c.method === 'session.audit'));
+
+  // Open Settings modal
+  app.ui['open-settings-button'].click();
+  assert.ok(app.ui['settings-dialog'], 'settings dialog should mount');
+  app.ui['close-settings-button'].click();
+
+  // Open New Project Directory Browser modal
+  app.ui['open-new-project-btn'].click();
+  await new Promise(r => setTimeout(r, 20));
+  assert.ok(app.ui['new-project-dialog'], 'directory browser dialog should mount');
+  assert.ok(app.calls.some(c => c.method === 'projects.browse'));
+});

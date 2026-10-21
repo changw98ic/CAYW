@@ -23640,7 +23640,7 @@ var attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-var readMethods = /* @__PURE__ */ new Set(["runtime.health", "projects.list", "session.list", "session.get", "session.events", "capabilities.list"]);
+var readMethods = /* @__PURE__ */ new Set(["runtime.health", "projects.list", "projects.browse", "session.list", "session.get", "session.events", "session.grants", "session.audit", "capabilities.list"]);
 var rejectedCodes = /* @__PURE__ */ new Set(["forbidden", "invalid_params", "invalid_request", "invalid_json", "method_not_allowed", "queue_full", "queue_timeout", "body_timeout", "invalid_body", "busy", "session_frozen", "needs_reconciliation", "stale_approval", "cancelled"]);
 var RpcError = class extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -24126,6 +24126,26 @@ var ROLE_LABELS = {
   toolResult: "\u5DE5\u5177\u7ED3\u679C",
   custom: "\u5BBF\u4E3B\u8BB0\u5F55"
 };
+var PERMISSION_PRESETS = [
+  {
+    id: "standard",
+    label: "\u6309\u9700\u5BA1\u6279",
+    enLabel: "Standard",
+    desc: "\u53EA\u8BFB\u64CD\u4F5C\u76F4\u63A5\u6267\u884C\uFF1B\u6587\u4EF6\u5199\u5165\u3001\u4FEE\u6539\u3001\u6784\u5EFA\u4E0E\u5916\u90E8\u5DE5\u5177\u9700\u6BCF\u6B21\u6216\u6309\u4EFB\u52A1\u660E\u786E\u6388\u6743\u3002"
+  },
+  {
+    id: "workspace-write",
+    label: "\u5DE5\u4F5C\u533A\u8BFB\u5199",
+    enLabel: "Workspace Write",
+    desc: "\u5F53\u524D\u5DE5\u4F5C\u533A\u5185\u6587\u4EF6\u8BFB\u5199\u4F18\u5148\u4F7F\u7528\u4EFB\u52A1\u6388\u6743\uFF0C\u8DE8\u76EE\u5F55\u6216\u5916\u90E8\u547D\u4EE4\u4ECD\u9700\u5BA1\u6279\u3002"
+  },
+  {
+    id: "danger-full-access",
+    label: "\u5B8C\u5168\u8BBF\u95EE",
+    enLabel: "Full access",
+    desc: "\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5141\u8BB8\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF1B\u4EC5\u5EFA\u8BAE\u5728\u5B8C\u5168\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u542F\u7528\u3002"
+  }
+];
 var STARTER_PROMPTS = [
   {
     title: "\u{1F4C4} \u8BFB\u53D6\u5DE5\u4F5C\u533A\u8BF4\u660E",
@@ -24203,6 +24223,12 @@ var OPTIONAL_PLUGIN_CATALOG = [
     desc: "\u8BA2\u9605\u4F1A\u8BDD\u4E8B\u4EF6\u6D41\u8FDB\u884C\u53EA\u8BFB\u5BA1\u8BA1\u4E0E\u8BCA\u65AD\u7EDF\u8BA1\uFF0C\u4E0D\u5E72\u9884\u666E\u901A\u804A\u5929\u3002"
   }
 ];
+var QUICK_WORKSPACES = [
+  ["/Volumes/ORICO/CAYW", "CAYW \u4E3B\u4ED3\u5E93"],
+  ["/Volumes/ORICO/CAYW-tui", "CAYW TUI \u5206\u652F"],
+  ["/Volumes/ORICO/CAYW-webui", "CAYW WebUI \u5206\u652F"],
+  ["/tmp/cayw-demo-project", "\u65B0\u5EFA\u6F14\u793A\u5DE5\u4F5C\u533A (/tmp)"]
+];
 function renderInlineTokens(text) {
   const parts = String(text ?? "").split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
   return parts.map((part, idx) => {
@@ -24218,10 +24244,12 @@ function renderInlineTokens(text) {
 function FormattedBody({ text }) {
   const raw = String(text ?? "");
   const blocks = raw.split(/(```[\s\S]*?```)/g);
-  return /* @__PURE__ */ import_react2.default.createElement("div", { className: "body" }, blocks.map((block, bIdx) => {
+  return /* @__PURE__ */ import_react2.default.createElement("div", { className: "body dsh-markdown" }, blocks.map((block, bIdx) => {
     if (block.startsWith("```") && block.endsWith("```") && block.length >= 6) {
+      const firstLineMatch = block.slice(3, -3).match(/^([a-zA-Z0-9_-]+)\n/);
+      const lang = firstLineMatch ? firstLineMatch[1] : "code";
       const inner = block.slice(3, -3).replace(/^[a-zA-Z0-9_-]+\n/, "");
-      return /* @__PURE__ */ import_react2.default.createElement("pre", { key: bIdx, className: "code-block" }, /* @__PURE__ */ import_react2.default.createElement("code", null, inner));
+      return /* @__PURE__ */ import_react2.default.createElement("div", { key: bIdx, className: "dsh-codeblock" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-codeblock-banner" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-codeblock-lang" }, lang)), /* @__PURE__ */ import_react2.default.createElement("pre", { className: "code-block" }, /* @__PURE__ */ import_react2.default.createElement("code", null, inner)));
     }
     return /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, { key: bIdx }, renderInlineTokens(block));
   }));
@@ -24310,6 +24338,7 @@ function CAYWApp({ env } = {}) {
       refreshSessionsBusy: false,
       refreshProjectsBusy: false,
       refreshPluginsBusy: false,
+      refreshPermissionsBusy: false,
       addProjectBusy: false,
       forkBusy: false,
       forkOpen: false,
@@ -24324,6 +24353,7 @@ function CAYWApp({ env } = {}) {
       pollStatus: "",
       projectsStatus: "",
       pluginsStatus: "",
+      permissionsStatus: "",
       globalError: "",
       activePage: "conversation",
       activeProject: null,
@@ -24339,7 +24369,33 @@ function CAYWApp({ env } = {}) {
       projectStates: /* @__PURE__ */ new Map(),
       cachedCapabilities: [],
       sessionTitleOverrides: /* @__PURE__ */ new Map(),
-      sessionPickerOpen: true
+      sessionPickerOpen: true,
+      sessionSearchQuery: "",
+      // DSH Settings Modal state
+      settingsOpen: false,
+      settingsTab: "general",
+      themeMode: "dark",
+      enterBehavior: "enter",
+      // DSH Permission Preset & Grants state
+      permissionPreset: "standard",
+      permissionPopoverOpen: false,
+      fullAccessConfirmOpen: false,
+      fullAccessAcknowledged: false,
+      pendingPresetTarget: null,
+      sessionGrants: [],
+      sessionAudit: [],
+      revokeBusyKey: null,
+      // DSH New Project / Directory Picker Modal state
+      newProjectModalOpen: false,
+      browsePath: "/Volumes/ORICO",
+      browseParent: "/Volumes",
+      browseEntries: [],
+      browseSelectedPath: "",
+      browseShowHidden: false,
+      browseLoading: false,
+      browseError: "",
+      newFolderOpen: false,
+      newFolderName: ""
     };
   }
   const s = stateRef.current;
@@ -24349,6 +24405,19 @@ function CAYWApp({ env } = {}) {
   const forkConfirmInputRef = (0, import_react2.useRef)(null);
   const projectWsInputRef = (0, import_react2.useRef)(null);
   const projectLabelInputRef = (0, import_react2.useRef)(null);
+  const modalProjectWsInputRef = (0, import_react2.useRef)(null);
+  const modalProjectLabelInputRef = (0, import_react2.useRef)(null);
+  const applyTheme = (mode, shouldRender = true) => {
+    s.themeMode = mode;
+    if (typeof document !== "undefined" && document.documentElement) {
+      let resolved = mode;
+      if (mode === "system" && typeof window !== "undefined" && typeof window.matchMedia === "function") {
+        resolved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      }
+      document.documentElement.dataset.theme = resolved;
+    }
+    if (shouldRender) forceRender();
+  };
   const currentProjectId = () => s.activeProject ?? s.projects[0]?.id ?? "default";
   const activeView = () => s.selected ? s.views.get(s.selected) : void 0;
   const displayLabel = (sessionOrSnap) => {
@@ -24452,8 +24521,7 @@ function CAYWApp({ env } = {}) {
         throw new RpcError(
           "invalid_response",
           "\u7F51\u5173\u54CD\u5E94\u7F3A\u5C11 result\uFF1B\u5F53\u524D\u8BF7\u6C42\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1\u3002",
-          !readMethods.has(method),
-          response.status
+          !readMethods.has(method)
         );
       }
       return payload.result;
@@ -24589,6 +24657,86 @@ function CAYWApp({ env } = {}) {
         forceRender();
       }
     }
+  };
+  const refreshPermissions = async (sessionId = s.selected) => {
+    if (!sessionId) {
+      s.sessionGrants = [];
+      s.sessionAudit = [];
+      s.permissionsStatus = "\u8BF7\u5148\u9009\u62E9\u6216\u65B0\u5EFA\u4E00\u4E2A\u4F1A\u8BDD\u4EE5\u67E5\u770B\u6388\u6743\u8BB0\u5F55\u3002";
+      forceRender();
+      return;
+    }
+    const login = s.loginGeneration;
+    s.refreshPermissionsBusy = true;
+    s.permissionsStatus = "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u6388\u6743\u4E0E\u5BA1\u8BA1\u8BB0\u5F55\u2026";
+    forceRender();
+    try {
+      const [grantsRes, auditRes] = await Promise.all([
+        rpc("session.grants", { session_id: sessionId }).catch(() => []),
+        rpc("session.audit", { session_id: sessionId }).catch(() => [])
+      ]);
+      if (login !== s.loginGeneration) return;
+      s.sessionGrants = Array.isArray(grantsRes) ? grantsRes : Array.isArray(grantsRes?.grants) ? grantsRes.grants : [];
+      s.sessionAudit = Array.isArray(auditRes) ? auditRes : Array.isArray(auditRes?.records) ? auditRes.records : Array.isArray(auditRes?.audit) ? auditRes.audit : [];
+      s.permissionsStatus = `\u5F53\u524D\u4F1A\u8BDD\u5171\u6709 ${s.sessionGrants.length} \u9879\u751F\u6548\u6388\u6743 \xB7 ${s.sessionAudit.length} \u6761\u5BA1\u8BA1\u8BB0\u5F55`;
+      forceRender();
+    } catch (error) {
+      if (login === s.loginGeneration) {
+        s.permissionsStatus = errorText(error);
+        forceRender();
+      }
+    } finally {
+      s.refreshPermissionsBusy = false;
+      forceRender();
+    }
+  };
+  const revokeGrant = async (grant) => {
+    const sessionId = s.selected;
+    if (!sessionId || s.revokeBusyKey) return;
+    const capability = grant?.capability ?? grant?.input?.capability ?? "";
+    const scope = grant?.scope ?? grant?.input?.scope ?? "{}";
+    const key = `${capability}:${scope}`;
+    const login = s.loginGeneration;
+    s.revokeBusyKey = key;
+    report(null);
+    forceRender();
+    try {
+      await writeRpc(sessionId, "approval.revoke", {
+        session_id: sessionId,
+        capability,
+        scope: typeof scope === "string" ? scope : JSON.stringify(scope),
+        ...grant?.task_id ? { task_id: grant.task_id } : {}
+      });
+      if (login !== s.loginGeneration) return;
+      await refreshPermissions(sessionId);
+      await freshSnapshot(sessionId, login);
+    } catch (error) {
+      if (login === s.loginGeneration) report(error);
+    } finally {
+      s.revokeBusyKey = null;
+      forceRender();
+    }
+  };
+  const selectPermissionPreset = (presetId) => {
+    if (presetId === "danger-full-access" && s.permissionPreset !== "danger-full-access") {
+      s.pendingPresetTarget = presetId;
+      s.fullAccessAcknowledged = false;
+      s.fullAccessConfirmOpen = true;
+      s.permissionPopoverOpen = false;
+      forceRender();
+      return;
+    }
+    s.permissionPreset = presetId;
+    s.permissionPopoverOpen = false;
+    forceRender();
+  };
+  const confirmFullAccess = () => {
+    if (!s.fullAccessAcknowledged) return;
+    s.permissionPreset = s.pendingPresetTarget || "danger-full-access";
+    s.fullAccessConfirmOpen = false;
+    s.fullAccessAcknowledged = false;
+    s.pendingPresetTarget = null;
+    forceRender();
   };
   const selectSession = async (id) => {
     if (id === s.selected) return;
@@ -24816,6 +24964,41 @@ function CAYWApp({ env } = {}) {
       forceRender();
     }
   };
+  const browseDirectory = async (path = s.browsePath, createDir = "") => {
+    s.browseLoading = true;
+    s.browseError = "";
+    forceRender();
+    try {
+      const res = await rpc("projects.browse", {
+        path,
+        ...createDir ? { create_dir: createDir } : {}
+      });
+      if (object(res)) {
+        s.browsePath = res.path || path;
+        s.browseParent = res.parent || "";
+        s.browseEntries = Array.isArray(res.entries) ? res.entries : [];
+        s.projectWorkspaceInput = s.browsePath;
+        if (projectWsInputRef.current) projectWsInputRef.current.value = s.browsePath;
+        if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = s.browsePath;
+      }
+    } catch (error) {
+      s.browseError = errorText(error);
+    } finally {
+      s.browseLoading = false;
+      forceRender();
+    }
+  };
+  const openNewProjectModal = () => {
+    s.newProjectModalOpen = true;
+    s.newFolderOpen = false;
+    s.newFolderName = "";
+    s.browseError = "";
+    if (!s.projectWorkspaceInput) {
+      s.projectWorkspaceInput = s.browsePath || "/Volumes/ORICO";
+    }
+    forceRender();
+    void browseDirectory(s.projectWorkspaceInput || "/Volumes/ORICO");
+  };
   const switchPage = (page) => {
     s.activePage = page;
     forceRender();
@@ -24828,6 +25011,21 @@ function CAYWApp({ env } = {}) {
       if (!s.cachedCapabilities.length) {
         void refreshPlugins();
       }
+    }
+    if (page === "permissions") {
+      void refreshPermissions();
+    }
+  };
+  const openSettings = (tab = "general") => {
+    s.settingsTab = tab;
+    s.settingsOpen = true;
+    forceRender();
+    if (tab === "permissions") {
+      void refreshPermissions();
+    } else if (tab === "plugins" && !s.cachedCapabilities.length) {
+      void refreshPlugins();
+    } else if (tab === "models" && s.projects.length === 1 && s.projects[0]?.address === "\u672C\u673A IPC") {
+      void refreshProjects();
     }
   };
   const selectProject = async (projectId) => {
@@ -24892,26 +25090,40 @@ function CAYWApp({ env } = {}) {
       forceRender();
     }
   };
-  const handleAddProject = async (event) => {
-    event.preventDefault();
-    const ws = (projectWsInputRef.current?.value ?? s.projectWorkspaceInput).trim();
-    const label = (projectLabelInputRef.current?.value ?? s.projectLabelInput).trim();
+  const handleAddProject = async (event, andEnter = false) => {
+    event?.preventDefault?.();
+    const ws = (modalProjectWsInputRef.current?.value || projectWsInputRef.current?.value || s.projectWorkspaceInput).trim();
+    const label = (modalProjectLabelInputRef.current?.value || projectLabelInputRef.current?.value || s.projectLabelInput).trim();
     if (!ws || s.addProjectBusy) return;
     const login = s.loginGeneration;
     s.addProjectBusy = true;
+    s.browseError = "";
     report(null);
     forceRender();
     try {
-      await rpc("projects.create", label ? { workspace: ws, label } : { workspace: ws });
+      const created = await rpc(
+        "projects.create",
+        label ? { workspace: ws, label } : { workspace: ws }
+      );
       if (login !== s.loginGeneration) return;
       s.projectWorkspaceInput = "";
       s.projectLabelInput = "";
       if (projectWsInputRef.current) projectWsInputRef.current.value = "";
       if (projectLabelInputRef.current) projectLabelInputRef.current.value = "";
+      if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = "";
+      if (modalProjectLabelInputRef.current) modalProjectLabelInputRef.current.value = "";
+      s.newProjectModalOpen = false;
       await refreshProjects();
+      if (andEnter && created?.id) {
+        await selectProject(created.id);
+        if (!s.sessions.length) {
+          await createNewSession();
+        }
+      }
     } catch (error) {
       if (login === s.loginGeneration) {
         s.projectsStatus = errorText(error);
+        s.browseError = errorText(error);
         report(error);
         forceRender();
       }
@@ -25008,77 +25220,45 @@ function CAYWApp({ env } = {}) {
     if (forkLabelInputRef.current) forkLabelInputRef.current.value = defaultLabel;
     if (forkConfirmInputRef.current) forkConfirmInputRef.current.checked = false;
     forceRender();
-    if (forkDialogRef.current?.showModal && !forkDialogRef.current.open) {
-      try {
-        forkDialogRef.current.showModal();
-      } catch {
-        forkDialogRef.current.open = true;
-      }
-    }
+    if (forkDialogRef.current?.showModal) forkDialogRef.current.showModal();
   };
   const closeForkDialog = () => {
     s.forkOpen = false;
-    if (forkDialogRef.current?.close) {
-      try {
-        forkDialogRef.current.close();
-      } catch {
-        forkDialogRef.current.open = false;
-      }
-    }
+    if (forkDialogRef.current?.close) forkDialogRef.current.close();
     forceRender();
   };
   const handleForkSubmit = async (event) => {
-    event?.preventDefault?.();
+    event.preventDefault();
+    const view2 = activeView();
+    const label = (forkLabelInputRef.current?.value ?? s.forkLabel).trim();
     const confirmed = Boolean(
       forkConfirmInputRef.current?.checked ?? s.forkConfirm
     );
-    const labelVal = (forkLabelInputRef.current?.value ?? s.forkLabel).trim();
-    s.forkConfirm = confirmed;
-    if (labelVal) s.forkLabel = labelVal;
-    if (!confirmed || s.forkBusy || !s.selected || !canFork(activeView())) return;
-    const id = s.selected;
+    if (!s.selected || !canFork(view2) || !confirmed || !label) {
+      s.forkError = "\u8BF7\u586B\u5199\u65B0\u4F1A\u8BDD\u540D\u79F0\uFF0C\u5E76\u52FE\u9009\u786E\u8BA4\u3002";
+      forceRender();
+      return;
+    }
+    const sourceId = s.selected;
     const login = s.loginGeneration;
     s.forkBusy = true;
     s.forkError = "";
     forceRender();
     try {
-      const snapshot2 = await writeRpc(id, "session.fork", {
-        session_id: id,
-        label: labelVal,
+      const snapshot2 = await writeRpc(sourceId, "session.fork", {
+        session_id: sourceId,
+        label: label.slice(0, 160),
         confirm: true,
         mode: "chat"
       });
-      if (typeof snapshot2?.id !== "string" || !snapshot2.id || snapshot2.id === id) {
-        throw new RpcError(
-          "invalid_response",
-          "\u65B0\u4F1A\u8BDD\u7ED3\u679C\u4E0D\u5B8C\u6574\uFF0C\u8BF7\u7531\u5BBF\u4E3B\u6838\u5BF9\uFF1B\u4E0D\u8981\u518D\u6B21 Fork\u3002",
-          true
-        );
-      }
-      const forkView = applySnapshot(createView(snapshot2.id), snapshot2, true);
-      const source = s.views.get(id);
-      if (source && login === s.loginGeneration) {
-        rememberView({
-          ...source,
-          writes: source.writes.filter((write) => write.method !== "session.fork")
-        });
-      }
       if (login !== s.loginGeneration) return;
-      rememberView(forkView);
+      const forked = applySnapshot(createView(snapshot2.id), snapshot2, true);
+      rememberView(forked);
       updateSessionSummary(snapshot2);
       closeForkDialog();
       await selectSession(snapshot2.id);
     } catch (error) {
       if (login === s.loginGeneration) {
-        const source = s.views.get(id);
-        if (source) {
-          rememberView({
-            ...source,
-            writes: source.writes.map(
-              (write) => write.method === "session.fork" ? { ...write, phase: "uncertain" } : write
-            )
-          });
-        }
         s.forkError = errorText(error);
         forceRender();
       }
@@ -25088,8 +25268,9 @@ function CAYWApp({ env } = {}) {
     }
   };
   (0, import_react2.useEffect)(() => {
-    const initPromise = trackAsync(connectLocal());
-    env?.onInitialConnect?.(initPromise);
+    applyTheme(s.themeMode, false);
+    const p = trackAsync(connectLocal());
+    if (env?.onInitialConnect) env.onInitialConnect(p);
     const onVisibility = () => {
       if (!document.hidden && s.selected) schedulePoll(0);
     };
@@ -25100,15 +25281,31 @@ function CAYWApp({ env } = {}) {
       clearTimer(s.timer);
       for (const controller of s.controllers) controller.abort();
     };
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (s.settingsOpen) {
+          s.settingsOpen = false;
+          forceRender();
+        } else if (s.newProjectModalOpen) {
+          s.newProjectModalOpen = false;
+          forceRender();
+        } else if (s.permissionPopoverOpen) {
+          s.permissionPopoverOpen = false;
+          forceRender();
+        }
+      }
+    };
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("online", onOnline);
     window.addEventListener("pagehide", onPageHide);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
       clearTimer(s.timer);
       for (const controller of s.controllers) controller.abort();
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("online", onOnline);
       window.removeEventListener("pagehide", onPageHide);
+      document.removeEventListener("keydown", onKeyDown);
     };
   }, []);
   saveProjectState();
@@ -25165,7 +25362,36 @@ function CAYWApp({ env } = {}) {
   const projectsStatusText = s.projectsStatus || `\u5171 ${projectSummaries.length} \u4E2A\u672C\u673A\u9879\u76EE\u7A7A\u95F4 \xB7 \u5F53\u524D\u7A7A\u95F4\uFF1A${currentProjectSummary?.label ?? currentProjectId()}`;
   const pluginItems = summarizePlugins(s.sessions, s.cachedCapabilities, s.views);
   const pluginsStatusText = s.pluginsStatus || (pluginItems.length ? `\u5DF2\u8BC6\u522B ${pluginItems.length} \u4E2A\u63D2\u4EF6\u7ED1\u5B9A\u6216\u80FD\u529B\u7EC4` : "\u6682\u65E0\u5DF2\u7ED1\u5B9A\u7684\u63D2\u4EF6\u8BB0\u5F55");
-  return /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "backdrop", "aria-hidden": "true" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "backdrop-grid" }), /* @__PURE__ */ import_react2.default.createElement("div", { className: "backdrop-glow glow-rust" }), /* @__PURE__ */ import_react2.default.createElement("div", { className: "backdrop-glow glow-luau" }), /* @__PURE__ */ import_react2.default.createElement("div", { className: "backdrop-noise" })), /* @__PURE__ */ import_react2.default.createElement("a", { className: "skip", href: "#conversation" }, "\u8DF3\u5230\u4F1A\u8BDD\u5185\u5BB9"), /* @__PURE__ */ import_react2.default.createElement("header", { className: "topbar" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "identity" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "mark", "aria-hidden": "true" }, "C"), /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, "CAYW"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "muted" }, "\u672C\u673A\u4F1A\u8BDD"))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "connection" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "connection-status", role: "status" }, s.connectionStatus), /* @__PURE__ */ import_react2.default.createElement(
+  const currentPresetObj = PERMISSION_PRESETS.find((p) => p.id === s.permissionPreset) ?? PERMISSION_PRESETS[0];
+  const filteredSessions = s.sessionSearchQuery.trim() ? s.sessions.filter(
+    (sess) => displayLabel(sess).toLowerCase().includes(s.sessionSearchQuery.trim().toLowerCase())
+  ) : s.sessions;
+  const visibleBrowseEntries = s.browseShowHidden ? s.browseEntries : s.browseEntries.filter((e) => !e.hidden);
+  return /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-app-shell" }, /* @__PURE__ */ import_react2.default.createElement("a", { className: "skip", href: "#conversation" }, "\u8DF3\u5230\u4F1A\u8BDD\u5185\u5BB9"), /* @__PURE__ */ import_react2.default.createElement("header", { className: "topbar dsh-topbar" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "identity" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "mark", "aria-hidden": "true" }, "C"), /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, "CAYW"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-build-badge" }, "v3"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "muted" }, "DeepSeek Harness \u98CE\u683C\u5DE5\u4F5C\u53F0"))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "connection" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-top-pill",
+      onClick: () => openNewProjectModal()
+    },
+    "\u{1F4C1} + \u65B0\u5F00\u9879\u76EE"
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-top-pill",
+      onClick: () => switchPage("permissions")
+    },
+    `\u{1F512} \u6743\u9650\uFF1A${currentPresetObj.label}${approvals.length ? ` (${approvals.length} \u5F85\u5BA1)` : ""}`
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-top-pill",
+      onClick: () => openSettings("general")
+    },
+    "\u2699 \u8BBE\u7F6E"
+  ), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-conn-dot", "data-connected": String(s.connectionStatus === "\u5DF2\u8FDE\u63A5\u672C\u673A") }), /* @__PURE__ */ import_react2.default.createElement("span", { id: "connection-status", role: "status" }, s.connectionStatus), /* @__PURE__ */ import_react2.default.createElement(
     "button",
     {
       ref: bind({ click: () => trackAsync(connectLocal()) }),
@@ -25176,7 +25402,29 @@ function CAYWApp({ env } = {}) {
       onClick: () => trackAsync(connectLocal())
     },
     "\u91CD\u8FDE"
-  ))), /* @__PURE__ */ import_react2.default.createElement("div", { id: "workspace", className: "workspace" }, /* @__PURE__ */ import_react2.default.createElement("aside", { className: "sidebar", "aria-labelledby": "sessions-heading" }, /* @__PURE__ */ import_react2.default.createElement("nav", { className: "page-nav", "aria-label": "\u754C\u9762\u89C6\u56FE" }, /* @__PURE__ */ import_react2.default.createElement(
+  ))), /* @__PURE__ */ import_react2.default.createElement("div", { id: "workspace", className: "workspace dsh-frame" }, /* @__PURE__ */ import_react2.default.createElement("aside", { className: "sidebar dsh-sidebar", "aria-labelledby": "sessions-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-sidebar-primary-actions" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      ref: bind({ click: () => trackAsync(createNewSession()) }),
+      id: "create-button",
+      className: "dsh-new-session-btn create-btn",
+      type: "button",
+      "aria-label": "\u65B0\u5EFA\u4F1A\u8BDD",
+      disabled: s.createBusy,
+      onClick: () => trackAsync(createNewSession())
+    },
+    /* @__PURE__ */ import_react2.default.createElement("span", null, s.createBusy ? "\u521B\u5EFA\u4E2D\u2026" : "+ \u65B0\u5EFA\u4F1A\u8BDD")
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      id: "open-new-project-btn",
+      className: "dsh-new-project-btn secondary",
+      type: "button",
+      title: "\u9009\u62E9\u672C\u5730\u76EE\u5F55\u5E76\u65B0\u5F00\u9879\u76EE\u5DE5\u4F5C\u533A",
+      onClick: () => openNewProjectModal()
+    },
+    "\u{1F4C1} \u65B0\u5F00\u9879\u76EE"
+  )), /* @__PURE__ */ import_react2.default.createElement("nav", { className: "page-nav dsh-nav-segmented", "aria-label": "\u754C\u9762\u89C6\u56FE" }, /* @__PURE__ */ import_react2.default.createElement(
     "button",
     {
       ref: bind({ click: () => switchPage("conversation") }),
@@ -25186,7 +25434,7 @@ function CAYWApp({ env } = {}) {
       "aria-current": String(s.activePage === "conversation"),
       onClick: () => switchPage("conversation")
     },
-    "\u4F1A\u8BDD"
+    "\u5BF9\u8BDD"
   ), /* @__PURE__ */ import_react2.default.createElement(
     "button",
     {
@@ -25197,7 +25445,18 @@ function CAYWApp({ env } = {}) {
       "aria-current": String(s.activePage === "projects"),
       onClick: () => switchPage("projects")
     },
-    "\u9879\u76EE\u7A7A\u95F4"
+    "\u9879\u76EE"
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      ref: bind({ click: () => switchPage("permissions") }),
+      id: "nav-permissions",
+      className: "page-tab",
+      type: "button",
+      "aria-current": String(s.activePage === "permissions"),
+      onClick: () => switchPage("permissions")
+    },
+    `\u6743\u9650${approvals.length ? `(${approvals.length})` : ""}`
   ), /* @__PURE__ */ import_react2.default.createElement(
     "button",
     {
@@ -25208,62 +25467,66 @@ function CAYWApp({ env } = {}) {
       "aria-current": String(s.activePage === "plugins"),
       onClick: () => switchPage("plugins")
     },
-    "\u63D2\u4EF6\u7BA1\u7406"
-  )), /* @__PURE__ */ import_react2.default.createElement(
+    "\u63D2\u4EF6"
+  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-workspace-box" }, /* @__PURE__ */ import_react2.default.createElement(
     SpotlightCard,
     {
       as: "button",
       id: "current-workspace-btn",
-      className: "workspace-switcher",
+      className: "workspace-switcher dsh-workspace-pill",
       type: "button",
       handlers: { click: () => switchPage("projects") },
-      "data-tip": currentProjectSummary?.workspace ? `\u5F53\u524D\u76EE\u5F55\uFF1A${currentProjectSummary.workspace}\uFF08\u70B9\u51FB\u7BA1\u7406\u9879\u76EE\u7A7A\u95F4\uFF09` : `\u70B9\u51FB\u5207\u6362\u6216\u6DFB\u52A0\u672C\u5730\u9879\u76EE\u7A7A\u95F4\uFF08${currentProjectSummary?.address ?? "\u672C\u673A IPC"}\uFF09`,
+      "data-tip": currentProjectSummary?.workspace ? `\u5F53\u524D\u76EE\u5F55\uFF1A${currentProjectSummary.workspace}\uFF08\u70B9\u51FB\u5207\u6362\u6216\u7BA1\u7406\u9879\u76EE\u7A7A\u95F4\uFF09` : `\u70B9\u51FB\u5207\u6362\u6216\u65B0\u5F00\u672C\u5730\u9879\u76EE\u7A7A\u95F4\uFF08${currentProjectSummary?.address ?? "\u672C\u673A IPC"}\uFF09`,
       onClick: () => switchPage("projects")
     },
-    /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u5F53\u524D\u9879\u76EE\u7A7A\u95F4"),
-    /* @__PURE__ */ import_react2.default.createElement("strong", { id: "current-workspace-label" }, currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4")
-  ), /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-workspace-pill-top" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u{1F4C1} \u5F53\u524D\u5DE5\u4F5C\u533A"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-workspace-switch-hint" }, "\u5207\u6362 \u25BE")),
+    /* @__PURE__ */ import_react2.default.createElement("strong", { id: "current-workspace-label" }, currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"),
+    currentProjectSummary?.workspace ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-workspace-path mono" }, currentProjectSummary.workspace) : null
+  )), /* @__PURE__ */ import_react2.default.createElement(
     "details",
     {
       id: "session-picker",
-      className: "session-picker",
+      className: "session-picker dsh-session-browser",
       open: s.sessionPickerOpen,
       onToggle: (e) => {
         s.sessionPickerOpen = e.currentTarget.open;
       }
     },
-    /* @__PURE__ */ import_react2.default.createElement("summary", { className: "session-picker-summary" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u4F1A\u8BDD"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "session-picker-label", className: "muted" }, clip(snapshot ? displayLabel(snapshot) : "\u9009\u62E9\u6216\u65B0\u5EFA", 60))),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "session-picker-content" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "section-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "sessions-heading" }, "\u4F1A\u8BDD"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u4F1A\u8BDD\u540C\u6B65\u8BF4\u660E" }, "\u5BF9\u8BDD\u4FDD\u5B58\u5728\u672C\u673A\u3002\u65AD\u7EBF\u540E\u4ECE\u5DF2\u6D88\u8D39\u6E38\u6807\u7EE7\u7EED\u63A5\u6536\u7ED3\u679C\uFF0C\u6D88\u606F\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "session-actions" }, /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react2.default.createElement("summary", { className: "session-picker-summary" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u5DE5\u4F5C\u533A\u4F1A\u8BDD"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "session-picker-label", className: "muted" }, clip(snapshot ? displayLabel(snapshot) : "\u9009\u62E9\u6216\u65B0\u5EFA", 60))),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "session-picker-content" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "section-heading dsh-section-header" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "sessions-heading" }, "\u4F1A\u8BDD\u5217\u8868"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u4F1A\u8BDD\u540C\u6B65\u8BF4\u660E" }, "\u5BF9\u8BDD\u4FDD\u5B58\u5728\u672C\u673A\u3002\u65AD\u7EBF\u540E\u4ECE\u5DF2\u6D88\u8D39\u6E38\u6807\u7EE7\u7EED\u63A5\u6536\u7ED3\u679C\uFF0C\u6D88\u606F\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "session-actions" }, /* @__PURE__ */ import_react2.default.createElement(
       "button",
       {
         ref: bind({ click: () => trackAsync(refreshSessions()) }),
         id: "refresh-sessions",
-        className: "quiet",
+        className: "quiet dsh-icon-btn",
         type: "button",
+        title: "\u5237\u65B0\u4F1A\u8BDD\u5217\u8868",
         disabled: s.refreshSessionsBusy,
         onClick: () => trackAsync(refreshSessions())
       },
-      "\u5237\u65B0"
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+      "\u21BB \u5237\u65B0"
+    ))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-search-bar" }, /* @__PURE__ */ import_react2.default.createElement(
+      "input",
       {
-        ref: bind({ click: () => trackAsync(createNewSession()) }),
-        id: "create-button",
-        className: "create-btn",
-        type: "button",
-        "aria-label": "\u65B0\u5EFA\u4F1A\u8BDD",
-        disabled: s.createBusy,
-        onClick: () => trackAsync(createNewSession())
-      },
-      s.createBusy ? "\u521B\u5EFA\u4E2D\u2026" : "+ \u65B0\u5EFA\u4F1A\u8BDD"
-    ))), /* @__PURE__ */ import_react2.default.createElement("p", { id: "list-status", className: "small muted", role: "status" }, s.listStatus), /* @__PURE__ */ import_react2.default.createElement("nav", { id: "session-list", className: "session-list", "aria-label": "\u9009\u62E9\u4F1A\u8BDD" }, !s.sessions.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u6682\u65E0\u4F1A\u8BDD\uFF0C\u70B9\u51FB\u4E0A\u65B9\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5373\u53EF\u5F00\u59CB\u3002") : s.sessions.map((session) => {
+        type: "search",
+        className: "dsh-search-input",
+        placeholder: "\u641C\u7D22\u4F1A\u8BDD\u2026",
+        "aria-label": "\u641C\u7D22\u4F1A\u8BDD",
+        value: s.sessionSearchQuery,
+        onChange: (e) => {
+          s.sessionSearchQuery = e.target.value;
+          forceRender();
+        }
+      }
+    )), /* @__PURE__ */ import_react2.default.createElement("p", { id: "list-status", className: "small muted", role: "status" }, s.listStatus), /* @__PURE__ */ import_react2.default.createElement("nav", { id: "session-list", className: "session-list dsh-tree-list", "aria-label": "\u9009\u62E9\u4F1A\u8BDD" }, !filteredSessions.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted dsh-empty-note" }, s.sessionSearchQuery.trim() ? "\u65E0\u5339\u914D\u4F1A\u8BDD" : "\u6682\u65E0\u4F1A\u8BDD\uFF0C\u70B9\u51FB\u4E0A\u65B9\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5373\u53EF\u5F00\u59CB\u3002") : filteredSessions.map((session) => {
       const shortId = String(session.id ?? "").slice(0, 8);
+      const sState = stateName(session);
       return /* @__PURE__ */ import_react2.default.createElement(
         SpotlightCard,
         {
           as: "button",
           key: session.id,
-          className: "session-item",
+          className: "session-item dsh-session-row",
           type: "button",
           "aria-current": String(session.id === s.selected),
           handlers: {
@@ -25271,11 +25534,30 @@ function CAYWApp({ env } = {}) {
           },
           onClick: () => trackAsync(selectSession(session.id))
         },
-        /* @__PURE__ */ import_react2.default.createElement("strong", null, displayLabel(session)),
+        /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-session-row-main" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: `dsh-status-dot dot-${sState}` }), /* @__PURE__ */ import_react2.default.createElement("strong", null, displayLabel(session))),
         /* @__PURE__ */ import_react2.default.createElement("span", null, `${stateLabel(session, s.views.get(session.id))} \xB7 ${shortId}`)
       );
     })))
-  )), /* @__PURE__ */ import_react2.default.createElement("main", { id: "conversation", className: "conversation", tabIndex: -1 }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "conversation-view", hidden: s.activePage !== "conversation" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u5DE5\u4F5C\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "session-title" }, snapshot ? displayLabel(snapshot) : s.selected ? "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026" : "\u70B9\u51FB\u5DE6\u4FA7\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5F00\u59CB")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-meta" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "history-note", className: "meta-pill muted", hidden: !historyNote }, historyNote), /* @__PURE__ */ import_react2.default.createElement(
+  ), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-sidebar-footer" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      id: "open-settings-button",
+      type: "button",
+      className: "dsh-settings-trigger",
+      onClick: () => openSettings("general")
+    },
+    /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-settings-gear" }, "\u2699"),
+    /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-settings-label" }, "\u8BBE\u7F6E\u4E0E\u504F\u597D"),
+    /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-settings-badge" }, currentPresetObj.label)
+  ))), /* @__PURE__ */ import_react2.default.createElement("main", { id: "conversation", className: "conversation dsh-center-col", tabIndex: -1 }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "conversation-view", className: "dsh-chat-surface", hidden: s.activePage !== "conversation" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading dsh-chat-header" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-crumbs" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-crumb-btn",
+      onClick: () => switchPage("projects")
+    },
+    `\u{1F4C1} ${currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"}`
+  ), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-crumb-sep" }, "/"), /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "session-title", className: "dsh-session-title" }, snapshot ? displayLabel(snapshot) : s.selected ? "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026" : "\u70B9\u51FB\u5DE6\u4FA7\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5F00\u59CB")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-meta" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "history-note", className: "meta-pill muted", hidden: !historyNote }, historyNote), /* @__PURE__ */ import_react2.default.createElement(
     "span",
     {
       id: "poll-status",
@@ -25320,11 +25602,127 @@ function CAYWApp({ env } = {}) {
       },
       "\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929"
     ))
+  ), /* @__PURE__ */ import_react2.default.createElement("section", { "aria-label": "\u4F1A\u8BDD\u5386\u53F2", className: "history-section dsh-chat-scroll" }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "messages", className: "messages dsh-chat-column" }, !messages.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty dsh-hero" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-hero-headline" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-hero-mark" }, "C"), /* @__PURE__ */ import_react2.default.createElement("h2", null, view?.snapshot ? "\u63A2\u7D22\u672A\u81F3\u4E4B\u5883 \xB7 \u4ECE\u4E00\u6761\u6D88\u606F\u5F00\u59CB" : "\u63A2\u7D22\u672A\u81F3\u4E4B\u5883 \xB7 \u7EE7\u7EED\u4E00\u6BB5\u5BF9\u8BDD"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-preview-badge" }, "CAYW v3"), /* @__PURE__ */ import_react2.default.createElement(
+    TooltipBadge,
+    {
+      className: "hint-trigger",
+      label: "?",
+      tip: view?.snapshot ? "\u8F93\u5165\u4EFB\u52A1\u540E\uFF0CRuntime \u4F1A\u5728\u6B64\u4FDD\u7559\u5BF9\u8BDD\u548C\u5DE5\u5177\u8BB0\u5F55\u3002" : "\u4ECE\u5DE6\u4FA7\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u70B9\u51FB\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u3002"
+    }
+  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-hero-workspace-bar" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-hero-ws-pill",
+      onClick: () => switchPage("projects")
+    },
+    `\u{1F4C1} \u5DE5\u4F5C\u533A\uFF1A${currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"}${currentProjectSummary?.workspace ? ` (${currentProjectSummary.workspace})` : ""} \u25BE`
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-hero-ws-pill",
+      onClick: () => openNewProjectModal()
+    },
+    "+ \u65B0\u5F00\u9879\u76EE\u76EE\u5F55"
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "dsh-hero-ws-pill",
+      onClick: () => switchPage("permissions")
+    },
+    `\u{1F512} \u6743\u9650\u6A21\u5F0F\uFF1A${currentPresetObj.label}`
+  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "starter-grid dsh-starter-pills" }, STARTER_PROMPTS.map((item, idx) => /* @__PURE__ */ import_react2.default.createElement(
+    SpotlightCard,
+    {
+      as: "button",
+      key: idx,
+      type: "button",
+      className: "starter-card dsh-starter-card",
+      onClick: () => trackAsync(
+        (async () => {
+          if (!s.selected) {
+            await createNewSession();
+          }
+          s.promptText = item.prompt;
+          if (promptInputRef.current) {
+            promptInputRef.current.value = item.prompt;
+            promptInputRef.current.focus();
+          }
+          forceRender();
+        })()
+      )
+    },
+    /* @__PURE__ */ import_react2.default.createElement("strong", null, item.title),
+    /* @__PURE__ */ import_react2.default.createElement("span", null, item.desc)
+  )))) : messages.map((message, index) => {
+    const role = [
+      "user",
+      "assistant",
+      "system",
+      "toolResult",
+      "custom"
+    ].includes(message.role) ? message.role : "custom";
+    const presentation = messagePresentation(message);
+    const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
+    const isOp = presentation.kind !== "text";
+    return /* @__PURE__ */ import_react2.default.createElement(
+      SpotlightCard,
+      {
+        as: "article",
+        key,
+        className: `message ${role}${isOp ? " operation-record dsh-tool-card" : ""}`
+      },
+      /* @__PURE__ */ import_react2.default.createElement("div", { className: "role" }, ROLE_LABELS[role]),
+      presentation.kind === "text" ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : presentation.kind === "tool_call" ? /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, presentation.text ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : null, presentation.calls.map((call, callIndex) => {
+        const callKey = `${key}/${callIndex}`;
+        const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "\u7B49\u5F85\u4EFB\u52A1\u7ED3\u679C" : "\u8FD0\u884C Luau \u4EE3\u7801\u5355\u5143\uFF08execute_code\uFF09" : `\u4F7F\u7528\u5DE5\u5177\uFF1A${clip(call.name, 100)}`;
+        return /* @__PURE__ */ import_react2.default.createElement(
+          "details",
+          {
+            key: callKey,
+            className: "record-details dsh-disclosure-row",
+            open: expandedSet.has(callKey),
+            onToggle: (e) => toggleRecordExpand(callKey, e.currentTarget.open)
+          },
+          /* @__PURE__ */ import_react2.default.createElement("summary", null, title),
+          /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(call))
+        );
+      })) : /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "result-header" }, /* @__PURE__ */ import_react2.default.createElement(
+        "strong",
+        {
+          className: `result-title ${presentation.status ?? ""}`
+        },
+        presentation.title
+      ), /* @__PURE__ */ import_react2.default.createElement(
+        "details",
+        {
+          className: "record-details inline-details",
+          open: expandedSet.has(key),
+          onToggle: (e) => toggleRecordExpand(key, e.currentTarget.open)
+        },
+        /* @__PURE__ */ import_react2.default.createElement("summary", null, "\u67E5\u770B\u5B8C\u6574\u6267\u884C\u8BB0\u5F55"),
+        /* @__PURE__ */ import_react2.default.createElement("pre", null, presentation.raw)
+      )), presentation.text ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "result-description" }, presentation.text) : null, (presentation.values ?? []).map((val, vIdx) => /* @__PURE__ */ import_react2.default.createElement("div", { key: vIdx, className: "file-output-box" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "output-label" }, `\u{1F4C4} ${val.label}`), /* @__PURE__ */ import_react2.default.createElement("div", { className: "body output-value" }, val.text)))),
+      message.error_message ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, clip(message.error_message, 2e3)) : null,
+      message.outcome_unknown ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, "\u6B64\u5DE5\u5177\u8C03\u7528\u7684\u771F\u5B9E\u7ED3\u679C\u5F85\u5BBF\u4E3B\u6838\u5BF9\u3002") : null
+    );
+  }))), /* @__PURE__ */ import_react2.default.createElement(
+    "section",
+    {
+      id: "live-section",
+      className: "live-section dsh-live-stream",
+      "aria-labelledby": "live-heading",
+      hidden: !view?.liveText
+    },
+    /* @__PURE__ */ import_react2.default.createElement("h2", { id: "live-heading", className: "small" }, "\u6B63\u5728\u751F\u6210\u56DE\u590D\u2026"),
+    /* @__PURE__ */ import_react2.default.createElement("pre", { id: "live-text", "aria-live": "off" }, view?.liveText ?? "")
   ), /* @__PURE__ */ import_react2.default.createElement(
     "section",
     {
       id: "approvals",
-      className: "approval-section",
+      className: "approval-section dsh-approval-dock",
       "aria-label": "\u5F85\u5BA1\u6279\u8BF7\u6C42",
       hidden: !approvals.length
     },
@@ -25361,19 +25759,19 @@ function CAYWApp({ env } = {}) {
           as: "article",
           key: id ?? idx,
           border: true,
-          className: "approval-card"
+          className: "approval-card dsh-approval-card"
         },
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("h3", null, "\u8BF7\u6C42\u4F60\u7684\u6388\u6743"), /* @__PURE__ */ import_react2.default.createElement(
+        /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-approval-strip" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-approval-dot" }), /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u7B49\u5F85\u5BA1\u6279 \xB7 \u8BF7\u6C42\u4F60\u7684\u6388\u6743"), /* @__PURE__ */ import_react2.default.createElement(
           TooltipBadge,
           {
             label: "\u7CBE\u786E\u53C2\u6570\u8303\u56F4 ?",
             tip: "\u4EC5\u9650\u672C\u6B21\u5217\u660E\u7684\u80FD\u529B\u548C\u5B8C\u5168\u76F8\u540C\u7684\u53C2\u6570\uFF1B\u5141\u8BB8\u6B64\u4EFB\u52A1\u4E5F\u4E0D\u4F1A\u6269\u5C55\u5230\u5176\u4ED6\u6587\u4EF6\u6216\u5185\u5BB9\u3002"
           }
         )),
-        /* @__PURE__ */ import_react2.default.createElement("p", null, `\u64CD\u4F5C\uFF1A${operation}`),
-        scopeLines.map(([label, val, limit], sIdx) => /* @__PURE__ */ import_react2.default.createElement("p", { key: sIdx, className: "small" }, `${label}\uFF1A${clip(val, limit)}`)),
+        /* @__PURE__ */ import_react2.default.createElement("p", { className: "dsh-approval-headline" }, `\u64CD\u4F5C\uFF1A${operation}`),
+        scopeLines.map(([label, val, limit], sIdx) => /* @__PURE__ */ import_react2.default.createElement("p", { key: sIdx, className: "small dsh-approval-command" }, `${label}\uFF1A${clip(val, limit)}`)),
         /* @__PURE__ */ import_react2.default.createElement("details", null, /* @__PURE__ */ import_react2.default.createElement("summary", null, "\u67E5\u770B\u5B8C\u6574\u6388\u6743\u53C2\u6570"), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(approval))),
-        typeof id !== "string" ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "error" }, "\u5BA1\u6279\u8BB0\u5F55\u7F3A\u5C11 ID\uFF0C\u8BF7\u5728\u5BBF\u4E3B\u4E2D\u5904\u7406\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, [
+        typeof id !== "string" ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "error" }, "\u5BA1\u6279\u8BB0\u5F55\u7F3A\u5C11 ID\uFF0C\u8BF7\u5728\u5BBF\u4E3B\u4E2D\u5904\u7406\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions dsh-approval-actions" }, [
           ["allow_once", "\u5141\u8BB8\u4E00\u6B21", ""],
           ["allow_task", "\u5141\u8BB8\u6B64\u4EFB\u52A1", "secondary"],
           ["deny", "\u62D2\u7EDD", "secondary deny"]
@@ -25393,115 +25791,49 @@ function CAYWApp({ env } = {}) {
         )))
       );
     })
-  ), /* @__PURE__ */ import_react2.default.createElement("section", { "aria-label": "\u4F1A\u8BDD\u5386\u53F2", className: "history-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "messages", className: "messages" }, !messages.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty-heading" }, /* @__PURE__ */ import_react2.default.createElement("h2", null, view?.snapshot ? "\u4ECE\u4E00\u6761\u6D88\u606F\u5F00\u59CB" : "\u7EE7\u7EED\u4E00\u6BB5\u5BF9\u8BDD"), /* @__PURE__ */ import_react2.default.createElement(
-    TooltipBadge,
+  ), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-composer-dock" }, s.permissionPopoverOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-permission-popover", role: "dialog", "aria-label": "\u5207\u6362\u6743\u9650\u6A21\u5F0F" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-popover-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u4F1A\u8BDD\u6743\u9650\u6A21\u5F0F (`/permission`)"), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
     {
-      className: "hint-trigger",
-      label: "?",
-      tip: view?.snapshot ? "\u8F93\u5165\u4EFB\u52A1\u540E\uFF0CRuntime \u4F1A\u5728\u6B64\u4FDD\u7559\u5BF9\u8BDD\u548C\u5DE5\u5177\u8BB0\u5F55\u3002" : "\u4ECE\u5DE6\u4FA7\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u70B9\u51FB\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u3002"
-    }
-  )), /* @__PURE__ */ import_react2.default.createElement("p", { className: "empty-sub" }, "\u9009\u62E9\u4E00\u4E2A\u5E38\u7528\u4EFB\u52A1\u5FEB\u901F\u586B\u5165\uFF0C\u6216\u5728\u4E0B\u65B9\u8F93\u5165\u6846\u76F4\u63A5\u63CF\u8FF0\u4F60\u7684\u9700\u6C42\uFF1A"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "starter-grid" }, STARTER_PROMPTS.map((item, idx) => /* @__PURE__ */ import_react2.default.createElement(
-    SpotlightCard,
-    {
-      as: "button",
-      key: idx,
       type: "button",
-      className: "starter-card",
-      onClick: () => trackAsync(
-        (async () => {
-          if (!s.selected) {
-            await createNewSession();
-          }
-          s.promptText = item.prompt;
-          if (promptInputRef.current) {
-            promptInputRef.current.value = item.prompt;
-            promptInputRef.current.focus();
-          }
-          forceRender();
-        })()
-      )
+      className: "quiet",
+      onClick: () => {
+        s.permissionPopoverOpen = false;
+        forceRender();
+      }
     },
-    /* @__PURE__ */ import_react2.default.createElement("strong", null, item.title),
-    /* @__PURE__ */ import_react2.default.createElement("span", null, item.desc)
-  )))) : messages.map((message, index) => {
-    const role = [
-      "user",
-      "assistant",
-      "system",
-      "toolResult",
-      "custom"
-    ].includes(message.role) ? message.role : "custom";
-    const presentation = messagePresentation(message);
-    const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
-    const isOp = presentation.kind !== "text";
-    return /* @__PURE__ */ import_react2.default.createElement(
-      SpotlightCard,
-      {
-        as: "article",
-        key,
-        className: `message ${role}${isOp ? " operation-record" : ""}`
-      },
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "role" }, ROLE_LABELS[role]),
-      presentation.kind === "text" ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : presentation.kind === "tool_call" ? /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, presentation.text ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : null, presentation.calls.map((call, callIndex) => {
-        const callKey = `${key}/${callIndex}`;
-        const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "\u7B49\u5F85\u4EFB\u52A1\u7ED3\u679C" : "\u8FD0\u884C Luau \u4EE3\u7801\u5355\u5143\uFF08execute_code\uFF09" : `\u4F7F\u7528\u5DE5\u5177\uFF1A${clip(call.name, 100)}`;
-        return /* @__PURE__ */ import_react2.default.createElement(
-          "details",
-          {
-            key: callKey,
-            className: "record-details",
-            open: expandedSet.has(callKey),
-            onToggle: (e) => toggleRecordExpand(callKey, e.currentTarget.open)
-          },
-          /* @__PURE__ */ import_react2.default.createElement("summary", null, title),
-          /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(call))
-        );
-      })) : /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "result-header" }, /* @__PURE__ */ import_react2.default.createElement(
-        "strong",
-        {
-          className: `result-title ${presentation.status ?? ""}`
-        },
-        presentation.title
-      ), /* @__PURE__ */ import_react2.default.createElement(
-        "details",
-        {
-          className: "record-details inline-details",
-          open: expandedSet.has(key),
-          onToggle: (e) => toggleRecordExpand(key, e.currentTarget.open)
-        },
-        /* @__PURE__ */ import_react2.default.createElement("summary", null, "\u67E5\u770B\u5B8C\u6574\u6267\u884C\u8BB0\u5F55"),
-        /* @__PURE__ */ import_react2.default.createElement("pre", null, presentation.raw)
-      )), presentation.text ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "result-description" }, presentation.text) : null, (presentation.values ?? []).map((val, vIdx) => /* @__PURE__ */ import_react2.default.createElement("div", { key: vIdx, className: "file-output-box" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "output-label" }, `\u{1F4C4} ${val.label}`), /* @__PURE__ */ import_react2.default.createElement("div", { className: "body output-value" }, val.text)))),
-      message.error_message ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, clip(message.error_message, 2e3)) : null,
-      message.outcome_unknown ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, "\u6B64\u5DE5\u5177\u8C03\u7528\u7684\u771F\u5B9E\u7ED3\u679C\u5F85\u5BBF\u4E3B\u6838\u5BF9\u3002") : null
-    );
-  }))), /* @__PURE__ */ import_react2.default.createElement(
-    "section",
+    "\u2715"
+  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-list" }, PERMISSION_PRESETS.map((preset) => /* @__PURE__ */ import_react2.default.createElement(
+    "button",
     {
-      id: "live-section",
-      className: "live-section",
-      "aria-labelledby": "live-heading",
-      hidden: !view?.liveText
+      key: preset.id,
+      type: "button",
+      className: `dsh-preset-option${s.permissionPreset === preset.id ? " is-selected" : ""}`,
+      onClick: () => selectPermissionPreset(preset.id)
     },
-    /* @__PURE__ */ import_react2.default.createElement("h2", { id: "live-heading", className: "small" }, "\u6B63\u5728\u63A5\u6536"),
-    /* @__PURE__ */ import_react2.default.createElement("pre", { id: "live-text", "aria-live": "off" }, view?.liveText ?? "")
-  ), /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-option-top" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, `${preset.label} (${preset.enLabel})`), s.permissionPreset === preset.id ? /* @__PURE__ */ import_react2.default.createElement("span", null, "\u2713 \u5F53\u524D") : null),
+    /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, preset.desc)
+  ))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-popover-footer" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "secondary",
+      onClick: () => {
+        s.permissionPopoverOpen = false;
+        switchPage("permissions");
+      }
+    },
+    "\u67E5\u770B\u5DF2\u6388\u6743\u80FD\u529B\u4E0E\u64A4\u9500\u8BB0\u5F55 \u2192"
+  ))) : null, /* @__PURE__ */ import_react2.default.createElement(
     SpotlightCard,
     {
       as: "form",
       id: "prompt-form",
       border: true,
-      className: "composer",
+      className: "composer dsh-input-card",
       handlers: { submit: (e) => trackAsync(handleSendPrompt(e)) },
       onSubmit: (e) => trackAsync(handleSendPrompt(e))
     },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "composer-header" }, /* @__PURE__ */ import_react2.default.createElement("label", { htmlFor: "prompt" }, "\u53D1\u9001\u6D88\u606F"), /* @__PURE__ */ import_react2.default.createElement(
-      TooltipBadge,
-      {
-        label: "\u5FEB\u6377\u952E ?",
-        tip: "Enter \u76F4\u63A5\u53D1\u9001 \xB7 Shift + Enter \u6362\u884C"
-      }
-    )),
+    /* @__PURE__ */ import_react2.default.createElement("label", { htmlFor: "prompt", className: "visually-hidden" }, "\u53D1\u9001\u6D88\u606F"),
     /* @__PURE__ */ import_react2.default.createElement(
       "textarea",
       {
@@ -25515,40 +25847,89 @@ function CAYWApp({ env } = {}) {
           promptInputRef
         ),
         id: "prompt",
+        className: "dsh-composer-textarea",
         rows: 3,
-        maxLength: 64e3,
-        placeholder: "\u8F93\u5165\u4F60\u60F3\u5B8C\u6210\u7684\u4E8B\u60C5\u2026",
+        maxLength: 32e3,
         disabled: promptDisabled,
+        placeholder: "\u7ED9\u667A\u80FD\u4F53\u53D1\u6D88\u606F\uFF08Enter \u53D1\u9001\uFF0CShift + Enter \u6362\u884C\uFF09",
         value: s.promptText,
         onChange: (e) => {
           s.promptText = e.target.value;
           forceRender();
         },
-        onInput: (e) => {
-          s.promptText = e.currentTarget.value;
-          forceRender();
-        },
         onKeyDown: (e) => {
-          if (e.key === "Enter" && !e.nativeEvent?.isComposing && !e.shiftKey) {
+          if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (s.enterBehavior === "enter" || e.metaKey || e.ctrlKey)) {
             e.preventDefault();
-            if (!sendDisabled) trackAsync(handleSendPrompt(e));
+            trackAsync(handleSendPrompt(e));
           }
         }
       }
     ),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "composer-footer" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "prompt-status", className: "small muted", role: "status" }, promptStatus), /* @__PURE__ */ import_react2.default.createElement("div", { className: "composer-actions" }, /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "composer-actions dsh-composer-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-composer-tools" }, /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "composer-workspace-btn",
+        type: "button",
+        className: "dsh-chip-btn",
+        title: "\u5207\u6362\u5DE5\u4F5C\u533A\u9879\u76EE",
+        onClick: () => switchPage("projects")
+      },
+      `\u{1F4C1} ${currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"}`
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "composer-new-project-btn",
+        type: "button",
+        className: "dsh-chip-btn",
+        title: "\u6D4F\u89C8\u672C\u5730\u76EE\u5F55\u5E76\u65B0\u5F00\u9879\u76EE",
+        onClick: () => openNewProjectModal()
+      },
+      "+ \u65B0\u5F00\u9879\u76EE"
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "composer-permission-btn",
+        type: "button",
+        className: `dsh-chip-btn dsh-perm-chip${s.permissionPreset === "danger-full-access" ? " is-danger" : ""}`,
+        title: "\u5207\u6362\u6743\u9650\u9884\u8BBE\u6216\u7BA1\u7406\u4F1A\u8BDD\u6388\u6743",
+        onClick: () => {
+          s.permissionPopoverOpen = !s.permissionPopoverOpen;
+          forceRender();
+        }
+      },
+      `\u{1F512} ${currentPresetObj.label} \u25BE`
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "composer-model-btn",
+        type: "button",
+        className: "dsh-chip-btn",
+        title: "\u67E5\u770B\u6A21\u578B\u4E0E\u7F51\u5173\u8BBE\u7F6E",
+        onClick: () => openSettings("models")
+      },
+      "\u26A1 deepseek-v4.1-flash"
+    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "action-buttons dsh-composer-trailing" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "prompt-status", className: "small muted", role: "status" }, promptStatus), /* @__PURE__ */ import_react2.default.createElement(
       "button",
       {
         ref: bind({ click: () => trackAsync(handleCancel()) }),
         id: "cancel-button",
-        className: "secondary",
+        className: "secondary dsh-stop-btn",
         type: "button",
         disabled: cancelDisabled,
         onClick: () => trackAsync(handleCancel())
       },
-      s.cancelPending ? "\u6B63\u5728\u505C\u6B62\u2026" : "\u505C\u6B62\u8FD0\u884C"
-    ), /* @__PURE__ */ import_react2.default.createElement("button", { id: "send-button", type: "submit", disabled: sendDisabled }, pending ? "\u7B49\u5F85\u5B8C\u6210\u2026" : "\u53D1\u9001")))
-  ), /* @__PURE__ */ import_react2.default.createElement("details", { className: "event-details" }, /* @__PURE__ */ import_react2.default.createElement("summary", { "data-tip": "\u6700\u8FD1 120 \u6761\u5DF2\u6D88\u8D39\u4E8B\u4EF6\uFF1B\u672A\u8BC6\u522B\u4E8B\u4EF6\u6309\u539F\u59CB\u8BB0\u5F55\u5C55\u793A" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u8BCA\u65AD\u4E0E\u4E8B\u4EF6\u8BB0\u5F55"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "event-count", className: "muted" }, `${events.length} \xB7 \u6E38\u6807 ${view?.cursor ?? 0}`)), /* @__PURE__ */ import_react2.default.createElement("div", { id: "event-log" }, events.map((record) => /* @__PURE__ */ import_react2.default.createElement("details", { key: record.cursor }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${record.cursor} \xB7 ${clip(record.event?.type ?? record.event?.kind ?? "\u4E8B\u4EF6", 100)}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(record.event))))))), /* @__PURE__ */ import_react2.default.createElement(
+      "\u505C\u6B62"
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "send-button",
+        className: "dsh-send-btn",
+        type: "submit",
+        disabled: sendDisabled
+      },
+      pending ? "\u7B49\u5F85\u5B8C\u6210\u2026" : "\u2191 \u53D1\u9001"
+    )))
+  )), /* @__PURE__ */ import_react2.default.createElement("details", { className: "event-details dsh-event-drawer" }, /* @__PURE__ */ import_react2.default.createElement("summary", { "data-tip": "\u6700\u8FD1 120 \u6761\u5DF2\u6D88\u8D39\u4E8B\u4EF6\uFF1B\u672A\u8BC6\u522B\u4E8B\u4EF6\u6309\u539F\u59CB\u8BB0\u5F55\u5C55\u793A" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u8BCA\u65AD\u4E0E\u4E8B\u4EF6\u8BB0\u5F55"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "event-count", className: "muted" }, `${events.length} \xB7 \u6E38\u6807 ${view?.cursor ?? 0}`)), /* @__PURE__ */ import_react2.default.createElement("div", { id: "event-log" }, events.map((record) => /* @__PURE__ */ import_react2.default.createElement("details", { key: record.cursor }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${record.cursor} \xB7 ${clip(record.event?.type ?? record.event?.kind ?? "\u4E8B\u4EF6", 100)}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(record.event))))))), /* @__PURE__ */ import_react2.default.createElement(
     "section",
     {
       id: "projects-page",
@@ -25556,7 +25937,14 @@ function CAYWApp({ env } = {}) {
       hidden: s.activePage !== "projects",
       "aria-labelledby": "projects-heading"
     },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u9879\u76EE\u7A7A\u95F4\u7BA1\u7406"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "projects-heading" }, "\u672C\u5730\u9879\u76EE\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u9879\u76EE\u7A7A\u95F4\u7BA1\u7406\u8BF4\u660E" }, "\u6DFB\u52A0\u3001\u5207\u6362\u6216\u79FB\u9664\u672C\u5730\u9879\u76EE\u5DE5\u4F5C\u76EE\u5F55\uFF1B\u5404\u9879\u76EE\u7A7A\u95F4\u7684\u4F1A\u8BDD\u5217\u8868\u3001\u4E8B\u4EF6\u6E38\u6807\u4E0E\u672A\u786E\u8BA4\u8BF7\u6C42\u9501\u76F8\u4E92\u72EC\u7ACB\u3002"))), /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u5DE5\u4F5C\u533A\u4E0E\u9879\u76EE\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "projects-heading" }, "\u672C\u5730\u9879\u76EE\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u9879\u76EE\u7A7A\u95F4\u7BA1\u7406\u8BF4\u660E" }, "\u9009\u62E9\u76EE\u5F55\u5373\u53EF\u65B0\u5F00\u72EC\u7ACB\u9879\u76EE Runtime\uFF1B\u5404\u9879\u76EE\u7684\u4F1A\u8BDD\u5217\u8868\u3001\u6743\u9650\u6388\u6743\u4E0E\u4E8B\u4EF6\u6E38\u6807\u76F8\u4E92\u9694\u79BB\u3002"))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => openNewProjectModal()
+      },
+      "\u{1F4C1} \u6D4F\u89C8\u76EE\u5F55\u65B0\u5F00\u9879\u76EE"
+    ), /* @__PURE__ */ import_react2.default.createElement(
       "button",
       {
         ref: bind({ click: () => trackAsync(refreshProjects()) }),
@@ -25567,7 +25955,7 @@ function CAYWApp({ env } = {}) {
         onClick: () => trackAsync(refreshProjects())
       },
       "\u5237\u65B0\u7A7A\u95F4"
-    )),
+    ))),
     /* @__PURE__ */ import_react2.default.createElement(
       SpotlightCard,
       {
@@ -25575,8 +25963,8 @@ function CAYWApp({ env } = {}) {
         id: "add-project-form",
         border: true,
         className: "project-add-bar",
-        handlers: { submit: (e) => trackAsync(handleAddProject(e)) },
-        onSubmit: (e) => trackAsync(handleAddProject(e))
+        handlers: { submit: (e) => trackAsync(handleAddProject(e, true)) },
+        onSubmit: (e) => trackAsync(handleAddProject(e, true))
       },
       /* @__PURE__ */ import_react2.default.createElement(
         "input",
@@ -25616,14 +26004,10 @@ function CAYWApp({ env } = {}) {
           type: "submit",
           disabled: s.addProjectBusy
         },
-        s.addProjectBusy ? "\u6DFB\u52A0\u4E2D\u2026" : "+ \u6DFB\u52A0\u9879\u76EE\u7A7A\u95F4"
+        s.addProjectBusy ? "\u6B63\u5728\u542F\u52A8\u9879\u76EE\u2026" : "+ \u65B0\u5F00\u9879\u76EE\u7A7A\u95F4"
       )
     ),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "quick-paths" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u5E38\u7528\u76EE\u5F55\u5FEB\u586B\uFF1A"), [
-      ["/Volumes/ORICO/CAYW", "CAYW \u4E3B\u4ED3\u5E93"],
-      ["/Volumes/ORICO/CAYW-tui", "CAYW TUI \u5206\u652F"],
-      ["/Volumes/ORICO/CAYW-webui", "CAYW WebUI \u5206\u652F"]
-    ].map(([p, lbl]) => /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "quick-paths" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u5E38\u7528\u76EE\u5F55\u5FEB\u586B\uFF1A"), QUICK_WORKSPACES.map(([p, lbl]) => /* @__PURE__ */ import_react2.default.createElement(
       "button",
       {
         key: p,
@@ -25673,7 +26057,7 @@ function CAYWApp({ env } = {}) {
             "data-tip": `\u9879\u76EE\u8FD0\u884C\u72B6\u6001\uFF1A${item.statusLabel}\uFF08IPC\uFF1A${item.address}\uFF09`
           },
           item.statusLabel
-        ), item.frozenCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill warn" }, `${item.frozenCount} \u5DF2\u51BB\u7ED3`) : null, item.unresolvedCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill danger" }, `${item.unresolvedCount} \u5F85\u6838\u5BF9`) : null),
+        ), /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill mono" }, item.address), item.frozenCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill warn" }, `${item.frozenCount} \u5DF2\u51BB\u7ED3`) : null, item.unresolvedCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill danger" }, `${item.unresolvedCount} \u5F85\u6838\u5BF9`) : null),
         /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, /* @__PURE__ */ import_react2.default.createElement(
           "button",
           {
@@ -25720,6 +26104,54 @@ function CAYWApp({ env } = {}) {
         ) : null)
       );
     }))
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "section",
+    {
+      id: "permissions-page",
+      className: "management-page",
+      hidden: s.activePage !== "permissions",
+      "aria-labelledby": "permissions-heading"
+    },
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u6743\u9650\u4E0E\u5B89\u5168\u63A7\u5236"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "permissions-heading" }, "\u4F1A\u8BDD\u6743\u9650\u9884\u8BBE\u4E0E\u5DF2\u6388\u6743\u7BA1\u7406"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u6743\u9650\u8BF4\u660E" }, "\u6240\u6709 CodeMode \u5DE5\u5177\u8C03\u7528\u5747\u7ECF\u8FC7\u5BBF\u4E3B\u53C2\u6570\u6821\u9A8C\u4E0E\u6743\u9650\u95E8\u7981\u3002\u4F60\u53EF\u4EE5\u5728\u6B64\u5207\u6362\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F\u3001\u67E5\u770B\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6388\u4E88\u7684\u7CBE\u786E\u53C2\u6570\u6388\u6743\uFF0C\u6216\u968F\u65F6\u64A4\u9500\u4EFB\u610F\u6388\u6743\u3002"))), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "refresh-permissions",
+        className: "secondary",
+        type: "button",
+        disabled: s.refreshPermissionsBusy,
+        onClick: () => trackAsync(refreshPermissions())
+      },
+      "\u5237\u65B0\u6743\u9650\u8BB0\u5F55"
+    )),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-permission-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-permission-row-text" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F\uFF08Permission Preset\uFF09"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u9009\u62E9\u5F53\u524D\u4E0E\u65B0\u5EFA\u4F1A\u8BDD\u7684\u6743\u9650\u95E8\u7981\u7B56\u7565\u3002\u542F\u7528 Full access \u524D\u9700\u663E\u5F0F\u786E\u8BA4\u98CE\u9669\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-pills" }, PERMISSION_PRESETS.map((preset) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: preset.id,
+        type: "button",
+        className: `dsh-preset-pill${s.permissionPreset === preset.id ? " is-active" : ""}`,
+        onClick: () => selectPermissionPreset(preset.id)
+      },
+      `${preset.label} (${preset.enLabel})`
+    )))), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, currentPresetObj.desc)),
+    /* @__PURE__ */ import_react2.default.createElement("p", { id: "permissions-status", className: "small muted", role: "status" }, s.permissionsStatus || `\u5F53\u524D\u4F1A\u8BDD\uFF1A${snapshot ? displayLabel(snapshot) : "\u672A\u9009\u62E9"} \xB7 ${s.sessionGrants.length} \u9879\u751F\u6548\u6388\u6743`),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "management-grid" }, /* @__PURE__ */ import_react2.default.createElement(SpotlightCard, { as: "article", border: true, className: "management-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u5F53\u524D\u4F1A\u8BDD\u751F\u6548\u6388\u6743\uFF08`session.grants`\uFF09"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, `${s.sessionGrants.length} \u9879`)), !s.sessionGrants.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u5F53\u524D\u4F1A\u8BDD\u6682\u65E0\u6301\u4E45\u4EFB\u52A1\u6388\u6743\u3002\u5F53\u4F60\u5728\u5BA1\u6279\u5361\u7247\u70B9\u51FB\u201C\u5141\u8BB8\u6B64\u4EFB\u52A1\u201D\u540E\uFF0C\u6388\u6743\u6761\u76EE\u4F1A\u663E\u793A\u5728\u6B64\u5904\u5E76\u53EF\u968F\u65F6\u64A4\u9500\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-grants-list" }, s.sessionGrants.map((grant, idx) => {
+      const cap = grant.capability ?? grant.input?.capability ?? "\u672A\u77E5\u80FD\u529B";
+      const scopeStr = typeof grant.scope === "string" ? grant.scope : JSON.stringify(grant.scope ?? {});
+      const key = `${cap}:${scopeStr}`;
+      return /* @__PURE__ */ import_react2.default.createElement("div", { key: `${key}/${idx}`, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, CAPABILITY_LABELS[cap] ?? cap), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small mono muted" }, ` \xB7 ${clip(scopeStr, 140)}`)), /* @__PURE__ */ import_react2.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "secondary deny",
+          disabled: s.revokeBusyKey === key,
+          onClick: () => trackAsync(revokeGrant(grant))
+        },
+        s.revokeBusyKey === key ? "\u64A4\u9500\u4E2D\u2026" : "\u64A4\u9500\u6388\u6743"
+      ));
+    }))), /* @__PURE__ */ import_react2.default.createElement(SpotlightCard, { as: "article", border: true, className: "management-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u6743\u9650\u4E0E\u5DE5\u5177\u5BA1\u8BA1\u8BB0\u5F55\uFF08`session.audit`\uFF09"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, `${s.sessionAudit.length} \u6761`)), !s.sessionAudit.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u5F53\u524D\u4F1A\u8BDD\u6682\u65E0\u5DE5\u5177\u5BA1\u6279\u5BA1\u8BA1\u8BB0\u5F55\u3002\u53D1\u751F\u5DE5\u5177\u8C03\u7528\u6216\u6388\u6743\u51B3\u7B56\u540E\u5C06\u81EA\u52A8\u540C\u6B65\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-audit-list" }, s.sessionAudit.slice(-15).map((item, idx) => /* @__PURE__ */ import_react2.default.createElement("details", { key: idx, className: "record-details" }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${idx + 1} \xB7 ${clip(
+      item.capability ?? item.kind ?? item.decision ?? "\u5BA1\u8BA1\u6761\u76EE",
+      80
+    )}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(item)))))))
   ), /* @__PURE__ */ import_react2.default.createElement(
     "section",
     {
@@ -25830,7 +26262,370 @@ function CAYWApp({ env } = {}) {
       /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, group.title), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, group.badge)),
       /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-items" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react2.default.createElement("div", { key: code, className: "capability-row" }, /* @__PURE__ */ import_react2.default.createElement("code", { className: "inline-code" }, code), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, desc))))
     ))))
-  ))), /* @__PURE__ */ import_react2.default.createElement(
+  ))), s.settingsOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-modal-overlay", role: "presentation" }, /* @__PURE__ */ import_react2.default.createElement(
+    "div",
+    {
+      className: "dsh-modal-mask",
+      onClick: () => {
+        s.settingsOpen = false;
+        forceRender();
+      }
+    }
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "div",
+    {
+      id: "settings-dialog",
+      className: "dsh-settings-panel",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "settings-modal-title"
+    },
+    /* @__PURE__ */ import_react2.default.createElement("nav", { className: "dsh-settings-nav", "aria-label": "\u8BBE\u7F6E\u5206\u533A" }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "settings-modal-title", className: "dsh-settings-nav-title" }, "\u8BBE\u7F6E"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-nav-list" }, [
+      ["general", "\u2699 \u901A\u7528\u8BBE\u7F6E"],
+      ["permissions", "\u{1F512} \u6743\u9650\u4E0E\u5B89\u5168"],
+      ["models", "\u26A1 \u6A21\u578B\u4E0E\u8FDE\u63A5"],
+      ["plugins", "\u{1F9E9} \u63D2\u4EF6\u4E0E\u80FD\u529B"]
+    ].map(([tabId, label]) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: tabId,
+        type: "button",
+        className: `dsh-settings-nav-cell${s.settingsTab === tabId ? " is-active" : ""}`,
+        onClick: () => openSettings(tabId)
+      },
+      label
+    )))),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-content" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, {
+      general: "\u901A\u7528\u4E0E\u5916\u89C2\u8BBE\u7F6E",
+      permissions: "\u6743\u9650\u6A21\u5F0F\u4E0E\u4F1A\u8BDD\u6388\u6743",
+      models: "\u6A21\u578B\u63D0\u4F9B\u65B9\u4E0E\u672C\u673A Runtime \u8FDE\u63A5",
+      plugins: "\u63D2\u4EF6\u7ED1\u5B9A\u4E0E CodeMode \u80FD\u529B\u76EE\u5F55"
+    }[s.settingsTab]), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "close-settings-button",
+        type: "button",
+        className: "dsh-modal-close",
+        "aria-label": "\u5173\u95ED\u8BBE\u7F6E",
+        onClick: () => {
+          s.settingsOpen = false;
+          forceRender();
+        }
+      },
+      "\u2715"
+    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-options" }, s.settingsTab === "general" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-appearance-group" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u5916\u89C2\u4E3B\u9898\uFF08Appearance\uFF09"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-theme-cube-row" }, [
+      ["light", "\u2600\uFE0F \u6D45\u8272\u6A21\u5F0F", "Light"],
+      ["dark", "\u{1F319} \u6DF1\u8272\u6A21\u5F0F", "Dark"],
+      ["system", "\u{1F4BB} \u8DDF\u968F\u7CFB\u7EDF", "System"]
+    ].map(([mode, title, sub]) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: mode,
+        type: "button",
+        className: `dsh-theme-cube${s.themeMode === mode ? " is-selected" : ""}`,
+        onClick: () => applyTheme(mode)
+      },
+      /* @__PURE__ */ import_react2.default.createElement("strong", null, title),
+      /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, sub)
+    )))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row-text" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F\uFF08Permission\uFF09"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-desc" }, "\u9009\u62E9\u65B0\u4F1A\u8BDD\u4E0E\u5F53\u524D\u5DE5\u4F5C\u533A\u7684\u6743\u9650\u7B56\u7565\uFF1BFull access \u9700\u98CE\u9669\u786E\u8BA4\u3002")), /* @__PURE__ */ import_react2.default.createElement(
+      "select",
+      {
+        "aria-label": "\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F",
+        className: "dsh-setting-select",
+        value: s.permissionPreset,
+        onChange: (e) => selectPermissionPreset(e.target.value)
+      },
+      PERMISSION_PRESETS.map((p) => /* @__PURE__ */ import_react2.default.createElement("option", { key: p.id, value: p.id }, `${p.label} (${p.enLabel})`))
+    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row-text" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u53D1\u9001\u5FEB\u6377\u952E\uFF08Enter \u952E\u884C\u4E3A\uFF09"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-desc" }, "\u8BBE\u7F6E\u8F93\u5165\u6846\u6309\u4E0B Enter \u65F6\u7684\u9ED8\u8BA4\u53D1\u9001\u65B9\u5F0F\u3002")), /* @__PURE__ */ import_react2.default.createElement(
+      "select",
+      {
+        "aria-label": "\u53D1\u9001\u5FEB\u6377\u952E",
+        className: "dsh-setting-select",
+        value: s.enterBehavior,
+        onChange: (e) => {
+          s.enterBehavior = e.target.value;
+          forceRender();
+        }
+      },
+      /* @__PURE__ */ import_react2.default.createElement("option", { value: "enter" }, "Enter \u76F4\u63A5\u53D1\u9001\uFF08Shift+Enter \u6362\u884C\uFF09"),
+      /* @__PURE__ */ import_react2.default.createElement("option", { value: "cmd-enter" }, "Cmd/Ctrl + Enter \u53D1\u9001\uFF08Enter \u6362\u884C\uFF09")
+    ))) : null, s.settingsTab === "permissions" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row-text" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u5F53\u524D\u6743\u9650\u6A21\u5F0F"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-desc" }, currentPresetObj.desc)), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-pills" }, PERMISSION_PRESETS.map((p) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: p.id,
+        type: "button",
+        className: `dsh-preset-pill${s.permissionPreset === p.id ? " is-active" : ""}`,
+        onClick: () => selectPermissionPreset(p.id)
+      },
+      p.label
+    )))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-block" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6388\u6743\u9879\uFF08`session.grants`\uFF09"), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "quiet",
+        onClick: () => trackAsync(refreshPermissions())
+      },
+      "\u21BB \u5237\u65B0"
+    )), !s.sessionGrants.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u6682\u65E0\u6309\u4EFB\u52A1\u8BB0\u4F4F\u7684\u6301\u4E45\u5316\u6388\u6743\u8BB0\u5F55\u3002") : s.sessionGrants.map((grant, idx) => {
+      const cap = grant.capability ?? grant.input?.capability ?? "\u672A\u77E5\u80FD\u529B";
+      const scopeStr = typeof grant.scope === "string" ? grant.scope : JSON.stringify(grant.scope ?? {});
+      const key = `${cap}:${scopeStr}`;
+      return /* @__PURE__ */ import_react2.default.createElement("div", { key: `${key}/${idx}`, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, CAPABILITY_LABELS[cap] ?? cap), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small mono muted" }, ` \xB7 ${clip(scopeStr, 120)}`)), /* @__PURE__ */ import_react2.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "secondary deny",
+          disabled: s.revokeBusyKey === key,
+          onClick: () => trackAsync(revokeGrant(grant))
+        },
+        "\u64A4\u9500\u6388\u6743"
+      ));
+    }))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-head" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-cred-dot configured" }), /* @__PURE__ */ import_react2.default.createElement("strong", null, "DeepSeek / Magpie OpenAI \u517C\u5BB9\u7F51\u5173"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-row-tag" }, "\u5DF2\u8FDE\u63A5")), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u9ED8\u8BA4\u6A21\u578B\uFF1A", /* @__PURE__ */ import_react2.default.createElement("code", null, "auto/deepseek-v4.1-flash"), " \xB7 \u7AEF\u70B9\uFF1A", /* @__PURE__ */ import_react2.default.createElement("code", null, "http://127.0.0.1:3425/v1")), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "API \u51ED\u636E\u7531\u672C\u673A Runtime \u8FDB\u7A0B\u6301\u6709\uFF0C\u4ECE\u4E0D\u5411\u6D4F\u89C8\u5668\u66B4\u9732\u6216\u56DE\u663E\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-head" }, /* @__PURE__ */ import_react2.default.createElement(
+      "span",
+      {
+        className: `dsh-cred-dot ${s.connectionStatus === "\u5DF2\u8FDE\u63A5\u672C\u673A" ? "configured" : "missing"}`
+      }
+    ), /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u672C\u673A Loopback \u7F51\u5173\u4E0E\u9879\u76EE Runtime"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-row-tag" }, `Core \u534F\u8BAE v${CORE_PROTOCOL_VERSION}`)), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-grants-list" }, projectSummaries.map((proj) => /* @__PURE__ */ import_react2.default.createElement("div", { key: proj.id, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, proj.label), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small mono muted" }, ` \xB7 ${proj.address}${proj.workspace ? ` \xB7 ${proj.workspace}` : ""}`)), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, proj.statusLabel)))))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react2.default.createElement("div", { key: group.title, className: "dsh-provider-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, group.title), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-row-tag" }, group.badge)), /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-items" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react2.default.createElement("div", { key: code, className: "capability-row" }, /* @__PURE__ */ import_react2.default.createElement("code", { className: "inline-code" }, code), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, desc))))))) : null))
+  )) : null, s.newProjectModalOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-modal-overlay", role: "presentation" }, /* @__PURE__ */ import_react2.default.createElement(
+    "div",
+    {
+      className: "dsh-modal-mask",
+      onClick: () => {
+        s.newProjectModalOpen = false;
+        forceRender();
+      }
+    }
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "div",
+    {
+      id: "new-project-dialog",
+      className: "dsh-dir-dialog",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "dir-dialog-title"
+    },
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-header" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "dir-dialog-title", className: "dsh-dir-title" }, "\u9009\u62E9\u5DE5\u4F5C\u533A\u76EE\u5F55 \xB7 \u65B0\u5F00\u9879\u76EE"), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "dsh-modal-close",
+        onClick: () => {
+          s.newProjectModalOpen = false;
+          forceRender();
+        }
+      },
+      "\u2715"
+    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-crumb-bar" }, s.browseParent ? /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "quiet dsh-up-btn",
+        onClick: () => void browseDirectory(s.browseParent)
+      },
+      "\u2B06 \u4E0A\u7EA7\u76EE\u5F55"
+    ) : null, /* @__PURE__ */ import_react2.default.createElement(
+      "input",
+      {
+        ref: modalProjectWsInputRef,
+        id: "modal-project-path",
+        type: "text",
+        className: "dsh-path-input mono",
+        placeholder: "\u8F93\u5165\u6216\u9009\u62E9\u672C\u5730\u7EDD\u5BF9\u76EE\u5F55\u8DEF\u5F84\uFF0C\u5982 /Volumes/ORICO/CAYW",
+        value: s.projectWorkspaceInput,
+        onChange: (e) => {
+          s.projectWorkspaceInput = e.target.value;
+          forceRender();
+        },
+        onKeyDown: (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void browseDirectory(s.projectWorkspaceInput);
+          }
+        }
+      }
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "secondary",
+        onClick: () => void browseDirectory(s.projectWorkspaceInput)
+      },
+      "\u8DF3\u8F6C\u76EE\u5F55"
+    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "quick-paths" }, QUICK_WORKSPACES.map(([p, lbl]) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: p,
+        type: "button",
+        className: "quiet path-chip",
+        onClick: () => {
+          s.projectWorkspaceInput = p;
+          s.projectLabelInput = lbl;
+          if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = p;
+          if (modalProjectLabelInputRef.current) modalProjectLabelInputRef.current.value = lbl;
+          void browseDirectory(p);
+        }
+      },
+      `\u{1F4C1} ${lbl}`
+    )))),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-content" }, s.browseLoading ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-column" }, !visibleBrowseEntries.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u5F53\u524D\u76EE\u5F55\u4E0B\u6CA1\u6709\u5B50\u6587\u4EF6\u5939\uFF0C\u53EF\u76F4\u63A5\u9009\u62E9\u5F53\u524D\u76EE\u5F55\u6216\u65B0\u5EFA\u6587\u4EF6\u5939\u3002") : visibleBrowseEntries.map((entry) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: entry.path,
+        type: "button",
+        className: `dsh-dir-row${s.projectWorkspaceInput === entry.path ? " is-selected" : ""}`,
+        onClick: () => {
+          s.projectWorkspaceInput = entry.path;
+          if (modalProjectWsInputRef.current) {
+            modalProjectWsInputRef.current.value = entry.path;
+          }
+          forceRender();
+        },
+        onDoubleClick: () => void browseDirectory(entry.path)
+      },
+      /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-dir-icon" }, "\u{1F4C1}"),
+      /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-dir-name" }, entry.name),
+      /* @__PURE__ */ import_react2.default.createElement(
+        "span",
+        {
+          className: "dsh-dir-enter",
+          onClick: (e) => {
+            e.stopPropagation();
+            void browseDirectory(entry.path);
+          }
+        },
+        "\u8FDB\u5165 \u203A"
+      )
+    ))), s.newFolderOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-new-folder-bar" }, /* @__PURE__ */ import_react2.default.createElement(
+      "input",
+      {
+        type: "text",
+        placeholder: "\u8F93\u5165\u65B0\u5EFA\u6587\u4EF6\u5939\u540D\u79F0",
+        value: s.newFolderName,
+        onChange: (e) => {
+          s.newFolderName = e.target.value;
+          forceRender();
+        }
+      }
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        onClick: () => {
+          if (s.newFolderName.trim()) {
+            void browseDirectory(s.browsePath, s.newFolderName.trim());
+            s.newFolderName = "";
+            s.newFolderOpen = false;
+          }
+        }
+      },
+      "\u521B\u5EFA\u5E76\u8FDB\u5165"
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "secondary",
+        onClick: () => {
+          s.newFolderOpen = false;
+          forceRender();
+        }
+      },
+      "\u53D6\u6D88"
+    )) : null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-label-bar" }, /* @__PURE__ */ import_react2.default.createElement(
+      "input",
+      {
+        ref: modalProjectLabelInputRef,
+        id: "modal-project-label",
+        type: "text",
+        maxLength: 160,
+        placeholder: "\u9879\u76EE\u663E\u793A\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u9ED8\u8BA4\u4F7F\u7528\u6587\u4EF6\u5939\u540D\uFF09",
+        value: s.projectLabelInput,
+        onChange: (e) => {
+          s.projectLabelInput = e.target.value;
+          forceRender();
+        }
+      }
+    )), s.browseError ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "error", role: "alert" }, s.browseError) : null),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-footer" }, /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "secondary",
+        onClick: () => {
+          s.newFolderOpen = !s.newFolderOpen;
+          forceRender();
+        }
+      },
+      "+ \u65B0\u5EFA\u6587\u4EF6\u5939"
+    ), /* @__PURE__ */ import_react2.default.createElement("label", { className: "small muted dsh-hidden-toggle" }, /* @__PURE__ */ import_react2.default.createElement(
+      "input",
+      {
+        type: "checkbox",
+        checked: s.browseShowHidden,
+        onChange: (e) => {
+          s.browseShowHidden = e.target.checked;
+          forceRender();
+        }
+      }
+    ), "\u663E\u793A\u9690\u85CF\u6587\u4EF6\u5939"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-footer-gap" }), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        type: "button",
+        className: "secondary",
+        onClick: () => {
+          s.newProjectModalOpen = false;
+          forceRender();
+        }
+      },
+      "\u53D6\u6D88"
+    ), /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        id: "confirm-new-project-btn",
+        type: "button",
+        disabled: s.addProjectBusy || !s.projectWorkspaceInput.trim(),
+        onClick: (e) => trackAsync(handleAddProject(e, true))
+      },
+      s.addProjectBusy ? "\u6B63\u5728\u542F\u52A8 Runtime\u2026" : "\u65B0\u5F00\u9879\u76EE\u5E76\u8FDB\u5165"
+    ))
+  )) : null, s.fullAccessConfirmOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-modal-overlay", role: "presentation" }, /* @__PURE__ */ import_react2.default.createElement(
+    "div",
+    {
+      className: "dsh-modal-mask",
+      onClick: () => {
+        s.fullAccessConfirmOpen = false;
+        forceRender();
+      }
+    }
+  ), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-confirm-dialog", role: "dialog", "aria-modal": "true" }, /* @__PURE__ */ import_react2.default.createElement("h3", null, "\u786E\u8BA4\u542F\u7528 Full access\uFF1F"), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u542F\u7528 Full access \u540E\uFF0Cagent \u5C06\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5E76\u4E14\u53EF\u4EE5\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF0C\u5305\u62EC\u654F\u611F\u64CD\u4F5C\u3001\u6587\u4EF6\u4FEE\u6539\u6216\u5916\u90E8\u547D\u4EE4\u3002\u4EC5\u5EFA\u8BAE\u5728\u4F60\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u4F7F\u7528\u3002"), /* @__PURE__ */ import_react2.default.createElement("label", { className: "confirm-label" }, /* @__PURE__ */ import_react2.default.createElement(
+    "input",
+    {
+      type: "checkbox",
+      checked: s.fullAccessAcknowledged,
+      onChange: (e) => {
+        s.fullAccessAcknowledged = e.target.checked;
+        forceRender();
+      }
+    }
+  ), "\u6211\u5DF2\u4E86\u89E3\u98CE\u9669\uFF0C\u5E76\u613F\u610F\u7EE7\u7EED"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dialog-actions" }, /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      className: "secondary",
+      onClick: () => {
+        s.fullAccessConfirmOpen = false;
+        forceRender();
+      }
+    },
+    "\u53D6\u6D88"
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "button",
+    {
+      type: "button",
+      disabled: !s.fullAccessAcknowledged,
+      onClick: confirmFullAccess
+    },
+    "\u542F\u7528 Full access"
+  )))) : null, /* @__PURE__ */ import_react2.default.createElement(
     "dialog",
     {
       ref: forkDialogRef,

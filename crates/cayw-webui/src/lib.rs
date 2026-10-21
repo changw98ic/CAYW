@@ -30,15 +30,19 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
     "projects.list",
+    "projects.browse",
     "projects.create",
     "projects.remove",
     "session.create",
     "session.list",
     "session.get",
     "session.events",
+    "session.grants",
+    "session.audit",
     "session.prompt",
     "session.cancel",
     "approval.decide",
+    "approval.revoke",
     "session.fork",
     "capabilities.list",
 ];
@@ -522,6 +526,9 @@ async fn rpc(
         let list = project_list_json(&state);
         return Json(json!({ "result": list })).into_response();
     }
+    if request.method == "projects.browse" {
+        return handle_projects_browse(&request.params);
+    }
     if request.method == "projects.create" {
         return handle_projects_create(&state, &request.params);
     }
@@ -737,7 +744,14 @@ fn handle_projects_create(state: &Gateway, params: &Value) -> Response {
         }
         None => derive_project_id(inferred_label, &projects),
     };
-    let ipc = projects[0].ipc.clone();
+    let default_ipc = projects[0].ipc.clone();
+    let ipc = match try_spawn_project_runtime(&id, workspace, &default_ipc.token) {
+        Ok(Some(spawned)) => spawned,
+        Ok(None) => default_ipc,
+        Err(msg) => {
+            return error_response(StatusCode::BAD_REQUEST, "invalid_params", &msg, false);
+        }
+    };
     let endpoint = match ProjectEndpoint::new(id, label, ipc)
         .and_then(|p| p.with_workspace(workspace.to_owned()))
     {
@@ -760,6 +774,187 @@ fn handle_projects_create(state: &Gateway, params: &Value) -> Response {
     });
     projects.push(endpoint);
     Json(json!({ "result": created })).into_response()
+}
+
+fn handle_projects_browse(params: &Value) -> Response {
+    let raw_path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let default_dir = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "/Volumes/ORICO".to_owned());
+    let base_str = raw_path.unwrap_or(&default_dir);
+    let mut target = std::path::PathBuf::from(base_str);
+    if !target.is_absolute() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "浏览路径必须是绝对路径",
+            false,
+        );
+    }
+    if let Some(create_name) = params
+        .get("create_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if create_name == "."
+            || create_name == ".."
+            || create_name.contains('/')
+            || create_name.contains('\\')
+            || create_name.chars().any(char::is_control)
+        {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_params",
+                "新建文件夹名称不能包含路径分隔符或控制字符",
+                false,
+            );
+        }
+        let new_dir = target.join(create_name);
+        if let Err(e) = std::fs::create_dir_all(&new_dir) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_params",
+                &format!("无法创建文件夹：{e}"),
+                false,
+            );
+        }
+        target = new_dir;
+    }
+    let read_dir = match std::fs::read_dir(&target) {
+        Ok(rd) => rd,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_params",
+                &format!("无法读取目录 {}：{e}", target.display()),
+                false,
+            );
+        }
+    };
+    let mut dirs: Vec<(bool, String, String)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let hidden = name.starts_with('.');
+        let full = entry.path().to_string_lossy().into_owned();
+        dirs.push((hidden, name, full));
+    }
+    dirs.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
+    let entries: Vec<Value> = dirs
+        .into_iter()
+        .take(200)
+        .map(|(hidden, name, path)| {
+            json!({
+                "name": name,
+                "path": path,
+                "hidden": hidden,
+            })
+        })
+        .collect();
+    let parent = target
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    Json(json!({
+        "result": {
+            "path": target.to_string_lossy(),
+            "parent": parent,
+            "entries": entries,
+        }
+    }))
+    .into_response()
+}
+
+fn try_spawn_project_runtime(
+    id: &str,
+    workspace: &str,
+    token: &str,
+) -> Result<Option<IpcEndpoint>, String> {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let Ok(runtime_bin) = std::env::var("CAYW_RUNTIME_BIN") else {
+        return Ok(None);
+    };
+    if runtime_bin.trim().is_empty() {
+        return Ok(None);
+    }
+    let ws_path = std::path::Path::new(workspace);
+    if !ws_path.is_absolute() {
+        return Err("新开项目请输入绝对目录路径（例如 /Volumes/... 或 /tmp/...）".into());
+    }
+    std::fs::create_dir_all(ws_path)
+        .map_err(|e| format!("无法创建或访问项目目录 {workspace}：{e}"))?;
+    let db_dir = std::env::var("CAYW_RUNTIME_DB_DIR")
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    std::fs::create_dir_all(&db_dir).map_err(|e| format!("无法创建运行时数据目录：{e}"))?;
+    let db_path = std::path::Path::new(&db_dir).join(format!("cayw-project-{id}.db"));
+
+    let mut cmd = Command::new(runtime_bin.trim());
+    cmd.arg("serve")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--workspace")
+        .arg(ws_path)
+        .arg("--listen")
+        .arg("127.0.0.1:0")
+        .arg("--token-env")
+        .arg("CAYW_IPC_TOKEN")
+        .env("CAYW_IPC_TOKEN", token)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if std::env::var("CAYW_PROVIDER_BASE_URL").is_err() {
+        cmd.arg("--offline");
+    } else if std::env::var("CAYW_PROVIDER_API_KEY").is_err() {
+        let fallback_key = std::env::var("MAGPIE_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "magpie-local".to_owned());
+        cmd.env("CAYW_PROVIDER_API_KEY", fallback_key);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("无法启动项目专属 Runtime：{e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取项目 Runtime 启动端口".to_owned())?;
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("读取项目 Runtime 端口失败：{e}"))?;
+    let parsed: Value = serde_json::from_str(line.trim())
+        .map_err(|_| "项目 Runtime 启动输出格式无效".to_owned())?;
+    let addr_str = parsed
+        .get("listening")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "项目 Runtime 未返回监听地址".to_owned())?;
+    let addr: SocketAddr = addr_str
+        .parse()
+        .map_err(|_| "项目 Runtime 监听地址无效".to_owned())?;
+    let endpoint =
+        IpcEndpoint::new(addr, token.to_owned()).map_err(|e| format!("项目 IPC 配置无效：{e}"))?;
+    std::mem::forget(child);
+    Ok(Some(endpoint))
 }
 
 fn handle_projects_remove(state: &Gateway, params: &Value) -> Response {
@@ -804,7 +999,12 @@ fn handle_projects_remove(state: &Gateway, params: &Value) -> Response {
 fn side_effecting(method: &str) -> bool {
     matches!(
         method,
-        "session.create" | "session.prompt" | "session.cancel" | "approval.decide" | "session.fork"
+        "session.create"
+            | "session.prompt"
+            | "session.cancel"
+            | "approval.decide"
+            | "approval.revoke"
+            | "session.fork"
     )
 }
 

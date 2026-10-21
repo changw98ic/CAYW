@@ -65,6 +65,27 @@ const ROLE_LABELS = {
   custom: '宿主记录',
 };
 
+const PERMISSION_PRESETS = [
+  {
+    id: 'standard',
+    label: '按需审批',
+    enLabel: 'Standard',
+    desc: '只读操作直接执行；文件写入、修改、构建与外部工具需每次或按任务明确授权。',
+  },
+  {
+    id: 'workspace-write',
+    label: '工作区读写',
+    enLabel: 'Workspace Write',
+    desc: '当前工作区内文件读写优先使用任务授权，跨目录或外部命令仍需审批。',
+  },
+  {
+    id: 'danger-full-access',
+    label: '完全访问',
+    enLabel: 'Full access',
+    desc: '减少确认步骤，允许直接执行更多操作；仅建议在完全信任当前任务时启用。',
+  },
+];
+
 const STARTER_PROMPTS = [
   {
     title: '📄 读取工作区说明',
@@ -145,6 +166,13 @@ const OPTIONAL_PLUGIN_CATALOG = [
   },
 ];
 
+const QUICK_WORKSPACES = [
+  ['/Volumes/ORICO/CAYW', 'CAYW 主仓库'],
+  ['/Volumes/ORICO/CAYW-tui', 'CAYW TUI 分支'],
+  ['/Volumes/ORICO/CAYW-webui', 'CAYW WebUI 分支'],
+  ['/tmp/cayw-demo-project', '新建演示工作区 (/tmp)'],
+];
+
 function renderInlineTokens(text) {
   const parts = String(text ?? '').split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
   return parts.map((part, idx) => {
@@ -166,16 +194,23 @@ function FormattedBody({ text }) {
   const raw = String(text ?? '');
   const blocks = raw.split(/(```[\s\S]*?```)/g);
   return (
-    <div className="body">
+    <div className="body dsh-markdown">
       {blocks.map((block, bIdx) => {
         if (block.startsWith('```') && block.endsWith('```') && block.length >= 6) {
+          const firstLineMatch = block.slice(3, -3).match(/^([a-zA-Z0-9_-]+)\n/);
+          const lang = firstLineMatch ? firstLineMatch[1] : 'code';
           const inner = block
             .slice(3, -3)
             .replace(/^[a-zA-Z0-9_-]+\n/, '');
           return (
-            <pre key={bIdx} className="code-block">
-              <code>{inner}</code>
-            </pre>
+            <div key={bIdx} className="dsh-codeblock">
+              <div className="dsh-codeblock-banner">
+                <span className="dsh-codeblock-lang">{lang}</span>
+              </div>
+              <pre className="code-block">
+                <code>{inner}</code>
+              </pre>
+            </div>
           );
         }
         return <React.Fragment key={bIdx}>{renderInlineTokens(block)}</React.Fragment>;
@@ -282,6 +317,7 @@ export function CAYWApp({ env } = {}) {
       refreshSessionsBusy: false,
       refreshProjectsBusy: false,
       refreshPluginsBusy: false,
+      refreshPermissionsBusy: false,
       addProjectBusy: false,
       forkBusy: false,
       forkOpen: false,
@@ -296,6 +332,7 @@ export function CAYWApp({ env } = {}) {
       pollStatus: '',
       projectsStatus: '',
       pluginsStatus: '',
+      permissionsStatus: '',
       globalError: '',
       activePage: 'conversation',
       activeProject: null,
@@ -312,6 +349,32 @@ export function CAYWApp({ env } = {}) {
       cachedCapabilities: [],
       sessionTitleOverrides: new Map(),
       sessionPickerOpen: true,
+      sessionSearchQuery: '',
+      // DSH Settings Modal state
+      settingsOpen: false,
+      settingsTab: 'general',
+      themeMode: 'dark',
+      enterBehavior: 'enter',
+      // DSH Permission Preset & Grants state
+      permissionPreset: 'standard',
+      permissionPopoverOpen: false,
+      fullAccessConfirmOpen: false,
+      fullAccessAcknowledged: false,
+      pendingPresetTarget: null,
+      sessionGrants: [],
+      sessionAudit: [],
+      revokeBusyKey: null,
+      // DSH New Project / Directory Picker Modal state
+      newProjectModalOpen: false,
+      browsePath: '/Volumes/ORICO',
+      browseParent: '/Volumes',
+      browseEntries: [],
+      browseSelectedPath: '',
+      browseShowHidden: false,
+      browseLoading: false,
+      browseError: '',
+      newFolderOpen: false,
+      newFolderName: '',
     };
   }
   const s = stateRef.current;
@@ -322,6 +385,20 @@ export function CAYWApp({ env } = {}) {
   const forkConfirmInputRef = useRef(null);
   const projectWsInputRef = useRef(null);
   const projectLabelInputRef = useRef(null);
+  const modalProjectWsInputRef = useRef(null);
+  const modalProjectLabelInputRef = useRef(null);
+
+  const applyTheme = (mode, shouldRender = true) => {
+    s.themeMode = mode;
+    if (typeof document !== 'undefined' && document.documentElement) {
+      let resolved = mode;
+      if (mode === 'system' && typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+        resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.dataset.theme = resolved;
+    }
+    if (shouldRender) forceRender();
+  };
 
   const currentProjectId = () => s.activeProject ?? s.projects[0]?.id ?? 'default';
   const activeView = () => (s.selected ? s.views.get(s.selected) : undefined);
@@ -448,7 +525,6 @@ export function CAYWApp({ env } = {}) {
           'invalid_response',
           '网关响应缺少 result；当前请求不会自动重发。',
           !readMethods.has(method),
-          response.status,
         );
       }
       return payload.result;
@@ -594,6 +670,100 @@ export function CAYWApp({ env } = {}) {
         forceRender();
       }
     }
+  };
+
+  const refreshPermissions = async (sessionId = s.selected) => {
+    if (!sessionId) {
+      s.sessionGrants = [];
+      s.sessionAudit = [];
+      s.permissionsStatus = '请先选择或新建一个会话以查看授权记录。';
+      forceRender();
+      return;
+    }
+    const login = s.loginGeneration;
+    s.refreshPermissionsBusy = true;
+    s.permissionsStatus = '正在读取会话授权与审计记录…';
+    forceRender();
+    try {
+      const [grantsRes, auditRes] = await Promise.all([
+        rpc('session.grants', { session_id: sessionId }).catch(() => []),
+        rpc('session.audit', { session_id: sessionId }).catch(() => []),
+      ]);
+      if (login !== s.loginGeneration) return;
+      s.sessionGrants = Array.isArray(grantsRes)
+        ? grantsRes
+        : Array.isArray(grantsRes?.grants)
+          ? grantsRes.grants
+          : [];
+      s.sessionAudit = Array.isArray(auditRes)
+        ? auditRes
+        : Array.isArray(auditRes?.records)
+          ? auditRes.records
+          : Array.isArray(auditRes?.audit)
+            ? auditRes.audit
+            : [];
+      s.permissionsStatus = `当前会话共有 ${s.sessionGrants.length} 项生效授权 · ${s.sessionAudit.length} 条审计记录`;
+      forceRender();
+    } catch (error) {
+      if (login === s.loginGeneration) {
+        s.permissionsStatus = errorText(error);
+        forceRender();
+      }
+    } finally {
+      s.refreshPermissionsBusy = false;
+      forceRender();
+    }
+  };
+
+  const revokeGrant = async grant => {
+    const sessionId = s.selected;
+    if (!sessionId || s.revokeBusyKey) return;
+    const capability = grant?.capability ?? grant?.input?.capability ?? '';
+    const scope = grant?.scope ?? grant?.input?.scope ?? '{}';
+    const key = `${capability}:${scope}`;
+    const login = s.loginGeneration;
+    s.revokeBusyKey = key;
+    report(null);
+    forceRender();
+    try {
+      await writeRpc(sessionId, 'approval.revoke', {
+        session_id: sessionId,
+        capability,
+        scope: typeof scope === 'string' ? scope : JSON.stringify(scope),
+        ...(grant?.task_id ? { task_id: grant.task_id } : {}),
+      });
+      if (login !== s.loginGeneration) return;
+      await refreshPermissions(sessionId);
+      await freshSnapshot(sessionId, login);
+    } catch (error) {
+      if (login === s.loginGeneration) report(error);
+    } finally {
+      s.revokeBusyKey = null;
+      forceRender();
+    }
+  };
+
+  const selectPermissionPreset = presetId => {
+    if (presetId === 'danger-full-access' && s.permissionPreset !== 'danger-full-access') {
+      s.pendingPresetTarget = presetId;
+      s.fullAccessAcknowledged = false;
+      s.fullAccessConfirmOpen = true;
+      s.permissionPopoverOpen = false;
+      forceRender();
+      return;
+    }
+    s.permissionPreset = presetId;
+    s.permissionPopoverOpen = false;
+    forceRender();
+  };
+
+  const confirmFullAccess = () => {
+    if (!s.fullAccessAcknowledged) return;
+    s.permissionPreset = s.pendingPresetTarget || 'danger-full-access';
+    s.fullAccessConfirmOpen = false;
+    s.fullAccessAcknowledged = false;
+    s.pendingPresetTarget = null;
+    forceRender();
   };
 
   const selectSession = async id => {
@@ -844,6 +1014,43 @@ export function CAYWApp({ env } = {}) {
     }
   };
 
+  const browseDirectory = async (path = s.browsePath, createDir = '') => {
+    s.browseLoading = true;
+    s.browseError = '';
+    forceRender();
+    try {
+      const res = await rpc('projects.browse', {
+        path,
+        ...(createDir ? { create_dir: createDir } : {}),
+      });
+      if (object(res)) {
+        s.browsePath = res.path || path;
+        s.browseParent = res.parent || '';
+        s.browseEntries = Array.isArray(res.entries) ? res.entries : [];
+        s.projectWorkspaceInput = s.browsePath;
+        if (projectWsInputRef.current) projectWsInputRef.current.value = s.browsePath;
+        if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = s.browsePath;
+      }
+    } catch (error) {
+      s.browseError = errorText(error);
+    } finally {
+      s.browseLoading = false;
+      forceRender();
+    }
+  };
+
+  const openNewProjectModal = () => {
+    s.newProjectModalOpen = true;
+    s.newFolderOpen = false;
+    s.newFolderName = '';
+    s.browseError = '';
+    if (!s.projectWorkspaceInput) {
+      s.projectWorkspaceInput = s.browsePath || '/Volumes/ORICO';
+    }
+    forceRender();
+    void browseDirectory(s.projectWorkspaceInput || '/Volumes/ORICO');
+  };
+
   const switchPage = page => {
     s.activePage = page;
     forceRender();
@@ -856,6 +1063,22 @@ export function CAYWApp({ env } = {}) {
       if (!s.cachedCapabilities.length) {
         void refreshPlugins();
       }
+    }
+    if (page === 'permissions') {
+      void refreshPermissions();
+    }
+  };
+
+  const openSettings = (tab = 'general') => {
+    s.settingsTab = tab;
+    s.settingsOpen = true;
+    forceRender();
+    if (tab === 'permissions') {
+      void refreshPermissions();
+    } else if (tab === 'plugins' && !s.cachedCapabilities.length) {
+      void refreshPlugins();
+    } else if (tab === 'models' && s.projects.length === 1 && s.projects[0]?.address === '本机 IPC') {
+      void refreshProjects();
     }
   };
 
@@ -929,30 +1152,48 @@ export function CAYWApp({ env } = {}) {
     }
   };
 
-  const handleAddProject = async event => {
-    event.preventDefault();
+  const handleAddProject = async (event, andEnter = false) => {
+    event?.preventDefault?.();
     const ws = (
-      projectWsInputRef.current?.value ?? s.projectWorkspaceInput
+      modalProjectWsInputRef.current?.value ||
+      projectWsInputRef.current?.value ||
+      s.projectWorkspaceInput
     ).trim();
     const label = (
-      projectLabelInputRef.current?.value ?? s.projectLabelInput
+      modalProjectLabelInputRef.current?.value ||
+      projectLabelInputRef.current?.value ||
+      s.projectLabelInput
     ).trim();
     if (!ws || s.addProjectBusy) return;
     const login = s.loginGeneration;
     s.addProjectBusy = true;
+    s.browseError = '';
     report(null);
     forceRender();
     try {
-      await rpc('projects.create', label ? { workspace: ws, label } : { workspace: ws });
+      const created = await rpc(
+        'projects.create',
+        label ? { workspace: ws, label } : { workspace: ws },
+      );
       if (login !== s.loginGeneration) return;
       s.projectWorkspaceInput = '';
       s.projectLabelInput = '';
       if (projectWsInputRef.current) projectWsInputRef.current.value = '';
       if (projectLabelInputRef.current) projectLabelInputRef.current.value = '';
+      if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = '';
+      if (modalProjectLabelInputRef.current) modalProjectLabelInputRef.current.value = '';
+      s.newProjectModalOpen = false;
       await refreshProjects();
+      if (andEnter && created?.id) {
+        await selectProject(created.id);
+        if (!s.sessions.length) {
+          await createNewSession();
+        }
+      }
     } catch (error) {
       if (login === s.loginGeneration) {
         s.projectsStatus = errorText(error);
+        s.browseError = errorText(error);
         report(error);
         forceRender();
       }
@@ -1064,87 +1305,47 @@ export function CAYWApp({ env } = {}) {
     if (forkLabelInputRef.current) forkLabelInputRef.current.value = defaultLabel;
     if (forkConfirmInputRef.current) forkConfirmInputRef.current.checked = false;
     forceRender();
-    if (forkDialogRef.current?.showModal && !forkDialogRef.current.open) {
-      try {
-        forkDialogRef.current.showModal();
-      } catch {
-        forkDialogRef.current.open = true;
-      }
-    }
+    if (forkDialogRef.current?.showModal) forkDialogRef.current.showModal();
   };
 
   const closeForkDialog = () => {
     s.forkOpen = false;
-    if (forkDialogRef.current?.close) {
-      try {
-        forkDialogRef.current.close();
-      } catch {
-        forkDialogRef.current.open = false;
-      }
-    }
+    if (forkDialogRef.current?.close) forkDialogRef.current.close();
     forceRender();
   };
 
   const handleForkSubmit = async event => {
-    event?.preventDefault?.();
+    event.preventDefault();
+    const view = activeView();
+    const label = (forkLabelInputRef.current?.value ?? s.forkLabel).trim();
     const confirmed = Boolean(
       forkConfirmInputRef.current?.checked ?? s.forkConfirm,
     );
-    const labelVal = (
-      forkLabelInputRef.current?.value ?? s.forkLabel
-    ).trim();
-    s.forkConfirm = confirmed;
-    if (labelVal) s.forkLabel = labelVal;
-    if (!confirmed || s.forkBusy || !s.selected || !canFork(activeView())) return;
-    const id = s.selected;
+    if (!s.selected || !canFork(view) || !confirmed || !label) {
+      s.forkError = '请填写新会话名称，并勾选确认。';
+      forceRender();
+      return;
+    }
+    const sourceId = s.selected;
     const login = s.loginGeneration;
     s.forkBusy = true;
     s.forkError = '';
     forceRender();
     try {
-      const snapshot = await writeRpc(id, 'session.fork', {
-        session_id: id,
-        label: labelVal,
+      const snapshot = await writeRpc(sourceId, 'session.fork', {
+        session_id: sourceId,
+        label: label.slice(0, 160),
         confirm: true,
         mode: 'chat',
       });
-      if (
-        typeof snapshot?.id !== 'string' ||
-        !snapshot.id ||
-        snapshot.id === id
-      ) {
-        throw new RpcError(
-          'invalid_response',
-          '新会话结果不完整，请由宿主核对；不要再次 Fork。',
-          true,
-        );
-      }
-      const forkView = applySnapshot(createView(snapshot.id), snapshot, true);
-      const source = s.views.get(id);
-      if (source && login === s.loginGeneration) {
-        rememberView({
-          ...source,
-          writes: source.writes.filter(write => write.method !== 'session.fork'),
-        });
-      }
       if (login !== s.loginGeneration) return;
-      rememberView(forkView);
+      const forked = applySnapshot(createView(snapshot.id), snapshot, true);
+      rememberView(forked);
       updateSessionSummary(snapshot);
       closeForkDialog();
       await selectSession(snapshot.id);
     } catch (error) {
       if (login === s.loginGeneration) {
-        const source = s.views.get(id);
-        if (source) {
-          rememberView({
-            ...source,
-            writes: source.writes.map(write =>
-              write.method === 'session.fork'
-                ? { ...write, phase: 'uncertain' }
-                : write,
-            ),
-          });
-        }
         s.forkError = errorText(error);
         forceRender();
       }
@@ -1155,8 +1356,10 @@ export function CAYWApp({ env } = {}) {
   };
 
   useEffect(() => {
-    const initPromise = trackAsync(connectLocal());
-    env?.onInitialConnect?.(initPromise);
+    applyTheme(s.themeMode, false);
+    const p = trackAsync(connectLocal());
+    if (env?.onInitialConnect) env.onInitialConnect(p);
+
     const onVisibility = () => {
       if (!document.hidden && s.selected) schedulePoll(0);
     };
@@ -1167,15 +1370,31 @@ export function CAYWApp({ env } = {}) {
       clearTimer(s.timer);
       for (const controller of s.controllers) controller.abort();
     };
+    const onKeyDown = e => {
+      if (e.key === 'Escape') {
+        if (s.settingsOpen) {
+          s.settingsOpen = false;
+          forceRender();
+        } else if (s.newProjectModalOpen) {
+          s.newProjectModalOpen = false;
+          forceRender();
+        } else if (s.permissionPopoverOpen) {
+          s.permissionPopoverOpen = false;
+          forceRender();
+        }
+      }
+    };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('online', onOnline);
     window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('keydown', onKeyDown);
     return () => {
       clearTimer(s.timer);
       for (const controller of s.controllers) controller.abort();
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('online', onOnline);
       window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('keydown', onKeyDown);
     };
   }, []);
 
@@ -1284,28 +1503,61 @@ export function CAYWApp({ env } = {}) {
       ? `已识别 ${pluginItems.length} 个插件绑定或能力组`
       : '暂无已绑定的插件记录');
 
+  const currentPresetObj =
+    PERMISSION_PRESETS.find(p => p.id === s.permissionPreset) ??
+    PERMISSION_PRESETS[0];
+
+  const filteredSessions = s.sessionSearchQuery.trim()
+    ? s.sessions.filter(sess =>
+        displayLabel(sess)
+          .toLowerCase()
+          .includes(s.sessionSearchQuery.trim().toLowerCase()),
+      )
+    : s.sessions;
+
+  const visibleBrowseEntries = s.browseShowHidden
+    ? s.browseEntries
+    : s.browseEntries.filter(e => !e.hidden);
+
   return (
-    <>
-      <div className="backdrop" aria-hidden="true">
-        <div className="backdrop-grid" />
-        <div className="backdrop-glow glow-rust" />
-        <div className="backdrop-glow glow-luau" />
-        <div className="backdrop-noise" />
-      </div>
+    <div className="dsh-app-shell">
       <a className="skip" href="#conversation">
         跳到会话内容
       </a>
-      <header className="topbar">
+      <header className="topbar dsh-topbar">
         <div className="identity">
           <span className="mark" aria-hidden="true">
             C
           </span>
           <div>
             <strong>CAYW</strong>
-            <span className="muted">本机会话</span>
+            <span className="dsh-build-badge">v3</span>
+            <span className="muted">DeepSeek Harness 风格工作台</span>
           </div>
         </div>
         <div className="connection">
+          <button
+            type="button"
+            className="dsh-top-pill"
+            onClick={() => openNewProjectModal()}
+          >
+            📁 + 新开项目
+          </button>
+          <button
+            type="button"
+            className="dsh-top-pill"
+            onClick={() => switchPage('permissions')}
+          >
+            {`🔒 权限：${currentPresetObj.label}${approvals.length ? ` (${approvals.length} 待审)` : ''}`}
+          </button>
+          <button
+            type="button"
+            className="dsh-top-pill"
+            onClick={() => openSettings('general')}
+          >
+            ⚙ 设置
+          </button>
+          <span className="dsh-conn-dot" data-connected={String(s.connectionStatus === '已连接本机')} />
           <span id="connection-status" role="status">
             {s.connectionStatus}
           </span>
@@ -1322,9 +1574,32 @@ export function CAYWApp({ env } = {}) {
         </div>
       </header>
 
-      <div id="workspace" className="workspace">
-        <aside className="sidebar" aria-labelledby="sessions-heading">
-          <nav className="page-nav" aria-label="界面视图">
+      <div id="workspace" className="workspace dsh-frame">
+        <aside className="sidebar dsh-sidebar" aria-labelledby="sessions-heading">
+          <div className="dsh-sidebar-primary-actions">
+            <button
+              ref={bind({ click: () => trackAsync(createNewSession()) })}
+              id="create-button"
+              className="dsh-new-session-btn create-btn"
+              type="button"
+              aria-label="新建会话"
+              disabled={s.createBusy}
+              onClick={() => trackAsync(createNewSession())}
+            >
+              <span>{s.createBusy ? '创建中…' : '+ 新建会话'}</span>
+            </button>
+            <button
+              id="open-new-project-btn"
+              className="dsh-new-project-btn secondary"
+              type="button"
+              title="选择本地目录并新开项目工作区"
+              onClick={() => openNewProjectModal()}
+            >
+              📁 新开项目
+            </button>
+          </div>
+
+          <nav className="page-nav dsh-nav-segmented" aria-label="界面视图">
             <button
               ref={bind({ click: () => switchPage('conversation') })}
               id="nav-conversation"
@@ -1333,7 +1608,7 @@ export function CAYWApp({ env } = {}) {
               aria-current={String(s.activePage === 'conversation')}
               onClick={() => switchPage('conversation')}
             >
-              会话
+              对话
             </button>
             <button
               ref={bind({ click: () => switchPage('projects') })}
@@ -1343,7 +1618,17 @@ export function CAYWApp({ env } = {}) {
               aria-current={String(s.activePage === 'projects')}
               onClick={() => switchPage('projects')}
             >
-              项目空间
+              项目
+            </button>
+            <button
+              ref={bind({ click: () => switchPage('permissions') })}
+              id="nav-permissions"
+              className="page-tab"
+              type="button"
+              aria-current={String(s.activePage === 'permissions')}
+              onClick={() => switchPage('permissions')}
+            >
+              {`权限${approvals.length ? `(${approvals.length})` : ''}`}
             </button>
             <button
               ref={bind({ click: () => switchPage('plugins') })}
@@ -1353,47 +1638,57 @@ export function CAYWApp({ env } = {}) {
               aria-current={String(s.activePage === 'plugins')}
               onClick={() => switchPage('plugins')}
             >
-              插件管理
+              插件
             </button>
           </nav>
 
-          <SpotlightCard
-            as="button"
-            id="current-workspace-btn"
-            className="workspace-switcher"
-            type="button"
-            handlers={{ click: () => switchPage('projects') }}
-            data-tip={
-              currentProjectSummary?.workspace
-                ? `当前目录：${currentProjectSummary.workspace}（点击管理项目空间）`
-                : `点击切换或添加本地项目空间（${currentProjectSummary?.address ?? '本机 IPC'}）`
-            }
-            onClick={() => switchPage('projects')}
-          >
-            <span className="small muted">当前项目空间</span>
-            <strong id="current-workspace-label">
-              {currentProjectSummary?.label ?? '默认项目空间'}
-            </strong>
-          </SpotlightCard>
+          <div className="dsh-workspace-box">
+            <SpotlightCard
+              as="button"
+              id="current-workspace-btn"
+              className="workspace-switcher dsh-workspace-pill"
+              type="button"
+              handlers={{ click: () => switchPage('projects') }}
+              data-tip={
+                currentProjectSummary?.workspace
+                  ? `当前目录：${currentProjectSummary.workspace}（点击切换或管理项目空间）`
+                  : `点击切换或新开本地项目空间（${currentProjectSummary?.address ?? '本机 IPC'}）`
+              }
+              onClick={() => switchPage('projects')}
+            >
+              <div className="dsh-workspace-pill-top">
+                <span className="small muted">📁 当前工作区</span>
+                <span className="dsh-workspace-switch-hint">切换 ▾</span>
+              </div>
+              <strong id="current-workspace-label">
+                {currentProjectSummary?.label ?? '默认项目空间'}
+              </strong>
+              {currentProjectSummary?.workspace ? (
+                <span className="dsh-workspace-path mono">
+                  {currentProjectSummary.workspace}
+                </span>
+              ) : null}
+            </SpotlightCard>
+          </div>
 
           <details
             id="session-picker"
-            className="session-picker"
+            className="session-picker dsh-session-browser"
             open={s.sessionPickerOpen}
             onToggle={e => {
               s.sessionPickerOpen = e.currentTarget.open;
             }}
           >
             <summary className="session-picker-summary">
-              <span>会话</span>
+              <span>工作区会话</span>
               <span id="session-picker-label" className="muted">
                 {clip(snapshot ? displayLabel(snapshot) : '选择或新建', 60)}
               </span>
             </summary>
             <div className="session-picker-content">
-              <div className="section-heading">
+              <div className="section-heading dsh-section-header">
                 <div className="title-with-hint">
-                  <h2 id="sessions-heading">会话</h2>
+                  <h2 id="sessions-heading">会话列表</h2>
                   <HintPopover ariaLabel="会话同步说明">
                     对话保存在本机。断线后从已消费游标继续接收结果，消息不会自动重发。
                   </HintPopover>
@@ -1402,42 +1697,50 @@ export function CAYWApp({ env } = {}) {
                   <button
                     ref={bind({ click: () => trackAsync(refreshSessions()) })}
                     id="refresh-sessions"
-                    className="quiet"
+                    className="quiet dsh-icon-btn"
                     type="button"
+                    title="刷新会话列表"
                     disabled={s.refreshSessionsBusy}
                     onClick={() => trackAsync(refreshSessions())}
                   >
-                    刷新
-                  </button>
-                  <button
-                    ref={bind({ click: () => trackAsync(createNewSession()) })}
-                    id="create-button"
-                    className="create-btn"
-                    type="button"
-                    aria-label="新建会话"
-                    disabled={s.createBusy}
-                    onClick={() => trackAsync(createNewSession())}
-                  >
-                    {s.createBusy ? '创建中…' : '+ 新建会话'}
+                    ↻ 刷新
                   </button>
                 </div>
               </div>
+
+              <div className="dsh-search-bar">
+                <input
+                  type="search"
+                  className="dsh-search-input"
+                  placeholder="搜索会话…"
+                  aria-label="搜索会话"
+                  value={s.sessionSearchQuery}
+                  onChange={e => {
+                    s.sessionSearchQuery = e.target.value;
+                    forceRender();
+                  }}
+                />
+              </div>
+
               <p id="list-status" className="small muted" role="status">
                 {s.listStatus}
               </p>
-              <nav id="session-list" className="session-list" aria-label="选择会话">
-                {!s.sessions.length ? (
-                  <p className="small muted">
-                    暂无会话，点击上方“+ 新建会话”即可开始。
+              <nav id="session-list" className="session-list dsh-tree-list" aria-label="选择会话">
+                {!filteredSessions.length ? (
+                  <p className="small muted dsh-empty-note">
+                    {s.sessionSearchQuery.trim()
+                      ? '无匹配会话'
+                      : '暂无会话，点击上方“+ 新建会话”即可开始。'}
                   </p>
                 ) : (
-                  s.sessions.map(session => {
+                  filteredSessions.map(session => {
                     const shortId = String(session.id ?? '').slice(0, 8);
+                    const sState = stateName(session);
                     return (
                       <SpotlightCard
                         as="button"
                         key={session.id}
-                        className="session-item"
+                        className="session-item dsh-session-row"
                         type="button"
                         aria-current={String(session.id === s.selected)}
                         handlers={{
@@ -1445,7 +1748,10 @@ export function CAYWApp({ env } = {}) {
                         }}
                         onClick={() => trackAsync(selectSession(session.id))}
                       >
-                        <strong>{displayLabel(session)}</strong>
+                        <div className="dsh-session-row-main">
+                          <span className={`dsh-status-dot dot-${sState}`} />
+                          <strong>{displayLabel(session)}</strong>
+                        </div>
                         <span>
                           {`${stateLabel(session, s.views.get(session.id))} · ${shortId}`}
                         </span>
@@ -1456,14 +1762,34 @@ export function CAYWApp({ env } = {}) {
               </nav>
             </div>
           </details>
+
+          <div className="dsh-sidebar-footer">
+            <button
+              id="open-settings-button"
+              type="button"
+              className="dsh-settings-trigger"
+              onClick={() => openSettings('general')}
+            >
+              <span className="dsh-settings-gear">⚙</span>
+              <span className="dsh-settings-label">设置与偏好</span>
+              <span className="dsh-settings-badge">{currentPresetObj.label}</span>
+            </button>
+          </div>
         </aside>
 
-        <main id="conversation" className="conversation" tabIndex={-1}>
-          <div id="conversation-view" hidden={s.activePage !== 'conversation'}>
-            <div className="conversation-heading">
-              <div>
-                <ShinyText>工作空间</ShinyText>
-                <GradientText id="session-title">
+        <main id="conversation" className="conversation dsh-center-col" tabIndex={-1}>
+          <div id="conversation-view" className="dsh-chat-surface" hidden={s.activePage !== 'conversation'}>
+            <div className="conversation-heading dsh-chat-header">
+              <div className="dsh-crumbs">
+                <button
+                  type="button"
+                  className="dsh-crumb-btn"
+                  onClick={() => switchPage('projects')}
+                >
+                  {`📁 ${currentProjectSummary?.label ?? '默认项目空间'}`}
+                </button>
+                <span className="dsh-crumb-sep">/</span>
+                <GradientText id="session-title" className="dsh-session-title">
                   {snapshot
                     ? displayLabel(snapshot)
                     : s.selected
@@ -1527,106 +1853,14 @@ export function CAYWApp({ env } = {}) {
               </div>
             </SpotlightCard>
 
-            <section
-              id="approvals"
-              className="approval-section"
-              aria-label="待审批请求"
-              hidden={!approvals.length}
-            >
-              {approvals.slice(0, 30).map((approval, idx) => {
-                const id = approval.id ?? approval.approval_id;
-                const input = approval.input ?? {};
-                const capability = input.capability ?? '';
-                let scope = null;
-                try {
-                  scope = JSON.parse(input.scope);
-                } catch {
-                  scope = null;
-                }
-                const operation =
-                  CAPABILITY_LABELS[capability] ??
-                  `使用能力：${clip(capability || '宿主未说明', 100)}`;
-                const scopeLines = [];
-                if (object(scope)) {
-                  if (scope.path !== undefined) scopeLines.push(['文件', scope.path, 400]);
-                  if (scope.profile !== undefined) scopeLines.push(['预设任务', scope.profile, 400]);
-                  if (scope.query !== undefined) scopeLines.push(['检索内容', scope.query, 400]);
-                  if (scope.filter !== undefined) scopeLines.push(['测试范围', scope.filter, 400]);
-                  if (scope.server !== undefined) scopeLines.push(['工具连接', scope.server, 400]);
-                  if (scope.tool !== undefined) scopeLines.push(['工具', scope.tool, 400]);
-                  if (scope.name !== undefined) scopeLines.push(['名称', scope.name, 400]);
-                  if (scope.commit !== undefined) scopeLines.push(['提交', scope.commit, 400]);
-                  if (scope.overwrite === true) scopeLines.push(['文件操作', '覆盖现有文件', 400]);
-                  if (typeof scope.content === 'string') scopeLines.push(['写入内容', scope.content, 600]);
-                  if (typeof scope.old === 'string') scopeLines.push(['替换原文', scope.old, 400]);
-                  if (typeof scope.new === 'string') scopeLines.push(['替换为', scope.new, 400]);
-                }
-                const isDeciding =
-                  typeof id === 'string' &&
-                  s.approvalPending.has(`${snapshot?.id}/${id}`);
-
-                return (
-                  <SpotlightCard
-                    as="article"
-                    key={id ?? idx}
-                    border
-                    className="approval-card"
-                  >
-                    <div className="card-header">
-                      <h3>请求你的授权</h3>
-                      <TooltipBadge
-                        label="精确参数范围 ?"
-                        tip="仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。"
-                      />
-                    </div>
-                    <p>{`操作：${operation}`}</p>
-                    {scopeLines.map(([label, val, limit], sIdx) => (
-                      <p key={sIdx} className="small">
-                        {`${label}：${clip(val, limit)}`}
-                      </p>
-                    ))}
-                    <details>
-                      <summary>查看完整授权参数</summary>
-                      <pre>{recordText(approval)}</pre>
-                    </details>
-                    {typeof id !== 'string' ? (
-                      <p className="error">审批记录缺少 ID，请在宿主中处理。</p>
-                    ) : (
-                      <div className="approval-actions">
-                        {[
-                          ['allow_once', '允许一次', ''],
-                          ['allow_task', '允许此任务', 'secondary'],
-                          ['deny', '拒绝', 'secondary deny'],
-                        ].map(([decision, btnLabel, cls]) => (
-                          <button
-                            key={decision}
-                            ref={bind({
-                              click: () =>
-                                trackAsync(decide(snapshot.id, id, decision)),
-                            })}
-                            type="button"
-                            className={cls}
-                            disabled={isDeciding || approvalButtonsDisabled}
-                            onClick={() =>
-                              trackAsync(decide(snapshot.id, id, decision))
-                            }
-                          >
-                            {isDeciding ? '正在记录…' : btnLabel}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </SpotlightCard>
-                );
-              })}
-            </section>
-
-            <section aria-label="会话历史" className="history-section">
-              <div id="messages" className="messages">
+            <section aria-label="会话历史" className="history-section dsh-chat-scroll">
+              <div id="messages" className="messages dsh-chat-column">
                 {!messages.length ? (
-                  <div className="empty">
-                    <div className="empty-heading">
-                      <h2>{view?.snapshot ? '从一条消息开始' : '继续一段对话'}</h2>
+                  <div className="empty dsh-hero">
+                    <div className="dsh-hero-headline">
+                      <span className="dsh-hero-mark">C</span>
+                      <h2>{view?.snapshot ? '探索未至之境 · 从一条消息开始' : '探索未至之境 · 继续一段对话'}</h2>
+                      <span className="dsh-preview-badge">CAYW v3</span>
                       <TooltipBadge
                         className="hint-trigger"
                         label="?"
@@ -1637,16 +1871,36 @@ export function CAYWApp({ env } = {}) {
                         }
                       />
                     </div>
-                    <p className="empty-sub">
-                      选择一个常用任务快速填入，或在下方输入框直接描述你的需求：
-                    </p>
-                    <div className="starter-grid">
+                    <div className="dsh-hero-workspace-bar">
+                      <button
+                        type="button"
+                        className="dsh-hero-ws-pill"
+                        onClick={() => switchPage('projects')}
+                      >
+                        {`📁 工作区：${currentProjectSummary?.label ?? '默认项目空间'}${currentProjectSummary?.workspace ? ` (${currentProjectSummary.workspace})` : ''} ▾`}
+                      </button>
+                      <button
+                        type="button"
+                        className="dsh-hero-ws-pill"
+                        onClick={() => openNewProjectModal()}
+                      >
+                        + 新开项目目录
+                      </button>
+                      <button
+                        type="button"
+                        className="dsh-hero-ws-pill"
+                        onClick={() => switchPage('permissions')}
+                      >
+                        {`🔒 权限模式：${currentPresetObj.label}`}
+                      </button>
+                    </div>
+                    <div className="starter-grid dsh-starter-pills">
                       {STARTER_PROMPTS.map((item, idx) => (
                         <SpotlightCard
                           as="button"
                           key={idx}
                           type="button"
-                          className="starter-card"
+                          className="starter-card dsh-starter-card"
                           onClick={() =>
                             trackAsync(
                               (async () => {
@@ -1687,7 +1941,7 @@ export function CAYWApp({ env } = {}) {
                       <SpotlightCard
                         as="article"
                         key={key}
-                        className={`message ${role}${isOp ? ' operation-record' : ''}`}
+                        className={`message ${role}${isOp ? ' operation-record dsh-tool-card' : ''}`}
                       >
                         <div className="role">{ROLE_LABELS[role]}</div>
                         {presentation.kind === 'text' ? (
@@ -1708,7 +1962,7 @@ export function CAYWApp({ env } = {}) {
                               return (
                                 <details
                                   key={callKey}
-                                  className="record-details"
+                                  className="record-details dsh-disclosure-row"
                                   open={expandedSet.has(callKey)}
                                   onToggle={e =>
                                     toggleRecordExpand(callKey, e.currentTarget.open)
@@ -1771,91 +2025,274 @@ export function CAYWApp({ env } = {}) {
 
             <section
               id="live-section"
-              className="live-section"
+              className="live-section dsh-live-stream"
               aria-labelledby="live-heading"
               hidden={!view?.liveText}
             >
               <h2 id="live-heading" className="small">
-                正在接收
+                正在生成回复…
               </h2>
               <pre id="live-text" aria-live="off">
                 {view?.liveText ?? ''}
               </pre>
             </section>
 
-            <SpotlightCard
-              as="form"
-              id="prompt-form"
-              border
-              className="composer"
-              handlers={{ submit: e => trackAsync(handleSendPrompt(e)) }}
-              onSubmit={e => trackAsync(handleSendPrompt(e))}
+            <section
+              id="approvals"
+              className="approval-section dsh-approval-dock"
+              aria-label="待审批请求"
+              hidden={!approvals.length}
             >
-              <div className="composer-header">
-                <label htmlFor="prompt">发送消息</label>
-                <TooltipBadge
-                  label="快捷键 ?"
-                  tip="Enter 直接发送 · Shift + Enter 换行"
-                />
-              </div>
-              <textarea
-                ref={bind(
-                  {
-                    input: e => {
-                      s.promptText = e.currentTarget.value;
-                      forceRender();
-                    },
-                  },
-                  promptInputRef,
-                )}
-                id="prompt"
-                rows={3}
-                maxLength={64000}
-                placeholder="输入你想完成的事情…"
-                disabled={promptDisabled}
-                value={s.promptText}
-                onChange={e => {
-                  s.promptText = e.target.value;
-                  forceRender();
-                }}
-                onInput={e => {
-                  s.promptText = e.currentTarget.value;
-                  forceRender();
-                }}
-                onKeyDown={e => {
-                  if (
-                    e.key === 'Enter' &&
-                    !e.nativeEvent?.isComposing &&
-                    !e.shiftKey
-                  ) {
-                    e.preventDefault();
-                    if (!sendDisabled) trackAsync(handleSendPrompt(e));
-                  }
-                }}
-              />
-              <div className="composer-footer">
-                <span id="prompt-status" className="small muted" role="status">
-                  {promptStatus}
-                </span>
-                <div className="composer-actions">
-                  <button
-                    ref={bind({ click: () => trackAsync(handleCancel()) })}
-                    id="cancel-button"
-                    className="secondary"
-                    type="button"
-                    disabled={cancelDisabled}
-                    onClick={() => trackAsync(handleCancel())}
-                  >
-                    {s.cancelPending ? '正在停止…' : '停止运行'}
-                  </button>
-                  <button id="send-button" type="submit" disabled={sendDisabled}>
-                    {pending ? '等待完成…' : '发送'}
-                  </button>
-                </div>
-              </div>
-            </SpotlightCard>
+              {approvals.slice(0, 30).map((approval, idx) => {
+                const id = approval.id ?? approval.approval_id;
+                const input = approval.input ?? {};
+                const capability = input.capability ?? '';
+                let scope = null;
+                try {
+                  scope = JSON.parse(input.scope);
+                } catch {
+                  scope = null;
+                }
+                const operation =
+                  CAPABILITY_LABELS[capability] ??
+                  `使用能力：${clip(capability || '宿主未说明', 100)}`;
+                const scopeLines = [];
+                if (object(scope)) {
+                  if (scope.path !== undefined) scopeLines.push(['文件', scope.path, 400]);
+                  if (scope.profile !== undefined) scopeLines.push(['预设任务', scope.profile, 400]);
+                  if (scope.query !== undefined) scopeLines.push(['检索内容', scope.query, 400]);
+                  if (scope.filter !== undefined) scopeLines.push(['测试范围', scope.filter, 400]);
+                  if (scope.server !== undefined) scopeLines.push(['工具连接', scope.server, 400]);
+                  if (scope.tool !== undefined) scopeLines.push(['工具', scope.tool, 400]);
+                  if (scope.name !== undefined) scopeLines.push(['名称', scope.name, 400]);
+                  if (scope.commit !== undefined) scopeLines.push(['提交', scope.commit, 400]);
+                  if (scope.overwrite === true) scopeLines.push(['文件操作', '覆盖现有文件', 400]);
+                  if (typeof scope.content === 'string') scopeLines.push(['写入内容', scope.content, 600]);
+                  if (typeof scope.old === 'string') scopeLines.push(['替换原文', scope.old, 400]);
+                  if (typeof scope.new === 'string') scopeLines.push(['替换为', scope.new, 400]);
+                }
+                const isDeciding =
+                  typeof id === 'string' &&
+                  s.approvalPending.has(`${snapshot?.id}/${id}`);
 
-            <details className="event-details">
+                return (
+                  <SpotlightCard
+                    as="article"
+                    key={id ?? idx}
+                    border
+                    className="approval-card dsh-approval-card"
+                  >
+                    <div className="dsh-approval-strip">
+                      <span className="dsh-approval-dot" />
+                      <strong>等待审批 · 请求你的授权</strong>
+                      <TooltipBadge
+                        label="精确参数范围 ?"
+                        tip="仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。"
+                      />
+                    </div>
+                    <p className="dsh-approval-headline">{`操作：${operation}`}</p>
+                    {scopeLines.map(([label, val, limit], sIdx) => (
+                      <p key={sIdx} className="small dsh-approval-command">
+                        {`${label}：${clip(val, limit)}`}
+                      </p>
+                    ))}
+                    <details>
+                      <summary>查看完整授权参数</summary>
+                      <pre>{recordText(approval)}</pre>
+                    </details>
+                    {typeof id !== 'string' ? (
+                      <p className="error">审批记录缺少 ID，请在宿主中处理。</p>
+                    ) : (
+                      <div className="approval-actions dsh-approval-actions">
+                        {[
+                          ['allow_once', '允许一次', ''],
+                          ['allow_task', '允许此任务', 'secondary'],
+                          ['deny', '拒绝', 'secondary deny'],
+                        ].map(([decision, btnLabel, cls]) => (
+                          <button
+                            key={decision}
+                            ref={bind({
+                              click: () =>
+                                trackAsync(decide(snapshot.id, id, decision)),
+                            })}
+                            type="button"
+                            className={cls}
+                            disabled={isDeciding || approvalButtonsDisabled}
+                            onClick={() =>
+                              trackAsync(decide(snapshot.id, id, decision))
+                            }
+                          >
+                            {isDeciding ? '正在记录…' : btnLabel}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </SpotlightCard>
+                );
+              })}
+            </section>
+
+            <div className="dsh-composer-dock">
+              {s.permissionPopoverOpen ? (
+                <div className="dsh-permission-popover" role="dialog" aria-label="切换权限模式">
+                  <div className="dsh-popover-header">
+                    <strong>会话权限模式 (`/permission`)</strong>
+                    <button
+                      type="button"
+                      className="quiet"
+                      onClick={() => {
+                        s.permissionPopoverOpen = false;
+                        forceRender();
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="dsh-preset-list">
+                    {PERMISSION_PRESETS.map(preset => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        className={`dsh-preset-option${s.permissionPreset === preset.id ? ' is-selected' : ''}`}
+                        onClick={() => selectPermissionPreset(preset.id)}
+                      >
+                        <div className="dsh-preset-option-top">
+                          <strong>{`${preset.label} (${preset.enLabel})`}</strong>
+                          {s.permissionPreset === preset.id ? <span>✓ 当前</span> : null}
+                        </div>
+                        <span className="small muted">{preset.desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="dsh-popover-footer">
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        s.permissionPopoverOpen = false;
+                        switchPage('permissions');
+                      }}
+                    >
+                      查看已授权能力与撤销记录 →
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
+              <SpotlightCard
+                as="form"
+                id="prompt-form"
+                border
+                className="composer dsh-input-card"
+                handlers={{ submit: e => trackAsync(handleSendPrompt(e)) }}
+                onSubmit={e => trackAsync(handleSendPrompt(e))}
+              >
+                <label htmlFor="prompt" className="visually-hidden">
+                  发送消息
+                </label>
+                <textarea
+                  ref={bind(
+                    {
+                      input: e => {
+                        s.promptText = e.currentTarget.value;
+                        forceRender();
+                      },
+                    },
+                    promptInputRef,
+                  )}
+                  id="prompt"
+                  className="dsh-composer-textarea"
+                  rows={3}
+                  maxLength={32000}
+                  disabled={promptDisabled}
+                  placeholder="给智能体发消息（Enter 发送，Shift + Enter 换行）"
+                  value={s.promptText}
+                  onChange={e => {
+                    s.promptText = e.target.value;
+                    forceRender();
+                  }}
+                  onKeyDown={e => {
+                    if (
+                      e.key === 'Enter' &&
+                      !e.shiftKey &&
+                      !e.isComposing &&
+                      (s.enterBehavior === 'enter' || e.metaKey || e.ctrlKey)
+                    ) {
+                      e.preventDefault();
+                      trackAsync(handleSendPrompt(e));
+                    }
+                  }}
+                />
+                <div className="composer-actions dsh-composer-row">
+                  <div className="dsh-composer-tools">
+                    <button
+                      id="composer-workspace-btn"
+                      type="button"
+                      className="dsh-chip-btn"
+                      title="切换工作区项目"
+                      onClick={() => switchPage('projects')}
+                    >
+                      {`📁 ${currentProjectSummary?.label ?? '默认项目空间'}`}
+                    </button>
+                    <button
+                      id="composer-new-project-btn"
+                      type="button"
+                      className="dsh-chip-btn"
+                      title="浏览本地目录并新开项目"
+                      onClick={() => openNewProjectModal()}
+                    >
+                      + 新开项目
+                    </button>
+                    <button
+                      id="composer-permission-btn"
+                      type="button"
+                      className={`dsh-chip-btn dsh-perm-chip${s.permissionPreset === 'danger-full-access' ? ' is-danger' : ''}`}
+                      title="切换权限预设或管理会话授权"
+                      onClick={() => {
+                        s.permissionPopoverOpen = !s.permissionPopoverOpen;
+                        forceRender();
+                      }}
+                    >
+                      {`🔒 ${currentPresetObj.label} ▾`}
+                    </button>
+                    <button
+                      id="composer-model-btn"
+                      type="button"
+                      className="dsh-chip-btn"
+                      title="查看模型与网关设置"
+                      onClick={() => openSettings('models')}
+                    >
+                      ⚡ deepseek-v4.1-flash
+                    </button>
+                  </div>
+                  <div className="action-buttons dsh-composer-trailing">
+                    <span id="prompt-status" className="small muted" role="status">
+                      {promptStatus}
+                    </span>
+                    <button
+                      ref={bind({ click: () => trackAsync(handleCancel()) })}
+                      id="cancel-button"
+                      className="secondary dsh-stop-btn"
+                      type="button"
+                      disabled={cancelDisabled}
+                      onClick={() => trackAsync(handleCancel())}
+                    >
+                      停止
+                    </button>
+                    <button
+                      id="send-button"
+                      className="dsh-send-btn"
+                      type="submit"
+                      disabled={sendDisabled}
+                    >
+                      {pending ? '等待完成…' : '↑ 发送'}
+                    </button>
+                  </div>
+                </div>
+              </SpotlightCard>
+            </div>
+
+            <details className="event-details dsh-event-drawer">
               <summary data-tip="最近 120 条已消费事件；未识别事件按原始记录展示">
                 <span>诊断与事件记录</span>
                 <span id="event-count" className="muted">
@@ -1883,24 +2320,32 @@ export function CAYWApp({ env } = {}) {
           >
             <div className="conversation-heading">
               <div>
-                <ShinyText>项目空间管理</ShinyText>
+                <ShinyText>工作区与项目空间</ShinyText>
                 <div className="title-with-hint">
                   <GradientText id="projects-heading">本地项目空间</GradientText>
                   <HintPopover ariaLabel="项目空间管理说明">
-                    添加、切换或移除本地项目工作目录；各项目空间的会话列表、事件游标与未确认请求锁相互独立。
+                    选择目录即可新开独立项目 Runtime；各项目的会话列表、权限授权与事件游标相互隔离。
                   </HintPopover>
                 </div>
               </div>
-              <button
-                ref={bind({ click: () => trackAsync(refreshProjects()) })}
-                id="refresh-projects"
-                className="secondary"
-                type="button"
-                disabled={s.refreshProjectsBusy}
-                onClick={() => trackAsync(refreshProjects())}
-              >
-                刷新空间
-              </button>
+              <div className="approval-actions">
+                <button
+                  type="button"
+                  onClick={() => openNewProjectModal()}
+                >
+                  📁 浏览目录新开项目
+                </button>
+                <button
+                  ref={bind({ click: () => trackAsync(refreshProjects()) })}
+                  id="refresh-projects"
+                  className="secondary"
+                  type="button"
+                  disabled={s.refreshProjectsBusy}
+                  onClick={() => trackAsync(refreshProjects())}
+                >
+                  刷新空间
+                </button>
+              </div>
             </div>
 
             <SpotlightCard
@@ -1908,8 +2353,8 @@ export function CAYWApp({ env } = {}) {
               id="add-project-form"
               border
               className="project-add-bar"
-              handlers={{ submit: e => trackAsync(handleAddProject(e)) }}
-              onSubmit={e => trackAsync(handleAddProject(e))}
+              handlers={{ submit: e => trackAsync(handleAddProject(e, true)) }}
+              onSubmit={e => trackAsync(handleAddProject(e, true))}
             >
               <input
                 ref={projectWsInputRef}
@@ -1941,17 +2386,13 @@ export function CAYWApp({ env } = {}) {
                 type="submit"
                 disabled={s.addProjectBusy}
               >
-                {s.addProjectBusy ? '添加中…' : '+ 添加项目空间'}
+                {s.addProjectBusy ? '正在启动项目…' : '+ 新开项目空间'}
               </button>
             </SpotlightCard>
 
             <div className="quick-paths">
               <span className="small muted">常用目录快填：</span>
-              {[
-                ['/Volumes/ORICO/CAYW', 'CAYW 主仓库'],
-                ['/Volumes/ORICO/CAYW-tui', 'CAYW TUI 分支'],
-                ['/Volumes/ORICO/CAYW-webui', 'CAYW WebUI 分支'],
-              ].map(([p, lbl]) => (
+              {QUICK_WORKSPACES.map(([p, lbl]) => (
                 <button
                   key={p}
                   type="button"
@@ -2011,6 +2452,7 @@ export function CAYWApp({ env } = {}) {
                       >
                         {item.statusLabel}
                       </span>
+                      <span className="stat-pill mono">{item.address}</span>
                       {item.frozenCount ? (
                         <span className="stat-pill warn">
                           {`${item.frozenCount} 已冻结`}
@@ -2072,6 +2514,132 @@ export function CAYWApp({ env } = {}) {
                   </SpotlightCard>
                 );
               })}
+            </div>
+          </section>
+
+          <section
+            id="permissions-page"
+            className="management-page"
+            hidden={s.activePage !== 'permissions'}
+            aria-labelledby="permissions-heading"
+          >
+            <div className="conversation-heading">
+              <div>
+                <ShinyText>权限与安全控制</ShinyText>
+                <div className="title-with-hint">
+                  <GradientText id="permissions-heading">
+                    会话权限预设与已授权管理
+                  </GradientText>
+                  <HintPopover ariaLabel="权限说明">
+                    所有 CodeMode 工具调用均经过宿主参数校验与权限门禁。你可以在此切换默认权限模式、查看当前会话已授予的精确参数授权，或随时撤销任意授权。
+                  </HintPopover>
+                </div>
+              </div>
+              <button
+                id="refresh-permissions"
+                className="secondary"
+                type="button"
+                disabled={s.refreshPermissionsBusy}
+                onClick={() => trackAsync(refreshPermissions())}
+              >
+                刷新权限记录
+              </button>
+            </div>
+
+            <div className="dsh-settings-card">
+              <div className="dsh-permission-row">
+                <div className="dsh-permission-row-text">
+                  <strong>默认权限模式（Permission Preset）</strong>
+                  <span className="small muted">
+                    选择当前与新建会话的权限门禁策略。启用 Full access 前需显式确认风险。
+                  </span>
+                </div>
+                <div className="dsh-preset-pills">
+                  {PERMISSION_PRESETS.map(preset => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`dsh-preset-pill${s.permissionPreset === preset.id ? ' is-active' : ''}`}
+                      onClick={() => selectPermissionPreset(preset.id)}
+                    >
+                      {`${preset.label} (${preset.enLabel})`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className="small muted">{currentPresetObj.desc}</p>
+            </div>
+
+            <p id="permissions-status" className="small muted" role="status">
+              {s.permissionsStatus ||
+                `当前会话：${snapshot ? displayLabel(snapshot) : '未选择'} · ${s.sessionGrants.length} 项生效授权`}
+            </p>
+
+            <div className="management-grid">
+              <SpotlightCard as="article" border className="management-card">
+                <div className="card-header">
+                  <strong>当前会话生效授权（`session.grants`）</strong>
+                  <span className="state-label">{`${s.sessionGrants.length} 项`}</span>
+                </div>
+                {!s.sessionGrants.length ? (
+                  <p className="small muted">
+                    当前会话暂无持久任务授权。当你在审批卡片点击“允许此任务”后，授权条目会显示在此处并可随时撤销。
+                  </p>
+                ) : (
+                  <div className="dsh-grants-list">
+                    {s.sessionGrants.map((grant, idx) => {
+                      const cap = grant.capability ?? grant.input?.capability ?? '未知能力';
+                      const scopeStr =
+                        typeof grant.scope === 'string'
+                          ? grant.scope
+                          : JSON.stringify(grant.scope ?? {});
+                      const key = `${cap}:${scopeStr}`;
+                      return (
+                        <div key={`${key}/${idx}`} className="bound-session-row">
+                          <div>
+                            <strong>{CAPABILITY_LABELS[cap] ?? cap}</strong>
+                            <span className="small mono muted">{` · ${clip(scopeStr, 140)}`}</span>
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary deny"
+                            disabled={s.revokeBusyKey === key}
+                            onClick={() => trackAsync(revokeGrant(grant))}
+                          >
+                            {s.revokeBusyKey === key ? '撤销中…' : '撤销授权'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </SpotlightCard>
+
+              <SpotlightCard as="article" border className="management-card">
+                <div className="card-header">
+                  <strong>权限与工具审计记录（`session.audit`）</strong>
+                  <span className="state-label">{`${s.sessionAudit.length} 条`}</span>
+                </div>
+                {!s.sessionAudit.length ? (
+                  <p className="small muted">
+                    当前会话暂无工具审批审计记录。发生工具调用或授权决策后将自动同步。
+                  </p>
+                ) : (
+                  <div className="dsh-audit-list">
+                    {s.sessionAudit.slice(-15).map((item, idx) => (
+                      <details key={idx} className="record-details">
+                        <summary>
+                          {`#${idx + 1} · ${clip(
+                            item.capability ?? item.kind ?? item.decision ?? '审计条目',
+                            80,
+                          )}`}
+                        </summary>
+                        <pre>{recordText(item)}</pre>
+                      </details>
+                    ))}
+                  </div>
+                )}
+              </SpotlightCard>
             </div>
           </section>
 
@@ -2276,6 +2844,550 @@ export function CAYWApp({ env } = {}) {
         </main>
       </div>
 
+      {/* DSH Settings Modal (@deepseek-ai/dsh-client-ui-settings-general style) */}
+      {s.settingsOpen ? (
+        <div className="dsh-modal-overlay" role="presentation">
+          <div
+            className="dsh-modal-mask"
+            onClick={() => {
+              s.settingsOpen = false;
+              forceRender();
+            }}
+          />
+          <div
+            id="settings-dialog"
+            className="dsh-settings-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-modal-title"
+          >
+            <nav className="dsh-settings-nav" aria-label="设置分区">
+              <div id="settings-modal-title" className="dsh-settings-nav-title">
+                设置
+              </div>
+              <div className="dsh-settings-nav-list">
+                {[
+                  ['general', '⚙ 通用设置'],
+                  ['permissions', '🔒 权限与安全'],
+                  ['models', '⚡ 模型与连接'],
+                  ['plugins', '🧩 插件与能力'],
+                ].map(([tabId, label]) => (
+                  <button
+                    key={tabId}
+                    type="button"
+                    className={`dsh-settings-nav-cell${s.settingsTab === tabId ? ' is-active' : ''}`}
+                    onClick={() => openSettings(tabId)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </nav>
+
+            <div className="dsh-settings-content">
+              <div className="dsh-settings-header">
+                <strong>
+                  {{
+                    general: '通用与外观设置',
+                    permissions: '权限模式与会话授权',
+                    models: '模型提供方与本机 Runtime 连接',
+                    plugins: '插件绑定与 CodeMode 能力目录',
+                  }[s.settingsTab]}
+                </strong>
+                <button
+                  id="close-settings-button"
+                  type="button"
+                  className="dsh-modal-close"
+                  aria-label="关闭设置"
+                  onClick={() => {
+                    s.settingsOpen = false;
+                    forceRender();
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="dsh-settings-options">
+                {s.settingsTab === 'general' ? (
+                  <div className="dsh-settings-section">
+                    <div className="dsh-appearance-group">
+                      <div className="dsh-setting-title">外观主题（Appearance）</div>
+                      <div className="dsh-theme-cube-row">
+                        {[
+                          ['light', '☀️ 浅色模式', 'Light'],
+                          ['dark', '🌙 深色模式', 'Dark'],
+                          ['system', '💻 跟随系统', 'System'],
+                        ].map(([mode, title, sub]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            className={`dsh-theme-cube${s.themeMode === mode ? ' is-selected' : ''}`}
+                            onClick={() => applyTheme(mode)}
+                          >
+                            <strong>{title}</strong>
+                            <span className="small muted">{sub}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="dsh-setting-row">
+                      <div className="dsh-setting-row-text">
+                        <div className="dsh-setting-title">默认权限模式（Permission）</div>
+                        <div className="dsh-setting-desc">
+                          选择新会话与当前工作区的权限策略；Full access 需风险确认。
+                        </div>
+                      </div>
+                      <select
+                        aria-label="默认权限模式"
+                        className="dsh-setting-select"
+                        value={s.permissionPreset}
+                        onChange={e => selectPermissionPreset(e.target.value)}
+                      >
+                        {PERMISSION_PRESETS.map(p => (
+                          <option key={p.id} value={p.id}>
+                            {`${p.label} (${p.enLabel})`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="dsh-setting-row">
+                      <div className="dsh-setting-row-text">
+                        <div className="dsh-setting-title">发送快捷键（Enter 键行为）</div>
+                        <div className="dsh-setting-desc">
+                          设置输入框按下 Enter 时的默认发送方式。
+                        </div>
+                      </div>
+                      <select
+                        aria-label="发送快捷键"
+                        className="dsh-setting-select"
+                        value={s.enterBehavior}
+                        onChange={e => {
+                          s.enterBehavior = e.target.value;
+                          forceRender();
+                        }}
+                      >
+                        <option value="enter">Enter 直接发送（Shift+Enter 换行）</option>
+                        <option value="cmd-enter">Cmd/Ctrl + Enter 发送（Enter 换行）</option>
+                      </select>
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'permissions' ? (
+                  <div className="dsh-settings-section">
+                    <div className="dsh-setting-row">
+                      <div className="dsh-setting-row-text">
+                        <div className="dsh-setting-title">当前权限模式</div>
+                        <div className="dsh-setting-desc">{currentPresetObj.desc}</div>
+                      </div>
+                      <div className="dsh-preset-pills">
+                        {PERMISSION_PRESETS.map(p => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            className={`dsh-preset-pill${s.permissionPreset === p.id ? ' is-active' : ''}`}
+                            onClick={() => selectPermissionPreset(p.id)}
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="dsh-setting-block">
+                      <div className="card-header">
+                        <strong>当前会话已授权项（`session.grants`）</strong>
+                        <button
+                          type="button"
+                          className="quiet"
+                          onClick={() => trackAsync(refreshPermissions())}
+                        >
+                          ↻ 刷新
+                        </button>
+                      </div>
+                      {!s.sessionGrants.length ? (
+                        <p className="small muted">暂无按任务记住的持久化授权记录。</p>
+                      ) : (
+                        s.sessionGrants.map((grant, idx) => {
+                          const cap = grant.capability ?? grant.input?.capability ?? '未知能力';
+                          const scopeStr =
+                            typeof grant.scope === 'string'
+                              ? grant.scope
+                              : JSON.stringify(grant.scope ?? {});
+                          const key = `${cap}:${scopeStr}`;
+                          return (
+                            <div key={`${key}/${idx}`} className="bound-session-row">
+                              <div>
+                                <strong>{CAPABILITY_LABELS[cap] ?? cap}</strong>
+                                <span className="small mono muted">{` · ${clip(scopeStr, 120)}`}</span>
+                              </div>
+                              <button
+                                type="button"
+                                className="secondary deny"
+                                disabled={s.revokeBusyKey === key}
+                                onClick={() => trackAsync(revokeGrant(grant))}
+                              >
+                                撤销授权
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'models' ? (
+                  <div className="dsh-settings-section">
+                    <div className="dsh-provider-card">
+                      <div className="dsh-provider-head">
+                        <span className="dsh-cred-dot configured" />
+                        <strong>DeepSeek / Magpie OpenAI 兼容网关</strong>
+                        <span className="dsh-row-tag">已连接</span>
+                      </div>
+                      <p className="small muted">
+                        默认模型：<code>auto/deepseek-v4.1-flash</code> · 端点：<code>http://127.0.0.1:3425/v1</code>
+                      </p>
+                      <p className="small muted">
+                        API 凭据由本机 Runtime 进程持有，从不向浏览器暴露或回显。
+                      </p>
+                    </div>
+
+                    <div className="dsh-provider-card">
+                      <div className="dsh-provider-head">
+                        <span
+                          className={`dsh-cred-dot ${s.connectionStatus === '已连接本机' ? 'configured' : 'missing'}`}
+                        />
+                        <strong>本机 Loopback 网关与项目 Runtime</strong>
+                        <span className="dsh-row-tag">{`Core 协议 v${CORE_PROTOCOL_VERSION}`}</span>
+                      </div>
+                      <div className="dsh-grants-list">
+                        {projectSummaries.map(proj => (
+                          <div key={proj.id} className="bound-session-row">
+                            <div>
+                              <strong>{proj.label}</strong>
+                              <span className="small mono muted">
+                                {` · ${proj.address}${proj.workspace ? ` · ${proj.workspace}` : ''}`}
+                              </span>
+                            </div>
+                            <span className="state-label">{proj.statusLabel}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'plugins' ? (
+                  <div className="dsh-settings-section">
+                    {BUILTIN_CAPABILITY_GROUPS.map(group => (
+                      <div key={group.title} className="dsh-provider-card">
+                        <div className="card-header">
+                          <strong>{group.title}</strong>
+                          <span className="dsh-row-tag">{group.badge}</span>
+                        </div>
+                        <div className="capability-items">
+                          {group.items.map(([code, desc]) => (
+                            <div key={code} className="capability-row">
+                              <code className="inline-code">{code}</code>
+                              <span className="small muted">{desc}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* DSH New Project / Directory Picker Modal (@deepseek-ai/dsh-client-ui-directory-picker-browse style) */}
+      {s.newProjectModalOpen ? (
+        <div className="dsh-modal-overlay" role="presentation">
+          <div
+            className="dsh-modal-mask"
+            onClick={() => {
+              s.newProjectModalOpen = false;
+              forceRender();
+            }}
+          />
+          <div
+            id="new-project-dialog"
+            className="dsh-dir-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="dir-dialog-title"
+          >
+            <div className="dsh-dir-header">
+              <div className="card-header">
+                <h2 id="dir-dialog-title" className="dsh-dir-title">
+                  选择工作区目录 · 新开项目
+                </h2>
+                <button
+                  type="button"
+                  className="dsh-modal-close"
+                  onClick={() => {
+                    s.newProjectModalOpen = false;
+                    forceRender();
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="dsh-crumb-bar">
+                {s.browseParent ? (
+                  <button
+                    type="button"
+                    className="quiet dsh-up-btn"
+                    onClick={() => void browseDirectory(s.browseParent)}
+                  >
+                    ⬆ 上级目录
+                  </button>
+                ) : null}
+                <input
+                  ref={modalProjectWsInputRef}
+                  id="modal-project-path"
+                  type="text"
+                  className="dsh-path-input mono"
+                  placeholder="输入或选择本地绝对目录路径，如 /Volumes/ORICO/CAYW"
+                  value={s.projectWorkspaceInput}
+                  onChange={e => {
+                    s.projectWorkspaceInput = e.target.value;
+                    forceRender();
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void browseDirectory(s.projectWorkspaceInput);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => void browseDirectory(s.projectWorkspaceInput)}
+                >
+                  跳转目录
+                </button>
+              </div>
+              <div className="quick-paths">
+                {QUICK_WORKSPACES.map(([p, lbl]) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className="quiet path-chip"
+                    onClick={() => {
+                      s.projectWorkspaceInput = p;
+                      s.projectLabelInput = lbl;
+                      if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = p;
+                      if (modalProjectLabelInputRef.current) modalProjectLabelInputRef.current.value = lbl;
+                      void browseDirectory(p);
+                    }}
+                  >
+                    {`📁 ${lbl}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="dsh-dir-content">
+              {s.browseLoading ? (
+                <p className="small muted">正在读取目录…</p>
+              ) : (
+                <div className="dsh-dir-column">
+                  {!visibleBrowseEntries.length ? (
+                    <p className="small muted">当前目录下没有子文件夹，可直接选择当前目录或新建文件夹。</p>
+                  ) : (
+                    visibleBrowseEntries.map(entry => (
+                      <button
+                        key={entry.path}
+                        type="button"
+                        className={`dsh-dir-row${s.projectWorkspaceInput === entry.path ? ' is-selected' : ''}`}
+                        onClick={() => {
+                          s.projectWorkspaceInput = entry.path;
+                          if (modalProjectWsInputRef.current) {
+                            modalProjectWsInputRef.current.value = entry.path;
+                          }
+                          forceRender();
+                        }}
+                        onDoubleClick={() => void browseDirectory(entry.path)}
+                      >
+                        <span className="dsh-dir-icon">📁</span>
+                        <span className="dsh-dir-name">{entry.name}</span>
+                        <span
+                          className="dsh-dir-enter"
+                          onClick={e => {
+                            e.stopPropagation();
+                            void browseDirectory(entry.path);
+                          }}
+                        >
+                          进入 ›
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {s.newFolderOpen ? (
+                <div className="dsh-new-folder-bar">
+                  <input
+                    type="text"
+                    placeholder="输入新建文件夹名称"
+                    value={s.newFolderName}
+                    onChange={e => {
+                      s.newFolderName = e.target.value;
+                      forceRender();
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (s.newFolderName.trim()) {
+                        void browseDirectory(s.browsePath, s.newFolderName.trim());
+                        s.newFolderName = '';
+                        s.newFolderOpen = false;
+                      }
+                    }}
+                  >
+                    创建并进入
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => {
+                      s.newFolderOpen = false;
+                      forceRender();
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="dsh-dir-label-bar">
+                <input
+                  ref={modalProjectLabelInputRef}
+                  id="modal-project-label"
+                  type="text"
+                  maxLength={160}
+                  placeholder="项目显示名称（可选，默认使用文件夹名）"
+                  value={s.projectLabelInput}
+                  onChange={e => {
+                    s.projectLabelInput = e.target.value;
+                    forceRender();
+                  }}
+                />
+              </div>
+
+              {s.browseError ? (
+                <p className="error" role="alert">
+                  {s.browseError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="dsh-dir-footer">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  s.newFolderOpen = !s.newFolderOpen;
+                  forceRender();
+                }}
+              >
+                + 新建文件夹
+              </button>
+              <label className="small muted dsh-hidden-toggle">
+                <input
+                  type="checkbox"
+                  checked={s.browseShowHidden}
+                  onChange={e => {
+                    s.browseShowHidden = e.target.checked;
+                    forceRender();
+                  }}
+                />
+                显示隐藏文件夹
+              </label>
+              <div className="dsh-footer-gap" />
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  s.newProjectModalOpen = false;
+                  forceRender();
+                }}
+              >
+                取消
+              </button>
+              <button
+                id="confirm-new-project-btn"
+                type="button"
+                disabled={s.addProjectBusy || !s.projectWorkspaceInput.trim()}
+                onClick={e => trackAsync(handleAddProject(e, true))}
+              >
+                {s.addProjectBusy ? '正在启动 Runtime…' : '新开项目并进入'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* DSH Full Access Risk Confirmation Modal (@deepseek-ai/dsh-client-ui-permission-presets) */}
+      {s.fullAccessConfirmOpen ? (
+        <div className="dsh-modal-overlay" role="presentation">
+          <div
+            className="dsh-modal-mask"
+            onClick={() => {
+              s.fullAccessConfirmOpen = false;
+              forceRender();
+            }}
+          />
+          <div className="dsh-confirm-dialog" role="dialog" aria-modal="true">
+            <h3>确认启用 Full access？</h3>
+            <p className="small muted">
+              启用 Full access 后，agent 将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。
+            </p>
+            <label className="confirm-label">
+              <input
+                type="checkbox"
+                checked={s.fullAccessAcknowledged}
+                onChange={e => {
+                  s.fullAccessAcknowledged = e.target.checked;
+                  forceRender();
+                }}
+              />
+              我已了解风险，并愿意继续
+            </label>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  s.fullAccessConfirmOpen = false;
+                  forceRender();
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={!s.fullAccessAcknowledged}
+                onClick={confirmFullAccess}
+              >
+                启用 Full access
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <dialog
         ref={forkDialogRef}
         id="fork-dialog"
@@ -2338,6 +3450,6 @@ export function CAYWApp({ env } = {}) {
           </div>
         </form>
       </dialog>
-    </>
+    </div>
   );
 }
