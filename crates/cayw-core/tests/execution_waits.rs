@@ -132,6 +132,43 @@ fn registered_wait_reply_loss_recovers_from_independent_vm_facts() {
 }
 
 #[test]
+fn numeric_string_wait_keeps_original_arguments_across_reopen_and_recovery() {
+    let path = database();
+    let waiting = ToolCall::new(
+        "wait",
+        "execute_code",
+        json!({
+            "action":"wait", "cell_id":"vm", "cursor":"0",
+            "yield_time_ms":"30000.0", "max_output_tokens":"8192", "continue_execution":false
+        }),
+    );
+    let (store, lease) = fixture(&path, &[launch(), waiting.clone()]);
+    store.yield_execution(&lease, "vm").unwrap();
+    start(&store, &lease, &waiting);
+    let event = store
+        .register_execution_wait(&lease, &waiting.id, "vm", "task", &waiting.arguments)
+        .unwrap();
+    assert!(
+        matches!(&event.event, CoreEvent::ExecutionWaitRegistered { binding } if binding.arguments == waiting.arguments)
+    );
+    drop(store);
+    let reopened = SessionStore::open(&path).unwrap();
+    let recovered = reopened.recover(&lease.session_id).unwrap();
+    assert_eq!(recovered.state, SessionState::Idle);
+    assert!(recovered.unresolved_calls.is_empty());
+    assert!(recovered.unresolved_capabilities.is_empty());
+    assert!(
+        matches!(&recovered.messages[0], Message::Assistant(message) if message.content.iter().any(|part| matches!(part, Content::ToolCall(call) if call == &waiting)))
+    );
+    assert!(
+        reopened
+            .events(&lease.session_id, 0, 1000)
+            .unwrap()
+            .contains(&event)
+    );
+}
+
+#[test]
 fn registered_wait_does_not_hide_unknown_child_or_replay_it() {
     let path = database();
     let waiting = wait("wait", Some(true));

@@ -672,6 +672,7 @@ fn git_spec(
             env: git_environment(),
             timeout: host.config.process_timeout,
             max_output_bytes: host.config.max_process_output_bytes,
+            io: cayw_device::ProcessIo::Pipes,
         },
         view,
     ))
@@ -713,6 +714,7 @@ fn profile_spec(
         max_output_bytes: profile
             .max_output_bytes
             .min(host.config.max_process_output_bytes),
+        io: profile.io,
     })
 }
 fn device_error(error: DeviceError) -> CapabilityError {
@@ -989,6 +991,7 @@ mod tests {
                             timeout: Duration::from_secs(10),
                             max_output_bytes: 1024,
                             allow_filter: false,
+                            io: cayw_device::ProcessIo::Pipes,
                         },
                     )]),
                     ..Default::default()

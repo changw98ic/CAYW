@@ -20,6 +20,66 @@ pub fn parse_tool_arguments(input: &str) -> Result<Value, ValidationError> {
     Ok(value)
 }
 
+/// Explicit conversion for tool-owned unsigned integer fields. Decimal strings
+/// are parsed without floating-point rounding. Already parsed JSON floats must
+/// be integral and within the safe integer range. Callers enforce their own bounds.
+pub fn unsigned_tool_integer(value: &Value) -> Result<u64, ValidationError> {
+    let invalid =
+        || ValidationError("expected an exact nonnegative integer within u64 range".into());
+    if let Some(number) = value.as_u64() {
+        return Ok(number);
+    }
+    if let Some(number) = value.as_f64() {
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        if number.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(&number) && number.fract() == 0.0
+        {
+            return Ok(number as u64);
+        }
+        return Err(invalid());
+    }
+    let text = value.as_str().ok_or_else(invalid)?.trim();
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().map_err(|_| invalid())?),
+        None => (text, 0),
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return Err(invalid()),
+        None => (mantissa, ""),
+    };
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let mut digits = format!("{whole}{fraction}");
+    if digits.bytes().all(|byte| byte == b'0') {
+        return Ok(0);
+    }
+    let scale = exponent
+        .checked_sub(i64::try_from(fraction.len()).map_err(|_| invalid())?)
+        .ok_or_else(invalid)?;
+    if scale < 0 {
+        let removed = usize::try_from(scale.unsigned_abs()).map_err(|_| invalid())?;
+        let keep = digits.len().checked_sub(removed).ok_or_else(invalid)?;
+        if !digits.as_bytes()[keep..].iter().all(|byte| *byte == b'0') {
+            return Err(invalid());
+        }
+        digits.truncate(keep);
+    }
+    let significant = digits.trim_start_matches('0');
+    let zeros = usize::try_from(scale.max(0)).map_err(|_| invalid())?;
+    if significant.len().saturating_add(zeros) > 20 {
+        return Err(invalid());
+    }
+    let mut number = significant.parse::<u64>().map_err(|_| invalid())?;
+    for _ in 0..zeros {
+        number = number.checked_mul(10).ok_or_else(invalid)?;
+    }
+    Ok(number)
+}
+
 pub struct ArgumentValidator(jsonschema::Validator);
 
 impl ArgumentValidator {
@@ -38,13 +98,41 @@ impl ArgumentValidator {
         let errors = self
             .0
             .iter_errors(arguments)
-            .map(|error| format!("{}: {error}", error.instance_path()))
+            .map(|error| format_validation_error(&error))
             .collect::<Vec<_>>();
         if errors.is_empty() {
             Ok(())
         } else {
             Err(ValidationError(errors.join("; ")))
         }
+    }
+}
+
+fn format_validation_error(error: &jsonschema::ValidationError<'_>) -> String {
+    use jsonschema::error::ValidationErrorKind;
+    match error.kind() {
+        ValidationErrorKind::OneOfNotValid { context } | ValidationErrorKind::AnyOf { context }
+            if !context.is_empty() =>
+        {
+            context
+                .iter()
+                .enumerate()
+                .map(|(index, errors)| {
+                    let details = errors
+                        .iter()
+                        .map(format_validation_error)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    format!(
+                        "{} alternative {}: {details}",
+                        error.kind().keyword(),
+                        index + 1
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+        _ => format!("{}: {error}", error.instance_path()),
     }
 }
 

@@ -38,6 +38,7 @@ uuid = { version = "=1.27.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "cayw"

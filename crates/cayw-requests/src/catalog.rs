@@ -34,6 +34,10 @@ impl HostIdentity {
                 "kind":format!("{:?}",profile.kind), "program":profile.program,
                 "args":profile.args,"env":profile.env,"timeout_ns":profile.timeout.as_nanos().to_string(),
                 "max_output_bytes":profile.max_output_bytes,"allow_filter":profile.allow_filter,
+                "io":match profile.io {
+                    cayw_host::ProcessIo::Pipes => json!({"mode":"pipes"}),
+                    cayw_host::ProcessIo::Pty { columns, rows } => json!({"mode":"pty","columns":columns,"rows":rows}),
+                },
             }))
         }).collect();
         let data = config.data.as_ref().map(|limits| json!({

@@ -191,6 +191,7 @@ pub(crate) struct Inner {
     model: Model,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
+    binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
     #[cfg(feature = "plugins")]
@@ -287,6 +288,7 @@ impl Runtime {
                 model,
                 config,
                 active: Mutex::new(BTreeMap::new()),
+                binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
                 #[cfg(feature = "plugins")]

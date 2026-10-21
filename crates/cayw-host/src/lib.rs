@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use cap_std::fs::Dir;
 use cayw_ai::{ArgumentValidator, CancellationToken, ToolDefinition};
 use cayw_codemode::{CapabilityError, CapabilityHost};
-pub use cayw_device::DeviceError;
+pub use cayw_device::{DeviceError, ProcessIdentity, ProcessIo, ProcessObserver};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -98,6 +98,7 @@ pub struct Profile {
     pub timeout: Duration,
     pub max_output_bytes: usize,
     pub allow_filter: bool,
+    pub io: cayw_device::ProcessIo,
 }
 
 #[derive(Clone)]
@@ -190,6 +191,15 @@ impl HostConfig {
                 return Err(failure("invalid profile name"));
             }
             process::validate_program(&profile.program)?;
+            if let cayw_device::ProcessIo::Pty { columns, rows } = profile.io
+                && (columns == 0 || rows == 0)
+            {
+                return Err(failure("terminal dimensions must be positive"));
+            }
+            #[cfg(not(target_os = "macos"))]
+            if matches!(profile.io, cayw_device::ProcessIo::Pty { .. }) {
+                return Err(failure("terminal execution is only supported on macOS"));
+            }
             if profile.timeout.is_zero()
                 || Instant::now().checked_add(profile.timeout).is_none()
                 || profile.max_output_bytes == 0
@@ -400,6 +410,14 @@ impl Host {
             runner: self.runner.clone(),
             external: self.external.clone(),
         })
+    }
+
+    /// Adds durable OS process observations to this scope. The original runner's
+    /// ownership, admission, cancellation and cleanup ledger remain shared.
+    pub fn with_process_observer(&self, observer: Arc<dyn ProcessObserver>) -> Self {
+        let mut scope = self.clone();
+        scope.runner = Arc::new(self.runner.observed(observer));
+        scope
     }
 
     /// Overrides this scope's application service while sharing the original

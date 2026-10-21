@@ -19,7 +19,15 @@ impl ProcessJournal {
             "CREATE TABLE IF NOT EXISTS runtime_process_scopes (
             task TEXT PRIMARY KEY, session TEXT NOT NULL, attempt TEXT NOT NULL,
             worker TEXT NOT NULL, fence INTEGER NOT NULL, state TEXT NOT NULL,
-            evidence TEXT);",
+            evidence TEXT);
+            CREATE TABLE IF NOT EXISTS runtime_process_identities (
+            task TEXT NOT NULL, session TEXT NOT NULL, attempt TEXT NOT NULL,
+            worker TEXT NOT NULL, fence INTEGER NOT NULL,
+            execution TEXT NOT NULL, sequence INTEGER NOT NULL,
+            pid INTEGER NOT NULL, parent_pid INTEGER NOT NULL, process_group INTEGER NOT NULL,
+            started_seconds INTEGER NOT NULL, started_microseconds INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            PRIMARY KEY (task, execution, sequence, pid, started_seconds, started_microseconds));",
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -56,6 +64,127 @@ impl ProcessJournal {
             [task],
             |row| row.get(0),
         )?)
+    }
+
+    /// Record an OS process that actually started for this exact planned call.
+    /// The scope must still be open for the original attempt, and the written row
+    /// is re-read with the full original lease and call identity so a reused or
+    /// foreign incarnation can never be mistaken for this call's process.
+    pub(crate) fn identity_started(
+        &self,
+        call: &ProcessCallIdentity<'_>,
+        identity: &cayw_host::ProcessIdentity,
+    ) -> Result<(), RuntimeError> {
+        let mut connection = lock(&self.connection);
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_open_scope(&tx, call)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO runtime_process_identities(
+            task,session,attempt,worker,fence,execution,sequence,
+            pid,parent_pid,process_group,started_seconds,started_microseconds,state)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'started')",
+            params![
+                call.task,
+                call.lease.session_id,
+                call.lease.attempt_id,
+                call.lease.worker_id,
+                crate::audit::sql_u64(call.lease.fence)?,
+                call.execution_id,
+                crate::audit::sql_u64(call.sequence)?,
+                i64::from(identity.pid),
+                i64::from(identity.parent_pid),
+                i64::from(identity.process_group),
+                crate::audit::sql_u64(identity.started_seconds)?,
+                i64::from(identity.started_microseconds),
+            ],
+        )?;
+        require_owned_identity(&tx, call, identity)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record every further incarnation observed in this call's process group.
+    /// A descendant reported here is a new OS identity that has no row yet, so it
+    /// is inserted for the original open scope and call and then re-read with the
+    /// full lease and call identity. A row already confirmed `stopped` keeps its
+    /// terminal state, so a late observation can never reopen a finished record,
+    /// and no record is ever migrated into another task or attempt.
+    pub(crate) fn identity_observed(
+        &self,
+        call: &ProcessCallIdentity<'_>,
+        identities: &[cayw_host::ProcessIdentity],
+    ) -> Result<(), RuntimeError> {
+        if identities.is_empty() {
+            return Ok(());
+        }
+        let mut connection = lock(&self.connection);
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_open_scope(&tx, call)?;
+        for identity in identities {
+            tx.execute(
+                "INSERT OR IGNORE INTO runtime_process_identities(
+                task,session,attempt,worker,fence,execution,sequence,
+                pid,parent_pid,process_group,started_seconds,started_microseconds,state)
+                VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'observed')",
+                params![
+                    call.task,
+                    call.lease.session_id,
+                    call.lease.attempt_id,
+                    call.lease.worker_id,
+                    crate::audit::sql_u64(call.lease.fence)?,
+                    call.execution_id,
+                    crate::audit::sql_u64(call.sequence)?,
+                    i64::from(identity.pid),
+                    i64::from(identity.parent_pid),
+                    i64::from(identity.process_group),
+                    crate::audit::sql_u64(identity.started_seconds)?,
+                    i64::from(identity.started_microseconds),
+                ],
+            )?;
+            require_owned_identity(&tx, call, identity)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Confirm that the operating system has finished the recorded incarnation.
+    /// Only the row already written for the original lease and call is updated;
+    /// this records resource cleanup only and never revises a business outcome.
+    pub(crate) fn identity_stopped(
+        &self,
+        call: &ProcessCallIdentity<'_>,
+        identity: &cayw_host::ProcessIdentity,
+    ) -> Result<(), RuntimeError> {
+        let mut connection = lock(&self.connection);
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE runtime_process_identities SET state='stopped'
+            WHERE task=?1 AND session=?2 AND attempt=?3 AND worker=?4 AND fence=?5
+            AND execution=?6 AND sequence=?7 AND pid=?8
+            AND started_seconds=?9 AND started_microseconds=?10
+            AND parent_pid=?11 AND process_group=?12",
+            params![
+                call.task,
+                call.lease.session_id,
+                call.lease.attempt_id,
+                call.lease.worker_id,
+                crate::audit::sql_u64(call.lease.fence)?,
+                call.execution_id,
+                crate::audit::sql_u64(call.sequence)?,
+                i64::from(identity.pid),
+                crate::audit::sql_u64(identity.started_seconds)?,
+                i64::from(identity.started_microseconds),
+                i64::from(identity.parent_pid),
+                i64::from(identity.process_group),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(RuntimeError::Worker(
+                "a stopped OS process is unrecorded or belongs to another attempt and call".into(),
+            ));
+        }
+        tx.commit()?;
+        Ok(())
     }
     fn settled(&self, task: &TaskLease, evidence: &str) -> Result<(), RuntimeError> {
         self.finish(
@@ -114,6 +243,84 @@ impl ProcessJournal {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// The exact planned call that owns an observed OS process incarnation. Every
+/// identity write carries the original lease and call so a replaced attempt or a
+/// reused call sequence can never adopt another execution's process record.
+#[derive(Clone, Copy)]
+pub(crate) struct ProcessCallIdentity<'a> {
+    pub task: &'a str,
+    pub lease: &'a AttemptLease,
+    pub execution_id: &'a str,
+    pub sequence: u64,
+}
+
+/// Require that this exact lease still owns an open process scope. Every new
+/// process record is written against the original planned call, so a replaced
+/// attempt or an already closed scope can never adopt an observed incarnation.
+fn require_open_scope(
+    tx: &rusqlite::Transaction<'_>,
+    call: &ProcessCallIdentity<'_>,
+) -> Result<(), RuntimeError> {
+    let open: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_process_scopes
+        WHERE task=?1 AND session=?2 AND attempt=?3 AND worker=?4 AND fence=?5 AND state='open')",
+        params![
+            call.task,
+            call.lease.session_id,
+            call.lease.attempt_id,
+            call.lease.worker_id,
+            crate::audit::sql_u64(call.lease.fence)?,
+        ],
+        |row| row.get(0),
+    )?;
+    if !open {
+        return Err(RuntimeError::Worker(
+            "an OS process belongs to a process scope that is closed or owned by another attempt"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Re-read one written incarnation under the full original lease, call and OS
+/// identity. The predicate is the same one `stopped` uses, including the recorded
+/// topology: a row carrying the same primary key but different parent or group
+/// data is not this incarnation's record and must not pass as one.
+fn require_owned_identity(
+    tx: &rusqlite::Transaction<'_>,
+    call: &ProcessCallIdentity<'_>,
+    identity: &cayw_host::ProcessIdentity,
+) -> Result<(), RuntimeError> {
+    let owned: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_process_identities
+        WHERE task=?1 AND session=?2 AND attempt=?3 AND worker=?4 AND fence=?5
+        AND execution=?6 AND sequence=?7 AND pid=?8
+        AND started_seconds=?9 AND started_microseconds=?10
+        AND parent_pid=?11 AND process_group=?12)",
+        params![
+            call.task,
+            call.lease.session_id,
+            call.lease.attempt_id,
+            call.lease.worker_id,
+            crate::audit::sql_u64(call.lease.fence)?,
+            call.execution_id,
+            crate::audit::sql_u64(call.sequence)?,
+            i64::from(identity.pid),
+            crate::audit::sql_u64(identity.started_seconds)?,
+            i64::from(identity.started_microseconds),
+            i64::from(identity.parent_pid),
+            i64::from(identity.process_group),
+        ],
+        |row| row.get(0),
+    )?;
+    if !owned {
+        return Err(RuntimeError::Worker(
+            "an OS process identity is unrecorded or belongs to another attempt and call".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn is_process(name: &str) -> bool {
@@ -234,5 +441,144 @@ impl Runtime {
         lock(&self.inner.processes).remove(task_id);
         self.inner.changed.notify_waiters();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TASK: &str = "task";
+
+    fn lease(fence: u64) -> AttemptLease {
+        AttemptLease {
+            session_id: "session".into(),
+            attempt_id: "attempt".into(),
+            worker_id: "worker".into(),
+            fence,
+        }
+    }
+
+    fn identity(pid: u32) -> cayw_host::ProcessIdentity {
+        cayw_host::ProcessIdentity {
+            pid,
+            parent_pid: 1,
+            process_group: pid,
+            started_seconds: 1_700_000_000,
+            started_microseconds: 5,
+        }
+    }
+
+    fn open(dir: &std::path::Path) -> ProcessJournal {
+        let journal = ProcessJournal::open(&dir.join("journal.db")).unwrap();
+        // `finish` writes the cleanup audit row; the real runtime creates this
+        // table in its own store, so this test creates the same shape locally.
+        lock(&journal.connection)
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS runtime_audit(
+                session TEXT NOT NULL, task TEXT, kind TEXT NOT NULL,
+                timestamp INTEGER NOT NULL, payload TEXT NOT NULL);",
+            )
+            .unwrap();
+        journal
+    }
+
+    fn state(journal: &ProcessJournal, pid: u32) -> Option<String> {
+        lock(&journal.connection)
+            .query_row(
+                "SELECT state FROM runtime_process_identities WHERE pid=?1",
+                [i64::from(pid)],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// A late report about an incarnation that already finished must never reopen
+    /// its record. The supervisor's own loop can report a member after the cleanup
+    /// record was written, and that report carries no new information.
+    #[test]
+    fn a_late_observation_cannot_revert_a_stopped_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = open(dir.path());
+        let lease = lease(1);
+        journal.starting(TASK, &lease).unwrap();
+        let call = ProcessCallIdentity {
+            task: TASK,
+            lease: &lease,
+            execution_id: "cell",
+            sequence: 0,
+        };
+        let leader = identity(4242);
+        journal.identity_started(&call, &leader).unwrap();
+        assert_eq!(state(&journal, 4242).as_deref(), Some("started"));
+        journal.identity_stopped(&call, &leader).unwrap();
+        assert_eq!(state(&journal, 4242).as_deref(), Some("stopped"));
+        journal
+            .identity_observed(&call, std::slice::from_ref(&leader))
+            .unwrap();
+        assert_eq!(
+            state(&journal, 4242).as_deref(),
+            Some("stopped"),
+            "a late observation must not reopen a finished record"
+        );
+        // A genuinely new descendant in the same managed group is still recorded,
+        // so the late report is a no-op only for the incarnation that finished.
+        let child = cayw_host::ProcessIdentity {
+            parent_pid: 4242,
+            process_group: 4242,
+            ..identity(4243)
+        };
+        journal.identity_observed(&call, &[child]).unwrap();
+        assert_eq!(state(&journal, 4243).as_deref(), Some("observed"));
+        assert_eq!(state(&journal, 4242).as_deref(), Some("stopped"));
+    }
+
+    /// A replaced attempt, and a scope that is already closed, can never adopt an
+    /// observed process — including one that really is in the same process group.
+    #[test]
+    fn a_replaced_attempt_cannot_adopt_an_observed_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = open(dir.path());
+        let original = lease(1);
+        journal.starting(TASK, &original).unwrap();
+        let call = ProcessCallIdentity {
+            task: TASK,
+            lease: &original,
+            execution_id: "cell",
+            sequence: 0,
+        };
+        journal.identity_started(&call, &identity(5000)).unwrap();
+
+        // A later attempt cannot even open a scope for the same task.
+        let replaced = lease(2);
+        assert!(journal.starting(TASK, &replaced).is_err());
+        let stale = ProcessCallIdentity {
+            task: TASK,
+            lease: &replaced,
+            execution_id: "cell",
+            sequence: 0,
+        };
+        assert!(journal.identity_started(&stale, &identity(5001)).is_err());
+        assert!(
+            journal
+                .identity_observed(&stale, &[identity(5002)])
+                .is_err()
+        );
+        assert!(journal.identity_stopped(&stale, &identity(5000)).is_err());
+        assert!(state(&journal, 5001).is_none());
+        assert!(state(&journal, 5002).is_none());
+        // The original attempt keeps its own record untouched.
+        assert_eq!(state(&journal, 5000).as_deref(), Some("started"));
+
+        // Once the original scope is closed, even the original attempt cannot
+        // write another incarnation into it.
+        journal
+            .finish(TASK, None, "drained", "test", "closed")
+            .unwrap();
+        assert!(journal.identity_started(&call, &identity(5003)).is_err());
+        assert!(journal.identity_observed(&call, &[identity(5004)]).is_err());
+        assert!(state(&journal, 5003).is_none());
+        assert!(state(&journal, 5004).is_none());
     }
 }

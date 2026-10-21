@@ -62,6 +62,84 @@ fn validation_is_strict_and_local_only() {
 }
 
 #[test]
+fn explicit_unsigned_integer_conversion_never_rounds_or_truncates() {
+    for (text, expected) in [
+        ("30000", 30000_u64),
+        ("8192.0", 8192),
+        ("3e4", 30000),
+        ("300000e-1", 30000),
+        (" 0008192.000 ", 8192),
+        ("0.0e100", 0),
+        ("9007199254740993.0", 9007199254740993),
+        ("18446744073709551615", u64::MAX),
+    ] {
+        assert_eq!(
+            unsigned_tool_integer(&json!(text)).unwrap(),
+            expected,
+            "{text}"
+        );
+    }
+    for (value, expected) in [
+        (json!(30000.0), 30000),
+        (json!(8192.0), 8192),
+        (json!(0.0), 0),
+        (json!(9007199254740991.0), 9007199254740991),
+    ] {
+        assert_eq!(unsigned_tool_integer(&value).unwrap(), expected, "{value}");
+    }
+    for value in [
+        json!(9007199254740992.0),
+        json!(18446744073709551616.0),
+        json!(-1.0),
+        json!("8192.5"),
+        json!("9007199254740993.1"),
+        json!("1e-1"),
+        json!("18446744073709551616"),
+        json!("1e100"),
+        json!("-1"),
+        json!("true"),
+        json!("NaN"),
+        json!("Infinity"),
+        json!(""),
+        json!("1e"),
+        json!("1."),
+        json!(".1"),
+        json!(true),
+        json!(null),
+        json!(1.5),
+    ] {
+        assert!(unsigned_tool_integer(&value).is_err(), "accepted {value}");
+    }
+}
+
+#[test]
+fn alternative_schema_errors_identify_fields_without_converting_arguments() {
+    let validator = ArgumentValidator::new(&json!({
+        "type": "object",
+        "oneOf": [
+            {"properties": {"action": {"const": "exec"}, "options": {
+                "type": "object", "oneOf": [
+                    {"properties": {"yield_time_ms": {"type": "integer"}, "max_output_tokens": {"type": "integer"}},
+                     "required": ["yield_time_ms", "max_output_tokens"], "additionalProperties": false},
+                    {"properties": {"preset": {"const": "default"}}, "required": ["preset"], "additionalProperties": false}
+                ]}}, "required": ["action", "options"], "additionalProperties": false},
+            {"properties": {"action": {"const": "wait"}, "cell_id": {"type": "string"}},
+             "required": ["action", "cell_id"], "additionalProperties": false}
+        ]
+    })).unwrap();
+    let invalid = json!({"action": "exec", "options": {"yield_time_ms": "30000", "max_output_tokens": "8192"}});
+    let original = invalid.clone();
+    let error = validator.validate(&invalid).unwrap_err().to_string();
+    assert!(
+        error.contains("/options/yield_time_ms") && error.contains("integer"),
+        "{error}"
+    );
+    assert!(error.contains("/options/max_output_tokens"), "{error}");
+    assert_eq!(invalid, original);
+    assert!(validator.validate(&json!({"action": "exec", "options": {"yield_time_ms": 30000, "max_output_tokens": 8192}})).is_ok());
+}
+
+#[test]
 fn message_wire_format_and_usage_round_trip() {
     let model = Model::new("fixture", "test");
     let mut assistant = AssistantMessage::new(&model);
