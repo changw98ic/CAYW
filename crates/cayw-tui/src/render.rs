@@ -25,10 +25,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(2),
         ])
         .split(area);
+    let files_count = app.selected().map_or(0, |s| s.files.len());
+    let diffs_count = app.selected().map_or(0, |s| s.diffs.len());
+    let logs_count = app.selected().map_or(0, |s| s.logs.len());
+    let tab = |target: ViewTab, label: String| {
+        if app.view == target {
+            format!("[{label}]")
+        } else {
+            format!(" {label} ")
+        }
+    };
+    let tabs = format!(
+        "{} {} {} {}",
+        tab(ViewTab::Chat, "1:Chat".into()),
+        tab(ViewTab::Files, format!("2:Files({files_count})")),
+        tab(ViewTab::Diff, format!("3:Diff({diffs_count})")),
+        tab(ViewTab::Logs, format!("4:Logs({logs_count})")),
+    );
     let title = if app.connected {
-        "CAYW  •  connected"
+        format!("CAYW  •  connected   {tabs}")
     } else {
-        "CAYW  •  disconnected — Ctrl+R reconnect"
+        format!("CAYW  •  disconnected — Ctrl+R reconnect   {tabs}")
     };
     frame.render_widget(
         Paragraph::new(title).style(Style::default().fg(if app.connected {
@@ -79,6 +96,27 @@ fn pane(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
         }))
 }
 
+fn session_display_label(session: &crate::SessionView) -> String {
+    let raw = sanitize(&session.label).replace('\n', " ");
+    let trimmed = raw.trim();
+    if trimmed == "新会话" || trimmed.starts_with("新会话 ") {
+        for msg in &session.messages {
+            if string(msg, "role") == "user" {
+                let text = message_text(msg).replace('\n', " ");
+                let clean = text.trim();
+                if !clean.is_empty() {
+                    let graphemes: Vec<&str> = clean.graphemes(true).collect();
+                    if graphemes.len() > 22 {
+                        return format!("{}…", graphemes[..22].concat());
+                    }
+                    return clean.to_owned();
+                }
+            }
+        }
+    }
+    raw
+}
+
 fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<_> = app
         .sessions
@@ -89,11 +127,7 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 &session.state
             };
-            ListItem::new(format!(
-                "{}\n{}",
-                sanitize(&session.label).replace('\n', " "),
-                state
-            ))
+            ListItem::new(format!("{}\n{}", session_display_label(session), state))
         })
         .collect();
     let selected = app
@@ -134,7 +168,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
             };
             format!(
                 "{} · {}{flag} · {view_label}",
-                sanitize(&session.label).replace('\n', " "),
+                session_display_label(session),
                 session.state
             )
         },
