@@ -36,11 +36,11 @@ plugin 工具仅暴露 `strongflow.describe` 与 `strongflow.ready`。`WorkflowS
 
 `SessionBinding` 独立记录 Session ID、普通 / StrongFlow 模式、绑定 plugin 版本、注册表实例 UUID 和代际、冻结原因及来源 Session。新注册表即使重用同一个代际数字也不能恢复旧绑定。Runtime 必须在恢复、每次使用和卸载通知后调用 `check_available`；不匹配会冻结，重新加载相同版本也不能解冻。`request_ordinary_fork(new_id, user_confirmed)` 只在明确确认且 ID 不同时返回 `ForkDecision`，保留原绑定和来源，不会直接转换原 Session。Runtime 仍需核对未知副作用、原子预留新 ID、复制持久历史并保存真实 Fork；本库没有声称已完成 Core 集成。
 
-## Observer
+## Debug
 
-默认 feature `observer` 提供 `Observer::channel`。宿主同步调用 `publish`，内部只用 `try_send`；慢读者队列满时丢弃并计数，读者关闭或失败不阻塞主执行。事件数量与单条脱敏后体积均有上限，过大或无效事件有独立计数。`ObservationReader` 单独消费或关闭通道。plugin 只提供 `observer.stats`，卸载后停止接受发布。
+默认 feature `debug` 提供 `DebugLog::channel`。宿主同步调用 `publish`，内部只用 `try_send`；慢读者队列满时丢弃并计数，读者关闭或失败不阻塞主执行。记录数量与单条脱敏后体积均有上限，过大或无效记录有独立计数。`DebugReader` 单独消费或关闭通道。plugin 只提供 `debug.stats`，卸载后停止接受发布。
 
-每个字段必须标记 Public / Private / Thinking / Credential。默认仅公开 Public 字段，递归删除常见凭据和思考字段；Credential 永不输出。可以明确启用私有内容或思考，并增加脱敏 key。脱敏不能从任意自由文本推断秘密，宿主必须正确标记字段；事件名称和字段名称只允许短标识符。
+每条记录带写入时的毫秒时间戳。字段由调用方直接给出，不需要先标记敏感级别。常见凭据键和思考键按名称递归替换为 `[redacted]`，不区分大小写，忽略键名中的符号；宿主可以追加精确键名。这不能从自由文本里找出秘密。事件名称和字段名称只允许短标识符。
 
 ## JEv 与 Fusion
 

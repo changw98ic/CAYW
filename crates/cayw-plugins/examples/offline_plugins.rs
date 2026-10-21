@@ -1,4 +1,4 @@
-use cayw_plugins::{fusion::*, observer::*, strongflow::*, *};
+use cayw_plugins::{debug::*, fusion::*, strongflow::*, *};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,18 +55,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // each plan/status/evidence change and before unloading the plugin.
     let saved_workflows = binding.checkpoint_strongflow(&registry)?;
     // Deliberately no acceptance evidence: this example has not executed a build.
-    let (observer, mut reader) = Observer::channel(ObserverConfig::default())?;
-    observer.publish(Observation {
-        kind: "demo.started".into(),
-        fields: [(
-            "session".into(),
-            ObservedField {
-                value: json!(binding.session_id()),
-                sensitivity: Sensitivity::Private,
-            },
-        )]
-        .into(),
-    });
+    let (debug, mut reader) = DebugLog::channel(DebugConfig::default())?;
+    debug
+        .publish(
+            "demo.started",
+            [("session".into(), json!(binding.session_id()))].into(),
+        )
+        .ok();
     println!(
         "observation: {}",
         serde_json::to_string(&reader.recv().await)?

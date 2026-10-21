@@ -1,6 +1,6 @@
 [package]
 name = "cayw-plugins"
-description = "Explicit native and external plugins, workflow decisions and observation for CAYW hosts"
+description = "Explicit native and external plugins, workflow decisions and debug records for CAYW hosts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["strongflow", "observer", "evaluation"]
+default = ["strongflow", "debug", "evaluation"]
 strongflow = []
-observer = []
+debug = []
 jev = []
 fusion = ["dep:sha2"]
 evaluation = ["jev", "fusion"]
@@ -39,4 +39,4 @@ path = "tests/fixtures/external.rs"
 
 [[example]]
 name = "offline_plugins"
-required-features = ["strongflow", "observer", "evaluation"]
+required-features = ["strongflow", "debug", "evaluation"]

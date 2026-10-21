@@ -8,8 +8,8 @@ mod registry;
 pub mod fusion;
 #[cfg(feature = "jev")]
 pub mod jev;
-#[cfg(feature = "observer")]
-pub mod observer;
+#[cfg(feature = "debug")]
+pub mod debug;
 #[cfg(feature = "strongflow")]
 pub mod strongflow;
 
