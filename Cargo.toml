@@ -11,6 +11,7 @@ members = [
     "crates/cayw-runtime",
     "crates/cayw-providers",
     "crates/cayw-plugins",
+    "crates/cayw-fusion-plugin",
     "crates/cayw-remote",
     "crates/cayw-content",
     "crates/cayw-tui",
