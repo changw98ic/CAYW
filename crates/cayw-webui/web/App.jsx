@@ -30,12 +30,44 @@ import {
   summarizePlugins,
 } from './state.js';
 import {
-  SpotlightCard,
-  ShinyText,
-  GradientText,
-  HintPopover,
-  TooltipBadge,
-} from './components/Bits.jsx';
+  clsx,
+  BrandWordmark,
+  FishLogo,
+  StateDot,
+  Button,
+  Menu,
+  Modal,
+  RiskConfirmation,
+  DisclosureRow,
+  Tooltip,
+  IconAgentPresetOutline16,
+  IconCheckOutline16,
+  IconChevronDownOutline14,
+  IconChevronRightOutline14,
+  IconCloseFill14,
+  IconCloseOutline16,
+  IconCodeOutline16,
+  IconCopyOutline16,
+  IconDarkOutline16,
+  IconDataOutline16,
+  IconEditOutline16,
+  IconEllipsisOutline16,
+  IconFolderClose16,
+  IconFolderOpen16,
+  IconFollowsystemOutline16,
+  IconLightOutline16,
+  IconNewChatOutline16,
+  IconPanelLeftOutline16,
+  IconPersonalizationOutline16,
+  IconPlusOutline16,
+  IconProjectAddOutline16,
+  IconRefreshOutline16,
+  IconSearchOutline16,
+  IconSendOutline16,
+  IconSettingsOutline14,
+  IconSettingsOutline16,
+  IconTriangleRightFill14,
+} from './components/DshPrimitives.jsx';
 
 const CAPABILITY_LABELS = {
   'fs.read': '读取文件',
@@ -57,57 +89,131 @@ const CAPABILITY_LABELS = {
   'skills.read': '读取指定技能',
 };
 
-const ROLE_LABELS = {
-  user: '你',
-  assistant: '助手',
-  system: '系统',
-  toolResult: '工具结果',
-  custom: '宿主记录',
-};
+const SHIELD_OUTLINE =
+  'M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z';
+
+function PermissionGlyph({ value }) {
+  if (value === 'read-only' || value === 'standard') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d={SHIELD_OUTLINE}
+          stroke="currentColor"
+          strokeWidth="1.31831"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M12.1654 5.7552L8.9447 9.41475C8.73044 9.65816 8.53628 9.8804 8.35774 10.0423C8.1713 10.2114 7.94235 10.3717 7.64016 10.4254C7.48207 10.4535 7.32 10.4552 7.16151 10.4294C6.85843 10.3801 6.62728 10.2223 6.43836 10.0559C6.25752 9.89653 6.06037 9.67732 5.84264 9.43705L4.72925 8.20897L5.63557 7.38707L6.74897 8.61594C6.98603 8.87755 7.12974 9.03533 7.24673 9.13839C7.31033 9.19443 7.34485 9.21476 7.35823 9.22122C7.38068 9.22484 7.40352 9.22515 7.42593 9.22122C7.40522 9.22502 7.42893 9.23294 7.53583 9.136C7.65132 9.03126 7.79316 8.87139 8.02643 8.60638L11.2479 4.94763L12.1654 5.7552Z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+  if (value === 'danger-full-access') {
+    return (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path
+          d={SHIELD_OUTLINE}
+          stroke="currentColor"
+          strokeWidth="1.31831"
+          strokeLinejoin="round"
+        />
+        <path d="M9.10094 4.5V8.75939H7.59888V4.5H9.10094Z" fill="currentColor" />
+        <path d="M9.10094 9.8114V11.5H7.59888V9.8114H9.10094Z" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8.08887 0.251709C8.20479 0.23085 8.32486 0.241168 8.43652 0.282959L15.0215 2.75171C15.2787 2.84819 15.4492 3.09414 15.4492 3.3689V7.0105C15.4492 7.10986 15.4441 7.2081 15.4414 7.30542C15.0285 7.07175 14.5905 6.87695 14.1309 6.73022V3.82495L8.20508 1.60327L2.2793 3.82495V7.0105C2.27936 9.7171 3.4745 11.5379 5.02734 12.7947C5.01025 12.9942 5 13.1962 5 13.4001C5.00001 13.7617 5.02722 14.1169 5.08008 14.4636C2.91555 13.0393 0.961014 10.752 0.960938 7.0105V3.3689C0.960938 3.09417 1.13146 2.84821 1.38867 2.75171L7.97461 0.282959L8.08887 0.251709Z"
+        fill="currentColor"
+      />
+      <path d="M11.3525 5.64688V6.85688H5V5.64688H11.3525Z" fill="currentColor" />
+      <path d="M9.5824 8.29376V9.50376H5V8.29376H9.5824Z" fill="currentColor" />
+      <path
+        d="M14.6647 15.6852H10.0338C10.3878 15.3751 10.7567 15.0517 11.0772 14.7706C11.2531 14.6164 11.4144 14.4746 11.5511 14.3547H14.6647V15.6852Z"
+        fill="currentColor"
+      />
+      <path
+        d="M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function HeroGlow({ className }) {
+  return (
+    <svg className={className} viewBox="0 0 1051 468" fill="none" aria-hidden="true">
+      <defs>
+        <filter
+          id="dsh-empty-glow"
+          x="0"
+          y="0"
+          width="1051"
+          height="468"
+          filterUnits="userSpaceOnUse"
+          colorInterpolationFilters="sRGB"
+        >
+          <feFlood floodOpacity="0" result="BackgroundImageFix" />
+          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+          <feGaussianBlur stdDeviation="50" result="effect1_foregroundBlur" />
+        </filter>
+      </defs>
+      <g filter="url(#dsh-empty-glow)">
+        <ellipse cx="525.5" cy="234" rx="425.5" ry="134" fill="#6187D8" fillOpacity="0.08" />
+      </g>
+    </svg>
+  );
+}
 
 const PERMISSION_PRESETS = [
   {
     id: 'standard',
-    label: '按需审批',
-    enLabel: 'Standard',
+    label: 'Read Only',
+    zhLabel: '只读与按需审批',
     desc: '只读操作直接执行；文件写入、修改、构建与外部工具需每次或按任务明确授权。',
   },
   {
     id: 'workspace-write',
-    label: '工作区读写',
-    enLabel: 'Workspace Write',
+    label: 'Workspace Write',
+    zhLabel: '工作区读写',
     desc: '当前工作区内文件读写优先使用任务授权，跨目录或外部命令仍需审批。',
   },
   {
     id: 'danger-full-access',
-    label: '完全访问',
-    enLabel: 'Full access',
+    label: 'Full access',
+    zhLabel: '完全访问',
     desc: '减少确认步骤，允许直接执行更多操作；仅建议在完全信任当前任务时启用。',
   },
 ];
 
-const STARTER_PROMPTS = [
+const AGENT_PRESETS = [
   {
-    title: '📄 读取工作区说明',
-    desc: '读取 README.md 并用一句话概括当前项目',
-    prompt: '读取当前工作区的 README.md，并用一句话总结项目内容。',
+    id: 'code',
+    name: 'PTC 模式',
+    badge: '内置 · 默认',
+    desc: '通过 Luau CodeMode 呈现受控能力，让模型用代码单元组合多步操作并统一经过权限与预算边界。',
   },
   {
-    title: '✍️ 创建并验证文件',
-    desc: '写入一份测试笔记并读回校验内容',
-    prompt: '在当前工作区创建 hello-cayw.txt，写入 Hello from CAYW，再读取确认内容。',
+    id: 'standard',
+    name: '标准模式',
+    badge: '内置',
+    desc: '完整编码 Agent，支持文件读写、检索、Git 检视、预设构建测试与宿主连接工具。',
   },
   {
-    title: '🔍 查看工作区文件列表',
-    desc: '列出当前工作区根目录下的全部文件',
-    prompt: '列出当前工作区根目录下的所有文件，并简要说明各自用途。',
+    id: 'strongflow',
+    name: 'StrongFlow 强流程',
+    badge: '插件',
+    desc: '为复杂任务提供阶段门禁与检查点；插件卸载后已绑定会话保持冻结，支持确认后 Fork 为普通聊天。',
   },
 ];
 
 const BUILTIN_CAPABILITY_GROUPS = [
   {
     title: '文件与目录（fs.*）',
-    badge: '写操作需授权',
+    badge: '已挂载',
     items: [
       ['fs.read', '读取文件内容与 SHA-256'],
       ['fs.write', '原子创建或凭摘要覆盖文件'],
@@ -117,7 +223,7 @@ const BUILTIN_CAPABILITY_GROUPS = [
   },
   {
     title: '代码检索与语法（fs / code）',
-    badge: '受控只读',
+    badge: '已挂载',
     items: [
       ['fs.grep / fs.glob', '工作区有界文本检索与路径匹配'],
       ['code.outline', '提取源码结构与符号大纲'],
@@ -126,7 +232,7 @@ const BUILTIN_CAPABILITY_GROUPS = [
   },
   {
     title: 'Git 版本控制（git.*）',
-    badge: '只读检视',
+    badge: '已挂载',
     items: [
       ['git.status', '查看工作区当前变更状态'],
       ['git.diff', '查看未提交或指定范围的代码差异'],
@@ -135,7 +241,7 @@ const BUILTIN_CAPABILITY_GROUPS = [
   },
   {
     title: '预设构建与测试（build / test）',
-    badge: '执行需授权',
+    badge: '已挂载',
     items: [
       ['build.run', '运行宿主显式配置的预设构建任务'],
       ['test.run', '运行宿主显式配置的预设测试任务'],
@@ -143,45 +249,11 @@ const BUILTIN_CAPABILITY_GROUPS = [
   },
 ];
 
-const OPTIONAL_PLUGIN_CATALOG = [
-  {
-    name: 'StrongFlow',
-    role: '强流程编排插件',
-    desc: '为复杂任务提供阶段门禁与计划检查点；卸载后已绑定会话保持冻结，支持确认后 Fork 为普通聊天。',
-  },
-  {
-    name: 'JEv',
-    role: '执行验证插件',
-    desc: '对关键步骤产物与断言进行独立核验，不直接读写 Core 数据库。',
-  },
-  {
-    name: 'Fusion',
-    role: '多路探索与融合插件',
-    desc: '在受控预算内对比候选方案并汇总验证证据。',
-  },
-  {
-    name: 'Observer',
-    role: '运行轨迹观测插件',
-    desc: '订阅会话事件流进行只读审计与诊断统计，不干预普通聊天。',
-  },
-];
-
-const QUICK_WORKSPACES = [
-  ['/Volumes/ORICO/CAYW', 'CAYW 主仓库'],
-  ['/Volumes/ORICO/CAYW-tui', 'CAYW TUI 分支'],
-  ['/Volumes/ORICO/CAYW-webui', 'CAYW WebUI 分支'],
-  ['/tmp/cayw-demo-project', '新建演示工作区 (/tmp)'],
-];
-
 function renderInlineTokens(text) {
   const parts = String(text ?? '').split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
   return parts.map((part, idx) => {
     if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
-      return (
-        <code key={idx} className="inline-code">
-          {part.slice(1, -1)}
-        </code>
-      );
+      return <code key={idx}>{part.slice(1, -1)}</code>;
     }
     if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
       return <strong key={idx}>{part.slice(2, -2)}</strong>;
@@ -190,30 +262,52 @@ function renderInlineTokens(text) {
   });
 }
 
-function FormattedBody({ text }) {
+function FormattedMarkdown({ text }) {
   const raw = String(text ?? '');
   const blocks = raw.split(/(```[\s\S]*?```)/g);
   return (
-    <div className="body dsh-markdown">
+    <div className="_markdown_1nba0_5">
       {blocks.map((block, bIdx) => {
         if (block.startsWith('```') && block.endsWith('```') && block.length >= 6) {
           const firstLineMatch = block.slice(3, -3).match(/^([a-zA-Z0-9_-]+)\n/);
           const lang = firstLineMatch ? firstLineMatch[1] : 'code';
-          const inner = block
-            .slice(3, -3)
-            .replace(/^[a-zA-Z0-9_-]+\n/, '');
+          const inner = block.slice(3, -3).replace(/^[a-zA-Z0-9_-]+\n/, '');
           return (
-            <div key={bIdx} className="dsh-codeblock">
-              <div className="dsh-codeblock-banner">
-                <span className="dsh-codeblock-lang">{lang}</span>
+            <div key={bIdx} className="_block_178r4_4">
+              <div className="_bannerWrap_178r4_21">
+                <div className="_banner_178r4_21">
+                  <span className="_infostring_178r4_42">{lang}</span>
+                  <span className="_action_178r4_53">
+                    <button
+                      type="button"
+                      className="_copyButton_178r4_59"
+                      title="复制代码"
+                      onClick={() => {
+                        if (navigator.clipboard?.writeText) {
+                          navigator.clipboard.writeText(inner).catch(() => {});
+                        }
+                      }}
+                    >
+                      <IconCopyOutline16 size={14} />
+                    </button>
+                  </span>
+                </div>
               </div>
-              <pre className="code-block">
+              <pre className="_plain_178r4_94">
                 <code>{inner}</code>
               </pre>
             </div>
           );
         }
-        return <React.Fragment key={bIdx}>{renderInlineTokens(block)}</React.Fragment>;
+        const paragraphs = block.split(/\n{2,}/g).filter(p => p.trim() !== '');
+        if (!paragraphs.length) return null;
+        return (
+          <React.Fragment key={bIdx}>
+            {paragraphs.map((p, pIdx) => (
+              <p key={pIdx}>{renderInlineTokens(p)}</p>
+            ))}
+          </React.Fragment>
+        );
       })}
     </div>
   );
@@ -282,6 +376,21 @@ function shortTitle(text, max = 30) {
   return clean.length <= max ? clean : `${clean.slice(0, max)}…`;
 }
 
+function stateDotKind(sessionOrSnap, view) {
+  const st = stateName(sessionOrSnap);
+  if (st === 'running') return 'ongoing';
+  if (
+    st === 'awaiting_approval' ||
+    st === 'needs_reconciliation' ||
+    st === 'frozen' ||
+    unresolved(sessionOrSnap) ||
+    frozen(sessionOrSnap, view)
+  ) {
+    return 'warning';
+  }
+  return 'done';
+}
+
 export function CAYWApp({ env } = {}) {
   const fetchFn = env?.fetch ?? ((url, options) => fetch(url, options));
   const setTimer = env?.setTimeout ?? ((fn, delay) => setTimeout(fn, delay));
@@ -339,8 +448,8 @@ export function CAYWApp({ env } = {}) {
       projects: [
         {
           id: 'default',
-          label: '默认项目空间',
-          workspace: '',
+          label: 'CAYW',
+          workspace: '/Volumes/ORICO/CAYW',
           address: '本机 IPC',
           default: true,
         },
@@ -350,13 +459,21 @@ export function CAYWApp({ env } = {}) {
       sessionTitleOverrides: new Map(),
       sessionPickerOpen: true,
       sessionSearchQuery: '',
+      searchExpanded: false,
+      sidebarCollapsed: false,
+      expandedGroups: {},
+      // Hero & Composer menus
+      heroWsMenuOpen: false,
+      heroPresetMenuOpen: false,
+      selectedAgentPreset: 'code',
+      modelMenuOpen: false,
       // DSH Settings Modal state
       settingsOpen: false,
       settingsTab: 'general',
       themeMode: 'dark',
       enterBehavior: 'enter',
       // DSH Permission Preset & Grants state
-      permissionPreset: 'standard',
+      permissionPreset: 'workspace-write',
       permissionPopoverOpen: false,
       fullAccessConfirmOpen: false,
       fullAccessAcknowledged: false,
@@ -364,7 +481,7 @@ export function CAYWApp({ env } = {}) {
       sessionGrants: [],
       sessionAudit: [],
       revokeBusyKey: null,
-      // DSH New Project / Directory Picker Modal state
+      // DSH Directory Browser Modal state
       newProjectModalOpen: false,
       browsePath: '/Volumes/ORICO',
       browseParent: '/Volumes',
@@ -373,6 +490,7 @@ export function CAYWApp({ env } = {}) {
       browseShowHidden: false,
       browseLoading: false,
       browseError: '',
+      pathEditing: false,
       newFolderOpen: false,
       newFolderName: '',
     };
@@ -392,10 +510,24 @@ export function CAYWApp({ env } = {}) {
     s.themeMode = mode;
     if (typeof document !== 'undefined' && document.documentElement) {
       let resolved = mode;
-      if (mode === 'system' && typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-        resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      if (
+        mode === 'system' &&
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function'
+      ) {
+        resolved = window.matchMedia('(prefers-color-scheme: light)').matches
+          ? 'light'
+          : 'dark';
       }
       document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+      if (document.body) {
+        if (resolved === 'dark') {
+          document.body.setAttribute('data-ds-dark-theme', '');
+        } else {
+          document.body.removeAttribute('data-ds-dark-theme');
+        }
+      }
     }
     if (shouldRender) forceRender();
   };
@@ -795,13 +927,6 @@ export function CAYWApp({ env } = {}) {
       );
       updateSessionSummary(snapshot);
       s.pollFailures = 0;
-      if (
-        typeof window !== 'undefined' &&
-        typeof window.matchMedia === 'function' &&
-        window.matchMedia('(max-width: 640px)').matches
-      ) {
-        s.sessionPickerOpen = false;
-      }
       forceRender();
       schedulePoll(0, generation);
     } catch (error) {
@@ -870,6 +995,12 @@ export function CAYWApp({ env } = {}) {
       s.connectionStatus = '已连接本机';
       report(null);
       forceRender();
+      try {
+        const list = await rpc('projects.list');
+        if (login === s.loginGeneration && Array.isArray(list) && list.length) {
+          s.projects = list;
+        }
+      } catch {}
       await refreshSessions();
       if (login === s.loginGeneration && s.sessions.length) {
         await selectSession(s.sessions[0].id);
@@ -1027,6 +1158,7 @@ export function CAYWApp({ env } = {}) {
         s.browsePath = res.path || path;
         s.browseParent = res.parent || '';
         s.browseEntries = Array.isArray(res.entries) ? res.entries : [];
+        s.browseSelectedPath = '';
         s.projectWorkspaceInput = s.browsePath;
         if (projectWsInputRef.current) projectWsInputRef.current.value = s.browsePath;
         if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = s.browsePath;
@@ -1044,6 +1176,7 @@ export function CAYWApp({ env } = {}) {
     s.newFolderOpen = false;
     s.newFolderName = '';
     s.browseError = '';
+    s.pathEditing = false;
     if (!s.projectWorkspaceInput) {
       s.projectWorkspaceInput = s.browsePath || '/Volumes/ORICO';
     }
@@ -1155,6 +1288,7 @@ export function CAYWApp({ env } = {}) {
   const handleAddProject = async (event, andEnter = false) => {
     event?.preventDefault?.();
     const ws = (
+      s.browseSelectedPath ||
       modalProjectWsInputRef.current?.value ||
       projectWsInputRef.current?.value ||
       s.projectWorkspaceInput
@@ -1178,6 +1312,7 @@ export function CAYWApp({ env } = {}) {
       if (login !== s.loginGeneration) return;
       s.projectWorkspaceInput = '';
       s.projectLabelInput = '';
+      s.browseSelectedPath = '';
       if (projectWsInputRef.current) projectWsInputRef.current.value = '';
       if (projectLabelInputRef.current) projectLabelInputRef.current.value = '';
       if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = '';
@@ -1398,7 +1533,6 @@ export function CAYWApp({ env } = {}) {
     };
   }, []);
 
-  // Compute derived projections for rendering
   saveProjectState();
   const view = activeView();
   const snapshot = view?.snapshot;
@@ -1507,6 +1641,9 @@ export function CAYWApp({ env } = {}) {
     PERMISSION_PRESETS.find(p => p.id === s.permissionPreset) ??
     PERMISSION_PRESETS[0];
 
+  const currentAgentPresetObj =
+    AGENT_PRESETS.find(p => p.id === s.selectedAgentPreset) ?? AGENT_PRESETS[0];
+
   const filteredSessions = s.sessionSearchQuery.trim()
     ? s.sessions.filter(sess =>
         displayLabel(sess)
@@ -1519,527 +1656,837 @@ export function CAYWApp({ env } = {}) {
     ? s.browseEntries
     : s.browseEntries.filter(e => !e.hidden);
 
+  const browseCrumbs = (() => {
+    const raw = s.browsePath || '/';
+    const segments = raw.split('/').filter(Boolean);
+    const list = [{ name: '/', path: '/' }];
+    let acc = '';
+    for (const seg of segments) {
+      acc += `/${seg}`;
+      list.push({ name: seg, path: acc });
+    }
+    return list;
+  })();
+
+  const isHero =
+    s.activePage === 'conversation' &&
+    !messages.length &&
+    !approvals.length &&
+    !attention &&
+    !view?.liveText;
+
+  const wide = !s.sidebarCollapsed;
+
   return (
-    <div className="dsh-app-shell">
+    <div
+      id="workspace"
+      className="pI_x6G_frame"
+      style={{
+        gridTemplateColumns: wide ? '264px minmax(0, 1fr)' : '56px minmax(0, 1fr)',
+      }}
+    >
       <a className="skip" href="#conversation">
         跳到会话内容
       </a>
-      <header className="topbar dsh-topbar">
-        <div className="identity">
-          <span className="mark" aria-hidden="true">
-            C
-          </span>
-          <div>
-            <strong>CAYW</strong>
-            <span className="dsh-build-badge">v3</span>
-            <span className="muted">DeepSeek Harness 风格工作台</span>
-          </div>
-        </div>
-        <div className="connection">
-          <button
-            type="button"
-            className="dsh-top-pill"
-            onClick={() => openNewProjectModal()}
-          >
-            📁 + 新开项目
-          </button>
-          <button
-            type="button"
-            className="dsh-top-pill"
-            onClick={() => switchPage('permissions')}
-          >
-            {`🔒 权限：${currentPresetObj.label}${approvals.length ? ` (${approvals.length} 待审)` : ''}`}
-          </button>
-          <button
-            type="button"
-            className="dsh-top-pill"
-            onClick={() => openSettings('general')}
-          >
-            ⚙ 设置
-          </button>
-          <span className="dsh-conn-dot" data-connected={String(s.connectionStatus === '已连接本机')} />
-          <span id="connection-status" role="status">
-            {s.connectionStatus}
-          </span>
-          <button
-            ref={bind({ click: () => trackAsync(connectLocal()) })}
-            id="reconnect"
-            className="quiet"
-            type="button"
-            disabled={s.reconnectBusy}
-            onClick={() => trackAsync(connectLocal())}
-          >
-            重连
-          </button>
-        </div>
-      </header>
 
-      <div id="workspace" className="workspace dsh-frame">
-        <aside className="sidebar dsh-sidebar" aria-labelledby="sessions-heading">
-          <div className="dsh-sidebar-primary-actions">
+      {/* Accessible navigation hooks for programmatic view switching */}
+      <nav className="visually-hidden" aria-label="界面视图">
+        <button
+          ref={bind({ click: () => switchPage('conversation') })}
+          id="nav-conversation"
+          type="button"
+          aria-current={String(s.activePage === 'conversation')}
+          onClick={() => switchPage('conversation')}
+        >
+          对话
+        </button>
+        <button
+          ref={bind({ click: () => switchPage('projects') })}
+          id="nav-projects"
+          type="button"
+          aria-current={String(s.activePage === 'projects')}
+          onClick={() => switchPage('projects')}
+        >
+          项目
+        </button>
+        <button
+          ref={bind({ click: () => switchPage('permissions') })}
+          id="nav-permissions"
+          type="button"
+          aria-current={String(s.activePage === 'permissions')}
+          onClick={() => switchPage('permissions')}
+        >
+          权限
+        </button>
+        <button
+          ref={bind({ click: () => switchPage('plugins') })}
+          id="nav-plugins"
+          type="button"
+          aria-current={String(s.activePage === 'plugins')}
+          onClick={() => switchPage('plugins')}
+        >
+          插件
+        </button>
+      </nav>
+
+      {/* Official DSH Sidebar (@deepseek-ai/dsh-client-ui-sidebar + ui-workspace) */}
+      <aside
+        className={clsx('pI_x6G_sidebarCol hHd-Xa_root', !wide && 'hHd-Xa_collapsed')}
+        aria-labelledby="sessions-heading"
+      >
+        <div className="hHd-Xa_logoRow">
+          {wide ? (
             <button
-              ref={bind({ click: () => trackAsync(createNewSession()) })}
-              id="create-button"
-              className="dsh-new-session-btn create-btn"
               type="button"
+              className="hHd-Xa_brand hHd-Xa_wide"
               aria-label="新建会话"
-              disabled={s.createBusy}
               onClick={() => trackAsync(createNewSession())}
             >
-              <span>{s.createBusy ? '创建中…' : '+ 新建会话'}</span>
+              <span className="hHd-Xa_brandIdentity" aria-hidden="true">
+                <span className="hHd-Xa_brandMark">
+                  <FishLogo size={24} />
+                </span>
+                <span className="hHd-Xa_brandName">
+                  <BrandWordmark size={24} includeMark={false} />
+                </span>
+              </span>
             </button>
+          ) : null}
+          <Tooltip label={wide ? '收起侧边栏' : '打开侧边栏'} delayMs={400}>
             <button
-              id="open-new-project-btn"
-              className="dsh-new-project-btn secondary"
               type="button"
-              title="选择本地目录并新开项目工作区"
-              onClick={() => openNewProjectModal()}
+              className="hHd-Xa_iconButton hHd-Xa_toggle"
+              aria-label={wide ? '收起侧边栏' : '打开侧边栏'}
+              onClick={() => {
+                s.sidebarCollapsed = !s.sidebarCollapsed;
+                forceRender();
+              }}
             >
-              📁 新开项目
-            </button>
-          </div>
-
-          <nav className="page-nav dsh-nav-segmented" aria-label="界面视图">
-            <button
-              ref={bind({ click: () => switchPage('conversation') })}
-              id="nav-conversation"
-              className="page-tab"
-              type="button"
-              aria-current={String(s.activePage === 'conversation')}
-              onClick={() => switchPage('conversation')}
-            >
-              对话
-            </button>
-            <button
-              ref={bind({ click: () => switchPage('projects') })}
-              id="nav-projects"
-              className="page-tab"
-              type="button"
-              aria-current={String(s.activePage === 'projects')}
-              onClick={() => switchPage('projects')}
-            >
-              项目
-            </button>
-            <button
-              ref={bind({ click: () => switchPage('permissions') })}
-              id="nav-permissions"
-              className="page-tab"
-              type="button"
-              aria-current={String(s.activePage === 'permissions')}
-              onClick={() => switchPage('permissions')}
-            >
-              {`权限${approvals.length ? `(${approvals.length})` : ''}`}
-            </button>
-            <button
-              ref={bind({ click: () => switchPage('plugins') })}
-              id="nav-plugins"
-              className="page-tab"
-              type="button"
-              aria-current={String(s.activePage === 'plugins')}
-              onClick={() => switchPage('plugins')}
-            >
-              插件
-            </button>
-          </nav>
-
-          <div className="dsh-workspace-box">
-            <SpotlightCard
-              as="button"
-              id="current-workspace-btn"
-              className="workspace-switcher dsh-workspace-pill"
-              type="button"
-              handlers={{ click: () => switchPage('projects') }}
-              data-tip={
-                currentProjectSummary?.workspace
-                  ? `当前目录：${currentProjectSummary.workspace}（点击切换或管理项目空间）`
-                  : `点击切换或新开本地项目空间（${currentProjectSummary?.address ?? '本机 IPC'}）`
-              }
-              onClick={() => switchPage('projects')}
-            >
-              <div className="dsh-workspace-pill-top">
-                <span className="small muted">📁 当前工作区</span>
-                <span className="dsh-workspace-switch-hint">切换 ▾</span>
-              </div>
-              <strong id="current-workspace-label">
-                {currentProjectSummary?.label ?? '默认项目空间'}
-              </strong>
-              {currentProjectSummary?.workspace ? (
-                <span className="dsh-workspace-path mono">
-                  {currentProjectSummary.workspace}
+              {!wide ? (
+                <span className="hHd-Xa_railMark" aria-hidden="true">
+                  <FishLogo size={24} />
                 </span>
               ) : null}
-            </SpotlightCard>
-          </div>
+              <IconPanelLeftOutline16
+                className="hHd-Xa_panelIcon"
+                size={wide ? 16 : 18}
+              />
+            </button>
+          </Tooltip>
+        </div>
 
-          <details
-            id="session-picker"
-            className="session-picker dsh-session-browser"
-            open={s.sessionPickerOpen}
-            onToggle={e => {
-              s.sessionPickerOpen = e.currentTarget.open;
-            }}
+        <Tooltip label="新建会话" delayMs={400} disabled={wide}>
+          <button
+            ref={bind({ click: () => trackAsync(createNewSession()) })}
+            id="create-button"
+            type="button"
+            className="hHd-Xa_newSession"
+            aria-label="新建会话"
+            disabled={s.createBusy}
+            onClick={() => trackAsync(createNewSession())}
           >
-            <summary className="session-picker-summary">
-              <span>工作区会话</span>
-              <span id="session-picker-label" className="muted">
-                {clip(snapshot ? displayLabel(snapshot) : '选择或新建', 60)}
+            <IconNewChatOutline16 size={wide ? 14 : 18} />
+            {wide ? (
+              <span className="hHd-Xa_newSessionLabel hHd-Xa_wide">
+                {s.createBusy ? '创建中…' : '新会话'}
               </span>
-            </summary>
-            <div className="session-picker-content">
-              <div className="section-heading dsh-section-header">
-                <div className="title-with-hint">
-                  <h2 id="sessions-heading">会话列表</h2>
-                  <HintPopover ariaLabel="会话同步说明">
-                    对话保存在本机。断线后从已消费游标继续接收结果，消息不会自动重发。
-                  </HintPopover>
-                </div>
-                <div className="session-actions">
-                  <button
-                    ref={bind({ click: () => trackAsync(refreshSessions()) })}
-                    id="refresh-sessions"
-                    className="quiet dsh-icon-btn"
-                    type="button"
-                    title="刷新会话列表"
-                    disabled={s.refreshSessionsBusy}
-                    onClick={() => trackAsync(refreshSessions())}
+            ) : null}
+          </button>
+        </Tooltip>
+
+        <div className="hHd-Xa_regionArea">
+          <div className={clsx('qDHVXG_root', !wide && 'qDHVXG_rail')}>
+            <div className="qDHVXG_sectionHeader">
+              {wide ? (
+                <span
+                  id="sessions-heading"
+                  className={clsx(
+                    'qDHVXG_sectionLabel qDHVXG_wide',
+                    (s.searchExpanded || s.sessionSearchQuery.trim()) &&
+                      'qDHVXG_sectionLabelHidden',
+                  )}
+                >
+                  工作区
+                </span>
+              ) : (
+                <span id="sessions-heading" className="visually-hidden">
+                  工作区
+                </span>
+              )}
+
+              {wide ? (
+                <div
+                  className={clsx(
+                    'qDHVXG_searchSlot',
+                    (s.searchExpanded || s.sessionSearchQuery.trim()) &&
+                      'qDHVXG_searchSlotExpanded',
+                  )}
+                >
+                  <div
+                    className={clsx(
+                      'qDHVXG_search',
+                      (s.searchExpanded || s.sessionSearchQuery.trim()) &&
+                        'qDHVXG_searchExpanded',
+                    )}
                   >
-                    ↻ 刷新
-                  </button>
-                </div>
-              </div>
-
-              <div className="dsh-search-bar">
-                <input
-                  type="search"
-                  className="dsh-search-input"
-                  placeholder="搜索会话…"
-                  aria-label="搜索会话"
-                  value={s.sessionSearchQuery}
-                  onChange={e => {
-                    s.sessionSearchQuery = e.target.value;
-                    forceRender();
-                  }}
-                />
-              </div>
-
-              <p id="list-status" className="small muted" role="status">
-                {s.listStatus}
-              </p>
-              <nav id="session-list" className="session-list dsh-tree-list" aria-label="选择会话">
-                {!filteredSessions.length ? (
-                  <p className="small muted dsh-empty-note">
-                    {s.sessionSearchQuery.trim()
-                      ? '无匹配会话'
-                      : '暂无会话，点击上方“+ 新建会话”即可开始。'}
-                  </p>
-                ) : (
-                  filteredSessions.map(session => {
-                    const shortId = String(session.id ?? '').slice(0, 8);
-                    const sState = stateName(session);
-                    return (
-                      <SpotlightCard
-                        as="button"
-                        key={session.id}
-                        className="session-item dsh-session-row"
+                    <button
+                      type="button"
+                      className="qDHVXG_searchButton"
+                      aria-label="搜索会话"
+                      onClick={() => {
+                        s.searchExpanded = !s.searchExpanded;
+                        forceRender();
+                      }}
+                    >
+                      <IconSearchOutline16 size={16} />
+                    </button>
+                    <input
+                      type="text"
+                      className="qDHVXG_searchInput"
+                      placeholder="搜索会话…"
+                      aria-label="搜索会话"
+                      value={s.sessionSearchQuery}
+                      tabIndex={
+                        s.searchExpanded || s.sessionSearchQuery.trim() ? 0 : -1
+                      }
+                      onChange={e => {
+                        s.sessionSearchQuery = e.target.value;
+                        forceRender();
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Escape') {
+                          s.sessionSearchQuery = '';
+                          s.searchExpanded = false;
+                          forceRender();
+                        }
+                      }}
+                    />
+                    {s.searchExpanded || s.sessionSearchQuery.trim() ? (
+                      <button
                         type="button"
-                        aria-current={String(session.id === s.selected)}
-                        handlers={{
-                          click: () => trackAsync(selectSession(session.id)),
+                        className="qDHVXG_clearButton"
+                        aria-label="清除搜索"
+                        onClick={e => {
+                          e.stopPropagation();
+                          s.sessionSearchQuery = '';
+                          s.searchExpanded = false;
+                          forceRender();
                         }}
-                        onClick={() => trackAsync(selectSession(session.id))}
                       >
-                        <div className="dsh-session-row-main">
-                          <span className={`dsh-status-dot dot-${sState}`} />
-                          <strong>{displayLabel(session)}</strong>
-                        </div>
-                        <span>
-                          {`${stateLabel(session, s.views.get(session.id))} · ${shortId}`}
-                        </span>
-                      </SpotlightCard>
-                    );
-                  })
-                )}
-              </nav>
-            </div>
-          </details>
+                        <IconCloseFill14 />
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
 
-          <div className="dsh-sidebar-footer">
+              <div
+                className={clsx(
+                  'qDHVXG_headerActions',
+                  wide &&
+                    (s.searchExpanded || s.sessionSearchQuery.trim()) &&
+                    'qDHVXG_headerActionsHidden',
+                )}
+              >
+                {wide ? (
+                  <Tooltip label="刷新会话" side="bottom" delayMs={400}>
+                    <button
+                      ref={bind({ click: () => trackAsync(refreshSessions()) })}
+                      id="refresh-sessions"
+                      type="button"
+                      className="qDHVXG_iconButton qDHVXG_wide"
+                      aria-label="刷新会话"
+                      disabled={s.refreshSessionsBusy}
+                      onClick={() => trackAsync(refreshSessions())}
+                    >
+                      <IconRefreshOutline16 size={16} />
+                    </button>
+                  </Tooltip>
+                ) : null}
+                <Tooltip label="添加工作区" side="bottom" delayMs={400}>
+                  <button
+                    id="open-new-project-btn"
+                    type="button"
+                    className="qDHVXG_iconButton"
+                    aria-label="添加工作区"
+                    onClick={() => openNewProjectModal()}
+                  >
+                    <IconProjectAddOutline16 size={wide ? 16 : 18} />
+                  </button>
+                </Tooltip>
+              </div>
+            </div>
+
+            <span id="list-status" className="visually-hidden" role="status">
+              {s.listStatus}
+            </span>
+
+            <div className="qDHVXG_listArea">
+              {wide ? (
+                <div className="qDHVXG_treeBody qDHVXG_wide">
+                  <div
+                    id="session-list"
+                    className="qDHVXG_list"
+                    role="tree"
+                    aria-label="会话"
+                  >
+                    {projectSummaries.map(proj => {
+                      const isCurrentProj = proj.id === currentProjectId();
+                      const isExpanded =
+                        s.expandedGroups[proj.id] !== undefined
+                          ? s.expandedGroups[proj.id]
+                          : true;
+                      const projSessions = isCurrentProj
+                        ? filteredSessions
+                        : array(s.projectStates.get(proj.id)?.sessions);
+
+                      return (
+                        <div key={proj.id} className="qDHVXG_groupSection">
+                          <div
+                            className="YDXeBa_projectRow"
+                            role="treeitem"
+                            aria-expanded={isExpanded}
+                            onClick={() => {
+                              if (!isCurrentProj) {
+                                void selectProject(proj.id);
+                                s.expandedGroups[proj.id] = true;
+                              } else {
+                                s.expandedGroups[proj.id] = !isExpanded;
+                              }
+                              forceRender();
+                            }}
+                          >
+                            <span
+                              className={clsx(
+                                'YDXeBa_slot YDXeBa_folder',
+                                isExpanded && isCurrentProj && 'YDXeBa_folderActive',
+                              )}
+                            >
+                              {isExpanded ? (
+                                <IconFolderOpen16 />
+                              ) : (
+                                <IconFolderClose16 />
+                              )}
+                            </span>
+                            <span className="YDXeBa_slot YDXeBa_chevron">
+                              <IconTriangleRightFill14
+                                className={clsx(
+                                  'YDXeBa_arrow',
+                                  isExpanded && 'YDXeBa_arrowOpen',
+                                )}
+                              />
+                            </span>
+                            <span className="YDXeBa_projectText">
+                              <span className="YDXeBa_title">{proj.label}</span>
+                            </span>
+                            <span className="YDXeBa_rowActions">
+                              <button
+                                type="button"
+                                className="YDXeBa_iconButton"
+                                aria-label={`在“${proj.label}”中新建会话`}
+                                title={`在“${proj.label}”中新建会话`}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  s.expandedGroups[proj.id] = true;
+                                  trackAsync(
+                                    (async () => {
+                                      if (!isCurrentProj) {
+                                        await selectProject(proj.id);
+                                      }
+                                      await createNewSession();
+                                    })(),
+                                  );
+                                }}
+                              >
+                                <IconPlusOutline16 />
+                              </button>
+                            </span>
+                          </div>
+
+                          {isExpanded ? (
+                            !projSessions.length && isCurrentProj ? (
+                              <div className="qDHVXG_empty">
+                                {s.sessionSearchQuery.trim()
+                                  ? '无匹配会话'
+                                  : '暂无会话'}
+                              </div>
+                            ) : (
+                              projSessions.map(session => {
+                                const isSelected =
+                                  isCurrentProj && session.id === s.selected;
+                                const sessView = s.views.get(session.id);
+                                const dotState = stateDotKind(session, sessView);
+                                const showDot =
+                                  dotState !== 'done' || isSelected;
+                                return (
+                                  <button
+                                    key={session.id}
+                                    type="button"
+                                    role="treeitem"
+                                    aria-selected={isSelected}
+                                    aria-current={String(isSelected)}
+                                    className={clsx(
+                                      'YDXeBa_sessionRow',
+                                      isSelected && 'YDXeBa_selected',
+                                    )}
+                                    ref={bind({
+                                      click: () =>
+                                        trackAsync(
+                                          (async () => {
+                                            if (!isCurrentProj) {
+                                              await selectProject(proj.id);
+                                            }
+                                            await selectSession(session.id);
+                                          })(),
+                                        ),
+                                    })}
+                                    onClick={() =>
+                                      trackAsync(
+                                        (async () => {
+                                          if (!isCurrentProj) {
+                                            await selectProject(proj.id);
+                                          }
+                                          await selectSession(session.id);
+                                        })(),
+                                      )
+                                    }
+                                  >
+                                    <span className="YDXeBa_slot">
+                                      {showDot ? (
+                                        <StateDot state={dotState} />
+                                      ) : null}
+                                    </span>
+                                    <span className="YDXeBa_title">
+                                      {displayLabel(session)}
+                                      <span className="visually-hidden">
+                                        {` ${String(session.id ?? '').slice(0, 20)}`}
+                                      </span>
+                                    </span>
+                                    <span className="YDXeBa_time">
+                                      {stateLabel(session, sessView)}
+                                    </span>
+                                  </button>
+                                );
+                              })
+                            )
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="hHd-Xa_footArea">
+          <div
+            className="hHd-Xa_settingsArea"
+            style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+          >
             <button
               id="open-settings-button"
               type="button"
-              className="dsh-settings-trigger"
+              className={clsx('VOzbGW_trigger', !wide && 'VOzbGW_rail')}
+              style={{ flex: 1 }}
+              aria-haspopup="dialog"
+              aria-expanded={s.settingsOpen}
               onClick={() => openSettings('general')}
             >
-              <span className="dsh-settings-gear">⚙</span>
-              <span className="dsh-settings-label">设置与偏好</span>
-              <span className="dsh-settings-badge">{currentPresetObj.label}</span>
+              {wide ? (
+                <IconSettingsOutline16 size={16} />
+              ) : (
+                <IconSettingsOutline14 size={18} />
+              )}
+              {wide ? <span className="UQsH_q_triggerLabel">设置</span> : null}
             </button>
-          </div>
-        </aside>
-
-        <main id="conversation" className="conversation dsh-center-col" tabIndex={-1}>
-          <div id="conversation-view" className="dsh-chat-surface" hidden={s.activePage !== 'conversation'}>
-            <div className="conversation-heading dsh-chat-header">
-              <div className="dsh-crumbs">
-                <button
-                  type="button"
-                  className="dsh-crumb-btn"
-                  onClick={() => switchPage('projects')}
+            <Tooltip
+              label={`${s.connectionStatus} · 点击重连`}
+              side="top"
+              delayMs={400}
+            >
+              <button
+                ref={bind({ click: () => trackAsync(connectLocal()) })}
+                id="reconnect"
+                type="button"
+                className="hHd-Xa_iconButton"
+                aria-label="重连本机 Runtime"
+                disabled={s.reconnectBusy}
+                onClick={() => trackAsync(connectLocal())}
+              >
+                <StateDot
+                  state={
+                    s.connectionStatus === '已连接本机' ? 'done' : 'warning'
+                  }
+                />
+                <span
+                  id="connection-status"
+                  className="visually-hidden"
+                  role="status"
                 >
-                  {`📁 ${currentProjectSummary?.label ?? '默认项目空间'}`}
-                </button>
-                <span className="dsh-crumb-sep">/</span>
-                <GradientText id="session-title" className="dsh-session-title">
-                  {snapshot
-                    ? displayLabel(snapshot)
-                    : s.selected
-                      ? '正在读取会话…'
-                      : '点击左侧“+ 新建会话”开始'}
-                </GradientText>
+                  {s.connectionStatus}
+                </span>
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+      </aside>
+
+      {/* Official DSH Center Conversation Column (@deepseek-ai/dsh-client-ui-conversation) */}
+      <main id="conversation" className="pI_x6G_centerCol" tabIndex={-1}>
+        <div
+          id="conversation-view"
+          className="wSkVaW_root"
+          data-phase={isHero ? 'hero' : 'active'}
+          hidden={s.activePage !== 'conversation'}
+        >
+          <header
+            className={clsx('wSkVaW_header', isHero && 'wSkVaW_headerHidden')}
+            aria-hidden={isHero || undefined}
+          >
+            <div className="wSkVaW_titleRow">
+              <div className="wSkVaW_titleCluster">
+                <nav className="wSkVaW_crumbs" aria-label="会话层级">
+                  <span className="wSkVaW_crumbSeg">
+                    <button
+                      type="button"
+                      className="wSkVaW_crumb"
+                      onClick={() => openNewProjectModal()}
+                    >
+                      {currentProjectSummary?.label ?? 'CAYW'}
+                    </button>
+                  </span>
+                  <span className="wSkVaW_crumbSeg">
+                    <span className="wSkVaW_crumbSep">/</span>
+                    <span
+                      id="session-title"
+                      className="wSkVaW_crumb wSkVaW_crumbCurrent"
+                    >
+                      {snapshot
+                        ? displayLabel(snapshot)
+                        : s.selected
+                          ? '正在读取会话…'
+                          : '新会话'}
+                    </span>
+                  </span>
+                </nav>
+                <div className="wSkVaW_headerActions">
+                  <span
+                    className="pXSMma_previewBadge"
+                    style={{ marginTop: 0, marginLeft: 0 }}
+                  >
+                    {currentAgentPresetObj.name}
+                  </span>
+                </div>
               </div>
-              <div className="conversation-meta">
-                <span id="history-note" className="meta-pill muted" hidden={!historyNote}>
+              <div className="wSkVaW_headerUtilities">
+                <span id="history-note" className="visually-hidden">
                   {historyNote}
                 </span>
                 <span
                   id="poll-status"
-                  className="meta-pill muted"
+                  className="visually-hidden"
                   role="status"
-                  hidden={!s.pollStatus || s.pollStatus === '已同步'}
                 >
                   {s.pollStatus}
                 </span>
                 <span
                   id="session-state"
-                  className={`state-label state-${stateName(snapshot)}`}
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--dsw-alias-label-tertiary)',
+                  }}
                 >
                   {snapshot ? stateLabel(snapshot, view) : '等待选择'}
                 </span>
               </div>
             </div>
+          </header>
 
-            <p id="global-error" className="error" role="alert" hidden={!s.globalError}>
+          <div className="wSkVaW_scrollBody" data-conversation-scroll="">
+            <p
+              id="global-error"
+              className="_banner_ugy7y_1"
+              role="alert"
+              hidden={!s.globalError}
+            >
               {s.globalError}
             </p>
 
-            <SpotlightCard
-              as="section"
+            {/* Blocked / Reconciliation / Frozen Banner */}
+            <section
               id="blocked-notice"
-              className="notice"
+              className="bqrRRG_root"
               hidden={!attention}
               aria-labelledby="blocked-title"
             >
-              <div className="notice-bar">
-                <div className="title-with-hint">
-                  <h2 id="blocked-title">会话暂时不能继续</h2>
-                  <HintPopover
-                    chip
-                    label="查看原因与说明"
-                    bubbleId="blocked-text"
-                  >
-                    {blockedText}
-                  </HintPopover>
+              <div className="bqrRRG_card">
+                <div className="bqrRRG_strip">
+                  <span className="bqrRRG_dot" />
+                  <strong id="blocked-title">会话暂时不能继续</strong>
                 </div>
-                <button
-                  ref={bind({ click: openForkDialog })}
-                  id="open-fork"
-                  type="button"
-                  hidden={!showForkBtn}
-                  disabled={!forkEnabled}
-                  onClick={openForkDialog}
-                >
-                  确认后 Fork 为普通聊天
-                </button>
-              </div>
-            </SpotlightCard>
-
-            <section aria-label="会话历史" className="history-section dsh-chat-scroll">
-              <div id="messages" className="messages dsh-chat-column">
-                {!messages.length ? (
-                  <div className="empty dsh-hero">
-                    <div className="dsh-hero-headline">
-                      <span className="dsh-hero-mark">C</span>
-                      <h2>{view?.snapshot ? '探索未至之境 · 从一条消息开始' : '探索未至之境 · 继续一段对话'}</h2>
-                      <span className="dsh-preview-badge">CAYW v3</span>
-                      <TooltipBadge
-                        className="hint-trigger"
-                        label="?"
-                        tip={
-                          view?.snapshot
-                            ? '输入任务后，Runtime 会在此保留对话和工具记录。'
-                            : '从左侧选择已有会话，或点击“+ 新建会话”。'
-                        }
-                      />
-                    </div>
-                    <div className="dsh-hero-workspace-bar">
-                      <button
-                        type="button"
-                        className="dsh-hero-ws-pill"
-                        onClick={() => switchPage('projects')}
-                      >
-                        {`📁 工作区：${currentProjectSummary?.label ?? '默认项目空间'}${currentProjectSummary?.workspace ? ` (${currentProjectSummary.workspace})` : ''} ▾`}
-                      </button>
-                      <button
-                        type="button"
-                        className="dsh-hero-ws-pill"
-                        onClick={() => openNewProjectModal()}
-                      >
-                        + 新开项目目录
-                      </button>
-                      <button
-                        type="button"
-                        className="dsh-hero-ws-pill"
-                        onClick={() => switchPage('permissions')}
-                      >
-                        {`🔒 权限模式：${currentPresetObj.label}`}
-                      </button>
-                    </div>
-                    <div className="starter-grid dsh-starter-pills">
-                      {STARTER_PROMPTS.map((item, idx) => (
-                        <SpotlightCard
-                          as="button"
-                          key={idx}
-                          type="button"
-                          className="starter-card dsh-starter-card"
-                          onClick={() =>
-                            trackAsync(
-                              (async () => {
-                                if (!s.selected) {
-                                  await createNewSession();
-                                }
-                                s.promptText = item.prompt;
-                                if (promptInputRef.current) {
-                                  promptInputRef.current.value = item.prompt;
-                                  promptInputRef.current.focus();
-                                }
-                                forceRender();
-                              })(),
-                            )
-                          }
-                        >
-                          <strong>{item.title}</strong>
-                          <span>{item.desc}</span>
-                        </SpotlightCard>
-                      ))}
-                    </div>
+                <div className="bqrRRG_body">
+                  <div id="blocked-text" className="bqrRRG_headline">
+                    {blockedText}
                   </div>
-                ) : (
-                  messages.map((message, index) => {
-                    const role = [
-                      'user',
-                      'assistant',
-                      'system',
-                      'toolResult',
-                      'custom',
-                    ].includes(message.role)
-                      ? message.role
-                      : 'custom';
-                    const presentation = messagePresentation(message);
-                    const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
-                    const isOp = presentation.kind !== 'text';
-                    return (
-                      <SpotlightCard
-                        as="article"
-                        key={key}
-                        className={`message ${role}${isOp ? ' operation-record dsh-tool-card' : ''}`}
-                      >
-                        <div className="role">{ROLE_LABELS[role]}</div>
-                        {presentation.kind === 'text' ? (
-                          <FormattedBody text={presentation.text} />
-                        ) : presentation.kind === 'tool_call' ? (
-                          <>
+                </div>
+                <div className="bqrRRG_actionRow" hidden={!showForkBtn}>
+                  <Button
+                    ref={bind({ click: openForkDialog })}
+                    id="open-fork"
+                    variant="primary"
+                    disabled={!forkEnabled}
+                    onClick={openForkDialog}
+                  >
+                    确认后 Fork 为普通聊天
+                  </Button>
+                </div>
+              </div>
+            </section>
+
+            {/* Chat Flow Area */}
+            <div className="wSkVaW_viewArea" hidden={isHero}>
+              <div className="Md3f7G_root">
+                <div className="Md3f7G_scroll">
+                  <div
+                    id="messages"
+                    className="Md3f7G_column"
+                    data-chat-flow=""
+                  >
+                    {messages.map((message, index) => {
+                      const role = [
+                        'user',
+                        'assistant',
+                        'system',
+                        'toolResult',
+                        'custom',
+                      ].includes(message.role)
+                        ? message.role
+                        : 'custom';
+                      const presentation = messagePresentation(message);
+                      const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
+
+                      if (role === 'user' && presentation.kind === 'text') {
+                        return (
+                          <div key={key} className="Md3f7G_flowItem">
+                            <div className="gdEzaW_userRow">
+                              <div className="gdEzaW_userStack">
+                                <div className="gdEzaW_bubble">
+                                  {presentation.text}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (presentation.kind === 'text') {
+                        return (
+                          <div key={key} className="Md3f7G_flowItem">
+                            <div className="Sxvs8a_root">
+                              <div className="Sxvs8a_body">
+                                <FormattedMarkdown text={presentation.text} />
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (presentation.kind === 'tool_call') {
+                        return (
+                          <div key={key} className="Md3f7G_flowItem">
                             {presentation.text ? (
-                              <FormattedBody text={presentation.text} />
+                              <div
+                                className="Sxvs8a_root"
+                                style={{ marginBottom: 12 }}
+                              >
+                                <div className="Sxvs8a_body">
+                                  <FormattedMarkdown text={presentation.text} />
+                                </div>
+                              </div>
                             ) : null}
                             {presentation.calls.map((call, callIndex) => {
                               const callKey = `${key}/${callIndex}`;
+                              const isOpen = expandedSet.has(callKey);
                               const title =
                                 call.name === 'execute_code'
                                   ? call.arguments?.action === 'wait'
-                                    ? '等待任务结果'
-                                    : '运行 Luau 代码单元（execute_code）'
-                                  : `使用工具：${clip(call.name, 100)}`;
+                                    ? 'Wait'
+                                    : 'Execute Code'
+                                  : clip(call.name, 60);
+                              const summary =
+                                call.name === 'execute_code'
+                                  ? clip(
+                                      call.arguments?.code ??
+                                        call.arguments?.action ??
+                                        '运行 Luau 代码单元',
+                                      80,
+                                    )
+                                  : clip(JSON.stringify(call.arguments ?? {}), 80);
                               return (
-                                <details
-                                  key={callKey}
-                                  className="record-details dsh-disclosure-row"
-                                  open={expandedSet.has(callKey)}
-                                  onToggle={e =>
-                                    toggleRecordExpand(callKey, e.currentTarget.open)
-                                  }
-                                >
-                                  <summary>{title}</summary>
-                                  <pre>{recordText(call)}</pre>
-                                </details>
+                                <div key={callKey} className="Md3f7G_callRow">
+                                  <div
+                                    className="_Xvjua_root"
+                                    data-variant="others"
+                                    data-state="ok"
+                                  >
+                                    <DisclosureRow
+                                      rowClassName="_Xvjua_row"
+                                      leadingClassName="_Xvjua_leading"
+                                      titleClassName="_Xvjua_title"
+                                      chevronClassName="_Xvjua_chevron"
+                                      icon={<IconCodeOutline16 size={16} />}
+                                      title={title}
+                                      open={isOpen}
+                                      expandable={true}
+                                      expandOnRowClick={true}
+                                      keepContentWhenOpen={true}
+                                      onToggle={() =>
+                                        toggleRecordExpand(callKey, !isOpen)
+                                      }
+                                      collapsedContent={
+                                        <>
+                                          <span
+                                            className="_Xvjua_separator"
+                                            aria-hidden="true"
+                                          />
+                                          <span className="_Xvjua_summary">
+                                            {summary}
+                                          </span>
+                                        </>
+                                      }
+                                    >
+                                      <pre className="_Xvjua_body">
+                                        {recordText(call)}
+                                      </pre>
+                                    </DisclosureRow>
+                                  </div>
+                                </div>
                               );
                             })}
-                          </>
-                        ) : (
-                          <>
-                            <div className="result-header">
-                              <strong
-                                className={`result-title ${presentation.status ?? ''}`}
-                              >
-                                {presentation.title}
-                              </strong>
-                              <details
-                                className="record-details inline-details"
-                                open={expandedSet.has(key)}
-                                onToggle={e =>
-                                  toggleRecordExpand(key, e.currentTarget.open)
+                          </div>
+                        );
+                      }
+
+                      const isOpen = expandedSet.has(key);
+                      const isErr =
+                        presentation.status === 'error' ||
+                        Boolean(message.error_message) ||
+                        Boolean(message.outcome_unknown);
+                      return (
+                        <div key={key} className="Md3f7G_flowItem">
+                          <div className="Md3f7G_callRow">
+                            <div
+                              className="_Xvjua_root"
+                              data-variant="others"
+                              data-state={isErr ? 'error' : 'ok'}
+                            >
+                              <DisclosureRow
+                                rowClassName="_Xvjua_row"
+                                leadingClassName="_Xvjua_leading"
+                                titleClassName="_Xvjua_title"
+                                chevronClassName="_Xvjua_chevron"
+                                icon={<IconCodeOutline16 size={16} />}
+                                title={presentation.title || '工具执行结果'}
+                                open={isOpen}
+                                expandable={true}
+                                expandOnRowClick={true}
+                                keepContentWhenOpen={true}
+                                onToggle={() => toggleRecordExpand(key, !isOpen)}
+                                collapsedContent={
+                                  <>
+                                    <span
+                                      className="_Xvjua_separator"
+                                      aria-hidden="true"
+                                    />
+                                    <span
+                                      className="_Xvjua_summary"
+                                      data-error={isErr || undefined}
+                                    >
+                                      {presentation.text ||
+                                        (presentation.values ?? [])
+                                          .map(v => `${v.label}: ${v.text}`)
+                                          .join(' · ') ||
+                                        '点击展开详情'}
+                                    </span>
+                                  </>
                                 }
                               >
-                                <summary>查看完整执行记录</summary>
-                                <pre>{presentation.raw}</pre>
-                              </details>
+                                <pre
+                                  className="_Xvjua_body"
+                                  data-error={isErr || undefined}
+                                >
+                                  {presentation.raw}
+                                </pre>
+                              </DisclosureRow>
                             </div>
-                            {presentation.text ? (
-                              <p className="result-description">
-                                {presentation.text}
-                              </p>
-                            ) : null}
-                            {(presentation.values ?? []).map((val, vIdx) => (
-                              <div key={vIdx} className="file-output-box">
-                                <div className="output-label">{`📄 ${val.label}`}</div>
-                                <div className="body output-value">{val.text}</div>
+                          </div>
+                          {message.error_message ? (
+                            <div className="gdEzaW_turnErrorRow">
+                              <StateDot
+                                state="error"
+                                className="gdEzaW_turnErrorDot"
+                              />
+                              <div className="gdEzaW_turnErrorCopy">
+                                <span className="gdEzaW_turnErrorTitle">
+                                  执行异常
+                                </span>
+                                <span className="gdEzaW_turnErrorMessage">
+                                  {clip(message.error_message, 2000)}
+                                </span>
                               </div>
-                            ))}
-                          </>
-                        )}
-                        {message.error_message ? (
-                          <p className="effect-warning">
-                            {clip(message.error_message, 2000)}
-                          </p>
-                        ) : null}
-                        {message.outcome_unknown ? (
-                          <p className="effect-warning">
-                            此工具调用的真实结果待宿主核对。
-                          </p>
-                        ) : null}
-                      </SpotlightCard>
-                    );
-                  })
-                )}
+                            </div>
+                          ) : null}
+                          {message.outcome_unknown ? (
+                            <div className="gdEzaW_turnErrorRow">
+                              <StateDot
+                                state="warning"
+                                className="gdEzaW_turnErrorDot"
+                              />
+                              <div className="gdEzaW_turnErrorCopy">
+                                <span className="gdEzaW_maxTokensTitle">
+                                  待核对
+                                </span>
+                                <span className="gdEzaW_turnErrorMessage">
+                                  此工具调用的真实结果待宿主核对。
+                                </span>
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+
+                  </div>
+                  {/* Live streaming preview */}
+                  <section
+                    id="live-section"
+                    className="Md3f7G_column"
+                    hidden={!view?.liveText}
+                    aria-labelledby="live-heading"
+                  >
+                    <div className="Md3f7G_turnStatus" id="live-heading">
+                      正在思考与生成…
+                    </div>
+                    <div
+                      className="Sxvs8a_root"
+                      data-streaming="true"
+                      style={{ marginTop: 8 }}
+                    >
+                      <div id="live-text" className="Sxvs8a_body">
+                        <FormattedMarkdown text={view?.liveText ?? ''} />
+                      </div>
+                    </div>
+                  </section>
+                </div>
               </div>
-            </section>
+            </div>
 
-            <section
-              id="live-section"
-              className="live-section dsh-live-stream"
-              aria-labelledby="live-heading"
-              hidden={!view?.liveText}
-            >
-              <h2 id="live-heading" className="small">
-                正在生成回复…
-              </h2>
-              <pre id="live-text" aria-live="off">
-                {view?.liveText ?? ''}
-              </pre>
-            </section>
-
+            {/* Official DSH Approval Panel (@deepseek-ai/dsh-client-ui-conversation/ApprovalPanel) */}
             <section
               id="approvals"
-              className="approval-section dsh-approval-dock"
+              className="bqrRRG_root"
               aria-label="待审批请求"
               hidden={!approvals.length}
             >
@@ -2058,248 +2505,488 @@ export function CAYWApp({ env } = {}) {
                   `使用能力：${clip(capability || '宿主未说明', 100)}`;
                 const scopeLines = [];
                 if (object(scope)) {
-                  if (scope.path !== undefined) scopeLines.push(['文件', scope.path, 400]);
-                  if (scope.profile !== undefined) scopeLines.push(['预设任务', scope.profile, 400]);
-                  if (scope.query !== undefined) scopeLines.push(['检索内容', scope.query, 400]);
-                  if (scope.filter !== undefined) scopeLines.push(['测试范围', scope.filter, 400]);
-                  if (scope.server !== undefined) scopeLines.push(['工具连接', scope.server, 400]);
-                  if (scope.tool !== undefined) scopeLines.push(['工具', scope.tool, 400]);
-                  if (scope.name !== undefined) scopeLines.push(['名称', scope.name, 400]);
-                  if (scope.commit !== undefined) scopeLines.push(['提交', scope.commit, 400]);
-                  if (scope.overwrite === true) scopeLines.push(['文件操作', '覆盖现有文件', 400]);
-                  if (typeof scope.content === 'string') scopeLines.push(['写入内容', scope.content, 600]);
-                  if (typeof scope.old === 'string') scopeLines.push(['替换原文', scope.old, 400]);
-                  if (typeof scope.new === 'string') scopeLines.push(['替换为', scope.new, 400]);
+                  if (scope.path !== undefined)
+                    scopeLines.push(['文件', scope.path, 400]);
+                  if (scope.profile !== undefined)
+                    scopeLines.push(['预设任务', scope.profile, 400]);
+                  if (scope.query !== undefined)
+                    scopeLines.push(['检索内容', scope.query, 400]);
+                  if (scope.filter !== undefined)
+                    scopeLines.push(['测试范围', scope.filter, 400]);
+                  if (scope.server !== undefined)
+                    scopeLines.push(['工具连接', scope.server, 400]);
+                  if (scope.tool !== undefined)
+                    scopeLines.push(['工具', scope.tool, 400]);
+                  if (scope.name !== undefined)
+                    scopeLines.push(['名称', scope.name, 400]);
+                  if (scope.commit !== undefined)
+                    scopeLines.push(['提交', scope.commit, 400]);
+                  if (scope.overwrite === true)
+                    scopeLines.push(['文件操作', '覆盖现有文件', 400]);
+                  if (typeof scope.content === 'string')
+                    scopeLines.push(['写入内容', scope.content, 600]);
+                  if (typeof scope.old === 'string')
+                    scopeLines.push(['替换原文', scope.old, 400]);
+                  if (typeof scope.new === 'string')
+                    scopeLines.push(['替换为', scope.new, 400]);
                 }
                 const isDeciding =
                   typeof id === 'string' &&
                   s.approvalPending.has(`${snapshot?.id}/${id}`);
 
                 return (
-                  <SpotlightCard
-                    as="article"
+                  <div
                     key={id ?? idx}
-                    border
-                    className="approval-card dsh-approval-card"
+                    className="bqrRRG_card"
+                    style={{ marginBottom: 8 }}
                   >
-                    <div className="dsh-approval-strip">
-                      <span className="dsh-approval-dot" />
-                      <strong>等待审批 · 请求你的授权</strong>
-                      <TooltipBadge
-                        label="精确参数范围 ?"
-                        tip="仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。"
-                      />
+                    <div className="bqrRRG_strip">
+                      <span className="bqrRRG_dot" />
+                      <span>等待审批 · 需要你的授权（精确参数范围）</span>
                     </div>
-                    <p className="dsh-approval-headline">{`操作：${operation}`}</p>
-                    {scopeLines.map(([label, val, limit], sIdx) => (
-                      <p key={sIdx} className="small dsh-approval-command">
-                        {`${label}：${clip(val, limit)}`}
-                      </p>
-                    ))}
-                    <details>
-                      <summary>查看完整授权参数</summary>
-                      <pre>{recordText(approval)}</pre>
+                    <div className="bqrRRG_body" data-approval-scroll="">
+                      <div className="bqrRRG_headline">{operation}</div>
+                      {scopeLines.map(([label, val, limit], sIdx) => (
+                        <div key={sIdx} className="bqrRRG_command">
+                          {`${label}：${clip(val, limit)}`}
+                        </div>
+                      ))}
+                    </div>
+                    <details style={{ padding: '4px 16px 0', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                      <summary style={{ cursor: 'pointer' }}>查看完整授权参数</summary>
+                      <pre style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>
+                        {recordText(approval)}
+                      </pre>
                     </details>
                     {typeof id !== 'string' ? (
-                      <p className="error">审批记录缺少 ID，请在宿主中处理。</p>
+                      <div className="bqrRRG_body">
+                        <span className="gdEzaW_turnErrorTitle">
+                          审批记录缺少 ID，请在宿主中处理。
+                        </span>
+                      </div>
                     ) : (
-                      <div className="approval-actions dsh-approval-actions">
+                      <div className="bqrRRG_actionRow">
                         {[
-                          ['allow_once', '允许一次', ''],
-                          ['allow_task', '允许此任务', 'secondary'],
-                          ['deny', '拒绝', 'secondary deny'],
-                        ].map(([decision, btnLabel, cls]) => (
-                          <button
-                            key={decision}
-                            ref={bind({
-                              click: () =>
-                                trackAsync(decide(snapshot.id, id, decision)),
-                            })}
-                            type="button"
-                            className={cls}
-                            disabled={isDeciding || approvalButtonsDisabled}
-                            onClick={() =>
-                              trackAsync(decide(snapshot.id, id, decision))
-                            }
-                          >
-                            {isDeciding ? '正在记录…' : btnLabel}
-                          </button>
-                        ))}
+                          ['allow_once', '允许一次', 'primary'],
+                          ['allow_task', '允许此任务', 'outline'],
+                          ['deny', '拒绝', 'outline bqrRRG_reject'],
+                        ].map(([decision, btnLabel, variantCls]) => {
+                          const isPrimary = variantCls === 'primary';
+                          const isReject = variantCls.includes('bqrRRG_reject');
+                          return (
+                            <button
+                              key={decision}
+                              ref={bind({
+                                click: () =>
+                                  trackAsync(decide(snapshot.id, id, decision)),
+                              })}
+                              type="button"
+                              className={clsx(
+                                '_button_kz6gm_4 _md_kz6gm_24',
+                                isPrimary
+                                  ? '_primary_kz6gm_38'
+                                  : '_outline_kz6gm_56',
+                                isReject && 'bqrRRG_reject',
+                              )}
+                              disabled={isDeciding || approvalButtonsDisabled}
+                              onClick={() =>
+                                trackAsync(decide(snapshot.id, id, decision))
+                              }
+                            >
+                              {isDeciding ? '正在记录…' : btnLabel}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
-                  </SpotlightCard>
+                  </div>
                 );
               })}
             </section>
 
-            <div className="dsh-composer-dock">
-              {s.permissionPopoverOpen ? (
-                <div className="dsh-permission-popover" role="dialog" aria-label="切换权限模式">
-                  <div className="dsh-popover-header">
-                    <strong>会话权限模式 (`/permission`)</strong>
-                    <button
-                      type="button"
-                      className="quiet"
-                      onClick={() => {
-                        s.permissionPopoverOpen = false;
-                        forceRender();
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  <div className="dsh-preset-list">
-                    {PERMISSION_PRESETS.map(preset => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        className={`dsh-preset-option${s.permissionPreset === preset.id ? ' is-selected' : ''}`}
-                        onClick={() => selectPermissionPreset(preset.id)}
-                      >
-                        <div className="dsh-preset-option-top">
-                          <strong>{`${preset.label} (${preset.enLabel})`}</strong>
-                          {s.permissionPreset === preset.id ? <span>✓ 当前</span> : null}
-                        </div>
-                        <span className="small muted">{preset.desc}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="dsh-popover-footer">
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => {
-                        s.permissionPopoverOpen = false;
-                        switchPage('permissions');
-                      }}
-                    >
-                      查看已授权能力与撤销记录 →
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              <SpotlightCard
-                as="form"
-                id="prompt-form"
-                border
-                className="composer dsh-input-card"
-                handlers={{ submit: e => trackAsync(handleSendPrompt(e)) }}
-                onSubmit={e => trackAsync(handleSendPrompt(e))}
+            {/* Official DSH Composer Seat & Centered Hero */}
+            <div className="wSkVaW_composerSeat" data-composer-seat="">
+              <div
+                className={clsx(
+                  'wSkVaW_composerStack',
+                  isHero && 'wSkVaW_composerHero',
+                )}
               >
-                <label htmlFor="prompt" className="visually-hidden">
-                  发送消息
-                </label>
-                <textarea
-                  ref={bind(
-                    {
-                      input: e => {
-                        s.promptText = e.currentTarget.value;
-                        forceRender();
-                      },
-                    },
-                    promptInputRef,
-                  )}
-                  id="prompt"
-                  className="dsh-composer-textarea"
-                  rows={3}
-                  maxLength={32000}
-                  disabled={promptDisabled}
-                  placeholder="给智能体发消息（Enter 发送，Shift + Enter 换行）"
-                  value={s.promptText}
-                  onChange={e => {
-                    s.promptText = e.target.value;
-                    forceRender();
-                  }}
-                  onKeyDown={e => {
-                    if (
-                      e.key === 'Enter' &&
-                      !e.shiftKey &&
-                      !e.isComposing &&
-                      (s.enterBehavior === 'enter' || e.metaKey || e.ctrlKey)
-                    ) {
-                      e.preventDefault();
-                      trackAsync(handleSendPrompt(e));
-                    }
-                  }}
-                />
-                <div className="composer-actions dsh-composer-row">
-                  <div className="dsh-composer-tools">
-                    <button
-                      id="composer-workspace-btn"
-                      type="button"
-                      className="dsh-chip-btn"
-                      title="切换工作区项目"
-                      onClick={() => switchPage('projects')}
+                {isHero ? (
+                  <>
+                    <HeroGlow className="wSkVaW_heroGlow" />
+                    <div className="pXSMma_root">
+                      <div className="pXSMma_stack">
+                        <div className="pXSMma_headline">
+                          <span className="pXSMma_fishHitbox">
+                            <FishLogo size={34} className="pXSMma_fish" />
+                          </span>
+                          <span className="pXSMma_headlineText">
+                            探索未至之境
+                          </span>
+                          <span className="pXSMma_previewBadge">预览版</span>
+                        </div>
+                        <div className="pXSMma_body" />
+                      </div>
+                    </div>
+                    <div className="wSkVaW_heroWorkspaceRow">
+                      <Menu
+                        open={s.heroWsMenuOpen}
+                        onClose={() => {
+                          s.heroWsMenuOpen = false;
+                          forceRender();
+                        }}
+                        selectedId={currentProjectId()}
+                        items={projectSummaries.map(p => ({
+                          id: p.id,
+                          label: p.label,
+                          icon: <IconFolderClose16 size={16} />,
+                        }))}
+                        footer={[
+                          {
+                            id: '__add_workspace__',
+                            label: '添加工作区…',
+                            icon: <IconProjectAddOutline16 size={16} />,
+                          },
+                        ]}
+                        onSelect={id => {
+                          s.heroWsMenuOpen = false;
+                          if (id === '__add_workspace__') {
+                            openNewProjectModal();
+                          } else {
+                            void selectProject(id);
+                          }
+                          forceRender();
+                        }}
+                        portal={true}
+                        anchor={
+                          <button
+                            type="button"
+                            className="pXSMma_workspace"
+                            aria-label="选择工作区"
+                            aria-haspopup="menu"
+                            aria-expanded={s.heroWsMenuOpen}
+                            onClick={() => {
+                              s.heroWsMenuOpen = !s.heroWsMenuOpen;
+                              forceRender();
+                            }}
+                          >
+                            <IconFolderOpen16
+                              className="pXSMma_folder"
+                              size={16}
+                            />
+                            <span className="pXSMma_workspaceLabel">
+                              {currentProjectSummary?.label ?? '选择工作区'}
+                            </span>
+                            <IconChevronDownOutline14
+                              className="pXSMma_chevron"
+                              size={12}
+                            />
+                          </button>
+                        }
+                      />
+
+                      <Menu
+                        open={s.heroPresetMenuOpen}
+                        onClose={() => {
+                          s.heroPresetMenuOpen = false;
+                          forceRender();
+                        }}
+                        selectedId={s.selectedAgentPreset}
+                        items={AGENT_PRESETS.map(ap => ({
+                          id: ap.id,
+                          label: ap.name,
+                          icon: <IconAgentPresetOutline16 size={16} />,
+                        }))}
+                        onSelect={id => {
+                          s.selectedAgentPreset = id;
+                          s.heroPresetMenuOpen = false;
+                          forceRender();
+                        }}
+                        portal={true}
+                        anchor={
+                          <button
+                            type="button"
+                            className="pXSMma_workspace"
+                            aria-label="选择 Agent 预设"
+                            aria-haspopup="menu"
+                            aria-expanded={s.heroPresetMenuOpen}
+                            onClick={() => {
+                              s.heroPresetMenuOpen = !s.heroPresetMenuOpen;
+                              forceRender();
+                            }}
+                          >
+                            <IconAgentPresetOutline16
+                              className="pXSMma_folder"
+                              size={16}
+                            />
+                            <span className="pXSMma_workspaceLabel">
+                              {currentAgentPresetObj.name}
+                            </span>
+                            <IconChevronDownOutline14
+                              className="pXSMma_chevron"
+                              size={12}
+                            />
+                          </button>
+                        }
+                      />
+                    </div>
+                  </>
+                ) : null}
+
+                <div className={clsx('uV2eYG_root', isHero && 'uV2eYG_hero')}>
+                  {promptStatus ? (
+                    <div
+                      id="prompt-status"
+                      className="uV2eYG_notice"
+                      role="status"
                     >
-                      {`📁 ${currentProjectSummary?.label ?? '默认项目空间'}`}
-                    </button>
-                    <button
-                      id="composer-new-project-btn"
-                      type="button"
-                      className="dsh-chip-btn"
-                      title="浏览本地目录并新开项目"
-                      onClick={() => openNewProjectModal()}
-                    >
-                      + 新开项目
-                    </button>
-                    <button
-                      id="composer-permission-btn"
-                      type="button"
-                      className={`dsh-chip-btn dsh-perm-chip${s.permissionPreset === 'danger-full-access' ? ' is-danger' : ''}`}
-                      title="切换权限预设或管理会话授权"
-                      onClick={() => {
-                        s.permissionPopoverOpen = !s.permissionPopoverOpen;
-                        forceRender();
-                      }}
-                    >
-                      {`🔒 ${currentPresetObj.label} ▾`}
-                    </button>
-                    <button
-                      id="composer-model-btn"
-                      type="button"
-                      className="dsh-chip-btn"
-                      title="查看模型与网关设置"
-                      onClick={() => openSettings('models')}
-                    >
-                      ⚡ deepseek-v4.1-flash
-                    </button>
-                  </div>
-                  <div className="action-buttons dsh-composer-trailing">
-                    <span id="prompt-status" className="small muted" role="status">
                       {promptStatus}
-                    </span>
-                    <button
-                      ref={bind({ click: () => trackAsync(handleCancel()) })}
-                      id="cancel-button"
-                      className="secondary dsh-stop-btn"
-                      type="button"
-                      disabled={cancelDisabled}
-                      onClick={() => trackAsync(handleCancel())}
-                    >
-                      停止
-                    </button>
-                    <button
-                      id="send-button"
-                      className="dsh-send-btn"
-                      type="submit"
-                      disabled={sendDisabled}
-                    >
-                      {pending ? '等待完成…' : '↑ 发送'}
-                    </button>
-                  </div>
+                    </div>
+                  ) : (
+                    <span
+                      id="prompt-status"
+                      className="visually-hidden"
+                      role="status"
+                    />
+                  )}
+
+                  <form
+                    ref={bind({ submit: e => trackAsync(handleSendPrompt(e)) })}
+                    id="prompt-form"
+                    className="uV2eYG_card"
+                    data-composer-card="true"
+                    onSubmit={e => trackAsync(handleSendPrompt(e))}
+                  >
+                    <label htmlFor="prompt" className="visually-hidden">
+                      发送消息
+                    </label>
+                    <div className="uV2eYG_scroll" data-input-scroll="true">
+                      <div className="uV2eYG_grow">
+                        <textarea
+                          ref={bind(
+                            {
+                              input: e => {
+                                s.promptText = e.currentTarget.value;
+                                forceRender();
+                              },
+                            },
+                            promptInputRef,
+                          )}
+                          id="prompt"
+                          data-plain-input="true"
+                          className="uV2eYG_input"
+                          rows={isHero ? 3 : 2}
+                          maxLength={32000}
+                          disabled={promptDisabled}
+                          placeholder={
+                            isHero ? '描述你想要构建的内容' : '给智能体发消息'
+                          }
+                          value={s.promptText}
+                          onChange={e => {
+                            s.promptText = e.target.value;
+                            forceRender();
+                          }}
+                          onKeyDown={e => {
+                            if (
+                              e.key === 'Enter' &&
+                              !e.shiftKey &&
+                              !e.isComposing &&
+                              (s.enterBehavior === 'enter' ||
+                                e.metaKey ||
+                                e.ctrlKey)
+                            ) {
+                              e.preventDefault();
+                              trackAsync(handleSendPrompt(e));
+                            }
+                          }}
+                        />
+                        <div
+                          className="uV2eYG_mirror"
+                          aria-hidden="true"
+                          data-input-mirror="true"
+                        >
+                          {`${s.promptText || ' '}\n`}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="uV2eYG_row">
+                      <div className="uV2eYG_tools">
+                        <Tooltip label="添加工作区" side="top" delayMs={400}>
+                          <button
+                            type="button"
+                            className="uV2eYG_add"
+                            aria-label="添加工作区"
+                            onClick={() => openNewProjectModal()}
+                          >
+                            <IconPlusOutline16 size={14} />
+                          </button>
+                        </Tooltip>
+
+                        <div className="uV2eYG_modes">
+                          <Menu
+                            open={s.permissionPopoverOpen}
+                            onClose={() => {
+                              s.permissionPopoverOpen = false;
+                              forceRender();
+                            }}
+                            side="top"
+                            selectedId={s.permissionPreset}
+                            items={PERMISSION_PRESETS.map(p => ({
+                              id: p.id,
+                              label: p.label,
+                              icon: <PermissionGlyph value={p.id} />,
+                            }))}
+                            footer={[
+                              {
+                                id: '__manage_grants__',
+                                label: '查看授权与审计记录…',
+                                icon: <IconSettingsOutline16 size={16} />,
+                              },
+                            ]}
+                            onSelect={id => {
+                              if (id === '__manage_grants__') {
+                                s.permissionPopoverOpen = false;
+                                openSettings('permissions');
+                              } else {
+                                selectPermissionPreset(id);
+                              }
+                            }}
+                            anchor={
+                              <button
+                                id="composer-permission-btn"
+                                type="button"
+                                className="Sh0Q9G_trigger"
+                                aria-label={`访问模式，当前：${currentPresetObj.label}`}
+                                title={currentPresetObj.desc}
+                                onClick={() => {
+                                  s.permissionPopoverOpen =
+                                    !s.permissionPopoverOpen;
+                                  forceRender();
+                                }}
+                              >
+                                <span
+                                  className="Sh0Q9G_triggerIcon"
+                                  aria-hidden="true"
+                                >
+                                  <PermissionGlyph value={s.permissionPreset} />
+                                </span>
+                                <span className="Sh0Q9G_triggerLabel">
+                                  {currentPresetObj.label}
+                                </span>
+                                <span
+                                  className={clsx(
+                                    'Sh0Q9G_chevron',
+                                    s.permissionPopoverOpen &&
+                                      'Sh0Q9G_chevronOpen',
+                                  )}
+                                  aria-hidden="true"
+                                >
+                                  <IconChevronDownOutline14 />
+                                </span>
+                              </button>
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      <div className="uV2eYG_trailing">
+                        <div className="_7KE1Ra_root">
+                          <button
+                            id="composer-model-btn"
+                            type="button"
+                            className="_7KE1Ra_trigger"
+                            aria-label="当前模型：deepseek-v4.1-flash"
+                            title="点击查看模型与网关配置"
+                            onClick={() => openSettings('models')}
+                          >
+                            <span className="_7KE1Ra_triggerLabel">
+                              deepseek-v4.1-flash
+                            </span>
+                            <IconChevronDownOutline14 className="_7KE1Ra_chevron" />
+                          </button>
+                        </div>
+
+                        <button
+                          ref={bind({ click: () => trackAsync(handleCancel()) })}
+                          id="cancel-button"
+                          type="button"
+                          className="uV2eYG_primary"
+                          aria-label="停止生成"
+                          disabled={cancelDisabled}
+                          style={
+                            cancelDisabled
+                              ? {
+                                  position: 'absolute',
+                                  width: 1,
+                                  height: 1,
+                                  opacity: 0,
+                                  pointerEvents: 'none',
+                                  overflow: 'hidden',
+                                }
+                              : undefined
+                          }
+                          onClick={() => trackAsync(handleCancel())}
+                        >
+                          <svg
+                            viewBox="0 0 16 16"
+                            width="16"
+                            height="16"
+                            aria-hidden="true"
+                          >
+                            <rect
+                              x="3"
+                              y="3"
+                              width="10"
+                              height="10"
+                              rx="3"
+                              fill="currentColor"
+                            />
+                          </svg>
+                          <span className="visually-hidden">停止</span>
+                        </button>
+
+                        <button
+                          id="send-button"
+                          type="submit"
+                          className="uV2eYG_primary"
+                          aria-label="发送消息"
+                          disabled={sendDisabled}
+                          style={
+                            !cancelDisabled
+                              ? {
+                                  position: 'absolute',
+                                  width: 1,
+                                  height: 1,
+                                  opacity: 0,
+                                  pointerEvents: 'none',
+                                  overflow: 'hidden',
+                                }
+                              : undefined
+                          }
+                        >
+                          <IconSendOutline16 size={16} />
+                          <span className="visually-hidden">
+                            {pending ? '等待完成…' : '发送'}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  </form>
                 </div>
-              </SpotlightCard>
+              </div>
             </div>
 
-            <details className="event-details dsh-event-drawer">
-              <summary data-tip="最近 120 条已消费事件；未识别事件按原始记录展示">
-                <span>诊断与事件记录</span>
-                <span id="event-count" className="muted">
+            {/* Event Ledger Drawer (accessible for cursor verification) */}
+            <details className="visually-hidden">
+              <summary style={{ cursor: 'pointer', userSelect: 'none' }}>
+                <span>事件流记录</span>
+                <span id="event-count" style={{ marginLeft: 8 }}>
                   {`${events.length} · 游标 ${view?.cursor ?? 0}`}
                 </span>
               </summary>
-              <div id="event-log">
+              <div id="event-log" style={{ marginTop: 6 }}>
                 {events.map(record => (
                   <details key={record.cursor}>
                     <summary>
@@ -2311,58 +2998,74 @@ export function CAYWApp({ env } = {}) {
               </div>
             </details>
           </div>
+        </div>
 
-          <section
-            id="projects-page"
-            className="management-page"
-            hidden={s.activePage !== 'projects'}
-            aria-labelledby="projects-heading"
+        {/* Projects Management View (#projects-page) */}
+        <section
+          id="projects-page"
+          className="wSkVaW_root"
+          hidden={s.activePage !== 'projects'}
+          aria-labelledby="projects-heading"
+          style={{ padding: 24, overflowY: 'auto' }}
+        >
+          <div
+            style={{
+              maxWidth: 748,
+              width: '100%',
+              margin: '0 auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+            }}
           >
-            <div className="conversation-heading">
-              <div>
-                <ShinyText>工作区与项目空间</ShinyText>
-                <div className="title-with-hint">
-                  <GradientText id="projects-heading">本地项目空间</GradientText>
-                  <HintPopover ariaLabel="项目空间管理说明">
-                    选择目录即可新开独立项目 Runtime；各项目的会话列表、权限授权与事件游标相互隔离。
-                  </HintPopover>
-                </div>
-              </div>
-              <div className="approval-actions">
-                <button
-                  type="button"
-                  onClick={() => openNewProjectModal()}
-                >
-                  📁 浏览目录新开项目
-                </button>
-                <button
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <h2 id="projects-heading" style={{ margin: 0, fontSize: 18 }}>
+                工作区与本机项目空间
+              </h2>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Button variant="primary" onClick={() => openNewProjectModal()}>
+                  添加工作区
+                </Button>
+                <Button
                   ref={bind({ click: () => trackAsync(refreshProjects()) })}
                   id="refresh-projects"
-                  className="secondary"
-                  type="button"
+                  variant="outline"
                   disabled={s.refreshProjectsBusy}
                   onClick={() => trackAsync(refreshProjects())}
                 >
                   刷新空间
-                </button>
+                </Button>
               </div>
             </div>
-
-            <SpotlightCard
-              as="form"
+            <p id="projects-status" role="status" style={{ margin: 0 }}>
+              {projectsStatusText}
+            </p>
+            <form
+              ref={bind({ submit: e => trackAsync(handleAddProject(e)) })}
               id="add-project-form"
-              border
-              className="project-add-bar"
-              handlers={{ submit: e => trackAsync(handleAddProject(e, true)) }}
-              onSubmit={e => trackAsync(handleAddProject(e, true))}
+              style={{ display: 'flex', gap: 8 }}
+              onSubmit={e => trackAsync(handleAddProject(e))}
             >
               <input
-                ref={projectWsInputRef}
+                ref={bind(
+                  {
+                    input: e => {
+                      s.projectWorkspaceInput = e.currentTarget.value;
+                      forceRender();
+                    },
+                  },
+                  projectWsInputRef,
+                )}
                 id="project-workspace-input"
                 type="text"
-                maxLength={1024}
-                required
-                placeholder="输入本地项目目录路径，例如 /Volumes/ORICO/CAYW"
+                className="zGbnIq_input"
+                placeholder="工作区目录路径，如 /Volumes/ORICO/CAYW"
                 value={s.projectWorkspaceInput}
                 onChange={e => {
                   s.projectWorkspaceInput = e.target.value;
@@ -2370,485 +3073,227 @@ export function CAYWApp({ env } = {}) {
                 }}
               />
               <input
-                ref={projectLabelInputRef}
+                ref={bind(
+                  {
+                    input: e => {
+                      s.projectLabelInput = e.currentTarget.value;
+                      forceRender();
+                    },
+                  },
+                  projectLabelInputRef,
+                )}
                 id="project-label-input"
                 type="text"
-                maxLength={160}
-                placeholder="空间名称（可选，默认取目录名）"
+                className="zGbnIq_input"
+                placeholder="显示名称（可选）"
                 value={s.projectLabelInput}
                 onChange={e => {
                   s.projectLabelInput = e.target.value;
                   forceRender();
                 }}
               />
-              <button
-                id="add-project-button"
-                type="submit"
-                disabled={s.addProjectBusy}
-              >
-                {s.addProjectBusy ? '正在启动项目…' : '+ 新开项目空间'}
-              </button>
-            </SpotlightCard>
-
-            <div className="quick-paths">
-              <span className="small muted">常用目录快填：</span>
-              {QUICK_WORKSPACES.map(([p, lbl]) => (
-                <button
-                  key={p}
-                  type="button"
-                  className="quiet path-chip"
-                  onClick={() => {
-                    s.projectWorkspaceInput = p;
-                    s.projectLabelInput = lbl;
-                    if (projectWsInputRef.current) projectWsInputRef.current.value = p;
-                    if (projectLabelInputRef.current) projectLabelInputRef.current.value = lbl;
-                    forceRender();
-                  }}
-                >
-                  {`📁 ${lbl}`}
-                </button>
-              ))}
-            </div>
-
-            <p id="projects-status" className="small muted" role="status">
-              {projectsStatusText}
-            </p>
-
-            <div id="project-list" className="management-grid">
-              {projectSummaries.map(item => {
-                const isCurrent = item.id === currentProjectId();
+              <Button id="add-project-button" type="submit" variant="primary">
+                开启项目
+              </Button>
+            </form>
+            <div id="project-list" className="zGbnIq_rows">
+              {projectSummaries.map(project => {
+                const isCurrent = project.id === currentProjectId();
                 return (
-                  <SpotlightCard
-                    as="article"
-                    key={item.id}
-                    tilt
-                    border
-                    className={`management-card${isCurrent ? ' is-active' : ''}`}
-                  >
-                    <div className="card-header">
-                      <strong>{item.label}</strong>
-                      <span className="state-label">
-                        {isCurrent ? '当前使用中' : '可切换'}
-                      </span>
+                  <article key={project.id} className="zGbnIq_rowCard">
+                    <div className="zGbnIq_rowHead">
+                      <div className="zGbnIq_rowIdentity">
+                        <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
+                        <span className="zGbnIq_rowName">{project.label}</span>
+                        <span className="zGbnIq_rowTag">
+                          {project.statusLabel}
+                        </span>
+                      </div>
                     </div>
-                    <div className="stat-pills">
-                      {item.workspace ? (
-                        <span
-                          className="stat-pill mono"
-                          data-tip={`本地项目目录：${item.workspace}（IPC 端点：${item.address}）`}
-                        >
-                          {`📁 ${item.workspace}`}
-                        </span>
-                      ) : null}
-                      <span
-                        className="stat-pill"
-                        data-tip={`该项目当前共有 ${item.sessionCount} 个会话`}
-                      >
-                        {`${item.sessionCount} 个会话`}
-                      </span>
-                      <span
-                        className="stat-pill"
-                        data-tip={`项目运行状态：${item.statusLabel}（IPC：${item.address}）`}
-                      >
-                        {item.statusLabel}
-                      </span>
-                      <span className="stat-pill mono">{item.address}</span>
-                      {item.frozenCount ? (
-                        <span className="stat-pill warn">
-                          {`${item.frozenCount} 已冻结`}
-                        </span>
-                      ) : null}
-                      {item.unresolvedCount ? (
-                        <span className="stat-pill danger">
-                          {`${item.unresolvedCount} 待核对`}
-                        </span>
-                      ) : null}
+                    <div style={{ fontSize: 13, opacity: 0.75 }}>
+                      {`${project.address}${project.workspace ? ` · ${project.workspace}` : ''} · ${project.sessionCount} 个会话`}
                     </div>
-                    <div className="approval-actions">
+                    <div className="zGbnIq_rowActions">
                       <button
                         ref={bind({
-                          click: () => trackAsync(selectProject(item.id)),
+                          click: () => trackAsync(selectProject(project.id)),
                         })}
                         type="button"
-                        className={isCurrent ? 'secondary' : ''}
-                        onClick={() => trackAsync(selectProject(item.id))}
+                        className="_button_kz6gm_4 _sm_kz6gm_30 _primary_kz6gm_38"
+                        disabled={isCurrent}
+                        onClick={() => trackAsync(selectProject(project.id))}
                       >
-                        {isCurrent ? '查看空间会话' : '切换到此空间'}
+                        {isCurrent ? '当前项目空间' : '切换到此项目'}
                       </button>
-                      <button
-                        ref={bind({
-                          click: () =>
-                            trackAsync(
-                              (async () => {
-                                await selectProject(item.id);
-                                await createNewSession();
-                              })(),
-                            ),
-                        })}
-                        type="button"
-                        className="secondary"
-                        onClick={() =>
-                          trackAsync(
-                            (async () => {
-                              await selectProject(item.id);
-                              await createNewSession();
-                            })(),
-                          )
-                        }
-                      >
-                        + 在此空间新建会话
-                      </button>
-                      {!item.default ? (
+                      {!project.default && project.id !== 'default' ? (
                         <button
                           ref={bind({
-                            click: () => trackAsync(removeProject(item.id)),
+                            click: () => trackAsync(removeProject(project.id)),
                           })}
                           type="button"
-                          className="secondary deny"
-                          onClick={() => trackAsync(removeProject(item.id))}
+                          className="_button_kz6gm_4 _sm_kz6gm_30 _outline_kz6gm_56"
+                          onClick={() => trackAsync(removeProject(project.id))}
                         >
-                          移除
+                          移除空间
                         </button>
                       ) : null}
                     </div>
-                  </SpotlightCard>
+                  </article>
                 );
               })}
             </div>
-          </section>
+          </div>
+        </section>
 
-          <section
-            id="permissions-page"
-            className="management-page"
-            hidden={s.activePage !== 'permissions'}
-            aria-labelledby="permissions-heading"
+        {/* Permissions & Audit View (#permissions-page) */}
+        <section
+          id="permissions-page"
+          className="wSkVaW_root"
+          hidden={s.activePage !== 'permissions'}
+          aria-labelledby="permissions-heading"
+          style={{ padding: 24, overflowY: 'auto' }}
+        >
+          <div
+            style={{
+              maxWidth: 748,
+              width: '100%',
+              margin: '0 auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+            }}
           >
-            <div className="conversation-heading">
-              <div>
-                <ShinyText>权限与安全控制</ShinyText>
-                <div className="title-with-hint">
-                  <GradientText id="permissions-heading">
-                    会话权限预设与已授权管理
-                  </GradientText>
-                  <HintPopover ariaLabel="权限说明">
-                    所有 CodeMode 工具调用均经过宿主参数校验与权限门禁。你可以在此切换默认权限模式、查看当前会话已授予的精确参数授权，或随时撤销任意授权。
-                  </HintPopover>
-                </div>
-              </div>
-              <button
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <h2 id="permissions-heading" style={{ margin: 0, fontSize: 18 }}>
+                权限模式、任务授权与审计记录
+              </h2>
+              <Button
+                ref={bind({ click: () => trackAsync(refreshPermissions()) })}
                 id="refresh-permissions"
-                className="secondary"
-                type="button"
+                variant="outline"
                 disabled={s.refreshPermissionsBusy}
                 onClick={() => trackAsync(refreshPermissions())}
               >
-                刷新权限记录
-              </button>
+                刷新授权记录
+              </Button>
             </div>
-
-            <div className="dsh-settings-card">
-              <div className="dsh-permission-row">
-                <div className="dsh-permission-row-text">
-                  <strong>默认权限模式（Permission Preset）</strong>
-                  <span className="small muted">
-                    选择当前与新建会话的权限门禁策略。启用 Full access 前需显式确认风险。
-                  </span>
-                </div>
-                <div className="dsh-preset-pills">
-                  {PERMISSION_PRESETS.map(preset => (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      className={`dsh-preset-pill${s.permissionPreset === preset.id ? ' is-active' : ''}`}
-                      onClick={() => selectPermissionPreset(preset.id)}
-                    >
-                      {`${preset.label} (${preset.enLabel})`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <p className="small muted">{currentPresetObj.desc}</p>
-            </div>
-
-            <p id="permissions-status" className="small muted" role="status">
-              {s.permissionsStatus ||
-                `当前会话：${snapshot ? displayLabel(snapshot) : '未选择'} · ${s.sessionGrants.length} 项生效授权`}
+            <p id="permissions-status" role="status" style={{ margin: 0 }}>
+              {s.permissionsStatus || `当前模式：${currentPresetObj.label}`}
             </p>
-
-            <div className="management-grid">
-              <SpotlightCard as="article" border className="management-card">
-                <div className="card-header">
-                  <strong>当前会话生效授权（`session.grants`）</strong>
-                  <span className="state-label">{`${s.sessionGrants.length} 项`}</span>
-                </div>
-                {!s.sessionGrants.length ? (
-                  <p className="small muted">
-                    当前会话暂无持久任务授权。当你在审批卡片点击“允许此任务”后，授权条目会显示在此处并可随时撤销。
-                  </p>
-                ) : (
-                  <div className="dsh-grants-list">
-                    {s.sessionGrants.map((grant, idx) => {
-                      const cap = grant.capability ?? grant.input?.capability ?? '未知能力';
-                      const scopeStr =
-                        typeof grant.scope === 'string'
-                          ? grant.scope
-                          : JSON.stringify(grant.scope ?? {});
-                      const key = `${cap}:${scopeStr}`;
-                      return (
-                        <div key={`${key}/${idx}`} className="bound-session-row">
-                          <div>
-                            <strong>{CAPABILITY_LABELS[cap] ?? cap}</strong>
-                            <span className="small mono muted">{` · ${clip(scopeStr, 140)}`}</span>
-                          </div>
-                          <button
-                            type="button"
-                            className="secondary deny"
-                            disabled={s.revokeBusyKey === key}
-                            onClick={() => trackAsync(revokeGrant(grant))}
-                          >
-                            {s.revokeBusyKey === key ? '撤销中…' : '撤销授权'}
-                          </button>
-                        </div>
-                      );
-                    })}
+            <div id="grants-list" className="zGbnIq_rows">
+              {s.sessionGrants.map((grant, idx) => {
+                const cap =
+                  grant.capability ?? grant.input?.capability ?? '未知能力';
+                const scopeStr =
+                  typeof grant.scope === 'string'
+                    ? grant.scope
+                    : JSON.stringify(grant.scope ?? {});
+                const key = `${cap}:${scopeStr}`;
+                return (
+                  <div key={`${key}/${idx}`} className="zGbnIq_rowCard">
+                    <div className="zGbnIq_rowHead">
+                      <div className="zGbnIq_rowIdentity">
+                        <span className="zGbnIq_rowName">
+                          {CAPABILITY_LABELS[cap] ?? cap}
+                        </span>
+                        <span className="zGbnIq_rowTag">{scopeStr}</span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={s.revokeBusyKey === key}
+                        onClick={() => trackAsync(revokeGrant(grant))}
+                      >
+                        撤销授权
+                      </Button>
+                    </div>
                   </div>
-                )}
-              </SpotlightCard>
-
-              <SpotlightCard as="article" border className="management-card">
-                <div className="card-header">
-                  <strong>权限与工具审计记录（`session.audit`）</strong>
-                  <span className="state-label">{`${s.sessionAudit.length} 条`}</span>
-                </div>
-                {!s.sessionAudit.length ? (
-                  <p className="small muted">
-                    当前会话暂无工具审批审计记录。发生工具调用或授权决策后将自动同步。
-                  </p>
-                ) : (
-                  <div className="dsh-audit-list">
-                    {s.sessionAudit.slice(-15).map((item, idx) => (
-                      <details key={idx} className="record-details">
-                        <summary>
-                          {`#${idx + 1} · ${clip(
-                            item.capability ?? item.kind ?? item.decision ?? '审计条目',
-                            80,
-                          )}`}
-                        </summary>
-                        <pre>{recordText(item)}</pre>
-                      </details>
-                    ))}
-                  </div>
-                )}
-              </SpotlightCard>
+                );
+              })}
             </div>
-          </section>
+          </div>
+        </section>
 
-          <section
-            id="plugins-page"
-            className="management-page"
-            hidden={s.activePage !== 'plugins'}
-            aria-labelledby="plugins-heading"
+        {/* Plugins View (#plugins-page) */}
+        <section
+          id="plugins-page"
+          className="wSkVaW_root"
+          hidden={s.activePage !== 'plugins'}
+          aria-labelledby="plugins-heading"
+          style={{ padding: 24, overflowY: 'auto' }}
+        >
+          <div
+            style={{
+              maxWidth: 748,
+              width: '100%',
+              margin: '0 auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+            }}
           >
-            <div className="conversation-heading">
-              <div>
-                <ShinyText>插件管理</ShinyText>
-                <div className="title-with-hint">
-                  <GradientText id="plugins-heading">
-                    插件与会话绑定
-                  </GradientText>
-                  <HintPopover ariaLabel="插件管理说明">
-                    展示当前项目已绑定的 plugin、版本代际、公开能力与冻结状态。plugin 启停由本机宿主控制；若卸载导致会话冻结，可在副作用核对完毕后显式 Fork 为普通聊天。
-                  </HintPopover>
-                </div>
-              </div>
-              <button
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <h2 id="plugins-heading" style={{ margin: 0, fontSize: 18 }}>
+                插件与能力目录
+              </h2>
+              <Button
                 ref={bind({ click: () => trackAsync(refreshPlugins()) })}
                 id="refresh-plugins"
-                className="secondary"
-                type="button"
+                variant="outline"
                 disabled={s.refreshPluginsBusy}
                 onClick={() => trackAsync(refreshPlugins())}
               >
                 刷新插件状态
-              </button>
+              </Button>
             </div>
-
-            <p id="plugins-status" className="small muted" role="status">
+            <p id="plugins-status" role="status" style={{ margin: 0 }}>
               {pluginsStatusText}
             </p>
-
-            <div id="plugin-list" className="management-grid">
-              {!pluginItems.length ? (
-                OPTIONAL_PLUGIN_CATALOG.map(mod => (
-                  <SpotlightCard
-                    as="article"
-                    key={mod.name}
-                    tilt
-                    border
-                    className="management-card"
-                  >
-                    <div className="card-header">
-                      <strong>{mod.name}</strong>
-                      <span className="state-label">按需插拔</span>
+            <div id="plugin-list" className="qSYn7G_cards">
+              {pluginItems.map(plugin => (
+                <article key={plugin.name} className="qSYn7G_card">
+                  <div className="qSYn7G_cardContent">
+                    <span className="qSYn7G_cardTitle">{plugin.name}</span>
+                    <span className="qSYn7G_cardTrailing">
+                      <span className="qSYn7G_status">
+                        <StateDot
+                          state={plugin.frozen ? 'warning' : 'done'}
+                          className="qSYn7G_statusDot"
+                        />
+                        {plugin.frozen ? '插件已卸载 · 会话冻结' : '已挂载'}
+                      </span>
+                    </span>
+                  </div>
+                  {array(plugin.reasons).map((reason, rIdx) => (
+                    <div key={rIdx} className="qSYn7G_failure">
+                      {reason}
                     </div>
-                    <div className="stat-pills">
-                      <span className="stat-pill">{mod.role}</span>
-                      <span className="stat-pill">0 个绑定会话</span>
-                    </div>
-                    <p className="small muted card-desc">{mod.desc}</p>
-                  </SpotlightCard>
-                ))
-              ) : (
-                pluginItems.map(plugin => {
-                  const shortReg =
-                    plugin.registryId.length > 14
-                      ? `${plugin.registryId.slice(0, 8)}…`
-                      : plugin.registryId;
-                  return (
-                    <SpotlightCard
-                      as="article"
-                      key={plugin.name}
-                      tilt
-                      border
-                      className={`management-card${plugin.frozen ? ' is-frozen' : ''}`}
-                    >
-                      <div className="card-header">
-                        <strong>{plugin.name}</strong>
-                        <span className="state-label">{plugin.statusLabel}</span>
-                      </div>
-                      <div className="stat-pills">
-                        <span
-                          className="stat-pill"
-                          data-tip={`插件版本：${plugin.version}`}
-                        >
-                          {`版本 ${plugin.version}`}
-                        </span>
-                        <span
-                          className="stat-pill mono"
-                          data-tip={`实例标识：${plugin.registryId}`}
-                        >
-                          {shortReg}
-                        </span>
-                        {plugin.generation !== null ? (
-                          <span className="stat-pill">
-                            {`代际 #${plugin.generation}`}
-                          </span>
-                        ) : null}
-                        <span className="stat-pill">
-                          {`${plugin.boundSessions.length} 个绑定会话`}
-                        </span>
-                        {plugin.reasons.length ? (
-                          <HintPopover chip warn label="冻结原因 ?">
-                            {plugin.reasons.join('；')}
-                          </HintPopover>
-                        ) : null}
-                      </div>
-                      {plugin.capabilities.length ? (
-                        <div className="stat-pills">
-                          {plugin.capabilities.map(cap => (
-                            <span
-                              key={cap}
-                              className="stat-pill mono"
-                              data-tip={`插件公开能力：${cap}`}
-                            >
-                              {cap}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                      {plugin.boundSessions.map(bound => (
-                        <div key={bound.id} className="bound-session-row">
-                          <span className="small">
-                            {`${bound.label}（${bound.stateLabel}）`}
-                          </span>
-                          <div className="approval-actions">
-                            <button
-                              type="button"
-                              className="secondary"
-                              onClick={() =>
-                                trackAsync(
-                                  (async () => {
-                                    switchPage('conversation');
-                                    await selectSession(bound.id);
-                                  })(),
-                                )
-                              }
-                            >
-                              打开会话
-                            </button>
-                            {bound.frozen ? (
-                              <button
-                                type="button"
-                                disabled={!bound.canFork}
-                                onClick={() =>
-                                  trackAsync(
-                                    (async () => {
-                                      switchPage('conversation');
-                                      await selectSession(bound.id);
-                                      openForkDialog();
-                                    })(),
-                                  )
-                                }
-                              >
-                                确认后 Fork 为普通聊天
-                              </button>
-                            ) : null}
-                          </div>
-                        </div>
-                      ))}
-                    </SpotlightCard>
-                  );
-                })
-              )}
+                  ))}
+                </article>
+              ))}
             </div>
+          </div>
+        </section>
+      </main>
 
-            <div className="capability-catalog">
-              <div className="section-heading">
-                <div className="title-with-hint">
-                  <h2>工作区内置能力（CodeMode）</h2>
-                  <HintPopover ariaLabel="CodeMode 内置能力说明">
-                    模型通过 Luau 单元调用以下受控能力；每次具体调用都经过宿主参数校验、权限审批与结果配对。
-                  </HintPopover>
-                </div>
-                <span className="small muted">
-                  {s.cachedCapabilities.length
-                    ? `已加载 ${s.cachedCapabilities.length} 项宿主能力`
-                    : '共 4 组预置工作区能力'}
-                </span>
-              </div>
-              <div className="management-grid">
-                {BUILTIN_CAPABILITY_GROUPS.map(group => (
-                  <SpotlightCard
-                    as="article"
-                    key={group.title}
-                    border
-                    className="management-card capability-card"
-                  >
-                    <div className="card-header">
-                      <strong>{group.title}</strong>
-                      <span className="state-label">{group.badge}</span>
-                    </div>
-                    <div className="capability-items">
-                      {group.items.map(([code, desc]) => (
-                        <div key={code} className="capability-row">
-                          <code className="inline-code">{code}</code>
-                          <span className="small muted">{desc}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </SpotlightCard>
-                ))}
-              </div>
-            </div>
-          </section>
-        </main>
-      </div>
-
-      {/* DSH Settings Modal (@deepseek-ai/dsh-client-ui-settings-general style) */}
+      {/* Official DSH Settings Modal (@deepseek-ai/dsh-client-ui-settings-general) */}
       {s.settingsOpen ? (
-        <div className="dsh-modal-overlay" role="presentation">
+        <div className="VOzbGW_overlay" role="presentation">
           <div
-            className="dsh-modal-mask"
+            className="VOzbGW_mask"
+            aria-hidden="true"
             onClick={() => {
               s.settingsOpen = false;
               forceRender();
@@ -2856,182 +3301,277 @@ export function CAYWApp({ env } = {}) {
           />
           <div
             id="settings-dialog"
-            className="dsh-settings-panel"
+            className="VOzbGW_panel"
             role="dialog"
             aria-modal="true"
-            aria-labelledby="settings-modal-title"
+            aria-labelledby="settings-title"
           >
-            <nav className="dsh-settings-nav" aria-label="设置分区">
-              <div id="settings-modal-title" className="dsh-settings-nav-title">
+            <nav className="VOzbGW_nav">
+              <div id="settings-title" className="VOzbGW_navTitle">
                 设置
               </div>
-              <div className="dsh-settings-nav-list">
+              <div className="VOzbGW_navList">
                 {[
-                  ['general', '⚙ 通用设置'],
-                  ['permissions', '🔒 权限与安全'],
-                  ['models', '⚡ 模型与连接'],
-                  ['plugins', '🧩 插件与能力'],
-                ].map(([tabId, label]) => (
+                  ['general', '通用设置', IconSettingsOutline16],
+                  ['models', '模型', IconDataOutline16],
+                  ['agent-presets', 'Agent 预设', IconAgentPresetOutline16],
+                  ['permissions', '权限与审计', IconPersonalizationOutline16],
+                  ['plugins', '插件', IconPersonalizationOutline16],
+                ].map(([tabId, label, IconComp]) => (
                   <button
                     key={tabId}
                     type="button"
-                    className={`dsh-settings-nav-cell${s.settingsTab === tabId ? ' is-active' : ''}`}
+                    className={clsx(
+                      'VOzbGW_navCell',
+                      s.settingsTab === tabId && 'VOzbGW_active',
+                    )}
+                    aria-current={s.settingsTab === tabId ? 'true' : undefined}
                     onClick={() => openSettings(tabId)}
                   >
-                    {label}
+                    <IconComp className="VOzbGW_navIcon" size={16} />
+                    <span className="VOzbGW_navLabel">{label}</span>
                   </button>
                 ))}
               </div>
             </nav>
 
-            <div className="dsh-settings-content">
-              <div className="dsh-settings-header">
-                <strong>
-                  {{
-                    general: '通用与外观设置',
-                    permissions: '权限模式与会话授权',
-                    models: '模型提供方与本机 Runtime 连接',
-                    plugins: '插件绑定与 CodeMode 能力目录',
-                  }[s.settingsTab]}
-                </strong>
+            <div className="VOzbGW_content">
+              <div className="VOzbGW_header">
+                <div className="VOzbGW_actions" />
                 <button
                   id="close-settings-button"
                   type="button"
-                  className="dsh-modal-close"
-                  aria-label="关闭设置"
+                  className="VOzbGW_close"
+                  aria-label="关闭"
                   onClick={() => {
                     s.settingsOpen = false;
                     forceRender();
                   }}
                 >
-                  ✕
+                  <IconCloseOutline16 size={14} />
                 </button>
               </div>
 
-              <div className="dsh-settings-options">
+              <div className="VOzbGW_options">
                 {s.settingsTab === 'general' ? (
-                  <div className="dsh-settings-section">
-                    <div className="dsh-appearance-group">
-                      <div className="dsh-setting-title">外观主题（Appearance）</div>
-                      <div className="dsh-theme-cube-row">
+                  <div className="_WvWnq_section">
+                    <div className="_8HJdBW_group">
+                      <div className="_8HJdBW_title">外观</div>
+                      <div className="_8HJdBW_cubeRow">
                         {[
-                          ['light', '☀️ 浅色模式', 'Light'],
-                          ['dark', '🌙 深色模式', 'Dark'],
-                          ['system', '💻 跟随系统', 'System'],
-                        ].map(([mode, title, sub]) => (
+                          ['light', '浅色', IconLightOutline16],
+                          ['dark', '深色', IconDarkOutline16],
+                          ['system', '跟随系统', IconFollowsystemOutline16],
+                        ].map(([modeId, modeLabel, ModeIcon]) => (
                           <button
-                            key={mode}
+                            key={modeId}
                             type="button"
-                            className={`dsh-theme-cube${s.themeMode === mode ? ' is-selected' : ''}`}
-                            onClick={() => applyTheme(mode)}
+                            className={clsx(
+                              '_8HJdBW_themeCube',
+                              s.themeMode === modeId && '_8HJdBW_selected',
+                            )}
+                            onClick={() => applyTheme(modeId)}
                           >
-                            <strong>{title}</strong>
-                            <span className="small muted">{sub}</span>
+                            <ModeIcon size={16} />
+                            <span>{modeLabel}</span>
                           </button>
                         ))}
                       </div>
                     </div>
 
-                    <div className="dsh-setting-row">
-                      <div className="dsh-setting-row-text">
-                        <div className="dsh-setting-title">默认权限模式（Permission）</div>
-                        <div className="dsh-setting-desc">
-                          选择新会话与当前工作区的权限策略；Full access 需风险确认。
+                    <div className="oY77xG_row">
+                      <div className="oY77xG_rowText">
+                        <div className="oY77xG_title">默认权限预设</div>
+                        <div className="oY77xG_desc">
+                          {currentPresetObj.desc}
                         </div>
                       </div>
-                      <select
-                        aria-label="默认权限模式"
-                        className="dsh-setting-select"
-                        value={s.permissionPreset}
-                        onChange={e => selectPermissionPreset(e.target.value)}
+                      <button
+                        type="button"
+                        className="oY77xG_selector"
+                        onClick={() => {
+                          const idx = PERMISSION_PRESETS.findIndex(
+                            p => p.id === s.permissionPreset,
+                          );
+                          const next =
+                            PERMISSION_PRESETS[
+                              (idx + 1) % PERMISSION_PRESETS.length
+                            ];
+                          selectPermissionPreset(next.id);
+                        }}
                       >
-                        {PERMISSION_PRESETS.map(p => (
-                          <option key={p.id} value={p.id}>
-                            {`${p.label} (${p.enLabel})`}
-                          </option>
-                        ))}
-                      </select>
+                        <span>{currentPresetObj.label}</span>
+                        <IconChevronDownOutline14 className="oY77xG_chevron" />
+                      </button>
                     </div>
 
-                    <div className="dsh-setting-row">
-                      <div className="dsh-setting-row-text">
-                        <div className="dsh-setting-title">发送快捷键（Enter 键行为）</div>
-                        <div className="dsh-setting-desc">
-                          设置输入框按下 Enter 时的默认发送方式。
+                    <div className="T1PP_q_row">
+                      <div className="T1PP_q_rowText">
+                        <div className="T1PP_q_title">发送快捷键</div>
+                        <div className="T1PP_q_desc">
+                          配置输入框按下 Enter 键时的默认发送方式。
                         </div>
                       </div>
-                      <select
-                        aria-label="发送快捷键"
-                        className="dsh-setting-select"
-                        value={s.enterBehavior}
-                        onChange={e => {
-                          s.enterBehavior = e.target.value;
+                      <button
+                        type="button"
+                        className="T1PP_q_selector"
+                        onClick={() => {
+                          s.enterBehavior =
+                            s.enterBehavior === 'enter' ? 'cmd-enter' : 'enter';
                           forceRender();
                         }}
                       >
-                        <option value="enter">Enter 直接发送（Shift+Enter 换行）</option>
-                        <option value="cmd-enter">Cmd/Ctrl + Enter 发送（Enter 换行）</option>
-                      </select>
+                        <span>
+                          {s.enterBehavior === 'enter'
+                            ? 'Enter 直接发送'
+                            : 'Cmd/Ctrl + Enter 发送'}
+                        </span>
+                        <IconChevronDownOutline14 className="T1PP_q_chevron" />
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'models' ? (
+                  <div className="zGbnIq_section">
+                    <h3 className="zGbnIq_title">模型</h3>
+                    <p className="zGbnIq_intro">
+                      本机 Runtime 已接入真实模型提供方，API 密钥由本机进程安全持有。
+                    </p>
+                    <div className="zGbnIq_rows">
+                      <div className="zGbnIq_rowCard">
+                        <div className="zGbnIq_rowHead">
+                          <div className="zGbnIq_rowIdentity">
+                            <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
+                            <span className="zGbnIq_rowName">
+                              DeepSeek / Magpie OpenAI 兼容提供方
+                            </span>
+                            <span className="zGbnIq_rowTag">API 密钥已配置</span>
+                          </div>
+                        </div>
+                        <div className="zGbnIq_modelCatalog">
+                          <div className="zGbnIq_modelCatalogHeading">
+                            <span className="zGbnIq_modelCatalogTitle">
+                              模型目录
+                            </span>
+                            <span className="zGbnIq_modelCatalogMeta">
+                              http://127.0.0.1:3425/v1
+                            </span>
+                          </div>
+                          <div className="zGbnIq_modelList">
+                            <div className="zGbnIq_modelEntry">
+                              <div className="zGbnIq_modelRow">
+                                <strong>auto/deepseek-v4.1-flash</strong>
+                                <span className="zGbnIq_rowTag">当前使用</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'agent-presets' ? (
+                  <div className="zGbnIq_section">
+                    <h3 className="zGbnIq_title">Agent 预设</h3>
+                    <p className="zGbnIq_intro">
+                      预设决定会话的 Agent 所使用的工具编排方式与能力集合。
+                    </p>
+                    <div className="zGbnIq_rows">
+                      {AGENT_PRESETS.map(ap => (
+                        <div key={ap.id} className="zGbnIq_rowCard">
+                          <div className="zGbnIq_rowHead">
+                            <div className="zGbnIq_rowIdentity">
+                              <span className="zGbnIq_rowName">{ap.name}</span>
+                              <span className="zGbnIq_rowTag">{ap.badge}</span>
+                            </div>
+                            <Button
+                              variant={
+                                s.selectedAgentPreset === ap.id
+                                  ? 'primary'
+                                  : 'outline'
+                              }
+                              size="sm"
+                              onClick={() => {
+                                s.selectedAgentPreset = ap.id;
+                                forceRender();
+                              }}
+                            >
+                              {s.selectedAgentPreset === ap.id
+                                ? '当前默认'
+                                : '设为默认'}
+                            </Button>
+                          </div>
+                          <p className="zGbnIq_intro" style={{ margin: 0 }}>
+                            {ap.desc}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ) : null}
 
                 {s.settingsTab === 'permissions' ? (
-                  <div className="dsh-settings-section">
-                    <div className="dsh-setting-row">
-                      <div className="dsh-setting-row-text">
-                        <div className="dsh-setting-title">当前权限模式</div>
-                        <div className="dsh-setting-desc">{currentPresetObj.desc}</div>
-                      </div>
-                      <div className="dsh-preset-pills">
-                        {PERMISSION_PRESETS.map(p => (
-                          <button
-                            key={p.id}
-                            type="button"
-                            className={`dsh-preset-pill${s.permissionPreset === p.id ? ' is-active' : ''}`}
-                            onClick={() => selectPermissionPreset(p.id)}
-                          >
-                            {p.label}
-                          </button>
-                        ))}
-                      </div>
+                  <div className="zGbnIq_section">
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <h3 className="zGbnIq_title" style={{ margin: 0 }}>
+                        会话授权与审计记录
+                      </h3>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => trackAsync(refreshPermissions())}
+                      >
+                        刷新
+                      </Button>
                     </div>
-
-                    <div className="dsh-setting-block">
-                      <div className="card-header">
-                        <strong>当前会话已授权项（`session.grants`）</strong>
-                        <button
-                          type="button"
-                          className="quiet"
-                          onClick={() => trackAsync(refreshPermissions())}
-                        >
-                          ↻ 刷新
-                        </button>
-                      </div>
+                    <p className="zGbnIq_intro">
+                      {s.permissionsStatus ||
+                        '查看当前会话已授予的任务级权限，并可随时撤销。'}
+                    </p>
+                    <div className="zGbnIq_rows">
                       {!s.sessionGrants.length ? (
-                        <p className="small muted">暂无按任务记住的持久化授权记录。</p>
+                        <div className="zGbnIq_modelEmpty">
+                          当前会话暂无持久化任务授权记录。
+                        </div>
                       ) : (
                         s.sessionGrants.map((grant, idx) => {
-                          const cap = grant.capability ?? grant.input?.capability ?? '未知能力';
+                          const cap =
+                            grant.capability ??
+                            grant.input?.capability ??
+                            '未知能力';
                           const scopeStr =
                             typeof grant.scope === 'string'
                               ? grant.scope
                               : JSON.stringify(grant.scope ?? {});
                           const key = `${cap}:${scopeStr}`;
                           return (
-                            <div key={`${key}/${idx}`} className="bound-session-row">
-                              <div>
-                                <strong>{CAPABILITY_LABELS[cap] ?? cap}</strong>
-                                <span className="small mono muted">{` · ${clip(scopeStr, 120)}`}</span>
+                            <div key={`${key}/${idx}`} className="zGbnIq_rowCard">
+                              <div className="zGbnIq_rowHead">
+                                <div className="zGbnIq_rowIdentity">
+                                  <span className="zGbnIq_rowName">
+                                    {CAPABILITY_LABELS[cap] ?? cap}
+                                  </span>
+                                  <span className="zGbnIq_rowTag">
+                                    {clip(scopeStr, 80)}
+                                  </span>
+                                </div>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={s.revokeBusyKey === key}
+                                  onClick={() => trackAsync(revokeGrant(grant))}
+                                >
+                                  撤销授权
+                                </Button>
                               </div>
-                              <button
-                                type="button"
-                                className="secondary deny"
-                                disabled={s.revokeBusyKey === key}
-                                onClick={() => trackAsync(revokeGrant(grant))}
-                              >
-                                撤销授权
-                              </button>
                             </div>
                           );
                         })
@@ -3040,65 +3580,40 @@ export function CAYWApp({ env } = {}) {
                   </div>
                 ) : null}
 
-                {s.settingsTab === 'models' ? (
-                  <div className="dsh-settings-section">
-                    <div className="dsh-provider-card">
-                      <div className="dsh-provider-head">
-                        <span className="dsh-cred-dot configured" />
-                        <strong>DeepSeek / Magpie OpenAI 兼容网关</strong>
-                        <span className="dsh-row-tag">已连接</span>
-                      </div>
-                      <p className="small muted">
-                        默认模型：<code>auto/deepseek-v4.1-flash</code> · 端点：<code>http://127.0.0.1:3425/v1</code>
-                      </p>
-                      <p className="small muted">
-                        API 凭据由本机 Runtime 进程持有，从不向浏览器暴露或回显。
-                      </p>
-                    </div>
-
-                    <div className="dsh-provider-card">
-                      <div className="dsh-provider-head">
-                        <span
-                          className={`dsh-cred-dot ${s.connectionStatus === '已连接本机' ? 'configured' : 'missing'}`}
-                        />
-                        <strong>本机 Loopback 网关与项目 Runtime</strong>
-                        <span className="dsh-row-tag">{`Core 协议 v${CORE_PROTOCOL_VERSION}`}</span>
-                      </div>
-                      <div className="dsh-grants-list">
-                        {projectSummaries.map(proj => (
-                          <div key={proj.id} className="bound-session-row">
-                            <div>
-                              <strong>{proj.label}</strong>
-                              <span className="small mono muted">
-                                {` · ${proj.address}${proj.workspace ? ` · ${proj.workspace}` : ''}`}
-                              </span>
-                            </div>
-                            <span className="state-label">{proj.statusLabel}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
                 {s.settingsTab === 'plugins' ? (
-                  <div className="dsh-settings-section">
-                    {BUILTIN_CAPABILITY_GROUPS.map(group => (
-                      <div key={group.title} className="dsh-provider-card">
-                        <div className="card-header">
-                          <strong>{group.title}</strong>
-                          <span className="dsh-row-tag">{group.badge}</span>
+                  <div className="pbvGtq_section">
+                    <h3 className="pbvGtq_heading">插件列表</h3>
+                    <p className="pbvGtq_intro">
+                      查看当前 Runtime 已挂载的受控能力组与会话插件状态。
+                    </p>
+                    <div className="qSYn7G_cards">
+                      {BUILTIN_CAPABILITY_GROUPS.map(group => (
+                        <div key={group.title} className="qSYn7G_card">
+                          <div className="qSYn7G_cardContent">
+                            <span className="qSYn7G_cardTitle">
+                              {group.title}
+                            </span>
+                            <span className="qSYn7G_cardTrailing">
+                              <span className="qSYn7G_status">
+                                <StateDot
+                                  state="done"
+                                  className="qSYn7G_statusDot"
+                                />
+                                {group.badge}
+                              </span>
+                            </span>
+                          </div>
+                          <div className="qSYn7G_cardDetails">
+                            {group.items.map(([code, desc]) => (
+                              <div key={code} className="qSYn7G_details">
+                                <span>{code}</span>
+                                <span className="qSYn7G_entryValue">{desc}</span>
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                        <div className="capability-items">
-                          {group.items.map(([code, desc]) => (
-                            <div key={code} className="capability-row">
-                              <code className="inline-code">{code}</code>
-                              <span className="small muted">{desc}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -3107,286 +3622,300 @@ export function CAYWApp({ env } = {}) {
         </div>
       ) : null}
 
-      {/* DSH New Project / Directory Picker Modal (@deepseek-ai/dsh-client-ui-directory-picker-browse style) */}
-      {s.newProjectModalOpen ? (
-        <div className="dsh-modal-overlay" role="presentation">
-          <div
-            className="dsh-modal-mask"
-            onClick={() => {
-              s.newProjectModalOpen = false;
-              forceRender();
-            }}
-          />
-          <div
-            id="new-project-dialog"
-            className="dsh-dir-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="dir-dialog-title"
-          >
-            <div className="dsh-dir-header">
-              <div className="card-header">
-                <h2 id="dir-dialog-title" className="dsh-dir-title">
-                  选择工作区目录 · 新开项目
-                </h2>
-                <button
-                  type="button"
-                  className="dsh-modal-close"
-                  onClick={() => {
-                    s.newProjectModalOpen = false;
-                    forceRender();
-                  }}
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="dsh-crumb-bar">
-                {s.browseParent ? (
+      {/* Official DSH Directory Browser Modal (@deepseek-ai/dsh-client-ui-directory-picker-browse) */}
+      <Modal
+        open={s.newProjectModalOpen}
+        onClose={() => {
+          if (!s.addProjectBusy) {
+            s.newProjectModalOpen = false;
+            forceRender();
+          }
+        }}
+        title="选择工作区目录"
+        className="ZuhsRW_dialog"
+        headless={true}
+      >
+        <div id="new-project-dialog" className="ZuhsRW_editorScope">
+          <div className="ZuhsRW_header">
+            <h2 className="ZuhsRW_title">选择工作区目录</h2>
+            <div className="ZuhsRW_crumbBar">
+              {!s.pathEditing ? (
+                <>
+                  <span className="ZuhsRW_crumbTrail" role="navigation">
+                    {browseCrumbs.map((crumb, index) => (
+                      <span key={crumb.path} className="ZuhsRW_crumbSeat">
+                        {index > 0 ? (
+                          <IconChevronRightOutline14
+                            size={12}
+                            className="ZuhsRW_crumbChevron"
+                          />
+                        ) : null}
+                        <button
+                          type="button"
+                          className="ZuhsRW_crumb"
+                          disabled={s.browseLoading || s.addProjectBusy}
+                          onClick={() => void browseDirectory(crumb.path)}
+                        >
+                          {crumb.name}
+                        </button>
+                      </span>
+                    ))}
+                  </span>
                   <button
                     type="button"
-                    className="quiet dsh-up-btn"
-                    onClick={() => void browseDirectory(s.browseParent)}
+                    className="ZuhsRW_crumbEditZone"
+                    aria-label="编辑路径"
+                    title="编辑路径"
+                    onClick={() => {
+                      s.pathEditing = true;
+                      forceRender();
+                    }}
                   >
-                    ⬆ 上级目录
+                    <IconEditOutline16
+                      size={14}
+                      className="ZuhsRW_crumbEditGlyph"
+                    />
                   </button>
-                ) : null}
+                </>
+              ) : (
                 <input
                   ref={modalProjectWsInputRef}
                   id="modal-project-path"
                   type="text"
-                  className="dsh-path-input mono"
-                  placeholder="输入或选择本地绝对目录路径，如 /Volumes/ORICO/CAYW"
+                  className="ZuhsRW_pathInput"
+                  aria-label="编辑路径"
+                  autoFocus={true}
                   value={s.projectWorkspaceInput}
                   onChange={e => {
                     s.projectWorkspaceInput = e.target.value;
                     forceRender();
                   }}
+                  onBlur={() => {
+                    s.pathEditing = false;
+                    forceRender();
+                  }}
                   onKeyDown={e => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
+                      s.pathEditing = false;
                       void browseDirectory(s.projectWorkspaceInput);
+                    } else if (e.key === 'Escape') {
+                      e.stopPropagation();
+                      s.pathEditing = false;
+                      forceRender();
                     }
                   }}
                 />
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => void browseDirectory(s.projectWorkspaceInput)}
-                >
-                  跳转目录
-                </button>
-              </div>
-              <div className="quick-paths">
-                {QUICK_WORKSPACES.map(([p, lbl]) => (
-                  <button
-                    key={p}
-                    type="button"
-                    className="quiet path-chip"
-                    onClick={() => {
-                      s.projectWorkspaceInput = p;
-                      s.projectLabelInput = lbl;
-                      if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = p;
-                      if (modalProjectLabelInputRef.current) modalProjectLabelInputRef.current.value = lbl;
-                      void browseDirectory(p);
-                    }}
-                  >
-                    {`📁 ${lbl}`}
-                  </button>
-                ))}
-              </div>
+              )}
             </div>
+          </div>
 
-            <div className="dsh-dir-content">
-              {s.browseLoading ? (
-                <p className="small muted">正在读取目录…</p>
-              ) : (
-                <div className="dsh-dir-column">
-                  {!visibleBrowseEntries.length ? (
-                    <p className="small muted">当前目录下没有子文件夹，可直接选择当前目录或新建文件夹。</p>
-                  ) : (
-                    visibleBrowseEntries.map(entry => (
+          <div className="ZuhsRW_content">
+            <div className="ZuhsRW_millerRow">
+              <div className="ZuhsRW_column" role="list">
+                {visibleBrowseEntries.map(entry => {
+                  const selected =
+                    (s.browseSelectedPath || s.projectWorkspaceInput) ===
+                    entry.path;
+                  return (
+                    <span
+                      key={entry.path}
+                      role="listitem"
+                      className="ZuhsRW_rowSeat"
+                    >
                       <button
-                        key={entry.path}
                         type="button"
-                        className={`dsh-dir-row${s.projectWorkspaceInput === entry.path ? ' is-selected' : ''}`}
+                        aria-current={selected || undefined}
+                        className={clsx(
+                          'ZuhsRW_row',
+                          selected && 'ZuhsRW_rowSelected',
+                        )}
+                        disabled={s.browseLoading || s.addProjectBusy}
                         onClick={() => {
+                          s.browseSelectedPath = entry.path;
                           s.projectWorkspaceInput = entry.path;
-                          if (modalProjectWsInputRef.current) {
-                            modalProjectWsInputRef.current.value = entry.path;
-                          }
                           forceRender();
                         }}
                         onDoubleClick={() => void browseDirectory(entry.path)}
                       >
-                        <span className="dsh-dir-icon">📁</span>
-                        <span className="dsh-dir-name">{entry.name}</span>
-                        <span
-                          className="dsh-dir-enter"
-                          onClick={e => {
-                            e.stopPropagation();
-                            void browseDirectory(entry.path);
-                          }}
-                        >
-                          进入 ›
-                        </span>
+                        {selected ? (
+                          <IconFolderOpen16
+                            size={16}
+                            className="ZuhsRW_rowIconSelected"
+                          />
+                        ) : (
+                          <IconFolderClose16
+                            size={16}
+                            className="ZuhsRW_rowIcon"
+                          />
+                        )}
+                        <span className="ZuhsRW_rowName">{entry.name}</span>
+                        <IconChevronRightOutline14
+                          size={14}
+                          className="ZuhsRW_rowChevron"
+                        />
                       </button>
-                    ))
-                  )}
-                </div>
-              )}
-
-              {s.newFolderOpen ? (
-                <div className="dsh-new-folder-bar">
-                  <input
-                    type="text"
-                    placeholder="输入新建文件夹名称"
-                    value={s.newFolderName}
-                    onChange={e => {
-                      s.newFolderName = e.target.value;
-                      forceRender();
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (s.newFolderName.trim()) {
-                        void browseDirectory(s.browsePath, s.newFolderName.trim());
-                        s.newFolderName = '';
-                        s.newFolderOpen = false;
-                      }
-                    }}
-                  >
-                    创建并进入
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => {
-                      s.newFolderOpen = false;
-                      forceRender();
-                    }}
-                  >
-                    取消
-                  </button>
-                </div>
-              ) : null}
-
-              <div className="dsh-dir-label-bar">
-                <input
-                  ref={modalProjectLabelInputRef}
-                  id="modal-project-label"
-                  type="text"
-                  maxLength={160}
-                  placeholder="项目显示名称（可选，默认使用文件夹名）"
-                  value={s.projectLabelInput}
-                  onChange={e => {
-                    s.projectLabelInput = e.target.value;
-                    forceRender();
-                  }}
-                />
+                    </span>
+                  );
+                })}
               </div>
-
-              {s.browseError ? (
-                <p className="error" role="alert">
-                  {s.browseError}
-                </p>
-              ) : null}
             </div>
 
-            <div className="dsh-dir-footer">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => {
-                  s.newFolderOpen = !s.newFolderOpen;
-                  forceRender();
-                }}
+            {s.browseLoading ? (
+              <div
+                className="ZuhsRW_status ZuhsRW_loadingFloat"
+                role="status"
               >
-                + 新建文件夹
-              </button>
-              <label className="small muted dsh-hidden-toggle">
-                <input
-                  type="checkbox"
-                  checked={s.browseShowHidden}
-                  onChange={e => {
-                    s.browseShowHidden = e.target.checked;
-                    forceRender();
-                  }}
-                />
-                显示隐藏文件夹
-              </label>
-              <div className="dsh-footer-gap" />
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => {
-                  s.newProjectModalOpen = false;
-                  forceRender();
-                }}
-              >
-                取消
-              </button>
-              <button
-                id="confirm-new-project-btn"
-                type="button"
-                disabled={s.addProjectBusy || !s.projectWorkspaceInput.trim()}
-                onClick={e => trackAsync(handleAddProject(e, true))}
-              >
-                {s.addProjectBusy ? '正在启动 Runtime…' : '新开项目并进入'}
-              </button>
-            </div>
+                加载中…
+              </div>
+            ) : null}
+
+            {s.browseError ? (
+              <div className="ZuhsRW_error" role="alert">
+                {s.browseError}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="ZuhsRW_footerBar">
+            <Button
+              variant="outline"
+              icon={<IconPlusOutline16 size={14} />}
+              disabled={s.browseLoading || s.addProjectBusy}
+              onClick={() => {
+                s.newFolderOpen = true;
+                s.newFolderName = '';
+                forceRender();
+              }}
+            >
+              新建文件夹
+            </Button>
+            <button
+              type="button"
+              className={clsx(
+                'ZuhsRW_showHiddenToggle',
+                s.browseShowHidden && 'ZuhsRW_showHiddenToggleActive',
+              )}
+              aria-pressed={s.browseShowHidden}
+              onClick={() => {
+                s.browseShowHidden = !s.browseShowHidden;
+                forceRender();
+              }}
+            >
+              显示隐藏文件
+              {s.browseShowHidden ? <IconCheckOutline16 size={14} /> : null}
+            </button>
+            <span className="ZuhsRW_footerGap" />
+            <Button
+              variant="outline"
+              className="ZuhsRW_footerAction"
+              disabled={s.addProjectBusy}
+              onClick={() => {
+                s.newProjectModalOpen = false;
+                forceRender();
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              id="confirm-new-project-btn"
+              variant="primary"
+              className="ZuhsRW_footerAction"
+              disabled={
+                s.addProjectBusy ||
+                !(s.browseSelectedPath || s.projectWorkspaceInput || s.browsePath)
+              }
+              onClick={e => trackAsync(handleAddProject(e, true))}
+            >
+              {s.addProjectBusy ? '正在打开…' : '打开'}
+            </Button>
           </div>
         </div>
-      ) : null}
+      </Modal>
 
-      {/* DSH Full Access Risk Confirmation Modal (@deepseek-ai/dsh-client-ui-permission-presets) */}
-      {s.fullAccessConfirmOpen ? (
-        <div className="dsh-modal-overlay" role="presentation">
-          <div
-            className="dsh-modal-mask"
-            onClick={() => {
-              s.fullAccessConfirmOpen = false;
+      {/* Nested New Folder Modal inside Directory Browser */}
+      <Modal
+        open={s.newFolderOpen}
+        onClose={() => {
+          s.newFolderOpen = false;
+          forceRender();
+        }}
+        title="新建文件夹"
+        className="ZuhsRW_createDialog"
+        headless={true}
+      >
+        <div className="ZuhsRW_createBody">
+          <h3 className="ZuhsRW_createTitle">新建文件夹</h3>
+          <p className="ZuhsRW_createIn">
+            {`在“${s.browsePath}”中新建文件夹`}
+          </p>
+          <input
+            type="text"
+            className="ZuhsRW_createInput"
+            aria-label="文件夹名称"
+            placeholder="未命名文件夹"
+            autoFocus={true}
+            value={s.newFolderName}
+            onChange={e => {
+              s.newFolderName = e.target.value;
               forceRender();
             }}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && s.newFolderName.trim()) {
+                e.preventDefault();
+                const name = s.newFolderName.trim();
+                s.newFolderOpen = false;
+                s.newFolderName = '';
+                void browseDirectory(s.browsePath, name);
+              }
+            }}
           />
-          <div className="dsh-confirm-dialog" role="dialog" aria-modal="true">
-            <h3>确认启用 Full access？</h3>
-            <p className="small muted">
-              启用 Full access 后，agent 将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。
-            </p>
-            <label className="confirm-label">
-              <input
-                type="checkbox"
-                checked={s.fullAccessAcknowledged}
-                onChange={e => {
-                  s.fullAccessAcknowledged = e.target.checked;
-                  forceRender();
-                }}
-              />
-              我已了解风险，并愿意继续
-            </label>
-            <div className="dialog-actions">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => {
-                  s.fullAccessConfirmOpen = false;
-                  forceRender();
-                }}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                disabled={!s.fullAccessAcknowledged}
-                onClick={confirmFullAccess}
-              >
-                启用 Full access
-              </button>
-            </div>
+          <div className="ZuhsRW_createActions">
+            <Button
+              variant="outline"
+              onClick={() => {
+                s.newFolderOpen = false;
+                forceRender();
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              disabled={!s.newFolderName.trim()}
+              onClick={() => {
+                const name = s.newFolderName.trim();
+                s.newFolderOpen = false;
+                s.newFolderName = '';
+                void browseDirectory(s.browsePath, name);
+              }}
+            >
+              创建
+            </Button>
           </div>
         </div>
-      ) : null}
+      </Modal>
+
+      {/* Official DSH Risk Confirmation Modal (@deepseek-ai/dsh-client-ui-primitives) */}
+      <RiskConfirmation
+        open={s.fullAccessConfirmOpen}
+        title="确认启用 Full access？"
+        description="启用 Full access 后，agent 将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。"
+        acknowledgeLabel="我已了解风险，并愿意继续"
+        cancelLabel="取消"
+        confirmLabel="启用 Full access"
+        acknowledged={s.fullAccessAcknowledged}
+        onAcknowledgedChange={checked => {
+          s.fullAccessAcknowledged = checked;
+          forceRender();
+        }}
+        onCancel={() => {
+          s.fullAccessConfirmOpen = false;
+          s.fullAccessAcknowledged = false;
+          forceRender();
+        }}
+        onConfirm={confirmFullAccess}
+      />
 
       <dialog
         ref={forkDialogRef}
@@ -3394,12 +3923,7 @@ export function CAYWApp({ env } = {}) {
         open={s.forkOpen}
         aria-labelledby="fork-heading"
       >
-        <div className="heading-with-hint">
-          <h2 id="fork-heading">创建普通聊天分支</h2>
-          <HintPopover ariaLabel="分支规则说明">
-            原强流程会话及记录继续保留冻结状态；新建分支作为普通聊天运行。尚未核对的工具副作用不能通过 Fork 清除。
-          </HintPopover>
-        </div>
+        <h2 id="fork-heading">创建普通聊天分支</h2>
         <form
           ref={bind({ submit: e => trackAsync(handleForkSubmit(e)) })}
           id="fork-form"
@@ -3417,7 +3941,7 @@ export function CAYWApp({ env } = {}) {
               forceRender();
             }}
           />
-          <label className="confirm-label">
+          <label>
             <input
               ref={forkConfirmInputRef}
               id="fork-confirm"
@@ -3431,14 +3955,13 @@ export function CAYWApp({ env } = {}) {
             />
             我确认新建普通聊天分支，并理解原会话仍被冻结。
           </label>
-          <p id="fork-error" className="error" role="alert">
+          <p id="fork-error" role="alert">
             {s.forkError}
           </p>
-          <div className="dialog-actions">
+          <div>
             <button
               ref={bind({ click: closeForkDialog })}
               id="close-fork"
-              className="secondary"
               type="button"
               onClick={closeForkDialog}
             >

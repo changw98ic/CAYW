@@ -1362,7 +1362,7 @@ var require_react_dom_development = __commonJS({
         return dispatcher;
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var React4 = require_react(), Internals = {
+      var React3 = require_react(), Internals = {
         d: {
           f: noop,
           r: function() {
@@ -1380,7 +1380,7 @@ var require_react_dom_development = __commonJS({
         },
         p: 0,
         findDOMNode: null
-      }, REACT_PORTAL_TYPE = /* @__PURE__ */ Symbol.for("react.portal"), REACT_RECOVERABLE_TYPE = /* @__PURE__ */ Symbol.for("react.recoverable"), REACT_OPTIMISTIC_KEY = /* @__PURE__ */ Symbol.for("react.optimistic_key"), ReactSharedInternals = React4.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+      }, REACT_PORTAL_TYPE = /* @__PURE__ */ Symbol.for("react.portal"), REACT_RECOVERABLE_TYPE = /* @__PURE__ */ Symbol.for("react.recoverable"), REACT_OPTIMISTIC_KEY = /* @__PURE__ */ Symbol.for("react.optimistic_key"), ReactSharedInternals = React3.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
       "function" === typeof Map && null != Map.prototype && "function" === typeof Map.prototype.forEach && "function" === typeof Set && null != Set.prototype && "function" === typeof Set.prototype.clear && "function" === typeof Set.prototype.forEach || console.error(
         "React depends on Map and Set built-in types. Make sure that you load a polyfill in older browsers. https://reactjs.org/link/react-polyfills"
       );
@@ -3066,7 +3066,7 @@ var require_react_dom_client_development = __commonJS({
         node.defaultValue !== "" + value && (node.defaultValue = "" + value);
       }
       function validateOptionProps(element, props) {
-        null == props.value && ("object" === typeof props.children && null !== props.children ? React4.Children.forEach(props.children, function(child) {
+        null == props.value && ("object" === typeof props.children && null !== props.children ? React3.Children.forEach(props.children, function(child) {
           null == child || "string" === typeof child || "number" === typeof child || "bigint" === typeof child || didWarnInvalidChild || (didWarnInvalidChild = true, console.error(
             "Cannot infer the option value of complex children. Pass a `value` prop or use a plain string as children to <option>."
           ));
@@ -20214,11 +20214,11 @@ var require_react_dom_client_development = __commonJS({
         ));
       }
       "undefined" !== typeof __REACT_DEVTOOLS_GLOBAL_HOOK__ && "function" === typeof __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart && __REACT_DEVTOOLS_GLOBAL_HOOK__.registerInternalModuleStart(Error());
-      var Scheduler = require_scheduler(), React4 = require_react(), ReactDOM = require_react_dom(), searchTarget = null, searchBoundary = null, assign = Object.assign, REACT_LEGACY_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.element"), REACT_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.transitional.element"), REACT_PORTAL_TYPE = /* @__PURE__ */ Symbol.for("react.portal"), REACT_FRAGMENT_TYPE = /* @__PURE__ */ Symbol.for("react.fragment"), REACT_STRICT_MODE_TYPE = /* @__PURE__ */ Symbol.for("react.strict_mode"), REACT_PROFILER_TYPE = /* @__PURE__ */ Symbol.for("react.profiler"), REACT_CONSUMER_TYPE = /* @__PURE__ */ Symbol.for("react.consumer"), REACT_CONTEXT_TYPE = /* @__PURE__ */ Symbol.for("react.context"), REACT_FORWARD_REF_TYPE = /* @__PURE__ */ Symbol.for("react.forward_ref"), REACT_SUSPENSE_TYPE = /* @__PURE__ */ Symbol.for("react.suspense"), REACT_SUSPENSE_LIST_TYPE = /* @__PURE__ */ Symbol.for("react.suspense_list"), REACT_MEMO_TYPE = /* @__PURE__ */ Symbol.for("react.memo"), REACT_LAZY_TYPE = /* @__PURE__ */ Symbol.for("react.lazy");
+      var Scheduler = require_scheduler(), React3 = require_react(), ReactDOM = require_react_dom(), searchTarget = null, searchBoundary = null, assign = Object.assign, REACT_LEGACY_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.element"), REACT_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.transitional.element"), REACT_PORTAL_TYPE = /* @__PURE__ */ Symbol.for("react.portal"), REACT_FRAGMENT_TYPE = /* @__PURE__ */ Symbol.for("react.fragment"), REACT_STRICT_MODE_TYPE = /* @__PURE__ */ Symbol.for("react.strict_mode"), REACT_PROFILER_TYPE = /* @__PURE__ */ Symbol.for("react.profiler"), REACT_CONSUMER_TYPE = /* @__PURE__ */ Symbol.for("react.consumer"), REACT_CONTEXT_TYPE = /* @__PURE__ */ Symbol.for("react.context"), REACT_FORWARD_REF_TYPE = /* @__PURE__ */ Symbol.for("react.forward_ref"), REACT_SUSPENSE_TYPE = /* @__PURE__ */ Symbol.for("react.suspense"), REACT_SUSPENSE_LIST_TYPE = /* @__PURE__ */ Symbol.for("react.suspense_list"), REACT_MEMO_TYPE = /* @__PURE__ */ Symbol.for("react.memo"), REACT_LAZY_TYPE = /* @__PURE__ */ Symbol.for("react.lazy");
       /* @__PURE__ */ Symbol.for("react.scope");
       var REACT_ACTIVITY_TYPE = /* @__PURE__ */ Symbol.for("react.activity"), REACT_LEGACY_HIDDEN_TYPE = /* @__PURE__ */ Symbol.for("react.legacy_hidden");
       /* @__PURE__ */ Symbol.for("react.tracing_marker");
-      var REACT_MEMO_CACHE_SENTINEL = /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel"), REACT_VIEW_TRANSITION_TYPE = /* @__PURE__ */ Symbol.for("react.view_transition"), REACT_RECOVERABLE_TYPE = /* @__PURE__ */ Symbol.for("react.recoverable"), MAYBE_ITERATOR_SYMBOL = Symbol.iterator, REACT_CLIENT_REFERENCE = /* @__PURE__ */ Symbol.for("react.client.reference"), isArrayImpl = Array.isArray, ReactSharedInternals = React4.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, ReactDOMSharedInternals = ReactDOM.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, NotPending = Object.freeze({
+      var REACT_MEMO_CACHE_SENTINEL = /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel"), REACT_VIEW_TRANSITION_TYPE = /* @__PURE__ */ Symbol.for("react.view_transition"), REACT_RECOVERABLE_TYPE = /* @__PURE__ */ Symbol.for("react.recoverable"), MAYBE_ITERATOR_SYMBOL = Symbol.iterator, REACT_CLIENT_REFERENCE = /* @__PURE__ */ Symbol.for("react.client.reference"), isArrayImpl = Array.isArray, ReactSharedInternals = React3.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, ReactDOMSharedInternals = ReactDOM.__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, NotPending = Object.freeze({
         pending: false,
         data: null,
         method: null,
@@ -23410,7 +23410,7 @@ var require_react_dom_client_development = __commonJS({
         }
       };
       (function() {
-        var isomorphicReactPackageVersion = React4.version;
+        var isomorphicReactPackageVersion = React3.version;
         if ("19.3.1" !== isomorphicReactPackageVersion)
           throw Error(
             'Incompatible React versions: The "react" and "react-dom" packages must have the exact same version. Instead got:\n  - react:      ' + (isomorphicReactPackageVersion + "\n  - react-dom:  19.3.1\nLearn more: https://react.dev/warnings/version-mismatch")
@@ -23550,13 +23550,296 @@ var require_client = __commonJS({
   }
 });
 
+// node_modules/react/cjs/react-jsx-runtime.development.js
+var require_react_jsx_runtime_development = __commonJS({
+  "node_modules/react/cjs/react-jsx-runtime.development.js"(exports) {
+    "use strict";
+    (function() {
+      function getComponentNameFromType(type) {
+        if (null == type) return null;
+        if ("function" === typeof type)
+          return type.$$typeof === REACT_CLIENT_REFERENCE ? null : type.displayName || type.name || null;
+        if ("string" === typeof type) return type;
+        switch (type) {
+          case REACT_FRAGMENT_TYPE:
+            return "Fragment";
+          case REACT_PROFILER_TYPE:
+            return "Profiler";
+          case REACT_STRICT_MODE_TYPE:
+            return "StrictMode";
+          case REACT_SUSPENSE_TYPE:
+            return "Suspense";
+          case REACT_SUSPENSE_LIST_TYPE:
+            return "SuspenseList";
+          case REACT_ACTIVITY_TYPE:
+            return "Activity";
+          case REACT_VIEW_TRANSITION_TYPE:
+            return "ViewTransition";
+        }
+        if ("object" === typeof type)
+          switch ("number" === typeof type.tag && console.error(
+            "Received an unexpected object in getComponentNameFromType(). This is likely a bug in React. Please file an issue."
+          ), type.$$typeof) {
+            case REACT_PORTAL_TYPE:
+              return "Portal";
+            case REACT_CONTEXT_TYPE:
+              return type.displayName || "Context";
+            case REACT_CONSUMER_TYPE:
+              return (type._context.displayName || "Context") + ".Consumer";
+            case REACT_FORWARD_REF_TYPE:
+              var innerType = type.render;
+              type = type.displayName;
+              type || (type = innerType.displayName || innerType.name || "", type = "" !== type ? "ForwardRef(" + type + ")" : "ForwardRef");
+              return type;
+            case REACT_MEMO_TYPE:
+              return innerType = type.displayName || null, null !== innerType ? innerType : getComponentNameFromType(type.type) || "Memo";
+            case REACT_LAZY_TYPE:
+              innerType = type._payload;
+              type = type._init;
+              try {
+                return getComponentNameFromType(type(innerType));
+              } catch (x) {
+              }
+          }
+        return null;
+      }
+      function testStringCoercion(value) {
+        return "" + value;
+      }
+      function checkKeyStringCoercion(value) {
+        try {
+          testStringCoercion(value);
+          var JSCompiler_inline_result = false;
+        } catch (e) {
+          JSCompiler_inline_result = true;
+        }
+        if (JSCompiler_inline_result) {
+          JSCompiler_inline_result = console;
+          var JSCompiler_temp_const = JSCompiler_inline_result.error;
+          var JSCompiler_inline_result$jscomp$0 = "function" === typeof Symbol && Symbol.toStringTag && value[Symbol.toStringTag] || value.constructor.name || "Object";
+          JSCompiler_temp_const.call(
+            JSCompiler_inline_result,
+            "The provided key is an unsupported type %s. This value must be coerced to a string before using it here.",
+            JSCompiler_inline_result$jscomp$0
+          );
+          return testStringCoercion(value);
+        }
+      }
+      function getTaskName(type) {
+        if (type === REACT_FRAGMENT_TYPE) return "<>";
+        if ("object" === typeof type && null !== type && type.$$typeof === REACT_LAZY_TYPE)
+          return "<...>";
+        try {
+          var name = getComponentNameFromType(type);
+          return name ? "<" + name + ">" : "<...>";
+        } catch (x) {
+          return "<...>";
+        }
+      }
+      function getOwner() {
+        var dispatcher = ReactSharedInternals.A;
+        return null === dispatcher ? null : dispatcher.getOwner();
+      }
+      function UnknownOwner() {
+        return Error("react-stack-top-frame");
+      }
+      function hasValidKey(config) {
+        if (hasOwnProperty.call(config, "key")) {
+          var getter = Object.getOwnPropertyDescriptor(config, "key").get;
+          if (getter && getter.isReactWarning) return false;
+        }
+        return void 0 !== config.key;
+      }
+      function defineKeyPropWarningGetter(props, displayName) {
+        function warnAboutAccessingKey() {
+          specialPropKeyWarningShown || (specialPropKeyWarningShown = true, console.error(
+            "%s: `key` is not a prop. Trying to access it will result in `undefined` being returned. If you need to access the same value within the child component, you should pass it as a different prop. (https://react.dev/link/special-props)",
+            displayName
+          ));
+        }
+        warnAboutAccessingKey.isReactWarning = true;
+        Object.defineProperty(props, "key", {
+          get: warnAboutAccessingKey,
+          configurable: true
+        });
+      }
+      function elementRefGetterWithDeprecationWarning() {
+        var componentName = getComponentNameFromType(this.type);
+        didWarnAboutElementRef[componentName] || (didWarnAboutElementRef[componentName] = true, console.error(
+          "Accessing element.ref was removed in React 19. ref is now a regular prop. It will be removed from the JSX Element type in a future release."
+        ));
+        componentName = this.props.ref;
+        return void 0 !== componentName ? componentName : null;
+      }
+      function ReactElement(type, key, props, owner, debugStack, debugTask) {
+        var refProp = props.ref;
+        type = {
+          $$typeof: REACT_ELEMENT_TYPE,
+          type,
+          key,
+          props,
+          _owner: owner
+        };
+        null !== (void 0 !== refProp ? refProp : null) ? Object.defineProperty(type, "ref", {
+          enumerable: false,
+          get: elementRefGetterWithDeprecationWarning
+        }) : Object.defineProperty(type, "ref", { enumerable: false, value: null });
+        type._store = {};
+        Object.defineProperty(type._store, "validated", {
+          configurable: false,
+          enumerable: false,
+          writable: true,
+          value: 0
+        });
+        Object.defineProperty(type, "_debugInfo", {
+          configurable: false,
+          enumerable: false,
+          writable: true,
+          value: null
+        });
+        Object.defineProperty(type, "_debugStack", {
+          configurable: false,
+          enumerable: false,
+          writable: true,
+          value: debugStack
+        });
+        Object.defineProperty(type, "_debugTask", {
+          configurable: false,
+          enumerable: false,
+          writable: true,
+          value: debugTask
+        });
+        Object.freeze && (Object.freeze(type.props), Object.freeze(type));
+        return type;
+      }
+      function jsxDEVImpl(type, config, maybeKey, isStaticChildren, debugStack, debugTask) {
+        var children = config.children;
+        if (void 0 !== children)
+          if (isStaticChildren)
+            if (isArrayImpl(children)) {
+              for (isStaticChildren = 0; isStaticChildren < children.length; isStaticChildren++)
+                validateChildKeys(children[isStaticChildren]);
+              Object.freeze && Object.freeze(children);
+            } else
+              console.error(
+                "React.jsx: Static children should always be an array. You are likely explicitly calling React.jsxs or React.jsxDEV. Use the Babel transform instead."
+              );
+          else validateChildKeys(children);
+        if (hasOwnProperty.call(config, "key")) {
+          children = getComponentNameFromType(type);
+          var keys = Object.keys(config).filter(function(k) {
+            return "key" !== k;
+          });
+          isStaticChildren = 0 < keys.length ? "{key: someKey, " + keys.join(": ..., ") + ": ...}" : "{key: someKey}";
+          didWarnAboutKeySpread[children + isStaticChildren] || (keys = 0 < keys.length ? "{" + keys.join(": ..., ") + ": ...}" : "{}", console.error(
+            'A props object containing a "key" prop is being spread into JSX:\n  let props = %s;\n  <%s {...props} />\nReact keys must be passed directly to JSX without using spread:\n  let props = %s;\n  <%s key={someKey} {...props} />',
+            isStaticChildren,
+            children,
+            keys,
+            children
+          ), didWarnAboutKeySpread[children + isStaticChildren] = true);
+        }
+        children = null;
+        void 0 !== maybeKey && (checkKeyStringCoercion(maybeKey), children = "" + maybeKey);
+        hasValidKey(config) && (checkKeyStringCoercion(config.key), children = "" + config.key);
+        if ("key" in config) {
+          maybeKey = {};
+          for (var propName in config)
+            "key" !== propName && (maybeKey[propName] = config[propName]);
+        } else maybeKey = config;
+        children && defineKeyPropWarningGetter(
+          maybeKey,
+          "function" === typeof type ? type.displayName || type.name || "Unknown" : type
+        );
+        return ReactElement(
+          type,
+          children,
+          maybeKey,
+          getOwner(),
+          debugStack,
+          debugTask
+        );
+      }
+      function validateChildKeys(node) {
+        isValidElement(node) ? node._store && (node._store.validated = 1) : "object" === typeof node && null !== node && node.$$typeof === REACT_LAZY_TYPE && ("fulfilled" === node._payload.status ? isValidElement(node._payload.value) && node._payload.value._store && (node._payload.value._store.validated = 1) : node._store && (node._store.validated = 1));
+      }
+      function isValidElement(object2) {
+        return "object" === typeof object2 && null !== object2 && object2.$$typeof === REACT_ELEMENT_TYPE;
+      }
+      var React3 = require_react(), REACT_ELEMENT_TYPE = /* @__PURE__ */ Symbol.for("react.transitional.element"), REACT_PORTAL_TYPE = /* @__PURE__ */ Symbol.for("react.portal"), REACT_FRAGMENT_TYPE = /* @__PURE__ */ Symbol.for("react.fragment"), REACT_STRICT_MODE_TYPE = /* @__PURE__ */ Symbol.for("react.strict_mode"), REACT_PROFILER_TYPE = /* @__PURE__ */ Symbol.for("react.profiler"), REACT_CONSUMER_TYPE = /* @__PURE__ */ Symbol.for("react.consumer"), REACT_CONTEXT_TYPE = /* @__PURE__ */ Symbol.for("react.context"), REACT_FORWARD_REF_TYPE = /* @__PURE__ */ Symbol.for("react.forward_ref"), REACT_SUSPENSE_TYPE = /* @__PURE__ */ Symbol.for("react.suspense"), REACT_SUSPENSE_LIST_TYPE = /* @__PURE__ */ Symbol.for("react.suspense_list"), REACT_MEMO_TYPE = /* @__PURE__ */ Symbol.for("react.memo"), REACT_LAZY_TYPE = /* @__PURE__ */ Symbol.for("react.lazy"), REACT_ACTIVITY_TYPE = /* @__PURE__ */ Symbol.for("react.activity"), REACT_VIEW_TRANSITION_TYPE = /* @__PURE__ */ Symbol.for("react.view_transition"), REACT_CLIENT_REFERENCE = /* @__PURE__ */ Symbol.for("react.client.reference"), ReactSharedInternals = React3.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE, hasOwnProperty = Object.prototype.hasOwnProperty, isArrayImpl = Array.isArray, createTask = console.createTask ? console.createTask : function() {
+        return null;
+      };
+      React3 = {
+        react_stack_bottom_frame: function(callStackForError) {
+          return callStackForError();
+        }
+      };
+      var specialPropKeyWarningShown;
+      var didWarnAboutElementRef = {};
+      var unknownOwnerDebugStack = React3.react_stack_bottom_frame.bind(
+        React3,
+        UnknownOwner
+      )();
+      var unknownOwnerDebugTask = createTask(getTaskName(UnknownOwner));
+      var didWarnAboutKeySpread = {};
+      exports.Fragment = REACT_FRAGMENT_TYPE;
+      exports.jsx = function(type, config, maybeKey) {
+        var trackActualOwner = 1e4 > ReactSharedInternals.recentlyCreatedOwnerStacks++;
+        if (trackActualOwner) {
+          var previousStackTraceLimit = Error.stackTraceLimit;
+          Error.stackTraceLimit = 10;
+          var debugStackDEV = Error("react-stack-top-frame");
+          Error.stackTraceLimit = previousStackTraceLimit;
+        } else debugStackDEV = unknownOwnerDebugStack;
+        return jsxDEVImpl(
+          type,
+          config,
+          maybeKey,
+          false,
+          debugStackDEV,
+          trackActualOwner ? createTask(getTaskName(type)) : unknownOwnerDebugTask
+        );
+      };
+      exports.jsxs = function(type, config, maybeKey) {
+        var trackActualOwner = 1e4 > ReactSharedInternals.recentlyCreatedOwnerStacks++;
+        if (trackActualOwner) {
+          var previousStackTraceLimit = Error.stackTraceLimit;
+          Error.stackTraceLimit = 10;
+          var debugStackDEV = Error("react-stack-top-frame");
+          Error.stackTraceLimit = previousStackTraceLimit;
+        } else debugStackDEV = unknownOwnerDebugStack;
+        return jsxDEVImpl(
+          type,
+          config,
+          maybeKey,
+          true,
+          debugStackDEV,
+          trackActualOwner ? createTask(getTaskName(type)) : unknownOwnerDebugTask
+        );
+      };
+    })();
+  }
+});
+
+// node_modules/react/jsx-runtime.js
+var require_jsx_runtime = __commonJS({
+  "node_modules/react/jsx-runtime.js"(exports, module) {
+    "use strict";
+    if (false) {
+      module.exports = null;
+    } else {
+      module.exports = require_react_jsx_runtime_development();
+    }
+  }
+});
+
 // web/index.jsx
-var import_react3 = __toESM(require_react(), 1);
+var import_react2 = __toESM(require_react(), 1);
 var import_client = __toESM(require_client(), 1);
 var import_react_dom2 = __toESM(require_react_dom(), 1);
 
 // web/App.jsx
-var import_react2 = __toESM(require_react(), 1);
+var import_react = __toESM(require_react(), 1);
 var import_react_dom = __toESM(require_react_dom(), 1);
 
 // web/state.js
@@ -23974,129 +24257,283 @@ function summarizePlugins(sessions = [], capabilities = [], views = /* @__PURE__
   }));
 }
 
-// web/components/Bits.jsx
-var import_react = __toESM(require_react(), 1);
-function updateSpotlightCssRule(mx, my, rx, ry) {
-  if (typeof document === "undefined") return;
-  const sheets = document.styleSheets;
-  if (!sheets || !sheets.length) return;
-  try {
-    const rules = sheets[0].cssRules;
-    for (let i = rules.length - 1; i >= 0; i--) {
-      const rule = rules[i];
-      if (rule.selectorText === '[data-spotlight="active"]' && rule.style) {
-        rule.style.setProperty("--mx", mx);
-        rule.style.setProperty("--my", my);
-        rule.style.setProperty("--rx", rx);
-        rule.style.setProperty("--ry", ry);
+// web/components/DshPrimitives.jsx
+var R = __toESM(require_react(), 1);
+var An = __toESM(require_react_dom(), 1);
+var f = __toESM(require_jsx_runtime(), 1);
+function Ou(n) {
+  var i, l, u = "";
+  if (typeof n == "string" || typeof n == "number") u += n;
+  else if (typeof n == "object") if (Array.isArray(n)) {
+    var c = n.length;
+    for (i = 0; i < c; i++) n[i] && (l = Ou(n[i])) && (u && (u += " "), u += l);
+  } else for (l in n) n[l] && (u && (u += " "), u += l);
+  return u;
+}
+function we() {
+  for (var n, i, l = 0, u = "", c = arguments.length; l < c; l++) (n = arguments[l]) && (i = Ou(n)) && (u && (u += " "), u += i);
+  return u;
+}
+var w6 = "_dot_10orb_3";
+var x6 = "_matrix_10orb_4";
+var _6 = "_cell_10orb_54";
+var ql = { dot: w6, matrix: x6, cell: _6 };
+var L6 = "_root_9cl6j_3";
+var k6 = "_row_9cl6j_10";
+var S6 = "_leading_9cl6j_23";
+var j6 = "_iconIdle_9cl6j_42";
+var E6 = "_chevronHover_9cl6j_48";
+var M6 = "_title_9cl6j_64";
+var Tn = { root: L6, row: k6, leading: S6, iconIdle: j6, chevronHover: E6, title: M6 };
+var N6 = "_button_kz6gm_4";
+var O6 = "_md_kz6gm_24";
+var P6 = "_sm_kz6gm_30";
+var R6 = "_primary_kz6gm_38";
+var T6 = "_ghost_kz6gm_47";
+var b6 = "_outline_kz6gm_56";
+var H6 = "_toolbar_kz6gm_65";
+var I6 = "_icon_kz6gm_73";
+var Ei = { button: N6, md: O6, sm: P6, primary: R6, ghost: T6, outline: b6, toolbar: H6, icon: I6 };
+var B6 = "_root_19372_1";
+var Z6 = "_list_19372_8";
+var U6 = "_submenu_19372_9";
+var W6 = "_portal_19372_43";
+var Q6 = "_sideTop_19372_51";
+var q6 = "_alignEnd_19372_56";
+var K6 = "_scrollable_19372_21";
+var G6 = "_viewport_19372_21";
+var J6 = "_footer_19372_63";
+var Y6 = "_itemWrap_19372_91";
+var X6 = "_item_19372_91";
+var ec = "_denseList_19372_118";
+var tc = "_label_19372_123";
+var nc = "_compactList_19372_127";
+var rc = "_itemIcon_19372_143";
+var ic = "_separator_19372_81";
+var oc = "_itemLabel_19372_173";
+var lc = "_check_19372_181";
+var sc = "_selected_19372_188";
+var uc = "_danger_19372_193";
+var Re = { root: B6, list: Z6, submenu: U6, portal: W6, sideTop: Q6, alignEnd: q6, scrollable: K6, viewport: G6, footer: J6, itemWrap: Y6, item: X6, denseList: ec, label: tc, compactList: nc, itemIcon: rc, separator: ic, itemLabel: oc, check: lc, selected: sc, danger: uc };
+var Cc = "_root_15u5s_2";
+var mc = "_mask_15u5s_14";
+var gc = "_dialog_15u5s_22";
+var vc = "_content_15u5s_37";
+var yc = "_header_15u5s_45";
+var wc = "_title_15u5s_53";
+var xc = "_close_15u5s_61";
+var _c = "_description_15u5s_80";
+var Lc = "_body_15u5s_89";
+var kc = "_footer_15u5s_97";
+var At = { root: Cc, mask: mc, dialog: gc, content: vc, header: yc, title: wc, close: xc, description: _c, body: Lc, footer: kc };
+var Mc = "_confirmation_1nu42_1";
+var Nc = "_confirmationContent_1nu42_7";
+var Oc = "_warning_1nu42_19";
+var Pc = "_warningIcon_1nu42_32";
+var Rc = "_acknowledgement_1nu42_38";
+var Tc = "_modalAction_1nu42_67";
+var bc = "_confirmAction_1nu42_71";
+var bn = { confirmation: Mc, confirmationContent: Nc, warning: Oc, warningIcon: Pc, acknowledgement: Rc, modalAction: Tc, confirmAction: bc };
+var Vc = "_bubble_owhem_8";
+var $c = { bubble: Vc };
+var Z0 = [[0, 0], [4, 0], [8, 0], [8, 4], [8, 8], [4, 8], [0, 8], [0, 4]];
+function Pu({ state: n, size: i = 10, className: l }) {
+  return n === "ongoing" ? f.jsx("svg", { className: we(ql.matrix, l), "data-state": "ongoing", width: i, height: i, viewBox: "0 0 10 10", shapeRendering: "crispEdges", "aria-hidden": "true", children: Z0.map(([u, c], d) => f.jsx("rect", { className: ql.cell, x: u, y: c, width: "2", height: "2", style: { animationDelay: `${(d - Z0.length) * 125}ms` } }, `${u}-${c}`)) }) : f.jsx("span", { className: we(ql.dot, l), "data-state": n, style: { width: i, height: i }, "aria-hidden": "true" });
+}
+var I9 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M8.00003 0.3237C3.76075 0.3237 0.32373 3.76072 0.32373 8C0.32373 9.17603 0.589121 10.2922 1.0632 11.2901L1.35291 11.8989L2.5705 11.3205L2.28079 10.7117C1.89079 9.89074 1.67301 8.97167 1.67301 8C1.67301 4.50546 4.50549 1.67298 8.00003 1.67298C11.4946 1.67298 14.3271 4.50546 14.3271 8C14.3271 11.4945 11.4946 14.327 8.00003 14.327C7.28473 14.327 6.76077 14.277 6.29621 14.1487C5.83857 14.0224 5.40441 13.8109 4.88514 13.4488C4.12569 12.919 3.03778 12.7316 2.141 13.2978L2.12682 13.307L2.11264 13.3171L1.34886 13.854L1.79659 15.188L2.86122 14.4384C3.19068 14.2305 3.68325 14.2542 4.11326 14.5539C4.72789 14.9826 5.30042 15.2724 5.93762 15.4484C6.56803 15.6224 7.22776 15.6763 8.00003 15.6763C12.2393 15.6763 15.6763 12.2393 15.6763 8C15.6763 3.76072 12.2393 0.3237 8.00003 0.3237ZM7.32033 4.82535V7.32536H4.82538V8.67464H7.32033V11.1747H8.6696V8.67464H11.1747V7.32536H8.6696V4.82535H7.32033Z", fill: "currentColor" }) });
+var V9 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsx("path", { d: "M11.894845 6.647401C11.894845 3.725463 9.534486 1.356779 6.623219 1.35657C3.711786 1.35657 1.351635 3.725338 1.351635 6.647401C1.351843 9.569296 3.711911 11.938273 6.623219 11.938273C9.534361 11.938064 11.894637 9.569171 11.894845 6.647401ZM13.245462 6.647401C13.245254 10.317935 10.280401 13.293613 6.623219 13.293821C2.965871 13.293821 0.000204 10.31806 0 6.647401C0 2.976574 2.965746 0 6.623219 0C10.280526 0.000205 13.245462 2.9767 13.245462 6.647401Z", fill: "currentColor" }), f.jsx("path", { d: "M16.000417 15.041079L15.044449 16.000433L11.530434 12.473588L12.486298 11.514234L16.000417 15.041079Z", fill: "currentColor" })] });
+var D9 = ({ size: n = 14, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 14 14", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsxs("g", { clipPath: "url(#clip0_2580_121189)", children: [f.jsx("path", { d: "M12.1192 4.91016C11.9392 4.52714 11.7007 4.1292 11.4483 3.78809C11.385 3.70258 11.3517 3.68409 11.2462 3.67383C10.7419 3.6248 10.2318 3.69454 9.72662 3.64551C9.29108 3.60318 8.93739 3.40341 8.67682 3.05176C8.38762 2.66127 8.19217 2.20926 7.90338 1.81934C7.83985 1.73359 7.80848 1.71542 7.70221 1.70508C7.24758 1.6609 6.7511 1.66104 6.29791 1.70508C6.19164 1.71542 6.16027 1.73359 6.09674 1.81934C5.80775 2.20954 5.61248 2.66131 5.3233 3.05176C5.06273 3.40341 4.70904 3.60318 4.2735 3.64551C3.76831 3.69454 3.25825 3.6248 2.75397 3.67383C2.6484 3.68409 2.61509 3.70258 2.55182 3.78809C2.30019 4.12814 2.06125 4.52646 1.88092 4.91016C1.83256 5.01309 1.83242 5.04912 1.88092 5.15235C2.07954 5.57482 2.37449 5.94529 2.5733 6.36817C2.76971 6.78606 2.76964 7.21293 2.5733 7.63086C2.37462 8.05374 2.07947 8.42453 1.88092 8.84668C1.83235 8.95004 1.83257 8.98695 1.88092 9.08985C2.06098 9.47285 2.2994 9.87079 2.55182 10.2119C2.61509 10.2974 2.6484 10.3159 2.75397 10.3262C3.25879 10.3753 3.76834 10.3055 4.2735 10.3545C4.70904 10.3968 5.06273 10.5966 5.3233 10.9482C5.6125 11.3387 5.80795 11.7907 6.09674 12.1807C6.16027 12.2664 6.19164 12.2846 6.29791 12.2949C6.7511 12.339 7.24758 12.3391 7.70221 12.2949C7.80848 12.2846 7.83985 12.2664 7.90338 12.1807C8.19237 11.7905 8.38764 11.3387 8.67682 10.9482C8.93739 10.5966 9.29108 10.3968 9.72662 10.3545C10.2318 10.3055 10.7419 10.3752 11.2462 10.3262C11.3517 10.3159 11.385 10.2974 11.4483 10.2119C11.7007 9.87079 11.9391 9.47285 12.1192 9.08985C12.1675 8.98695 12.1678 8.95004 12.1192 8.84668C11.9205 8.42428 11.6255 8.05377 11.4268 7.63086C11.2305 7.21293 11.2304 6.78606 11.4268 6.36817C11.6256 5.94531 11.9207 5.5746 12.1192 5.15235C12.1677 5.04912 12.1676 5.01309 12.1192 4.91016ZM13.2051 5.66309C13.0064 6.08573 12.7114 6.45579 12.5128 6.87793C12.4642 6.98123 12.4645 7.01829 12.5128 7.1211C12.7112 7.54328 13.0064 7.91405 13.2051 8.33692C13.4015 8.75487 13.4015 9.18169 13.2051 9.59961C12.9911 10.0551 12.7109 10.5221 12.4122 10.9258C12.1522 11.277 11.7974 11.4782 11.3624 11.5205C10.8573 11.5696 10.3477 11.4999 9.84283 11.5488C9.73621 11.5592 9.70429 11.5772 9.64069 11.6631C9.35229 12.0526 9.15705 12.5044 8.86823 12.8945C8.60854 13.2452 8.25275 13.447 7.81842 13.4893C7.28749 13.5409 6.71096 13.5407 6.1817 13.4893C5.74737 13.447 5.39158 13.2452 5.1319 12.8945C4.84312 12.5045 4.64808 12.0529 4.35944 11.6631C4.29583 11.5772 4.26392 11.5592 4.15729 11.5488C3.65283 11.5 3.14295 11.5696 2.63776 11.5205C2.20274 11.4782 1.84796 11.277 1.58795 10.9258C1.28834 10.5209 1.00864 10.0543 0.794982 9.59961C0.598644 9.18169 0.598598 8.75487 0.794982 8.33692C0.993688 7.91405 1.28889 7.54328 1.48737 7.1211C1.53567 7.01829 1.53593 6.98123 1.48737 6.87793C1.28887 6.45603 0.993667 6.08569 0.794982 5.66309C0.598535 5.24516 0.59869 4.81829 0.794982 4.40039C1.00898 3.94492 1.28922 3.47791 1.58795 3.07422C1.84796 2.723 2.20274 2.5218 2.63776 2.47949C3.14295 2.43038 3.65283 2.50003 4.15729 2.45117C4.26391 2.44081 4.29583 2.4228 4.35944 2.33692C4.64783 1.94742 4.84308 1.49557 5.1319 1.10547C5.39158 0.754835 5.74737 0.553005 6.1817 0.510744C6.71263 0.459147 7.28917 0.459309 7.81842 0.510744C8.25275 0.553005 8.60854 0.754835 8.86823 1.10547C9.157 1.49551 9.35204 1.94708 9.64069 2.33692C9.70429 2.4228 9.73621 2.44081 9.84283 2.45117C10.3477 2.50007 10.8573 2.43039 11.3624 2.47949C11.7974 2.5218 12.1522 2.723 12.4122 3.07422C12.7118 3.47909 12.9915 3.94567 13.2051 4.40039C13.4014 4.81829 13.4016 5.24516 13.2051 5.66309Z", fill: "currentColor" }), f.jsx("path", { d: "M7.9317 7C7.9317 6.48569 7.51438 6.06836 7.00006 6.06836C6.48575 6.06836 6.06842 6.48569 6.06842 7C6.06842 7.51432 6.48575 7.93164 7.00006 7.93164C7.51438 7.93164 7.9317 7.51432 7.9317 7ZM9.13092 7C9.13092 8.17706 8.17712 9.13086 7.00006 9.13086C5.823 9.13086 4.8692 8.17706 4.8692 7C4.8692 5.82294 5.823 4.86914 7.00006 4.86914C8.17712 4.86914 9.13092 5.82294 9.13092 7Z", fill: "currentColor" })] }), f.jsx("defs", { children: f.jsx("clipPath", { id: "clip0_2580_121189", children: f.jsx("rect", { width: 14, height: 14, fill: "currentColor" }) }) })] });
+var A9 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsxs("g", { clipPath: "url(#clip0_1450_63327)", children: [f.jsx("path", { d: "M14.0861 5.51366C13.8717 5.0575 13.588 4.58542 13.2889 4.18108C13.208 4.07172 13.1596 4.04373 13.0243 4.03054C12.4277 3.97255 11.8245 4.05527 11.2269 3.9972C10.7224 3.94816 10.3133 3.71661 10.0115 3.30919C9.66986 2.84777 9.43973 2.31343 9.09824 1.85234C9.01771 1.74365 8.96805 1.71589 8.83354 1.70282C8.29432 1.65044 7.70402 1.65061 7.16656 1.70282C7.03205 1.71589 6.98239 1.74365 6.90186 1.85234C6.56067 2.31303 6.33025 2.84774 5.98855 3.30919C5.68681 3.71661 5.27774 3.94816 4.77317 3.9972C4.17564 4.05527 3.57239 3.97255 2.97585 4.03054C2.84046 4.04373 2.79208 4.07172 2.71115 4.18108C2.41212 4.58542 2.12835 5.0575 1.91403 5.51366C1.85299 5.64359 1.85286 5.7018 1.91403 5.8319C2.14865 6.33077 2.49748 6.76892 2.73237 7.26854C2.9594 7.7515 2.96041 8.24717 2.73338 8.73044C2.49837 9.23061 2.14891 9.66837 1.91403 10.1681C1.85291 10.2982 1.85299 10.3564 1.91403 10.4863C2.12856 10.9429 2.41185 11.4142 2.71115 11.8189C2.79208 11.9283 2.84046 11.9563 2.97585 11.9694C3.57239 12.0274 4.17564 11.9447 4.77317 12.0028C5.27774 12.0518 5.68681 12.2834 5.98855 12.6908C6.33024 13.1522 6.56037 13.6866 6.90186 14.1476C6.98239 14.2563 7.03205 14.2841 7.16656 14.2972C7.70402 14.3494 8.29432 14.3495 8.83354 14.2972C8.96805 14.2841 9.01771 14.2563 9.09824 14.1476C9.43944 13.687 9.66985 13.1522 10.0115 12.6908C10.3133 12.2834 10.7224 12.0518 11.2269 12.0028C11.8244 11.9447 12.4271 12.0275 13.0243 11.9694C13.1596 11.9563 13.208 11.9283 13.2889 11.8189C13.5891 11.4131 13.872 10.942 14.0861 10.4863C14.1471 10.3564 14.1472 10.2982 14.0861 10.1681C13.8513 9.66861 13.5017 9.23061 13.2667 8.73044C13.0397 8.24717 13.0407 7.7515 13.2677 7.26854C13.5026 6.7689 13.8513 6.33106 14.0861 5.8319C14.1472 5.7018 14.1471 5.64359 14.0861 5.51366ZM15.3035 6.40373C15.0685 6.90359 14.7188 7.34119 14.4841 7.84037C14.4231 7.97025 14.423 8.02855 14.4841 8.15861C14.7189 8.65833 15.0685 9.09611 15.3035 9.59626C15.5308 10.0801 15.5308 10.5744 15.3035 11.0582C15.052 11.5933 14.7225 12.1426 14.37 12.6191C14.0685 13.0265 13.6581 13.259 13.1536 13.3081C12.5566 13.366 11.9541 13.2835 11.3573 13.3414C11.2228 13.3545 11.1731 13.3823 11.0926 13.491C10.7511 13.9521 10.521 14.4864 10.1793 14.9478C9.87828 15.3542 9.46719 15.5869 8.96387 15.6358C8.34008 15.6964 7.66194 15.6966 7.03623 15.6358C6.53291 15.5869 6.12182 15.3542 5.82084 14.9478C5.47911 14.4863 5.24878 13.9517 4.90753 13.491C4.82701 13.3823 4.77734 13.3545 4.64284 13.3414C4.04647 13.2835 3.44373 13.366 2.84653 13.3081C2.34201 13.259 1.93164 13.0265 1.63013 12.6191C1.27867 12.144 0.948453 11.5941 0.696621 11.0582C0.469315 10.5744 0.469279 10.0801 0.696621 9.59626C0.931628 9.09613 1.2813 8.65807 1.51597 8.15861C1.57708 8.02855 1.57702 7.97025 1.51597 7.84037C1.28117 7.34095 0.931635 6.9036 0.696621 6.40373C0.469213 5.91992 0.469367 5.42562 0.696621 4.94183C0.948441 4.40587 1.27868 3.85598 1.63013 3.38092C1.93164 2.97349 2.34201 2.74095 2.84653 2.6919C3.44353 2.63397 4.04599 2.71649 4.64284 2.65856C4.77734 2.64549 4.82701 2.61774 4.90753 2.50904C5.24905 2.04792 5.47913 1.51362 5.82084 1.05219C6.12182 0.645806 6.53291 0.413119 7.03623 0.364178C7.66002 0.303556 8.33816 0.303369 8.96387 0.364178C9.46719 0.413119 9.87828 0.645806 10.1793 1.05219C10.521 1.51365 10.7513 2.04828 11.0926 2.50904C11.1731 2.61774 11.2228 2.64549 11.3573 2.65856C11.9541 2.71649 12.5566 2.63397 13.1536 2.6919C13.6581 2.74095 14.0685 2.97349 14.37 3.38092C14.7214 3.85598 15.0517 4.40587 15.3035 4.94183C15.5307 5.42562 15.5309 5.91992 15.3035 6.40373Z", fill: "currentColor" }), f.jsx("path", { d: "M9.13764 7.99999C9.13764 7.3715 8.62855 6.8624 8.00005 6.8624C7.37155 6.8624 6.86246 7.3715 6.86246 7.99999C6.86246 8.62849 7.37155 9.13759 8.00005 9.13759C8.62855 9.13759 9.13764 8.62849 9.13764 7.99999ZM10.4834 7.99999C10.4834 9.37126 9.37132 10.4833 8.00005 10.4833C6.62878 10.4833 5.51674 9.37126 5.51674 7.99999C5.51674 6.62873 6.62878 5.51669 8.00005 5.51669C9.37132 5.51669 10.4834 6.62873 10.4834 7.99999Z", fill: "currentColor" })] }), f.jsx("defs", { children: f.jsx("clipPath", { id: "clip0_1450_63327", children: f.jsx("rect", { width: 16, height: 16, fill: "currentColor" }) }) })] });
+var F9 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { fillRule: "evenodd", clipRule: "evenodd", d: "M9.67272 0.522841C10.8339 0.522841 11.76 0.522714 12.4963 0.602493C13.2453 0.683657 13.8789 0.854248 14.4264 1.25197C14.7504 1.48739 15.0355 1.77247 15.2709 2.0965C15.6686 2.64394 15.8392 3.27758 15.9204 4.02655C16.0002 4.7629 16 5.68895 16 6.85014V9.14986C16 10.3111 16.0002 11.2371 15.9204 11.9735C15.8392 12.7224 15.6686 13.3561 15.2709 13.9035C15.0355 14.2275 14.7504 14.5126 14.4264 14.748C13.8789 15.1458 13.2453 15.3163 12.4963 15.3975C11.76 15.4773 10.8339 15.4772 9.67272 15.4772H6.3273C5.16611 15.4772 4.24006 15.4773 3.50371 15.3975C2.75474 15.3163 2.1211 15.1458 1.57366 14.748C1.24963 14.5126 0.964549 14.2275 0.729131 13.9035C0.331407 13.3561 0.160817 12.7224 0.0796529 11.9735C-0.000126137 11.2371 1.25338e-09 10.3111 1.25338e-09 9.14986V6.85014C1.25329e-09 5.68895 -0.000126137 4.7629 0.0796529 4.02655C0.160817 3.27758 0.331407 2.64394 0.729131 2.0965C0.964549 1.77247 1.24963 1.48739 1.57366 1.25197C2.1211 0.854248 2.75474 0.683657 3.50371 0.602493C4.24006 0.522714 5.16611 0.522841 6.3273 0.522841H9.67272ZM5.54303 1.88715V14.1118C5.78636 14.1128 6.04709 14.1169 6.3273 14.1169H9.67272C10.8639 14.1169 11.7032 14.1164 12.3493 14.0465C12.9824 13.9779 13.3497 13.8494 13.6268 13.6482C13.8354 13.4966 14.0195 13.3125 14.1711 13.1039C14.3723 12.8268 14.5007 12.4595 14.5693 11.8264C14.6393 11.1803 14.6398 10.341 14.6398 9.14986V6.85014C14.6398 5.65896 14.6393 4.81967 14.5693 4.1736C14.5007 3.54048 14.3723 3.17318 14.1711 2.89609C14.0195 2.68747 13.8354 2.50337 13.6268 2.35179C13.3497 2.1506 12.9824 2.02212 12.3493 1.95353C11.7032 1.88358 10.8639 1.88307 9.67272 1.88307H6.3273C6.04709 1.88307 5.78636 1.8862 5.54303 1.88715ZM4.1828 1.91166C3.99125 1.9216 3.8148 1.93577 3.65076 1.95353C3.01764 2.02212 2.65034 2.1506 2.37325 2.35179C2.16463 2.50337 1.98052 2.68747 1.82895 2.89609C1.62776 3.17318 1.49928 3.54048 1.43069 4.1736C1.36074 4.81967 1.36023 5.65896 1.36023 6.85014V9.14986C1.36023 10.341 1.36074 11.1803 1.43069 11.8264C1.49928 12.4595 1.62776 12.8268 1.82895 13.1039C1.98052 13.3125 2.16463 13.4966 2.37325 13.6482C2.65034 13.8494 3.01764 13.9779 3.65076 14.0465C3.81478 14.0642 3.99127 14.0774 4.1828 14.0873V1.91166Z", fill: "currentColor" }) });
+var B9 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M8.64453 1.5V7.34961H14.5V8.65039H8.64453V14.5H7.34473V8.65039H1.5V7.34961H7.34473V1.5H8.64453Z", fill: "currentColor" }) });
+var Es = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M15.0498 3.92579L8.49512 12.3818C8.25774 12.6881 8.04517 12.9645 7.84668 13.1689C7.63957 13.3823 7.38732 13.5841 7.04492 13.6719C6.86373 13.7183 6.6757 13.7346 6.48926 13.7197C6.13666 13.6915 5.8528 13.5355 5.6123 13.3604C5.38201 13.1926 5.12573 12.9567 4.83984 12.6953L1.03125 9.21289L1.96875 8.1875L5.77734 11.6699C6.08684 11.9529 6.27773 12.1249 6.43066 12.2363C6.50183 12.2882 6.54699 12.3135 6.57324 12.3252C6.58525 12.3305 6.59269 12.3322 6.5957 12.333C6.59802 12.3336 6.59961 12.334 6.59961 12.334C6.63317 12.3367 6.66758 12.3335 6.7002 12.3252C6.7002 12.3252 6.70211 12.3251 6.7041 12.3242C6.70698 12.3229 6.71348 12.319 6.72461 12.3115C6.74849 12.2956 6.78843 12.2642 6.84961 12.2012C6.98138 12.0654 7.13957 11.8628 7.39648 11.5313L13.9502 3.07422L15.0498 3.92579Z", fill: "currentColor" }) });
+var hs = ({ size: n = 14, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 14 14", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z", fill: "currentColor" }) });
+var Q9 = ({ size: n = 14, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 14 14", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.5762L7.80273 7.84863C8.07732 7.57405 8.24849 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z", fill: "currentColor" }) });
+var q9 = ({ size: n = 14, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 14 14", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M4.25 2.82782L4.25 11.1722C4.25 11.6622 4.84243 11.9076 5.18891 11.5611L9.36109 7.38891C9.57588 7.17412 9.57588 6.82588 9.36109 6.61109L5.18891 2.43891C4.84243 2.09243 4.25 2.33782 4.25 2.82782Z", fill: "currentColor" }) });
+var Ru = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsx("path", { d: "M14.1168 13.197L13.197 14.1167L1.8833 2.80303L2.80309 1.88324L14.1168 13.197Z", fill: "currentColor" }), f.jsx("path", { d: "M13.197 1.88326L14.1168 2.80305L2.80309 14.1168L1.8833 13.197L13.197 1.88326Z", fill: "currentColor" })] });
+var G9 = ({ size: n = 14, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 14 14", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M10.6074 4.40278L8.00975 6.99973L10.6074 9.59739L9.59736 10.6074L6.9997 8.00978L4.40274 10.6074L3.3927 9.59739L5.98966 6.99973L3.3927 4.40278L4.40274 3.39273L6.9997 5.98969L9.59736 3.39273L10.6074 4.40278Z", fill: "currentColor" }) });
+var Tu = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M6.14929 4.02032C7.11197 4.02032 7.87983 4.02016 8.49597 4.07598C9.12128 4.13269 9.65792 4.25188 10.1415 4.53106C10.7202 4.8653 11.2008 5.3459 11.535 5.92462C11.8142 6.40818 11.9334 6.94481 11.9901 7.57012C12.0459 8.18625 12.0458 8.95419 12.0458 9.9168C12.0458 10.8795 12.0459 11.6473 11.9901 12.2635C11.9334 12.8888 11.8142 13.4254 11.535 13.909C11.2008 14.4877 10.7202 14.9683 10.1415 15.3025C9.65792 15.5817 9.12128 15.7009 8.49597 15.7576C7.87984 15.8134 7.11196 15.8133 6.14929 15.8133C5.18667 15.8133 4.41874 15.8134 3.80261 15.7576C3.1773 15.7009 2.64067 15.5817 2.1571 15.3025C1.5784 14.9683 1.09778 14.4877 0.76355 13.909C0.484366 13.4254 0.365184 12.8888 0.308472 12.2635C0.252649 11.6473 0.252808 10.8795 0.252808 9.9168C0.252808 8.95418 0.252664 8.18625 0.308472 7.57012C0.365184 6.94481 0.484366 6.40818 0.76355 5.92462C1.09777 5.34589 1.57839 4.86529 2.1571 4.53106C2.64067 4.25188 3.1773 4.13269 3.80261 4.07598C4.41874 4.02017 5.18666 4.02032 6.14929 4.02032ZM6.14929 5.37774C5.16181 5.37774 4.46634 5.37761 3.92566 5.42657C3.39434 5.47472 3.07859 5.56574 2.83582 5.70587C2.4632 5.92106 2.15354 6.2307 1.93835 6.60333C1.79823 6.8461 1.70721 7.16185 1.65906 7.69317C1.6101 8.23385 1.61023 8.92933 1.61023 9.9168C1.61023 10.9043 1.61009 11.5998 1.65906 12.1404C1.70721 12.6717 1.79823 12.9875 1.93835 13.2303C2.15356 13.6029 2.46321 13.9126 2.83582 14.1277C3.07859 14.2679 3.39434 14.3589 3.92566 14.407C4.46634 14.456 5.16182 14.4559 6.14929 14.4559C7.13682 14.4559 7.83224 14.456 8.37292 14.407C8.90425 14.3589 9.21999 14.2679 9.46277 14.1277C9.83535 13.9126 10.145 13.6029 10.3602 13.2303C10.5004 12.9875 10.5914 12.6717 10.6395 12.1404C10.6885 11.5998 10.6884 10.9043 10.6884 9.9168C10.6884 8.92934 10.6885 8.23384 10.6395 7.69317C10.5914 7.16185 10.5004 6.8461 10.3602 6.60333C10.1451 6.23071 9.83536 5.92107 9.46277 5.70587C9.21999 5.56574 8.90424 5.47472 8.37292 5.42657C7.83224 5.3776 7.13682 5.37774 6.14929 5.37774ZM9.80164 0.367975C10.7638 0.367975 11.5314 0.36788 12.1473 0.423639C12.7726 0.480307 13.3093 0.598759 13.7928 0.877741C14.3717 1.21192 14.8521 1.69355 15.1864 2.27227C15.4655 2.75574 15.5857 3.29164 15.6425 3.9168C15.6983 4.53301 15.6971 5.3016 15.6971 6.26446V7.82989C15.6971 8.29264 15.6989 8.58993 15.6649 8.84844C15.4668 10.3525 14.401 11.5738 12.9833 11.9988V10.5467C13.6973 10.1903 14.2105 9.49662 14.3192 8.67169C14.3387 8.52347 14.3407 8.3358 14.3407 7.82989V6.26446C14.3407 5.27706 14.3398 4.58149 14.2909 4.04083C14.2428 3.50968 14.1526 3.19372 14.0126 2.95098C13.7974 2.57849 13.4876 2.26869 13.1151 2.05352C12.8724 1.91347 12.5564 1.82237 12.0253 1.77423C11.4847 1.72528 10.7888 1.7254 9.80164 1.7254H7.71472C6.7562 1.72558 5.92665 2.27697 5.52332 3.07891H4.07019C4.54221 1.51132 5.9932 0.368186 7.71472 0.367975H9.80164Z", fill: "currentColor" }) });
+var J9 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M7.92136 0.349152C10.3744 0.349234 12.5564 1.5052 13.9557 3.29894L15.1281 2.12759C15.3303 1.92546 15.6767 2.06943 15.6767 2.35538V5.53923C15.6766 5.71626 15.5329 5.85976 15.3559 5.86002H12.171C11.8854 5.8597 11.7426 5.51465 11.9443 5.31249L12.9641 4.29056C11.8237 2.74305 9.98908 1.74106 7.92136 1.74097C4.46436 1.74097 1.66233 4.543 1.66233 8C1.66233 11.457 4.46436 14.259 7.92136 14.259C11.3782 14.2589 14.1804 11.4569 14.1804 8H15.5722C15.5722 12.2251 12.1465 15.6507 7.92136 15.6508C3.69614 15.6508 0.270508 12.2252 0.270508 8C0.270508 3.77478 3.69614 0.349152 7.92136 0.349152Z", fill: "currentColor" }) });
+var i7 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z", fill: "currentColor" }) });
+var s7 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsxs("mask", { id: "mask0_agent_preset_16", maskUnits: "userSpaceOnUse", x: "0", y: "0", width: "16", height: "16", children: [f.jsx("rect", { width: "16", height: "16", fill: "white" }), f.jsx("circle", { cx: "7.9995", cy: "3.28319", r: "1.712", fill: "black" }), f.jsx("circle", { cx: "3.51122", cy: "11.3855", r: "1.712", fill: "black" }), f.jsx("circle", { cx: "12.4878", cy: "11.3855", r: "1.712", fill: "black" })] }), f.jsx("path", { mask: "url(#mask0_agent_preset_16)", d: "M12.2881 11.0425C12.6002 11.3723 13.0413 11.5786 13.5312 11.5786L13.5342 11.5776C13.1476 12.3233 12.6119 12.9785 11.9639 13.5005C10.9327 14.3309 9.6199 14.8286 8.19336 14.8286C7.29864 14.8285 6.45056 14.6313 5.6875 14.2808C6.08309 14.0281 6.36707 13.6189 6.45215 13.1392C6.99022 13.3561 7.57767 13.476 8.19336 13.4761C9.30019 13.4761 10.3157 13.0915 11.1152 12.4478C11.5935 12.0626 11.9924 11.5848 12.2881 11.0425ZM4.14746 4.36475C4.25569 4.83228 4.55488 5.2247 4.95898 5.4585C4.07956 6.30639 3.53144 7.49605 3.53125 8.81396C3.53125 9.69534 3.77613 10.5202 4.20117 11.2231C3.74959 11.3817 3.38395 11.7232 3.19531 12.1597C2.5541 11.2032 2.17969 10.052 2.17969 8.81396C2.17989 7.05087 2.93868 5.4646 4.14746 4.36475ZM8.19336 2.80029C8.85717 2.80029 9.49784 2.90834 10.0967 3.10791C12.3237 3.85044 13.9725 5.86061 14.1846 8.28369C13.9832 8.20048 13.7627 8.15382 13.5312 8.15381C13.2802 8.15381 13.042 8.20907 12.8271 8.30615C12.6281 6.47264 11.3666 4.95616 9.66895 4.39014C9.2063 4.236 8.70989 4.15186 8.19336 4.15186C7.96112 4.15189 7.7329 4.16981 7.50977 4.20264C7.51947 4.12886 7.52637 4.05348 7.52637 3.97705C7.52628 3.56604 7.3811 3.18914 7.13965 2.89404C7.48183 2.83352 7.83381 2.80033 8.19336 2.80029Z", fill: "currentColor" }), f.jsx("path", { d: "M9.1123 3.28271C9.11205 2.66858 8.61322 2.17041 7.99902 2.17041C7.38504 2.17067 6.88697 2.66874 6.88672 3.28271C6.88672 3.89691 7.38489 4.39574 7.99902 4.396C8.61338 4.396 9.1123 3.89707 9.1123 3.28271ZM10.3115 3.28271C10.3115 4.55981 9.27612 5.59521 7.99902 5.59521C6.72214 5.59496 5.6875 4.55965 5.6875 3.28271C5.68776 2.00599 6.7223 0.971447 7.99902 0.971191C9.27596 0.971191 10.3113 2.00584 10.3115 3.28271Z", fill: "currentColor" }), f.jsx("path", { d: "M4.62402 11.385C4.62377 10.7709 4.12494 10.2727 3.51074 10.2727C2.89676 10.273 2.39869 10.771 2.39844 11.385C2.39844 11.9992 2.89661 12.498 3.51074 12.4983C4.1251 12.4983 4.62402 11.9994 4.62402 11.385ZM5.82324 11.385C5.82324 12.6621 4.78784 13.6975 3.51074 13.6975C2.23386 13.6973 1.19922 12.6619 1.19922 11.385C1.19947 10.1083 2.23402 9.07374 3.51074 9.07349C4.78768 9.07349 5.82299 10.1081 5.82324 11.385Z", fill: "currentColor" }), f.jsx("path", { d: "M13.6006 11.385C13.6003 10.7709 13.1015 10.2727 12.4873 10.2727C11.8733 10.273 11.3753 10.771 11.375 11.385C11.375 11.9992 11.8732 12.498 12.4873 12.4983C13.1017 12.4983 13.6006 11.9994 13.6006 11.385ZM14.7998 11.385C14.7998 12.6621 13.7644 13.6975 12.4873 13.6975C11.2104 13.6973 10.1758 12.6619 10.1758 11.385C10.176 10.1083 11.2106 9.07374 12.4873 9.07349C13.7642 9.07349 14.7995 10.1081 14.7998 11.385Z", fill: "currentColor" })] });
+var bu = ({ size: n = 14, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 14 14", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsx("path", { d: "M6.3002 3.32843L7.69986 3.32843L7.69986 7.79657H6.3002L6.3002 3.32843Z", fill: "currentColor" }), f.jsx("path", { d: "M6.3002 9.01935H7.69986V10.6711H6.3002V9.01935Z", fill: "currentColor" }), f.jsx("path", { d: "M12.6328 6.99976C12.6328 3.88874 10.111 1.36694 7 1.36694C3.88899 1.36695 1.3672 3.88875 1.36719 6.99976C1.36719 10.1108 3.88899 12.6326 7 12.6326C10.111 12.6326 12.6328 10.1108 12.6328 6.99976ZM13.8582 6.99976C13.8582 10.7873 10.7876 13.8579 7 13.8579C3.21244 13.8579 0.141846 10.7873 0.141846 6.99976C0.141857 3.2122 3.21245 0.141612 7 0.141602C10.7876 0.141602 13.8581 3.21219 13.8582 6.99976Z", fill: "currentColor" })] });
+var m7 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M8.3125 0.981587C8.66767 1.0545 8.97902 1.20558 9.2627 1.43374C9.48724 1.61438 9.73029 1.85933 9.97949 2.10854L14.707 6.83608L13.293 8.25014L9 3.95717V15.0431H7V3.95717L2.70703 8.25014L1.29297 6.83608L6.02051 2.10854C6.26971 1.85933 6.51277 1.61438 6.7373 1.43374C6.97662 1.24126 7.28445 1.04542 7.6875 0.981587C7.8973 0.94841 8.1031 0.956564 8.3125 0.981587Z", fill: "currentColor" }) });
+var k7 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { fillRule: "evenodd", clipRule: "evenodd", d: "M12.3368 1.53569L11.931 4.43172H14.8086V5.79673H11.7404L11.1962 9.67859H14.2839V11.0436H11.0056L10.4994 14.6529L9.14873 14.4643L9.62731 11.0436H5.75876L5.25252 14.6529L3.90186 14.4643L4.38043 11.0436H1.69141V9.67859H4.57104L5.11417 5.79673H2.21609V4.43172H5.30581L5.73724 1.34713L7.08995 1.53569L6.68414 4.43172H10.5527L10.9841 1.34713L12.3368 1.53569ZM5.94937 9.67859H9.81791L10.361 5.79673H6.49353L5.94937 9.67859Z", fill: "currentColor" }) });
+var E7 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", children: f.jsx("path", { transform: "translate(1.292 1.3)", d: "M10.3232 9.18164C11.2868 9.18164 12.0985 9.82833 12.3506 10.7109L13.415 10.7109L13.415 11.8711L12.3496 11.8711C12.0971 12.7532 11.2864 13.3994 10.3232 13.3994C9.36031 13.3992 8.55012 12.7531 8.29785 11.8711L0 11.8711L0 10.7109L8.29688 10.7109C8.54876 9.82845 9.35988 9.18186 10.3232 9.18164ZM10.3232 10.3418C9.7999 10.3421 9.37534 10.7667 9.375 11.29C9.375 11.8137 9.79969 12.239 10.3232 12.2393C10.847 12.2393 11.2725 11.8138 11.2725 11.29C11.2721 10.7666 10.8468 10.3418 10.3232 10.3418ZM12.4326 11.291C12.4326 11.3549 12.4284 11.418 12.4229 11.4805C12.4287 11.4181 12.4326 11.355 12.4326 11.291ZM8.21484 11.2832C8.21484 11.2856 8.21484 11.2886 8.21484 11.291L8.21484 11.29C8.21484 11.2878 8.21484 11.2855 8.21484 11.2832ZM3.08301 4.59082C4.04605 4.59095 4.85696 5.23717 5.10938 6.11914L13.415 6.11914L13.415 7.2793L5.11035 7.2793C4.85833 8.16202 4.04648 8.80846 3.08301 8.80859C2.11972 8.80843 1.30963 8.16179 1.05762 7.2793L0 7.2793L0 6.11914L1.05762 6.11914C1.30994 5.23728 2.12006 4.59098 3.08301 4.59082ZM3.08301 5.75098C2.55962 5.75117 2.13512 6.17587 2.13477 6.69922C2.13477 7.22287 2.5594 7.64824 3.08301 7.64844C3.60665 7.64828 4.03223 7.2229 4.03223 6.69922C4.03187 6.17585 3.60643 5.75113 3.08301 5.75098ZM5.19238 6.69922C5.19238 6.763 5.18816 6.82633 5.18262 6.88867C5.18846 6.82629 5.19238 6.76313 5.19238 6.69922C5.19236 6.63495 5.18853 6.57152 5.18262 6.50879C5.18826 6.57154 5.19236 6.635 5.19238 6.69922ZM0.982422 6.52344C0.977382 6.58136 0.97463 6.63999 0.974609 6.69922C0.974609 6.75775 0.977496 6.81579 0.982422 6.87305C0.977758 6.81579 0.974609 6.75767 0.974609 6.69922C0.974628 6.64 0.977618 6.58142 0.982422 6.52344ZM10.3232 0C11.2869 0 12.0986 0.646596 12.3506 1.5293L13.415 1.5293L13.415 2.68945L12.3496 2.68945C12.363 2.64266 12.3754 2.59488 12.3857 2.54688C12.1838 3.50118 11.3376 4.21777 10.3232 4.21777C9.36037 4.21756 8.55018 3.57139 8.29785 2.68945L0 2.68945L0 1.5293L8.29688 1.5293C8.5487 0.646717 9.35981 0.00021854 10.3232 0ZM10.3232 1.16016C9.79984 1.16042 9.37524 1.58499 9.375 2.1084C9.375 2.63201 9.79969 3.05735 10.3232 3.05762C10.847 3.05762 11.2725 2.63217 11.2725 2.1084C11.2722 1.58483 10.8469 1.16016 10.3232 1.16016ZM12.4229 2.29883C12.4287 2.23641 12.4326 2.17331 12.4326 2.10938C12.4326 2.17327 12.4284 2.23638 12.4229 2.29883ZM8.21484 2.10938L8.21484 2.1084L8.21484 2.10938ZM8.22266 1.93359C8.21785 1.98897 8.21506 2.04499 8.21484 2.10156C8.21503 2.04501 8.2181 1.98902 8.22266 1.93359ZM8.22266 11.1162C8.2179 11.1713 8.21507 11.227 8.21484 11.2832C8.21504 11.227 8.21814 11.1713 8.22266 11.1162Z", fill: "currentColor" }) });
+var M7 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", children: [f.jsx("path", { transform: "translate(9.52 2.52)", d: "M3.55246 0L3.55246 2.44252L6 2.44252L6 3.55748L3.55246 3.55748L3.55246 6L2.43834 6L2.43834 3.55748L0 3.55748L0 2.44252L2.43834 2.44252L2.43834 0L3.55246 0Z", fill: "currentColor" }), f.jsx("path", { transform: "translate(0.3496 2.35)", d: "M4.76367 0C5.36861 1.80598e-05 5.93113 0.310294 6.25488 0.821289L6.78027 1.64941C6.79685 1.67558 6.81791 1.69775 6.83887 1.71973C6.72186 2.15521 6.65702 2.61192 6.65137 3.08301C6.25601 2.96045 5.90909 2.70478 5.68164 2.3457L5.15723 1.5166C5.07183 1.38189 4.92318 1.3008 4.76367 1.30078L2.32422 1.30078C1.7589 1.30078 1.30078 1.7589 1.30078 2.32422L1.30078 10.1338C1.30078 10.6991 1.7589 11.1572 2.32422 11.1572L11.9766 11.1572C12.5419 11.1572 13 10.6991 13 10.1338L13 8.58398C13.4545 8.5135 13.8903 8.38748 14.3008 8.21289L14.3008 10.1338C14.3008 11.4171 13.2598 12.458 11.9766 12.458L2.32422 12.458C1.04093 12.458 0 11.4171 0 10.1338L0 2.32422C0 1.04093 1.04093 0 2.32422 0L4.76367 0Z", fill: "currentColor" })] });
+var O7 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", children: [f.jsx("path", { d: "M5.19629 1.57104C5.81144 1.5711 6.38623 1.8786 6.72754 2.39038L7.19922 3.09839C7.28454 3.22635 7.42824 3.30344 7.58203 3.30347H12.1699C13.5039 3.30348 14.5859 4.38548 14.5859 5.71948V6.62671C15.2694 7.02689 15.6605 7.85012 15.4385 8.68726L14.3848 12.658C14.1037 13.7164 13.1449 14.4527 12.0498 14.4529H2.91699C1.51651 14.4529 0.451662 13.2814 0.501954 11.9519V3.98706C0.501954 2.65305 1.58396 1.57104 2.91797 1.57104H5.19629ZM3.7793 7.75562C3.30994 7.75562 2.89883 8.07153 2.77832 8.52515L1.91602 11.7722C1.74167 12.4291 2.23734 13.073 2.91699 13.073H12.0498C12.5191 13.0728 12.9304 12.757 13.0508 12.3035L14.1045 8.33374C14.1819 8.04202 13.9619 7.756 13.6602 7.75562H3.7793ZM2.91797 2.9519C2.34625 2.9519 1.88281 3.41534 1.88281 3.98706V7.2937C2.33068 6.7269 3.02249 6.37476 3.7793 6.37476H13.2051V5.71948C13.2051 5.14777 12.7416 4.68434 12.1699 4.68433H7.58203C6.96675 4.6843 6.39209 4.37595 6.05078 3.86401L5.5791 3.15601C5.49379 3.02821 5.34995 2.95196 5.19629 2.9519H2.91797Z", fill: "currentColor" }), f.jsx("path", { opacity: "0.2", d: "M13.6602 7.75525C13.9618 7.7556 14.1815 8.04179 14.1045 8.33337L13.0508 12.3031C12.9304 12.7567 12.5191 13.0725 12.0498 13.0726H2.91701C2.23744 13.0725 1.7417 12.4287 1.91603 11.7719L2.77834 8.52478C2.89898 8.07146 3.31018 7.75532 3.77931 7.75525H13.6602ZM5.1963 2.95154C5.34985 2.95159 5.49377 3.02803 5.57912 3.15564L6.0508 3.86365C6.39205 4.37553 6.96685 4.68385 7.58205 4.68396H12.1699C12.7416 4.68396 13.2049 5.14754 13.2051 5.71912V6.37439H3.77931C3.02267 6.37444 2.33067 6.72671 1.88283 7.29333V3.98669C1.88299 3.4152 2.34649 2.95168 2.91798 2.95154H5.1963Z", fill: "currentColor" })] });
+var P7 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", children: f.jsx("path", { transform: "translate(1.5 2.429)", d: "M5.05582 0.518756L4.50669 0.86654L5.05582 0.518756ZM13 9.4837L13.65 9.4837L13.65 3.53962L13 3.53962L12.35 3.53962L12.35 9.4837L13 9.4837ZM11.3264 1.86603L11.3264 1.21603L6.52313 1.21603L6.52313 1.86603L6.52313 2.51603L11.3264 2.51603L11.3264 1.86603ZM5.58054 1.34727L6.12968 0.999489L5.60495 0.170972L5.05582 0.518756L4.50669 0.86654L5.03141 1.69506L5.58054 1.34727ZM4.11323 1.23058e-13L4.11323 -0.65L1.67359 -0.65L1.67359 5.00699e-14L1.67359 0.65L4.11323 0.65L4.11323 1.23058e-13ZM0 1.67359L-0.65 1.67359L-0.65 9.4837L0 9.4837L0.65 9.4837L0.65 1.67359L0 1.67359ZM11.3264 11.1573L11.3264 10.5073L1.67359 10.5073L1.67359 11.1573L1.67359 11.8073L11.3264 11.8073L11.3264 11.1573ZM0 9.4837L-0.65 9.4837C-0.65 10.767 0.390308 11.8073 1.67359 11.8073L1.67359 11.1573L1.67359 10.5073C1.10828 10.5073 0.65 10.049 0.65 9.4837L0 9.4837ZM1.67359 5.00699e-14L1.67359 -0.65C0.390307 -0.65 -0.65 0.390309 -0.65 1.67359L0 1.67359L0.65 1.67359C0.65 1.10828 1.10828 0.65 1.67359 0.65L1.67359 5.00699e-14ZM5.05582 0.518756L5.60495 0.170972C5.28121 -0.340193 4.71829 -0.65 4.11323 -0.65L4.11323 1.23058e-13L4.11323 0.65C4.27282 0.65 4.4213 0.731715 4.50669 0.86654L5.05582 0.518756ZM6.52313 1.86603L6.52313 1.21603C6.36354 1.21603 6.21507 1.13431 6.12968 0.999489L5.58054 1.34727L5.03141 1.69506C5.35515 2.20622 5.91808 2.51603 6.52313 2.51603L6.52313 1.86603ZM13 3.53962L13.65 3.53962C13.65 2.25634 12.6097 1.21603 11.3264 1.21603L11.3264 1.86603L11.3264 2.51603C11.8917 2.51603 12.35 2.97431 12.35 3.53962L13 3.53962ZM13 9.4837L12.35 9.4837C12.35 10.049 11.8917 10.5073 11.3264 10.5073L11.3264 11.1573L11.3264 11.8073C12.6097 11.8073 13.65 10.767 13.65 9.4837L13 9.4837Z", fill: "currentColor" }) });
+var T7 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsx("path", { d: "M11.3496 8C11.3496 6.14985 9.85015 4.65039 8 4.65039C6.14985 4.65039 4.65039 6.14985 4.65039 8C4.65039 9.85015 6.14985 11.3496 8 11.3496C9.85015 11.3496 11.3496 9.85015 11.3496 8ZM12.6504 8C12.6504 10.5681 10.5681 12.6504 8 12.6504C5.43188 12.6504 3.34961 10.5681 3.34961 8C3.34961 5.43188 5.43188 3.34961 8 3.34961C10.5681 3.34961 12.6504 5.43188 12.6504 8Z", fill: "currentColor" }), f.jsx("path", { d: "M8.65039 0.5V2.5H7.34961V0.5H8.65039Z", fill: "currentColor" }), f.jsx("path", { d: "M8.65039 13.5V15.5H7.34961V13.5H8.65039Z", fill: "currentColor" }), f.jsx("path", { d: "M3.15808 2.24035L4.57229 3.65456L3.6525 4.57435L2.23829 3.16014L3.15808 2.24035Z", fill: "currentColor" }), f.jsx("path", { d: "M12.3505 11.4327L13.7647 12.8469L12.8449 13.7667L11.4307 12.3525L12.3505 11.4327Z", fill: "currentColor" }), f.jsx("path", { d: "M2.24537 12.8469L3.65958 11.4327L4.57937 12.3525L3.16516 13.7667L2.24537 12.8469Z", fill: "currentColor" }), f.jsx("path", { d: "M11.4377 3.65455L12.852 2.24033L13.7718 3.16012L12.3575 4.57434L11.4377 3.65455Z", fill: "currentColor" }), f.jsx("path", { d: "M0.5 7.35461H2.5V8.6554H0.5L0.5 7.35461Z", fill: "currentColor" }), f.jsx("path", { d: "M13.5 7.35461H15.5V8.6554H13.5V7.35461Z", fill: "currentColor" })] });
+var b7 = ({ size: n = 16, className: i }) => f.jsx("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: f.jsx("path", { d: "M13.2764 9.52324C12.5607 9.97754 11.7177 10.242 10.7812 10.242C8.11386 10.2419 5.95042 8.07997 5.9502 5.41289C5.9502 4.48128 6.21453 3.61071 6.67188 2.87285C4.30332 3.4658 2.54992 5.60845 2.5498 8.16093C2.5498 11.1712 4.99103 13.6102 8 13.6102C10.5383 13.6102 12.6709 11.8724 13.2764 9.52324ZM7.05078 5.41289C7.051 7.47224 8.72116 9.1423 10.7812 9.14238C11.9248 9.14238 12.887 8.63397 13.5781 7.8084C13.7266 7.63106 13.9701 7.56547 14.1875 7.64433C14.4049 7.72329 14.5497 7.9297 14.5498 8.16093C14.5498 11.7766 11.6161 14.7098 8 14.7098C4.38402 14.7098 1.4502 11.7792 1.4502 8.16093C1.45033 4.54322 4.3812 1.61015 8 1.61015C8.23027 1.61015 8.43585 1.75352 8.51562 1.96953C8.59536 2.18554 8.53241 2.42829 8.35742 2.57793C7.55573 3.26311 7.05078 4.27876 7.05078 5.41289Z", fill: "currentColor" }) });
+var H7 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsx("path", { d: "M12.1665 13.5811V14.7803H3.66651V13.5811H12.1665Z", fill: "currentColor" }), f.jsx("path", { d: "M13.4453 7.02379C13.4453 6.04702 13.4452 5.3616 13.3887 4.83434C13.3333 4.31828 13.2302 4.02378 13.0723 3.80309C12.9446 3.62475 12.7877 3.46883 12.6094 3.34117C12.3887 3.18328 12.0942 3.08007 11.5781 3.02477C11.0508 2.96829 10.3655 2.96715 9.38867 2.96715H6.61035C5.63359 2.96715 4.94816 2.96827 4.4209 3.02477C3.90486 3.0801 3.61034 3.18321 3.38965 3.34117C3.21143 3.46878 3.05534 3.62487 2.92774 3.80309C2.76977 4.02377 2.66667 4.3183 2.61133 4.83434C2.55483 5.3616 2.55371 6.04702 2.55371 7.02379C2.55371 8.0006 2.55485 8.68596 2.61133 9.21324C2.66663 9.72936 2.76983 10.0238 2.92774 10.2445C3.0554 10.4228 3.21131 10.5797 3.38965 10.7074C3.61034 10.8654 3.90484 10.9685 4.4209 11.0238C4.94816 11.0803 5.63359 11.0804 6.61035 11.0804H9.38867C10.3654 11.0804 11.0508 11.0803 11.5781 11.0238C12.0941 10.9685 12.3887 10.8652 12.6094 10.7074C12.7877 10.5797 12.9446 10.4229 13.0723 10.2445C13.2301 10.0238 13.3334 9.72927 13.3887 9.21324C13.4452 8.68596 13.4453 8.00058 13.4453 7.02379ZM14.6455 7.02379C14.6455 7.97428 14.646 8.73509 14.5811 9.34117C14.5149 9.95828 14.3756 10.4858 14.0479 10.9437C13.8436 11.229 13.5938 11.4788 13.3086 11.683C12.8507 12.0108 12.3232 12.15 11.7061 12.2162C11.1 12.2811 10.3391 12.2806 9.38867 12.2806H6.61035C5.66018 12.2806 4.89991 12.2811 4.29395 12.2162C3.67684 12.15 3.14935 12.0108 2.69141 11.683C2.40613 11.4788 2.15639 11.229 1.95215 10.9437C1.62436 10.4858 1.4841 9.95828 1.41797 9.34117C1.35305 8.73511 1.35449 7.97424 1.35449 7.02379C1.35449 6.07366 1.35308 5.31333 1.41797 4.70738C1.4841 4.09028 1.62436 3.56279 1.95215 3.10485C2.15638 2.81956 2.40613 2.56982 2.69141 2.36559C3.14935 2.03779 3.67684 1.89753 4.29395 1.83141C4.8999 1.76652 5.66022 1.76793 6.61035 1.76793H9.38867C10.3391 1.76793 11.1 1.76649 11.7061 1.83141C12.3232 1.89753 12.8507 2.03779 13.3086 2.36559C13.5939 2.56982 13.8436 2.81957 14.0479 3.10485C14.3756 3.56279 14.5149 4.09028 14.5811 4.70738C14.646 5.31335 14.6455 6.07362 14.6455 7.02379Z", fill: "currentColor" })] });
+var I7 = ({ size: n = 16, className: i }) => f.jsxs("svg", { width: n, height: n, className: i, viewBox: "0 0 16 16", fill: "none", xmlns: "http://www.w3.org/2000/svg", children: [f.jsx("path", { fillRule: "evenodd", clipRule: "evenodd", d: "M12.0997 8.54554C12.2905 8.54989 12.3541 8.58056 12.4535 8.74614L12.8849 9.46387C12.9851 9.63071 13.0464 9.66013 13.2388 9.66447H14.1138C14.3417 9.66448 14.3512 9.66937 14.4686 9.86507L14.892 10.5717C14.9942 10.7422 14.9948 10.8247 14.892 10.9961L14.4756 11.6906C14.3741 11.8677 14.3694 11.9379 14.4756 12.115L14.892 12.8096C14.9942 12.9801 14.9947 13.0625 14.892 13.234L14.4686 13.9406C14.3643 14.1028 14.3063 14.1354 14.1138 14.1412H13.2388C13.0465 14.1456 12.985 14.1752 12.8849 14.3418L12.4535 15.0595C12.353 15.2195 12.2895 15.2558 12.0997 15.2601H11.2237C10.9962 15.2601 10.9871 15.2548 10.8699 15.0595L10.4384 14.3418C10.3383 14.175 10.2767 14.1456 10.0846 14.1412H9.2096C9.01854 14.1355 8.95761 14.1006 8.85477 13.9406L8.43139 13.234C8.32562 13.0576 8.33148 12.9862 8.43139 12.8096L8.84771 12.115C8.95165 11.9416 8.94659 11.863 8.84771 11.6906L8.43139 10.9961C8.32767 10.8232 8.33411 10.7437 8.43139 10.5717L8.85477 9.86507C8.95447 9.69891 9.01875 9.67017 9.2096 9.66447H10.0846C10.2741 9.66441 10.3414 9.62547 10.4384 9.46387L10.8699 8.74614C10.987 8.55106 10.9963 8.54554 11.2237 8.54554H12.0997ZM11.6612 10.232C11.3326 10.7798 10.8155 11.0948 10.1743 11.106C10.4443 11.61 10.4425 12.1976 10.1743 12.6987C10.803 12.7096 11.3391 13.0359 11.6612 13.5727C11.9855 13.0323 12.5131 12.7098 13.148 12.6987C12.879 12.196 12.8789 11.6086 13.148 11.106C12.5076 11.0948 11.9894 10.7794 11.6612 10.232Z", fill: "currentColor" }), f.jsx("path", { fillRule: "evenodd", clipRule: "evenodd", d: "M7.51205 0.790627C9.19055 0.790649 10.7401 1.0691 11.892 1.54364C12.4664 1.78029 12.9719 2.07885 13.3436 2.4408C13.7171 2.80467 13.9916 3.27253 13.9918 3.82384V7.90442C13.6067 7.69532 13.1907 7.53597 12.7529 7.43366V5.66454C12.4928 5.82898 12.2028 5.97601 11.892 6.10405C10.74 6.57865 9.19071 6.85706 7.51205 6.85706C5.8337 6.85703 4.285 6.57852 3.13309 6.10405C2.82215 5.97593 2.53164 5.8291 2.27121 5.66454V7.4135C2.27134 7.75678 2.6066 8.27106 3.62502 8.73405C4.58641 9.17097 5.95762 9.45591 7.50499 9.45681C7.24582 9.83133 7.03684 10.2434 6.88706 10.6826C5.44388 10.6162 4.12516 10.3216 3.11192 9.86104C2.81708 9.72698 2.53185 9.56866 2.27121 9.38928V11.2542C2.27158 11.5974 2.60697 12.1109 3.62502 12.5737C4.41933 12.9347 5.4937 13.1898 6.71569 13.2693C6.80349 13.7128 6.9513 14.1345 7.14814 14.5273C5.60324 14.4862 4.18593 14.1889 3.11192 13.7007C2.01039 13.1998 1.03366 12.3814 1.03333 11.2542V3.82384C1.03352 3.27273 1.30721 2.80461 1.68049 2.4408C2.05211 2.07893 2.55887 1.78026 3.13309 1.54364C4.28492 1.06926 5.83393 0.790683 7.51205 0.790627ZM7.51205 2.02851C5.95492 2.02857 4.57354 2.29079 3.60486 2.68979C3.11958 2.88977 2.76667 3.11253 2.5454 3.32788C2.32671 3.54101 2.2714 3.7089 2.27121 3.82384C2.27121 3.93882 2.32624 4.10625 2.5454 4.3198C2.76667 4.53527 3.11927 4.75781 3.60486 4.9579C4.5736 5.35699 5.95467 5.61914 7.51205 5.61918C9.06942 5.61918 10.4505 5.35695 11.4192 4.9579C11.9051 4.75773 12.2584 4.53536 12.4797 4.3198C12.6988 4.10627 12.7529 3.93882 12.7529 3.82384C12.7527 3.70889 12.6984 3.54104 12.4797 3.32788C12.2584 3.11239 11.9049 2.88989 11.4192 2.68979C10.4505 2.29079 9.06925 2.02853 7.51205 2.02851Z", fill: "currentColor" })] });
+function Q7({ icon: n, title: i, open: l, expandable: u, onToggle: c, expandOnRowClick: d = false, previewChevron: h = u, keepContentWhenOpen: C = false, collapsedContent: m, children: g, className: _, rowClassName: M, leadingClassName: w, chevronClassName: L, titleClassName: S }) {
+  const T = u && d, V = (ie) => {
+    ie.stopPropagation(), c();
+  }, W = (ie) => {
+    !T || ie.key !== "Enter" && ie.key !== " " || (ie.preventDefault(), c());
+  }, Q = h ? f.jsxs(f.Fragment, { children: [f.jsx("span", { className: Tn.iconIdle, children: n }), f.jsx(hs, { className: we(L, Tn.chevronHover) })] }) : n, B = l ? f.jsx(hs, { className: L }) : Q;
+  return f.jsxs("div", { className: we(Tn.root, _), "data-open": l || void 0, children: [f.jsxs("div", { className: we(Tn.row, M), "data-disclosure-row": true, "data-expandable": T || void 0, role: T ? "button" : void 0, tabIndex: T ? 0 : void 0, "aria-expanded": T ? l : void 0, onClick: T ? c : void 0, onKeyDown: T ? W : void 0, children: [u && !T ? f.jsx("button", { type: "button", className: we(Tn.leading, w), "aria-expanded": l, onClick: V, children: B }) : f.jsx("span", { className: we(Tn.leading, w), children: B }), f.jsx("span", { className: we(Tn.title, S), children: i }), (C || !l) && m] }), l && g] });
+}
+function ps({ variant: n = "ghost", size: i = "md", icon: l, className: u, children: c, ...d }) {
+  return f.jsxs("button", { type: "button", className: we(Ei.button, Ei[n], Ei[i], u), ...d, children: [l != null && f.jsx("span", { className: Ei.icon, children: l }), c] });
+}
+function Iu(n) {
+  const i = R.useRef(null), l = R.useRef(n);
+  l.current = n;
+  const u = R.useCallback(() => {
+    i.current !== null && (clearTimeout(i.current), i.current = null);
+  }, []), c = R.useCallback(() => {
+    u(), i.current = setTimeout(() => {
+      i.current = null, l.current();
+    }, 200);
+  }, [u]);
+  return R.useEffect(() => u, [u]), { arm: c, cancel: u };
+}
+function U0(n) {
+  return "type" in n && n.type === "separator";
+}
+function W0(n) {
+  return "type" in n && n.type === "label";
+}
+var K7 = { visibility: "hidden", left: 0, top: 0 };
+function Vu({ open: n, anchor: i, items: l, selectedId: u, selectedIds: c, onSelect: d, onClose: h, align: C = "start", side: m = "bottom", portal: g = false, closeOnPointerLeave: _ = false, dense: M = false, compact: w = false, getAnchorRect: L, footer: S, className: T }) {
+  const V = R.useRef(null), W = R.useRef(null), [Q, B] = R.useState(null), [ie, Z] = R.useState(null), { arm: A, cancel: q } = Iu(h);
+  R.useLayoutEffect(() => {
+    if (!n || !g) {
+      Z(null);
+      return;
+    }
+    const z = () => {
+      var k;
+      let se;
+      if (L !== void 0 ? se = L() : se = ((k = V.current) == null ? void 0 : k.getBoundingClientRect()) ?? null, se === null) return;
+      const le = 12, de = window.innerWidth, he = window.innerHeight, Le = W.current, ve = (Le == null ? void 0 : Le.offsetWidth) ?? 0, F = (Le == null ? void 0 : Le.offsetHeight) ?? 0;
+      let ne, U;
+      m === "right" ? (ne = se.right + 4, U = se.top) : C === "start" ? (ne = se.left, U = m === "bottom" ? se.bottom + 4 : se.top - F - 4) : (ne = se.right - ve, U = m === "bottom" ? se.bottom + 4 : se.top - F - 4), ve > 0 && (ne = Math.min(Math.max(ne, le), de - ve - le)), F > 0 && (U = Math.min(Math.max(U, le), he - F - le)), Z({ left: ne, top: U });
+    };
+    return z(), window.addEventListener("scroll", z, true), window.addEventListener("resize", z), () => {
+      window.removeEventListener("scroll", z, true), window.removeEventListener("resize", z);
+    };
+  }, [n, g, C, m, L]), R.useEffect(() => {
+    if (!n) {
+      B(null);
+      return;
+    }
+    const z = (le) => {
+      var de, he;
+      le.target instanceof Node && ((de = V.current) == null ? void 0 : de.contains(le.target)) !== true && ((he = W.current) == null ? void 0 : he.contains(le.target)) !== true && h();
+    }, se = (le) => {
+      le.key === "Escape" && h();
+    };
+    return document.addEventListener("pointerdown", z), document.addEventListener("keydown", se), () => {
+      document.removeEventListener("pointerdown", z), document.removeEventListener("keydown", se);
+    };
+  }, [n, h]), R.useEffect(() => {
+    n || q();
+  }, [n, q]);
+  const oe = !l.some((z) => !U0(z) && !W0(z) && z.submenu !== void 0 && z.submenu.length > 0), b = (z) => {
+    if (U0(z)) return f.jsx("div", { className: Re.separator, role: "separator" }, z.id);
+    if (W0(z)) return f.jsx("div", { className: Re.label, role: "presentation", children: z.text }, z.id);
+    const se = z.submenu !== void 0 && z.submenu.length > 0, le = se && Q === z.id, de = z.id === u || (c == null ? void 0 : c.includes(z.id)) === true;
+    return f.jsxs("div", { className: Re.itemWrap, onMouseEnter: () => {
+      B(se ? z.id : null);
+    }, onMouseLeave: () => {
+      B(null);
+    }, children: [f.jsxs("button", { type: "button", role: "menuitem", className: we(Re.item, de && Re.selected, z.danger === true && Re.danger), disabled: z.disabled, "aria-haspopup": se ? "menu" : void 0, "aria-expanded": se ? le : void 0, onFocus: () => {
+      B(se ? z.id : null);
+    }, onClick: () => {
+      if (se) {
+        B(z.id);
         return;
       }
-    }
-  } catch {
-  }
+      d(z.id);
+    }, children: [z.icon !== void 0 && f.jsx("span", { className: Re.itemIcon, children: z.icon }), f.jsx("span", { className: Re.itemLabel, children: z.label }), de && f.jsx(Es, { className: Re.check })] }), le && z.submenu !== void 0 && f.jsx("div", { className: we(Re.submenu, w && Re.compactList), role: "menu", children: z.submenu.map((he) => f.jsxs("button", { type: "button", role: "menuitem", className: Re.item, disabled: he.disabled, onClick: () => {
+      d(he.id);
+    }, children: [he.icon !== void 0 && f.jsx("span", { className: Re.itemIcon, children: he.icon }), f.jsx("span", { className: Re.itemLabel, children: he.label })] }, he.id)) })] }, z.id);
+  }, K = n && f.jsxs("div", { ref: W, className: we(Re.list, M && Re.denseList, w && Re.compactList, oe && Re.scrollable, g && Re.portal, m === "top" && !g && Re.sideTop, C === "end" && !g && Re.alignEnd), style: g ? ie ?? K7 : void 0, role: "menu", onClick: (z) => {
+    z.stopPropagation();
+  }, children: [f.jsx("div", { className: Re.viewport, role: "presentation", children: l.map(b) }), S !== void 0 && S.length > 0 && f.jsx("div", { className: Re.footer, role: "presentation", children: S.map(b) })] });
+  return f.jsxs("span", { ref: V, className: we(Re.root, T), onPointerEnter: _ ? q : void 0, onPointerLeave: _ ? () => {
+    n && A();
+  } : void 0, children: [i, g ? K !== false && An.createPortal(K, document.body) : K] });
 }
-function SpotlightCard({
-  as: Tag = "article",
-  tilt = false,
-  border = false,
-  className = "",
-  handlers,
-  children,
-  ...rest
-}) {
-  const [active, setActive] = (0, import_react.useState)(false);
-  const ref = (0, import_react.useRef)(null);
-  const setNodeRef = (node) => {
-    ref.current = node;
-    if (node && handlers) node.__handlers = handlers;
-  };
-  const handlePointerMove = (0, import_react.useCallback)(
-    (event) => {
-      const node = ref.current;
-      if (!node || typeof node.getBoundingClientRect !== "function") return;
-      if (!active) setActive(true);
-      const rect = node.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const ry = tilt && rect.width > 0 ? `${((x / rect.width - 0.5) * 3.2).toFixed(2)}deg` : "0deg";
-      const rx = tilt && rect.height > 0 ? `${((0.5 - y / rect.height) * 2.6).toFixed(2)}deg` : "0deg";
-      updateSpotlightCssRule(`${Math.round(x)}px`, `${Math.round(y)}px`, rx, ry);
-    },
-    [active, tilt]
-  );
-  const handlePointerLeave = (0, import_react.useCallback)(() => {
-    setActive(false);
-    updateSpotlightCssRule("50%", "50%", "0deg", "0deg");
+function $u({ open: n, onClose: i, title: l, closeLabel: u = "Close", description: c, children: d, footer: h, className: C, contentClassName: m, headless: g = false }) {
+  return R.useEffect(() => {
+    if (!n) return;
+    const _ = (M) => {
+      M.key === "Escape" && i();
+    };
+    return document.addEventListener("keydown", _), () => {
+      document.removeEventListener("keydown", _);
+    };
+  }, [n, i]), n ? An.createPortal(f.jsxs("div", { className: At.root, role: "presentation", children: [f.jsx("div", { className: At.mask, "aria-hidden": "true", onClick: i }), f.jsx("div", { className: we(At.dialog, C), role: "dialog", "aria-modal": "true", "aria-label": l, children: g ? d : f.jsxs(f.Fragment, { children: [f.jsxs("div", { className: we(At.content, m), children: [f.jsxs("div", { className: At.header, children: [f.jsx("h2", { className: At.title, children: l }), f.jsx("button", { type: "button", className: At.close, "aria-label": u, onClick: i, children: f.jsx(Ru, { size: 14 }) })] }), c !== void 0 && c !== "" && f.jsx("p", { className: At.description, children: c }), d !== void 0 && f.jsx("div", { className: At.body, children: d })] }), h !== void 0 && f.jsx("div", { className: At.footer, children: h })] }) })] }), document.body) : null;
+}
+function nf({ open: n, title: i, description: l, acknowledgeLabel: u, cancelLabel: c, confirmLabel: d, acknowledged: h, disabled: C = false, onAcknowledgedChange: m, onCancel: g, onConfirm: _ }) {
+  return f.jsxs($u, { open: n, onClose: g, title: i, className: bn.confirmation, contentClassName: bn.confirmationContent, footer: f.jsxs(f.Fragment, { children: [f.jsx(ps, { variant: "outline", className: bn.modalAction, onClick: g, children: c }), f.jsx(ps, { variant: "primary", className: bn.confirmAction, disabled: C || !h, onClick: _, children: d })] }), children: [f.jsxs("div", { className: bn.warning, children: [f.jsx(bu, { size: 18, className: bn.warningIcon }), f.jsx("p", { children: l })] }), f.jsxs("label", { className: bn.acknowledgement, children: [f.jsx("input", { type: "checkbox", checked: h, disabled: C, autoFocus: true, onChange: (M) => {
+    m(M.currentTarget.checked);
+  } }), f.jsx("span", { children: u })] })] });
+}
+function of({ size: n = 24, className: i }) {
+  return f.jsx("svg", { width: n, height: n * 17.04 / 23.16, className: i, viewBox: "0 0 23.16 17.04", fill: "none", "aria-hidden": "true", children: f.jsx("path", { d: "M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z", fill: "currentColor" }) });
+}
+function lf({ size: n = 24, className: i, includeMark: l = true }) {
+  return f.jsxs("svg", { width: n * (l ? 182 : 156) / 24, height: n, className: i, viewBox: l ? "0 0 182 24" : "26 0 156 24", fill: "none", "aria-hidden": "true", children: [f.jsx("path", { d: "M68.416 18.2447H67.0501V16.1272H68.416C69.2619 16.1272 70.1166 15.9163 70.6671 15.3304C71.2181 14.7444 71.426 13.8455 71.426 12.9471C71.426 12.0487 71.2268 11.1498 70.6671 10.5643C70.1083 9.97831 69.2619 9.76744 68.416 9.76744C67.5701 9.76744 66.7154 9.97831 66.1639 10.5643C65.6129 11.1503 65.4049 12.0487 65.4049 12.9471V21.6435H63.009V7.6582H65.4049V8.54883H65.8442C65.8918 8.49393 65.9394 8.44728 65.9875 8.40064C66.5871 7.85353 67.5049 7.6582 68.4072 7.6582C69.8212 7.6582 71.2341 8.00998 72.1607 8.98662C73.0868 9.96325 73.4143 11.4632 73.4143 12.9558C73.4143 14.4485 73.0785 15.9406 72.1607 16.925C71.2424 17.9094 69.8212 18.2457 68.416 18.2457V18.2447Z", fill: "currentColor" }), f.jsx("path", { d: "M31.9551 8.03497H33.3204V10.1525H31.9551C31.1087 10.1525 30.2545 10.3633 29.7035 10.9493C29.1525 11.5353 28.945 12.4342 28.945 13.3326C28.945 14.231 29.1447 15.1294 29.7035 15.7154C30.2623 16.3014 31.1087 16.5122 31.9551 16.5122C32.8015 16.5122 33.6562 16.3014 34.2072 15.7154C34.7582 15.1294 34.9657 14.231 34.9657 13.3326V4.62842H37.3611V18.6219H34.9657V17.7313H34.5264C34.4783 17.7857 34.4307 17.8329 34.3826 17.8795C33.7835 18.4261 32.8652 18.6219 31.9629 18.6219C30.5494 18.6219 29.136 18.2707 28.2099 17.294C27.2838 16.3174 26.9563 14.817 26.9563 13.3248C26.9563 11.8327 27.2916 10.34 28.2099 9.35561C29.136 8.37898 30.5494 8.03497 31.9551 8.03497Z", fill: "currentColor" }), f.jsx("path", { d: "M49.3786 13.1431V13.9948H42.9984V12.2996H47.2305C47.1348 11.6825 46.9113 11.1043 46.5119 10.682C45.9371 10.0727 45.0503 9.85409 44.1723 9.85409C43.2943 9.85409 42.4076 10.0727 41.8328 10.682C41.258 11.2913 41.05 12.2213 41.05 13.1435C41.05 14.0658 41.2575 15.003 41.8328 15.6046C42.4076 16.2061 43.2939 16.433 44.1723 16.433C45.0508 16.433 45.9371 16.2143 46.5119 15.6046C46.5916 15.5186 46.6635 15.4248 46.7354 15.331H49.0992C48.8918 16.0657 48.5643 16.7299 48.0691 17.2454C47.111 18.2531 45.6339 18.6205 44.1723 18.6205C42.7108 18.6205 41.2337 18.2609 40.2755 17.2454C39.3174 16.2299 38.9661 14.6828 38.9661 13.1435C38.9661 11.6043 39.3096 10.0494 40.2755 9.04168C41.242 8.03396 42.7108 7.66663 44.1723 7.66663C45.6339 7.66663 47.111 8.02618 48.0691 9.04168C49.0351 10.0572 49.3786 11.6043 49.3786 13.1435V13.1431Z", fill: "currentColor" }), f.jsx("path", { d: "M61.4045 13.1431V13.9948H55.0243V12.2996H59.2564C59.1602 11.6825 58.9372 11.1043 58.5378 10.682C57.963 10.0727 57.0762 9.85409 56.1982 9.85409C55.3202 9.85409 54.4335 10.0727 53.8587 10.682C53.2839 11.2913 53.0759 12.2213 53.0759 13.1435C53.0759 14.0658 53.2834 15.003 53.8587 15.6046C54.4335 16.2061 55.3202 16.433 56.1982 16.433C57.0762 16.433 57.963 16.2143 58.5378 15.6046C58.6179 15.5186 58.6894 15.4248 58.7608 15.331H61.1251C60.9171 16.0657 60.5897 16.7299 60.0945 17.2454C59.1364 18.2531 57.6593 18.6205 56.1982 18.6205C54.7372 18.6205 53.2596 18.2609 52.3014 17.2454C51.3432 16.2299 50.9919 14.6828 50.9919 13.1435C50.9919 11.6043 51.3355 10.0494 52.3014 9.04168C53.2678 8.03396 54.7367 7.66663 56.1982 7.66663C57.6598 7.66663 59.1364 8.02618 60.0945 9.04168C61.061 10.0572 61.4045 11.6043 61.4045 13.1435V13.1431Z", fill: "currentColor" }), f.jsx("path", { d: "M80.242 18.6214C81.7035 18.6214 83.1801 18.4105 84.1383 17.809C85.0965 17.2075 85.4482 16.2931 85.4482 15.3869C85.4482 14.4807 85.1042 13.5585 84.1383 12.9647C83.1801 12.371 81.703 12.1518 80.242 12.1518C79.6186 12.1518 79.0438 12.0658 78.6366 11.8394C78.2294 11.6047 78.0778 11.2534 78.0778 10.9017C78.0778 10.5499 78.2216 10.1908 78.6366 9.9639C79.0438 9.72921 79.6749 9.65147 80.2973 9.65147C80.9198 9.65147 81.5509 9.73747 81.9591 9.9639C82.3663 10.1986 82.5179 10.5499 82.5179 10.9017H84.9531C84.9531 9.99499 84.6421 9.07327 83.7719 8.47951C82.9017 7.88576 81.5679 7.66663 80.2424 7.66663C78.9169 7.66663 77.5837 7.8775 76.713 8.47951C75.8427 9.08104 75.5308 9.99499 75.5308 10.9017C75.5308 11.8083 75.8423 12.73 76.713 13.3238C77.5832 13.9176 78.9165 14.1367 80.2424 14.1367C80.929 14.1367 81.688 14.2227 82.1428 14.4491C82.5985 14.676 82.7579 15.0351 82.7579 15.3869C82.7579 15.7387 82.5985 16.0977 82.1428 16.3246C81.688 16.5511 80.9931 16.6371 80.3066 16.6371C79.62 16.6371 78.9169 16.5511 78.4694 16.3246C78.0224 16.0982 77.8543 15.7387 77.8543 15.3869H75.0435C75.0435 16.2935 75.3865 17.2153 76.3534 17.809C77.3194 18.4028 78.7809 18.6214 80.2424 18.6214H80.242Z", fill: "currentColor" }), f.jsx("path", { d: "M97.4733 13.1431V13.9948H91.0932V12.2996H95.3252C95.23 11.6825 95.006 11.1043 94.6071 10.682C94.0313 10.0727 93.1456 9.85409 92.2666 9.85409C91.3876 9.85409 90.5018 10.0727 89.927 10.682C89.3522 11.2913 89.1452 12.2213 89.1452 13.1435C89.1452 14.0658 89.3522 15.003 89.927 15.6046C90.5018 16.2061 91.3886 16.433 92.2666 16.433C93.1446 16.433 94.0313 16.2143 94.6071 15.6046C94.6863 15.5186 94.7587 15.4248 94.8301 15.331H97.1935C96.9855 16.0657 96.6585 16.7299 96.1639 17.2454C95.2057 18.2531 93.7281 18.6205 92.2666 18.6205C90.805 18.6205 89.3284 18.2609 88.3703 17.2454C87.4121 16.2299 87.0613 14.6828 87.0613 13.1435C87.0613 11.6043 87.4043 10.0494 88.3703 9.04168C89.3367 8.03396 90.806 7.66663 92.2666 7.66663C93.7272 7.66663 95.2057 8.02618 96.1639 9.04168C97.1298 10.0572 97.4729 11.6043 97.4729 13.1435L97.4733 13.1431Z", fill: "currentColor" }), f.jsx("path", { d: "M109.499 13.1431V13.9948H103.119V12.2996H107.351C107.256 11.6825 107.032 11.1043 106.632 10.682C106.057 10.0727 105.172 9.85409 104.293 9.85409C103.414 9.85409 102.528 10.0727 101.953 10.682C101.378 11.2913 101.17 12.2213 101.17 13.1435C101.17 14.0658 101.378 15.003 101.953 15.6046C102.528 16.2061 103.415 16.433 104.293 16.433C105.171 16.433 106.057 16.2143 106.632 15.6046C106.712 15.5186 106.784 15.4248 106.856 15.331H109.22C109.012 16.0657 108.685 16.7299 108.19 17.2454C107.231 18.2531 105.754 18.6205 104.293 18.6205C102.831 18.6205 101.355 18.2609 100.396 17.2454C99.4382 16.2299 99.0864 14.6828 99.0864 13.1435C99.0864 11.6043 99.4295 10.0494 100.396 9.04168C101.362 8.03396 102.832 7.66663 104.293 7.66663C105.754 7.66663 107.231 8.02618 108.19 9.04168C109.156 10.0572 109.499 11.6043 109.499 13.1435V13.1431Z", fill: "currentColor" }), f.jsx("path", { d: "M113.5 4.62817H111.104V18.6217H113.5V4.62817Z", fill: "currentColor" }), f.jsx("path", { d: "M117.589 12.8154L121.517 18.6208H118.554L114.625 12.8154L118.554 8.15088H121.517L117.589 12.8154Z", fill: "currentColor" }), f.jsx("g", { clipPath: "url(#dsh-wordmark-whale-clip)", children: f.jsx("path", { d: "M23.0584 4.95203C22.8129 4.83203 22.7074 5.06103 22.5639 5.17704C22.5149 5.21454 22.4734 5.26354 22.4319 5.30854C22.0734 5.69155 21.6543 5.94306 21.1073 5.91306C20.3073 5.86806 19.6243 6.11957 19.0203 6.73158C18.8918 5.97706 18.4652 5.52655 17.8162 5.23754C17.4767 5.08753 17.1332 4.93703 16.8952 4.61052C16.7292 4.37801 16.6837 4.11901 16.6007 3.8635C16.5477 3.70949 16.4952 3.55199 16.3177 3.52549C16.1252 3.49549 16.0497 3.65699 15.9742 3.792C15.6722 4.34401 15.5552 4.95203 15.5667 5.56805C15.5932 6.95359 16.1782 8.05712 17.3407 8.84215C17.4727 8.93215 17.5067 9.02215 17.4652 9.15366C17.3857 9.42416 17.2917 9.68667 17.2087 9.95718C17.1557 10.1297 17.0767 10.1677 16.8917 10.0922C16.2537 9.82568 15.7027 9.43117 15.2156 8.95465C14.3891 8.15513 13.6416 7.2726 12.7096 6.58158C12.4906 6.42007 12.2716 6.27007 12.045 6.12707C11.094 5.20354 12.1696 4.44502 12.4186 4.35501C12.6791 4.26101 12.5091 3.938 11.6675 3.942C10.826 3.9455 10.056 4.22751 9.07446 4.60302C8.93096 4.65952 8.77995 4.70052 8.62545 4.73452C7.73492 4.56552 6.80989 4.52802 5.84386 4.63702C4.02481 4.83953 2.57177 5.69955 1.50373 7.1676C0.220694 8.93215 -0.0813148 10.9372 0.288196 13.0283C0.676708 15.2323 1.80174 17.0569 3.53029 18.4834C5.32285 19.9625 7.38741 20.6875 9.74298 20.5485C11.1735 20.466 12.7661 20.2745 14.5626 18.7539C15.0156 18.9795 15.4912 19.0695 16.2797 19.137C16.8872 19.1935 17.4722 19.107 17.9252 19.013C18.6347 18.8629 18.5857 18.2059 18.3292 18.0854C16.2497 17.1169 16.7062 17.5109 16.2912 17.1919C17.3477 15.9419 18.9618 13.7198 19.4598 10.6942C19.5088 10.3602 19.5713 9.88968 19.5638 9.61917C19.5598 9.45417 19.5978 9.39016 19.7863 9.37116C20.3073 9.31116 20.8128 9.16866 21.2773 8.91315C22.6249 8.17713 23.1684 6.96809 23.2964 5.51905C23.3154 5.29754 23.2924 5.06853 23.0584 4.95203ZM11.3165 17.9954C9.30097 16.4109 8.32344 15.8894 7.91992 15.9119C7.54241 15.9344 7.61042 16.3664 7.69342 16.6479C7.78042 16.9259 7.89342 17.1174 8.05193 17.3614C8.16143 17.5229 8.23694 17.7629 7.94243 17.9434C7.29341 18.3449 6.16487 17.8084 6.11187 17.7819C4.79833 17.0084 3.7003 15.9874 2.92628 14.5908C2.17875 13.2468 1.74474 11.8047 1.67324 10.2657C1.65424 9.89418 1.76374 9.76267 2.13375 9.69517C2.62077 9.60517 3.12278 9.58617 3.6093 9.65767C5.66636 9.95818 7.41741 10.8777 8.88545 12.3348C9.72348 13.1643 10.3575 14.1558 11.0105 15.1243C11.705 16.1529 12.4521 17.1329 13.4036 17.9364C13.7396 18.2179 14.0076 18.4319 14.2641 18.5899C13.4906 18.6764 12.1996 18.6949 11.3165 17.9964V17.9954ZM12.2826 11.7817C12.2826 11.6167 12.4146 11.4852 12.5806 11.4852C12.6181 11.4852 12.6521 11.4927 12.6826 11.5037C12.7241 11.5187 12.7621 11.5412 12.7921 11.5752C12.8451 11.6277 12.8751 11.7027 12.8751 11.7817C12.8751 11.9467 12.7431 12.0782 12.5771 12.0782C12.4111 12.0782 12.2826 11.9467 12.2826 11.7817ZM15.2831 13.3208C15.0906 13.3998 14.8981 13.4673 14.7131 13.4748C14.4261 13.4898 14.1131 13.3733 13.9431 13.2308C13.6791 13.0093 13.4901 12.8853 13.4111 12.4988C13.3771 12.3338 13.3961 12.0782 13.4261 11.9317C13.4941 11.6162 13.4186 11.4137 13.1961 11.2297C13.0151 11.0797 12.7846 11.0382 12.5316 11.0382C12.4371 11.0382 12.3506 10.9967 12.2861 10.9632C12.1806 10.9107 12.0936 10.7792 12.1766 10.6177C12.2031 10.5652 12.3316 10.4377 12.3616 10.4152C12.7051 10.2197 13.1011 10.2837 13.4676 10.4302C13.8071 10.5692 14.0641 10.8242 14.4336 11.1847C14.8111 11.6202 14.8791 11.7402 15.0941 12.0672C15.2641 12.3228 15.4186 12.5853 15.5247 12.8858C15.5887 13.0733 15.5057 13.2268 15.2831 13.3208Z", fill: "currentColor" }) }), f.jsx("rect", { x: "129.348", y: "5.5", width: "52", height: "14", rx: "2", fill: "currentColor" }), f.jsxs("g", { clipPath: "url(#dsh-wordmark-badge-clip)", children: [f.jsx("path", { d: "M132.848 8.93205H134.08V16.137H132.848V8.93205ZM136.5 8.93205H137.732V16.137H136.5V8.93205ZM133.365 13.024V11.99H137.193V13.024H133.365Z", fill: "var(--dsw-alias-label-primary-inverted)" }), f.jsx("path", { d: "M140.397 14.432L140.672 13.453H143.202L143.532 14.432H140.397ZM140.287 16.137H139.055L141.277 8.93205H142.201L142.146 9.74605L140.947 13.915H140.969L140.287 16.137ZM145.039 16.137H143.741L143.07 13.948L143.081 13.937L141.871 9.74605L141.926 8.93205H142.817L145.039 16.137Z", fill: "var(--dsw-alias-label-primary-inverted)" }), f.jsx("path", { d: "M146.846 8.93205H149.068C149.852 8.93205 150.443 9.11538 150.839 9.48205C151.235 9.84138 151.433 10.3327 151.433 10.956C151.433 11.22 151.396 11.4657 151.323 11.693C151.249 11.9204 151.125 12.1257 150.949 12.309C150.773 12.4924 150.531 12.65 150.223 12.782C149.922 12.9067 149.541 13.0057 149.079 13.079V13.321H146.846V12.639L148.023 12.485C148.631 12.4044 149.09 12.298 149.398 12.166C149.706 12.034 149.915 11.8764 150.025 11.693C150.135 11.5024 150.19 11.2934 150.19 11.066C150.19 10.6994 150.083 10.417 149.871 10.219C149.658 10.021 149.324 9.92205 148.87 9.92205H146.846V8.93205ZM146.395 8.93205H147.627V16.137H146.395V8.93205ZM151.917 16.093V16.137H150.366L149.024 14.322C148.87 14.1094 148.73 13.9407 148.606 13.816C148.481 13.684 148.345 13.5887 148.199 13.53C148.052 13.464 147.872 13.42 147.66 13.398C147.447 13.3687 147.176 13.3504 146.846 13.343V13.145H149.079C149.233 13.211 149.368 13.2844 149.486 13.365C149.61 13.4457 149.735 13.5447 149.86 13.662C149.992 13.7794 150.138 13.937 150.3 14.135L151.917 16.093Z", fill: "var(--dsw-alias-label-primary-inverted)" }), f.jsx("path", { d: "M153.58 9.57005L153.591 8.93205H154.46L157.584 15.51V16.137H156.704L153.58 9.57005ZM158.024 16.137H156.968L156.88 8.93205H158.024V16.137ZM154.24 16.137H153.096V8.93205H154.152L154.24 16.137Z", fill: "var(--dsw-alias-label-primary-inverted)" }), f.jsx("path", { d: "M159.963 8.93205H161.206V16.137H159.963V8.93205ZM160.095 9.96605V8.93205H164.858V9.96605H160.095ZM160.095 16.137V15.103H164.902V16.137H160.095ZM160.095 13.013V11.99H164.374V13.013H160.095Z", fill: "var(--dsw-alias-label-primary-inverted)" }), f.jsx("path", { d: "M169.052 15.257C169.543 15.257 169.895 15.1654 170.108 14.982C170.328 14.7987 170.438 14.5457 170.438 14.223C170.438 14.047 170.405 13.8967 170.339 13.772C170.273 13.6474 170.152 13.5337 169.976 13.431C169.807 13.321 169.558 13.2147 169.228 13.112L168.491 12.881C167.846 12.6757 167.38 12.4044 167.094 12.067C166.808 11.7297 166.665 11.3007 166.665 10.78C166.665 10.428 166.76 10.1017 166.951 9.80105C167.142 9.50038 167.428 9.25838 167.809 9.07505C168.19 8.89172 168.663 8.80005 169.228 8.80005C169.631 8.80005 169.998 8.82938 170.328 8.88805C170.665 8.93938 171.039 9.01638 171.45 9.11905L171.274 10.175C170.834 10.0504 170.442 9.96238 170.097 9.91105C169.76 9.85238 169.463 9.82305 169.206 9.82305C168.737 9.82305 168.403 9.90738 168.205 10.076C168.007 10.2374 167.908 10.439 167.908 10.681C167.908 10.857 167.941 11.0147 168.007 11.154C168.073 11.286 168.19 11.407 168.359 11.517C168.535 11.627 168.784 11.7334 169.107 11.836L169.866 12.078C170.526 12.276 170.995 12.5327 171.274 12.848C171.553 13.156 171.692 13.585 171.692 14.135C171.692 14.5604 171.589 14.9344 171.384 15.257C171.179 15.5797 170.878 15.8327 170.482 16.016C170.093 16.1994 169.609 16.291 169.03 16.291C168.627 16.291 168.212 16.247 167.787 16.159C167.362 16.071 166.9 15.9427 166.401 15.774L166.665 14.718C167.156 14.894 167.6 15.0297 167.996 15.125C168.399 15.213 168.751 15.257 169.052 15.257Z", fill: "var(--dsw-alias-label-primary-inverted)" }), f.jsx("path", { d: "M175.809 15.257C176.3 15.257 176.652 15.1654 176.865 14.982C177.085 14.7987 177.195 14.5457 177.195 14.223C177.195 14.047 177.162 13.8967 177.096 13.772C177.03 13.6474 176.909 13.5337 176.733 13.431C176.564 13.321 176.315 13.2147 175.985 13.112L175.248 12.881C174.603 12.6757 174.137 12.4044 173.851 12.067C173.565 11.7297 173.422 11.3007 173.422 10.78C173.422 10.428 173.517 10.1017 173.708 9.80105C173.899 9.50038 174.185 9.25838 174.566 9.07505C174.947 8.89172 175.42 8.80005 175.985 8.80005C176.388 8.80005 176.755 8.82938 177.085 8.88805C177.422 8.93938 177.796 9.01638 178.207 9.11905L178.031 10.175C177.591 10.0504 177.199 9.96238 176.854 9.91105C176.517 9.85238 176.22 9.82305 175.963 9.82305C175.494 9.82305 175.16 9.90738 174.962 10.076C174.764 10.2374 174.665 10.439 174.665 10.681C174.665 10.857 174.698 11.0147 174.764 11.154C174.83 11.286 174.947 11.407 175.116 11.517C175.292 11.627 175.541 11.7334 175.864 11.836L176.623 12.078C177.283 12.276 177.752 12.5327 178.031 12.848C178.31 13.156 178.449 13.585 178.449 14.135C178.449 14.5604 178.346 14.9344 178.141 15.257C177.936 15.5797 177.635 15.8327 177.239 16.016C176.85 16.1994 176.366 16.291 175.787 16.291C175.384 16.291 174.969 16.247 174.544 16.159C174.119 16.071 173.657 15.9427 173.158 15.774L173.422 14.718C173.913 14.894 174.357 15.0297 174.753 15.125C175.156 15.213 175.508 15.257 175.809 15.257Z", fill: "var(--dsw-alias-label-primary-inverted)" })] }), f.jsxs("defs", { children: [f.jsx("clipPath", { id: "dsh-wordmark-whale-clip", children: f.jsx("rect", { width: "23.16", height: "17.0435", fill: "white", transform: "translate(0.141602 3.52185)" }) }), f.jsx("clipPath", { id: "dsh-wordmark-badge-clip", children: f.jsx("rect", { width: "46", height: "14", fill: "white", transform: "translate(132.348 5.5)" }) })] })] });
+}
+function sf({ label: n, side: i = "right", delayMs: l = 0, disabled: u = false, maxWidth: c, children: d }) {
+  const h = R.useRef(null), C = d.props?.ref, m = R.useCallback((q) => {
+    h.current = q, typeof C == "function" ? C(q) : C != null && (C.current = q);
+  }, [C]), [g, _] = R.useState(null), [M, w] = R.useState(i), L = R.useRef(null), S = g === null ? null : typeof n == "function" ? n() : n, T = g === null ? 0 : M === "right" ? g.top + (g.bottom - g.top) / 2 : M === "top" ? g.top - 8 : g.bottom + 8, V = 12;
+  R.useLayoutEffect(() => {
+    if (g === null) return;
+    const q = () => {
+      const oe = L.current;
+      if (oe === null) return;
+      oe.style.left = `${g.x}px`;
+      const b = oe.getBoundingClientRect();
+      let K = 0;
+      if (b.right > window.innerWidth - V && (K = window.innerWidth - V - b.right), b.left + K < V && (K = V - b.left), oe.style.left = `${g.x + K}px`, i === "right") return;
+      const z = g.bottom + 8 + b.height <= window.innerHeight - V, se = g.top - 8 - b.height >= V;
+      M === "bottom" && !z && se && w("top"), M === "top" && !se && z && w("bottom");
+    };
+    return q(), window.addEventListener("resize", q), () => {
+      window.removeEventListener("resize", q);
+    };
+  }, [M, g, S, i]);
+  const W = R.useRef(null), Q = R.useRef({ hover: false, focus: false }), B = R.useCallback(() => {
+    W.current !== null && (clearTimeout(W.current), W.current = null);
   }, []);
-  const classes = [
-    className,
-    "bits-spotlight",
-    tilt ? "bits-tilt" : "",
-    border ? "bits-border" : ""
-  ].filter(Boolean).join(" ");
-  return /* @__PURE__ */ import_react.default.createElement(
-    Tag,
-    {
-      ref: setNodeRef,
-      className: classes,
-      "data-spotlight": active ? "active" : void 0,
-      onPointerMove: handlePointerMove,
-      onPointerLeave: handlePointerLeave,
-      ...rest
-    },
-    children
-  );
-}
-function ShinyText({ as: Tag = "p", className = "", children, ...rest }) {
-  const classes = ["eyebrow", "bits-shiny", className].filter(Boolean).join(" ");
-  return /* @__PURE__ */ import_react.default.createElement(Tag, { className: classes, ...rest }, children);
-}
-function GradientText({ as: Tag = "h1", className = "", children, ...rest }) {
-  const classes = ["bits-gradient-text", className].filter(Boolean).join(" ");
-  return /* @__PURE__ */ import_react.default.createElement(Tag, { className: classes, ...rest }, children);
-}
-function HintPopover({
-  label = "?",
-  ariaLabel,
-  chip = false,
-  warn = false,
-  bubbleId,
-  children
-}) {
-  const [open, setOpen] = (0, import_react.useState)(false);
-  const ref = (0, import_react.useRef)(null);
-  (0, import_react.useEffect)(() => {
-    if (!open || typeof document === "undefined") return void 0;
-    const onDocClick = (event) => {
-      if (ref.current && typeof ref.current.contains === "function" && !ref.current.contains(event.target)) {
-        setOpen(false);
-      }
-    };
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("click", onDocClick);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("click", onDocClick);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-  const summaryClass = chip ? `hint-chip${warn ? " warn" : ""}` : "hint-trigger";
-  return /* @__PURE__ */ import_react.default.createElement(
-    "details",
-    {
-      ref,
-      className: "hint-popover",
-      open,
-      onToggle: (event) => setOpen(event.currentTarget.open)
-    },
-    /* @__PURE__ */ import_react.default.createElement("summary", { className: summaryClass, "aria-label": ariaLabel }, label),
-    /* @__PURE__ */ import_react.default.createElement("div", { id: bubbleId, className: "hint-bubble" }, children)
-  );
-}
-function TooltipBadge({ label, tip, className = "hint-badge" }) {
-  return /* @__PURE__ */ import_react.default.createElement("span", { className, tabIndex: 0, "data-tip": tip }, label);
+  R.useEffect(() => (u && (B(), Q.current = { hover: false, focus: false }, _(null)), B), [B, u]);
+  const ie = () => {
+    if (u) return;
+    const q = h.current;
+    if (q === null) return;
+    const oe = q.getBoundingClientRect();
+    w(i), _({ x: i === "right" ? oe.right + 10 : oe.left + oe.width / 2, top: oe.top, bottom: oe.bottom });
+  }, Z = () => {
+    if (B(), l <= 0) {
+      ie();
+      return;
+    }
+    W.current = setTimeout(() => {
+      W.current = null, ie();
+    }, l);
+  }, A = () => {
+    B(), !Q.current.hover && !Q.current.focus && _(null);
+  };
+  return f.jsxs(f.Fragment, { children: [R.cloneElement(d, { ref: m, onMouseEnter: (q) => {
+    var oe, b;
+    (b = (oe = d.props).onMouseEnter) == null || b.call(oe, q), Q.current.hover = true, Z();
+  }, onMouseLeave: (q) => {
+    var oe, b;
+    (b = (oe = d.props).onMouseLeave) == null || b.call(oe, q), Q.current.hover = false, B(), _(null);
+  }, onFocus: (q) => {
+    var oe, b;
+    (b = (oe = d.props).onFocus) == null || b.call(oe, q), Q.current.focus = true, B(), ie();
+  }, onBlur: (q) => {
+    var oe, b;
+    (b = (oe = d.props).onBlur) == null || b.call(oe, q), Q.current.focus = false, A();
+  } }), g !== null && f.jsx("span", { ref: L, className: $c.bubble, "data-side": M, style: { left: g.x, top: T, ...c === void 0 ? {} : { maxWidth: c } }, role: "tooltip", children: S })] });
 }
 
 // web/App.jsx
@@ -24119,54 +24556,117 @@ var CAPABILITY_LABELS = {
   "skills.list": "\u67E5\u770B\u53EF\u7528\u6280\u80FD",
   "skills.read": "\u8BFB\u53D6\u6307\u5B9A\u6280\u80FD"
 };
-var ROLE_LABELS = {
-  user: "\u4F60",
-  assistant: "\u52A9\u624B",
-  system: "\u7CFB\u7EDF",
-  toolResult: "\u5DE5\u5177\u7ED3\u679C",
-  custom: "\u5BBF\u4E3B\u8BB0\u5F55"
-};
+var SHIELD_OUTLINE = "M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z";
+function PermissionGlyph({ value }) {
+  if (value === "read-only" || value === "standard") {
+    return /* @__PURE__ */ import_react.default.createElement("svg", { width: "16", height: "16", viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ import_react.default.createElement(
+      "path",
+      {
+        d: SHIELD_OUTLINE,
+        stroke: "currentColor",
+        strokeWidth: "1.31831",
+        strokeLinejoin: "round"
+      }
+    ), /* @__PURE__ */ import_react.default.createElement(
+      "path",
+      {
+        d: "M12.1654 5.7552L8.9447 9.41475C8.73044 9.65816 8.53628 9.8804 8.35774 10.0423C8.1713 10.2114 7.94235 10.3717 7.64016 10.4254C7.48207 10.4535 7.32 10.4552 7.16151 10.4294C6.85843 10.3801 6.62728 10.2223 6.43836 10.0559C6.25752 9.89653 6.06037 9.67732 5.84264 9.43705L4.72925 8.20897L5.63557 7.38707L6.74897 8.61594C6.98603 8.87755 7.12974 9.03533 7.24673 9.13839C7.31033 9.19443 7.34485 9.21476 7.35823 9.22122C7.38068 9.22484 7.40352 9.22515 7.42593 9.22122C7.40522 9.22502 7.42893 9.23294 7.53583 9.136C7.65132 9.03126 7.79316 8.87139 8.02643 8.60638L11.2479 4.94763L12.1654 5.7552Z",
+        fill: "currentColor"
+      }
+    ));
+  }
+  if (value === "danger-full-access") {
+    return /* @__PURE__ */ import_react.default.createElement("svg", { width: "16", height: "16", viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ import_react.default.createElement(
+      "path",
+      {
+        d: SHIELD_OUTLINE,
+        stroke: "currentColor",
+        strokeWidth: "1.31831",
+        strokeLinejoin: "round"
+      }
+    ), /* @__PURE__ */ import_react.default.createElement("path", { d: "M9.10094 4.5V8.75939H7.59888V4.5H9.10094Z", fill: "currentColor" }), /* @__PURE__ */ import_react.default.createElement("path", { d: "M9.10094 9.8114V11.5H7.59888V9.8114H9.10094Z", fill: "currentColor" }));
+  }
+  return /* @__PURE__ */ import_react.default.createElement("svg", { width: "16", height: "16", viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ import_react.default.createElement(
+    "path",
+    {
+      d: "M8.08887 0.251709C8.20479 0.23085 8.32486 0.241168 8.43652 0.282959L15.0215 2.75171C15.2787 2.84819 15.4492 3.09414 15.4492 3.3689V7.0105C15.4492 7.10986 15.4441 7.2081 15.4414 7.30542C15.0285 7.07175 14.5905 6.87695 14.1309 6.73022V3.82495L8.20508 1.60327L2.2793 3.82495V7.0105C2.27936 9.7171 3.4745 11.5379 5.02734 12.7947C5.01025 12.9942 5 13.1962 5 13.4001C5.00001 13.7617 5.02722 14.1169 5.08008 14.4636C2.91555 13.0393 0.961014 10.752 0.960938 7.0105V3.3689C0.960938 3.09417 1.13146 2.84821 1.38867 2.75171L7.97461 0.282959L8.08887 0.251709Z",
+      fill: "currentColor"
+    }
+  ), /* @__PURE__ */ import_react.default.createElement("path", { d: "M11.3525 5.64688V6.85688H5V5.64688H11.3525Z", fill: "currentColor" }), /* @__PURE__ */ import_react.default.createElement("path", { d: "M9.5824 8.29376V9.50376H5V8.29376H9.5824Z", fill: "currentColor" }), /* @__PURE__ */ import_react.default.createElement(
+    "path",
+    {
+      d: "M14.6647 15.6852H10.0338C10.3878 15.3751 10.7567 15.0517 11.0772 14.7706C11.2531 14.6164 11.4144 14.4746 11.5511 14.3547H14.6647V15.6852Z",
+      fill: "currentColor"
+    }
+  ), /* @__PURE__ */ import_react.default.createElement(
+    "path",
+    {
+      d: "M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z",
+      fill: "currentColor"
+    }
+  ));
+}
+function HeroGlow({ className }) {
+  return /* @__PURE__ */ import_react.default.createElement("svg", { className, viewBox: "0 0 1051 468", fill: "none", "aria-hidden": "true" }, /* @__PURE__ */ import_react.default.createElement("defs", null, /* @__PURE__ */ import_react.default.createElement(
+    "filter",
+    {
+      id: "dsh-empty-glow",
+      x: "0",
+      y: "0",
+      width: "1051",
+      height: "468",
+      filterUnits: "userSpaceOnUse",
+      colorInterpolationFilters: "sRGB"
+    },
+    /* @__PURE__ */ import_react.default.createElement("feFlood", { floodOpacity: "0", result: "BackgroundImageFix" }),
+    /* @__PURE__ */ import_react.default.createElement("feBlend", { mode: "normal", in: "SourceGraphic", in2: "BackgroundImageFix", result: "shape" }),
+    /* @__PURE__ */ import_react.default.createElement("feGaussianBlur", { stdDeviation: "50", result: "effect1_foregroundBlur" })
+  )), /* @__PURE__ */ import_react.default.createElement("g", { filter: "url(#dsh-empty-glow)" }, /* @__PURE__ */ import_react.default.createElement("ellipse", { cx: "525.5", cy: "234", rx: "425.5", ry: "134", fill: "#6187D8", fillOpacity: "0.08" })));
+}
 var PERMISSION_PRESETS = [
   {
     id: "standard",
-    label: "\u6309\u9700\u5BA1\u6279",
-    enLabel: "Standard",
+    label: "Read Only",
+    zhLabel: "\u53EA\u8BFB\u4E0E\u6309\u9700\u5BA1\u6279",
     desc: "\u53EA\u8BFB\u64CD\u4F5C\u76F4\u63A5\u6267\u884C\uFF1B\u6587\u4EF6\u5199\u5165\u3001\u4FEE\u6539\u3001\u6784\u5EFA\u4E0E\u5916\u90E8\u5DE5\u5177\u9700\u6BCF\u6B21\u6216\u6309\u4EFB\u52A1\u660E\u786E\u6388\u6743\u3002"
   },
   {
     id: "workspace-write",
-    label: "\u5DE5\u4F5C\u533A\u8BFB\u5199",
-    enLabel: "Workspace Write",
+    label: "Workspace Write",
+    zhLabel: "\u5DE5\u4F5C\u533A\u8BFB\u5199",
     desc: "\u5F53\u524D\u5DE5\u4F5C\u533A\u5185\u6587\u4EF6\u8BFB\u5199\u4F18\u5148\u4F7F\u7528\u4EFB\u52A1\u6388\u6743\uFF0C\u8DE8\u76EE\u5F55\u6216\u5916\u90E8\u547D\u4EE4\u4ECD\u9700\u5BA1\u6279\u3002"
   },
   {
     id: "danger-full-access",
-    label: "\u5B8C\u5168\u8BBF\u95EE",
-    enLabel: "Full access",
+    label: "Full access",
+    zhLabel: "\u5B8C\u5168\u8BBF\u95EE",
     desc: "\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5141\u8BB8\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF1B\u4EC5\u5EFA\u8BAE\u5728\u5B8C\u5168\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u542F\u7528\u3002"
   }
 ];
-var STARTER_PROMPTS = [
+var AGENT_PRESETS = [
   {
-    title: "\u{1F4C4} \u8BFB\u53D6\u5DE5\u4F5C\u533A\u8BF4\u660E",
-    desc: "\u8BFB\u53D6 README.md \u5E76\u7528\u4E00\u53E5\u8BDD\u6982\u62EC\u5F53\u524D\u9879\u76EE",
-    prompt: "\u8BFB\u53D6\u5F53\u524D\u5DE5\u4F5C\u533A\u7684 README.md\uFF0C\u5E76\u7528\u4E00\u53E5\u8BDD\u603B\u7ED3\u9879\u76EE\u5185\u5BB9\u3002"
+    id: "code",
+    name: "PTC \u6A21\u5F0F",
+    badge: "\u5185\u7F6E \xB7 \u9ED8\u8BA4",
+    desc: "\u901A\u8FC7 Luau CodeMode \u5448\u73B0\u53D7\u63A7\u80FD\u529B\uFF0C\u8BA9\u6A21\u578B\u7528\u4EE3\u7801\u5355\u5143\u7EC4\u5408\u591A\u6B65\u64CD\u4F5C\u5E76\u7EDF\u4E00\u7ECF\u8FC7\u6743\u9650\u4E0E\u9884\u7B97\u8FB9\u754C\u3002"
   },
   {
-    title: "\u270D\uFE0F \u521B\u5EFA\u5E76\u9A8C\u8BC1\u6587\u4EF6",
-    desc: "\u5199\u5165\u4E00\u4EFD\u6D4B\u8BD5\u7B14\u8BB0\u5E76\u8BFB\u56DE\u6821\u9A8C\u5185\u5BB9",
-    prompt: "\u5728\u5F53\u524D\u5DE5\u4F5C\u533A\u521B\u5EFA hello-cayw.txt\uFF0C\u5199\u5165 Hello from CAYW\uFF0C\u518D\u8BFB\u53D6\u786E\u8BA4\u5185\u5BB9\u3002"
+    id: "standard",
+    name: "\u6807\u51C6\u6A21\u5F0F",
+    badge: "\u5185\u7F6E",
+    desc: "\u5B8C\u6574\u7F16\u7801 Agent\uFF0C\u652F\u6301\u6587\u4EF6\u8BFB\u5199\u3001\u68C0\u7D22\u3001Git \u68C0\u89C6\u3001\u9884\u8BBE\u6784\u5EFA\u6D4B\u8BD5\u4E0E\u5BBF\u4E3B\u8FDE\u63A5\u5DE5\u5177\u3002"
   },
   {
-    title: "\u{1F50D} \u67E5\u770B\u5DE5\u4F5C\u533A\u6587\u4EF6\u5217\u8868",
-    desc: "\u5217\u51FA\u5F53\u524D\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\u7684\u5168\u90E8\u6587\u4EF6",
-    prompt: "\u5217\u51FA\u5F53\u524D\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\u7684\u6240\u6709\u6587\u4EF6\uFF0C\u5E76\u7B80\u8981\u8BF4\u660E\u5404\u81EA\u7528\u9014\u3002"
+    id: "strongflow",
+    name: "StrongFlow \u5F3A\u6D41\u7A0B",
+    badge: "\u63D2\u4EF6",
+    desc: "\u4E3A\u590D\u6742\u4EFB\u52A1\u63D0\u4F9B\u9636\u6BB5\u95E8\u7981\u4E0E\u68C0\u67E5\u70B9\uFF1B\u63D2\u4EF6\u5378\u8F7D\u540E\u5DF2\u7ED1\u5B9A\u4F1A\u8BDD\u4FDD\u6301\u51BB\u7ED3\uFF0C\u652F\u6301\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929\u3002"
   }
 ];
 var BUILTIN_CAPABILITY_GROUPS = [
   {
     title: "\u6587\u4EF6\u4E0E\u76EE\u5F55\uFF08fs.*\uFF09",
-    badge: "\u5199\u64CD\u4F5C\u9700\u6388\u6743",
+    badge: "\u5DF2\u6302\u8F7D",
     items: [
       ["fs.read", "\u8BFB\u53D6\u6587\u4EF6\u5185\u5BB9\u4E0E SHA-256"],
       ["fs.write", "\u539F\u5B50\u521B\u5EFA\u6216\u51ED\u6458\u8981\u8986\u76D6\u6587\u4EF6"],
@@ -24176,7 +24676,7 @@ var BUILTIN_CAPABILITY_GROUPS = [
   },
   {
     title: "\u4EE3\u7801\u68C0\u7D22\u4E0E\u8BED\u6CD5\uFF08fs / code\uFF09",
-    badge: "\u53D7\u63A7\u53EA\u8BFB",
+    badge: "\u5DF2\u6302\u8F7D",
     items: [
       ["fs.grep / fs.glob", "\u5DE5\u4F5C\u533A\u6709\u754C\u6587\u672C\u68C0\u7D22\u4E0E\u8DEF\u5F84\u5339\u914D"],
       ["code.outline", "\u63D0\u53D6\u6E90\u7801\u7ED3\u6784\u4E0E\u7B26\u53F7\u5927\u7EB2"],
@@ -24185,7 +24685,7 @@ var BUILTIN_CAPABILITY_GROUPS = [
   },
   {
     title: "Git \u7248\u672C\u63A7\u5236\uFF08git.*\uFF09",
-    badge: "\u53EA\u8BFB\u68C0\u89C6",
+    badge: "\u5DF2\u6302\u8F7D",
     items: [
       ["git.status", "\u67E5\u770B\u5DE5\u4F5C\u533A\u5F53\u524D\u53D8\u66F4\u72B6\u6001"],
       ["git.diff", "\u67E5\u770B\u672A\u63D0\u4EA4\u6216\u6307\u5B9A\u8303\u56F4\u7684\u4EE3\u7801\u5DEE\u5F02"],
@@ -24194,64 +24694,52 @@ var BUILTIN_CAPABILITY_GROUPS = [
   },
   {
     title: "\u9884\u8BBE\u6784\u5EFA\u4E0E\u6D4B\u8BD5\uFF08build / test\uFF09",
-    badge: "\u6267\u884C\u9700\u6388\u6743",
+    badge: "\u5DF2\u6302\u8F7D",
     items: [
       ["build.run", "\u8FD0\u884C\u5BBF\u4E3B\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1"],
       ["test.run", "\u8FD0\u884C\u5BBF\u4E3B\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1"]
     ]
   }
 ];
-var OPTIONAL_PLUGIN_CATALOG = [
-  {
-    name: "StrongFlow",
-    role: "\u5F3A\u6D41\u7A0B\u7F16\u6392\u63D2\u4EF6",
-    desc: "\u4E3A\u590D\u6742\u4EFB\u52A1\u63D0\u4F9B\u9636\u6BB5\u95E8\u7981\u4E0E\u8BA1\u5212\u68C0\u67E5\u70B9\uFF1B\u5378\u8F7D\u540E\u5DF2\u7ED1\u5B9A\u4F1A\u8BDD\u4FDD\u6301\u51BB\u7ED3\uFF0C\u652F\u6301\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929\u3002"
-  },
-  {
-    name: "JEv",
-    role: "\u6267\u884C\u9A8C\u8BC1\u63D2\u4EF6",
-    desc: "\u5BF9\u5173\u952E\u6B65\u9AA4\u4EA7\u7269\u4E0E\u65AD\u8A00\u8FDB\u884C\u72EC\u7ACB\u6838\u9A8C\uFF0C\u4E0D\u76F4\u63A5\u8BFB\u5199 Core \u6570\u636E\u5E93\u3002"
-  },
-  {
-    name: "Fusion",
-    role: "\u591A\u8DEF\u63A2\u7D22\u4E0E\u878D\u5408\u63D2\u4EF6",
-    desc: "\u5728\u53D7\u63A7\u9884\u7B97\u5185\u5BF9\u6BD4\u5019\u9009\u65B9\u6848\u5E76\u6C47\u603B\u9A8C\u8BC1\u8BC1\u636E\u3002"
-  },
-  {
-    name: "Observer",
-    role: "\u8FD0\u884C\u8F68\u8FF9\u89C2\u6D4B\u63D2\u4EF6",
-    desc: "\u8BA2\u9605\u4F1A\u8BDD\u4E8B\u4EF6\u6D41\u8FDB\u884C\u53EA\u8BFB\u5BA1\u8BA1\u4E0E\u8BCA\u65AD\u7EDF\u8BA1\uFF0C\u4E0D\u5E72\u9884\u666E\u901A\u804A\u5929\u3002"
-  }
-];
-var QUICK_WORKSPACES = [
-  ["/Volumes/ORICO/CAYW", "CAYW \u4E3B\u4ED3\u5E93"],
-  ["/Volumes/ORICO/CAYW-tui", "CAYW TUI \u5206\u652F"],
-  ["/Volumes/ORICO/CAYW-webui", "CAYW WebUI \u5206\u652F"],
-  ["/tmp/cayw-demo-project", "\u65B0\u5EFA\u6F14\u793A\u5DE5\u4F5C\u533A (/tmp)"]
-];
 function renderInlineTokens(text) {
   const parts = String(text ?? "").split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
   return parts.map((part, idx) => {
     if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
-      return /* @__PURE__ */ import_react2.default.createElement("code", { key: idx, className: "inline-code" }, part.slice(1, -1));
+      return /* @__PURE__ */ import_react.default.createElement("code", { key: idx }, part.slice(1, -1));
     }
     if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
-      return /* @__PURE__ */ import_react2.default.createElement("strong", { key: idx }, part.slice(2, -2));
+      return /* @__PURE__ */ import_react.default.createElement("strong", { key: idx }, part.slice(2, -2));
     }
     return part;
   });
 }
-function FormattedBody({ text }) {
+function FormattedMarkdown({ text }) {
   const raw = String(text ?? "");
   const blocks = raw.split(/(```[\s\S]*?```)/g);
-  return /* @__PURE__ */ import_react2.default.createElement("div", { className: "body dsh-markdown" }, blocks.map((block, bIdx) => {
+  return /* @__PURE__ */ import_react.default.createElement("div", { className: "_markdown_1nba0_5" }, blocks.map((block, bIdx) => {
     if (block.startsWith("```") && block.endsWith("```") && block.length >= 6) {
       const firstLineMatch = block.slice(3, -3).match(/^([a-zA-Z0-9_-]+)\n/);
       const lang = firstLineMatch ? firstLineMatch[1] : "code";
       const inner = block.slice(3, -3).replace(/^[a-zA-Z0-9_-]+\n/, "");
-      return /* @__PURE__ */ import_react2.default.createElement("div", { key: bIdx, className: "dsh-codeblock" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-codeblock-banner" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-codeblock-lang" }, lang)), /* @__PURE__ */ import_react2.default.createElement("pre", { className: "code-block" }, /* @__PURE__ */ import_react2.default.createElement("code", null, inner)));
+      return /* @__PURE__ */ import_react.default.createElement("div", { key: bIdx, className: "_block_178r4_4" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "_bannerWrap_178r4_21" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "_banner_178r4_21" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "_infostring_178r4_42" }, lang), /* @__PURE__ */ import_react.default.createElement("span", { className: "_action_178r4_53" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "_copyButton_178r4_59",
+          title: "\u590D\u5236\u4EE3\u7801",
+          onClick: () => {
+            if (navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(inner).catch(() => {
+              });
+            }
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(Tu, { size: 14 })
+      )))), /* @__PURE__ */ import_react.default.createElement("pre", { className: "_plain_178r4_94" }, /* @__PURE__ */ import_react.default.createElement("code", null, inner)));
     }
-    return /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, { key: bIdx }, renderInlineTokens(block));
+    const paragraphs = block.split(/\n{2,}/g).filter((p) => p.trim() !== "");
+    if (!paragraphs.length) return null;
+    return /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, { key: bIdx }, paragraphs.map((p, pIdx) => /* @__PURE__ */ import_react.default.createElement("p", { key: pIdx }, renderInlineTokens(p))));
   }));
 }
 function errorText(error) {
@@ -24305,19 +24793,27 @@ function shortTitle(text, max = 30) {
   if (!clean) return "\u65B0\u4F1A\u8BDD";
   return clean.length <= max ? clean : `${clean.slice(0, max)}\u2026`;
 }
+function stateDotKind(sessionOrSnap, view) {
+  const st = stateName(sessionOrSnap);
+  if (st === "running") return "ongoing";
+  if (st === "awaiting_approval" || st === "needs_reconciliation" || st === "frozen" || unresolved(sessionOrSnap) || frozen(sessionOrSnap, view)) {
+    return "warning";
+  }
+  return "done";
+}
 function CAYWApp({ env } = {}) {
   const fetchFn = env?.fetch ?? ((url, options) => fetch(url, options));
   const setTimer = env?.setTimeout ?? ((fn, delay) => setTimeout(fn, delay));
   const clearTimer = env?.clearTimeout ?? ((id) => clearTimeout(id));
-  const [, setRenderTick] = (0, import_react2.useState)(0);
-  const forceRender = (0, import_react2.useCallback)(() => {
+  const [, setRenderTick] = (0, import_react.useState)(0);
+  const forceRender = (0, import_react.useCallback)(() => {
     try {
       (0, import_react_dom.flushSync)(() => setRenderTick((t) => t + 1));
     } catch {
       setRenderTick((t) => t + 1);
     }
   }, []);
-  const stateRef = (0, import_react2.useRef)(null);
+  const stateRef = (0, import_react.useRef)(null);
   if (!stateRef.current) {
     stateRef.current = {
       loginGeneration: 0,
@@ -24360,8 +24856,8 @@ function CAYWApp({ env } = {}) {
       projects: [
         {
           id: "default",
-          label: "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4",
-          workspace: "",
+          label: "CAYW",
+          workspace: "/Volumes/ORICO/CAYW",
           address: "\u672C\u673A IPC",
           default: true
         }
@@ -24371,13 +24867,21 @@ function CAYWApp({ env } = {}) {
       sessionTitleOverrides: /* @__PURE__ */ new Map(),
       sessionPickerOpen: true,
       sessionSearchQuery: "",
+      searchExpanded: false,
+      sidebarCollapsed: false,
+      expandedGroups: {},
+      // Hero & Composer menus
+      heroWsMenuOpen: false,
+      heroPresetMenuOpen: false,
+      selectedAgentPreset: "code",
+      modelMenuOpen: false,
       // DSH Settings Modal state
       settingsOpen: false,
       settingsTab: "general",
       themeMode: "dark",
       enterBehavior: "enter",
       // DSH Permission Preset & Grants state
-      permissionPreset: "standard",
+      permissionPreset: "workspace-write",
       permissionPopoverOpen: false,
       fullAccessConfirmOpen: false,
       fullAccessAcknowledged: false,
@@ -24385,7 +24889,7 @@ function CAYWApp({ env } = {}) {
       sessionGrants: [],
       sessionAudit: [],
       revokeBusyKey: null,
-      // DSH New Project / Directory Picker Modal state
+      // DSH Directory Browser Modal state
       newProjectModalOpen: false,
       browsePath: "/Volumes/ORICO",
       browseParent: "/Volumes",
@@ -24394,19 +24898,20 @@ function CAYWApp({ env } = {}) {
       browseShowHidden: false,
       browseLoading: false,
       browseError: "",
+      pathEditing: false,
       newFolderOpen: false,
       newFolderName: ""
     };
   }
   const s = stateRef.current;
-  const promptInputRef = (0, import_react2.useRef)(null);
-  const forkDialogRef = (0, import_react2.useRef)(null);
-  const forkLabelInputRef = (0, import_react2.useRef)(null);
-  const forkConfirmInputRef = (0, import_react2.useRef)(null);
-  const projectWsInputRef = (0, import_react2.useRef)(null);
-  const projectLabelInputRef = (0, import_react2.useRef)(null);
-  const modalProjectWsInputRef = (0, import_react2.useRef)(null);
-  const modalProjectLabelInputRef = (0, import_react2.useRef)(null);
+  const promptInputRef = (0, import_react.useRef)(null);
+  const forkDialogRef = (0, import_react.useRef)(null);
+  const forkLabelInputRef = (0, import_react.useRef)(null);
+  const forkConfirmInputRef = (0, import_react.useRef)(null);
+  const projectWsInputRef = (0, import_react.useRef)(null);
+  const projectLabelInputRef = (0, import_react.useRef)(null);
+  const modalProjectWsInputRef = (0, import_react.useRef)(null);
+  const modalProjectLabelInputRef = (0, import_react.useRef)(null);
   const applyTheme = (mode, shouldRender = true) => {
     s.themeMode = mode;
     if (typeof document !== "undefined" && document.documentElement) {
@@ -24415,6 +24920,14 @@ function CAYWApp({ env } = {}) {
         resolved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
       }
       document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+      if (document.body) {
+        if (resolved === "dark") {
+          document.body.setAttribute("data-ds-dark-theme", "");
+        } else {
+          document.body.removeAttribute("data-ds-dark-theme");
+        }
+      }
     }
     if (shouldRender) forceRender();
   };
@@ -24453,13 +24966,13 @@ function CAYWApp({ env } = {}) {
     });
   };
   const loadProjectState = (projectId) => {
-    const ps = s.projectStates.get(projectId);
-    s.selected = ps?.selected ?? null;
-    s.sessions = ps?.sessions ?? [];
-    s.views = ps?.views ?? /* @__PURE__ */ new Map();
-    s.promptPending = ps?.promptPending ?? /* @__PURE__ */ new Set();
-    s.approvalPending = ps?.approvalPending ?? /* @__PURE__ */ new Set();
-    s.cachedCapabilities = ps?.cachedCapabilities ?? [];
+    const ps2 = s.projectStates.get(projectId);
+    s.selected = ps2?.selected ?? null;
+    s.sessions = ps2?.sessions ?? [];
+    s.views = ps2?.views ?? /* @__PURE__ */ new Map();
+    s.promptPending = ps2?.promptPending ?? /* @__PURE__ */ new Set();
+    s.approvalPending = ps2?.approvalPending ?? /* @__PURE__ */ new Set();
+    s.cachedCapabilities = ps2?.cachedCapabilities ?? [];
   };
   const rememberView = (view2) => {
     s.views.set(view2.id, view2);
@@ -24767,9 +25280,6 @@ function CAYWApp({ env } = {}) {
       );
       updateSessionSummary(snapshot2);
       s.pollFailures = 0;
-      if (typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 640px)").matches) {
-        s.sessionPickerOpen = false;
-      }
       forceRender();
       schedulePoll(0, generation);
     } catch (error) {
@@ -24791,9 +25301,9 @@ function CAYWApp({ env } = {}) {
     s.controllers.clear();
     s.selected = null;
     s.sessions = [];
-    for (const [projectId, ps] of s.projectStates.entries()) {
+    for (const [projectId, ps2] of s.projectStates.entries()) {
       const retained = new Map(
-        [...ps.views].filter(
+        [...ps2.views].filter(
           ([, view2]) => view2.writes.length || view2.activeAttempt || Object.keys(view2.faults).length
         ).map(([id, view2]) => [
           id,
@@ -24829,6 +25339,13 @@ function CAYWApp({ env } = {}) {
       s.connectionStatus = "\u5DF2\u8FDE\u63A5\u672C\u673A";
       report(null);
       forceRender();
+      try {
+        const list = await rpc("projects.list");
+        if (login === s.loginGeneration && Array.isArray(list) && list.length) {
+          s.projects = list;
+        }
+      } catch {
+      }
       await refreshSessions();
       if (login === s.loginGeneration && s.sessions.length) {
         await selectSession(s.sessions[0].id);
@@ -24977,6 +25494,7 @@ function CAYWApp({ env } = {}) {
         s.browsePath = res.path || path;
         s.browseParent = res.parent || "";
         s.browseEntries = Array.isArray(res.entries) ? res.entries : [];
+        s.browseSelectedPath = "";
         s.projectWorkspaceInput = s.browsePath;
         if (projectWsInputRef.current) projectWsInputRef.current.value = s.browsePath;
         if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = s.browsePath;
@@ -24993,6 +25511,7 @@ function CAYWApp({ env } = {}) {
     s.newFolderOpen = false;
     s.newFolderName = "";
     s.browseError = "";
+    s.pathEditing = false;
     if (!s.projectWorkspaceInput) {
       s.projectWorkspaceInput = s.browsePath || "/Volumes/ORICO";
     }
@@ -25092,7 +25611,7 @@ function CAYWApp({ env } = {}) {
   };
   const handleAddProject = async (event, andEnter = false) => {
     event?.preventDefault?.();
-    const ws = (modalProjectWsInputRef.current?.value || projectWsInputRef.current?.value || s.projectWorkspaceInput).trim();
+    const ws = (s.browseSelectedPath || modalProjectWsInputRef.current?.value || projectWsInputRef.current?.value || s.projectWorkspaceInput).trim();
     const label = (modalProjectLabelInputRef.current?.value || projectLabelInputRef.current?.value || s.projectLabelInput).trim();
     if (!ws || s.addProjectBusy) return;
     const login = s.loginGeneration;
@@ -25108,6 +25627,7 @@ function CAYWApp({ env } = {}) {
       if (login !== s.loginGeneration) return;
       s.projectWorkspaceInput = "";
       s.projectLabelInput = "";
+      s.browseSelectedPath = "";
       if (projectWsInputRef.current) projectWsInputRef.current.value = "";
       if (projectLabelInputRef.current) projectLabelInputRef.current.value = "";
       if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = "";
@@ -25267,7 +25787,7 @@ function CAYWApp({ env } = {}) {
       forceRender();
     }
   };
-  (0, import_react2.useEffect)(() => {
+  (0, import_react.useEffect)(() => {
     applyTheme(s.themeMode, false);
     const p = trackAsync(connectLocal());
     if (env?.onInitialConnect) env.onInitialConnect(p);
@@ -25363,1334 +25883,1783 @@ function CAYWApp({ env } = {}) {
   const pluginItems = summarizePlugins(s.sessions, s.cachedCapabilities, s.views);
   const pluginsStatusText = s.pluginsStatus || (pluginItems.length ? `\u5DF2\u8BC6\u522B ${pluginItems.length} \u4E2A\u63D2\u4EF6\u7ED1\u5B9A\u6216\u80FD\u529B\u7EC4` : "\u6682\u65E0\u5DF2\u7ED1\u5B9A\u7684\u63D2\u4EF6\u8BB0\u5F55");
   const currentPresetObj = PERMISSION_PRESETS.find((p) => p.id === s.permissionPreset) ?? PERMISSION_PRESETS[0];
+  const currentAgentPresetObj = AGENT_PRESETS.find((p) => p.id === s.selectedAgentPreset) ?? AGENT_PRESETS[0];
   const filteredSessions = s.sessionSearchQuery.trim() ? s.sessions.filter(
     (sess) => displayLabel(sess).toLowerCase().includes(s.sessionSearchQuery.trim().toLowerCase())
   ) : s.sessions;
   const visibleBrowseEntries = s.browseShowHidden ? s.browseEntries : s.browseEntries.filter((e) => !e.hidden);
-  return /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-app-shell" }, /* @__PURE__ */ import_react2.default.createElement("a", { className: "skip", href: "#conversation" }, "\u8DF3\u5230\u4F1A\u8BDD\u5185\u5BB9"), /* @__PURE__ */ import_react2.default.createElement("header", { className: "topbar dsh-topbar" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "identity" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "mark", "aria-hidden": "true" }, "C"), /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, "CAYW"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-build-badge" }, "v3"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "muted" }, "DeepSeek Harness \u98CE\u683C\u5DE5\u4F5C\u53F0"))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "connection" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsh-top-pill",
-      onClick: () => openNewProjectModal()
-    },
-    "\u{1F4C1} + \u65B0\u5F00\u9879\u76EE"
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsh-top-pill",
-      onClick: () => switchPage("permissions")
-    },
-    `\u{1F512} \u6743\u9650\uFF1A${currentPresetObj.label}${approvals.length ? ` (${approvals.length} \u5F85\u5BA1)` : ""}`
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsh-top-pill",
-      onClick: () => openSettings("general")
-    },
-    "\u2699 \u8BBE\u7F6E"
-  ), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-conn-dot", "data-connected": String(s.connectionStatus === "\u5DF2\u8FDE\u63A5\u672C\u673A") }), /* @__PURE__ */ import_react2.default.createElement("span", { id: "connection-status", role: "status" }, s.connectionStatus), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      ref: bind({ click: () => trackAsync(connectLocal()) }),
-      id: "reconnect",
-      className: "quiet",
-      type: "button",
-      disabled: s.reconnectBusy,
-      onClick: () => trackAsync(connectLocal())
-    },
-    "\u91CD\u8FDE"
-  ))), /* @__PURE__ */ import_react2.default.createElement("div", { id: "workspace", className: "workspace dsh-frame" }, /* @__PURE__ */ import_react2.default.createElement("aside", { className: "sidebar dsh-sidebar", "aria-labelledby": "sessions-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-sidebar-primary-actions" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      ref: bind({ click: () => trackAsync(createNewSession()) }),
-      id: "create-button",
-      className: "dsh-new-session-btn create-btn",
-      type: "button",
-      "aria-label": "\u65B0\u5EFA\u4F1A\u8BDD",
-      disabled: s.createBusy,
-      onClick: () => trackAsync(createNewSession())
-    },
-    /* @__PURE__ */ import_react2.default.createElement("span", null, s.createBusy ? "\u521B\u5EFA\u4E2D\u2026" : "+ \u65B0\u5EFA\u4F1A\u8BDD")
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      id: "open-new-project-btn",
-      className: "dsh-new-project-btn secondary",
-      type: "button",
-      title: "\u9009\u62E9\u672C\u5730\u76EE\u5F55\u5E76\u65B0\u5F00\u9879\u76EE\u5DE5\u4F5C\u533A",
-      onClick: () => openNewProjectModal()
-    },
-    "\u{1F4C1} \u65B0\u5F00\u9879\u76EE"
-  )), /* @__PURE__ */ import_react2.default.createElement("nav", { className: "page-nav dsh-nav-segmented", "aria-label": "\u754C\u9762\u89C6\u56FE" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      ref: bind({ click: () => switchPage("conversation") }),
-      id: "nav-conversation",
-      className: "page-tab",
-      type: "button",
-      "aria-current": String(s.activePage === "conversation"),
-      onClick: () => switchPage("conversation")
-    },
-    "\u5BF9\u8BDD"
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      ref: bind({ click: () => switchPage("projects") }),
-      id: "nav-projects",
-      className: "page-tab",
-      type: "button",
-      "aria-current": String(s.activePage === "projects"),
-      onClick: () => switchPage("projects")
-    },
-    "\u9879\u76EE"
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      ref: bind({ click: () => switchPage("permissions") }),
-      id: "nav-permissions",
-      className: "page-tab",
-      type: "button",
-      "aria-current": String(s.activePage === "permissions"),
-      onClick: () => switchPage("permissions")
-    },
-    `\u6743\u9650${approvals.length ? `(${approvals.length})` : ""}`
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      ref: bind({ click: () => switchPage("plugins") }),
-      id: "nav-plugins",
-      className: "page-tab",
-      type: "button",
-      "aria-current": String(s.activePage === "plugins"),
-      onClick: () => switchPage("plugins")
-    },
-    "\u63D2\u4EF6"
-  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-workspace-box" }, /* @__PURE__ */ import_react2.default.createElement(
-    SpotlightCard,
-    {
-      as: "button",
-      id: "current-workspace-btn",
-      className: "workspace-switcher dsh-workspace-pill",
-      type: "button",
-      handlers: { click: () => switchPage("projects") },
-      "data-tip": currentProjectSummary?.workspace ? `\u5F53\u524D\u76EE\u5F55\uFF1A${currentProjectSummary.workspace}\uFF08\u70B9\u51FB\u5207\u6362\u6216\u7BA1\u7406\u9879\u76EE\u7A7A\u95F4\uFF09` : `\u70B9\u51FB\u5207\u6362\u6216\u65B0\u5F00\u672C\u5730\u9879\u76EE\u7A7A\u95F4\uFF08${currentProjectSummary?.address ?? "\u672C\u673A IPC"}\uFF09`,
-      onClick: () => switchPage("projects")
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-workspace-pill-top" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u{1F4C1} \u5F53\u524D\u5DE5\u4F5C\u533A"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-workspace-switch-hint" }, "\u5207\u6362 \u25BE")),
-    /* @__PURE__ */ import_react2.default.createElement("strong", { id: "current-workspace-label" }, currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"),
-    currentProjectSummary?.workspace ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-workspace-path mono" }, currentProjectSummary.workspace) : null
-  )), /* @__PURE__ */ import_react2.default.createElement(
-    "details",
-    {
-      id: "session-picker",
-      className: "session-picker dsh-session-browser",
-      open: s.sessionPickerOpen,
-      onToggle: (e) => {
-        s.sessionPickerOpen = e.currentTarget.open;
-      }
-    },
-    /* @__PURE__ */ import_react2.default.createElement("summary", { className: "session-picker-summary" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u5DE5\u4F5C\u533A\u4F1A\u8BDD"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "session-picker-label", className: "muted" }, clip(snapshot ? displayLabel(snapshot) : "\u9009\u62E9\u6216\u65B0\u5EFA", 60))),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "session-picker-content" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "section-heading dsh-section-header" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "sessions-heading" }, "\u4F1A\u8BDD\u5217\u8868"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u4F1A\u8BDD\u540C\u6B65\u8BF4\u660E" }, "\u5BF9\u8BDD\u4FDD\u5B58\u5728\u672C\u673A\u3002\u65AD\u7EBF\u540E\u4ECE\u5DF2\u6D88\u8D39\u6E38\u6807\u7EE7\u7EED\u63A5\u6536\u7ED3\u679C\uFF0C\u6D88\u606F\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "session-actions" }, /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        ref: bind({ click: () => trackAsync(refreshSessions()) }),
-        id: "refresh-sessions",
-        className: "quiet dsh-icon-btn",
-        type: "button",
-        title: "\u5237\u65B0\u4F1A\u8BDD\u5217\u8868",
-        disabled: s.refreshSessionsBusy,
-        onClick: () => trackAsync(refreshSessions())
-      },
-      "\u21BB \u5237\u65B0"
-    ))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-search-bar" }, /* @__PURE__ */ import_react2.default.createElement(
-      "input",
-      {
-        type: "search",
-        className: "dsh-search-input",
-        placeholder: "\u641C\u7D22\u4F1A\u8BDD\u2026",
-        "aria-label": "\u641C\u7D22\u4F1A\u8BDD",
-        value: s.sessionSearchQuery,
-        onChange: (e) => {
-          s.sessionSearchQuery = e.target.value;
-          forceRender();
-        }
-      }
-    )), /* @__PURE__ */ import_react2.default.createElement("p", { id: "list-status", className: "small muted", role: "status" }, s.listStatus), /* @__PURE__ */ import_react2.default.createElement("nav", { id: "session-list", className: "session-list dsh-tree-list", "aria-label": "\u9009\u62E9\u4F1A\u8BDD" }, !filteredSessions.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted dsh-empty-note" }, s.sessionSearchQuery.trim() ? "\u65E0\u5339\u914D\u4F1A\u8BDD" : "\u6682\u65E0\u4F1A\u8BDD\uFF0C\u70B9\u51FB\u4E0A\u65B9\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5373\u53EF\u5F00\u59CB\u3002") : filteredSessions.map((session) => {
-      const shortId = String(session.id ?? "").slice(0, 8);
-      const sState = stateName(session);
-      return /* @__PURE__ */ import_react2.default.createElement(
-        SpotlightCard,
-        {
-          as: "button",
-          key: session.id,
-          className: "session-item dsh-session-row",
-          type: "button",
-          "aria-current": String(session.id === s.selected),
-          handlers: {
-            click: () => trackAsync(selectSession(session.id))
-          },
-          onClick: () => trackAsync(selectSession(session.id))
-        },
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-session-row-main" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: `dsh-status-dot dot-${sState}` }), /* @__PURE__ */ import_react2.default.createElement("strong", null, displayLabel(session))),
-        /* @__PURE__ */ import_react2.default.createElement("span", null, `${stateLabel(session, s.views.get(session.id))} \xB7 ${shortId}`)
-      );
-    })))
-  ), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-sidebar-footer" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      id: "open-settings-button",
-      type: "button",
-      className: "dsh-settings-trigger",
-      onClick: () => openSettings("general")
-    },
-    /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-settings-gear" }, "\u2699"),
-    /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-settings-label" }, "\u8BBE\u7F6E\u4E0E\u504F\u597D"),
-    /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-settings-badge" }, currentPresetObj.label)
-  ))), /* @__PURE__ */ import_react2.default.createElement("main", { id: "conversation", className: "conversation dsh-center-col", tabIndex: -1 }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "conversation-view", className: "dsh-chat-surface", hidden: s.activePage !== "conversation" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading dsh-chat-header" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-crumbs" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsh-crumb-btn",
-      onClick: () => switchPage("projects")
-    },
-    `\u{1F4C1} ${currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"}`
-  ), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-crumb-sep" }, "/"), /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "session-title", className: "dsh-session-title" }, snapshot ? displayLabel(snapshot) : s.selected ? "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026" : "\u70B9\u51FB\u5DE6\u4FA7\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5F00\u59CB")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-meta" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "history-note", className: "meta-pill muted", hidden: !historyNote }, historyNote), /* @__PURE__ */ import_react2.default.createElement(
-    "span",
-    {
-      id: "poll-status",
-      className: "meta-pill muted",
-      role: "status",
-      hidden: !s.pollStatus || s.pollStatus === "\u5DF2\u540C\u6B65"
-    },
-    s.pollStatus
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "span",
-    {
-      id: "session-state",
-      className: `state-label state-${stateName(snapshot)}`
-    },
-    snapshot ? stateLabel(snapshot, view) : "\u7B49\u5F85\u9009\u62E9"
-  ))), /* @__PURE__ */ import_react2.default.createElement("p", { id: "global-error", className: "error", role: "alert", hidden: !s.globalError }, s.globalError), /* @__PURE__ */ import_react2.default.createElement(
-    SpotlightCard,
-    {
-      as: "section",
-      id: "blocked-notice",
-      className: "notice",
-      hidden: !attention,
-      "aria-labelledby": "blocked-title"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "notice-bar" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "blocked-title" }, "\u4F1A\u8BDD\u6682\u65F6\u4E0D\u80FD\u7EE7\u7EED"), /* @__PURE__ */ import_react2.default.createElement(
-      HintPopover,
-      {
-        chip: true,
-        label: "\u67E5\u770B\u539F\u56E0\u4E0E\u8BF4\u660E",
-        bubbleId: "blocked-text"
-      },
-      blockedText
-    )), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        ref: bind({ click: openForkDialog }),
-        id: "open-fork",
-        type: "button",
-        hidden: !showForkBtn,
-        disabled: !forkEnabled,
-        onClick: openForkDialog
-      },
-      "\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929"
-    ))
-  ), /* @__PURE__ */ import_react2.default.createElement("section", { "aria-label": "\u4F1A\u8BDD\u5386\u53F2", className: "history-section dsh-chat-scroll" }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "messages", className: "messages dsh-chat-column" }, !messages.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty dsh-hero" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-hero-headline" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-hero-mark" }, "C"), /* @__PURE__ */ import_react2.default.createElement("h2", null, view?.snapshot ? "\u63A2\u7D22\u672A\u81F3\u4E4B\u5883 \xB7 \u4ECE\u4E00\u6761\u6D88\u606F\u5F00\u59CB" : "\u63A2\u7D22\u672A\u81F3\u4E4B\u5883 \xB7 \u7EE7\u7EED\u4E00\u6BB5\u5BF9\u8BDD"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-preview-badge" }, "CAYW v3"), /* @__PURE__ */ import_react2.default.createElement(
-    TooltipBadge,
-    {
-      className: "hint-trigger",
-      label: "?",
-      tip: view?.snapshot ? "\u8F93\u5165\u4EFB\u52A1\u540E\uFF0CRuntime \u4F1A\u5728\u6B64\u4FDD\u7559\u5BF9\u8BDD\u548C\u5DE5\u5177\u8BB0\u5F55\u3002" : "\u4ECE\u5DE6\u4FA7\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u70B9\u51FB\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u3002"
+  const browseCrumbs = (() => {
+    const raw = s.browsePath || "/";
+    const segments = raw.split("/").filter(Boolean);
+    const list = [{ name: "/", path: "/" }];
+    let acc = "";
+    for (const seg of segments) {
+      acc += `/${seg}`;
+      list.push({ name: seg, path: acc });
     }
-  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-hero-workspace-bar" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
+    return list;
+  })();
+  const isHero = s.activePage === "conversation" && !messages.length && !approvals.length && !attention && !view?.liveText;
+  const wide = !s.sidebarCollapsed;
+  return /* @__PURE__ */ import_react.default.createElement(
+    "div",
     {
-      type: "button",
-      className: "dsh-hero-ws-pill",
-      onClick: () => switchPage("projects")
-    },
-    `\u{1F4C1} \u5DE5\u4F5C\u533A\uFF1A${currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"}${currentProjectSummary?.workspace ? ` (${currentProjectSummary.workspace})` : ""} \u25BE`
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsh-hero-ws-pill",
-      onClick: () => openNewProjectModal()
-    },
-    "+ \u65B0\u5F00\u9879\u76EE\u76EE\u5F55"
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "dsh-hero-ws-pill",
-      onClick: () => switchPage("permissions")
-    },
-    `\u{1F512} \u6743\u9650\u6A21\u5F0F\uFF1A${currentPresetObj.label}`
-  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "starter-grid dsh-starter-pills" }, STARTER_PROMPTS.map((item, idx) => /* @__PURE__ */ import_react2.default.createElement(
-    SpotlightCard,
-    {
-      as: "button",
-      key: idx,
-      type: "button",
-      className: "starter-card dsh-starter-card",
-      onClick: () => trackAsync(
-        (async () => {
-          if (!s.selected) {
-            await createNewSession();
-          }
-          s.promptText = item.prompt;
-          if (promptInputRef.current) {
-            promptInputRef.current.value = item.prompt;
-            promptInputRef.current.focus();
-          }
-          forceRender();
-        })()
-      )
-    },
-    /* @__PURE__ */ import_react2.default.createElement("strong", null, item.title),
-    /* @__PURE__ */ import_react2.default.createElement("span", null, item.desc)
-  )))) : messages.map((message, index) => {
-    const role = [
-      "user",
-      "assistant",
-      "system",
-      "toolResult",
-      "custom"
-    ].includes(message.role) ? message.role : "custom";
-    const presentation = messagePresentation(message);
-    const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
-    const isOp = presentation.kind !== "text";
-    return /* @__PURE__ */ import_react2.default.createElement(
-      SpotlightCard,
-      {
-        as: "article",
-        key,
-        className: `message ${role}${isOp ? " operation-record dsh-tool-card" : ""}`
-      },
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "role" }, ROLE_LABELS[role]),
-      presentation.kind === "text" ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : presentation.kind === "tool_call" ? /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, presentation.text ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : null, presentation.calls.map((call, callIndex) => {
-        const callKey = `${key}/${callIndex}`;
-        const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "\u7B49\u5F85\u4EFB\u52A1\u7ED3\u679C" : "\u8FD0\u884C Luau \u4EE3\u7801\u5355\u5143\uFF08execute_code\uFF09" : `\u4F7F\u7528\u5DE5\u5177\uFF1A${clip(call.name, 100)}`;
-        return /* @__PURE__ */ import_react2.default.createElement(
-          "details",
-          {
-            key: callKey,
-            className: "record-details dsh-disclosure-row",
-            open: expandedSet.has(callKey),
-            onToggle: (e) => toggleRecordExpand(callKey, e.currentTarget.open)
-          },
-          /* @__PURE__ */ import_react2.default.createElement("summary", null, title),
-          /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(call))
-        );
-      })) : /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "result-header" }, /* @__PURE__ */ import_react2.default.createElement(
-        "strong",
-        {
-          className: `result-title ${presentation.status ?? ""}`
-        },
-        presentation.title
-      ), /* @__PURE__ */ import_react2.default.createElement(
-        "details",
-        {
-          className: "record-details inline-details",
-          open: expandedSet.has(key),
-          onToggle: (e) => toggleRecordExpand(key, e.currentTarget.open)
-        },
-        /* @__PURE__ */ import_react2.default.createElement("summary", null, "\u67E5\u770B\u5B8C\u6574\u6267\u884C\u8BB0\u5F55"),
-        /* @__PURE__ */ import_react2.default.createElement("pre", null, presentation.raw)
-      )), presentation.text ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "result-description" }, presentation.text) : null, (presentation.values ?? []).map((val, vIdx) => /* @__PURE__ */ import_react2.default.createElement("div", { key: vIdx, className: "file-output-box" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "output-label" }, `\u{1F4C4} ${val.label}`), /* @__PURE__ */ import_react2.default.createElement("div", { className: "body output-value" }, val.text)))),
-      message.error_message ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, clip(message.error_message, 2e3)) : null,
-      message.outcome_unknown ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, "\u6B64\u5DE5\u5177\u8C03\u7528\u7684\u771F\u5B9E\u7ED3\u679C\u5F85\u5BBF\u4E3B\u6838\u5BF9\u3002") : null
-    );
-  }))), /* @__PURE__ */ import_react2.default.createElement(
-    "section",
-    {
-      id: "live-section",
-      className: "live-section dsh-live-stream",
-      "aria-labelledby": "live-heading",
-      hidden: !view?.liveText
-    },
-    /* @__PURE__ */ import_react2.default.createElement("h2", { id: "live-heading", className: "small" }, "\u6B63\u5728\u751F\u6210\u56DE\u590D\u2026"),
-    /* @__PURE__ */ import_react2.default.createElement("pre", { id: "live-text", "aria-live": "off" }, view?.liveText ?? "")
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "section",
-    {
-      id: "approvals",
-      className: "approval-section dsh-approval-dock",
-      "aria-label": "\u5F85\u5BA1\u6279\u8BF7\u6C42",
-      hidden: !approvals.length
-    },
-    approvals.slice(0, 30).map((approval, idx) => {
-      const id = approval.id ?? approval.approval_id;
-      const input = approval.input ?? {};
-      const capability = input.capability ?? "";
-      let scope = null;
-      try {
-        scope = JSON.parse(input.scope);
-      } catch {
-        scope = null;
-      }
-      const operation = CAPABILITY_LABELS[capability] ?? `\u4F7F\u7528\u80FD\u529B\uFF1A${clip(capability || "\u5BBF\u4E3B\u672A\u8BF4\u660E", 100)}`;
-      const scopeLines = [];
-      if (object(scope)) {
-        if (scope.path !== void 0) scopeLines.push(["\u6587\u4EF6", scope.path, 400]);
-        if (scope.profile !== void 0) scopeLines.push(["\u9884\u8BBE\u4EFB\u52A1", scope.profile, 400]);
-        if (scope.query !== void 0) scopeLines.push(["\u68C0\u7D22\u5185\u5BB9", scope.query, 400]);
-        if (scope.filter !== void 0) scopeLines.push(["\u6D4B\u8BD5\u8303\u56F4", scope.filter, 400]);
-        if (scope.server !== void 0) scopeLines.push(["\u5DE5\u5177\u8FDE\u63A5", scope.server, 400]);
-        if (scope.tool !== void 0) scopeLines.push(["\u5DE5\u5177", scope.tool, 400]);
-        if (scope.name !== void 0) scopeLines.push(["\u540D\u79F0", scope.name, 400]);
-        if (scope.commit !== void 0) scopeLines.push(["\u63D0\u4EA4", scope.commit, 400]);
-        if (scope.overwrite === true) scopeLines.push(["\u6587\u4EF6\u64CD\u4F5C", "\u8986\u76D6\u73B0\u6709\u6587\u4EF6", 400]);
-        if (typeof scope.content === "string") scopeLines.push(["\u5199\u5165\u5185\u5BB9", scope.content, 600]);
-        if (typeof scope.old === "string") scopeLines.push(["\u66FF\u6362\u539F\u6587", scope.old, 400]);
-        if (typeof scope.new === "string") scopeLines.push(["\u66FF\u6362\u4E3A", scope.new, 400]);
-      }
-      const isDeciding = typeof id === "string" && s.approvalPending.has(`${snapshot?.id}/${id}`);
-      return /* @__PURE__ */ import_react2.default.createElement(
-        SpotlightCard,
-        {
-          as: "article",
-          key: id ?? idx,
-          border: true,
-          className: "approval-card dsh-approval-card"
-        },
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-approval-strip" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-approval-dot" }), /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u7B49\u5F85\u5BA1\u6279 \xB7 \u8BF7\u6C42\u4F60\u7684\u6388\u6743"), /* @__PURE__ */ import_react2.default.createElement(
-          TooltipBadge,
-          {
-            label: "\u7CBE\u786E\u53C2\u6570\u8303\u56F4 ?",
-            tip: "\u4EC5\u9650\u672C\u6B21\u5217\u660E\u7684\u80FD\u529B\u548C\u5B8C\u5168\u76F8\u540C\u7684\u53C2\u6570\uFF1B\u5141\u8BB8\u6B64\u4EFB\u52A1\u4E5F\u4E0D\u4F1A\u6269\u5C55\u5230\u5176\u4ED6\u6587\u4EF6\u6216\u5185\u5BB9\u3002"
-          }
-        )),
-        /* @__PURE__ */ import_react2.default.createElement("p", { className: "dsh-approval-headline" }, `\u64CD\u4F5C\uFF1A${operation}`),
-        scopeLines.map(([label, val, limit], sIdx) => /* @__PURE__ */ import_react2.default.createElement("p", { key: sIdx, className: "small dsh-approval-command" }, `${label}\uFF1A${clip(val, limit)}`)),
-        /* @__PURE__ */ import_react2.default.createElement("details", null, /* @__PURE__ */ import_react2.default.createElement("summary", null, "\u67E5\u770B\u5B8C\u6574\u6388\u6743\u53C2\u6570"), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(approval))),
-        typeof id !== "string" ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "error" }, "\u5BA1\u6279\u8BB0\u5F55\u7F3A\u5C11 ID\uFF0C\u8BF7\u5728\u5BBF\u4E3B\u4E2D\u5904\u7406\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions dsh-approval-actions" }, [
-          ["allow_once", "\u5141\u8BB8\u4E00\u6B21", ""],
-          ["allow_task", "\u5141\u8BB8\u6B64\u4EFB\u52A1", "secondary"],
-          ["deny", "\u62D2\u7EDD", "secondary deny"]
-        ].map(([decision, btnLabel, cls]) => /* @__PURE__ */ import_react2.default.createElement(
-          "button",
-          {
-            key: decision,
-            ref: bind({
-              click: () => trackAsync(decide(snapshot.id, id, decision))
-            }),
-            type: "button",
-            className: cls,
-            disabled: isDeciding || approvalButtonsDisabled,
-            onClick: () => trackAsync(decide(snapshot.id, id, decision))
-          },
-          isDeciding ? "\u6B63\u5728\u8BB0\u5F55\u2026" : btnLabel
-        )))
-      );
-    })
-  ), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-composer-dock" }, s.permissionPopoverOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-permission-popover", role: "dialog", "aria-label": "\u5207\u6362\u6743\u9650\u6A21\u5F0F" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-popover-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u4F1A\u8BDD\u6743\u9650\u6A21\u5F0F (`/permission`)"), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "quiet",
-      onClick: () => {
-        s.permissionPopoverOpen = false;
-        forceRender();
+      id: "workspace",
+      className: "pI_x6G_frame",
+      style: {
+        gridTemplateColumns: wide ? "264px minmax(0, 1fr)" : "56px minmax(0, 1fr)"
       }
     },
-    "\u2715"
-  )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-list" }, PERMISSION_PRESETS.map((preset) => /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      key: preset.id,
-      type: "button",
-      className: `dsh-preset-option${s.permissionPreset === preset.id ? " is-selected" : ""}`,
-      onClick: () => selectPermissionPreset(preset.id)
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-option-top" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, `${preset.label} (${preset.enLabel})`), s.permissionPreset === preset.id ? /* @__PURE__ */ import_react2.default.createElement("span", null, "\u2713 \u5F53\u524D") : null),
-    /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, preset.desc)
-  ))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-popover-footer" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "secondary",
-      onClick: () => {
-        s.permissionPopoverOpen = false;
-        switchPage("permissions");
-      }
-    },
-    "\u67E5\u770B\u5DF2\u6388\u6743\u80FD\u529B\u4E0E\u64A4\u9500\u8BB0\u5F55 \u2192"
-  ))) : null, /* @__PURE__ */ import_react2.default.createElement(
-    SpotlightCard,
-    {
-      as: "form",
-      id: "prompt-form",
-      border: true,
-      className: "composer dsh-input-card",
-      handlers: { submit: (e) => trackAsync(handleSendPrompt(e)) },
-      onSubmit: (e) => trackAsync(handleSendPrompt(e))
-    },
-    /* @__PURE__ */ import_react2.default.createElement("label", { htmlFor: "prompt", className: "visually-hidden" }, "\u53D1\u9001\u6D88\u606F"),
-    /* @__PURE__ */ import_react2.default.createElement(
-      "textarea",
-      {
-        ref: bind(
-          {
-            input: (e) => {
-              s.promptText = e.currentTarget.value;
-              forceRender();
-            }
-          },
-          promptInputRef
-        ),
-        id: "prompt",
-        className: "dsh-composer-textarea",
-        rows: 3,
-        maxLength: 32e3,
-        disabled: promptDisabled,
-        placeholder: "\u7ED9\u667A\u80FD\u4F53\u53D1\u6D88\u606F\uFF08Enter \u53D1\u9001\uFF0CShift + Enter \u6362\u884C\uFF09",
-        value: s.promptText,
-        onChange: (e) => {
-          s.promptText = e.target.value;
-          forceRender();
-        },
-        onKeyDown: (e) => {
-          if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (s.enterBehavior === "enter" || e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            trackAsync(handleSendPrompt(e));
-          }
-        }
-      }
-    ),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "composer-actions dsh-composer-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-composer-tools" }, /* @__PURE__ */ import_react2.default.createElement(
+    /* @__PURE__ */ import_react.default.createElement("a", { className: "skip", href: "#conversation" }, "\u8DF3\u5230\u4F1A\u8BDD\u5185\u5BB9"),
+    /* @__PURE__ */ import_react.default.createElement("nav", { className: "visually-hidden", "aria-label": "\u754C\u9762\u89C6\u56FE" }, /* @__PURE__ */ import_react.default.createElement(
       "button",
       {
-        id: "composer-workspace-btn",
+        ref: bind({ click: () => switchPage("conversation") }),
+        id: "nav-conversation",
         type: "button",
-        className: "dsh-chip-btn",
-        title: "\u5207\u6362\u5DE5\u4F5C\u533A\u9879\u76EE",
+        "aria-current": String(s.activePage === "conversation"),
+        onClick: () => switchPage("conversation")
+      },
+      "\u5BF9\u8BDD"
+    ), /* @__PURE__ */ import_react.default.createElement(
+      "button",
+      {
+        ref: bind({ click: () => switchPage("projects") }),
+        id: "nav-projects",
+        type: "button",
+        "aria-current": String(s.activePage === "projects"),
         onClick: () => switchPage("projects")
       },
-      `\u{1F4C1} ${currentProjectSummary?.label ?? "\u9ED8\u8BA4\u9879\u76EE\u7A7A\u95F4"}`
-    ), /* @__PURE__ */ import_react2.default.createElement(
+      "\u9879\u76EE"
+    ), /* @__PURE__ */ import_react.default.createElement(
       "button",
       {
-        id: "composer-new-project-btn",
+        ref: bind({ click: () => switchPage("permissions") }),
+        id: "nav-permissions",
         type: "button",
-        className: "dsh-chip-btn",
-        title: "\u6D4F\u89C8\u672C\u5730\u76EE\u5F55\u5E76\u65B0\u5F00\u9879\u76EE",
-        onClick: () => openNewProjectModal()
+        "aria-current": String(s.activePage === "permissions"),
+        onClick: () => switchPage("permissions")
       },
-      "+ \u65B0\u5F00\u9879\u76EE"
-    ), /* @__PURE__ */ import_react2.default.createElement(
+      "\u6743\u9650"
+    ), /* @__PURE__ */ import_react.default.createElement(
       "button",
       {
-        id: "composer-permission-btn",
+        ref: bind({ click: () => switchPage("plugins") }),
+        id: "nav-plugins",
         type: "button",
-        className: `dsh-chip-btn dsh-perm-chip${s.permissionPreset === "danger-full-access" ? " is-danger" : ""}`,
-        title: "\u5207\u6362\u6743\u9650\u9884\u8BBE\u6216\u7BA1\u7406\u4F1A\u8BDD\u6388\u6743",
-        onClick: () => {
-          s.permissionPopoverOpen = !s.permissionPopoverOpen;
-          forceRender();
-        }
+        "aria-current": String(s.activePage === "plugins"),
+        onClick: () => switchPage("plugins")
       },
-      `\u{1F512} ${currentPresetObj.label} \u25BE`
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        id: "composer-model-btn",
-        type: "button",
-        className: "dsh-chip-btn",
-        title: "\u67E5\u770B\u6A21\u578B\u4E0E\u7F51\u5173\u8BBE\u7F6E",
-        onClick: () => openSettings("models")
-      },
-      "\u26A1 deepseek-v4.1-flash"
-    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "action-buttons dsh-composer-trailing" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "prompt-status", className: "small muted", role: "status" }, promptStatus), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        ref: bind({ click: () => trackAsync(handleCancel()) }),
-        id: "cancel-button",
-        className: "secondary dsh-stop-btn",
-        type: "button",
-        disabled: cancelDisabled,
-        onClick: () => trackAsync(handleCancel())
-      },
-      "\u505C\u6B62"
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        id: "send-button",
-        className: "dsh-send-btn",
-        type: "submit",
-        disabled: sendDisabled
-      },
-      pending ? "\u7B49\u5F85\u5B8C\u6210\u2026" : "\u2191 \u53D1\u9001"
-    )))
-  )), /* @__PURE__ */ import_react2.default.createElement("details", { className: "event-details dsh-event-drawer" }, /* @__PURE__ */ import_react2.default.createElement("summary", { "data-tip": "\u6700\u8FD1 120 \u6761\u5DF2\u6D88\u8D39\u4E8B\u4EF6\uFF1B\u672A\u8BC6\u522B\u4E8B\u4EF6\u6309\u539F\u59CB\u8BB0\u5F55\u5C55\u793A" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u8BCA\u65AD\u4E0E\u4E8B\u4EF6\u8BB0\u5F55"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "event-count", className: "muted" }, `${events.length} \xB7 \u6E38\u6807 ${view?.cursor ?? 0}`)), /* @__PURE__ */ import_react2.default.createElement("div", { id: "event-log" }, events.map((record) => /* @__PURE__ */ import_react2.default.createElement("details", { key: record.cursor }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${record.cursor} \xB7 ${clip(record.event?.type ?? record.event?.kind ?? "\u4E8B\u4EF6", 100)}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(record.event))))))), /* @__PURE__ */ import_react2.default.createElement(
-    "section",
-    {
-      id: "projects-page",
-      className: "management-page",
-      hidden: s.activePage !== "projects",
-      "aria-labelledby": "projects-heading"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u5DE5\u4F5C\u533A\u4E0E\u9879\u76EE\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "projects-heading" }, "\u672C\u5730\u9879\u76EE\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u9879\u76EE\u7A7A\u95F4\u7BA1\u7406\u8BF4\u660E" }, "\u9009\u62E9\u76EE\u5F55\u5373\u53EF\u65B0\u5F00\u72EC\u7ACB\u9879\u76EE Runtime\uFF1B\u5404\u9879\u76EE\u7684\u4F1A\u8BDD\u5217\u8868\u3001\u6743\u9650\u6388\u6743\u4E0E\u4E8B\u4EF6\u6E38\u6807\u76F8\u4E92\u9694\u79BB\u3002"))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        onClick: () => openNewProjectModal()
-      },
-      "\u{1F4C1} \u6D4F\u89C8\u76EE\u5F55\u65B0\u5F00\u9879\u76EE"
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        ref: bind({ click: () => trackAsync(refreshProjects()) }),
-        id: "refresh-projects",
-        className: "secondary",
-        type: "button",
-        disabled: s.refreshProjectsBusy,
-        onClick: () => trackAsync(refreshProjects())
-      },
-      "\u5237\u65B0\u7A7A\u95F4"
-    ))),
-    /* @__PURE__ */ import_react2.default.createElement(
-      SpotlightCard,
-      {
-        as: "form",
-        id: "add-project-form",
-        border: true,
-        className: "project-add-bar",
-        handlers: { submit: (e) => trackAsync(handleAddProject(e, true)) },
-        onSubmit: (e) => trackAsync(handleAddProject(e, true))
-      },
-      /* @__PURE__ */ import_react2.default.createElement(
-        "input",
-        {
-          ref: projectWsInputRef,
-          id: "project-workspace-input",
-          type: "text",
-          maxLength: 1024,
-          required: true,
-          placeholder: "\u8F93\u5165\u672C\u5730\u9879\u76EE\u76EE\u5F55\u8DEF\u5F84\uFF0C\u4F8B\u5982 /Volumes/ORICO/CAYW",
-          value: s.projectWorkspaceInput,
-          onChange: (e) => {
-            s.projectWorkspaceInput = e.target.value;
-            forceRender();
-          }
-        }
-      ),
-      /* @__PURE__ */ import_react2.default.createElement(
-        "input",
-        {
-          ref: projectLabelInputRef,
-          id: "project-label-input",
-          type: "text",
-          maxLength: 160,
-          placeholder: "\u7A7A\u95F4\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u9ED8\u8BA4\u53D6\u76EE\u5F55\u540D\uFF09",
-          value: s.projectLabelInput,
-          onChange: (e) => {
-            s.projectLabelInput = e.target.value;
-            forceRender();
-          }
-        }
-      ),
-      /* @__PURE__ */ import_react2.default.createElement(
-        "button",
-        {
-          id: "add-project-button",
-          type: "submit",
-          disabled: s.addProjectBusy
-        },
-        s.addProjectBusy ? "\u6B63\u5728\u542F\u52A8\u9879\u76EE\u2026" : "+ \u65B0\u5F00\u9879\u76EE\u7A7A\u95F4"
-      )
-    ),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "quick-paths" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u5E38\u7528\u76EE\u5F55\u5FEB\u586B\uFF1A"), QUICK_WORKSPACES.map(([p, lbl]) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        key: p,
-        type: "button",
-        className: "quiet path-chip",
-        onClick: () => {
-          s.projectWorkspaceInput = p;
-          s.projectLabelInput = lbl;
-          if (projectWsInputRef.current) projectWsInputRef.current.value = p;
-          if (projectLabelInputRef.current) projectLabelInputRef.current.value = lbl;
-          forceRender();
-        }
-      },
-      `\u{1F4C1} ${lbl}`
-    ))),
-    /* @__PURE__ */ import_react2.default.createElement("p", { id: "projects-status", className: "small muted", role: "status" }, projectsStatusText),
-    /* @__PURE__ */ import_react2.default.createElement("div", { id: "project-list", className: "management-grid" }, projectSummaries.map((item) => {
-      const isCurrent = item.id === currentProjectId();
-      return /* @__PURE__ */ import_react2.default.createElement(
-        SpotlightCard,
-        {
-          as: "article",
-          key: item.id,
-          tilt: true,
-          border: true,
-          className: `management-card${isCurrent ? " is-active" : ""}`
-        },
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, item.label), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, isCurrent ? "\u5F53\u524D\u4F7F\u7528\u4E2D" : "\u53EF\u5207\u6362")),
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "stat-pills" }, item.workspace ? /* @__PURE__ */ import_react2.default.createElement(
-          "span",
-          {
-            className: "stat-pill mono",
-            "data-tip": `\u672C\u5730\u9879\u76EE\u76EE\u5F55\uFF1A${item.workspace}\uFF08IPC \u7AEF\u70B9\uFF1A${item.address}\uFF09`
-          },
-          `\u{1F4C1} ${item.workspace}`
-        ) : null, /* @__PURE__ */ import_react2.default.createElement(
-          "span",
-          {
-            className: "stat-pill",
-            "data-tip": `\u8BE5\u9879\u76EE\u5F53\u524D\u5171\u6709 ${item.sessionCount} \u4E2A\u4F1A\u8BDD`
-          },
-          `${item.sessionCount} \u4E2A\u4F1A\u8BDD`
-        ), /* @__PURE__ */ import_react2.default.createElement(
-          "span",
-          {
-            className: "stat-pill",
-            "data-tip": `\u9879\u76EE\u8FD0\u884C\u72B6\u6001\uFF1A${item.statusLabel}\uFF08IPC\uFF1A${item.address}\uFF09`
-          },
-          item.statusLabel
-        ), /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill mono" }, item.address), item.frozenCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill warn" }, `${item.frozenCount} \u5DF2\u51BB\u7ED3`) : null, item.unresolvedCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill danger" }, `${item.unresolvedCount} \u5F85\u6838\u5BF9`) : null),
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, /* @__PURE__ */ import_react2.default.createElement(
-          "button",
-          {
-            ref: bind({
-              click: () => trackAsync(selectProject(item.id))
-            }),
-            type: "button",
-            className: isCurrent ? "secondary" : "",
-            onClick: () => trackAsync(selectProject(item.id))
-          },
-          isCurrent ? "\u67E5\u770B\u7A7A\u95F4\u4F1A\u8BDD" : "\u5207\u6362\u5230\u6B64\u7A7A\u95F4"
-        ), /* @__PURE__ */ import_react2.default.createElement(
-          "button",
-          {
-            ref: bind({
-              click: () => trackAsync(
-                (async () => {
-                  await selectProject(item.id);
-                  await createNewSession();
-                })()
-              )
-            }),
-            type: "button",
-            className: "secondary",
-            onClick: () => trackAsync(
-              (async () => {
-                await selectProject(item.id);
-                await createNewSession();
-              })()
-            )
-          },
-          "+ \u5728\u6B64\u7A7A\u95F4\u65B0\u5EFA\u4F1A\u8BDD"
-        ), !item.default ? /* @__PURE__ */ import_react2.default.createElement(
-          "button",
-          {
-            ref: bind({
-              click: () => trackAsync(removeProject(item.id))
-            }),
-            type: "button",
-            className: "secondary deny",
-            onClick: () => trackAsync(removeProject(item.id))
-          },
-          "\u79FB\u9664"
-        ) : null)
-      );
-    }))
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "section",
-    {
-      id: "permissions-page",
-      className: "management-page",
-      hidden: s.activePage !== "permissions",
-      "aria-labelledby": "permissions-heading"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u6743\u9650\u4E0E\u5B89\u5168\u63A7\u5236"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "permissions-heading" }, "\u4F1A\u8BDD\u6743\u9650\u9884\u8BBE\u4E0E\u5DF2\u6388\u6743\u7BA1\u7406"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u6743\u9650\u8BF4\u660E" }, "\u6240\u6709 CodeMode \u5DE5\u5177\u8C03\u7528\u5747\u7ECF\u8FC7\u5BBF\u4E3B\u53C2\u6570\u6821\u9A8C\u4E0E\u6743\u9650\u95E8\u7981\u3002\u4F60\u53EF\u4EE5\u5728\u6B64\u5207\u6362\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F\u3001\u67E5\u770B\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6388\u4E88\u7684\u7CBE\u786E\u53C2\u6570\u6388\u6743\uFF0C\u6216\u968F\u65F6\u64A4\u9500\u4EFB\u610F\u6388\u6743\u3002"))), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        id: "refresh-permissions",
-        className: "secondary",
-        type: "button",
-        disabled: s.refreshPermissionsBusy,
-        onClick: () => trackAsync(refreshPermissions())
-      },
-      "\u5237\u65B0\u6743\u9650\u8BB0\u5F55"
+      "\u63D2\u4EF6"
     )),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-permission-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-permission-row-text" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F\uFF08Permission Preset\uFF09"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u9009\u62E9\u5F53\u524D\u4E0E\u65B0\u5EFA\u4F1A\u8BDD\u7684\u6743\u9650\u95E8\u7981\u7B56\u7565\u3002\u542F\u7528 Full access \u524D\u9700\u663E\u5F0F\u786E\u8BA4\u98CE\u9669\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-pills" }, PERMISSION_PRESETS.map((preset) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+    /* @__PURE__ */ import_react.default.createElement(
+      "aside",
       {
-        key: preset.id,
-        type: "button",
-        className: `dsh-preset-pill${s.permissionPreset === preset.id ? " is-active" : ""}`,
-        onClick: () => selectPermissionPreset(preset.id)
+        className: we("pI_x6G_sidebarCol hHd-Xa_root", !wide && "hHd-Xa_collapsed"),
+        "aria-labelledby": "sessions-heading"
       },
-      `${preset.label} (${preset.enLabel})`
-    )))), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, currentPresetObj.desc)),
-    /* @__PURE__ */ import_react2.default.createElement("p", { id: "permissions-status", className: "small muted", role: "status" }, s.permissionsStatus || `\u5F53\u524D\u4F1A\u8BDD\uFF1A${snapshot ? displayLabel(snapshot) : "\u672A\u9009\u62E9"} \xB7 ${s.sessionGrants.length} \u9879\u751F\u6548\u6388\u6743`),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "management-grid" }, /* @__PURE__ */ import_react2.default.createElement(SpotlightCard, { as: "article", border: true, className: "management-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u5F53\u524D\u4F1A\u8BDD\u751F\u6548\u6388\u6743\uFF08`session.grants`\uFF09"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, `${s.sessionGrants.length} \u9879`)), !s.sessionGrants.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u5F53\u524D\u4F1A\u8BDD\u6682\u65E0\u6301\u4E45\u4EFB\u52A1\u6388\u6743\u3002\u5F53\u4F60\u5728\u5BA1\u6279\u5361\u7247\u70B9\u51FB\u201C\u5141\u8BB8\u6B64\u4EFB\u52A1\u201D\u540E\uFF0C\u6388\u6743\u6761\u76EE\u4F1A\u663E\u793A\u5728\u6B64\u5904\u5E76\u53EF\u968F\u65F6\u64A4\u9500\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-grants-list" }, s.sessionGrants.map((grant, idx) => {
-      const cap = grant.capability ?? grant.input?.capability ?? "\u672A\u77E5\u80FD\u529B";
-      const scopeStr = typeof grant.scope === "string" ? grant.scope : JSON.stringify(grant.scope ?? {});
-      const key = `${cap}:${scopeStr}`;
-      return /* @__PURE__ */ import_react2.default.createElement("div", { key: `${key}/${idx}`, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, CAPABILITY_LABELS[cap] ?? cap), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small mono muted" }, ` \xB7 ${clip(scopeStr, 140)}`)), /* @__PURE__ */ import_react2.default.createElement(
+      /* @__PURE__ */ import_react.default.createElement("div", { className: "hHd-Xa_logoRow" }, wide ? /* @__PURE__ */ import_react.default.createElement(
         "button",
         {
           type: "button",
-          className: "secondary deny",
-          disabled: s.revokeBusyKey === key,
-          onClick: () => trackAsync(revokeGrant(grant))
+          className: "hHd-Xa_brand hHd-Xa_wide",
+          "aria-label": "\u65B0\u5EFA\u4F1A\u8BDD",
+          onClick: () => trackAsync(createNewSession())
         },
-        s.revokeBusyKey === key ? "\u64A4\u9500\u4E2D\u2026" : "\u64A4\u9500\u6388\u6743"
-      ));
-    }))), /* @__PURE__ */ import_react2.default.createElement(SpotlightCard, { as: "article", border: true, className: "management-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u6743\u9650\u4E0E\u5DE5\u5177\u5BA1\u8BA1\u8BB0\u5F55\uFF08`session.audit`\uFF09"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, `${s.sessionAudit.length} \u6761`)), !s.sessionAudit.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u5F53\u524D\u4F1A\u8BDD\u6682\u65E0\u5DE5\u5177\u5BA1\u6279\u5BA1\u8BA1\u8BB0\u5F55\u3002\u53D1\u751F\u5DE5\u5177\u8C03\u7528\u6216\u6388\u6743\u51B3\u7B56\u540E\u5C06\u81EA\u52A8\u540C\u6B65\u3002") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-audit-list" }, s.sessionAudit.slice(-15).map((item, idx) => /* @__PURE__ */ import_react2.default.createElement("details", { key: idx, className: "record-details" }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${idx + 1} \xB7 ${clip(
-      item.capability ?? item.kind ?? item.decision ?? "\u5BA1\u8BA1\u6761\u76EE",
-      80
-    )}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(item)))))))
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "section",
-    {
-      id: "plugins-page",
-      className: "management-page",
-      hidden: s.activePage !== "plugins",
-      "aria-labelledby": "plugins-heading"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u63D2\u4EF6\u7BA1\u7406"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "plugins-heading" }, "\u63D2\u4EF6\u4E0E\u4F1A\u8BDD\u7ED1\u5B9A"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u63D2\u4EF6\u7BA1\u7406\u8BF4\u660E" }, "\u5C55\u793A\u5F53\u524D\u9879\u76EE\u5DF2\u7ED1\u5B9A\u7684 plugin\u3001\u7248\u672C\u4EE3\u9645\u3001\u516C\u5F00\u80FD\u529B\u4E0E\u51BB\u7ED3\u72B6\u6001\u3002plugin \u542F\u505C\u7531\u672C\u673A\u5BBF\u4E3B\u63A7\u5236\uFF1B\u82E5\u5378\u8F7D\u5BFC\u81F4\u4F1A\u8BDD\u51BB\u7ED3\uFF0C\u53EF\u5728\u526F\u4F5C\u7528\u6838\u5BF9\u5B8C\u6BD5\u540E\u663E\u5F0F Fork \u4E3A\u666E\u901A\u804A\u5929\u3002"))), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        ref: bind({ click: () => trackAsync(refreshPlugins()) }),
-        id: "refresh-plugins",
-        className: "secondary",
-        type: "button",
-        disabled: s.refreshPluginsBusy,
-        onClick: () => trackAsync(refreshPlugins())
-      },
-      "\u5237\u65B0\u63D2\u4EF6\u72B6\u6001"
-    )),
-    /* @__PURE__ */ import_react2.default.createElement("p", { id: "plugins-status", className: "small muted", role: "status" }, pluginsStatusText),
-    /* @__PURE__ */ import_react2.default.createElement("div", { id: "plugin-list", className: "management-grid" }, !pluginItems.length ? OPTIONAL_PLUGIN_CATALOG.map((mod) => /* @__PURE__ */ import_react2.default.createElement(
-      SpotlightCard,
-      {
-        as: "article",
-        key: mod.name,
-        tilt: true,
-        border: true,
-        className: "management-card"
-      },
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, mod.name), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, "\u6309\u9700\u63D2\u62D4")),
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "stat-pills" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill" }, mod.role), /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill" }, "0 \u4E2A\u7ED1\u5B9A\u4F1A\u8BDD")),
-      /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted card-desc" }, mod.desc)
-    )) : pluginItems.map((plugin) => {
-      const shortReg = plugin.registryId.length > 14 ? `${plugin.registryId.slice(0, 8)}\u2026` : plugin.registryId;
-      return /* @__PURE__ */ import_react2.default.createElement(
-        SpotlightCard,
+        /* @__PURE__ */ import_react.default.createElement("span", { className: "hHd-Xa_brandIdentity", "aria-hidden": "true" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "hHd-Xa_brandMark" }, /* @__PURE__ */ import_react.default.createElement(of, { size: 24 })), /* @__PURE__ */ import_react.default.createElement("span", { className: "hHd-Xa_brandName" }, /* @__PURE__ */ import_react.default.createElement(lf, { size: 24, includeMark: false })))
+      ) : null, /* @__PURE__ */ import_react.default.createElement(sf, { label: wide ? "\u6536\u8D77\u4FA7\u8FB9\u680F" : "\u6253\u5F00\u4FA7\u8FB9\u680F", delayMs: 400 }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
         {
-          as: "article",
-          key: plugin.name,
-          tilt: true,
-          border: true,
-          className: `management-card${plugin.frozen ? " is-frozen" : ""}`
+          type: "button",
+          className: "hHd-Xa_iconButton hHd-Xa_toggle",
+          "aria-label": wide ? "\u6536\u8D77\u4FA7\u8FB9\u680F" : "\u6253\u5F00\u4FA7\u8FB9\u680F",
+          onClick: () => {
+            s.sidebarCollapsed = !s.sidebarCollapsed;
+            forceRender();
+          }
         },
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, plugin.name), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, plugin.statusLabel)),
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "stat-pills" }, /* @__PURE__ */ import_react2.default.createElement(
-          "span",
+        !wide ? /* @__PURE__ */ import_react.default.createElement("span", { className: "hHd-Xa_railMark", "aria-hidden": "true" }, /* @__PURE__ */ import_react.default.createElement(of, { size: 24 })) : null,
+        /* @__PURE__ */ import_react.default.createElement(
+          F9,
           {
-            className: "stat-pill",
-            "data-tip": `\u63D2\u4EF6\u7248\u672C\uFF1A${plugin.version}`
-          },
-          `\u7248\u672C ${plugin.version}`
-        ), /* @__PURE__ */ import_react2.default.createElement(
-          "span",
+            className: "hHd-Xa_panelIcon",
+            size: wide ? 16 : 18
+          }
+        )
+      ))),
+      /* @__PURE__ */ import_react.default.createElement(sf, { label: "\u65B0\u5EFA\u4F1A\u8BDD", delayMs: 400, disabled: wide }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          ref: bind({ click: () => trackAsync(createNewSession()) }),
+          id: "create-button",
+          type: "button",
+          className: "hHd-Xa_newSession",
+          "aria-label": "\u65B0\u5EFA\u4F1A\u8BDD",
+          disabled: s.createBusy,
+          onClick: () => trackAsync(createNewSession())
+        },
+        /* @__PURE__ */ import_react.default.createElement(I9, { size: wide ? 14 : 18 }),
+        wide ? /* @__PURE__ */ import_react.default.createElement("span", { className: "hHd-Xa_newSessionLabel hHd-Xa_wide" }, s.createBusy ? "\u521B\u5EFA\u4E2D\u2026" : "\u65B0\u4F1A\u8BDD") : null
+      )),
+      /* @__PURE__ */ import_react.default.createElement("div", { className: "hHd-Xa_regionArea" }, /* @__PURE__ */ import_react.default.createElement("div", { className: we("qDHVXG_root", !wide && "qDHVXG_rail") }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qDHVXG_sectionHeader" }, wide ? /* @__PURE__ */ import_react.default.createElement(
+        "span",
+        {
+          id: "sessions-heading",
+          className: we(
+            "qDHVXG_sectionLabel qDHVXG_wide",
+            (s.searchExpanded || s.sessionSearchQuery.trim()) && "qDHVXG_sectionLabelHidden"
+          )
+        },
+        "\u5DE5\u4F5C\u533A"
+      ) : /* @__PURE__ */ import_react.default.createElement("span", { id: "sessions-heading", className: "visually-hidden" }, "\u5DE5\u4F5C\u533A"), wide ? /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          className: we(
+            "qDHVXG_searchSlot",
+            (s.searchExpanded || s.sessionSearchQuery.trim()) && "qDHVXG_searchSlotExpanded"
+          )
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          "div",
           {
-            className: "stat-pill mono",
-            "data-tip": `\u5B9E\u4F8B\u6807\u8BC6\uFF1A${plugin.registryId}`
+            className: we(
+              "qDHVXG_search",
+              (s.searchExpanded || s.sessionSearchQuery.trim()) && "qDHVXG_searchExpanded"
+            )
           },
-          shortReg
-        ), plugin.generation !== null ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill" }, `\u4EE3\u9645 #${plugin.generation}`) : null, /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill" }, `${plugin.boundSessions.length} \u4E2A\u7ED1\u5B9A\u4F1A\u8BDD`), plugin.reasons.length ? /* @__PURE__ */ import_react2.default.createElement(HintPopover, { chip: true, warn: true, label: "\u51BB\u7ED3\u539F\u56E0 ?" }, plugin.reasons.join("\uFF1B")) : null),
-        plugin.capabilities.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "stat-pills" }, plugin.capabilities.map((cap) => /* @__PURE__ */ import_react2.default.createElement(
-          "span",
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "qDHVXG_searchButton",
+              "aria-label": "\u641C\u7D22\u4F1A\u8BDD",
+              onClick: () => {
+                s.searchExpanded = !s.searchExpanded;
+                forceRender();
+              }
+            },
+            /* @__PURE__ */ import_react.default.createElement(V9, { size: 16 })
+          ),
+          /* @__PURE__ */ import_react.default.createElement(
+            "input",
+            {
+              type: "text",
+              className: "qDHVXG_searchInput",
+              placeholder: "\u641C\u7D22\u4F1A\u8BDD\u2026",
+              "aria-label": "\u641C\u7D22\u4F1A\u8BDD",
+              value: s.sessionSearchQuery,
+              tabIndex: s.searchExpanded || s.sessionSearchQuery.trim() ? 0 : -1,
+              onChange: (e) => {
+                s.sessionSearchQuery = e.target.value;
+                forceRender();
+              },
+              onKeyDown: (e) => {
+                if (e.key === "Escape") {
+                  s.sessionSearchQuery = "";
+                  s.searchExpanded = false;
+                  forceRender();
+                }
+              }
+            }
+          ),
+          s.searchExpanded || s.sessionSearchQuery.trim() ? /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "qDHVXG_clearButton",
+              "aria-label": "\u6E05\u9664\u641C\u7D22",
+              onClick: (e) => {
+                e.stopPropagation();
+                s.sessionSearchQuery = "";
+                s.searchExpanded = false;
+                forceRender();
+              }
+            },
+            /* @__PURE__ */ import_react.default.createElement(G9, null)
+          ) : null
+        )
+      ) : null, /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          className: we(
+            "qDHVXG_headerActions",
+            wide && (s.searchExpanded || s.sessionSearchQuery.trim()) && "qDHVXG_headerActionsHidden"
+          )
+        },
+        wide ? /* @__PURE__ */ import_react.default.createElement(sf, { label: "\u5237\u65B0\u4F1A\u8BDD", side: "bottom", delayMs: 400 }, /* @__PURE__ */ import_react.default.createElement(
+          "button",
           {
-            key: cap,
-            className: "stat-pill mono",
-            "data-tip": `\u63D2\u4EF6\u516C\u5F00\u80FD\u529B\uFF1A${cap}`
+            ref: bind({ click: () => trackAsync(refreshSessions()) }),
+            id: "refresh-sessions",
+            type: "button",
+            className: "qDHVXG_iconButton qDHVXG_wide",
+            "aria-label": "\u5237\u65B0\u4F1A\u8BDD",
+            disabled: s.refreshSessionsBusy,
+            onClick: () => trackAsync(refreshSessions())
           },
-          cap
-        ))) : null,
-        plugin.boundSessions.map((bound) => /* @__PURE__ */ import_react2.default.createElement("div", { key: bound.id, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small" }, `${bound.label}\uFF08${bound.stateLabel}\uFF09`), /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, /* @__PURE__ */ import_react2.default.createElement(
+          /* @__PURE__ */ import_react.default.createElement(J9, { size: 16 })
+        )) : null,
+        /* @__PURE__ */ import_react.default.createElement(sf, { label: "\u6DFB\u52A0\u5DE5\u4F5C\u533A", side: "bottom", delayMs: 400 }, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            id: "open-new-project-btn",
+            type: "button",
+            className: "qDHVXG_iconButton",
+            "aria-label": "\u6DFB\u52A0\u5DE5\u4F5C\u533A",
+            onClick: () => openNewProjectModal()
+          },
+          /* @__PURE__ */ import_react.default.createElement(M7, { size: wide ? 16 : 18 })
+        ))
+      )), /* @__PURE__ */ import_react.default.createElement("span", { id: "list-status", className: "visually-hidden", role: "status" }, s.listStatus), /* @__PURE__ */ import_react.default.createElement("div", { className: "qDHVXG_listArea" }, wide ? /* @__PURE__ */ import_react.default.createElement("div", { className: "qDHVXG_treeBody qDHVXG_wide" }, /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          id: "session-list",
+          className: "qDHVXG_list",
+          role: "tree",
+          "aria-label": "\u4F1A\u8BDD"
+        },
+        projectSummaries.map((proj) => {
+          const isCurrentProj = proj.id === currentProjectId();
+          const isExpanded = s.expandedGroups[proj.id] !== void 0 ? s.expandedGroups[proj.id] : true;
+          const projSessions = isCurrentProj ? filteredSessions : array(s.projectStates.get(proj.id)?.sessions);
+          return /* @__PURE__ */ import_react.default.createElement("div", { key: proj.id, className: "qDHVXG_groupSection" }, /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              className: "YDXeBa_projectRow",
+              role: "treeitem",
+              "aria-expanded": isExpanded,
+              onClick: () => {
+                if (!isCurrentProj) {
+                  void selectProject(proj.id);
+                  s.expandedGroups[proj.id] = true;
+                } else {
+                  s.expandedGroups[proj.id] = !isExpanded;
+                }
+                forceRender();
+              }
+            },
+            /* @__PURE__ */ import_react.default.createElement(
+              "span",
+              {
+                className: we(
+                  "YDXeBa_slot YDXeBa_folder",
+                  isExpanded && isCurrentProj && "YDXeBa_folderActive"
+                )
+              },
+              isExpanded ? /* @__PURE__ */ import_react.default.createElement(O7, null) : /* @__PURE__ */ import_react.default.createElement(P7, null)
+            ),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_slot YDXeBa_chevron" }, /* @__PURE__ */ import_react.default.createElement(
+              q9,
+              {
+                className: we(
+                  "YDXeBa_arrow",
+                  isExpanded && "YDXeBa_arrowOpen"
+                )
+              }
+            )),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_projectText" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_title" }, proj.label)),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                type: "button",
+                className: "YDXeBa_iconButton",
+                "aria-label": `\u5728\u201C${proj.label}\u201D\u4E2D\u65B0\u5EFA\u4F1A\u8BDD`,
+                title: `\u5728\u201C${proj.label}\u201D\u4E2D\u65B0\u5EFA\u4F1A\u8BDD`,
+                onClick: (e) => {
+                  e.stopPropagation();
+                  s.expandedGroups[proj.id] = true;
+                  trackAsync(
+                    (async () => {
+                      if (!isCurrentProj) {
+                        await selectProject(proj.id);
+                      }
+                      await createNewSession();
+                    })()
+                  );
+                }
+              },
+              /* @__PURE__ */ import_react.default.createElement(B9, null)
+            ))
+          ), isExpanded ? !projSessions.length && isCurrentProj ? /* @__PURE__ */ import_react.default.createElement("div", { className: "qDHVXG_empty" }, s.sessionSearchQuery.trim() ? "\u65E0\u5339\u914D\u4F1A\u8BDD" : "\u6682\u65E0\u4F1A\u8BDD") : projSessions.map((session) => {
+            const isSelected = isCurrentProj && session.id === s.selected;
+            const sessView = s.views.get(session.id);
+            const dotState = stateDotKind(session, sessView);
+            const showDot = dotState !== "done" || isSelected;
+            return /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                key: session.id,
+                type: "button",
+                role: "treeitem",
+                "aria-selected": isSelected,
+                "aria-current": String(isSelected),
+                className: we(
+                  "YDXeBa_sessionRow",
+                  isSelected && "YDXeBa_selected"
+                ),
+                ref: bind({
+                  click: () => trackAsync(
+                    (async () => {
+                      if (!isCurrentProj) {
+                        await selectProject(proj.id);
+                      }
+                      await selectSession(session.id);
+                    })()
+                  )
+                }),
+                onClick: () => trackAsync(
+                  (async () => {
+                    if (!isCurrentProj) {
+                      await selectProject(proj.id);
+                    }
+                    await selectSession(session.id);
+                  })()
+                )
+              },
+              /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_slot" }, showDot ? /* @__PURE__ */ import_react.default.createElement(Pu, { state: dotState }) : null),
+              /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_title" }, displayLabel(session), /* @__PURE__ */ import_react.default.createElement("span", { className: "visually-hidden" }, ` ${String(session.id ?? "").slice(0, 20)}`)),
+              /* @__PURE__ */ import_react.default.createElement("span", { className: "YDXeBa_time" }, stateLabel(session, sessView))
+            );
+          }) : null);
+        })
+      )) : null))),
+      /* @__PURE__ */ import_react.default.createElement("div", { className: "hHd-Xa_footArea" }, /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          className: "hHd-Xa_settingsArea",
+          style: { display: "flex", alignItems: "center", gap: 4 }
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            id: "open-settings-button",
+            type: "button",
+            className: we("VOzbGW_trigger", !wide && "VOzbGW_rail"),
+            style: { flex: 1 },
+            "aria-haspopup": "dialog",
+            "aria-expanded": s.settingsOpen,
+            onClick: () => openSettings("general")
+          },
+          wide ? /* @__PURE__ */ import_react.default.createElement(A9, { size: 16 }) : /* @__PURE__ */ import_react.default.createElement(D9, { size: 18 }),
+          wide ? /* @__PURE__ */ import_react.default.createElement("span", { className: "UQsH_q_triggerLabel" }, "\u8BBE\u7F6E") : null
+        ),
+        /* @__PURE__ */ import_react.default.createElement(
+          sf,
+          {
+            label: `${s.connectionStatus} \xB7 \u70B9\u51FB\u91CD\u8FDE`,
+            side: "top",
+            delayMs: 400
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              ref: bind({ click: () => trackAsync(connectLocal()) }),
+              id: "reconnect",
+              type: "button",
+              className: "hHd-Xa_iconButton",
+              "aria-label": "\u91CD\u8FDE\u672C\u673A Runtime",
+              disabled: s.reconnectBusy,
+              onClick: () => trackAsync(connectLocal())
+            },
+            /* @__PURE__ */ import_react.default.createElement(
+              Pu,
+              {
+                state: s.connectionStatus === "\u5DF2\u8FDE\u63A5\u672C\u673A" ? "done" : "warning"
+              }
+            ),
+            /* @__PURE__ */ import_react.default.createElement(
+              "span",
+              {
+                id: "connection-status",
+                className: "visually-hidden",
+                role: "status"
+              },
+              s.connectionStatus
+            )
+          )
+        )
+      ))
+    ),
+    /* @__PURE__ */ import_react.default.createElement("main", { id: "conversation", className: "pI_x6G_centerCol", tabIndex: -1 }, /* @__PURE__ */ import_react.default.createElement(
+      "div",
+      {
+        id: "conversation-view",
+        className: "wSkVaW_root",
+        "data-phase": isHero ? "hero" : "active",
+        hidden: s.activePage !== "conversation"
+      },
+      /* @__PURE__ */ import_react.default.createElement(
+        "header",
+        {
+          className: we("wSkVaW_header", isHero && "wSkVaW_headerHidden"),
+          "aria-hidden": isHero || void 0
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_titleRow" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_titleCluster" }, /* @__PURE__ */ import_react.default.createElement("nav", { className: "wSkVaW_crumbs", "aria-label": "\u4F1A\u8BDD\u5C42\u7EA7" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "wSkVaW_crumbSeg" }, /* @__PURE__ */ import_react.default.createElement(
           "button",
           {
             type: "button",
-            className: "secondary",
-            onClick: () => trackAsync(
-              (async () => {
-                switchPage("conversation");
-                await selectSession(bound.id);
-              })()
-            )
+            className: "wSkVaW_crumb",
+            onClick: () => openNewProjectModal()
           },
-          "\u6253\u5F00\u4F1A\u8BDD"
-        ), bound.frozen ? /* @__PURE__ */ import_react2.default.createElement(
-          "button",
+          currentProjectSummary?.label ?? "CAYW"
+        )), /* @__PURE__ */ import_react.default.createElement("span", { className: "wSkVaW_crumbSeg" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "wSkVaW_crumbSep" }, "/"), /* @__PURE__ */ import_react.default.createElement(
+          "span",
           {
-            type: "button",
-            disabled: !bound.canFork,
-            onClick: () => trackAsync(
-              (async () => {
-                switchPage("conversation");
-                await selectSession(bound.id);
-                openForkDialog();
-              })()
-            )
+            id: "session-title",
+            className: "wSkVaW_crumb wSkVaW_crumbCurrent"
+          },
+          snapshot ? displayLabel(snapshot) : s.selected ? "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026" : "\u65B0\u4F1A\u8BDD"
+        ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_headerActions" }, /* @__PURE__ */ import_react.default.createElement(
+          "span",
+          {
+            className: "pXSMma_previewBadge",
+            style: { marginTop: 0, marginLeft: 0 }
+          },
+          currentAgentPresetObj.name
+        ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_headerUtilities" }, /* @__PURE__ */ import_react.default.createElement("span", { id: "history-note", className: "visually-hidden" }, historyNote), /* @__PURE__ */ import_react.default.createElement(
+          "span",
+          {
+            id: "poll-status",
+            className: "visually-hidden",
+            role: "status"
+          },
+          s.pollStatus
+        ), /* @__PURE__ */ import_react.default.createElement(
+          "span",
+          {
+            id: "session-state",
+            style: {
+              fontSize: 12,
+              color: "var(--dsw-alias-label-tertiary)"
+            }
+          },
+          snapshot ? stateLabel(snapshot, view) : "\u7B49\u5F85\u9009\u62E9"
+        )))
+      ),
+      /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_scrollBody", "data-conversation-scroll": "" }, /* @__PURE__ */ import_react.default.createElement(
+        "p",
+        {
+          id: "global-error",
+          className: "_banner_ugy7y_1",
+          role: "alert",
+          hidden: !s.globalError
+        },
+        s.globalError
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "section",
+        {
+          id: "blocked-notice",
+          className: "bqrRRG_root",
+          hidden: !attention,
+          "aria-labelledby": "blocked-title"
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_card" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_strip" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "bqrRRG_dot" }), /* @__PURE__ */ import_react.default.createElement("strong", { id: "blocked-title" }, "\u4F1A\u8BDD\u6682\u65F6\u4E0D\u80FD\u7EE7\u7EED")), /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_body" }, /* @__PURE__ */ import_react.default.createElement("div", { id: "blocked-text", className: "bqrRRG_headline" }, blockedText)), /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_actionRow", hidden: !showForkBtn }, /* @__PURE__ */ import_react.default.createElement(
+          ps,
+          {
+            ref: bind({ click: openForkDialog }),
+            id: "open-fork",
+            variant: "primary",
+            disabled: !forkEnabled,
+            onClick: openForkDialog
           },
           "\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929"
-        ) : null)))
-      );
-    })),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-catalog" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "section-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", null, "\u5DE5\u4F5C\u533A\u5185\u7F6E\u80FD\u529B\uFF08CodeMode\uFF09"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "CodeMode \u5185\u7F6E\u80FD\u529B\u8BF4\u660E" }, "\u6A21\u578B\u901A\u8FC7 Luau \u5355\u5143\u8C03\u7528\u4EE5\u4E0B\u53D7\u63A7\u80FD\u529B\uFF1B\u6BCF\u6B21\u5177\u4F53\u8C03\u7528\u90FD\u7ECF\u8FC7\u5BBF\u4E3B\u53C2\u6570\u6821\u9A8C\u3001\u6743\u9650\u5BA1\u6279\u4E0E\u7ED3\u679C\u914D\u5BF9\u3002")), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, s.cachedCapabilities.length ? `\u5DF2\u52A0\u8F7D ${s.cachedCapabilities.length} \u9879\u5BBF\u4E3B\u80FD\u529B` : "\u5171 4 \u7EC4\u9884\u7F6E\u5DE5\u4F5C\u533A\u80FD\u529B")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "management-grid" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react2.default.createElement(
-      SpotlightCard,
+        )))
+      ), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_viewArea", hidden: isHero }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Md3f7G_root" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Md3f7G_scroll" }, /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          id: "messages",
+          className: "Md3f7G_column",
+          "data-chat-flow": ""
+        },
+        messages.map((message, index) => {
+          const role = [
+            "user",
+            "assistant",
+            "system",
+            "toolResult",
+            "custom"
+          ].includes(message.role) ? message.role : "custom";
+          const presentation = messagePresentation(message);
+          const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
+          if (role === "user" && presentation.kind === "text") {
+            return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_userRow" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_userStack" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_bubble" }, presentation.text))));
+          }
+          if (presentation.kind === "text") {
+            return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_root" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_body" }, /* @__PURE__ */ import_react.default.createElement(FormattedMarkdown, { text: presentation.text }))));
+          }
+          if (presentation.kind === "tool_call") {
+            return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, presentation.text ? /* @__PURE__ */ import_react.default.createElement(
+              "div",
+              {
+                className: "Sxvs8a_root",
+                style: { marginBottom: 12 }
+              },
+              /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_body" }, /* @__PURE__ */ import_react.default.createElement(FormattedMarkdown, { text: presentation.text }))
+            ) : null, presentation.calls.map((call, callIndex) => {
+              const callKey = `${key}/${callIndex}`;
+              const isOpen2 = expandedSet.has(callKey);
+              const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "Wait" : "Execute Code" : clip(call.name, 60);
+              const summary = call.name === "execute_code" ? clip(
+                call.arguments?.code ?? call.arguments?.action ?? "\u8FD0\u884C Luau \u4EE3\u7801\u5355\u5143",
+                80
+              ) : clip(JSON.stringify(call.arguments ?? {}), 80);
+              return /* @__PURE__ */ import_react.default.createElement("div", { key: callKey, className: "Md3f7G_callRow" }, /* @__PURE__ */ import_react.default.createElement(
+                "div",
+                {
+                  className: "_Xvjua_root",
+                  "data-variant": "others",
+                  "data-state": "ok"
+                },
+                /* @__PURE__ */ import_react.default.createElement(
+                  Q7,
+                  {
+                    rowClassName: "_Xvjua_row",
+                    leadingClassName: "_Xvjua_leading",
+                    titleClassName: "_Xvjua_title",
+                    chevronClassName: "_Xvjua_chevron",
+                    icon: /* @__PURE__ */ import_react.default.createElement(k7, { size: 16 }),
+                    title,
+                    open: isOpen2,
+                    expandable: true,
+                    expandOnRowClick: true,
+                    keepContentWhenOpen: true,
+                    onToggle: () => toggleRecordExpand(callKey, !isOpen2),
+                    collapsedContent: /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, null, /* @__PURE__ */ import_react.default.createElement(
+                      "span",
+                      {
+                        className: "_Xvjua_separator",
+                        "aria-hidden": "true"
+                      }
+                    ), /* @__PURE__ */ import_react.default.createElement("span", { className: "_Xvjua_summary" }, summary))
+                  },
+                  /* @__PURE__ */ import_react.default.createElement("pre", { className: "_Xvjua_body" }, recordText(call))
+                )
+              ));
+            }));
+          }
+          const isOpen = expandedSet.has(key);
+          const isErr = presentation.status === "error" || Boolean(message.error_message) || Boolean(message.outcome_unknown);
+          return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Md3f7G_callRow" }, /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              className: "_Xvjua_root",
+              "data-variant": "others",
+              "data-state": isErr ? "error" : "ok"
+            },
+            /* @__PURE__ */ import_react.default.createElement(
+              Q7,
+              {
+                rowClassName: "_Xvjua_row",
+                leadingClassName: "_Xvjua_leading",
+                titleClassName: "_Xvjua_title",
+                chevronClassName: "_Xvjua_chevron",
+                icon: /* @__PURE__ */ import_react.default.createElement(k7, { size: 16 }),
+                title: presentation.title || "\u5DE5\u5177\u6267\u884C\u7ED3\u679C",
+                open: isOpen,
+                expandable: true,
+                expandOnRowClick: true,
+                keepContentWhenOpen: true,
+                onToggle: () => toggleRecordExpand(key, !isOpen),
+                collapsedContent: /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, null, /* @__PURE__ */ import_react.default.createElement(
+                  "span",
+                  {
+                    className: "_Xvjua_separator",
+                    "aria-hidden": "true"
+                  }
+                ), /* @__PURE__ */ import_react.default.createElement(
+                  "span",
+                  {
+                    className: "_Xvjua_summary",
+                    "data-error": isErr || void 0
+                  },
+                  presentation.text || (presentation.values ?? []).map((v) => `${v.label}: ${v.text}`).join(" \xB7 ") || "\u70B9\u51FB\u5C55\u5F00\u8BE6\u60C5"
+                ))
+              },
+              /* @__PURE__ */ import_react.default.createElement(
+                "pre",
+                {
+                  className: "_Xvjua_body",
+                  "data-error": isErr || void 0
+                },
+                presentation.raw
+              )
+            )
+          )), message.error_message ? /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_turnErrorRow" }, /* @__PURE__ */ import_react.default.createElement(
+            Pu,
+            {
+              state: "error",
+              className: "gdEzaW_turnErrorDot"
+            }
+          ), /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_turnErrorCopy" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "gdEzaW_turnErrorTitle" }, "\u6267\u884C\u5F02\u5E38"), /* @__PURE__ */ import_react.default.createElement("span", { className: "gdEzaW_turnErrorMessage" }, clip(message.error_message, 2e3)))) : null, message.outcome_unknown ? /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_turnErrorRow" }, /* @__PURE__ */ import_react.default.createElement(
+            Pu,
+            {
+              state: "warning",
+              className: "gdEzaW_turnErrorDot"
+            }
+          ), /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_turnErrorCopy" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "gdEzaW_maxTokensTitle" }, "\u5F85\u6838\u5BF9"), /* @__PURE__ */ import_react.default.createElement("span", { className: "gdEzaW_turnErrorMessage" }, "\u6B64\u5DE5\u5177\u8C03\u7528\u7684\u771F\u5B9E\u7ED3\u679C\u5F85\u5BBF\u4E3B\u6838\u5BF9\u3002"))) : null);
+        })
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "section",
+        {
+          id: "live-section",
+          className: "Md3f7G_column",
+          hidden: !view?.liveText,
+          "aria-labelledby": "live-heading"
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "Md3f7G_turnStatus", id: "live-heading" }, "\u6B63\u5728\u601D\u8003\u4E0E\u751F\u6210\u2026"),
+        /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            className: "Sxvs8a_root",
+            "data-streaming": "true",
+            style: { marginTop: 8 }
+          },
+          /* @__PURE__ */ import_react.default.createElement("div", { id: "live-text", className: "Sxvs8a_body" }, /* @__PURE__ */ import_react.default.createElement(FormattedMarkdown, { text: view?.liveText ?? "" }))
+        )
+      )))), /* @__PURE__ */ import_react.default.createElement(
+        "section",
+        {
+          id: "approvals",
+          className: "bqrRRG_root",
+          "aria-label": "\u5F85\u5BA1\u6279\u8BF7\u6C42",
+          hidden: !approvals.length
+        },
+        approvals.slice(0, 30).map((approval, idx) => {
+          const id = approval.id ?? approval.approval_id;
+          const input = approval.input ?? {};
+          const capability = input.capability ?? "";
+          let scope = null;
+          try {
+            scope = JSON.parse(input.scope);
+          } catch {
+            scope = null;
+          }
+          const operation = CAPABILITY_LABELS[capability] ?? `\u4F7F\u7528\u80FD\u529B\uFF1A${clip(capability || "\u5BBF\u4E3B\u672A\u8BF4\u660E", 100)}`;
+          const scopeLines = [];
+          if (object(scope)) {
+            if (scope.path !== void 0)
+              scopeLines.push(["\u6587\u4EF6", scope.path, 400]);
+            if (scope.profile !== void 0)
+              scopeLines.push(["\u9884\u8BBE\u4EFB\u52A1", scope.profile, 400]);
+            if (scope.query !== void 0)
+              scopeLines.push(["\u68C0\u7D22\u5185\u5BB9", scope.query, 400]);
+            if (scope.filter !== void 0)
+              scopeLines.push(["\u6D4B\u8BD5\u8303\u56F4", scope.filter, 400]);
+            if (scope.server !== void 0)
+              scopeLines.push(["\u5DE5\u5177\u8FDE\u63A5", scope.server, 400]);
+            if (scope.tool !== void 0)
+              scopeLines.push(["\u5DE5\u5177", scope.tool, 400]);
+            if (scope.name !== void 0)
+              scopeLines.push(["\u540D\u79F0", scope.name, 400]);
+            if (scope.commit !== void 0)
+              scopeLines.push(["\u63D0\u4EA4", scope.commit, 400]);
+            if (scope.overwrite === true)
+              scopeLines.push(["\u6587\u4EF6\u64CD\u4F5C", "\u8986\u76D6\u73B0\u6709\u6587\u4EF6", 400]);
+            if (typeof scope.content === "string")
+              scopeLines.push(["\u5199\u5165\u5185\u5BB9", scope.content, 600]);
+            if (typeof scope.old === "string")
+              scopeLines.push(["\u66FF\u6362\u539F\u6587", scope.old, 400]);
+            if (typeof scope.new === "string")
+              scopeLines.push(["\u66FF\u6362\u4E3A", scope.new, 400]);
+          }
+          const isDeciding = typeof id === "string" && s.approvalPending.has(`${snapshot?.id}/${id}`);
+          return /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              key: id ?? idx,
+              className: "bqrRRG_card",
+              style: { marginBottom: 8 }
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_strip" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "bqrRRG_dot" }), /* @__PURE__ */ import_react.default.createElement("span", null, "\u7B49\u5F85\u5BA1\u6279 \xB7 \u9700\u8981\u4F60\u7684\u6388\u6743\uFF08\u7CBE\u786E\u53C2\u6570\u8303\u56F4\uFF09")),
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_body", "data-approval-scroll": "" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_headline" }, operation), scopeLines.map(([label, val, limit], sIdx) => /* @__PURE__ */ import_react.default.createElement("div", { key: sIdx, className: "bqrRRG_command" }, `${label}\uFF1A${clip(val, limit)}`))),
+            /* @__PURE__ */ import_react.default.createElement("details", { style: { padding: "4px 16px 0", fontSize: 12, color: "var(--dsw-alias-label-tertiary)" } }, /* @__PURE__ */ import_react.default.createElement("summary", { style: { cursor: "pointer" } }, "\u67E5\u770B\u5B8C\u6574\u6388\u6743\u53C2\u6570"), /* @__PURE__ */ import_react.default.createElement("pre", { style: { margin: "6px 0 0", whiteSpace: "pre-wrap" } }, recordText(approval))),
+            typeof id !== "string" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_body" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "gdEzaW_turnErrorTitle" }, "\u5BA1\u6279\u8BB0\u5F55\u7F3A\u5C11 ID\uFF0C\u8BF7\u5728\u5BBF\u4E3B\u4E2D\u5904\u7406\u3002")) : /* @__PURE__ */ import_react.default.createElement("div", { className: "bqrRRG_actionRow" }, [
+              ["allow_once", "\u5141\u8BB8\u4E00\u6B21", "primary"],
+              ["allow_task", "\u5141\u8BB8\u6B64\u4EFB\u52A1", "outline"],
+              ["deny", "\u62D2\u7EDD", "outline bqrRRG_reject"]
+            ].map(([decision, btnLabel, variantCls]) => {
+              const isPrimary = variantCls === "primary";
+              const isReject = variantCls.includes("bqrRRG_reject");
+              return /* @__PURE__ */ import_react.default.createElement(
+                "button",
+                {
+                  key: decision,
+                  ref: bind({
+                    click: () => trackAsync(decide(snapshot.id, id, decision))
+                  }),
+                  type: "button",
+                  className: we(
+                    "_button_kz6gm_4 _md_kz6gm_24",
+                    isPrimary ? "_primary_kz6gm_38" : "_outline_kz6gm_56",
+                    isReject && "bqrRRG_reject"
+                  ),
+                  disabled: isDeciding || approvalButtonsDisabled,
+                  onClick: () => trackAsync(decide(snapshot.id, id, decision))
+                },
+                isDeciding ? "\u6B63\u5728\u8BB0\u5F55\u2026" : btnLabel
+              );
+            }))
+          );
+        })
+      ), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_composerSeat", "data-composer-seat": "" }, /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          className: we(
+            "wSkVaW_composerStack",
+            isHero && "wSkVaW_composerHero"
+          )
+        },
+        isHero ? /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, null, /* @__PURE__ */ import_react.default.createElement(HeroGlow, { className: "wSkVaW_heroGlow" }), /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_root" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_stack" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_headline" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_fishHitbox" }, /* @__PURE__ */ import_react.default.createElement(of, { size: 34, className: "pXSMma_fish" })), /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_headlineText" }, "\u63A2\u7D22\u672A\u81F3\u4E4B\u5883"), /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_previewBadge" }, "\u9884\u89C8\u7248")), /* @__PURE__ */ import_react.default.createElement("div", { className: "pXSMma_body" }))), /* @__PURE__ */ import_react.default.createElement("div", { className: "wSkVaW_heroWorkspaceRow" }, /* @__PURE__ */ import_react.default.createElement(
+          Vu,
+          {
+            open: s.heroWsMenuOpen,
+            onClose: () => {
+              s.heroWsMenuOpen = false;
+              forceRender();
+            },
+            selectedId: currentProjectId(),
+            items: projectSummaries.map((p) => ({
+              id: p.id,
+              label: p.label,
+              icon: /* @__PURE__ */ import_react.default.createElement(P7, { size: 16 })
+            })),
+            footer: [
+              {
+                id: "__add_workspace__",
+                label: "\u6DFB\u52A0\u5DE5\u4F5C\u533A\u2026",
+                icon: /* @__PURE__ */ import_react.default.createElement(M7, { size: 16 })
+              }
+            ],
+            onSelect: (id) => {
+              s.heroWsMenuOpen = false;
+              if (id === "__add_workspace__") {
+                openNewProjectModal();
+              } else {
+                void selectProject(id);
+              }
+              forceRender();
+            },
+            portal: true,
+            anchor: /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                type: "button",
+                className: "pXSMma_workspace",
+                "aria-label": "\u9009\u62E9\u5DE5\u4F5C\u533A",
+                "aria-haspopup": "menu",
+                "aria-expanded": s.heroWsMenuOpen,
+                onClick: () => {
+                  s.heroWsMenuOpen = !s.heroWsMenuOpen;
+                  forceRender();
+                }
+              },
+              /* @__PURE__ */ import_react.default.createElement(
+                O7,
+                {
+                  className: "pXSMma_folder",
+                  size: 16
+                }
+              ),
+              /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_workspaceLabel" }, currentProjectSummary?.label ?? "\u9009\u62E9\u5DE5\u4F5C\u533A"),
+              /* @__PURE__ */ import_react.default.createElement(
+                hs,
+                {
+                  className: "pXSMma_chevron",
+                  size: 12
+                }
+              )
+            )
+          }
+        ), /* @__PURE__ */ import_react.default.createElement(
+          Vu,
+          {
+            open: s.heroPresetMenuOpen,
+            onClose: () => {
+              s.heroPresetMenuOpen = false;
+              forceRender();
+            },
+            selectedId: s.selectedAgentPreset,
+            items: AGENT_PRESETS.map((ap) => ({
+              id: ap.id,
+              label: ap.name,
+              icon: /* @__PURE__ */ import_react.default.createElement(s7, { size: 16 })
+            })),
+            onSelect: (id) => {
+              s.selectedAgentPreset = id;
+              s.heroPresetMenuOpen = false;
+              forceRender();
+            },
+            portal: true,
+            anchor: /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                type: "button",
+                className: "pXSMma_workspace",
+                "aria-label": "\u9009\u62E9 Agent \u9884\u8BBE",
+                "aria-haspopup": "menu",
+                "aria-expanded": s.heroPresetMenuOpen,
+                onClick: () => {
+                  s.heroPresetMenuOpen = !s.heroPresetMenuOpen;
+                  forceRender();
+                }
+              },
+              /* @__PURE__ */ import_react.default.createElement(
+                s7,
+                {
+                  className: "pXSMma_folder",
+                  size: 16
+                }
+              ),
+              /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_workspaceLabel" }, currentAgentPresetObj.name),
+              /* @__PURE__ */ import_react.default.createElement(
+                hs,
+                {
+                  className: "pXSMma_chevron",
+                  size: 12
+                }
+              )
+            )
+          }
+        ))) : null,
+        /* @__PURE__ */ import_react.default.createElement("div", { className: we("uV2eYG_root", isHero && "uV2eYG_hero") }, promptStatus ? /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            id: "prompt-status",
+            className: "uV2eYG_notice",
+            role: "status"
+          },
+          promptStatus
+        ) : /* @__PURE__ */ import_react.default.createElement(
+          "span",
+          {
+            id: "prompt-status",
+            className: "visually-hidden",
+            role: "status"
+          }
+        ), /* @__PURE__ */ import_react.default.createElement(
+          "form",
+          {
+            ref: bind({ submit: (e) => trackAsync(handleSendPrompt(e)) }),
+            id: "prompt-form",
+            className: "uV2eYG_card",
+            "data-composer-card": "true",
+            onSubmit: (e) => trackAsync(handleSendPrompt(e))
+          },
+          /* @__PURE__ */ import_react.default.createElement("label", { htmlFor: "prompt", className: "visually-hidden" }, "\u53D1\u9001\u6D88\u606F"),
+          /* @__PURE__ */ import_react.default.createElement("div", { className: "uV2eYG_scroll", "data-input-scroll": "true" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "uV2eYG_grow" }, /* @__PURE__ */ import_react.default.createElement(
+            "textarea",
+            {
+              ref: bind(
+                {
+                  input: (e) => {
+                    s.promptText = e.currentTarget.value;
+                    forceRender();
+                  }
+                },
+                promptInputRef
+              ),
+              id: "prompt",
+              "data-plain-input": "true",
+              className: "uV2eYG_input",
+              rows: isHero ? 3 : 2,
+              maxLength: 32e3,
+              disabled: promptDisabled,
+              placeholder: isHero ? "\u63CF\u8FF0\u4F60\u60F3\u8981\u6784\u5EFA\u7684\u5185\u5BB9" : "\u7ED9\u667A\u80FD\u4F53\u53D1\u6D88\u606F",
+              value: s.promptText,
+              onChange: (e) => {
+                s.promptText = e.target.value;
+                forceRender();
+              },
+              onKeyDown: (e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.isComposing && (s.enterBehavior === "enter" || e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  trackAsync(handleSendPrompt(e));
+                }
+              }
+            }
+          ), /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              className: "uV2eYG_mirror",
+              "aria-hidden": "true",
+              "data-input-mirror": "true"
+            },
+            `${s.promptText || " "}
+`
+          ))),
+          /* @__PURE__ */ import_react.default.createElement("div", { className: "uV2eYG_row" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "uV2eYG_tools" }, /* @__PURE__ */ import_react.default.createElement(sf, { label: "\u6DFB\u52A0\u5DE5\u4F5C\u533A", side: "top", delayMs: 400 }, /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "uV2eYG_add",
+              "aria-label": "\u6DFB\u52A0\u5DE5\u4F5C\u533A",
+              onClick: () => openNewProjectModal()
+            },
+            /* @__PURE__ */ import_react.default.createElement(B9, { size: 14 })
+          )), /* @__PURE__ */ import_react.default.createElement("div", { className: "uV2eYG_modes" }, /* @__PURE__ */ import_react.default.createElement(
+            Vu,
+            {
+              open: s.permissionPopoverOpen,
+              onClose: () => {
+                s.permissionPopoverOpen = false;
+                forceRender();
+              },
+              side: "top",
+              selectedId: s.permissionPreset,
+              items: PERMISSION_PRESETS.map((p) => ({
+                id: p.id,
+                label: p.label,
+                icon: /* @__PURE__ */ import_react.default.createElement(PermissionGlyph, { value: p.id })
+              })),
+              footer: [
+                {
+                  id: "__manage_grants__",
+                  label: "\u67E5\u770B\u6388\u6743\u4E0E\u5BA1\u8BA1\u8BB0\u5F55\u2026",
+                  icon: /* @__PURE__ */ import_react.default.createElement(A9, { size: 16 })
+                }
+              ],
+              onSelect: (id) => {
+                if (id === "__manage_grants__") {
+                  s.permissionPopoverOpen = false;
+                  openSettings("permissions");
+                } else {
+                  selectPermissionPreset(id);
+                }
+              },
+              anchor: /* @__PURE__ */ import_react.default.createElement(
+                "button",
+                {
+                  id: "composer-permission-btn",
+                  type: "button",
+                  className: "Sh0Q9G_trigger",
+                  "aria-label": `\u8BBF\u95EE\u6A21\u5F0F\uFF0C\u5F53\u524D\uFF1A${currentPresetObj.label}`,
+                  title: currentPresetObj.desc,
+                  onClick: () => {
+                    s.permissionPopoverOpen = !s.permissionPopoverOpen;
+                    forceRender();
+                  }
+                },
+                /* @__PURE__ */ import_react.default.createElement(
+                  "span",
+                  {
+                    className: "Sh0Q9G_triggerIcon",
+                    "aria-hidden": "true"
+                  },
+                  /* @__PURE__ */ import_react.default.createElement(PermissionGlyph, { value: s.permissionPreset })
+                ),
+                /* @__PURE__ */ import_react.default.createElement("span", { className: "Sh0Q9G_triggerLabel" }, currentPresetObj.label),
+                /* @__PURE__ */ import_react.default.createElement(
+                  "span",
+                  {
+                    className: we(
+                      "Sh0Q9G_chevron",
+                      s.permissionPopoverOpen && "Sh0Q9G_chevronOpen"
+                    ),
+                    "aria-hidden": "true"
+                  },
+                  /* @__PURE__ */ import_react.default.createElement(hs, null)
+                )
+              )
+            }
+          ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "uV2eYG_trailing" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "_7KE1Ra_root" }, /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              id: "composer-model-btn",
+              type: "button",
+              className: "_7KE1Ra_trigger",
+              "aria-label": "\u5F53\u524D\u6A21\u578B\uFF1Adeepseek-v4.1-flash",
+              title: "\u70B9\u51FB\u67E5\u770B\u6A21\u578B\u4E0E\u7F51\u5173\u914D\u7F6E",
+              onClick: () => openSettings("models")
+            },
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_triggerLabel" }, "deepseek-v4.1-flash"),
+            /* @__PURE__ */ import_react.default.createElement(hs, { className: "_7KE1Ra_chevron" })
+          )), /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              ref: bind({ click: () => trackAsync(handleCancel()) }),
+              id: "cancel-button",
+              type: "button",
+              className: "uV2eYG_primary",
+              "aria-label": "\u505C\u6B62\u751F\u6210",
+              disabled: cancelDisabled,
+              style: cancelDisabled ? {
+                position: "absolute",
+                width: 1,
+                height: 1,
+                opacity: 0,
+                pointerEvents: "none",
+                overflow: "hidden"
+              } : void 0,
+              onClick: () => trackAsync(handleCancel())
+            },
+            /* @__PURE__ */ import_react.default.createElement(
+              "svg",
+              {
+                viewBox: "0 0 16 16",
+                width: "16",
+                height: "16",
+                "aria-hidden": "true"
+              },
+              /* @__PURE__ */ import_react.default.createElement(
+                "rect",
+                {
+                  x: "3",
+                  y: "3",
+                  width: "10",
+                  height: "10",
+                  rx: "3",
+                  fill: "currentColor"
+                }
+              )
+            ),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "visually-hidden" }, "\u505C\u6B62")
+          ), /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              id: "send-button",
+              type: "submit",
+              className: "uV2eYG_primary",
+              "aria-label": "\u53D1\u9001\u6D88\u606F",
+              disabled: sendDisabled,
+              style: !cancelDisabled ? {
+                position: "absolute",
+                width: 1,
+                height: 1,
+                opacity: 0,
+                pointerEvents: "none",
+                overflow: "hidden"
+              } : void 0
+            },
+            /* @__PURE__ */ import_react.default.createElement(m7, { size: 16 }),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "visually-hidden" }, pending ? "\u7B49\u5F85\u5B8C\u6210\u2026" : "\u53D1\u9001")
+          )))
+        ))
+      )), /* @__PURE__ */ import_react.default.createElement("details", { className: "visually-hidden" }, /* @__PURE__ */ import_react.default.createElement("summary", { style: { cursor: "pointer", userSelect: "none" } }, /* @__PURE__ */ import_react.default.createElement("span", null, "\u4E8B\u4EF6\u6D41\u8BB0\u5F55"), /* @__PURE__ */ import_react.default.createElement("span", { id: "event-count", style: { marginLeft: 8 } }, `${events.length} \xB7 \u6E38\u6807 ${view?.cursor ?? 0}`)), /* @__PURE__ */ import_react.default.createElement("div", { id: "event-log", style: { marginTop: 6 } }, events.map((record) => /* @__PURE__ */ import_react.default.createElement("details", { key: record.cursor }, /* @__PURE__ */ import_react.default.createElement("summary", null, `#${record.cursor} \xB7 ${clip(record.event?.type ?? record.event?.kind ?? "\u4E8B\u4EF6", 100)}`), /* @__PURE__ */ import_react.default.createElement("pre", null, recordText(record.event)))))))
+    ), /* @__PURE__ */ import_react.default.createElement(
+      "section",
       {
-        as: "article",
-        key: group.title,
-        border: true,
-        className: "management-card capability-card"
+        id: "projects-page",
+        className: "wSkVaW_root",
+        hidden: s.activePage !== "projects",
+        "aria-labelledby": "projects-heading",
+        style: { padding: 24, overflowY: "auto" }
       },
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, group.title), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, group.badge)),
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-items" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react2.default.createElement("div", { key: code, className: "capability-row" }, /* @__PURE__ */ import_react2.default.createElement("code", { className: "inline-code" }, code), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, desc))))
-    ))))
-  ))), s.settingsOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-modal-overlay", role: "presentation" }, /* @__PURE__ */ import_react2.default.createElement(
-    "div",
-    {
-      className: "dsh-modal-mask",
-      onClick: () => {
-        s.settingsOpen = false;
-        forceRender();
-      }
-    }
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "div",
-    {
-      id: "settings-dialog",
-      className: "dsh-settings-panel",
-      role: "dialog",
-      "aria-modal": "true",
-      "aria-labelledby": "settings-modal-title"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("nav", { className: "dsh-settings-nav", "aria-label": "\u8BBE\u7F6E\u5206\u533A" }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "settings-modal-title", className: "dsh-settings-nav-title" }, "\u8BBE\u7F6E"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-nav-list" }, [
-      ["general", "\u2699 \u901A\u7528\u8BBE\u7F6E"],
-      ["permissions", "\u{1F512} \u6743\u9650\u4E0E\u5B89\u5168"],
-      ["models", "\u26A1 \u6A21\u578B\u4E0E\u8FDE\u63A5"],
-      ["plugins", "\u{1F9E9} \u63D2\u4EF6\u4E0E\u80FD\u529B"]
-    ].map(([tabId, label]) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+      /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          style: {
+            maxWidth: 748,
+            width: "100%",
+            margin: "0 auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 16
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center"
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement("h2", { id: "projects-heading", style: { margin: 0, fontSize: 18 } }, "\u5DE5\u4F5C\u533A\u4E0E\u672C\u673A\u9879\u76EE\u7A7A\u95F4"),
+          /* @__PURE__ */ import_react.default.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ import_react.default.createElement(ps, { variant: "primary", onClick: () => openNewProjectModal() }, "\u6DFB\u52A0\u5DE5\u4F5C\u533A"), /* @__PURE__ */ import_react.default.createElement(
+            ps,
+            {
+              ref: bind({ click: () => trackAsync(refreshProjects()) }),
+              id: "refresh-projects",
+              variant: "outline",
+              disabled: s.refreshProjectsBusy,
+              onClick: () => trackAsync(refreshProjects())
+            },
+            "\u5237\u65B0\u7A7A\u95F4"
+          ))
+        ),
+        /* @__PURE__ */ import_react.default.createElement("p", { id: "projects-status", role: "status", style: { margin: 0 } }, projectsStatusText),
+        /* @__PURE__ */ import_react.default.createElement(
+          "form",
+          {
+            ref: bind({ submit: (e) => trackAsync(handleAddProject(e)) }),
+            id: "add-project-form",
+            style: { display: "flex", gap: 8 },
+            onSubmit: (e) => trackAsync(handleAddProject(e))
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "input",
+            {
+              ref: bind(
+                {
+                  input: (e) => {
+                    s.projectWorkspaceInput = e.currentTarget.value;
+                    forceRender();
+                  }
+                },
+                projectWsInputRef
+              ),
+              id: "project-workspace-input",
+              type: "text",
+              className: "zGbnIq_input",
+              placeholder: "\u5DE5\u4F5C\u533A\u76EE\u5F55\u8DEF\u5F84\uFF0C\u5982 /Volumes/ORICO/CAYW",
+              value: s.projectWorkspaceInput,
+              onChange: (e) => {
+                s.projectWorkspaceInput = e.target.value;
+                forceRender();
+              }
+            }
+          ),
+          /* @__PURE__ */ import_react.default.createElement(
+            "input",
+            {
+              ref: bind(
+                {
+                  input: (e) => {
+                    s.projectLabelInput = e.currentTarget.value;
+                    forceRender();
+                  }
+                },
+                projectLabelInputRef
+              ),
+              id: "project-label-input",
+              type: "text",
+              className: "zGbnIq_input",
+              placeholder: "\u663E\u793A\u540D\u79F0\uFF08\u53EF\u9009\uFF09",
+              value: s.projectLabelInput,
+              onChange: (e) => {
+                s.projectLabelInput = e.target.value;
+                forceRender();
+              }
+            }
+          ),
+          /* @__PURE__ */ import_react.default.createElement(ps, { id: "add-project-button", type: "submit", variant: "primary" }, "\u5F00\u542F\u9879\u76EE")
+        ),
+        /* @__PURE__ */ import_react.default.createElement("div", { id: "project-list", className: "zGbnIq_rows" }, projectSummaries.map((project) => {
+          const isCurrent = project.id === currentProjectId();
+          return /* @__PURE__ */ import_react.default.createElement("article", { key: project.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, project.label), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, project.statusLabel))), /* @__PURE__ */ import_react.default.createElement("div", { style: { fontSize: 13, opacity: 0.75 } }, `${project.address}${project.workspace ? ` \xB7 ${project.workspace}` : ""} \xB7 ${project.sessionCount} \u4E2A\u4F1A\u8BDD`), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              ref: bind({
+                click: () => trackAsync(selectProject(project.id))
+              }),
+              type: "button",
+              className: "_button_kz6gm_4 _sm_kz6gm_30 _primary_kz6gm_38",
+              disabled: isCurrent,
+              onClick: () => trackAsync(selectProject(project.id))
+            },
+            isCurrent ? "\u5F53\u524D\u9879\u76EE\u7A7A\u95F4" : "\u5207\u6362\u5230\u6B64\u9879\u76EE"
+          ), !project.default && project.id !== "default" ? /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              ref: bind({
+                click: () => trackAsync(removeProject(project.id))
+              }),
+              type: "button",
+              className: "_button_kz6gm_4 _sm_kz6gm_30 _outline_kz6gm_56",
+              onClick: () => trackAsync(removeProject(project.id))
+            },
+            "\u79FB\u9664\u7A7A\u95F4"
+          ) : null));
+        }))
+      )
+    ), /* @__PURE__ */ import_react.default.createElement(
+      "section",
       {
-        key: tabId,
-        type: "button",
-        className: `dsh-settings-nav-cell${s.settingsTab === tabId ? " is-active" : ""}`,
-        onClick: () => openSettings(tabId)
+        id: "permissions-page",
+        className: "wSkVaW_root",
+        hidden: s.activePage !== "permissions",
+        "aria-labelledby": "permissions-heading",
+        style: { padding: 24, overflowY: "auto" }
       },
-      label
-    )))),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-content" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, {
-      general: "\u901A\u7528\u4E0E\u5916\u89C2\u8BBE\u7F6E",
-      permissions: "\u6743\u9650\u6A21\u5F0F\u4E0E\u4F1A\u8BDD\u6388\u6743",
-      models: "\u6A21\u578B\u63D0\u4F9B\u65B9\u4E0E\u672C\u673A Runtime \u8FDE\u63A5",
-      plugins: "\u63D2\u4EF6\u7ED1\u5B9A\u4E0E CodeMode \u80FD\u529B\u76EE\u5F55"
-    }[s.settingsTab]), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+      /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          style: {
+            maxWidth: 748,
+            width: "100%",
+            margin: "0 auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 16
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center"
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement("h2", { id: "permissions-heading", style: { margin: 0, fontSize: 18 } }, "\u6743\u9650\u6A21\u5F0F\u3001\u4EFB\u52A1\u6388\u6743\u4E0E\u5BA1\u8BA1\u8BB0\u5F55"),
+          /* @__PURE__ */ import_react.default.createElement(
+            ps,
+            {
+              ref: bind({ click: () => trackAsync(refreshPermissions()) }),
+              id: "refresh-permissions",
+              variant: "outline",
+              disabled: s.refreshPermissionsBusy,
+              onClick: () => trackAsync(refreshPermissions())
+            },
+            "\u5237\u65B0\u6388\u6743\u8BB0\u5F55"
+          )
+        ),
+        /* @__PURE__ */ import_react.default.createElement("p", { id: "permissions-status", role: "status", style: { margin: 0 } }, s.permissionsStatus || `\u5F53\u524D\u6A21\u5F0F\uFF1A${currentPresetObj.label}`),
+        /* @__PURE__ */ import_react.default.createElement("div", { id: "grants-list", className: "zGbnIq_rows" }, s.sessionGrants.map((grant, idx) => {
+          const cap = grant.capability ?? grant.input?.capability ?? "\u672A\u77E5\u80FD\u529B";
+          const scopeStr = typeof grant.scope === "string" ? grant.scope : JSON.stringify(grant.scope ?? {});
+          const key = `${cap}:${scopeStr}`;
+          return /* @__PURE__ */ import_react.default.createElement("div", { key: `${key}/${idx}`, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, CAPABILITY_LABELS[cap] ?? cap), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, scopeStr)), /* @__PURE__ */ import_react.default.createElement(
+            ps,
+            {
+              variant: "outline",
+              size: "sm",
+              disabled: s.revokeBusyKey === key,
+              onClick: () => trackAsync(revokeGrant(grant))
+            },
+            "\u64A4\u9500\u6388\u6743"
+          )));
+        }))
+      )
+    ), /* @__PURE__ */ import_react.default.createElement(
+      "section",
       {
-        id: "close-settings-button",
-        type: "button",
-        className: "dsh-modal-close",
-        "aria-label": "\u5173\u95ED\u8BBE\u7F6E",
+        id: "plugins-page",
+        className: "wSkVaW_root",
+        hidden: s.activePage !== "plugins",
+        "aria-labelledby": "plugins-heading",
+        style: { padding: 24, overflowY: "auto" }
+      },
+      /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          style: {
+            maxWidth: 748,
+            width: "100%",
+            margin: "0 auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 16
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center"
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement("h2", { id: "plugins-heading", style: { margin: 0, fontSize: 18 } }, "\u63D2\u4EF6\u4E0E\u80FD\u529B\u76EE\u5F55"),
+          /* @__PURE__ */ import_react.default.createElement(
+            ps,
+            {
+              ref: bind({ click: () => trackAsync(refreshPlugins()) }),
+              id: "refresh-plugins",
+              variant: "outline",
+              disabled: s.refreshPluginsBusy,
+              onClick: () => trackAsync(refreshPlugins())
+            },
+            "\u5237\u65B0\u63D2\u4EF6\u72B6\u6001"
+          )
+        ),
+        /* @__PURE__ */ import_react.default.createElement("p", { id: "plugins-status", role: "status", style: { margin: 0 } }, pluginsStatusText),
+        /* @__PURE__ */ import_react.default.createElement("div", { id: "plugin-list", className: "qSYn7G_cards" }, pluginItems.map((plugin) => /* @__PURE__ */ import_react.default.createElement("article", { key: plugin.name, className: "qSYn7G_card" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardContent" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTitle" }, plugin.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTrailing" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_status" }, /* @__PURE__ */ import_react.default.createElement(
+          Pu,
+          {
+            state: plugin.frozen ? "warning" : "done",
+            className: "qSYn7G_statusDot"
+          }
+        ), plugin.frozen ? "\u63D2\u4EF6\u5DF2\u5378\u8F7D \xB7 \u4F1A\u8BDD\u51BB\u7ED3" : "\u5DF2\u6302\u8F7D"))), array(plugin.reasons).map((reason, rIdx) => /* @__PURE__ */ import_react.default.createElement("div", { key: rIdx, className: "qSYn7G_failure" }, reason)))))
+      )
+    )),
+    s.settingsOpen ? /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_overlay", role: "presentation" }, /* @__PURE__ */ import_react.default.createElement(
+      "div",
+      {
+        className: "VOzbGW_mask",
+        "aria-hidden": "true",
         onClick: () => {
           s.settingsOpen = false;
           forceRender();
         }
-      },
-      "\u2715"
-    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-options" }, s.settingsTab === "general" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-appearance-group" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u5916\u89C2\u4E3B\u9898\uFF08Appearance\uFF09"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-theme-cube-row" }, [
-      ["light", "\u2600\uFE0F \u6D45\u8272\u6A21\u5F0F", "Light"],
-      ["dark", "\u{1F319} \u6DF1\u8272\u6A21\u5F0F", "Dark"],
-      ["system", "\u{1F4BB} \u8DDF\u968F\u7CFB\u7EDF", "System"]
-    ].map(([mode, title, sub]) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+      }
+    ), /* @__PURE__ */ import_react.default.createElement(
+      "div",
       {
-        key: mode,
-        type: "button",
-        className: `dsh-theme-cube${s.themeMode === mode ? " is-selected" : ""}`,
-        onClick: () => applyTheme(mode)
+        id: "settings-dialog",
+        className: "VOzbGW_panel",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "settings-title"
       },
-      /* @__PURE__ */ import_react2.default.createElement("strong", null, title),
-      /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, sub)
-    )))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row-text" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F\uFF08Permission\uFF09"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-desc" }, "\u9009\u62E9\u65B0\u4F1A\u8BDD\u4E0E\u5F53\u524D\u5DE5\u4F5C\u533A\u7684\u6743\u9650\u7B56\u7565\uFF1BFull access \u9700\u98CE\u9669\u786E\u8BA4\u3002")), /* @__PURE__ */ import_react2.default.createElement(
-      "select",
-      {
-        "aria-label": "\u9ED8\u8BA4\u6743\u9650\u6A21\u5F0F",
-        className: "dsh-setting-select",
-        value: s.permissionPreset,
-        onChange: (e) => selectPermissionPreset(e.target.value)
-      },
-      PERMISSION_PRESETS.map((p) => /* @__PURE__ */ import_react2.default.createElement("option", { key: p.id, value: p.id }, `${p.label} (${p.enLabel})`))
-    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row-text" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u53D1\u9001\u5FEB\u6377\u952E\uFF08Enter \u952E\u884C\u4E3A\uFF09"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-desc" }, "\u8BBE\u7F6E\u8F93\u5165\u6846\u6309\u4E0B Enter \u65F6\u7684\u9ED8\u8BA4\u53D1\u9001\u65B9\u5F0F\u3002")), /* @__PURE__ */ import_react2.default.createElement(
-      "select",
-      {
-        "aria-label": "\u53D1\u9001\u5FEB\u6377\u952E",
-        className: "dsh-setting-select",
-        value: s.enterBehavior,
-        onChange: (e) => {
-          s.enterBehavior = e.target.value;
-          forceRender();
-        }
-      },
-      /* @__PURE__ */ import_react2.default.createElement("option", { value: "enter" }, "Enter \u76F4\u63A5\u53D1\u9001\uFF08Shift+Enter \u6362\u884C\uFF09"),
-      /* @__PURE__ */ import_react2.default.createElement("option", { value: "cmd-enter" }, "Cmd/Ctrl + Enter \u53D1\u9001\uFF08Enter \u6362\u884C\uFF09")
-    ))) : null, s.settingsTab === "permissions" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-row-text" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-title" }, "\u5F53\u524D\u6743\u9650\u6A21\u5F0F"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-desc" }, currentPresetObj.desc)), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-preset-pills" }, PERMISSION_PRESETS.map((p) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        key: p.id,
-        type: "button",
-        className: `dsh-preset-pill${s.permissionPreset === p.id ? " is-active" : ""}`,
-        onClick: () => selectPermissionPreset(p.id)
-      },
-      p.label
-    )))), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-setting-block" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6388\u6743\u9879\uFF08`session.grants`\uFF09"), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        className: "quiet",
-        onClick: () => trackAsync(refreshPermissions())
-      },
-      "\u21BB \u5237\u65B0"
-    )), !s.sessionGrants.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u6682\u65E0\u6309\u4EFB\u52A1\u8BB0\u4F4F\u7684\u6301\u4E45\u5316\u6388\u6743\u8BB0\u5F55\u3002") : s.sessionGrants.map((grant, idx) => {
-      const cap = grant.capability ?? grant.input?.capability ?? "\u672A\u77E5\u80FD\u529B";
-      const scopeStr = typeof grant.scope === "string" ? grant.scope : JSON.stringify(grant.scope ?? {});
-      const key = `${cap}:${scopeStr}`;
-      return /* @__PURE__ */ import_react2.default.createElement("div", { key: `${key}/${idx}`, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, CAPABILITY_LABELS[cap] ?? cap), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small mono muted" }, ` \xB7 ${clip(scopeStr, 120)}`)), /* @__PURE__ */ import_react2.default.createElement(
+      /* @__PURE__ */ import_react.default.createElement("nav", { className: "VOzbGW_nav" }, /* @__PURE__ */ import_react.default.createElement("div", { id: "settings-title", className: "VOzbGW_navTitle" }, "\u8BBE\u7F6E"), /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_navList" }, [
+        ["general", "\u901A\u7528\u8BBE\u7F6E", A9],
+        ["models", "\u6A21\u578B", I7],
+        ["agent-presets", "Agent \u9884\u8BBE", s7],
+        ["permissions", "\u6743\u9650\u4E0E\u5BA1\u8BA1", E7],
+        ["plugins", "\u63D2\u4EF6", E7]
+      ].map(([tabId, label, IconComp]) => /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          key: tabId,
+          type: "button",
+          className: we(
+            "VOzbGW_navCell",
+            s.settingsTab === tabId && "VOzbGW_active"
+          ),
+          "aria-current": s.settingsTab === tabId ? "true" : void 0,
+          onClick: () => openSettings(tabId)
+        },
+        /* @__PURE__ */ import_react.default.createElement(IconComp, { className: "VOzbGW_navIcon", size: 16 }),
+        /* @__PURE__ */ import_react.default.createElement("span", { className: "VOzbGW_navLabel" }, label)
+      )))),
+      /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_content" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_header" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_actions" }), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          id: "close-settings-button",
+          type: "button",
+          className: "VOzbGW_close",
+          "aria-label": "\u5173\u95ED",
+          onClick: () => {
+            s.settingsOpen = false;
+            forceRender();
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(Ru, { size: 14 })
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_options" }, s.settingsTab === "general" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "_WvWnq_section" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "_8HJdBW_group" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "_8HJdBW_title" }, "\u5916\u89C2"), /* @__PURE__ */ import_react.default.createElement("div", { className: "_8HJdBW_cubeRow" }, [
+        ["light", "\u6D45\u8272", T7],
+        ["dark", "\u6DF1\u8272", b7],
+        ["system", "\u8DDF\u968F\u7CFB\u7EDF", H7]
+      ].map(([modeId, modeLabel, ModeIcon]) => /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          key: modeId,
+          type: "button",
+          className: we(
+            "_8HJdBW_themeCube",
+            s.themeMode === modeId && "_8HJdBW_selected"
+          ),
+          onClick: () => applyTheme(modeId)
+        },
+        /* @__PURE__ */ import_react.default.createElement(ModeIcon, { size: 16 }),
+        /* @__PURE__ */ import_react.default.createElement("span", null, modeLabel)
+      )))), /* @__PURE__ */ import_react.default.createElement("div", { className: "oY77xG_row" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "oY77xG_rowText" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "oY77xG_title" }, "\u9ED8\u8BA4\u6743\u9650\u9884\u8BBE"), /* @__PURE__ */ import_react.default.createElement("div", { className: "oY77xG_desc" }, currentPresetObj.desc)), /* @__PURE__ */ import_react.default.createElement(
         "button",
         {
           type: "button",
-          className: "secondary deny",
-          disabled: s.revokeBusyKey === key,
-          onClick: () => trackAsync(revokeGrant(grant))
-        },
-        "\u64A4\u9500\u6388\u6743"
-      ));
-    }))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-head" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-cred-dot configured" }), /* @__PURE__ */ import_react2.default.createElement("strong", null, "DeepSeek / Magpie OpenAI \u517C\u5BB9\u7F51\u5173"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-row-tag" }, "\u5DF2\u8FDE\u63A5")), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u9ED8\u8BA4\u6A21\u578B\uFF1A", /* @__PURE__ */ import_react2.default.createElement("code", null, "auto/deepseek-v4.1-flash"), " \xB7 \u7AEF\u70B9\uFF1A", /* @__PURE__ */ import_react2.default.createElement("code", null, "http://127.0.0.1:3425/v1")), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "API \u51ED\u636E\u7531\u672C\u673A Runtime \u8FDB\u7A0B\u6301\u6709\uFF0C\u4ECE\u4E0D\u5411\u6D4F\u89C8\u5668\u66B4\u9732\u6216\u56DE\u663E\u3002")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-provider-head" }, /* @__PURE__ */ import_react2.default.createElement(
-      "span",
-      {
-        className: `dsh-cred-dot ${s.connectionStatus === "\u5DF2\u8FDE\u63A5\u672C\u673A" ? "configured" : "missing"}`
-      }
-    ), /* @__PURE__ */ import_react2.default.createElement("strong", null, "\u672C\u673A Loopback \u7F51\u5173\u4E0E\u9879\u76EE Runtime"), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-row-tag" }, `Core \u534F\u8BAE v${CORE_PROTOCOL_VERSION}`)), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-grants-list" }, projectSummaries.map((proj) => /* @__PURE__ */ import_react2.default.createElement("div", { key: proj.id, className: "bound-session-row" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement("strong", null, proj.label), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small mono muted" }, ` \xB7 ${proj.address}${proj.workspace ? ` \xB7 ${proj.workspace}` : ""}`)), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, proj.statusLabel)))))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-settings-section" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react2.default.createElement("div", { key: group.title, className: "dsh-provider-card" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, group.title), /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-row-tag" }, group.badge)), /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-items" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react2.default.createElement("div", { key: code, className: "capability-row" }, /* @__PURE__ */ import_react2.default.createElement("code", { className: "inline-code" }, code), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, desc))))))) : null))
-  )) : null, s.newProjectModalOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-modal-overlay", role: "presentation" }, /* @__PURE__ */ import_react2.default.createElement(
-    "div",
-    {
-      className: "dsh-modal-mask",
-      onClick: () => {
-        s.newProjectModalOpen = false;
-        forceRender();
-      }
-    }
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "div",
-    {
-      id: "new-project-dialog",
-      className: "dsh-dir-dialog",
-      role: "dialog",
-      "aria-modal": "true",
-      "aria-labelledby": "dir-dialog-title"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-header" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "dir-dialog-title", className: "dsh-dir-title" }, "\u9009\u62E9\u5DE5\u4F5C\u533A\u76EE\u5F55 \xB7 \u65B0\u5F00\u9879\u76EE"), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        className: "dsh-modal-close",
-        onClick: () => {
-          s.newProjectModalOpen = false;
-          forceRender();
-        }
-      },
-      "\u2715"
-    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-crumb-bar" }, s.browseParent ? /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        className: "quiet dsh-up-btn",
-        onClick: () => void browseDirectory(s.browseParent)
-      },
-      "\u2B06 \u4E0A\u7EA7\u76EE\u5F55"
-    ) : null, /* @__PURE__ */ import_react2.default.createElement(
-      "input",
-      {
-        ref: modalProjectWsInputRef,
-        id: "modal-project-path",
-        type: "text",
-        className: "dsh-path-input mono",
-        placeholder: "\u8F93\u5165\u6216\u9009\u62E9\u672C\u5730\u7EDD\u5BF9\u76EE\u5F55\u8DEF\u5F84\uFF0C\u5982 /Volumes/ORICO/CAYW",
-        value: s.projectWorkspaceInput,
-        onChange: (e) => {
-          s.projectWorkspaceInput = e.target.value;
-          forceRender();
-        },
-        onKeyDown: (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            void browseDirectory(s.projectWorkspaceInput);
+          className: "oY77xG_selector",
+          onClick: () => {
+            const idx = PERMISSION_PRESETS.findIndex(
+              (p) => p.id === s.permissionPreset
+            );
+            const next = PERMISSION_PRESETS[(idx + 1) % PERMISSION_PRESETS.length];
+            selectPermissionPreset(next.id);
           }
-        }
-      }
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        className: "secondary",
-        onClick: () => void browseDirectory(s.projectWorkspaceInput)
-      },
-      "\u8DF3\u8F6C\u76EE\u5F55"
-    )), /* @__PURE__ */ import_react2.default.createElement("div", { className: "quick-paths" }, QUICK_WORKSPACES.map(([p, lbl]) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        key: p,
-        type: "button",
-        className: "quiet path-chip",
-        onClick: () => {
-          s.projectWorkspaceInput = p;
-          s.projectLabelInput = lbl;
-          if (modalProjectWsInputRef.current) modalProjectWsInputRef.current.value = p;
-          if (modalProjectLabelInputRef.current) modalProjectLabelInputRef.current.value = lbl;
-          void browseDirectory(p);
-        }
-      },
-      `\u{1F4C1} ${lbl}`
-    )))),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-content" }, s.browseLoading ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u6B63\u5728\u8BFB\u53D6\u76EE\u5F55\u2026") : /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-column" }, !visibleBrowseEntries.length ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u5F53\u524D\u76EE\u5F55\u4E0B\u6CA1\u6709\u5B50\u6587\u4EF6\u5939\uFF0C\u53EF\u76F4\u63A5\u9009\u62E9\u5F53\u524D\u76EE\u5F55\u6216\u65B0\u5EFA\u6587\u4EF6\u5939\u3002") : visibleBrowseEntries.map((entry) => /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        key: entry.path,
-        type: "button",
-        className: `dsh-dir-row${s.projectWorkspaceInput === entry.path ? " is-selected" : ""}`,
-        onClick: () => {
-          s.projectWorkspaceInput = entry.path;
-          if (modalProjectWsInputRef.current) {
-            modalProjectWsInputRef.current.value = entry.path;
-          }
-          forceRender();
         },
-        onDoubleClick: () => void browseDirectory(entry.path)
-      },
-      /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-dir-icon" }, "\u{1F4C1}"),
-      /* @__PURE__ */ import_react2.default.createElement("span", { className: "dsh-dir-name" }, entry.name),
-      /* @__PURE__ */ import_react2.default.createElement(
-        "span",
+        /* @__PURE__ */ import_react.default.createElement("span", null, currentPresetObj.label),
+        /* @__PURE__ */ import_react.default.createElement(hs, { className: "oY77xG_chevron" })
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_row" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_rowText" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_title" }, "\u53D1\u9001\u5FEB\u6377\u952E"), /* @__PURE__ */ import_react.default.createElement("div", { className: "T1PP_q_desc" }, "\u914D\u7F6E\u8F93\u5165\u6846\u6309\u4E0B Enter \u952E\u65F6\u7684\u9ED8\u8BA4\u53D1\u9001\u65B9\u5F0F\u3002")), /* @__PURE__ */ import_react.default.createElement(
+        "button",
         {
-          className: "dsh-dir-enter",
-          onClick: (e) => {
-            e.stopPropagation();
-            void browseDirectory(entry.path);
+          type: "button",
+          className: "T1PP_q_selector",
+          onClick: () => {
+            s.enterBehavior = s.enterBehavior === "enter" ? "cmd-enter" : "enter";
+            forceRender();
           }
         },
-        "\u8FDB\u5165 \u203A"
-      )
-    ))), s.newFolderOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-new-folder-bar" }, /* @__PURE__ */ import_react2.default.createElement(
-      "input",
-      {
-        type: "text",
-        placeholder: "\u8F93\u5165\u65B0\u5EFA\u6587\u4EF6\u5939\u540D\u79F0",
-        value: s.newFolderName,
-        onChange: (e) => {
-          s.newFolderName = e.target.value;
-          forceRender();
+        /* @__PURE__ */ import_react.default.createElement("span", null, s.enterBehavior === "enter" ? "Enter \u76F4\u63A5\u53D1\u9001" : "Cmd/Ctrl + Enter \u53D1\u9001"),
+        /* @__PURE__ */ import_react.default.createElement(hs, { className: "T1PP_q_chevron" })
+      ))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u672C\u673A Runtime \u5DF2\u63A5\u5165\u771F\u5B9E\u6A21\u578B\u63D0\u4F9B\u65B9\uFF0CAPI \u5BC6\u94A5\u7531\u672C\u673A\u8FDB\u7A0B\u5B89\u5168\u6301\u6709\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "DeepSeek / Magpie OpenAI \u517C\u5BB9\u63D0\u4F9B\u65B9"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "API \u5BC6\u94A5\u5DF2\u914D\u7F6E"))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalog" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalogHeading" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogTitle" }, "\u6A21\u578B\u76EE\u5F55"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogMeta" }, "http://127.0.0.1:3425/v1")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelList" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelEntry" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelRow" }, /* @__PURE__ */ import_react.default.createElement("strong", null, "auto/deepseek-v4.1-flash"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "\u5F53\u524D\u4F7F\u7528")))))))) : null, s.settingsTab === "agent-presets" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "Agent \u9884\u8BBE"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u9884\u8BBE\u51B3\u5B9A\u4F1A\u8BDD\u7684 Agent \u6240\u4F7F\u7528\u7684\u5DE5\u5177\u7F16\u6392\u65B9\u5F0F\u4E0E\u80FD\u529B\u96C6\u5408\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, AGENT_PRESETS.map((ap) => /* @__PURE__ */ import_react.default.createElement("div", { key: ap.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, ap.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, ap.badge)), /* @__PURE__ */ import_react.default.createElement(
+        ps,
+        {
+          variant: s.selectedAgentPreset === ap.id ? "primary" : "outline",
+          size: "sm",
+          onClick: () => {
+            s.selectedAgentPreset = ap.id;
+            forceRender();
+          }
+        },
+        s.selectedAgentPreset === ap.id ? "\u5F53\u524D\u9ED8\u8BA4" : "\u8BBE\u4E3A\u9ED8\u8BA4"
+      )), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro", style: { margin: 0 } }, ap.desc))))) : null, s.settingsTab === "permissions" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          style: {
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center"
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title", style: { margin: 0 } }, "\u4F1A\u8BDD\u6388\u6743\u4E0E\u5BA1\u8BA1\u8BB0\u5F55"),
+        /* @__PURE__ */ import_react.default.createElement(
+          ps,
+          {
+            variant: "outline",
+            size: "sm",
+            onClick: () => trackAsync(refreshPermissions())
+          },
+          "\u5237\u65B0"
+        )
+      ), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, s.permissionsStatus || "\u67E5\u770B\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6388\u4E88\u7684\u4EFB\u52A1\u7EA7\u6743\u9650\uFF0C\u5E76\u53EF\u968F\u65F6\u64A4\u9500\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, !s.sessionGrants.length ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelEmpty" }, "\u5F53\u524D\u4F1A\u8BDD\u6682\u65E0\u6301\u4E45\u5316\u4EFB\u52A1\u6388\u6743\u8BB0\u5F55\u3002") : s.sessionGrants.map((grant, idx) => {
+        const cap = grant.capability ?? grant.input?.capability ?? "\u672A\u77E5\u80FD\u529B";
+        const scopeStr = typeof grant.scope === "string" ? grant.scope : JSON.stringify(grant.scope ?? {});
+        const key = `${cap}:${scopeStr}`;
+        return /* @__PURE__ */ import_react.default.createElement("div", { key: `${key}/${idx}`, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, CAPABILITY_LABELS[cap] ?? cap), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, clip(scopeStr, 80))), /* @__PURE__ */ import_react.default.createElement(
+          ps,
+          {
+            variant: "outline",
+            size: "sm",
+            disabled: s.revokeBusyKey === key,
+            onClick: () => trackAsync(revokeGrant(grant))
+          },
+          "\u64A4\u9500\u6388\u6743"
+        )));
+      }))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "pbvGtq_heading" }, "\u63D2\u4EF6\u5217\u8868"), /* @__PURE__ */ import_react.default.createElement("p", { className: "pbvGtq_intro" }, "\u67E5\u770B\u5F53\u524D Runtime \u5DF2\u6302\u8F7D\u7684\u53D7\u63A7\u80FD\u529B\u7EC4\u4E0E\u4F1A\u8BDD\u63D2\u4EF6\u72B6\u6001\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cards" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react.default.createElement("div", { key: group.title, className: "qSYn7G_card" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardContent" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTitle" }, group.title), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTrailing" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_status" }, /* @__PURE__ */ import_react.default.createElement(
+        Pu,
+        {
+          state: "done",
+          className: "qSYn7G_statusDot"
         }
-      }
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+      ), group.badge))), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardDetails" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react.default.createElement("div", { key: code, className: "qSYn7G_details" }, /* @__PURE__ */ import_react.default.createElement("span", null, code), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_entryValue" }, desc)))))))) : null))
+    )) : null,
+    /* @__PURE__ */ import_react.default.createElement(
+      $u,
       {
-        type: "button",
-        onClick: () => {
-          if (s.newFolderName.trim()) {
-            void browseDirectory(s.browsePath, s.newFolderName.trim());
-            s.newFolderName = "";
-            s.newFolderOpen = false;
+        open: s.newProjectModalOpen,
+        onClose: () => {
+          if (!s.addProjectBusy) {
+            s.newProjectModalOpen = false;
+            forceRender();
+          }
+        },
+        title: "\u9009\u62E9\u5DE5\u4F5C\u533A\u76EE\u5F55",
+        className: "ZuhsRW_dialog",
+        headless: true
+      },
+      /* @__PURE__ */ import_react.default.createElement("div", { id: "new-project-dialog", className: "ZuhsRW_editorScope" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_header" }, /* @__PURE__ */ import_react.default.createElement("h2", { className: "ZuhsRW_title" }, "\u9009\u62E9\u5DE5\u4F5C\u533A\u76EE\u5F55"), /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_crumbBar" }, !s.pathEditing ? /* @__PURE__ */ import_react.default.createElement(import_react.default.Fragment, null, /* @__PURE__ */ import_react.default.createElement("span", { className: "ZuhsRW_crumbTrail", role: "navigation" }, browseCrumbs.map((crumb, index) => /* @__PURE__ */ import_react.default.createElement("span", { key: crumb.path, className: "ZuhsRW_crumbSeat" }, index > 0 ? /* @__PURE__ */ import_react.default.createElement(
+        Q9,
+        {
+          size: 12,
+          className: "ZuhsRW_crumbChevron"
+        }
+      ) : null, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "ZuhsRW_crumb",
+          disabled: s.browseLoading || s.addProjectBusy,
+          onClick: () => void browseDirectory(crumb.path)
+        },
+        crumb.name
+      )))), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "ZuhsRW_crumbEditZone",
+          "aria-label": "\u7F16\u8F91\u8DEF\u5F84",
+          title: "\u7F16\u8F91\u8DEF\u5F84",
+          onClick: () => {
+            s.pathEditing = true;
+            forceRender();
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          i7,
+          {
+            size: 14,
+            className: "ZuhsRW_crumbEditGlyph"
+          }
+        )
+      )) : /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          ref: modalProjectWsInputRef,
+          id: "modal-project-path",
+          type: "text",
+          className: "ZuhsRW_pathInput",
+          "aria-label": "\u7F16\u8F91\u8DEF\u5F84",
+          autoFocus: true,
+          value: s.projectWorkspaceInput,
+          onChange: (e) => {
+            s.projectWorkspaceInput = e.target.value;
+            forceRender();
+          },
+          onBlur: () => {
+            s.pathEditing = false;
+            forceRender();
+          },
+          onKeyDown: (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              s.pathEditing = false;
+              void browseDirectory(s.projectWorkspaceInput);
+            } else if (e.key === "Escape") {
+              e.stopPropagation();
+              s.pathEditing = false;
+              forceRender();
+            }
           }
         }
-      },
-      "\u521B\u5EFA\u5E76\u8FDB\u5165"
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
+      ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_content" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_millerRow" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_column", role: "list" }, visibleBrowseEntries.map((entry) => {
+        const selected = (s.browseSelectedPath || s.projectWorkspaceInput) === entry.path;
+        return /* @__PURE__ */ import_react.default.createElement(
+          "span",
+          {
+            key: entry.path,
+            role: "listitem",
+            className: "ZuhsRW_rowSeat"
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              "aria-current": selected || void 0,
+              className: we(
+                "ZuhsRW_row",
+                selected && "ZuhsRW_rowSelected"
+              ),
+              disabled: s.browseLoading || s.addProjectBusy,
+              onClick: () => {
+                s.browseSelectedPath = entry.path;
+                s.projectWorkspaceInput = entry.path;
+                forceRender();
+              },
+              onDoubleClick: () => void browseDirectory(entry.path)
+            },
+            selected ? /* @__PURE__ */ import_react.default.createElement(
+              O7,
+              {
+                size: 16,
+                className: "ZuhsRW_rowIconSelected"
+              }
+            ) : /* @__PURE__ */ import_react.default.createElement(
+              P7,
+              {
+                size: 16,
+                className: "ZuhsRW_rowIcon"
+              }
+            ),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "ZuhsRW_rowName" }, entry.name),
+            /* @__PURE__ */ import_react.default.createElement(
+              Q9,
+              {
+                size: 14,
+                className: "ZuhsRW_rowChevron"
+              }
+            )
+          )
+        );
+      }))), s.browseLoading ? /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          className: "ZuhsRW_status ZuhsRW_loadingFloat",
+          role: "status"
+        },
+        "\u52A0\u8F7D\u4E2D\u2026"
+      ) : null, s.browseError ? /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_error", role: "alert" }, s.browseError) : null), /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_footerBar" }, /* @__PURE__ */ import_react.default.createElement(
+        ps,
+        {
+          variant: "outline",
+          icon: /* @__PURE__ */ import_react.default.createElement(B9, { size: 14 }),
+          disabled: s.browseLoading || s.addProjectBusy,
+          onClick: () => {
+            s.newFolderOpen = true;
+            s.newFolderName = "";
+            forceRender();
+          }
+        },
+        "\u65B0\u5EFA\u6587\u4EF6\u5939"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: we(
+            "ZuhsRW_showHiddenToggle",
+            s.browseShowHidden && "ZuhsRW_showHiddenToggleActive"
+          ),
+          "aria-pressed": s.browseShowHidden,
+          onClick: () => {
+            s.browseShowHidden = !s.browseShowHidden;
+            forceRender();
+          }
+        },
+        "\u663E\u793A\u9690\u85CF\u6587\u4EF6",
+        s.browseShowHidden ? /* @__PURE__ */ import_react.default.createElement(Es, { size: 14 }) : null
+      ), /* @__PURE__ */ import_react.default.createElement("span", { className: "ZuhsRW_footerGap" }), /* @__PURE__ */ import_react.default.createElement(
+        ps,
+        {
+          variant: "outline",
+          className: "ZuhsRW_footerAction",
+          disabled: s.addProjectBusy,
+          onClick: () => {
+            s.newProjectModalOpen = false;
+            forceRender();
+          }
+        },
+        "\u53D6\u6D88"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        ps,
+        {
+          id: "confirm-new-project-btn",
+          variant: "primary",
+          className: "ZuhsRW_footerAction",
+          disabled: s.addProjectBusy || !(s.browseSelectedPath || s.projectWorkspaceInput || s.browsePath),
+          onClick: (e) => trackAsync(handleAddProject(e, true))
+        },
+        s.addProjectBusy ? "\u6B63\u5728\u6253\u5F00\u2026" : "\u6253\u5F00"
+      )))
+    ),
+    /* @__PURE__ */ import_react.default.createElement(
+      $u,
       {
-        type: "button",
-        className: "secondary",
-        onClick: () => {
+        open: s.newFolderOpen,
+        onClose: () => {
           s.newFolderOpen = false;
           forceRender();
-        }
-      },
-      "\u53D6\u6D88"
-    )) : null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-label-bar" }, /* @__PURE__ */ import_react2.default.createElement(
-      "input",
-      {
-        ref: modalProjectLabelInputRef,
-        id: "modal-project-label",
-        type: "text",
-        maxLength: 160,
-        placeholder: "\u9879\u76EE\u663E\u793A\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u9ED8\u8BA4\u4F7F\u7528\u6587\u4EF6\u5939\u540D\uFF09",
-        value: s.projectLabelInput,
-        onChange: (e) => {
-          s.projectLabelInput = e.target.value;
-          forceRender();
-        }
-      }
-    )), s.browseError ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "error", role: "alert" }, s.browseError) : null),
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-dir-footer" }, /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        className: "secondary",
-        onClick: () => {
-          s.newFolderOpen = !s.newFolderOpen;
-          forceRender();
-        }
-      },
-      "+ \u65B0\u5EFA\u6587\u4EF6\u5939"
-    ), /* @__PURE__ */ import_react2.default.createElement("label", { className: "small muted dsh-hidden-toggle" }, /* @__PURE__ */ import_react2.default.createElement(
-      "input",
-      {
-        type: "checkbox",
-        checked: s.browseShowHidden,
-        onChange: (e) => {
-          s.browseShowHidden = e.target.checked;
-          forceRender();
-        }
-      }
-    ), "\u663E\u793A\u9690\u85CF\u6587\u4EF6\u5939"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-footer-gap" }), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        type: "button",
-        className: "secondary",
-        onClick: () => {
-          s.newProjectModalOpen = false;
-          forceRender();
-        }
-      },
-      "\u53D6\u6D88"
-    ), /* @__PURE__ */ import_react2.default.createElement(
-      "button",
-      {
-        id: "confirm-new-project-btn",
-        type: "button",
-        disabled: s.addProjectBusy || !s.projectWorkspaceInput.trim(),
-        onClick: (e) => trackAsync(handleAddProject(e, true))
-      },
-      s.addProjectBusy ? "\u6B63\u5728\u542F\u52A8 Runtime\u2026" : "\u65B0\u5F00\u9879\u76EE\u5E76\u8FDB\u5165"
-    ))
-  )) : null, s.fullAccessConfirmOpen ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-modal-overlay", role: "presentation" }, /* @__PURE__ */ import_react2.default.createElement(
-    "div",
-    {
-      className: "dsh-modal-mask",
-      onClick: () => {
-        s.fullAccessConfirmOpen = false;
-        forceRender();
-      }
-    }
-  ), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dsh-confirm-dialog", role: "dialog", "aria-modal": "true" }, /* @__PURE__ */ import_react2.default.createElement("h3", null, "\u786E\u8BA4\u542F\u7528 Full access\uFF1F"), /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted" }, "\u542F\u7528 Full access \u540E\uFF0Cagent \u5C06\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5E76\u4E14\u53EF\u4EE5\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF0C\u5305\u62EC\u654F\u611F\u64CD\u4F5C\u3001\u6587\u4EF6\u4FEE\u6539\u6216\u5916\u90E8\u547D\u4EE4\u3002\u4EC5\u5EFA\u8BAE\u5728\u4F60\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u4F7F\u7528\u3002"), /* @__PURE__ */ import_react2.default.createElement("label", { className: "confirm-label" }, /* @__PURE__ */ import_react2.default.createElement(
-    "input",
-    {
-      type: "checkbox",
-      checked: s.fullAccessAcknowledged,
-      onChange: (e) => {
-        s.fullAccessAcknowledged = e.target.checked;
-        forceRender();
-      }
-    }
-  ), "\u6211\u5DF2\u4E86\u89E3\u98CE\u9669\uFF0C\u5E76\u613F\u610F\u7EE7\u7EED"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "dialog-actions" }, /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      className: "secondary",
-      onClick: () => {
-        s.fullAccessConfirmOpen = false;
-        forceRender();
-      }
-    },
-    "\u53D6\u6D88"
-  ), /* @__PURE__ */ import_react2.default.createElement(
-    "button",
-    {
-      type: "button",
-      disabled: !s.fullAccessAcknowledged,
-      onClick: confirmFullAccess
-    },
-    "\u542F\u7528 Full access"
-  )))) : null, /* @__PURE__ */ import_react2.default.createElement(
-    "dialog",
-    {
-      ref: forkDialogRef,
-      id: "fork-dialog",
-      open: s.forkOpen,
-      "aria-labelledby": "fork-heading"
-    },
-    /* @__PURE__ */ import_react2.default.createElement("div", { className: "heading-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", { id: "fork-heading" }, "\u521B\u5EFA\u666E\u901A\u804A\u5929\u5206\u652F"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "\u5206\u652F\u89C4\u5219\u8BF4\u660E" }, "\u539F\u5F3A\u6D41\u7A0B\u4F1A\u8BDD\u53CA\u8BB0\u5F55\u7EE7\u7EED\u4FDD\u7559\u51BB\u7ED3\u72B6\u6001\uFF1B\u65B0\u5EFA\u5206\u652F\u4F5C\u4E3A\u666E\u901A\u804A\u5929\u8FD0\u884C\u3002\u5C1A\u672A\u6838\u5BF9\u7684\u5DE5\u5177\u526F\u4F5C\u7528\u4E0D\u80FD\u901A\u8FC7 Fork \u6E05\u9664\u3002")),
-    /* @__PURE__ */ import_react2.default.createElement(
-      "form",
-      {
-        ref: bind({ submit: (e) => trackAsync(handleForkSubmit(e)) }),
-        id: "fork-form",
-        onSubmit: (e) => trackAsync(handleForkSubmit(e))
-      },
-      /* @__PURE__ */ import_react2.default.createElement("label", { htmlFor: "fork-label" }, "\u65B0\u4F1A\u8BDD\u540D\u79F0"),
-      /* @__PURE__ */ import_react2.default.createElement(
-        "input",
-        {
-          ref: forkLabelInputRef,
-          id: "fork-label",
-          maxLength: 160,
-          required: true,
-          value: s.forkLabel,
-          onChange: (e) => {
-            s.forkLabel = e.target.value;
-            forceRender();
-          }
-        }
-      ),
-      /* @__PURE__ */ import_react2.default.createElement("label", { className: "confirm-label" }, /* @__PURE__ */ import_react2.default.createElement(
-        "input",
-        {
-          ref: forkConfirmInputRef,
-          id: "fork-confirm",
-          type: "checkbox",
-          required: true,
-          checked: s.forkConfirm,
-          onChange: (e) => {
-            s.forkConfirm = e.target.checked;
-            forceRender();
-          }
-        }
-      ), "\u6211\u786E\u8BA4\u65B0\u5EFA\u666E\u901A\u804A\u5929\u5206\u652F\uFF0C\u5E76\u7406\u89E3\u539F\u4F1A\u8BDD\u4ECD\u88AB\u51BB\u7ED3\u3002"),
-      /* @__PURE__ */ import_react2.default.createElement("p", { id: "fork-error", className: "error", role: "alert" }, s.forkError),
-      /* @__PURE__ */ import_react2.default.createElement("div", { className: "dialog-actions" }, /* @__PURE__ */ import_react2.default.createElement(
-        "button",
-        {
-          ref: bind({ click: closeForkDialog }),
-          id: "close-fork",
-          className: "secondary",
-          type: "button",
-          onClick: closeForkDialog
         },
-        "\u8FD4\u56DE"
-      ), /* @__PURE__ */ import_react2.default.createElement("button", { id: "fork-button", type: "submit", disabled: s.forkBusy }, s.forkBusy ? "\u6B63\u5728\u521B\u5EFA\u2026" : "\u786E\u8BA4 Fork"))
+        title: "\u65B0\u5EFA\u6587\u4EF6\u5939",
+        className: "ZuhsRW_createDialog",
+        headless: true
+      },
+      /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_createBody" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "ZuhsRW_createTitle" }, "\u65B0\u5EFA\u6587\u4EF6\u5939"), /* @__PURE__ */ import_react.default.createElement("p", { className: "ZuhsRW_createIn" }, `\u5728\u201C${s.browsePath}\u201D\u4E2D\u65B0\u5EFA\u6587\u4EF6\u5939`), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "ZuhsRW_createInput",
+          "aria-label": "\u6587\u4EF6\u5939\u540D\u79F0",
+          placeholder: "\u672A\u547D\u540D\u6587\u4EF6\u5939",
+          autoFocus: true,
+          value: s.newFolderName,
+          onChange: (e) => {
+            s.newFolderName = e.target.value;
+            forceRender();
+          },
+          onKeyDown: (e) => {
+            if (e.key === "Enter" && s.newFolderName.trim()) {
+              e.preventDefault();
+              const name = s.newFolderName.trim();
+              s.newFolderOpen = false;
+              s.newFolderName = "";
+              void browseDirectory(s.browsePath, name);
+            }
+          }
+        }
+      ), /* @__PURE__ */ import_react.default.createElement("div", { className: "ZuhsRW_createActions" }, /* @__PURE__ */ import_react.default.createElement(
+        ps,
+        {
+          variant: "outline",
+          onClick: () => {
+            s.newFolderOpen = false;
+            forceRender();
+          }
+        },
+        "\u53D6\u6D88"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        ps,
+        {
+          variant: "primary",
+          disabled: !s.newFolderName.trim(),
+          onClick: () => {
+            const name = s.newFolderName.trim();
+            s.newFolderOpen = false;
+            s.newFolderName = "";
+            void browseDirectory(s.browsePath, name);
+          }
+        },
+        "\u521B\u5EFA"
+      )))
+    ),
+    /* @__PURE__ */ import_react.default.createElement(
+      nf,
+      {
+        open: s.fullAccessConfirmOpen,
+        title: "\u786E\u8BA4\u542F\u7528 Full access\uFF1F",
+        description: "\u542F\u7528 Full access \u540E\uFF0Cagent \u5C06\u51CF\u5C11\u786E\u8BA4\u6B65\u9AA4\uFF0C\u5E76\u4E14\u53EF\u4EE5\u76F4\u63A5\u6267\u884C\u66F4\u591A\u64CD\u4F5C\uFF0C\u5305\u62EC\u654F\u611F\u64CD\u4F5C\u3001\u6587\u4EF6\u4FEE\u6539\u6216\u5916\u90E8\u547D\u4EE4\u3002\u4EC5\u5EFA\u8BAE\u5728\u4F60\u4FE1\u4EFB\u5F53\u524D\u4EFB\u52A1\u65F6\u4F7F\u7528\u3002",
+        acknowledgeLabel: "\u6211\u5DF2\u4E86\u89E3\u98CE\u9669\uFF0C\u5E76\u613F\u610F\u7EE7\u7EED",
+        cancelLabel: "\u53D6\u6D88",
+        confirmLabel: "\u542F\u7528 Full access",
+        acknowledged: s.fullAccessAcknowledged,
+        onAcknowledgedChange: (checked) => {
+          s.fullAccessAcknowledged = checked;
+          forceRender();
+        },
+        onCancel: () => {
+          s.fullAccessConfirmOpen = false;
+          s.fullAccessAcknowledged = false;
+          forceRender();
+        },
+        onConfirm: confirmFullAccess
+      }
+    ),
+    /* @__PURE__ */ import_react.default.createElement(
+      "dialog",
+      {
+        ref: forkDialogRef,
+        id: "fork-dialog",
+        open: s.forkOpen,
+        "aria-labelledby": "fork-heading"
+      },
+      /* @__PURE__ */ import_react.default.createElement("h2", { id: "fork-heading" }, "\u521B\u5EFA\u666E\u901A\u804A\u5929\u5206\u652F"),
+      /* @__PURE__ */ import_react.default.createElement(
+        "form",
+        {
+          ref: bind({ submit: (e) => trackAsync(handleForkSubmit(e)) }),
+          id: "fork-form",
+          onSubmit: (e) => trackAsync(handleForkSubmit(e))
+        },
+        /* @__PURE__ */ import_react.default.createElement("label", { htmlFor: "fork-label" }, "\u65B0\u4F1A\u8BDD\u540D\u79F0"),
+        /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            ref: forkLabelInputRef,
+            id: "fork-label",
+            maxLength: 160,
+            required: true,
+            value: s.forkLabel,
+            onChange: (e) => {
+              s.forkLabel = e.target.value;
+              forceRender();
+            }
+          }
+        ),
+        /* @__PURE__ */ import_react.default.createElement("label", null, /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            ref: forkConfirmInputRef,
+            id: "fork-confirm",
+            type: "checkbox",
+            required: true,
+            checked: s.forkConfirm,
+            onChange: (e) => {
+              s.forkConfirm = e.target.checked;
+              forceRender();
+            }
+          }
+        ), "\u6211\u786E\u8BA4\u65B0\u5EFA\u666E\u901A\u804A\u5929\u5206\u652F\uFF0C\u5E76\u7406\u89E3\u539F\u4F1A\u8BDD\u4ECD\u88AB\u51BB\u7ED3\u3002"),
+        /* @__PURE__ */ import_react.default.createElement("p", { id: "fork-error", role: "alert" }, s.forkError),
+        /* @__PURE__ */ import_react.default.createElement("div", null, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            ref: bind({ click: closeForkDialog }),
+            id: "close-fork",
+            type: "button",
+            onClick: closeForkDialog
+          },
+          "\u8FD4\u56DE"
+        ), /* @__PURE__ */ import_react.default.createElement("button", { id: "fork-button", type: "submit", disabled: s.forkBusy }, s.forkBusy ? "\u6B63\u5728\u521B\u5EFA\u2026" : "\u786E\u8BA4 Fork"))
+      )
     )
-  ));
+  );
 }
 
 // web/index.jsx
 function mountApp(container, env) {
   const root = (0, import_client.createRoot)(container);
   (0, import_react_dom2.flushSync)(() => {
-    root.render(/* @__PURE__ */ import_react3.default.createElement(CAYWApp, { env }));
+    root.render(/* @__PURE__ */ import_react2.default.createElement(CAYWApp, { env }));
   });
   return root;
 }
@@ -26774,6 +27743,17 @@ react-dom/cjs/react-dom-client.development.js:
   (**
    * @license React
    * react-dom-client.development.js
+   *
+   * Copyright (c) Meta Platforms, Inc. and affiliates.
+   *
+   * This source code is licensed under the MIT license found in the
+   * LICENSE file in the root directory of this source tree.
+   *)
+
+react/cjs/react-jsx-runtime.development.js:
+  (**
+   * @license React
+   * react-jsx-runtime.development.js
    *
    * Copyright (c) Meta Platforms, Inc. and affiliates.
    *
