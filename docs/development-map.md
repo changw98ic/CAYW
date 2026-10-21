@@ -6,9 +6,9 @@
 
 ## 从哪里开始
 
-**先把 Rust Agent 内核做出来，再在其上夯实 Stage A 执行底座。** `cayw-ai` / `cayw-agent` 的早期离线、本地 HTTP 和有限 Magpie + DS Flash 记录已保存。随后 Runtime 已接入持久化、Luau、工具权限、队列和恢复；共享读取与 Device 交互进程已分别验证。External plugin 统一进程清理的独立交付仍有测试失败，长会话读取优化已交回但尚未接主树，两者均未计入下文 Issue #1 的本地验收。当前持久化 Runtime 的真实 Provider 全链和其他必需 macOS 场景尚缺，因此 [#6](https://github.com/changw98ic/CAYW/issues/6) 的全部验收仍未完成。
+**先把 Rust Agent 内核做出来，再在其上夯实 Stage A 执行底座。** `cayw-ai` / `cayw-agent` 的早期离线、本地 HTTP 和有限 Magpie + DS Flash 记录已保存。随后 Runtime 已接入持久化、Luau、工具权限、队列和恢复；共享读取与 Device 交互进程已分别验证。这些早期记录不包含随后 #2、#3、#4 的验收。2026-10-21 的 [交付检查](validation/issue-234-macos-delivery.md)分别列出验证基线、Luau 测量、进程清理与有限真实模型补充；长会话绑定读取及工具数字参数修复随本次交付进入 Runtime。有限场景不代替 [#6](https://github.com/changw98ic/CAYW/issues/6) 的完整验收，#6 仍未完成。
 
-[#1](https://github.com/changw98ic/CAYW/issues/1) 的独立 Rust SDK/版本化 IPC 客户端、Session/事件契约和跨实例取消修复已接主树；事件订阅和续订、审批与取消、工具结果配对、同一会话重开恢复通过 macOS ARM64 离线复核。完整默认 workspace 测试通过 1,185 项，另有 5 个默认忽略入口；严格检查和所有目标/feature 编译通过，具体范围见[验收记录](validation/issue1-sdk-ipc.md)。按当前 macOS 首发范围，#1 的本地功能验收完成；不再等待 Windows/Linux。接下来建立 [#2](https://github.com/changw98ic/CAYW/issues/2) 的 macOS 可重复验证基线。基于 Luau 的语言原型 [#3](https://github.com/changw98ic/CAYW/issues/3) 与最小 Device [#4](https://github.com/changw98ic/CAYW/issues/4) 依硬依赖推进，随后汇入 [#5](https://github.com/changw98ic/CAYW/issues/5) 的预置 CodeMode 能力集。Stage A 稳固后，再完成 [#6](https://github.com/changw98ic/CAYW/issues/6) 的真实模型、权限、持久化和取消全链。原有 Issues 的硬依赖不变。
+[#1](https://github.com/changw98ic/CAYW/issues/1) 的独立 Rust SDK/版本化 IPC 客户端、Session/事件契约和跨实例取消修复已接主树；事件订阅和续订、审批与取消、工具结果配对、同一会话重开恢复通过 macOS ARM64 离线复核。完整默认 workspace 测试通过 1,185 项，另有 5 个默认忽略入口；严格检查和所有目标/feature 编译通过，具体范围见[验收记录](validation/issue1-sdk-ipc.md)。按当前 macOS 首发范围，#1 的本地功能验收完成；不再等待 Windows/Linux。[#2](https://github.com/changw98ic/CAYW/issues/2) 的 macOS 可重复验证基线已由 PR #27 合并到 `dev` 并关闭。基于 Luau 的语言原型 [#3](https://github.com/changw98ic/CAYW/issues/3) 与最小 Device [#4](https://github.com/changw98ic/CAYW/issues/4) 已完成各自声明的 macOS ARM64 验收，交付与复跑入口见 [本次记录](validation/issue-234-macos-delivery.md)。下一项仍为 [#5](https://github.com/changw98ic/CAYW/issues/5) 的预置 CodeMode 能力集。Stage A 稳固后，再完成 [#6](https://github.com/changw98ic/CAYW/issues/6) 的真实模型、权限、持久化和取消全链。原有 Issues 的硬依赖不变。
 
 阶段是阅读导航。每个任务只需满足自己的硬依赖即可启动，不需要等上一阶段所有分支结束。并行任务若触及相同文件或契约，应先协调接口变更。没有预设负责人、截止日期、性能结论或模型质量评分。
 
@@ -17,8 +17,9 @@
 ### A：最小接口、验证底座与统一执行
 
 - [#1](https://github.com/changw98ic/CAYW/issues/1)：先交付可执行的公开 Rust SDK 和版本化 IPC 往返，不先冻结完整接口或铺设空架构。
-- [#2](https://github.com/changw98ic/CAYW/issues/2)：当前建立 macOS 的故障注入与性能记录基线，后续每个任务持续补充其场景；Issue 标题与正文已改为 macOS 范围。VerifyTool 只用于验证，不是 Core 运行依赖；A/B 对比记录格式先用离线固定数据跑通，真实对比在 #6 后经授权运行。
-- [#3](https://github.com/changw98ic/CAYW/issues/3) 与 [#4](https://github.com/changw98ic/CAYW/issues/4)：优先使用 Luau 实现同机语言原型（Monty 仅作可选对照，不阻塞主线），与最小进程树治理并行。冷/暖启动、首执行、真实编排、取消与离线样本验证都要有可核对记录。
+- [#2](https://github.com/changw98ic/CAYW/issues/2)：macOS 验证基线已合并并关闭。VerifyTool 只用于验证，不是 Core 运行依赖；离线比较和反例已运行，缺少关键构建资料时保持 pending。后续任务继续补充自己的场景，正式真实任务性能比较在 #6 后经授权运行。
+- [#3](https://github.com/changw98ic/CAYW/issues/3)：[Luau 原型与同机测量](validation/issue-3-luau-macos.md)已验收，包含十八个正式场景、每场景三次采样及独立反例。Monty 是可选对照，不阻塞本项。
+- [#4](https://github.com/changw98ic/CAYW/issues/4)：[macOS 进程身份、Pipes/PTY、取消和清理](validation/issue-4-macos-process-lifecycle.md)已按具名拓扑验收。原进程身份、清理失败和业务效果不明分别保留。
 - [#5](https://github.com/changw98ic/CAYW/issues/5)：优先提供已经做好的标准 CodeMode 能力集作为统一模型工具编排入口，底层由 Rust 能力执行；所有执行路径共用权限、调用配对、取消和预算。
 
 ### B：首个 Core Only 真实闭环
@@ -66,9 +67,9 @@
 | Issue / 交付目标 | 阶段 | 硬依赖 | 可并行任务 / 条件依赖 | 状态 |
 | --- | --- | --- | --- | --- |
 | [[Core] 交付 Session/事件契约、最小 Rust SDK 与版本化 IPC 实接](https://github.com/changw98ic/CAYW/issues/1) | A | 无 | — | [已完成 macOS ARM64 首发范围的本地验收](validation/issue1-sdk-ipc.md)；GitHub 已关闭；实现与客户端已由 PR #20 合并到 `main` |
-| [[验证] 建立 macOS、故障注入与任务性能比较的可重复基线](https://github.com/changw98ic/CAYW/issues/2) | A | [#1](https://github.com/changw98ic/CAYW/issues/1) | — | 计划；按当前首发范围执行 |
-| [[CodeMode] 优先基于 Luau 交付同机原型与测量报告（Monty 可选对照）](https://github.com/changw98ic/CAYW/issues/3) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2) | [#4](https://github.com/changw98ic/CAYW/issues/4) | 计划 |
-| [[Device] 交付最小进程树归属、统一取消与执行预算](https://github.com/changw98ic/CAYW/issues/4) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2) | [#3](https://github.com/changw98ic/CAYW/issues/3) | 计划 |
+| [[验证] 建立 macOS、故障注入与任务性能比较的可重复基线](https://github.com/changw98ic/CAYW/issues/2) | A | [#1](https://github.com/changw98ic/CAYW/issues/1) | — | 已完成 macOS ARM64 范围验收；PR #27 已合并到 `dev`，GitHub 已关闭；[交付记录](validation/issue-234-macos-delivery.md) |
+| [[CodeMode] 优先基于 Luau 交付同机原型与测量报告（Monty 可选对照）](https://github.com/changw98ic/CAYW/issues/3) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2) | [#4](https://github.com/changw98ic/CAYW/issues/4) | [已完成 macOS ARM64 范围验收](validation/issue-3-luau-macos.md)；GitHub 状态以 Issue 为准 |
+| [[Device] 交付最小进程树归属、统一取消与执行预算](https://github.com/changw98ic/CAYW/issues/4) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2) | [#3](https://github.com/changw98ic/CAYW/issues/3) | [已完成具名 macOS ARM64 场景验收](validation/issue-4-macos-process-lifecycle.md)；GitHub 状态以 Issue 为准 |
 | [[CodeMode] 优先交付已做好的 CodeMode 能力集与 Rust 执行链](https://github.com/changw98ic/CAYW/issues/5) | A | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#3](https://github.com/changw98ic/CAYW/issues/3)、[#4](https://github.com/changw98ic/CAYW/issues/4) | — | 计划 |
 | [[Core] 交付首个协议的 Headless 流式多轮 Chat 与工具真实闭环](https://github.com/changw98ic/CAYW/issues/6) | B | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#2](https://github.com/changw98ic/CAYW/issues/2)、[#4](https://github.com/changw98ic/CAYW/issues/4)、[#5](https://github.com/changw98ic/CAYW/issues/5) | — | 计划 |
 | [[Session] 完善持久化恢复、副作用 unknown 核对与执行围栏](https://github.com/changw98ic/CAYW/issues/7) | C | [#6](https://github.com/changw98ic/CAYW/issues/6) | [#8](https://github.com/changw98ic/CAYW/issues/8)、[#9](https://github.com/changw98ic/CAYW/issues/9)、[#10](https://github.com/changw98ic/CAYW/issues/10) | 计划 |
