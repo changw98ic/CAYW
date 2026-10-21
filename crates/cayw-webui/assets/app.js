@@ -609,7 +609,7 @@ function boot() {
     const fragment = document.createDocumentFragment();
     if (!sessions.length) fragment.append(el('p', 'small muted', '暂无会话。新建一个即可开始。'));
     for (const session of sessions) {
-      const button = el('button', 'session-item');
+      const button = el('button', 'session-item bits-spotlight');
       button.type = 'button';
       button.setAttribute('aria-current', String(session.id === selected));
       const shortId = String(session.id ?? '').slice(0, 8);
@@ -733,7 +733,7 @@ function boot() {
     const summaries = summarizeProjects(projects, sessionMap, viewMap);
     const fragment = document.createDocumentFragment();
     for (const item of summaries) {
-      const card = el('article', 'management-card');
+      const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
       const isCurrent = item.id === currentProjectId();
       if (isCurrent) card.classList.add('is-active');
       const header = el('div', 'card-header');
@@ -828,7 +828,7 @@ function boot() {
       fragment.append(empty);
     }
     for (const plugin of items) {
-      const card = el('article', 'management-card');
+      const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
       if (plugin.frozen) card.classList.add('is-frozen');
       const header = el('div', 'card-header');
       header.append(el('strong', '', plugin.name), el('span', 'state-label', plugin.statusLabel));
@@ -961,7 +961,7 @@ function boot() {
     };
     for (const [index, message] of messages.entries()) {
       const role = ['user', 'assistant', 'system', 'toolResult', 'custom'].includes(message.role) ? message.role : 'custom';
-      const card = el('article', `message ${role}`);
+      const card = el('article', `message ${role} bits-spotlight`);
       const presentation = messagePresentation(message);
       const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
       card.append(el('div', 'role', ({ user: '你', assistant: '助手', system: '系统', toolResult: '工具结果', custom: '宿主记录' })[role]));
@@ -1040,7 +1040,7 @@ function boot() {
     const fragment = document.createDocumentFragment();
     for (const approval of approvals.slice(0, 30)) {
       const id = approval.id ?? approval.approval_id;
-      const card = el('article', 'approval-card');
+      const card = el('article', 'approval-card bits-spotlight bits-border');
       const input = approval.input ?? {};
       const capability = input.capability ?? '';
       let scope;
@@ -1410,6 +1410,42 @@ function boot() {
     if (event?.key !== 'Escape' || typeof document.querySelectorAll !== 'function') return;
     for (const pop of document.querySelectorAll('details.hint-popover[open]')) pop.open = false;
     openPluginHints.clear();
+  });
+  let activeSpotlightCard = null;
+  function updateSpotlightRule(mx, my, rx, ry) {
+    const sheets = document.styleSheets;
+    if (!sheets || !sheets.length) return;
+    try {
+      const rules = sheets[0].cssRules;
+      for (let i = rules.length - 1; i >= 0; i--) {
+        const rule = rules[i];
+        if (rule.selectorText === '[data-spotlight="active"]' && rule.style) {
+          rule.style.setProperty('--mx', mx);
+          rule.style.setProperty('--my', my);
+          rule.style.setProperty('--rx', rx);
+          rule.style.setProperty('--ry', ry);
+          return;
+        }
+      }
+    } catch { /* ignore cross-origin or mock DOM */ }
+  }
+  document.addEventListener('pointermove', event => {
+    if (!event?.target || typeof event.target.closest !== 'function') return;
+    const card = event.target.closest('.bits-spotlight');
+    if (activeSpotlightCard && activeSpotlightCard !== card) {
+      delete activeSpotlightCard.dataset.spotlight;
+      activeSpotlightCard = null;
+    }
+    if (!card || typeof card.getBoundingClientRect !== 'function') return;
+    activeSpotlightCard = card;
+    card.dataset.spotlight = 'active';
+    const rect = card.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const tilt = card.classList && typeof card.classList.contains === 'function' && card.classList.contains('bits-tilt');
+    const ry = tilt && rect.width > 0 ? `${(((x / rect.width) - 0.5) * 3.2).toFixed(2)}deg` : '0deg';
+    const rx = tilt && rect.height > 0 ? `${(((0.5 - (y / rect.height)) * 2.6)).toFixed(2)}deg` : '0deg';
+    updateSpotlightRule(`${Math.round(x)}px`, `${Math.round(y)}px`, rx, ry);
   });
   window.addEventListener('online', () => { if (token && selected) schedulePoll(0); });
   window.addEventListener('pagehide', () => { token = ''; for (const controller of controllers) controller.abort(); });

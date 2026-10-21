@@ -306,6 +306,7 @@ pub async fn serve_projects_with_limits(
         .route("/", get(index))
         .route("/app.js", get(script))
         .route("/styles.css", get(styles))
+        .route("/favicon.svg", get(favicon))
         .route("/api/rpc", post(rpc))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -440,7 +441,7 @@ fn secure_headers(mut response: Response) -> Response {
         ),
         (
             "content-security-policy",
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
         ),
     ] {
         headers.insert(name, HeaderValue::from_static(value));
@@ -706,5 +707,12 @@ async fn styles() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/styles.css"),
+    )
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#0b0d10" stroke="#ff7a33" stroke-width="1.5"/><text x="16" y="22" text-anchor="middle" font-family="system-ui,sans-serif" font-size="18" font-weight="700" fill="#ff7a33">C</text></svg>"##,
     )
 }

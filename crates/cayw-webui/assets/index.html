@@ -5,21 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>CAYW 本机会话</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
+  <div class="backdrop" aria-hidden="true">
+    <div class="backdrop-grid"></div>
+    <div class="backdrop-glow glow-rust"></div>
+    <div class="backdrop-glow glow-luau"></div>
+    <div class="backdrop-noise"></div>
+  </div>
   <a class="skip" href="#conversation">跳到会话内容</a>
   <header class="topbar">
     <div class="identity"><span class="mark" aria-hidden="true">C</span><div><strong>CAYW</strong><span class="muted">本机会话</span></div></div>
     <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="logout" class="quiet" hidden>断开</button></div>
   </header>
 
-  <section id="login-panel" class="login-panel" aria-labelledby="login-heading">
+  <section id="login-panel" class="login-panel bits-spotlight bits-tilt bits-border" aria-labelledby="login-heading">
     <div class="heading-with-hint">
       <div>
-        <p class="eyebrow">从这里开始</p>
-        <h1 id="login-heading">连接本机会话</h1>
+        <p class="eyebrow bits-shiny">从这里开始</p>
+        <h1 id="login-heading" class="bits-gradient-text">连接本机会话</h1>
       </div>
       <details class="hint-popover">
         <summary class="hint-trigger" aria-label="查看令牌说明">?</summary>
@@ -66,10 +73,10 @@
 
     <main id="conversation" class="conversation" tabindex="-1">
       <div id="conversation-view">
-      <div class="conversation-heading"><div><p class="eyebrow">工作空间</p><h1 id="session-title">选择或创建会话</h1></div><span id="session-state" class="state-label">等待选择</span></div>
+      <div class="conversation-heading"><div><p class="eyebrow bits-shiny">工作空间</p><h1 id="session-title" class="bits-gradient-text">选择或创建会话</h1></div><span id="session-state" class="state-label">等待选择</span></div>
       <p id="global-error" class="error" role="alert" hidden></p>
       <p id="poll-status" class="small muted" role="status"></p>
-      <section id="blocked-notice" class="notice" hidden aria-labelledby="blocked-title">
+      <section id="blocked-notice" class="notice bits-spotlight" hidden aria-labelledby="blocked-title">
         <div class="notice-bar">
           <div class="title-with-hint">
             <h2 id="blocked-title">会话暂时不能继续</h2>
@@ -85,7 +92,7 @@
       <section aria-label="会话历史" class="history-section"><p id="history-note" class="small muted"></p><div id="messages" class="messages"><div class="empty"><h2>继续一段对话</h2></div></div></section>
       <section id="live-section" class="live-section" aria-labelledby="live-heading" hidden><h2 id="live-heading" class="small">正在接收</h2><pre id="live-text" aria-live="off"></pre></section>
       <details class="event-details"><summary data-tip="最近 120 条已消费事件；未识别事件按原始记录展示">事件记录 <span id="event-count" class="muted">0</span></summary><div id="event-log"></div></details>
-      <form id="prompt-form" class="composer">
+      <form id="prompt-form" class="composer bits-spotlight bits-border">
         <div class="composer-header">
           <label for="prompt">发送消息</label>
           <span class="hint-badge" tabindex="0" data-tip="Enter 换行 · Ctrl / ⌘ + Enter 发送">快捷键 ?</span>
@@ -98,9 +105,9 @@
       <section id="projects-page" class="management-page" hidden aria-labelledby="projects-heading">
         <div class="conversation-heading">
           <div>
-            <p class="eyebrow">多项目管理</p>
+            <p class="eyebrow bits-shiny">多项目管理</p>
             <div class="title-with-hint">
-              <h1 id="projects-heading">本机项目</h1>
+              <h1 id="projects-heading" class="bits-gradient-text">本机项目</h1>
               <details class="hint-popover">
                 <summary class="hint-trigger" aria-label="多项目管理说明">?</summary>
                 <div class="hint-bubble">切换当前本机轻网关接入的多个 Runtime 项目；各项目会话、事件游标与未确认请求锁相互独立。多设备管理暂不提供。</div>
@@ -116,9 +123,9 @@
       <section id="plugins-page" class="management-page" hidden aria-labelledby="plugins-heading">
         <div class="conversation-heading">
           <div>
-            <p class="eyebrow">插件管理</p>
+            <p class="eyebrow bits-shiny">插件管理</p>
             <div class="title-with-hint">
-              <h1 id="plugins-heading">插件与会话绑定</h1>
+              <h1 id="plugins-heading" class="bits-gradient-text">插件与会话绑定</h1>
               <details class="hint-popover">
                 <summary class="hint-trigger" aria-label="插件管理说明">?</summary>
                 <div class="hint-bubble">展示当前项目已绑定的 plugin、版本代际、公开能力与冻结状态。plugin 启停由本机宿主控制；若卸载导致会话冻结，可在副作用核对完毕后显式 Fork 为普通聊天。</div>
