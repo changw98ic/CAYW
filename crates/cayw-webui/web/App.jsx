@@ -212,8 +212,13 @@ const AGENT_PRESETS = [
 
 const BUILTIN_CAPABILITY_GROUPS = [
   {
+    id: 'fs',
     title: '文件与目录',
-    badge: '已挂载',
+    summary: '工作区内文件读写、补丁替换与目录属性查询，统一经过根目录固定与哈希校验。',
+    paramLabel: '单次读取上限（字节）',
+    defaultParam: '262144',
+    authMode: '只读直接执行，写入与修改按模式审批',
+    badge: '已启用',
     items: [
       ['读取文件', '读取文件内容与校验摘要'],
       ['写入文件', '创建新文件或按摘要安全更新文件'],
@@ -222,8 +227,13 @@ const BUILTIN_CAPABILITY_GROUPS = [
     ],
   },
   {
+    id: 'code',
     title: '代码检索与语法大纲',
-    badge: '已挂载',
+    summary: '有界文本检索、路径匹配、源码符号大纲提取与改动片段对比。',
+    paramLabel: '单次检索返回上限（条）',
+    defaultParam: '200',
+    authMode: '工作区内只读直接执行',
+    badge: '已启用',
     items: [
       ['文本与路径检索', '在工作区内检索文本内容与文件路径'],
       ['源码结构大纲', '提取源码文件的结构与符号列表'],
@@ -231,8 +241,13 @@ const BUILTIN_CAPABILITY_GROUPS = [
     ],
   },
   {
+    id: 'git',
     title: '版本管理',
-    badge: '已挂载',
+    summary: '查看工作区未提交改动、代码差异、提交历史与单次提交详情。',
+    paramLabel: '历史记录默认条数',
+    defaultParam: '50',
+    authMode: '只读查询直接执行',
+    badge: '已启用',
     items: [
       ['工作区状态', '查看当前未提交的文件变更状态'],
       ['代码改动对比', '查看未提交或指定范围的代码改动'],
@@ -240,11 +255,30 @@ const BUILTIN_CAPABILITY_GROUPS = [
     ],
   },
   {
+    id: 'build',
     title: '预设构建与测试',
-    badge: '已挂载',
+    summary: '执行工作区显式配置的预设构建与测试任务，受独立进程组与超时预算控制。',
+    paramLabel: '任务执行超时（秒）',
+    defaultParam: '120',
+    authMode: '需明确任务授权或审批',
+    badge: '已启用',
     items: [
       ['预设构建任务', '运行已配置的预设构建任务'],
       ['预设测试任务', '运行已配置的预设测试任务'],
+    ],
+  },
+  {
+    id: 'mcp',
+    title: '外部工具与技能包',
+    summary: '由本机统一接入外部工具服务与本地技能说明，按需发现并经过统一授权。',
+    paramLabel: '工具调用超时（秒）',
+    defaultParam: '60',
+    authMode: '调用外部工具需明确审批',
+    badge: '已启用',
+    items: [
+      ['发现与读取工具', '查看已连接的工具服务与参数说明'],
+      ['调用外部工具', '在授权范围内执行外部工具请求'],
+      ['读取技能说明', '按需加载本地技能列表与文档'],
     ],
   },
 ];
@@ -467,11 +501,57 @@ export function CAYWApp({ env } = {}) {
       heroPresetMenuOpen: false,
       selectedAgentPreset: 'code',
       modelMenuOpen: false,
+      selectedModel: 'deepseek-v4.1-flash',
+      modelNotice: '',
+      editingProviderId: null,
+      editProviderBaseUrl: '',
+      editProviderApiKey: '',
+      addingModelProviderId: null,
+      newModelId: '',
+      newModelDesc: '',
+      addingProviderOpen: false,
+      newProviderName: '',
+      newProviderBaseUrl: '',
+      newProviderApiKey: '',
+      newProviderModelId: '',
+      modelProviders: [
+        {
+          id: 'local-deepseek',
+          name: 'DeepSeek 模型服务',
+          protocol: '兼容接口',
+          baseUrl: 'http://127.0.0.1:3425/v1',
+          configured: true,
+          builtin: true,
+          models: [
+            {
+              id: 'deepseek-v4.1-flash',
+              label: 'deepseek-v4.1-flash',
+              desc: '高速代码生成与工具编排（默认）',
+            },
+            {
+              id: 'deepseek-chat',
+              label: 'deepseek-chat',
+              desc: '通用对话与日常开发任务',
+            },
+            {
+              id: 'deepseek-reasoner',
+              label: 'deepseek-reasoner',
+              desc: '深度推理与复杂架构分析',
+            },
+          ],
+        },
+      ],
       // DSH Settings Modal state
       settingsOpen: false,
       settingsTab: 'general',
       themeMode: 'dark',
       enterBehavior: 'enter',
+      pluginsSubTab: 'config',
+      expandedPluginCards: {},
+      expandedInventoryCards: {},
+      pluginSearchQuery: '',
+      pluginParamValues: {},
+      pluginSavedNotice: '',
       // DSH Permission Preset & Grants state
       permissionPreset: 'workspace-write',
       permissionPopoverOpen: false,
@@ -2900,15 +2980,109 @@ export function CAYWApp({ env } = {}) {
                             id="composer-model-btn"
                             type="button"
                             className="_7KE1Ra_trigger"
-                            aria-label="当前模型：deepseek-v4.1-flash"
-                            title="点击查看模型与网关配置"
-                            onClick={() => openSettings('models')}
+                            aria-label={`当前模型：${s.selectedModel}`}
+                            aria-haspopup="listbox"
+                            aria-expanded={s.modelMenuOpen}
+                            title="切换模型或配置模型服务"
+                            onClick={() => {
+                              s.modelMenuOpen = !s.modelMenuOpen;
+                              forceRender();
+                            }}
                           >
                             <span className="_7KE1Ra_triggerLabel">
-                              deepseek-v4.1-flash
+                              {s.selectedModel}
                             </span>
-                            <IconChevronDownOutline14 className="_7KE1Ra_chevron" />
+                            <IconChevronDownOutline14
+                              className={clsx(
+                                '_7KE1Ra_chevron',
+                                s.modelMenuOpen && '_7KE1Ra_chevronOpen',
+                              )}
+                            />
                           </button>
+
+                          {s.modelMenuOpen ? (
+                            <div
+                              className="_7KE1Ra_menu"
+                              role="listbox"
+                              aria-label="选择模型"
+                            >
+                              <div className="_7KE1Ra_groups">
+                                {s.modelProviders.map(provider => (
+                                  <div
+                                    key={provider.id}
+                                    className="_7KE1Ra_group"
+                                  >
+                                    <div className="_7KE1Ra_groupTitle">
+                                      {provider.name}
+                                    </div>
+                                    {provider.models.map(m => {
+                                      const isSelected =
+                                        s.selectedModel === m.id;
+                                      return (
+                                        <button
+                                          key={m.id}
+                                          type="button"
+                                          role="option"
+                                          aria-selected={isSelected}
+                                          className={clsx(
+                                            '_7KE1Ra_option',
+                                            isSelected && '_7KE1Ra_selected',
+                                          )}
+                                          onClick={() => {
+                                            s.selectedModel = m.id;
+                                            s.modelMenuOpen = false;
+                                            forceRender();
+                                          }}
+                                        >
+                                          <span className="_7KE1Ra_optionCopy">
+                                            <span className="_7KE1Ra_modelName">
+                                              {m.label || m.id}
+                                            </span>
+                                            <span className="_7KE1Ra_description">
+                                              {m.desc}
+                                            </span>
+                                          </span>
+                                          <span className="_7KE1Ra_check">
+                                            {isSelected ? (
+                                              <IconCheckOutline16 size={14} />
+                                            ) : null}
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                ))}
+                              </div>
+                              <div
+                                style={{
+                                  borderTop:
+                                    '1px solid var(--dsw-alias-border-l2)',
+                                  marginTop: 4,
+                                  paddingTop: 4,
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="_7KE1Ra_cell"
+                                  onClick={() => {
+                                    s.modelMenuOpen = false;
+                                    openSettings('models');
+                                  }}
+                                >
+                                  <span className="_7KE1Ra_cellLabel">
+                                    配置模型与接口密钥…
+                                  </span>
+                                  <span className="_7KE1Ra_cellValue">
+                                    {`${s.modelProviders.length} 个服务`}
+                                  </span>
+                                  <IconChevronRightOutline14
+                                    className="_7KE1Ra_cellChevron"
+                                    size={14}
+                                  />
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
 
                         <button
@@ -3437,81 +3611,518 @@ export function CAYWApp({ env } = {}) {
 
                 {s.settingsTab === 'models' ? (
                   <div className="zGbnIq_section">
-                    <h3 className="zGbnIq_title">模型</h3>
+                    <h3 className="zGbnIq_title">模型服务配置</h3>
                     <p className="zGbnIq_intro">
-                      本机运行时已接入模型服务，接口密钥由本机进程安全持有。
+                      管理模型服务地址、接口密钥与可用模型目录。密钥仅保存在本机。
                     </p>
+                    {s.modelNotice ? (
+                      <p className="zGbnIq_savedNotice" role="status">
+                        {s.modelNotice}
+                      </p>
+                    ) : null}
                     <div className="zGbnIq_rows">
-                      <div className="zGbnIq_rowCard">
-                        <div className="zGbnIq_rowHead">
-                          <div className="zGbnIq_rowIdentity">
-                            <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
-                            <span className="zGbnIq_rowName">
-                              本机模型服务
-                            </span>
-                            <span className="zGbnIq_rowTag">密钥已配置</span>
-                          </div>
-                        </div>
-                        <div className="zGbnIq_modelCatalog">
-                          <div className="zGbnIq_modelCatalogHeading">
-                            <span className="zGbnIq_modelCatalogTitle">
-                              模型目录
-                            </span>
-                            <span className="zGbnIq_modelCatalogMeta">
-                              http://127.0.0.1:3425/v1
-                            </span>
-                          </div>
-                          <div className="zGbnIq_modelList">
-                            <div className="zGbnIq_modelEntry">
-                              <div className="zGbnIq_modelRow">
-                                <strong>auto/deepseek-v4.1-flash</strong>
-                                <span className="zGbnIq_rowTag">当前使用</span>
+                      {s.modelProviders.map(provider => {
+                        const isEditing = s.editingProviderId === provider.id;
+                        const isAddingModel =
+                          s.addingModelProviderId === provider.id;
+                        return (
+                          <div key={provider.id} className="zGbnIq_rowCard">
+                            <div className="zGbnIq_rowHead">
+                              <div className="zGbnIq_rowIdentity">
+                                <span
+                                  className={clsx(
+                                    'zGbnIq_credentialDot',
+                                    provider.configured
+                                      ? 'zGbnIq_credentialDotConfigured'
+                                      : 'zGbnIq_credentialDotMissing',
+                                  )}
+                                />
+                                <span className="zGbnIq_rowName">
+                                  {provider.name}
+                                </span>
+                                <span className="zGbnIq_rowTag">
+                                  {provider.configured
+                                    ? '密钥已配置'
+                                    : '未配置密钥'}
+                                </span>
+                              </div>
+                              <div className="zGbnIq_rowActions">
+                                <button
+                                  type="button"
+                                  className="zGbnIq_secondaryButton"
+                                  onClick={() => {
+                                    if (isEditing) {
+                                      s.editingProviderId = null;
+                                    } else {
+                                      s.editingProviderId = provider.id;
+                                      s.editProviderBaseUrl = provider.baseUrl;
+                                      s.editProviderApiKey = '';
+                                    }
+                                    forceRender();
+                                  }}
+                                >
+                                  {isEditing ? '收起配置' : '配置密钥与地址'}
+                                </button>
+                                {!provider.builtin ? (
+                                  <button
+                                    type="button"
+                                    className="zGbnIq_dangerButton"
+                                    onClick={() => {
+                                      s.modelProviders =
+                                        s.modelProviders.filter(
+                                          p => p.id !== provider.id,
+                                        );
+                                      s.modelNotice = `已移除服务“${provider.name}”。`;
+                                      forceRender();
+                                    }}
+                                  >
+                                    移除
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+
+                            {isEditing ? (
+                              <div className="zGbnIq_editor">
+                                <div className="zGbnIq_editorHeader">
+                                  <span className="zGbnIq_editorTitle">
+                                    连接与凭证设置
+                                  </span>
+                                  <span className="zGbnIq_editorRoute">
+                                    {provider.protocol}
+                                  </span>
+                                </div>
+                                <div className="zGbnIq_field">
+                                  <label className="zGbnIq_fieldLabel">
+                                    接口服务地址
+                                  </label>
+                                  <input
+                                    type="text"
+                                    className="zGbnIq_input"
+                                    placeholder="如 http://127.0.0.1:3425/v1"
+                                    value={s.editProviderBaseUrl}
+                                    onChange={e => {
+                                      s.editProviderBaseUrl = e.target.value;
+                                      forceRender();
+                                    }}
+                                  />
+                                </div>
+                                <div className="zGbnIq_field">
+                                  <label className="zGbnIq_fieldLabel">
+                                    接口密钥
+                                  </label>
+                                  <input
+                                    type="password"
+                                    className="zGbnIq_input"
+                                    placeholder={
+                                      provider.configured
+                                        ? '已配置本机密钥（输入新密钥可覆盖）'
+                                        : '输入模型服务密钥'
+                                    }
+                                    value={s.editProviderApiKey}
+                                    onChange={e => {
+                                      s.editProviderApiKey = e.target.value;
+                                      forceRender();
+                                    }}
+                                  />
+                                </div>
+                                <div className="zGbnIq_editorActions">
+                                  <button
+                                    type="button"
+                                    className="zGbnIq_secondaryButton"
+                                    onClick={() => {
+                                      s.editingProviderId = null;
+                                      forceRender();
+                                    }}
+                                  >
+                                    取消
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="zGbnIq_primaryButton"
+                                    onClick={() => {
+                                      provider.baseUrl =
+                                        s.editProviderBaseUrl.trim() ||
+                                        provider.baseUrl;
+                                      if (s.editProviderApiKey.trim()) {
+                                        provider.configured = true;
+                                      }
+                                      s.editingProviderId = null;
+                                      s.modelNotice = `已保存“${provider.name}”连接配置。`;
+                                      forceRender();
+                                    }}
+                                  >
+                                    保存配置
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="zGbnIq_modelCatalog">
+                              <div className="zGbnIq_modelListHead">
+                                <div className="zGbnIq_modelCatalogHeading">
+                                  <span className="zGbnIq_modelCatalogTitle">
+                                    {`可用模型（${provider.models.length}）`}
+                                  </span>
+                                  <span className="zGbnIq_modelCatalogMeta">
+                                    {provider.baseUrl}
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="zGbnIq_addModelButton"
+                                  onClick={() => {
+                                    s.addingModelProviderId = isAddingModel
+                                      ? null
+                                      : provider.id;
+                                    s.newModelId = '';
+                                    s.newModelDesc = '';
+                                    forceRender();
+                                  }}
+                                >
+                                  <IconPlusOutline16 size={12} />
+                                  <span>添加模型</span>
+                                </button>
+                              </div>
+
+                              {isAddingModel ? (
+                                <div className="zGbnIq_editor">
+                                  <div className="zGbnIq_modelAdvanced">
+                                    <div className="zGbnIq_modelField">
+                                      <label className="zGbnIq_modelFieldLabel">
+                                        模型标识
+                                      </label>
+                                      <input
+                                        type="text"
+                                        className="zGbnIq_input"
+                                        placeholder="如 deepseek-coder-v2"
+                                        value={s.newModelId}
+                                        onChange={e => {
+                                          s.newModelId = e.target.value;
+                                          forceRender();
+                                        }}
+                                      />
+                                    </div>
+                                    <div className="zGbnIq_modelField">
+                                      <label className="zGbnIq_modelFieldLabel">
+                                        用途说明
+                                      </label>
+                                      <input
+                                        type="text"
+                                        className="zGbnIq_input"
+                                        placeholder="如 代码补全与重构"
+                                        value={s.newModelDesc}
+                                        onChange={e => {
+                                          s.newModelDesc = e.target.value;
+                                          forceRender();
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <div className="zGbnIq_editorActions">
+                                    <button
+                                      type="button"
+                                      className="zGbnIq_secondaryButton"
+                                      onClick={() => {
+                                        s.addingModelProviderId = null;
+                                        forceRender();
+                                      }}
+                                    >
+                                      取消
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="zGbnIq_primaryButton"
+                                      disabled={!s.newModelId.trim()}
+                                      onClick={() => {
+                                        const id = s.newModelId.trim();
+                                        if (!id) return;
+                                        provider.models.push({
+                                          id,
+                                          label: id,
+                                          desc:
+                                            s.newModelDesc.trim() ||
+                                            '自定义模型',
+                                        });
+                                        s.selectedModel = id;
+                                        s.addingModelProviderId = null;
+                                        s.modelNotice = `已添加并切换到模型 ${id}。`;
+                                        forceRender();
+                                      }}
+                                    >
+                                      确认添加
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              <div className="zGbnIq_modelList">
+                                {provider.models.map(m => {
+                                  const isCurrent = s.selectedModel === m.id;
+                                  return (
+                                    <div
+                                      key={m.id}
+                                      className="zGbnIq_modelEntry"
+                                    >
+                                      <div className="zGbnIq_modelRow">
+                                        <strong
+                                          style={{
+                                            fontSize: 13,
+                                            paddingLeft: 6,
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {m.label || m.id}
+                                        </strong>
+                                        <span
+                                          className="zGbnIq_modelCatalogMeta"
+                                          style={{
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {m.desc}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          className="zGbnIq_addModelButton"
+                                          style={
+                                            isCurrent
+                                              ? {
+                                                  borderColor:
+                                                    'var(--dsw-alias-state-business-primary)',
+                                                  color:
+                                                    'var(--dsw-alias-state-business-primary)',
+                                                }
+                                              : undefined
+                                          }
+                                          onClick={() => {
+                                            s.selectedModel = m.id;
+                                            s.modelNotice = `当前默认模型已切换为 ${m.id}。`;
+                                            forceRender();
+                                          }}
+                                        >
+                                          {isCurrent ? '当前默认' : '设为默认'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="zGbnIq_iconButton zGbnIq_iconButtonDanger"
+                                          aria-label={`移除模型 ${m.id}`}
+                                          title="移除模型"
+                                          disabled={provider.models.length <= 1}
+                                          onClick={() => {
+                                            provider.models =
+                                              provider.models.filter(
+                                                item => item.id !== m.id,
+                                              );
+                                            if (s.selectedModel === m.id) {
+                                              s.selectedModel =
+                                                provider.models[0]?.id ??
+                                                'deepseek-v4.1-flash';
+                                            }
+                                            forceRender();
+                                          }}
+                                        >
+                                          <IconCloseOutline16 size={13} />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
                               </div>
                             </div>
                           </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="zGbnIq_addBlock">
+                      {!s.addingProviderOpen ? (
+                        <div className="zGbnIq_addActions">
+                          <button
+                            type="button"
+                            className="zGbnIq_addButton"
+                            onClick={() => {
+                              s.addingProviderOpen = true;
+                              s.newProviderName = '';
+                              s.newProviderBaseUrl = '';
+                              s.newProviderApiKey = '';
+                              s.newProviderModelId = '';
+                              forceRender();
+                            }}
+                          >
+                            <IconPlusOutline16 size={14} />
+                            <span>添加自定义模型服务</span>
+                          </button>
                         </div>
-                      </div>
+                      ) : (
+                        <div className="zGbnIq_addCard">
+                          <div className="zGbnIq_editor">
+                            <div className="zGbnIq_editorHeader">
+                              <span className="zGbnIq_editorTitle">
+                                新增兼容模型服务
+                              </span>
+                            </div>
+                            <div className="zGbnIq_modelAdvanced">
+                              <div className="zGbnIq_field">
+                                <label className="zGbnIq_fieldLabel">
+                                  服务名称
+                                </label>
+                                <input
+                                  type="text"
+                                  className="zGbnIq_input"
+                                  placeholder="如 本地推理服务"
+                                  value={s.newProviderName}
+                                  onChange={e => {
+                                    s.newProviderName = e.target.value;
+                                    forceRender();
+                                  }}
+                                />
+                              </div>
+                              <div className="zGbnIq_field">
+                                <label className="zGbnIq_fieldLabel">
+                                  默认模型标识
+                                </label>
+                                <input
+                                  type="text"
+                                  className="zGbnIq_input"
+                                  placeholder="如 qwen-coder-plus"
+                                  value={s.newProviderModelId}
+                                  onChange={e => {
+                                    s.newProviderModelId = e.target.value;
+                                    forceRender();
+                                  }}
+                                />
+                              </div>
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">
+                                接口服务地址
+                              </label>
+                              <input
+                                type="text"
+                                className="zGbnIq_input"
+                                placeholder="如 http://127.0.0.1:8000/v1"
+                                value={s.newProviderBaseUrl}
+                                onChange={e => {
+                                  s.newProviderBaseUrl = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">
+                                接口密钥
+                              </label>
+                              <input
+                                type="password"
+                                className="zGbnIq_input"
+                                placeholder="输入接口密钥（可选）"
+                                value={s.newProviderApiKey}
+                                onChange={e => {
+                                  s.newProviderApiKey = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_editorActions">
+                              <button
+                                type="button"
+                                className="zGbnIq_secondaryButton"
+                                onClick={() => {
+                                  s.addingProviderOpen = false;
+                                  forceRender();
+                                }}
+                              >
+                                取消
+                              </button>
+                              <button
+                                type="button"
+                                className="zGbnIq_primaryButton"
+                                disabled={
+                                  !s.newProviderName.trim() ||
+                                  !s.newProviderBaseUrl.trim()
+                                }
+                                onClick={() => {
+                                  const modelId =
+                                    s.newProviderModelId.trim() ||
+                                    'default-model';
+                                  s.modelProviders.push({
+                                    id: `custom-${Date.now()}`,
+                                    name: s.newProviderName.trim(),
+                                    protocol: '兼容接口',
+                                    baseUrl: s.newProviderBaseUrl.trim(),
+                                    configured: Boolean(
+                                      s.newProviderApiKey.trim(),
+                                    ),
+                                    builtin: false,
+                                    models: [
+                                      {
+                                        id: modelId,
+                                        label: modelId,
+                                        desc: '自定义接入模型',
+                                      },
+                                    ],
+                                  });
+                                  s.selectedModel = modelId;
+                                  s.addingProviderOpen = false;
+                                  s.modelNotice = `已添加模型服务“${s.newProviderName.trim()}”。`;
+                                  forceRender();
+                                }}
+                              >
+                                保存并启用
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : null}
 
                 {s.settingsTab === 'agent-presets' ? (
-                  <div className="zGbnIq_section">
-                    <h3 className="zGbnIq_title">会话模式</h3>
-                    <p className="zGbnIq_intro">
+                  <div className="rtSEdW_section">
+                    <h3 className="rtSEdW_title">会话模式</h3>
+                    <p className="rtSEdW_intro">
                       选择新建会话默认使用的工具编排与执行方式。
                     </p>
-                    <div className="zGbnIq_rows">
-                      {AGENT_PRESETS.map(ap => (
-                        <div key={ap.id} className="zGbnIq_rowCard">
-                          <div className="zGbnIq_rowHead">
-                            <div className="zGbnIq_rowIdentity">
-                              <span className="zGbnIq_rowName">{ap.name}</span>
-                              <span className="zGbnIq_rowTag">{ap.badge}</span>
-                            </div>
-                            <Button
-                              variant={
-                                s.selectedAgentPreset === ap.id
-                                  ? 'primary'
-                                  : 'outline'
-                              }
-                              size="sm"
+                    <ul className="rtSEdW_cards">
+                      {AGENT_PRESETS.map(ap => {
+                        const active = s.selectedAgentPreset === ap.id;
+                        return (
+                          <li
+                            key={ap.id}
+                            className={clsx(
+                              'rtSEdW_card',
+                              active && 'rtSEdW_cardActive',
+                            )}
+                          >
+                            <button
+                              type="button"
+                              className="rtSEdW_cardMain"
                               onClick={() => {
                                 s.selectedAgentPreset = ap.id;
                                 forceRender();
                               }}
                             >
-                              {s.selectedAgentPreset === ap.id
-                                ? '当前默认'
-                                : '设为默认'}
-                            </Button>
-                          </div>
-                          <p className="zGbnIq_intro" style={{ margin: 0 }}>
-                            {ap.desc}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
+                              <div className="rtSEdW_cardHead">
+                                <span className="rtSEdW_cardName">
+                                  {ap.name}
+                                </span>
+                                <span className="rtSEdW_badge">{ap.badge}</span>
+                                {active ? (
+                                  <span className="rtSEdW_inUse">当前默认</span>
+                                ) : null}
+                              </div>
+                              <div className="rtSEdW_cardDesc">{ap.desc}</div>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
                   </div>
                 ) : null}
 
@@ -3585,37 +4196,283 @@ export function CAYWApp({ env } = {}) {
 
                 {s.settingsTab === 'plugins' ? (
                   <div className="pbvGtq_section">
-                    <h3 className="pbvGtq_heading">扩展能力列表</h3>
+                    <h3 className="pbvGtq_heading">扩展能力</h3>
                     <p className="pbvGtq_intro">
-                      查看当前已挂载的受控能力组与会话扩展状态。
+                      按需展开查看或调整受控能力模块参数，或检索已挂载模块目录。
                     </p>
-                    <div className="qSYn7G_cards">
-                      {BUILTIN_CAPABILITY_GROUPS.map(group => (
-                        <div key={group.title} className="qSYn7G_card">
-                          <div className="qSYn7G_cardContent">
-                            <span className="qSYn7G_cardTitle">
-                              {group.title}
-                            </span>
-                            <span className="qSYn7G_cardTrailing">
-                              <span className="qSYn7G_status">
-                                <StateDot
-                                  state="done"
-                                  className="qSYn7G_statusDot"
-                                />
-                                {group.badge}
-                              </span>
-                            </span>
-                          </div>
-                          <div className="qSYn7G_cardDetails">
-                            {group.items.map(([code, desc]) => (
-                              <div key={code} className="qSYn7G_details">
-                                <span>{code}</span>
-                                <span className="qSYn7G_entryValue">{desc}</span>
-                              </div>
-                            ))}
+
+                    <div className="pbvGtq_tabs" role="tablist">
+                      {[
+                        ['config', '能力参数配置'],
+                        ['inventory', '已挂载模块目录'],
+                      ].map(([tabKey, tabTitle]) => (
+                        <button
+                          key={tabKey}
+                          type="button"
+                          role="tab"
+                          aria-selected={s.pluginsSubTab === tabKey}
+                          data-active={String(s.pluginsSubTab === tabKey)}
+                          className="pbvGtq_tab"
+                          onClick={() => {
+                            s.pluginsSubTab = tabKey;
+                            forceRender();
+                          }}
+                        >
+                          {tabTitle}
+                        </button>
+                      ))}
+                    </div>
+
+                    {s.pluginSavedNotice ? (
+                      <p className="zGbnIq_savedNotice" role="status">
+                        {s.pluginSavedNotice}
+                      </p>
+                    ) : null}
+
+                    <div className="pbvGtq_panel">
+                      {s.pluginsSubTab === 'config' ? (
+                        <ul className="pbvGtq_cards">
+                          {BUILTIN_CAPABILITY_GROUPS.map(group => {
+                            const isOpen = Boolean(
+                              s.expandedPluginCards[group.id],
+                            );
+                            const paramVal =
+                              s.pluginParamValues[group.id] ??
+                              group.defaultParam;
+                            return (
+                              <li
+                                key={group.id}
+                                className={clsx(
+                                  'YyYd_a_card',
+                                  isOpen && 'YyYd_a_cardOpen',
+                                )}
+                              >
+                                <button
+                                  type="button"
+                                  className="YyYd_a_header"
+                                  aria-expanded={isOpen}
+                                  onClick={() => {
+                                    s.expandedPluginCards[group.id] = !isOpen;
+                                    forceRender();
+                                  }}
+                                >
+                                  <div className="YyYd_a_headText">
+                                    <span className="YyYd_a_name">
+                                      {group.title}
+                                    </span>
+                                    <span className="YyYd_a_description">
+                                      {group.summary}
+                                    </span>
+                                  </div>
+                                  <span className="At1oFq_badge">
+                                    {`${group.badge} · ${group.items.length} 项能力`}
+                                  </span>
+                                  <IconChevronDownOutline14
+                                    size={14}
+                                    className={clsx(
+                                      'YyYd_a_chevron',
+                                      isOpen && 'YyYd_a_chevronOpen',
+                                    )}
+                                  />
+                                </button>
+
+                                {isOpen ? (
+                                  <div className="YyYd_a_body">
+                                    <div className="At1oFq_field">
+                                      <div className="At1oFq_head">
+                                        <label className="At1oFq_label">
+                                          {group.paramLabel}
+                                        </label>
+                                        <div className="At1oFq_badges">
+                                          <span className="At1oFq_badgeMuted">
+                                            {`默认：${group.defaultParam}`}
+                                          </span>
+                                          {paramVal !== group.defaultParam ? (
+                                            <button
+                                              type="button"
+                                              className="At1oFq_reset"
+                                              onClick={() => {
+                                                s.pluginParamValues[group.id] =
+                                                  group.defaultParam;
+                                                forceRender();
+                                              }}
+                                            >
+                                              恢复默认
+                                            </button>
+                                          ) : null}
+                                        </div>
+                                      </div>
+       <input
+                                        type="text"
+                                        className="At1oFq_input"
+                                        value={paramVal}
+                                        onChange={e => {
+                                          s.pluginParamValues[group.id] =
+                                            e.target.value;
+                                          forceRender();
+                                        }}
+                                      />
+                                      <p className="At1oFq_hint">
+                                        {`授权策略：${group.authMode}`}
+                                      </p>
+                                    </div>
+
+                                    {group.items.map(([itemName, itemDesc]) => (
+                                      <div
+                                        key={itemName}
+                                        className="At1oFq_field"
+                                      >
+                                        <div className="At1oFq_head">
+                                          <span className="At1oFq_label">
+                                            {itemName}
+                                          </span>
+                                          <span className="At1oFq_badge">
+                                            已就绪
+                                          </span>
+                                        </div>
+                                        <p className="At1oFq_hint">
+                                          {itemDesc}
+                                        </p>
+                                      </div>
+                                    ))}
+
+                                    <div className="YyYd_a_footer">
+                                      <button
+                                        type="button"
+                                        className="YyYd_a_discard"
+                                        onClick={() => {
+                                          s.expandedPluginCards[group.id] =
+                                            false;
+                                          forceRender();
+                                        }}
+                                      >
+                                        收起
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="YyYd_a_save"
+                                        onClick={() => {
+                                          s.pluginSavedNotice = `已保存“${group.title}”模块参数。`;
+                                          s.expandedPluginCards[group.id] =
+                                            false;
+                                          forceRender();
+                                        }}
+                                      >
+                                        保存参数
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : (
+                        <div className="qSYn7G_section">
+                          <div className="qSYn7G_catalog">
+                            <div className="qSYn7G_search">
+                              <IconSearchOutline16 size={16} />
+                              <input
+                                type="text"
+                                placeholder="搜索已挂载模块或能力…"
+                                value={s.pluginSearchQuery}
+                                onChange={e => {
+                                  s.pluginSearchQuery = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="qSYn7G_catalogHeading">
+                              <h3>已挂载模块</h3>
+                              <span>{BUILTIN_CAPABILITY_GROUPS.length}</span>
+                            </div>
+                            <div className="qSYn7G_cards">
+                              {BUILTIN_CAPABILITY_GROUPS.filter(g => {
+                                const q = s.pluginSearchQuery
+                                  .trim()
+                                  .toLowerCase();
+                                if (!q) return true;
+                                return (
+                                  g.title.toLowerCase().includes(q) ||
+                                  g.summary.toLowerCase().includes(q) ||
+                                  g.items.some(
+                                    ([n, d]) =>
+                                      n.toLowerCase().includes(q) ||
+                                      d.toLowerCase().includes(q),
+                                  )
+                                );
+                              }).map(group => {
+                                const isOpen = Boolean(
+                                  s.expandedInventoryCards[group.id],
+                                );
+                                return (
+                                  <div
+                                    key={group.id}
+                                    className="qSYn7G_card"
+                                    data-open={String(isOpen)}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="qSYn7G_cardContent"
+                                      aria-expanded={isOpen}
+                                      onClick={() => {
+                                        s.expandedInventoryCards[group.id] =
+                                          !isOpen;
+                                        forceRender();
+                                      }}
+                                    >
+                                      <span className="qSYn7G_cardTitle">
+                                        {group.title}
+                                      </span>
+                                      <span className="qSYn7G_cardTrailing">
+                                        <span
+                                          className="qSYn7G_statusDot"
+                                          data-phase="active"
+                                        />
+                                        <span
+                                          className="qSYn7G_configTag"
+                                          data-enabled="true"
+                                        >
+                                          {group.badge}
+                                        </span>
+                                        <IconChevronDownOutline14
+                                          size={14}
+                                          className="qSYn7G_chevron"
+                                        />
+                                      </span>
+                                    </button>
+                                    {isOpen ? (
+                                      <div className="qSYn7G_cardDetails">
+                                        <dl
+                                          className="qSYn7G_details"
+                                          style={{ margin: 0 }}
+                                        >
+                                          <div>
+                                            <dt>包含能力</dt>
+                                            <dd>
+                                              {group.items
+                                                .map(([name]) => name)
+                                                .join('、')}
+                                            </dd>
+                                          </div>
+                                          <div>
+                                            <dt>授权策略</dt>
+                                            <dd>{group.authMode}</dd>
+                                          </div>
+                                          <div>
+                                            <dt>默认参数</dt>
+                                            <dd>{`${group.paramLabel}：${s.pluginParamValues[group.id] ?? group.defaultParam}`}</dd>
+                                          </div>
+                                        </dl>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
                         </div>
-                      ))}
+                      )}
                     </div>
                   </div>
                 ) : null}

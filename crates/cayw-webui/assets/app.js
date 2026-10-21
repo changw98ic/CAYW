@@ -24665,8 +24665,13 @@ var AGENT_PRESETS = [
 ];
 var BUILTIN_CAPABILITY_GROUPS = [
   {
+    id: "fs",
     title: "\u6587\u4EF6\u4E0E\u76EE\u5F55",
-    badge: "\u5DF2\u6302\u8F7D",
+    summary: "\u5DE5\u4F5C\u533A\u5185\u6587\u4EF6\u8BFB\u5199\u3001\u8865\u4E01\u66FF\u6362\u4E0E\u76EE\u5F55\u5C5E\u6027\u67E5\u8BE2\uFF0C\u7EDF\u4E00\u7ECF\u8FC7\u6839\u76EE\u5F55\u56FA\u5B9A\u4E0E\u54C8\u5E0C\u6821\u9A8C\u3002",
+    paramLabel: "\u5355\u6B21\u8BFB\u53D6\u4E0A\u9650\uFF08\u5B57\u8282\uFF09",
+    defaultParam: "262144",
+    authMode: "\u53EA\u8BFB\u76F4\u63A5\u6267\u884C\uFF0C\u5199\u5165\u4E0E\u4FEE\u6539\u6309\u6A21\u5F0F\u5BA1\u6279",
+    badge: "\u5DF2\u542F\u7528",
     items: [
       ["\u8BFB\u53D6\u6587\u4EF6", "\u8BFB\u53D6\u6587\u4EF6\u5185\u5BB9\u4E0E\u6821\u9A8C\u6458\u8981"],
       ["\u5199\u5165\u6587\u4EF6", "\u521B\u5EFA\u65B0\u6587\u4EF6\u6216\u6309\u6458\u8981\u5B89\u5168\u66F4\u65B0\u6587\u4EF6"],
@@ -24675,8 +24680,13 @@ var BUILTIN_CAPABILITY_GROUPS = [
     ]
   },
   {
+    id: "code",
     title: "\u4EE3\u7801\u68C0\u7D22\u4E0E\u8BED\u6CD5\u5927\u7EB2",
-    badge: "\u5DF2\u6302\u8F7D",
+    summary: "\u6709\u754C\u6587\u672C\u68C0\u7D22\u3001\u8DEF\u5F84\u5339\u914D\u3001\u6E90\u7801\u7B26\u53F7\u5927\u7EB2\u63D0\u53D6\u4E0E\u6539\u52A8\u7247\u6BB5\u5BF9\u6BD4\u3002",
+    paramLabel: "\u5355\u6B21\u68C0\u7D22\u8FD4\u56DE\u4E0A\u9650\uFF08\u6761\uFF09",
+    defaultParam: "200",
+    authMode: "\u5DE5\u4F5C\u533A\u5185\u53EA\u8BFB\u76F4\u63A5\u6267\u884C",
+    badge: "\u5DF2\u542F\u7528",
     items: [
       ["\u6587\u672C\u4E0E\u8DEF\u5F84\u68C0\u7D22", "\u5728\u5DE5\u4F5C\u533A\u5185\u68C0\u7D22\u6587\u672C\u5185\u5BB9\u4E0E\u6587\u4EF6\u8DEF\u5F84"],
       ["\u6E90\u7801\u7ED3\u6784\u5927\u7EB2", "\u63D0\u53D6\u6E90\u7801\u6587\u4EF6\u7684\u7ED3\u6784\u4E0E\u7B26\u53F7\u5217\u8868"],
@@ -24684,8 +24694,13 @@ var BUILTIN_CAPABILITY_GROUPS = [
     ]
   },
   {
+    id: "git",
     title: "\u7248\u672C\u7BA1\u7406",
-    badge: "\u5DF2\u6302\u8F7D",
+    summary: "\u67E5\u770B\u5DE5\u4F5C\u533A\u672A\u63D0\u4EA4\u6539\u52A8\u3001\u4EE3\u7801\u5DEE\u5F02\u3001\u63D0\u4EA4\u5386\u53F2\u4E0E\u5355\u6B21\u63D0\u4EA4\u8BE6\u60C5\u3002",
+    paramLabel: "\u5386\u53F2\u8BB0\u5F55\u9ED8\u8BA4\u6761\u6570",
+    defaultParam: "50",
+    authMode: "\u53EA\u8BFB\u67E5\u8BE2\u76F4\u63A5\u6267\u884C",
+    badge: "\u5DF2\u542F\u7528",
     items: [
       ["\u5DE5\u4F5C\u533A\u72B6\u6001", "\u67E5\u770B\u5F53\u524D\u672A\u63D0\u4EA4\u7684\u6587\u4EF6\u53D8\u66F4\u72B6\u6001"],
       ["\u4EE3\u7801\u6539\u52A8\u5BF9\u6BD4", "\u67E5\u770B\u672A\u63D0\u4EA4\u6216\u6307\u5B9A\u8303\u56F4\u7684\u4EE3\u7801\u6539\u52A8"],
@@ -24693,11 +24708,30 @@ var BUILTIN_CAPABILITY_GROUPS = [
     ]
   },
   {
+    id: "build",
     title: "\u9884\u8BBE\u6784\u5EFA\u4E0E\u6D4B\u8BD5",
-    badge: "\u5DF2\u6302\u8F7D",
+    summary: "\u6267\u884C\u5DE5\u4F5C\u533A\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6784\u5EFA\u4E0E\u6D4B\u8BD5\u4EFB\u52A1\uFF0C\u53D7\u72EC\u7ACB\u8FDB\u7A0B\u7EC4\u4E0E\u8D85\u65F6\u9884\u7B97\u63A7\u5236\u3002",
+    paramLabel: "\u4EFB\u52A1\u6267\u884C\u8D85\u65F6\uFF08\u79D2\uFF09",
+    defaultParam: "120",
+    authMode: "\u9700\u660E\u786E\u4EFB\u52A1\u6388\u6743\u6216\u5BA1\u6279",
+    badge: "\u5DF2\u542F\u7528",
     items: [
       ["\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1", "\u8FD0\u884C\u5DF2\u914D\u7F6E\u7684\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1"],
       ["\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1", "\u8FD0\u884C\u5DF2\u914D\u7F6E\u7684\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1"]
+    ]
+  },
+  {
+    id: "mcp",
+    title: "\u5916\u90E8\u5DE5\u5177\u4E0E\u6280\u80FD\u5305",
+    summary: "\u7531\u672C\u673A\u7EDF\u4E00\u63A5\u5165\u5916\u90E8\u5DE5\u5177\u670D\u52A1\u4E0E\u672C\u5730\u6280\u80FD\u8BF4\u660E\uFF0C\u6309\u9700\u53D1\u73B0\u5E76\u7ECF\u8FC7\u7EDF\u4E00\u6388\u6743\u3002",
+    paramLabel: "\u5DE5\u5177\u8C03\u7528\u8D85\u65F6\uFF08\u79D2\uFF09",
+    defaultParam: "60",
+    authMode: "\u8C03\u7528\u5916\u90E8\u5DE5\u5177\u9700\u660E\u786E\u5BA1\u6279",
+    badge: "\u5DF2\u542F\u7528",
+    items: [
+      ["\u53D1\u73B0\u4E0E\u8BFB\u53D6\u5DE5\u5177", "\u67E5\u770B\u5DF2\u8FDE\u63A5\u7684\u5DE5\u5177\u670D\u52A1\u4E0E\u53C2\u6570\u8BF4\u660E"],
+      ["\u8C03\u7528\u5916\u90E8\u5DE5\u5177", "\u5728\u6388\u6743\u8303\u56F4\u5185\u6267\u884C\u5916\u90E8\u5DE5\u5177\u8BF7\u6C42"],
+      ["\u8BFB\u53D6\u6280\u80FD\u8BF4\u660E", "\u6309\u9700\u52A0\u8F7D\u672C\u5730\u6280\u80FD\u5217\u8868\u4E0E\u6587\u6863"]
     ]
   }
 ];
@@ -24875,11 +24909,57 @@ function CAYWApp({ env } = {}) {
       heroPresetMenuOpen: false,
       selectedAgentPreset: "code",
       modelMenuOpen: false,
+      selectedModel: "deepseek-v4.1-flash",
+      modelNotice: "",
+      editingProviderId: null,
+      editProviderBaseUrl: "",
+      editProviderApiKey: "",
+      addingModelProviderId: null,
+      newModelId: "",
+      newModelDesc: "",
+      addingProviderOpen: false,
+      newProviderName: "",
+      newProviderBaseUrl: "",
+      newProviderApiKey: "",
+      newProviderModelId: "",
+      modelProviders: [
+        {
+          id: "local-deepseek",
+          name: "DeepSeek \u6A21\u578B\u670D\u52A1",
+          protocol: "\u517C\u5BB9\u63A5\u53E3",
+          baseUrl: "http://127.0.0.1:3425/v1",
+          configured: true,
+          builtin: true,
+          models: [
+            {
+              id: "deepseek-v4.1-flash",
+              label: "deepseek-v4.1-flash",
+              desc: "\u9AD8\u901F\u4EE3\u7801\u751F\u6210\u4E0E\u5DE5\u5177\u7F16\u6392\uFF08\u9ED8\u8BA4\uFF09"
+            },
+            {
+              id: "deepseek-chat",
+              label: "deepseek-chat",
+              desc: "\u901A\u7528\u5BF9\u8BDD\u4E0E\u65E5\u5E38\u5F00\u53D1\u4EFB\u52A1"
+            },
+            {
+              id: "deepseek-reasoner",
+              label: "deepseek-reasoner",
+              desc: "\u6DF1\u5EA6\u63A8\u7406\u4E0E\u590D\u6742\u67B6\u6784\u5206\u6790"
+            }
+          ]
+        }
+      ],
       // DSH Settings Modal state
       settingsOpen: false,
       settingsTab: "general",
       themeMode: "dark",
       enterBehavior: "enter",
+      pluginsSubTab: "config",
+      expandedPluginCards: {},
+      expandedInventoryCards: {},
+      pluginSearchQuery: "",
+      pluginParamValues: {},
+      pluginSavedNotice: "",
       // DSH Permission Preset & Grants state
       permissionPreset: "workspace-write",
       permissionPopoverOpen: false,
@@ -26865,13 +26945,94 @@ function CAYWApp({ env } = {}) {
               id: "composer-model-btn",
               type: "button",
               className: "_7KE1Ra_trigger",
-              "aria-label": "\u5F53\u524D\u6A21\u578B\uFF1Adeepseek-v4.1-flash",
-              title: "\u70B9\u51FB\u67E5\u770B\u6A21\u578B\u4E0E\u7F51\u5173\u914D\u7F6E",
-              onClick: () => openSettings("models")
+              "aria-label": `\u5F53\u524D\u6A21\u578B\uFF1A${s.selectedModel}`,
+              "aria-haspopup": "listbox",
+              "aria-expanded": s.modelMenuOpen,
+              title: "\u5207\u6362\u6A21\u578B\u6216\u914D\u7F6E\u6A21\u578B\u670D\u52A1",
+              onClick: () => {
+                s.modelMenuOpen = !s.modelMenuOpen;
+                forceRender();
+              }
             },
-            /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_triggerLabel" }, "deepseek-v4.1-flash"),
-            /* @__PURE__ */ import_react.default.createElement(hs, { className: "_7KE1Ra_chevron" })
-          )), /* @__PURE__ */ import_react.default.createElement(
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_triggerLabel" }, s.selectedModel),
+            /* @__PURE__ */ import_react.default.createElement(
+              hs,
+              {
+                className: we(
+                  "_7KE1Ra_chevron",
+                  s.modelMenuOpen && "_7KE1Ra_chevronOpen"
+                )
+              }
+            )
+          ), s.modelMenuOpen ? /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              className: "_7KE1Ra_menu",
+              role: "listbox",
+              "aria-label": "\u9009\u62E9\u6A21\u578B"
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "_7KE1Ra_groups" }, s.modelProviders.map((provider) => /* @__PURE__ */ import_react.default.createElement(
+              "div",
+              {
+                key: provider.id,
+                className: "_7KE1Ra_group"
+              },
+              /* @__PURE__ */ import_react.default.createElement("div", { className: "_7KE1Ra_groupTitle" }, provider.name),
+              provider.models.map((m) => {
+                const isSelected = s.selectedModel === m.id;
+                return /* @__PURE__ */ import_react.default.createElement(
+                  "button",
+                  {
+                    key: m.id,
+                    type: "button",
+                    role: "option",
+                    "aria-selected": isSelected,
+                    className: we(
+                      "_7KE1Ra_option",
+                      isSelected && "_7KE1Ra_selected"
+                    ),
+                    onClick: () => {
+                      s.selectedModel = m.id;
+                      s.modelMenuOpen = false;
+                      forceRender();
+                    }
+                  },
+                  /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_optionCopy" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_modelName" }, m.label || m.id), /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_description" }, m.desc)),
+                  /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_check" }, isSelected ? /* @__PURE__ */ import_react.default.createElement(Es, { size: 14 }) : null)
+                );
+              })
+            ))),
+            /* @__PURE__ */ import_react.default.createElement(
+              "div",
+              {
+                style: {
+                  borderTop: "1px solid var(--dsw-alias-border-l2)",
+                  marginTop: 4,
+                  paddingTop: 4
+                }
+              },
+              /* @__PURE__ */ import_react.default.createElement(
+                "button",
+                {
+                  type: "button",
+                  className: "_7KE1Ra_cell",
+                  onClick: () => {
+                    s.modelMenuOpen = false;
+                    openSettings("models");
+                  }
+                },
+                /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_cellLabel" }, "\u914D\u7F6E\u6A21\u578B\u4E0E\u63A5\u53E3\u5BC6\u94A5\u2026"),
+                /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_cellValue" }, `${s.modelProviders.length} \u4E2A\u670D\u52A1`),
+                /* @__PURE__ */ import_react.default.createElement(
+                  Q9,
+                  {
+                    className: "_7KE1Ra_cellChevron",
+                    size: 14
+                  }
+                )
+              )
+            )
+          ) : null), /* @__PURE__ */ import_react.default.createElement(
             "button",
             {
               ref: bind({ click: () => trackAsync(handleCancel()) }),
@@ -27271,18 +27432,371 @@ function CAYWApp({ env } = {}) {
         },
         /* @__PURE__ */ import_react.default.createElement("span", null, s.enterBehavior === "enter" ? "\u6309\u56DE\u8F66\u76F4\u63A5\u53D1\u9001" : "\u6309\u7EC4\u5408\u952E\u53D1\u9001"),
         /* @__PURE__ */ import_react.default.createElement(hs, { className: "T1PP_q_chevron" })
-      ))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u672C\u673A\u8FD0\u884C\u65F6\u5DF2\u63A5\u5165\u6A21\u578B\u670D\u52A1\uFF0C\u63A5\u53E3\u5BC6\u94A5\u7531\u672C\u673A\u8FDB\u7A0B\u5B89\u5168\u6301\u6709\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "\u672C\u673A\u6A21\u578B\u670D\u52A1"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "\u5BC6\u94A5\u5DF2\u914D\u7F6E"))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalog" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalogHeading" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogTitle" }, "\u6A21\u578B\u76EE\u5F55"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogMeta" }, "http://127.0.0.1:3425/v1")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelList" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelEntry" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelRow" }, /* @__PURE__ */ import_react.default.createElement("strong", null, "auto/deepseek-v4.1-flash"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "\u5F53\u524D\u4F7F\u7528")))))))) : null, s.settingsTab === "agent-presets" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u4F1A\u8BDD\u6A21\u5F0F"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u9009\u62E9\u65B0\u5EFA\u4F1A\u8BDD\u9ED8\u8BA4\u4F7F\u7528\u7684\u5DE5\u5177\u7F16\u6392\u4E0E\u6267\u884C\u65B9\u5F0F\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, AGENT_PRESETS.map((ap) => /* @__PURE__ */ import_react.default.createElement("div", { key: ap.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, ap.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, ap.badge)), /* @__PURE__ */ import_react.default.createElement(
-        ps,
+      ))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B\u670D\u52A1\u914D\u7F6E"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u7BA1\u7406\u6A21\u578B\u670D\u52A1\u5730\u5740\u3001\u63A5\u53E3\u5BC6\u94A5\u4E0E\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002\u5BC6\u94A5\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u3002"), s.modelNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.modelNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, s.modelProviders.map((provider) => {
+        const isEditing = s.editingProviderId === provider.id;
+        const isAddingModel = s.addingModelProviderId === provider.id;
+        return /* @__PURE__ */ import_react.default.createElement("div", { key: provider.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement(
+          "span",
+          {
+            className: we(
+              "zGbnIq_credentialDot",
+              provider.configured ? "zGbnIq_credentialDotConfigured" : "zGbnIq_credentialDotMissing"
+            )
+          }
+        ), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, provider.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, provider.configured ? "\u5BC6\u94A5\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E\u5BC6\u94A5")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_secondaryButton",
+            onClick: () => {
+              if (isEditing) {
+                s.editingProviderId = null;
+              } else {
+                s.editingProviderId = provider.id;
+                s.editProviderBaseUrl = provider.baseUrl;
+                s.editProviderApiKey = "";
+              }
+              forceRender();
+            }
+          },
+          isEditing ? "\u6536\u8D77\u914D\u7F6E" : "\u914D\u7F6E\u5BC6\u94A5\u4E0E\u5730\u5740"
+        ), !provider.builtin ? /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_dangerButton",
+            onClick: () => {
+              s.modelProviders = s.modelProviders.filter(
+                (p) => p.id !== provider.id
+              );
+              s.modelNotice = `\u5DF2\u79FB\u9664\u670D\u52A1\u201C${provider.name}\u201D\u3002`;
+              forceRender();
+            }
+          },
+          "\u79FB\u9664"
+        ) : null)), isEditing ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editor" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorHeader" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_editorTitle" }, "\u8FDE\u63A5\u4E0E\u51ED\u8BC1\u8BBE\u7F6E"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_editorRoute" }, provider.protocol)), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u63A5\u53E3\u670D\u52A1\u5730\u5740"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u5982 http://127.0.0.1:3425/v1",
+            value: s.editProviderBaseUrl,
+            onChange: (e) => {
+              s.editProviderBaseUrl = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u63A5\u53E3\u5BC6\u94A5"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            type: "password",
+            className: "zGbnIq_input",
+            placeholder: provider.configured ? "\u5DF2\u914D\u7F6E\u672C\u673A\u5BC6\u94A5\uFF08\u8F93\u5165\u65B0\u5BC6\u94A5\u53EF\u8986\u76D6\uFF09" : "\u8F93\u5165\u6A21\u578B\u670D\u52A1\u5BC6\u94A5",
+            value: s.editProviderApiKey,
+            onChange: (e) => {
+              s.editProviderApiKey = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_secondaryButton",
+            onClick: () => {
+              s.editingProviderId = null;
+              forceRender();
+            }
+          },
+          "\u53D6\u6D88"
+        ), /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_primaryButton",
+            onClick: () => {
+              provider.baseUrl = s.editProviderBaseUrl.trim() || provider.baseUrl;
+              if (s.editProviderApiKey.trim()) {
+                provider.configured = true;
+              }
+              s.editingProviderId = null;
+              s.modelNotice = `\u5DF2\u4FDD\u5B58\u201C${provider.name}\u201D\u8FDE\u63A5\u914D\u7F6E\u3002`;
+              forceRender();
+            }
+          },
+          "\u4FDD\u5B58\u914D\u7F6E"
+        ))) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalog" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelListHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelCatalogHeading" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogTitle" }, `\u53EF\u7528\u6A21\u578B\uFF08${provider.models.length}\uFF09`), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_modelCatalogMeta" }, provider.baseUrl)), /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_addModelButton",
+            onClick: () => {
+              s.addingModelProviderId = isAddingModel ? null : provider.id;
+              s.newModelId = "";
+              s.newModelDesc = "";
+              forceRender();
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement(B9, { size: 12 }),
+          /* @__PURE__ */ import_react.default.createElement("span", null, "\u6DFB\u52A0\u6A21\u578B")
+        )), isAddingModel ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editor" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelField" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_modelFieldLabel" }, "\u6A21\u578B\u6807\u8BC6"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u5982 deepseek-coder-v2",
+            value: s.newModelId,
+            onChange: (e) => {
+              s.newModelId = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelField" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_modelFieldLabel" }, "\u7528\u9014\u8BF4\u660E"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u5982 \u4EE3\u7801\u8865\u5168\u4E0E\u91CD\u6784",
+            value: s.newModelDesc,
+            onChange: (e) => {
+              s.newModelDesc = e.target.value;
+              forceRender();
+            }
+          }
+        ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_secondaryButton",
+            onClick: () => {
+              s.addingModelProviderId = null;
+              forceRender();
+            }
+          },
+          "\u53D6\u6D88"
+        ), /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_primaryButton",
+            disabled: !s.newModelId.trim(),
+            onClick: () => {
+              const id = s.newModelId.trim();
+              if (!id) return;
+              provider.models.push({
+                id,
+                label: id,
+                desc: s.newModelDesc.trim() || "\u81EA\u5B9A\u4E49\u6A21\u578B"
+              });
+              s.selectedModel = id;
+              s.addingModelProviderId = null;
+              s.modelNotice = `\u5DF2\u6DFB\u52A0\u5E76\u5207\u6362\u5230\u6A21\u578B ${id}\u3002`;
+              forceRender();
+            }
+          },
+          "\u786E\u8BA4\u6DFB\u52A0"
+        ))) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelList" }, provider.models.map((m) => {
+          const isCurrent = s.selectedModel === m.id;
+          return /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              key: m.id,
+              className: "zGbnIq_modelEntry"
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelRow" }, /* @__PURE__ */ import_react.default.createElement(
+              "strong",
+              {
+                style: {
+                  fontSize: 13,
+                  paddingLeft: 6,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap"
+                }
+              },
+              m.label || m.id
+            ), /* @__PURE__ */ import_react.default.createElement(
+              "span",
+              {
+                className: "zGbnIq_modelCatalogMeta",
+                style: {
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap"
+                }
+              },
+              m.desc
+            ), /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                type: "button",
+                className: "zGbnIq_addModelButton",
+                style: isCurrent ? {
+                  borderColor: "var(--dsw-alias-state-business-primary)",
+                  color: "var(--dsw-alias-state-business-primary)"
+                } : void 0,
+                onClick: () => {
+                  s.selectedModel = m.id;
+                  s.modelNotice = `\u5F53\u524D\u9ED8\u8BA4\u6A21\u578B\u5DF2\u5207\u6362\u4E3A ${m.id}\u3002`;
+                  forceRender();
+                }
+              },
+              isCurrent ? "\u5F53\u524D\u9ED8\u8BA4" : "\u8BBE\u4E3A\u9ED8\u8BA4"
+            ), /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                type: "button",
+                className: "zGbnIq_iconButton zGbnIq_iconButtonDanger",
+                "aria-label": `\u79FB\u9664\u6A21\u578B ${m.id}`,
+                title: "\u79FB\u9664\u6A21\u578B",
+                disabled: provider.models.length <= 1,
+                onClick: () => {
+                  provider.models = provider.models.filter(
+                    (item) => item.id !== m.id
+                  );
+                  if (s.selectedModel === m.id) {
+                    s.selectedModel = provider.models[0]?.id ?? "deepseek-v4.1-flash";
+                  }
+                  forceRender();
+                }
+              },
+              /* @__PURE__ */ import_react.default.createElement(Ru, { size: 13 })
+            ))
+          );
+        }))));
+      })), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_addBlock" }, !s.addingProviderOpen ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_addActions" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
         {
-          variant: s.selectedAgentPreset === ap.id ? "primary" : "outline",
-          size: "sm",
+          type: "button",
+          className: "zGbnIq_addButton",
           onClick: () => {
-            s.selectedAgentPreset = ap.id;
+            s.addingProviderOpen = true;
+            s.newProviderName = "";
+            s.newProviderBaseUrl = "";
+            s.newProviderApiKey = "";
+            s.newProviderModelId = "";
             forceRender();
           }
         },
-        s.selectedAgentPreset === ap.id ? "\u5F53\u524D\u9ED8\u8BA4" : "\u8BBE\u4E3A\u9ED8\u8BA4"
-      )), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro", style: { margin: 0 } }, ap.desc))))) : null, s.settingsTab === "permissions" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement(
+        /* @__PURE__ */ import_react.default.createElement(B9, { size: 14 }),
+        /* @__PURE__ */ import_react.default.createElement("span", null, "\u6DFB\u52A0\u81EA\u5B9A\u4E49\u6A21\u578B\u670D\u52A1")
+      )) : /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_addCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editor" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorHeader" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_editorTitle" }, "\u65B0\u589E\u517C\u5BB9\u6A21\u578B\u670D\u52A1")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u670D\u52A1\u540D\u79F0"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          placeholder: "\u5982 \u672C\u5730\u63A8\u7406\u670D\u52A1",
+          value: s.newProviderName,
+          onChange: (e) => {
+            s.newProviderName = e.target.value;
+            forceRender();
+          }
+        }
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u9ED8\u8BA4\u6A21\u578B\u6807\u8BC6"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          placeholder: "\u5982 qwen-coder-plus",
+          value: s.newProviderModelId,
+          onChange: (e) => {
+            s.newProviderModelId = e.target.value;
+            forceRender();
+          }
+        }
+      ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u63A5\u53E3\u670D\u52A1\u5730\u5740"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          placeholder: "\u5982 http://127.0.0.1:8000/v1",
+          value: s.newProviderBaseUrl,
+          onChange: (e) => {
+            s.newProviderBaseUrl = e.target.value;
+            forceRender();
+          }
+        }
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u63A5\u53E3\u5BC6\u94A5"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "password",
+          className: "zGbnIq_input",
+          placeholder: "\u8F93\u5165\u63A5\u53E3\u5BC6\u94A5\uFF08\u53EF\u9009\uFF09",
+          value: s.newProviderApiKey,
+          onChange: (e) => {
+            s.newProviderApiKey = e.target.value;
+            forceRender();
+          }
+        }
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "zGbnIq_secondaryButton",
+          onClick: () => {
+            s.addingProviderOpen = false;
+            forceRender();
+          }
+        },
+        "\u53D6\u6D88"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "zGbnIq_primaryButton",
+          disabled: !s.newProviderName.trim() || !s.newProviderBaseUrl.trim(),
+          onClick: () => {
+            const modelId = s.newProviderModelId.trim() || "default-model";
+            s.modelProviders.push({
+              id: `custom-${Date.now()}`,
+              name: s.newProviderName.trim(),
+              protocol: "\u517C\u5BB9\u63A5\u53E3",
+              baseUrl: s.newProviderBaseUrl.trim(),
+              configured: Boolean(
+                s.newProviderApiKey.trim()
+              ),
+              builtin: false,
+              models: [
+                {
+                  id: modelId,
+                  label: modelId,
+                  desc: "\u81EA\u5B9A\u4E49\u63A5\u5165\u6A21\u578B"
+                }
+              ]
+            });
+            s.selectedModel = modelId;
+            s.addingProviderOpen = false;
+            s.modelNotice = `\u5DF2\u6DFB\u52A0\u6A21\u578B\u670D\u52A1\u201C${s.newProviderName.trim()}\u201D\u3002`;
+            forceRender();
+          }
+        },
+        "\u4FDD\u5B58\u5E76\u542F\u7528"
+      )))))) : null, s.settingsTab === "agent-presets" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "rtSEdW_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "rtSEdW_title" }, "\u4F1A\u8BDD\u6A21\u5F0F"), /* @__PURE__ */ import_react.default.createElement("p", { className: "rtSEdW_intro" }, "\u9009\u62E9\u65B0\u5EFA\u4F1A\u8BDD\u9ED8\u8BA4\u4F7F\u7528\u7684\u5DE5\u5177\u7F16\u6392\u4E0E\u6267\u884C\u65B9\u5F0F\u3002"), /* @__PURE__ */ import_react.default.createElement("ul", { className: "rtSEdW_cards" }, AGENT_PRESETS.map((ap) => {
+        const active = s.selectedAgentPreset === ap.id;
+        return /* @__PURE__ */ import_react.default.createElement(
+          "li",
+          {
+            key: ap.id,
+            className: we(
+              "rtSEdW_card",
+              active && "rtSEdW_cardActive"
+            )
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "rtSEdW_cardMain",
+              onClick: () => {
+                s.selectedAgentPreset = ap.id;
+                forceRender();
+              }
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "rtSEdW_cardHead" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "rtSEdW_cardName" }, ap.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "rtSEdW_badge" }, ap.badge), active ? /* @__PURE__ */ import_react.default.createElement("span", { className: "rtSEdW_inUse" }, "\u5F53\u524D\u9ED8\u8BA4") : null),
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "rtSEdW_cardDesc" }, ap.desc)
+          )
+        );
+      }))) : null, s.settingsTab === "permissions" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement(
         "div",
         {
           style: {
@@ -27315,13 +27829,190 @@ function CAYWApp({ env } = {}) {
           },
           "\u64A4\u9500\u6388\u6743"
         )));
-      }))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "pbvGtq_heading" }, "\u6269\u5C55\u80FD\u529B\u5217\u8868"), /* @__PURE__ */ import_react.default.createElement("p", { className: "pbvGtq_intro" }, "\u67E5\u770B\u5F53\u524D\u5DF2\u6302\u8F7D\u7684\u53D7\u63A7\u80FD\u529B\u7EC4\u4E0E\u4F1A\u8BDD\u6269\u5C55\u72B6\u6001\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cards" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react.default.createElement("div", { key: group.title, className: "qSYn7G_card" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardContent" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTitle" }, group.title), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTrailing" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_status" }, /* @__PURE__ */ import_react.default.createElement(
-        Pu,
+      }))) : null, s.settingsTab === "plugins" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "pbvGtq_heading" }, "\u6269\u5C55\u80FD\u529B"), /* @__PURE__ */ import_react.default.createElement("p", { className: "pbvGtq_intro" }, "\u6309\u9700\u5C55\u5F00\u67E5\u770B\u6216\u8C03\u6574\u53D7\u63A7\u80FD\u529B\u6A21\u5757\u53C2\u6570\uFF0C\u6216\u68C0\u7D22\u5DF2\u6302\u8F7D\u6A21\u5757\u76EE\u5F55\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_tabs", role: "tablist" }, [
+        ["config", "\u80FD\u529B\u53C2\u6570\u914D\u7F6E"],
+        ["inventory", "\u5DF2\u6302\u8F7D\u6A21\u5757\u76EE\u5F55"]
+      ].map(([tabKey, tabTitle]) => /* @__PURE__ */ import_react.default.createElement(
+        "button",
         {
-          state: "done",
-          className: "qSYn7G_statusDot"
+          key: tabKey,
+          type: "button",
+          role: "tab",
+          "aria-selected": s.pluginsSubTab === tabKey,
+          "data-active": String(s.pluginsSubTab === tabKey),
+          className: "pbvGtq_tab",
+          onClick: () => {
+            s.pluginsSubTab = tabKey;
+            forceRender();
+          }
+        },
+        tabTitle
+      ))), s.pluginSavedNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.pluginSavedNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "pbvGtq_panel" }, s.pluginsSubTab === "config" ? /* @__PURE__ */ import_react.default.createElement("ul", { className: "pbvGtq_cards" }, BUILTIN_CAPABILITY_GROUPS.map((group) => {
+        const isOpen = Boolean(
+          s.expandedPluginCards[group.id]
+        );
+        const paramVal = s.pluginParamValues[group.id] ?? group.defaultParam;
+        return /* @__PURE__ */ import_react.default.createElement(
+          "li",
+          {
+            key: group.id,
+            className: we(
+              "YyYd_a_card",
+              isOpen && "YyYd_a_cardOpen"
+            )
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "YyYd_a_header",
+              "aria-expanded": isOpen,
+              onClick: () => {
+                s.expandedPluginCards[group.id] = !isOpen;
+                forceRender();
+              }
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_headText" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "YyYd_a_name" }, group.title), /* @__PURE__ */ import_react.default.createElement("span", { className: "YyYd_a_description" }, group.summary)),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_badge" }, `${group.badge} \xB7 ${group.items.length} \u9879\u80FD\u529B`),
+            /* @__PURE__ */ import_react.default.createElement(
+              hs,
+              {
+                size: 14,
+                className: we(
+                  "YyYd_a_chevron",
+                  isOpen && "YyYd_a_chevronOpen"
+                )
+              }
+            )
+          ),
+          isOpen ? /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_body" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "At1oFq_field" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "At1oFq_head" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "At1oFq_label" }, group.paramLabel), /* @__PURE__ */ import_react.default.createElement("div", { className: "At1oFq_badges" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_badgeMuted" }, `\u9ED8\u8BA4\uFF1A${group.defaultParam}`), paramVal !== group.defaultParam ? /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "At1oFq_reset",
+              onClick: () => {
+                s.pluginParamValues[group.id] = group.defaultParam;
+                forceRender();
+              }
+            },
+            "\u6062\u590D\u9ED8\u8BA4"
+          ) : null)), /* @__PURE__ */ import_react.default.createElement(
+            "input",
+            {
+              type: "text",
+              className: "At1oFq_input",
+              value: paramVal,
+              onChange: (e) => {
+                s.pluginParamValues[group.id] = e.target.value;
+                forceRender();
+              }
+            }
+          ), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint" }, `\u6388\u6743\u7B56\u7565\uFF1A${group.authMode}`)), group.items.map(([itemName, itemDesc]) => /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              key: itemName,
+              className: "At1oFq_field"
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", { className: "At1oFq_head" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_label" }, itemName), /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_badge" }, "\u5DF2\u5C31\u7EEA")),
+            /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint" }, itemDesc)
+          )), /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_footer" }, /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "YyYd_a_discard",
+              onClick: () => {
+                s.expandedPluginCards[group.id] = false;
+                forceRender();
+              }
+            },
+            "\u6536\u8D77"
+          ), /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "YyYd_a_save",
+              onClick: () => {
+                s.pluginSavedNotice = `\u5DF2\u4FDD\u5B58\u201C${group.title}\u201D\u6A21\u5757\u53C2\u6570\u3002`;
+                s.expandedPluginCards[group.id] = false;
+                forceRender();
+              }
+            },
+            "\u4FDD\u5B58\u53C2\u6570"
+          ))) : null
+        );
+      })) : /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_section" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_catalog" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_search" }, /* @__PURE__ */ import_react.default.createElement(V9, { size: 16 }), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          placeholder: "\u641C\u7D22\u5DF2\u6302\u8F7D\u6A21\u5757\u6216\u80FD\u529B\u2026",
+          value: s.pluginSearchQuery,
+          onChange: (e) => {
+            s.pluginSearchQuery = e.target.value;
+            forceRender();
+          }
         }
-      ), group.badge))), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardDetails" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react.default.createElement("div", { key: code, className: "qSYn7G_details" }, /* @__PURE__ */ import_react.default.createElement("span", null, code), /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_entryValue" }, desc)))))))) : null))
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_catalogHeading" }, /* @__PURE__ */ import_react.default.createElement("h3", null, "\u5DF2\u6302\u8F7D\u6A21\u5757"), /* @__PURE__ */ import_react.default.createElement("span", null, BUILTIN_CAPABILITY_GROUPS.length)), /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cards" }, BUILTIN_CAPABILITY_GROUPS.filter((g) => {
+        const q = s.pluginSearchQuery.trim().toLowerCase();
+        if (!q) return true;
+        return g.title.toLowerCase().includes(q) || g.summary.toLowerCase().includes(q) || g.items.some(
+          ([n, d]) => n.toLowerCase().includes(q) || d.toLowerCase().includes(q)
+        );
+      }).map((group) => {
+        const isOpen = Boolean(
+          s.expandedInventoryCards[group.id]
+        );
+        return /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            key: group.id,
+            className: "qSYn7G_card",
+            "data-open": String(isOpen)
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "qSYn7G_cardContent",
+              "aria-expanded": isOpen,
+              onClick: () => {
+                s.expandedInventoryCards[group.id] = !isOpen;
+                forceRender();
+              }
+            },
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTitle" }, group.title),
+            /* @__PURE__ */ import_react.default.createElement("span", { className: "qSYn7G_cardTrailing" }, /* @__PURE__ */ import_react.default.createElement(
+              "span",
+              {
+                className: "qSYn7G_statusDot",
+                "data-phase": "active"
+              }
+            ), /* @__PURE__ */ import_react.default.createElement(
+              "span",
+              {
+                className: "qSYn7G_configTag",
+                "data-enabled": "true"
+              },
+              group.badge
+            ), /* @__PURE__ */ import_react.default.createElement(
+              hs,
+              {
+                size: 14,
+                className: "qSYn7G_chevron"
+              }
+            ))
+          ),
+          isOpen ? /* @__PURE__ */ import_react.default.createElement("div", { className: "qSYn7G_cardDetails" }, /* @__PURE__ */ import_react.default.createElement(
+            "dl",
+            {
+              className: "qSYn7G_details",
+              style: { margin: 0 }
+            },
+            /* @__PURE__ */ import_react.default.createElement("div", null, /* @__PURE__ */ import_react.default.createElement("dt", null, "\u5305\u542B\u80FD\u529B"), /* @__PURE__ */ import_react.default.createElement("dd", null, group.items.map(([name]) => name).join("\u3001"))),
+            /* @__PURE__ */ import_react.default.createElement("div", null, /* @__PURE__ */ import_react.default.createElement("dt", null, "\u6388\u6743\u7B56\u7565"), /* @__PURE__ */ import_react.default.createElement("dd", null, group.authMode)),
+            /* @__PURE__ */ import_react.default.createElement("div", null, /* @__PURE__ */ import_react.default.createElement("dt", null, "\u9ED8\u8BA4\u53C2\u6570"), /* @__PURE__ */ import_react.default.createElement("dd", null, `${group.paramLabel}\uFF1A${s.pluginParamValues[group.id] ?? group.defaultParam}`))
+          )) : null
+        );
+      })))))) : null))
     )) : null,
     /* @__PURE__ */ import_react.default.createElement(
       $u,
