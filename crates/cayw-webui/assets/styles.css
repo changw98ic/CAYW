@@ -20,9 +20,7 @@
 .bits-gradient-text{background:linear-gradient(180deg,var(--text) 0%,var(--muted) 145%);-webkit-background-clip:text;background-clip:text;color:transparent}
 @keyframes bits-shine{0%{background-position:200% 0}100%{background-position:-20% 0}}
 @keyframes bits-ping{0%{box-shadow:0 0 0 0 rgba(255,122,51,.55)}70%,100%{box-shadow:0 0 0 7px rgba(255,122,51,0)}}
-@keyframes bits-enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 #connection-status::before{animation:bits-ping 2.4s infinite}
-.management-card,.approval-card,.message{animation:bits-enter .26s cubic-bezier(.22,1,.36,1) backwards}
 [data-spotlight="active"]{--mx:50%;--my:50%;--rx:0deg;--ry:0deg}
 @media(max-width:900px){.workspace{grid-template-columns:236px minmax(0,1fr)}.conversation{padding:28px 24px}.sidebar{padding:28px 16px}.composer-footer{align-items:flex-start;flex-direction:column}.composer-actions{align-self:flex-end}}
 @media(max-width:640px){.topbar{height:68px;padding:0 16px}.workspace{display:flex;flex-direction:column;min-height:calc(100vh - 68px)}.sidebar{padding:20px 16px;border-right:0;border-bottom:1px solid var(--line);gap:14px}.section-heading h2{font-size:15px}.session-list{max-height:200px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.sidebar-note{padding-top:0;margin:0}.capabilities{padding-top:8px}.conversation{padding:24px 16px 32px}.conversation-heading{gap:8px}.conversation-heading h1{font-size:21px}.state-label{max-width:140px;white-space:normal}.login-panel{margin:40px 16px;padding:24px 20px}.login-panel h1{font-size:24px}.login-row{flex-direction:column}.empty{padding:38px 0}.composer{padding:14px}.composer-actions{align-self:stretch}.composer-actions button{flex:1}.notice{padding:16px}.connection{gap:5px}dialog{padding:22px}.message .body{font-size:14px}}

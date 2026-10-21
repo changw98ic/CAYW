@@ -482,6 +482,13 @@ async function boot() {
     if (text !== undefined) element.textContent = text;
     return element;
   };
+  const renderIfChanged = (container, signatureKey, buildFragment) => {
+    if (!container) return;
+    const sig = typeof signatureKey === 'string' ? signatureKey : JSON.stringify(signatureKey);
+    if (container._lastSig === sig && container.children?.length !== undefined) return;
+    container._lastSig = sig;
+    container.replaceChildren(buildFragment());
+  };
   const errorText = error => clip(({
     session_frozen: '强流程当前不可用，会话保持冻结。请在会话提示中确认后创建普通聊天分支。',
     needs_reconciliation: '工具副作用尚未核对，需要由宿主检查真实结果。',
@@ -606,18 +613,26 @@ async function boot() {
   }
 
   function renderSessionList() {
-    const fragment = document.createDocumentFragment();
-    if (!sessions.length) fragment.append(el('p', 'small muted', '暂无会话，点击上方“+ 新建会话”即可开始。'));
-    for (const session of sessions) {
-      const button = el('button', 'session-item bits-spotlight');
-      button.type = 'button';
-      button.setAttribute('aria-current', String(session.id === selected));
-      const shortId = String(session.id ?? '').slice(0, 8);
-      button.append(el('strong', '', displayLabel(session)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${shortId}`));
-      button.addEventListener('click', () => selectSession(session.id));
-      fragment.append(button);
-    }
-    ui['session-list'].replaceChildren(fragment);
+    const sig = sessions.map(session => [
+      session.id,
+      session.id === selected,
+      displayLabel(session),
+      stateLabel(session, views.get(session.id)),
+    ]);
+    renderIfChanged(ui['session-list'], sig, () => {
+      const fragment = document.createDocumentFragment();
+      if (!sessions.length) fragment.append(el('p', 'small muted', '暂无会话，点击上方“+ 新建会话”即可开始。'));
+      for (const session of sessions) {
+        const button = el('button', 'session-item bits-spotlight');
+        button.type = 'button';
+        button.setAttribute('aria-current', String(session.id === selected));
+        const shortId = String(session.id ?? '').slice(0, 8);
+        button.append(el('strong', '', displayLabel(session)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${shortId}`));
+        button.addEventListener('click', () => selectSession(session.id));
+        fragment.append(button);
+      }
+      return fragment;
+    });
     ui['list-status'].textContent = sessions.length === 200 ? '显示最近 200 个会话。' : `${sessions.length} 个会话`;
   }
 
@@ -749,61 +764,63 @@ async function boot() {
           : `点击切换或添加本地项目空间（${currentSummary.address}）`,
       );
     }
-    const fragment = document.createDocumentFragment();
-    for (const item of summaries) {
-      const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
-      const isCurrent = item.id === currentProjectId();
-      if (isCurrent) card.classList.add('is-active');
-      const header = el('div', 'card-header');
-      header.append(
-        el('strong', '', item.label),
-        el('span', 'state-label', isCurrent ? '当前空间' : item.id),
-      );
-      const pills = el('div', 'stat-pills');
-      if (item.workspace) {
-        const wsPill = el('span', 'stat-pill mono', item.workspace);
-        wsPill.setAttribute('data-tip', `本地项目目录：${item.workspace}`);
-        pills.append(wsPill);
+    renderIfChanged(ui['project-list'], [currentProjectId(), summaries], () => {
+      const fragment = document.createDocumentFragment();
+      for (const item of summaries) {
+        const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
+        const isCurrent = item.id === currentProjectId();
+        if (isCurrent) card.classList.add('is-active');
+        const header = el('div', 'card-header');
+        header.append(
+          el('strong', '', item.label),
+          el('span', 'state-label', isCurrent ? '当前空间' : item.id),
+        );
+        const pills = el('div', 'stat-pills');
+        if (item.workspace) {
+          const wsPill = el('span', 'stat-pill mono', item.workspace);
+          wsPill.setAttribute('data-tip', `本地项目目录：${item.workspace}`);
+          pills.append(wsPill);
+        }
+        const sessionPill = el('span', 'stat-pill', `${item.sessionCount} 个会话`);
+        sessionPill.setAttribute('data-tip', `该项目当前共有 ${item.sessionCount} 个会话`);
+        const statusPill = el('span', 'stat-pill', item.statusLabel);
+        statusPill.setAttribute('data-tip', `项目运行状态：${item.statusLabel}`);
+        const addrPill = el('span', 'stat-pill mono', item.address);
+        addrPill.setAttribute('data-tip', `本机 IPC 端点：${item.address}`);
+        pills.append(
+          sessionPill,
+          statusPill,
+          addrPill,
+        );
+        if (item.frozenCount) pills.append(el('span', 'stat-pill warn', `${item.frozenCount} 已冻结`));
+        if (item.unresolvedCount) pills.append(el('span', 'stat-pill danger', `${item.unresolvedCount} 待核对`));
+        card.append(
+          header,
+          pills,
+        );
+        const actions = el('div', 'approval-actions');
+        const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看空间会话' : '切换到此空间');
+        button.type = 'button';
+        button.addEventListener('click', () => selectProject(item.id));
+        actions.append(button);
+        const newSessionBtn = el('button', 'secondary', '+ 在此空间新建会话');
+        newSessionBtn.type = 'button';
+        newSessionBtn.addEventListener('click', async () => {
+          await selectProject(item.id);
+          await createNewSession();
+        });
+        actions.append(newSessionBtn);
+        if (!item.default) {
+          const removeBtn = el('button', 'secondary deny', '移除');
+          removeBtn.type = 'button';
+          removeBtn.addEventListener('click', () => removeProject(item.id));
+          actions.append(removeBtn);
+        }
+        card.append(actions);
+        fragment.append(card);
       }
-      const sessionPill = el('span', 'stat-pill', `${item.sessionCount} 个会话`);
-      sessionPill.setAttribute('data-tip', `该项目当前共有 ${item.sessionCount} 个会话`);
-      const statusPill = el('span', 'stat-pill', item.statusLabel);
-      statusPill.setAttribute('data-tip', `项目运行状态：${item.statusLabel}`);
-      const addrPill = el('span', 'stat-pill mono', item.address);
-      addrPill.setAttribute('data-tip', `本机 IPC 端点：${item.address}`);
-      pills.append(
-        sessionPill,
-        statusPill,
-        addrPill,
-      );
-      if (item.frozenCount) pills.append(el('span', 'stat-pill warn', `${item.frozenCount} 已冻结`));
-      if (item.unresolvedCount) pills.append(el('span', 'stat-pill danger', `${item.unresolvedCount} 待核对`));
-      card.append(
-        header,
-        pills,
-      );
-      const actions = el('div', 'approval-actions');
-      const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看空间会话' : '切换到此空间');
-      button.type = 'button';
-      button.addEventListener('click', () => selectProject(item.id));
-      actions.append(button);
-      const newSessionBtn = el('button', 'secondary', '+ 在此空间新建会话');
-      newSessionBtn.type = 'button';
-      newSessionBtn.addEventListener('click', async () => {
-        await selectProject(item.id);
-        await createNewSession();
-      });
-      actions.append(newSessionBtn);
-      if (!item.default) {
-        const removeBtn = el('button', 'secondary deny', '移除');
-        removeBtn.type = 'button';
-        removeBtn.addEventListener('click', () => removeProject(item.id));
-        actions.append(removeBtn);
-      }
-      card.append(actions);
-      fragment.append(card);
-    }
-    ui['project-list'].replaceChildren(fragment);
+      return fragment;
+    });
     if (ui['projects-status']) {
       ui['projects-status'].textContent = `共 ${summaries.length} 个本机项目空间 · 当前空间：${currentSummary?.label ?? currentProjectId()}`;
     }
@@ -851,91 +868,93 @@ async function boot() {
   function renderPluginsPage() {
     if (!ui['plugin-list']) return;
     const items = summarizePlugins(sessions, cachedCapabilities, views);
-    const fragment = document.createDocumentFragment();
-    if (!items.length) {
-      const empty = el('div', 'empty');
-      const row = el('div', 'empty-heading');
-      const hint = el('span', 'hint-trigger', '?');
-      hint.tabIndex = 0;
-      hint.setAttribute('data-tip', '当会话绑定 StrongFlow 或其他 plugin，或宿主公开插件能力后，可在此查看版本、状态与关联会话。');
-      row.append(el('h2', '', '当前项目暂无插件记录'), hint);
-      empty.append(row);
-      fragment.append(empty);
-    }
-    for (const plugin of items) {
-      const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
-      if (plugin.frozen) card.classList.add('is-frozen');
-      const header = el('div', 'card-header');
-      header.append(el('strong', '', plugin.name), el('span', 'state-label', plugin.statusLabel));
-      const pills = el('div', 'stat-pills');
-      const versionPill = el('span', 'stat-pill', `版本 ${plugin.version}`);
-      versionPill.setAttribute('data-tip', `插件版本：${plugin.version}`);
-      const shortReg = plugin.registryId.length > 14 ? `${plugin.registryId.slice(0, 8)}…` : plugin.registryId;
-      const regPill = el('span', 'stat-pill mono', shortReg);
-      regPill.setAttribute('data-tip', `实例标识：${plugin.registryId}`);
-      pills.append(
-        versionPill,
-        regPill,
-      );
-      if (plugin.generation !== null) pills.append(el('span', 'stat-pill', `代际 #${plugin.generation}`));
-      pills.append(el('span', 'stat-pill', `${plugin.boundSessions.length} 个绑定会话`));
-      if (plugin.reasons.length) {
-        const reasonDetails = el('details', 'hint-popover');
-        reasonDetails.open = openPluginHints.has(plugin.name);
-        reasonDetails.append(
-          el('summary', 'hint-chip warn', '冻结原因 ?'),
-          el('div', 'hint-bubble', plugin.reasons.join('；')),
-        );
-        reasonDetails.addEventListener('toggle', () => {
-          if (!reasonDetails.isConnected) return;
-          if (reasonDetails.open) openPluginHints.add(plugin.name);
-          else openPluginHints.delete(plugin.name);
-        });
-        pills.append(reasonDetails);
+    renderIfChanged(ui['plugin-list'], items, () => {
+      const fragment = document.createDocumentFragment();
+      if (!items.length) {
+        const empty = el('div', 'empty');
+        const row = el('div', 'empty-heading');
+        const hint = el('span', 'hint-trigger', '?');
+        hint.tabIndex = 0;
+        hint.setAttribute('data-tip', '当会话绑定 StrongFlow 或其他 plugin，或宿主公开插件能力后，可在此查看版本、状态与关联会话。');
+        row.append(el('h2', '', '当前项目暂无插件记录'), hint);
+        empty.append(row);
+        fragment.append(empty);
       }
-      card.append(
-        header,
-        pills,
-      );
-      if (plugin.capabilities.length) {
-        const capRow = el('div', 'stat-pills');
-        for (const cap of plugin.capabilities) {
-          const capPill = el('span', 'stat-pill mono', cap);
-          capPill.setAttribute('data-tip', `插件公开能力：${cap}`);
-          capRow.append(capPill);
+      for (const plugin of items) {
+        const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
+        if (plugin.frozen) card.classList.add('is-frozen');
+        const header = el('div', 'card-header');
+        header.append(el('strong', '', plugin.name), el('span', 'state-label', plugin.statusLabel));
+        const pills = el('div', 'stat-pills');
+        const versionPill = el('span', 'stat-pill', `版本 ${plugin.version}`);
+        versionPill.setAttribute('data-tip', `插件版本：${plugin.version}`);
+        const shortReg = plugin.registryId.length > 14 ? `${plugin.registryId.slice(0, 8)}…` : plugin.registryId;
+        const regPill = el('span', 'stat-pill mono', shortReg);
+        regPill.setAttribute('data-tip', `实例标识：${plugin.registryId}`);
+        pills.append(
+          versionPill,
+          regPill,
+        );
+        if (plugin.generation !== null) pills.append(el('span', 'stat-pill', `代际 #${plugin.generation}`));
+        pills.append(el('span', 'stat-pill', `${plugin.boundSessions.length} 个绑定会话`));
+        if (plugin.reasons.length) {
+          const reasonDetails = el('details', 'hint-popover');
+          reasonDetails.open = openPluginHints.has(plugin.name);
+          reasonDetails.append(
+            el('summary', 'hint-chip warn', '冻结原因 ?'),
+            el('div', 'hint-bubble', plugin.reasons.join('；')),
+          );
+          reasonDetails.addEventListener('toggle', () => {
+            if (!reasonDetails.isConnected) return;
+            if (reasonDetails.open) openPluginHints.add(plugin.name);
+            else openPluginHints.delete(plugin.name);
+          });
+          pills.append(reasonDetails);
         }
-        card.append(capRow);
-      }
-      for (const bound of plugin.boundSessions) {
-        const row = el('div', 'bound-session-row');
-        row.append(
-          el('span', 'small', `${bound.label}（${bound.stateLabel}）`),
+        card.append(
+          header,
+          pills,
         );
-        const actions = el('div', 'approval-actions');
-        const openBtn = el('button', 'secondary', '打开会话');
-        openBtn.type = 'button';
-        openBtn.addEventListener('click', async () => {
-          switchPage('conversation');
-          await selectSession(bound.id);
-        });
-        actions.append(openBtn);
-        if (bound.frozen) {
-          const forkBtn = el('button', '', '确认后 Fork 为普通聊天');
-          forkBtn.type = 'button';
-          forkBtn.disabled = !bound.canFork;
-          forkBtn.addEventListener('click', async () => {
+        if (plugin.capabilities.length) {
+          const capRow = el('div', 'stat-pills');
+          for (const cap of plugin.capabilities) {
+            const capPill = el('span', 'stat-pill mono', cap);
+            capPill.setAttribute('data-tip', `插件公开能力：${cap}`);
+            capRow.append(capPill);
+          }
+          card.append(capRow);
+        }
+        for (const bound of plugin.boundSessions) {
+          const row = el('div', 'bound-session-row');
+          row.append(
+            el('span', 'small', `${bound.label}（${bound.stateLabel}）`),
+          );
+          const actions = el('div', 'approval-actions');
+          const openBtn = el('button', 'secondary', '打开会话');
+          openBtn.type = 'button';
+          openBtn.addEventListener('click', async () => {
             switchPage('conversation');
             await selectSession(bound.id);
-            openForkDialog();
           });
-          actions.append(forkBtn);
+          actions.append(openBtn);
+          if (bound.frozen) {
+            const forkBtn = el('button', '', '确认后 Fork 为普通聊天');
+            forkBtn.type = 'button';
+            forkBtn.disabled = !bound.canFork;
+            forkBtn.addEventListener('click', async () => {
+              switchPage('conversation');
+              await selectSession(bound.id);
+              openForkDialog();
+            });
+            actions.append(forkBtn);
+          }
+          row.append(actions);
+          card.append(row);
         }
-        row.append(actions);
-        card.append(row);
+        fragment.append(card);
       }
-      fragment.append(card);
-    }
-    ui['plugin-list'].replaceChildren(fragment);
+      return fragment;
+    });
     if (ui['plugins-status']) {
       ui['plugins-status'].textContent = items.length ? `已识别 ${items.length} 个插件绑定或能力组` : '暂无已绑定的插件记录';
     }
@@ -965,63 +984,65 @@ async function boot() {
   }
 
   function renderMessages(view) {
-    const fragment = document.createDocumentFragment();
     const messages = array(view?.snapshot?.messages).filter(message => message.role !== 'system' && messageText(message).trim());
-    if (!messages.length) {
-      const empty = el('div', 'empty');
-      const row = el('div', 'empty-heading');
-      const hint = el('span', 'hint-trigger', '?');
-      hint.tabIndex = 0;
-      hint.setAttribute('data-tip', view?.snapshot ? '输入任务后，Runtime 会在此保留对话和工具记录。' : '从左侧选择已有会话，或创建新会话。');
-      row.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '继续一段对话'), hint);
-      empty.append(row);
-      fragment.append(empty);
-    }
-    const expanded = new Set(view?.expandedRecords ?? []);
-    const detailsFor = (key, label, text) => {
-      const details = el('details', 'record-details');
-      details.open = expanded.has(key);
-      details.append(el('summary', '', label), el('pre', '', text));
-      details.addEventListener('toggle', () => {
-        if (!details.isConnected) return;
-        const current = views.get(view.id);
-        if (!current) return;
-        const keys = new Set(current.expandedRecords ?? []);
-        if (details.open) keys.add(key);
-        else keys.delete(key);
-        rememberView({ ...current, expandedRecords: [...keys].slice(-MAX_MESSAGES) });
-      });
-      return details;
-    };
-    for (const [index, message] of messages.entries()) {
-      const role = ['user', 'assistant', 'system', 'toolResult', 'custom'].includes(message.role) ? message.role : 'custom';
-      const card = el('article', `message ${role} bits-spotlight`);
-      const presentation = messagePresentation(message);
-      const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
-      card.append(el('div', 'role', ({ user: '你', assistant: '助手', system: '系统', toolResult: '工具结果', custom: '宿主记录' })[role]));
-      if (presentation.kind === 'text') card.append(el('div', 'body', presentation.text));
-      else {
-        card.classList.add('operation-record');
-        if (presentation.kind === 'tool_call') {
-          if (presentation.text) card.append(el('div', 'body', presentation.text));
-          for (const [callIndex, call] of presentation.calls.entries()) {
-            const title = call.name === 'execute_code' ? call.arguments?.action === 'wait' ? '等待任务结果' : '运行任务' : `使用工具：${clip(call.name, 100)}`;
-            card.append(detailsFor(`${key}/${callIndex}`, title, recordText(call)));
-          }
-        } else {
-          card.append(el('strong', `result-title ${presentation.status ?? ''}`, presentation.title));
-          if (presentation.text) card.append(el('p', 'result-description', presentation.text));
-          for (const value of presentation.values ?? []) {
-            card.append(el('div', 'output-label', value.label), el('div', 'body output-value', value.text));
-          }
-          card.append(detailsFor(key, '查看完整执行记录', presentation.raw));
-        }
+    renderIfChanged(ui['messages'], [view?.id, Boolean(view?.snapshot), messages], () => {
+      const fragment = document.createDocumentFragment();
+      if (!messages.length) {
+        const empty = el('div', 'empty');
+        const row = el('div', 'empty-heading');
+        const hint = el('span', 'hint-trigger', '?');
+        hint.tabIndex = 0;
+        hint.setAttribute('data-tip', view?.snapshot ? '输入任务后，Runtime 会在此保留对话和工具记录。' : '从左侧选择已有会话，或创建新会话。');
+        row.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '继续一段对话'), hint);
+        empty.append(row);
+        fragment.append(empty);
       }
-      if (message.error_message) card.append(el('p', 'effect-warning', clip(message.error_message, 2000)));
-      if (message.outcome_unknown) card.append(el('p', 'effect-warning', '此工具调用的真实结果待宿主核对。'));
-      fragment.append(card);
-    }
-    ui['messages'].replaceChildren(fragment);
+      const expanded = new Set(view?.expandedRecords ?? []);
+      const detailsFor = (key, label, text) => {
+        const details = el('details', 'record-details');
+        details.open = expanded.has(key);
+        details.append(el('summary', '', label), el('pre', '', text));
+        details.addEventListener('toggle', () => {
+          if (!details.isConnected) return;
+          const current = views.get(view.id);
+          if (!current) return;
+          const keys = new Set(current.expandedRecords ?? []);
+          if (details.open) keys.add(key);
+          else keys.delete(key);
+          rememberView({ ...current, expandedRecords: [...keys].slice(-MAX_MESSAGES) });
+        });
+        return details;
+      };
+      for (const [index, message] of messages.entries()) {
+        const role = ['user', 'assistant', 'system', 'toolResult', 'custom'].includes(message.role) ? message.role : 'custom';
+        const card = el('article', `message ${role} bits-spotlight`);
+        const presentation = messagePresentation(message);
+        const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
+        card.append(el('div', 'role', ({ user: '你', assistant: '助手', system: '系统', toolResult: '工具结果', custom: '宿主记录' })[role]));
+        if (presentation.kind === 'text') card.append(el('div', 'body', presentation.text));
+        else {
+          card.classList.add('operation-record');
+          if (presentation.kind === 'tool_call') {
+            if (presentation.text) card.append(el('div', 'body', presentation.text));
+            for (const [callIndex, call] of presentation.calls.entries()) {
+              const title = call.name === 'execute_code' ? call.arguments?.action === 'wait' ? '等待任务结果' : '运行任务' : `使用工具：${clip(call.name, 100)}`;
+              card.append(detailsFor(`${key}/${callIndex}`, title, recordText(call)));
+            }
+          } else {
+            card.append(el('strong', `result-title ${presentation.status ?? ''}`, presentation.title));
+            if (presentation.text) card.append(el('p', 'result-description', presentation.text));
+            for (const value of presentation.values ?? []) {
+              card.append(el('div', 'output-label', value.label), el('div', 'body output-value', value.text));
+            }
+            card.append(detailsFor(key, '查看完整执行记录', presentation.raw));
+          }
+        }
+        if (message.error_message) card.append(el('p', 'effect-warning', clip(message.error_message, 2000)));
+        if (message.outcome_unknown) card.append(el('p', 'effect-warning', '此工具调用的真实结果待宿主核对。'));
+        fragment.append(card);
+      }
+      return fragment;
+    });
     const total = view?.totalMessages ?? 0;
     ui['history-note'].textContent = total > MAX_MESSAGES ? '显示最近的对话，完整记录保存在本机。' : (messages.length ? `${messages.length} 条消息` : '');
     ui['live-text'].textContent = view?.liveText ?? '';
@@ -1030,13 +1051,15 @@ async function boot() {
 
   function renderEvents(view) {
     const events = array(view?.events);
-    const fragment = document.createDocumentFragment();
-    for (const record of events) {
-      const details = el('details');
-      details.append(el('summary', '', `#${record.cursor} · ${clip(record.event?.type ?? record.event?.kind ?? '事件', 100)}`), el('pre', '', recordText(record.event)));
-      fragment.append(details);
-    }
-    ui['event-log'].replaceChildren(fragment);
+    renderIfChanged(ui['event-log'], [view?.id, events.map(r => r.cursor)], () => {
+      const fragment = document.createDocumentFragment();
+      for (const record of events) {
+        const details = el('details');
+        details.append(el('summary', '', `#${record.cursor} · ${clip(record.event?.type ?? record.event?.kind ?? '事件', 100)}`), el('pre', '', recordText(record.event)));
+        fragment.append(details);
+      }
+      return fragment;
+    });
     ui['event-count'].textContent = `${events.length} · 游标 ${view?.cursor ?? 0}`;
   }
 
@@ -1071,56 +1094,66 @@ async function boot() {
 
   function renderApprovals(snapshot) {
     const approvals = array(snapshot?.pending_approvals);
-    const fragment = document.createDocumentFragment();
-    for (const approval of approvals.slice(0, 30)) {
-      const id = approval.id ?? approval.approval_id;
-      const card = el('article', 'approval-card bits-spotlight bits-border');
-      const input = approval.input ?? {};
-      const capability = input.capability ?? '';
-      let scope;
-      try { scope = JSON.parse(input.scope); } catch { scope = null; }
-      const operation = ({ 'fs.read': '读取文件', 'fs.write': '写入文件', 'fs.patch': '修改文件', 'fs.list': '列出文件', 'fs.stat': '查看文件信息', 'search.query': '检索内容', 'git.status': '查看 Git 状态', 'git.diff': '查看代码改动', 'git.log': '查看提交记录', 'git.show': '查看指定提交', 'build.run': '运行预设构建', 'test.run': '运行预设测试', 'mcp.call': '调用宿主连接的工具', 'mcp.discover': '查看宿主连接的工具', 'mcp.describe': '读取工具说明', 'skills.list': '查看可用技能', 'skills.read': '读取指定技能' })[capability] ?? `使用能力：${clip(capability || '宿主未说明', 100)}`;
-      const head = el('div', 'card-header');
-      const scopeHint = el('span', 'hint-badge', '精确参数范围 ?');
-      scopeHint.tabIndex = 0;
-      scopeHint.setAttribute('data-tip', '仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。');
-      head.append(el('h3', '', '请求你的授权'), scopeHint);
-      card.append(head, el('p', '', `操作：${operation}`));
-      const scopeLine = (label, value, limit = 400) => card.append(el('p', 'small', `${label}：${clip(value, limit)}`));
-      if (object(scope)) {
-        if (scope.path !== undefined) scopeLine('文件', scope.path);
-        if (scope.profile !== undefined) scopeLine('预设任务', scope.profile);
-        if (scope.query !== undefined) scopeLine('检索内容', scope.query);
-        if (scope.filter !== undefined) scopeLine('测试范围', scope.filter);
-        if (scope.server !== undefined) scopeLine('工具连接', scope.server);
-        if (scope.tool !== undefined) scopeLine('工具', scope.tool);
-        if (scope.name !== undefined) scopeLine('名称', scope.name);
-        if (scope.commit !== undefined) scopeLine('提交', scope.commit);
-        if (scope.overwrite === true) scopeLine('文件操作', '覆盖现有文件');
-        if (typeof scope.content === 'string') scopeLine('写入内容', scope.content, 600);
-        if (typeof scope.old === 'string') scopeLine('替换原文', scope.old, 400);
-        if (typeof scope.new === 'string') scopeLine('替换为', scope.new, 400);
-      }
-      const details = el('details');
-      details.append(el('summary', '', '查看完整授权参数'), el('pre', '', recordText(approval)));
-      card.append(details);
-      if (typeof id !== 'string') {
-        card.append(el('p', 'error', '审批记录缺少 ID，请在宿主中处理。'));
-      } else {
-        const actions = el('div', 'approval-actions');
-        for (const [decision, label, className] of [['allow_once', '允许一次', ''], ['allow_task', '允许此任务', 'secondary'], ['deny', '拒绝', 'secondary deny']]) {
-          const button = el('button', className, approvalPending.has(`${snapshot.id}/${id}`) ? '正在记录…' : label);
-          button.type = 'button';
-          const view = views.get(snapshot.id);
-          button.disabled = approvalPending.has(`${snapshot.id}/${id}`) || unresolved(snapshot) || frozen(snapshot, view) || Boolean(view?.faults.reconciliation) || view?.writes.some(write => write.phase === 'uncertain' || write.method === 'approval.decide');
-          button.addEventListener('click', () => decide(snapshot.id, id, decision));
-          actions.append(button);
+    const view = snapshot ? views.get(snapshot.id) : undefined;
+    const buttonsDisabled = Boolean(
+      snapshot && (
+        unresolved(snapshot)
+        || frozen(snapshot, view)
+        || view?.faults.reconciliation
+        || view?.writes.some(write => write.phase === 'uncertain' || write.method === 'approval.decide')
+      ),
+    );
+    renderIfChanged(ui['approvals'], [snapshot?.id, approvals, [...approvalPending], buttonsDisabled], () => {
+      const fragment = document.createDocumentFragment();
+      for (const approval of approvals.slice(0, 30)) {
+        const id = approval.id ?? approval.approval_id;
+        const card = el('article', 'approval-card bits-spotlight bits-border');
+        const input = approval.input ?? {};
+        const capability = input.capability ?? '';
+        let scope;
+        try { scope = JSON.parse(input.scope); } catch { scope = null; }
+        const operation = ({ 'fs.read': '读取文件', 'fs.write': '写入文件', 'fs.patch': '修改文件', 'fs.list': '列出文件', 'fs.stat': '查看文件信息', 'search.query': '检索内容', 'git.status': '查看 Git 状态', 'git.diff': '查看代码改动', 'git.log': '查看提交记录', 'git.show': '查看指定提交', 'build.run': '运行预设构建', 'test.run': '运行预设测试', 'mcp.call': '调用宿主连接的工具', 'mcp.discover': '查看宿主连接的工具', 'mcp.describe': '读取工具说明', 'skills.list': '查看可用技能', 'skills.read': '读取指定技能' })[capability] ?? `使用能力：${clip(capability || '宿主未说明', 100)}`;
+        const head = el('div', 'card-header');
+        const scopeHint = el('span', 'hint-badge', '精确参数范围 ?');
+        scopeHint.tabIndex = 0;
+        scopeHint.setAttribute('data-tip', '仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。');
+        head.append(el('h3', '', '请求你的授权'), scopeHint);
+        card.append(head, el('p', '', `操作：${operation}`));
+        const scopeLine = (label, value, limit = 400) => card.append(el('p', 'small', `${label}：${clip(value, limit)}`));
+        if (object(scope)) {
+          if (scope.path !== undefined) scopeLine('文件', scope.path);
+          if (scope.profile !== undefined) scopeLine('预设任务', scope.profile);
+          if (scope.query !== undefined) scopeLine('检索内容', scope.query);
+          if (scope.filter !== undefined) scopeLine('测试范围', scope.filter);
+          if (scope.server !== undefined) scopeLine('工具连接', scope.server);
+          if (scope.tool !== undefined) scopeLine('工具', scope.tool);
+          if (scope.name !== undefined) scopeLine('名称', scope.name);
+          if (scope.commit !== undefined) scopeLine('提交', scope.commit);
+          if (scope.overwrite === true) scopeLine('文件操作', '覆盖现有文件');
+          if (typeof scope.content === 'string') scopeLine('写入内容', scope.content, 600);
+          if (typeof scope.old === 'string') scopeLine('替换原文', scope.old, 400);
+          if (typeof scope.new === 'string') scopeLine('替换为', scope.new, 400);
         }
-        card.append(actions);
+        const details = el('details');
+        details.append(el('summary', '', '查看完整授权参数'), el('pre', '', recordText(approval)));
+        card.append(details);
+        if (typeof id !== 'string') {
+          card.append(el('p', 'error', '审批记录缺少 ID，请在宿主中处理。'));
+        } else {
+          const actions = el('div', 'approval-actions');
+          for (const [decision, label, className] of [['allow_once', '允许一次', ''], ['allow_task', '允许此任务', 'secondary'], ['deny', '拒绝', 'secondary deny']]) {
+            const button = el('button', className, approvalPending.has(`${snapshot.id}/${id}`) ? '正在记录…' : label);
+            button.type = 'button';
+            button.disabled = approvalPending.has(`${snapshot.id}/${id}`) || buttonsDisabled;
+            button.addEventListener('click', () => decide(snapshot.id, id, decision));
+            actions.append(button);
+          }
+          card.append(actions);
+        }
+        fragment.append(card);
       }
-      fragment.append(card);
-    }
-    ui['approvals'].replaceChildren(fragment);
+      return fragment;
+    });
     ui['approvals'].hidden = !approvals.length;
   }
 
