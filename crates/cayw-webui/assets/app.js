@@ -24172,6 +24172,11 @@ function bind(handlers, extraRef) {
     if (node) node.__handlers = handlers;
   };
 }
+function shortTitle(text, max = 30) {
+  const clean = String(text ?? "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").replace(/\s+/g, " ").trim();
+  if (!clean) return "\u65B0\u4F1A\u8BDD";
+  return clean.length <= max ? clean : `${clean.slice(0, max)}\u2026`;
+}
 function CAYWApp({ env } = {}) {
   const fetchFn = env?.fetch ?? ((url, options) => fetch(url, options));
   const setTimer = env?.setTimeout ?? ((fn, delay) => setTimeout(fn, delay));
@@ -24258,15 +24263,12 @@ function CAYWApp({ env } = {}) {
         (m) => m?.role === "user" && messageText(m).trim()
       );
       if (firstUser) {
-        const derived = clip(
-          messageText(firstUser).trim().replace(/\s+/g, " "),
-          36
-        );
+        const derived = shortTitle(messageText(firstUser), 30);
         if (id) s.sessionTitleOverrides.set(id, derived);
         return derived;
       }
     }
-    return clip(rawLabel, 160);
+    return shortTitle(rawLabel, 80);
   };
   const report = (error) => {
     s.globalError = error ? errorText(error) : "";
@@ -24831,7 +24833,7 @@ function CAYWApp({ env } = {}) {
     const id = s.selected;
     const currentSnap = s.views.get(id)?.snapshot;
     if (currentSnap && /^新会话(\s+\d+)?$/.test(currentSnap.label || "") && !s.sessionTitleOverrides.has(id)) {
-      s.sessionTitleOverrides.set(id, clip(text.replace(/\s+/g, " "), 36));
+      s.sessionTitleOverrides.set(id, shortTitle(text, 30));
     }
     const login = s.loginGeneration;
     const requestedAfter = s.views.get(id)?.cursor ?? 0;
