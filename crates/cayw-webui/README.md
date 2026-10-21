@@ -5,6 +5,7 @@
 ## 职责与边界
 
 - **本地轻网关**：仅绑定 loopback 地址，打开网页直接连接本机工作空间，无需手动输入网页令牌；网关严格校验 `Host`、`Origin`、`Sec-Fetch-Site`，并在本机持有 IPC 令牌（`CAYW_IPC_TOKEN`）防止向浏览器泄露。
+- **React 前端与 Bits 组件**：前端采用 React 19（`web/App.jsx`、`web/components/Bits.jsx`、`web/state.js`），打包输出至 `assets/app.js`。轮询通过 React 虚拟 DOM 按需更新，避免整块替换 DOM 造成的页面闪动。
 - **会话与恢复安全语义**：支持流式对话、工具输出折叠查看、审批决定、取消请求、游标续读，以及未知副作用（`outcome_unknown`）与冻结会话的显式确认 Fork。
 - **多项目管理与插件管理**：支持在同一本机网关下配置和切换多个本地 Runtime 项目（各项目会话、事件游标与未决写入锁彼此隔离），并提供插件管理页面查看会话绑定的 plugin、版本代际、公开能力与冻结转换入口。暂不包含多设备管理。
 
@@ -29,6 +30,6 @@ cargo run -p cayw-webui --locked -- --project docs=文档项目@127.0.0.1:4101
 ## 验证命令
 
 ```sh
-node --test crates/cayw-webui/tests/state.test.mjs crates/cayw-webui/tests/ui.test.mjs crates/cayw-webui/tests/dom.test.mjs crates/cayw-webui/tests/core-protocol.mjs
+cd crates/cayw-webui && npm run build && npm test
 cargo test -p cayw-webui --all-targets --locked
 ```

@@ -1,33 +1,15 @@
-// Runs the shipped app against real HTTP/fetch, with a small DOM and clock.
-// No npm dependencies. The fixture uses the Core event/snapshot envelopes.
+// Runs the shipped React app bundle against real HTTP/fetch, with happy-dom and clock.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import vm from 'node:vm';
+import { Window } from 'happy-dom';
+import { mountApp } from '../assets/app.js';
 
-const source = await readFile(new URL('../assets/app.js', import.meta.url), 'utf8');
-const html = await readFile(new URL('../assets/index.html', import.meta.url), 'utf8');
 const lease = (attempt = 'attempt-1') => ({ session_id: 's1', attempt_id: attempt, worker_id: 'worker-1', fence: 1 });
 const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 10, state: 'idle', attempt: null, pending_approvals: [], unresolved_calls: [], ...extra });
 const record = (cursor, event, attempt = lease()) => ({ protocol_version: 3, session_id: 's1', cursor, timestamp: 1, attempt, event });
 const failure = (code, outcome_unknown = false) => ({ status: 502, error: { code, message: 'internal diagnostic is not the main user message', outcome_unknown } });
-
-class Element {
-  constructor(tag = 'div') { this.tagName = tag; this.children = []; this.listeners = new Map(); this.dataset = {}; this.disabled = false; this.hidden = false; this.value = ''; this.checked = false; this.ownText = ''; }
-  set textContent(text) { this.ownText = String(text); this.children = []; }
-  get textContent() { return this.ownText + this.children.map(child => child.textContent).join(''); }
-  append(...children) { this.children.push(...children.flatMap(child => child.tagName === '#fragment' ? child.children : [child])); }
-  replaceChildren(...children) { this.ownText = ''; this.children = []; this.append(...children); }
-  get classList() { return { add: (...names) => { this.className = [...new Set([...(this.className ?? '').split(/\s+/).filter(Boolean), ...names])].join(' '); } }; }
-  setAttribute(name, value) { this[name] = value; }
-  addEventListener(name, fn) { const list = this.listeners.get(name) ?? []; list.push(fn); this.listeners.set(name, list); }
-  async dispatch(name) { for (const fn of this.listeners.get(name) ?? []) await fn({ preventDefault() {} }); }
-  showModal() { this.open = true; }
-  close() { this.open = false; }
-  focus() {}
-}
 
 async function page(t, handler) {
   const calls = [];
@@ -45,23 +27,47 @@ async function page(t, handler) {
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  const ids = [...html.matchAll(/id="([^"]+)"/g)].map(match => match[1]);
-  const elements = Object.fromEntries(ids.map(id => [id, new Element()]));
-  for (const match of html.matchAll(/<[^>]*id="([^"]+)"[^>]*>/g)) {
-    elements[match[1]].disabled = /\bdisabled\b/.test(match[0]);
-    elements[match[1]].hidden = /\bhidden\b/.test(match[0]);
-  }
+
+  const win = new Window({ url: `http://127.0.0.1:${server.address().port}/` });
+  globalThis.window = win;
+  globalThis.document = win.document;
+  globalThis.HTMLElement = win.HTMLElement;
+  globalThis.SVGElement = win.SVGElement;
+
+  win.HTMLElement.prototype.dispatch = async function (name) {
+    return await this.__handlers?.[name]?.({
+      preventDefault() {},
+      target: this,
+      currentTarget: this,
+    });
+  };
+  const collectionProto = Object.getPrototypeOf(win.document.body.children);
+  collectionProto.at = function (index) { return Array.from(this).at(index); };
+  collectionProto.filter = function (fn) { return Array.from(this).filter(fn); };
+  collectionProto.some = function (fn) { return Array.from(this).some(fn); };
+
+  win.document.body.innerHTML = '<div id="app-root"></div>';
+  const container = win.document.getElementById('app-root');
+
   const timers = new Map();
   let nextTimer = 0;
-  const context = vm.createContext({
-    document: { getElementById: id => elements[id], createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), addEventListener() {}, hidden: false },
-    window: { addEventListener() {}, matchMedia: () => ({ matches: false }) }, AbortController, TypeError,
+  let initPromise;
+  const root = mountApp(container, {
     fetch: (url, options) => fetch(`http://127.0.0.1:${server.address().port}${url}`, options),
     setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout: id => timers.delete(id),
+    onInitialConnect: p => { initPromise = p; },
   });
-  await vm.runInContext(source.replaceAll('export ', ''), context, { filename: 'app.js' });
+  t.after(() => new Promise(resolve => {
+    try { root.unmount(); } catch {}
+    server.close(resolve);
+    server.closeAllConnections();
+  }));
+  await initPromise;
+
+  const elements = new Proxy({}, {
+    get: (_, prop) => typeof prop === 'string' ? win.document.getElementById(prop) : undefined,
+  });
   assert.equal(elements['global-error'].textContent, '', 'fixture must connect to the real fetch endpoint');
   assert.equal(elements.workspace.hidden, false);
   const poll = async () => {
@@ -179,12 +185,12 @@ test('binding metadata and plain approval scope are consumed without showing sys
   assert.doesNotMatch(app.ui.messages.textContent, /private system instruction|系统/);
   assert.equal(app.ui.messages.children.length, 1);
   const card = app.ui.approvals.children[0];
-  const primary = card.children.filter(child => child.tagName !== 'details').map(child => child.textContent).join(' ');
+  const primary = card.children.filter(child => child.tagName.toLowerCase() !== 'details').map(child => child.textContent).join(' ');
   assert.match(primary, /写入|修改/);
   assert.match(primary, /notes\.txt/);
   assert.match(primary, /范围/);
   assert.doesNotMatch(primary, /opaque internal|task-1|call-1|attempt-1/);
-  assert.ok(card.children.some(child => child.tagName === 'details'), 'raw approval belongs in closed details');
+  assert.ok(card.children.some(child => child.tagName.toLowerCase() === 'details'), 'raw approval belongs in closed details');
 });
 
 test('frozen Runtime binding locks both prompt and fork until the active attempt settles', async t => {

@@ -1,0 +1,26 @@
+{
+  "name": "cayw-webui",
+  "version": "1.0.0",
+  "description": "`cayw-webui` 是 CAYW 的可选本机浏览器界面与 loopback 轻网关。它通过公开的认证本机 IPC（`cayw-ipc`）转发请求，不依赖可选远程 Server，也不直接访问 Core 数据库或执行隐藏工具。",
+  "private": true,
+  "type": "module",
+  "main": "assets/app.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "build": "esbuild web/index.jsx --bundle --format=esm --outfile=assets/app.js",
+    "test": "node --test tests/state.test.mjs tests/ui.test.mjs tests/dom.test.mjs tests/core-protocol.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "happy-dom": "21.0.4"
+  }
+}
