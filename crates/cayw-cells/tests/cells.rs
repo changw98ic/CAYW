@@ -615,6 +615,55 @@ async fn single_agent_entry_schema_has_only_exec_and_wait_and_no_session_overrid
     assert_eq!(definition.name, "execute_code");
     let validator = cayw_ai::ArgumentValidator::new(&definition.parameters).unwrap();
     assert!(validator.validate(&json!({"action":"exec","script":"text('ok')","yield_time_ms":0,"max_output_tokens":1024})).is_ok());
+    let raw = json!({"action":"exec","script":"return '00123'","yield_time_ms":"30000","max_output_tokens":"8192.0"});
+    let prepared = tool.prepare_arguments(raw.clone()).unwrap();
+    assert_eq!(
+        prepared,
+        json!({"action":"exec","script":"return '00123'","yield_time_ms":30000,"max_output_tokens":8192})
+    );
+    assert!(validator.validate(&prepared).is_ok());
+    assert_eq!(raw["max_output_tokens"], "8192.0");
+    let wait = tool.prepare_arguments(json!({"action":"wait","cell_id":"00123","cursor":"9007199254740993","yield_time_ms":"3e4","max_output_tokens":"8192","continue_execution":false})).unwrap();
+    assert_eq!(wait["cursor"], json!(9007199254740993_u64));
+    assert_eq!(wait["cell_id"], "00123");
+    assert_eq!(wait["yield_time_ms"], 30000);
+    assert_eq!(wait["continue_execution"], false);
+    assert!(validator.validate(&wait).is_ok());
+    for value in ["-1", "8192.5", "18446744073709551616", "NaN", "", "true"] {
+        let arguments = json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":value});
+        assert!(
+            tool.prepare_arguments(arguments).is_err(),
+            "accepted {value}"
+        );
+    }
+    for (field, value) in [
+        ("yield_time_ms", "30001"),
+        ("max_output_tokens", "1023"),
+        ("max_output_tokens", "131073"),
+    ] {
+        let mut arguments =
+            json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1024});
+        arguments[field] = json!(value);
+        let prepared = tool.prepare_arguments(arguments).unwrap();
+        assert!(
+            validator.validate(&prepared).is_err(),
+            "accepted {prepared}"
+        );
+    }
+    for arguments in [
+        json!({"action":"exec","script":"return 1","yield_time_ms":-1,"max_output_tokens":1024}),
+        json!({"action":"exec","script":"return 1","yield_time_ms":30001,"max_output_tokens":1024}),
+        json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1023}),
+        json!({"action":"exec","script":"return 1","yield_time_ms":true,"max_output_tokens":1024}),
+        json!({"action":"wait","cell_id":"x","cursor":"0","yield_time_ms":0,"max_output_tokens":1024}),
+        json!({"action":"wait","cell_id":"x","cursor":0,"yield_time_ms":0,"max_output_tokens":1024,"continue_execution":"true"}),
+    ] {
+        assert!(
+            validator.validate(&arguments).is_err(),
+            "accepted {arguments}"
+        );
+    }
+    assert!(validator.validate(&json!({"action":"wait","cell_id":"x","cursor":0,"yield_time_ms":0,"max_output_tokens":1024,"continue_execution":false})).is_ok());
     assert!(validator.validate(&json!({"script":"return 1"})).is_err());
     assert!(validator.validate(&json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1024,"session_id":"other"})).is_err());
     assert!(

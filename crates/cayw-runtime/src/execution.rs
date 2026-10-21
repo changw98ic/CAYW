@@ -177,6 +177,18 @@ impl AgentTool for DurableTool {
                 if record.identity != crate::cells::identity(&self.context) {
                     return Err("wait cell belongs to a different task attempt".into());
                 }
+                // Preserve the model's original call in the log; only execution
+                // receives the tool-owned numeric conversion.
+                let original = self
+                    .context
+                    .inner
+                    .store
+                    .snapshot(&self.context.lease.session_id)
+                    .map_err(|error| self.context.persistence_failed(error).to_string())?
+                    .unresolved_calls
+                    .into_iter()
+                    .find(|call| call.call.id == input.call_id)
+                    .ok_or_else(|| "wait requires its original started tool call".to_string())?;
                 self.context
                     .inner
                     .store
@@ -185,7 +197,7 @@ impl AgentTool for DurableTool {
                         &input.call_id,
                         execution_id,
                         &self.context.task.id,
-                        &input.arguments,
+                        &original.call.arguments,
                     )
                     .map_err(|error| self.context.persistence_failed(error).to_string())?;
                 self.context.inner.changed.notify_waiters();
@@ -723,16 +735,49 @@ async fn execute_with_cells(
         }
     });
     const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
-    let run = agent.prompt_messages(vec![Message::system(INSTRUCTION), Message::user(text)]);
+    let run = async {
+        agent
+            .prompt_messages(vec![Message::system(INSTRUCTION), Message::user(text)])
+            .await
+            .map(|_| ())
+            .map_err(Into::into)
+    };
+    supervise_run(
+        run,
+        &context.cancel,
+        tokio::time::Instant::now() + inner.config.max_run_time,
+        || async { context.check(&context.cancel) },
+        || agent.control().abort(),
+    )
+    .await
+}
+
+async fn supervise_run<F, C, CF, A>(
+    run: F,
+    cancel: &CancellationToken,
+    deadline: tokio::time::Instant,
+    mut check: C,
+    mut abort: A,
+) -> Result<(), RuntimeError>
+where
+    F: std::future::Future<Output = Result<(), RuntimeError>>,
+    C: FnMut() -> CF,
+    CF: std::future::Future<Output = Result<(), RuntimeError>>,
+    A: FnMut(),
+{
     tokio::pin!(run);
-    let deadline = tokio::time::Instant::now() + inner.config.max_run_time;
     let mut fence = tokio::time::interval(Duration::from_millis(25));
     loop {
         tokio::select! { biased;
-            result = &mut run => return result.map(|_| ()).map_err(Into::into),
-            _ = context.cancel.cancelled() => { agent.control().abort(); return run.await.map(|_| ()).map_err(Into::into); },
-            _ = tokio::time::sleep_until(deadline) => { context.cancel.cancel(); agent.control().abort(); return run.await.map(|_| ()).map_err(Into::into); },
-            _ = fence.tick() => { if context.check(&context.cancel).is_err() { context.cancel.cancel(); } },
+            result = &mut run => return result,
+            _ = cancel.cancelled() => { abort(); return run.await; },
+            _ = tokio::time::sleep_until(deadline) => { cancel.cancel(); abort(); return run.await; },
+            _ = fence.tick() => {
+                if check().await.is_err() { cancel.cancel(); }
+                // A slow persistent check must not queue catch-up work ahead of
+                // the model stream. Start the next interval after it completes.
+                fence.reset();
+            },
         }
     }
 }
@@ -748,4 +793,87 @@ pub(crate) fn capabilities(inner: &Arc<Inner>) -> Result<Vec<ToolDefinition>, Ru
         catalog.extend(plugin.manifest.capabilities);
     }
     Ok(catalog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    // Break caught: overdue checks run again before a response that becomes ready
+    // during the next normal checking interval. Only virtual time is advanced.
+    #[tokio::test(start_paused = true)]
+    async fn slow_lifecycle_check_does_not_catch_up_overdue_ticks() {
+        let checks = Cell::new(0);
+        let started = tokio::time::Instant::now();
+        let run = async {
+            tokio::time::sleep_until(started + Duration::from_millis(120)).await;
+            Ok(())
+        };
+        supervise_run(
+            run,
+            &CancellationToken::new(),
+            started + Duration::from_secs(10),
+            || async {
+                checks.set(checks.get() + 1);
+                tokio::time::advance(Duration::from_millis(100)).await;
+                Ok(())
+            },
+            || panic!("a valid response must not be cancelled"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            checks.get(),
+            1,
+            "overdue lifecycle checks must not run back-to-back"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_after_a_slow_check_still_aborts_the_run() {
+        let cancel = CancellationToken::new();
+        let finished = CancellationToken::new();
+        let run = async {
+            finished.cancelled().await;
+            Ok(())
+        };
+        let checks = Cell::new(0);
+        supervise_run(
+            run,
+            &cancel,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            || async {
+                checks.set(checks.get() + 1);
+                tokio::time::advance(Duration::from_millis(100)).await;
+                cancel.cancel();
+                Ok(())
+            },
+            || finished.cancel(),
+        )
+        .await
+        .unwrap();
+        assert!(finished.is_cancelled());
+        assert_eq!(checks.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_lifecycle_check_cancels_and_joins_the_run() {
+        let cancel = CancellationToken::new();
+        let finished = CancellationToken::new();
+        supervise_run(
+            async {
+                finished.cancelled().await;
+                Ok(())
+            },
+            &cancel,
+            tokio::time::Instant::now() + Duration::from_secs(10),
+            || async { Err(RuntimeError::Cancelled) },
+            || finished.cancel(),
+        )
+        .await
+        .unwrap();
+        assert!(cancel.is_cancelled());
+        assert!(finished.is_cancelled());
+    }
 }

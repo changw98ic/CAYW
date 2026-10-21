@@ -1650,6 +1650,7 @@ fn process_profile(kind: ProfileKind, mode: &str) -> Profile {
         timeout: Duration::from_secs(10),
         max_output_bytes: 8192,
         allow_filter: false,
+        io: cayw_device::ProcessIo::Pipes,
     }
 }
 #[test]

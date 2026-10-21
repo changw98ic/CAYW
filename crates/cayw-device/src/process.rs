@@ -7,7 +7,9 @@ use std::time::Instant;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+mod identity;
 mod interactive;
+pub use identity::{ProcessIdentity, ProcessObserver};
 use interactive::InteractiveShared;
 pub use interactive::{
     InteractiveLimits, InteractiveProcess, ManagedStdin, ManagedStdout, ProcessControl,
@@ -316,6 +318,7 @@ struct PreparedProcess {
     // Keep application-owned snapshots/resources alive even if the run future
     // drops, until all managed processes and their output pipes are cleaned up.
     resources: Option<Box<dyn Send>>,
+    observer: Option<Arc<dyn ProcessObserver>>,
 }
 
 // The admission guard owns failed-start preparation; the join worker holds its
@@ -384,6 +387,7 @@ fn start_supervisor(
 pub struct ProcessRunner {
     programs: BTreeSet<PathBuf>,
     owner: Arc<Owner>,
+    observer: Option<Arc<dyn ProcessObserver>>,
 }
 
 impl ProcessRunner {
@@ -405,7 +409,17 @@ impl ProcessRunner {
         Ok(Self {
             programs: allowed,
             owner: Arc::default(),
+            observer: None,
         })
+    }
+
+    /// Adds host records to future launches while keeping the original task's
+    /// admission, cancellation, resource ledger, and supervisor ownership.
+    pub fn observed(&self, observer: Arc<dyn ProcessObserver>) -> Self {
+        Self {
+            observer: Some(observer),
+            ..self.clone()
+        }
     }
 
     pub async fn run(
@@ -542,6 +556,7 @@ impl ProcessRunner {
                 env: spec.env,
                 timeout: spec.timeout,
                 max_output_bytes: spec.max_output_bytes,
+                io: spec.io,
             })
         }
     }
@@ -562,6 +577,17 @@ impl ProcessRunner {
             return Err(DeviceError::InvalidSpec(
                 "max_output_bytes must be positive",
             ));
+        }
+        if let crate::ProcessIo::Pty { columns, rows } = spec.io
+            && (columns == 0 || rows == 0)
+        {
+            return Err(DeviceError::InvalidSpec(
+                "terminal dimensions must be positive",
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        if matches!(spec.io, crate::ProcessIo::Pty { .. }) {
+            return Err(DeviceError::UnsupportedPlatform);
         }
         if spec.args.iter().any(|argument| argument.contains('\0')) {
             return Err(DeviceError::InvalidSpec("arguments must not contain NUL"));
@@ -615,8 +641,10 @@ impl ProcessRunner {
                 env: spec.env,
                 timeout: spec.timeout,
                 max_output_bytes: spec.max_output_bytes,
+                io: spec.io,
             },
             resources: None,
+            observer: self.observer.clone(),
         })
     }
 
@@ -669,6 +697,7 @@ impl ProcessRunner {
         // Every real launch carries its original Scope's admission flag into
         // the common process owner, including ordinary and unwinding runs.
         let admission_closed = scope.admission_closed.clone();
+        let cleanup_ledger = scope.cleanup.clone();
         let prepared = resources.prepared.clone();
         let completion: Arc<Mutex<ThreadCompletion>> = interactive
             .as_ref()
@@ -712,6 +741,7 @@ impl ProcessRunner {
                         abandoned,
                         interactive.clone(),
                         admission_closed,
+                        cleanup_ledger,
                     )
                 }))
                 .unwrap_or(Err(DeviceError::SupervisorStopped));
@@ -816,6 +846,7 @@ mod cleanup_ownership {
                 env: Default::default(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 1024,
+                io: crate::ProcessIo::Pipes,
             })
             .unwrap();
         prepared.resources = Some(Box::new(resource));
@@ -870,6 +901,7 @@ mod cleanup_ownership {
                 env: Default::default(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 1024,
+                io: crate::ProcessIo::Pipes,
             })
             .unwrap();
         prepared.resources =
@@ -1005,6 +1037,7 @@ mod cleanup_ownership {
                 env: Default::default(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 10,
+                io: crate::ProcessIo::Pipes,
             })
             .unwrap();
         prepared.resources = Some(Box::new(runner.own_cleanup(Refused(dropped.clone()))));
@@ -1143,6 +1176,7 @@ mod directory_races {
                     env: BTreeMap::new(),
                     timeout: Duration::from_secs(10),
                     max_output_bytes: 1024,
+                    io: crate::ProcessIo::Pipes,
                 })
                 .unwrap();
             fs::rename(&original, &moved).unwrap();
@@ -1195,6 +1229,10 @@ mod unix {
         admission_closed: Arc<std::sync::atomic::AtomicBool>,
         termination_sent: bool,
         reaped: bool,
+        observer: Option<Arc<dyn ProcessObserver>>,
+        observed: BTreeSet<ProcessIdentity>,
+        records_closed: bool,
+        ledger: Arc<CleanupLedger>,
     }
 
     pub(super) fn identity_running(
@@ -1242,6 +1280,74 @@ mod unix {
     }
 
     impl ProcessGroup {
+        fn record(
+            &self,
+            phase: &str,
+            write: impl FnOnce(&dyn ProcessObserver) -> io::Result<()>,
+        ) -> io::Result<()> {
+            let Some(observer) = &self.observer else {
+                return Ok(());
+            };
+            // Host callbacks run without runner or identity locks. Keep every
+            // failed record sticky even if later OS cleanup succeeds, and keep
+            // a callback panic from unwinding the supervisor's cleanup owner.
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(observer.as_ref())))
+                    .unwrap_or_else(|_| {
+                        Err(io::Error::other(format!("process {phase} record panicked")))
+                    });
+            if let Err(error) = &result {
+                self.admission_closed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                lock(&self.ledger.state)
+                    .failure
+                    .get_or_insert_with(|| format!("process {phase} record failed: {error}"));
+            }
+            result
+        }
+
+        #[cfg(target_os = "macos")]
+        fn record_started(&mut self) -> io::Result<()> {
+            let identity = lock(&self.identity)
+                .original
+                .ok_or_else(|| io::Error::other("original process startup identity is absent"))?;
+            self.observed.insert(identity);
+            self.record("start", |observer| observer.started(&identity))
+        }
+
+        #[cfg(target_os = "macos")]
+        fn record_members(&mut self) -> io::Result<()> {
+            if self.observer.is_none() {
+                return Ok(());
+            }
+            let members = process_group_members(self.child.id())?;
+            let changed: Vec<_> = members
+                .into_iter()
+                .filter(|identity| {
+                    !self
+                        .observed
+                        .iter()
+                        .any(|known| known.same_process(*identity))
+                })
+                .collect();
+            if !changed.is_empty() {
+                self.observed.extend(changed.iter().copied());
+                self.record("observation", |observer| observer.observed(&changed))?;
+            }
+            Ok(())
+        }
+
+        fn record_stopped(&mut self) -> io::Result<()> {
+            if self.records_closed || !self.reaped {
+                return Ok(());
+            }
+            self.records_closed = true;
+            for identity in &self.observed {
+                self.record("cleanup", |observer| observer.stopped(identity))?;
+            }
+            Ok(())
+        }
+
         fn leader_exited(&self) -> io::Result<bool> {
             identity_running(&self.identity).map(|running| !running)
         }
@@ -1254,8 +1360,22 @@ mod unix {
             let Some(pid) = identity.pid else {
                 return Ok(None);
             };
+            if pid != self.child.id() {
+                return Err(io::Error::other(
+                    "process identity does not match the owned child",
+                ));
+            }
             identity.exited = false;
             observe_identity(&mut identity)?;
+            #[cfg(target_os = "macos")]
+            if let Some(original) = identity.original {
+                let current = ProcessIdentity::observe(pid)?;
+                if !original.same_process(current) {
+                    return Err(io::Error::other(
+                        "process startup identity no longer matches",
+                    ));
+                }
+            }
             if identity.lost {
                 return Err(io::Error::from_raw_os_error(libc::ECHILD));
             }
@@ -1321,6 +1441,12 @@ mod unix {
             while group_has_running_members(self.child.id())? {
                 std::thread::sleep(Duration::from_millis(5));
             }
+            #[cfg(target_os = "macos")]
+            for identity in &self.observed {
+                while identity.is_running()? {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
             loop {
                 let result = {
                     let mut identity = lock(&self.identity);
@@ -1353,6 +1479,52 @@ mod unix {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn process_group_members(group: u32) -> io::Result<Vec<ProcessIdentity>> {
+        #[cfg(all(test, target_os = "macos"))]
+        if tests::member_query_error() {
+            // Inject a failed group-membership syscall at its narrowest boundary.
+            // The real child, supervisor, observer, and permit still run.
+            return Err(io::Error::from_raw_os_error(libc::EIO));
+        }
+        const PROC_PGRP_ONLY: u32 = 2;
+        let mut capacity = 64usize;
+        loop {
+            let mut pids = vec![0 as libc::pid_t; capacity];
+            let bytes = std::mem::size_of_val(pids.as_slice());
+            let size = libc::c_int::try_from(bytes).map_err(io::Error::other)?;
+            // SAFETY: pids is writable for size bytes and this is read-only.
+            let count = unsafe {
+                libc::proc_listpids(PROC_PGRP_ONLY, group, pids.as_mut_ptr().cast(), size)
+            };
+            if count < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if count as usize == bytes {
+                capacity = capacity
+                    .checked_mul(2)
+                    .ok_or_else(|| io::Error::other("process group is too large"))?;
+                continue;
+            }
+            if count as usize > bytes
+                || !(count as usize).is_multiple_of(std::mem::size_of::<libc::pid_t>())
+            {
+                return Err(io::Error::other("incomplete process group observation"));
+            }
+            pids.truncate(count as usize / std::mem::size_of::<libc::pid_t>());
+            let mut members = Vec::new();
+            for pid in pids {
+                match ProcessIdentity::observe(pid as u32) {
+                    Ok(identity) if identity.process_group == group => members.push(identity),
+                    Ok(_) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            return Ok(members);
+        }
+    }
+
     impl Drop for ProcessGroup {
         fn drop(&mut self) {
             if !self.reaped {
@@ -1369,6 +1541,7 @@ mod unix {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
+            let _ = self.record_stopped();
         }
     }
 
@@ -1426,8 +1599,7 @@ mod unix {
                 // SAFETY: this C POD struct is initialized by proc_pidinfo.
                 let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
                 let size = std::mem::size_of_val(&info) as libc::c_int;
-                // SAFETY: info is writable for size bytes. arg=1 includes
-                // zombies, which otherwise could appear as missing processes.
+                // SAFETY: info is writable for exactly the supplied size bytes.
                 let result = unsafe {
                     libc::proc_pidinfo(
                         pid,
@@ -1557,12 +1729,14 @@ mod unix {
             denied: bool,
             transient_observations: usize,
             observation_error: bool,
+            member_query_error: bool,
             survivor: Option<Child>,
             leader: Option<u32>,
             pause: Option<PausedCleanup>,
             failed_cleanup: Option<PausedCleanup>,
             release: Option<Receiver<()>>,
             panic_after_spawn: Option<PausedCleanup>,
+            before_launch_grant: Option<std::os::unix::net::UnixStream>,
         }
 
         thread_local! {
@@ -1596,6 +1770,16 @@ mod unix {
                 });
                 Self
             }
+
+            fn member_query() -> Self {
+                FAULTS.with(|faults| {
+                    *faults.borrow_mut() = Faults {
+                        member_query_error: true,
+                        ..Faults::default()
+                    };
+                });
+                Self
+            }
         }
 
         impl Drop for Injection {
@@ -1624,6 +1808,10 @@ mod unix {
 
         pub(crate) fn fail_join_start() -> bool {
             JOIN_START_FAILURE.with(|fail| fail.replace(false))
+        }
+
+        pub(super) fn take_launch_pause() -> Option<std::os::unix::net::UnixStream> {
+            FAULTS.with(|faults| faults.borrow_mut().before_launch_grant.take())
         }
 
         pub(super) fn panic_after_spawn(pid: u32) {
@@ -1681,6 +1869,10 @@ mod unix {
                         .expect("test did not resume failed cleanup");
                 }
             });
+        }
+
+        pub(super) fn member_query_error() -> bool {
+            FAULTS.with(|faults| faults.borrow().member_query_error)
         }
 
         pub(super) fn group_observation() -> Option<io::Result<bool>> {
@@ -1745,6 +1937,10 @@ mod unix {
                 admission_closed: Arc::default(),
                 termination_sent: false,
                 reaped: false,
+                observer: None,
+                observed: BTreeSet::new(),
+                records_closed: false,
+                ledger: Arc::default(),
             }
         }
 
@@ -1778,6 +1974,7 @@ mod unix {
                 env: BTreeMap::new(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 1,
+                io: crate::ProcessIo::Pipes,
             };
             let runner = ProcessRunner::new([spec.program.clone()]).unwrap();
             let result = supervise(
@@ -1820,6 +2017,7 @@ mod unix {
                     env: BTreeMap::new(),
                     timeout: Duration::from_secs(10),
                     max_output_bytes: 1,
+                    io: crate::ProcessIo::Pipes,
                 },
                 CancellationToken::new(),
                 permit,
@@ -1864,6 +2062,101 @@ mod unix {
             assert_reaped(survivor);
         }
 
+        #[derive(Debug, Default)]
+        struct Recording(std::sync::Mutex<Vec<(&'static str, ProcessIdentity)>>);
+        impl ProcessObserver for Recording {
+            fn started(&self, identity: &ProcessIdentity) -> io::Result<()> {
+                self.0.lock().unwrap().push(("started", *identity));
+                Ok(())
+            }
+            fn observed(&self, identities: &[ProcessIdentity]) -> io::Result<()> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .extend(identities.iter().map(|identity| ("observed", *identity)));
+                Ok(())
+            }
+            fn stopped(&self, identity: &ProcessIdentity) -> io::Result<()> {
+                self.0.lock().unwrap().push(("stopped", *identity));
+                Ok(())
+            }
+        }
+
+        // A non-ESRCH failure of the group-membership query aborts the run with
+        // an Io error, but it does NOT bypass cleanup: finish() confirms the
+        // managed group is empty through the INDEPENDENT group-inspection query
+        // (`unreadable_group_state_does_not_confirm_cleanup` proves that query is
+        // itself fail-closed). The direct child is still killed and reaped, so the
+        // original permit is released only after the resource is provably cleared.
+        // An incarnation that left the managed group before it could be observed
+        // is already outside recorded coverage. Both transports run here.
+        #[tokio::test]
+        async fn a_failed_group_membership_query_aborts_the_run_but_confirms_cleanup() {
+            for io in [
+                crate::ProcessIo::Pipes,
+                crate::ProcessIo::Pty {
+                    columns: 80,
+                    rows: 24,
+                },
+            ] {
+                let scheduler = scheduler();
+                let permit = scheduler
+                    .try_acquire(
+                        SessionId::new("member-query").unwrap(),
+                        ResourceRequest::default(),
+                    )
+                    .unwrap();
+                let records = Arc::new(Recording::default());
+                let runner = ProcessRunner::new([PathBuf::from("/bin/sleep")])
+                    .unwrap()
+                    .observed(records.clone());
+                let injection = Injection::member_query();
+                let result = runner
+                    .run_with_permit(
+                        ProcessSpec {
+                            program: "/bin/sleep".into(),
+                            args: vec!["60".into()],
+                            cwd: std::env::temp_dir(),
+                            env: BTreeMap::new(),
+                            timeout: Duration::from_secs(10),
+                            max_output_bytes: 1024,
+                            io,
+                        },
+                        CancellationToken::new(),
+                        permit,
+                    )
+                    .await;
+                drop(injection);
+                let drain = runner.drain().await;
+                let reserved = scheduler.usage().active_tasks;
+                let records = records.0.lock().unwrap().clone();
+                let leader = records.first().expect("no start record").1;
+                println!(
+                    "MEMBER_QUERY io={io:?} result={result:?} drain={drain:?} reserved={reserved} records={records:?}"
+                );
+                // The host is told the run failed, so it is not misled about the
+                // missing member records.
+                assert!(
+                    matches!(
+                        result,
+                        Err(DeviceError::Io {
+                            operation: "record process members",
+                            ..
+                        })
+                    ),
+                    "a failed membership query must surface as an error: {result:?}"
+                );
+                // The same supervisor still killed and reaped the direct child, and
+                // released the permit only after that confirmed cleanup.
+                assert_reaped(leader.pid);
+                assert_eq!(runner.active_count(), 0);
+                assert!(matches!(drain, Ok(())), "{drain:?}");
+                assert_eq!(reserved, 0);
+                drop(runner);
+                assert_eq!(scheduler.usage().active_tasks, 0);
+            }
+        }
+
         #[tokio::test]
         async fn supervisor_start_failure_pairs_reservation_without_a_thread() {
             let scheduler = scheduler();
@@ -1884,6 +2177,7 @@ mod unix {
                         env: BTreeMap::new(),
                         timeout: Duration::from_secs(10),
                         max_output_bytes: 1024,
+                        io: crate::ProcessIo::Pipes,
                     },
                     CancellationToken::new(),
                     permit,
@@ -1936,6 +2230,7 @@ mod unix {
                         env: BTreeMap::new(),
                         timeout: Duration::from_secs(10),
                         max_output_bytes: 1024,
+                        io: crate::ProcessIo::Pipes,
                     })
                     .unwrap();
                 prepared.resources = Some(Box::new(resource));
@@ -1992,6 +2287,7 @@ mod unix {
                     env: BTreeMap::new(),
                     timeout: Duration::from_secs(10),
                     max_output_bytes: 1024,
+                    io: crate::ProcessIo::Pipes,
                 },
                 CancellationToken::new(),
                 permit,
@@ -2039,6 +2335,7 @@ mod unix {
                             env: BTreeMap::new(),
                             timeout: Duration::from_secs(10),
                             max_output_bytes: 10,
+                            io: crate::ProcessIo::Pipes,
                         },
                         InteractiveLimits {
                             max_write_bytes: 10,
@@ -2052,6 +2349,95 @@ mod unix {
                 runner.drain().await.unwrap();
                 assert_eq!(runner.active_count(), 0);
                 assert_eq!(scheduler.usage().active_tasks, 0);
+            }
+        }
+
+        // Granting exec without rechecking cancellation would run /usr/bin/true
+        // after this controlled pre-exec boundary, or release the live child slot.
+        #[tokio::test(flavor = "current_thread")]
+        async fn cancellation_during_real_pipe_and_pty_startup_reaps_the_ungranted_child() {
+            use std::io::{Read, Write};
+            for io in [
+                crate::ProcessIo::Pipes,
+                crate::ProcessIo::Pty {
+                    columns: 80,
+                    rows: 24,
+                },
+            ] {
+                let runner = ProcessRunner::new([PathBuf::from("/usr/bin/true")]).unwrap();
+                let scheduler = scheduler();
+                let permit = scheduler
+                    .try_acquire(
+                        SessionId::new("startup").unwrap(),
+                        ResourceRequest::default(),
+                    )
+                    .unwrap();
+                let (pause, mut control) = std::os::unix::net::UnixStream::pair().unwrap();
+                control
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                FAULTS.with(|faults| faults.borrow_mut().before_launch_grant = Some(pause));
+                let cancel = CancellationToken::new();
+                let mut run = Box::pin(runner.run_with_permit(
+                    ProcessSpec {
+                        program: "/usr/bin/true".into(),
+                        args: vec![],
+                        cwd: std::env::temp_dir(),
+                        env: BTreeMap::new(),
+                        timeout: Duration::from_secs(30),
+                        max_output_bytes: 1024,
+                        io,
+                    },
+                    cancel.clone(),
+                    permit,
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(run.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                let (pid, mut control) = tokio::task::spawn_blocking(move || {
+                    let mut bytes = [0u8; std::mem::size_of::<libc::pid_t>()];
+                    control.read_exact(&mut bytes).unwrap();
+                    (libc::pid_t::from_ne_bytes(bytes), control)
+                })
+                .await
+                .unwrap();
+                let identity = ProcessIdentity::observe(pid as u32).unwrap();
+                cancel.cancel();
+                let mut drain = Box::pin(runner.drain());
+                let early =
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx)))
+                        .await;
+                let reserved = scheduler.usage().active_tasks;
+                let active = runner.active_count();
+                let pending = early.is_pending();
+                control.write_all(&[1]).unwrap();
+                let result = tokio::time::timeout(Duration::from_secs(10), &mut run)
+                    .await
+                    .unwrap();
+                match early {
+                    std::task::Poll::Ready(value) => value.unwrap(),
+                    std::task::Poll::Pending => {
+                        tokio::time::timeout(Duration::from_secs(10), &mut drain)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                    }
+                }
+                println!(
+                    "STARTUP_CANCEL io={io:?} identity={identity:?} reserved={reserved} active={active} result={result:?}"
+                );
+                assert!(pending, "startup child was omitted from drain");
+                assert_eq!(reserved, 1);
+                assert_eq!(active, 1);
+                assert!(
+                    matches!(result, Err(DeviceError::Cancelled)),
+                    "cancelled pre-exec child ran the program: {result:?}"
+                );
+                assert_reaped(pid as u32);
+                assert_eq!(scheduler.usage().active_tasks, 0);
+                assert_eq!(runner.active_count(), 0);
             }
         }
 
@@ -2084,6 +2470,7 @@ mod unix {
                     env: BTreeMap::new(),
                     timeout: Duration::from_secs(10),
                     max_output_bytes: 10,
+                    io: crate::ProcessIo::Pipes,
                 },
                 InteractiveLimits {
                     max_write_bytes: 10,
@@ -2146,6 +2533,7 @@ mod unix {
                         env: BTreeMap::new(),
                         timeout: Duration::from_secs(10),
                         max_output_bytes: 1,
+                        io: crate::ProcessIo::Pipes,
                     },
                     InteractiveLimits {
                         max_write_bytes: 10,
@@ -2173,6 +2561,7 @@ mod unix {
                         env: BTreeMap::new(),
                         timeout: Duration::from_secs(10),
                         max_output_bytes: 10,
+                        io: crate::ProcessIo::Pipes,
                     },
                     CancellationToken::new(),
                 )
@@ -2234,6 +2623,7 @@ mod unix {
                         env: BTreeMap::new(),
                         timeout: Duration::from_secs(10),
                         max_output_bytes: 10,
+                        io: crate::ProcessIo::Pipes,
                     },
                     InteractiveLimits {
                         max_write_bytes: 10,
@@ -2283,6 +2673,7 @@ mod unix {
                 env: BTreeMap::new(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 1,
+                io: crate::ProcessIo::Pipes,
             };
             let mut run =
                 Box::pin(runner.run_with_permit(make_spec(), CancellationToken::new(), permit));
@@ -2360,6 +2751,33 @@ mod unix {
             assert_eq!(runner.active_count(), 0);
         }
 
+        // Returning as soon as retained bytes reach the limit would leave one
+        // or both OS pipes unread. The retained prefix and raw bytes are separate.
+        #[test]
+        fn truncated_output_still_drains_both_real_pipes_to_eof() {
+            use std::io::Write;
+            let (mut out_writer, out_reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            let (mut err_writer, err_reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            out_writer.write_all(b"stdout-after-budget").unwrap();
+            err_writer.write_all(b"stderr-after-budget").unwrap();
+            out_writer.shutdown(std::net::Shutdown::Write).unwrap();
+            err_writer.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut stdout = Pipe::new(out_reader, PipeSink::Collected).unwrap();
+            let mut stderr = Pipe::new(err_reader, PipeSink::Collected).unwrap();
+            let mut budget = OutputBudget {
+                remaining: 3,
+                read: 0,
+            };
+            let out_overflow = stdout.drain(&mut budget).unwrap();
+            let err_overflow = stderr.drain(&mut budget).unwrap();
+            assert!(out_overflow && err_overflow);
+            assert_eq!(stdout.bytes, b"std");
+            assert!(stderr.bytes.is_empty());
+            assert_eq!(budget.remaining, 0);
+            assert_eq!(budget.read, 38);
+            assert!(stdout.reader.is_none() && stderr.reader.is_none());
+        }
+
         #[test]
         fn stdout_and_stderr_read_errors_and_raw_counter_exhaustion_are_not_discarded() {
             struct FailingReader(fs::File);
@@ -2424,6 +2842,57 @@ mod unix {
             assert!(!pipe.drain(&mut budget).unwrap());
             assert_eq!(budget.read, 6);
             assert_eq!(&lock(&shared.io).stdout, b"def");
+        }
+
+        #[test]
+        fn replacing_a_leader_pid_cannot_signal_another_live_process_group() {
+            let mut original = running_group();
+            let mut unrelated = running_group();
+            let pid = original.child.id();
+            let replacement = unrelated.child.id();
+            lock(&original.identity).pid = Some(replacement);
+            let stopped = original.terminate();
+            let original_alive = identity_running(&Mutex::new(interactive::LeaderIdentity {
+                pid: Some(pid),
+                ..Default::default()
+            }))
+            .unwrap();
+            let unrelated_alive = identity_running(&unrelated.identity).unwrap();
+            // Restore only this test's injected identity before cleaning both real
+            // children. Assertions run after cleanup even against the broken path.
+            lock(&original.identity).pid = Some(pid);
+            original.termination_sent = false;
+            original.finish().unwrap();
+            unrelated.finish().unwrap();
+            assert!(stopped.is_err(), "a replaced identity was accepted");
+            assert!(
+                original_alive,
+                "mismatch sent a signal to the original leader"
+            );
+            assert!(
+                unrelated_alive,
+                "mismatch killed unrelated group {replacement}"
+            );
+        }
+
+        #[test]
+        fn a_replaced_start_time_cannot_signal_the_same_numeric_pid() {
+            let mut group = running_group();
+            let actual = ProcessIdentity::observe(group.child.id()).unwrap();
+            lock(&group.identity).original = Some(ProcessIdentity {
+                started_microseconds: (actual.started_microseconds + 1) % 1_000_000,
+                ..actual
+            });
+            let result = group.terminate();
+            let alive = identity_running(&group.identity).unwrap();
+            lock(&group.identity).original = Some(actual);
+            group.termination_sent = false;
+            group.finish().unwrap();
+            assert!(
+                result.is_err(),
+                "the same PID with a different startup identity was accepted"
+            );
+            assert!(alive, "a mismatched incarnation was signalled");
         }
 
         #[test]
@@ -2552,6 +3021,7 @@ mod unix {
                 env: BTreeMap::new(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 1,
+                io: crate::ProcessIo::Pipes,
             };
             let run = runner.run_with_permit(spec, CancellationToken::new(), permit);
             tokio::pin!(run);
@@ -2603,6 +3073,75 @@ mod unix {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    struct Terminal {
+        primary: fs::File,
+        replica: fs::File,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Terminal {
+        fn open(columns: u16, rows: u16) -> io::Result<Self> {
+            use std::os::fd::FromRawFd;
+            use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+            // Set CLOEXEC atomically at open, before any concurrent spawn. Keep
+            // every descriptor above stdio even if this host closed 0, 1 or 2.
+            fn protect(file: fs::File) -> io::Result<fs::File> {
+                let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+                if fd == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: fcntl returned a new owned descriptor.
+                Ok(unsafe { fs::File::from_raw_fd(fd) })
+            }
+            let primary = protect(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
+                    .open("/dev/ptmx")?,
+            )?;
+            // SAFETY: these operate on this newly opened primary, not host stdio.
+            if unsafe { libc::grantpt(primary.as_raw_fd()) } == -1
+                || unsafe { libc::unlockpt(primary.as_raw_fd()) } == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // Darwin's TIOCPTYGNAME fills a caller-owned 128-byte buffer, avoiding
+            // ptsname's shared static storage during concurrent launches.
+            let mut name = [0u8; 128];
+            if unsafe {
+                libc::ioctl(
+                    primary.as_raw_fd(),
+                    libc::TIOCPTYGNAME.into(),
+                    name.as_mut_ptr(),
+                )
+            } == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let name = std::ffi::CStr::from_bytes_until_nul(&name).map_err(io::Error::other)?;
+            let replica = protect(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
+                    .open(std::ffi::OsStr::from_bytes(name.to_bytes()))?,
+            )?;
+            let size = libc::winsize {
+                ws_row: rows,
+                ws_col: columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            // SAFETY: size is a live winsize and this fd owns the replica.
+            if unsafe { libc::ioctl(replica.as_raw_fd(), libc::TIOCSWINSZ, &size) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { primary, replica })
+        }
+    }
+
     struct OutputBudget {
         remaining: usize,
         read: usize,
@@ -2620,6 +3159,7 @@ mod unix {
         sink: PipeSink,
         cleaning: bool,
         discarded: bool,
+        terminal_eof: bool,
     }
 
     impl<T: Read + AsRawFd> Pipe<T> {
@@ -2631,7 +3171,19 @@ mod unix {
                 sink,
                 cleaning: false,
                 discarded: false,
+                terminal_eof: false,
             })
+        }
+
+        fn absent(sink: PipeSink) -> Self {
+            Self {
+                reader: None,
+                bytes: Vec::new(),
+                sink,
+                cleaning: false,
+                discarded: false,
+                terminal_eof: false,
+            }
         }
 
         fn fd(&self) -> RawFd {
@@ -2693,6 +3245,14 @@ mod unix {
                             .ok_or_else(|| io::Error::other("output budget underflow"))?;
                         overflow |= keep != count;
                     }
+                    Err(error) if self.terminal_eof && error.raw_os_error() == Some(libc::EIO) => {
+                        // A PTY primary reports EIO after the last replica closes.
+                        self.reader = None;
+                        if let PipeSink::Stdout(shared) = &self.sink {
+                            shared.stdout_eof();
+                        }
+                        break;
+                    }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
@@ -2715,10 +3275,9 @@ mod unix {
     }
 
     fn write_pending(
-        stdin: &mut std::process::ChildStdin,
+        stdin: &mut impl std::io::Write,
         shared: &InteractiveShared,
     ) -> io::Result<()> {
-        use std::io::Write;
         let mut state = lock(&shared.io);
         if state.stopping {
             return Ok(());
@@ -2969,7 +3528,14 @@ mod unix {
         cancellation: CancellationToken,
         abandoned: CancellationToken,
     ) -> Result<ProcessResult, DeviceError> {
-        supervise_mode(prepared, cancellation, abandoned, None, Arc::default())
+        supervise_mode(
+            prepared,
+            cancellation,
+            abandoned,
+            None,
+            Arc::default(),
+            Arc::default(),
+        )
     }
 
     pub(super) fn supervise_mode(
@@ -2978,10 +3544,12 @@ mod unix {
         abandoned: CancellationToken,
         interactive: Option<Arc<InteractiveShared>>,
         admission_closed: Arc<std::sync::atomic::AtomicBool>,
+        ledger: Arc<CleanupLedger>,
     ) -> Result<ProcessResult, DeviceError> {
         let PreparedProcess {
             spec,
             resources: _resources,
+            observer,
         } = prepared;
         let DirectoryProcessSpec {
             program,
@@ -2990,6 +3558,7 @@ mod unix {
             env,
             timeout,
             max_output_bytes,
+            io,
         } = spec;
         if cancellation.is_cancelled() || abandoned.is_cancelled() {
             return Err(DeviceError::Cancelled);
@@ -2998,19 +3567,51 @@ mod unix {
             .checked_add(timeout)
             .ok_or(DeviceError::InvalidSpec("timeout is not representable"))?;
         let image = ExecImage::new(&program, &args, &env)?;
+        #[cfg(target_os = "macos")]
+        let terminal = match io {
+            crate::ProcessIo::Pipes => None,
+            crate::ProcessIo::Pty { columns, rows } => Some(
+                Terminal::open(columns, rows)
+                    .map_err(|error| DeviceError::not_started("open terminal", error))?,
+            ),
+        };
+        #[cfg(not(target_os = "macos"))]
+        if !matches!(io, crate::ProcessIo::Pipes) {
+            return Err(DeviceError::UnsupportedPlatform);
+        }
         let mut command = Command::new(program);
-        command
-            .args(args)
-            .env_clear()
-            .envs(env)
-            .stdin(if interactive.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+        command.args(args).env_clear().envs(env);
+        #[cfg(target_os = "macos")]
+        let terminal_fd = terminal
+            .as_ref()
+            .map(|terminal| terminal.replica.as_raw_fd());
+        #[cfg(not(target_os = "macos"))]
+        let terminal_fd: Option<RawFd> = None;
+        if terminal_fd.is_some() {
+            #[cfg(target_os = "macos")]
+            {
+                let replica = &terminal.as_ref().expect("terminal").replica;
+                let clone = || {
+                    replica
+                        .try_clone()
+                        .map_err(|error| DeviceError::not_started("clone terminal replica", error))
+                };
+                command
+                    .stdin(Stdio::from(clone()?))
+                    .stdout(Stdio::from(clone()?))
+                    .stderr(Stdio::from(clone()?));
+            }
+        } else {
+            command
+                .stdin(if interactive.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+        }
         let cwd_fd = cwd.as_raw_fd();
         let (parent_gate, child_gate) = std::os::unix::net::UnixStream::pair()
             .map_err(|error| DeviceError::not_started("create launch gate", error))?;
@@ -3037,6 +3638,10 @@ mod unix {
         let child_fd = child_gate.as_raw_fd();
         let gate_cancel = cancellation.clone();
         let gate_abandoned = abandoned.clone();
+        #[cfg(all(test, target_os = "macos"))]
+        let launch_pause = tests::take_launch_pause();
+        #[cfg(all(test, target_os = "macos"))]
+        let launch_pause_fd = launch_pause.as_ref().map(AsRawFd::as_raw_fd);
         let gate = std::thread::Builder::new()
             .name("cayw-launch-gate".into())
             .spawn(move || launch_gate(gate_socket, gate_cancel, gate_abandoned, deadline))
@@ -3052,6 +3657,33 @@ mod unix {
                 if libc::fchdir(cwd_fd) == -1 {
                     return Err(io::Error::last_os_error());
                 }
+                if let Some(fd) = terminal_fd {
+                    if libc::setsid() == -1 || libc::ioctl(fd, libc::TIOCSCTTY.into(), 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if libc::tcsetpgrp(fd, libc::getpgrp()) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                #[cfg(all(test, target_os = "macos"))]
+                if let Some(fd) = launch_pause_fd {
+                    // Only the test binary carries this gate. The forked child
+                    // uses raw descriptor syscalls, never a mutex or allocator.
+                    let pid = libc::getpid();
+                    if libc::send(
+                        fd,
+                        (&pid as *const libc::pid_t).cast(),
+                        std::mem::size_of_val(&pid),
+                        libc::MSG_NOSIGNAL,
+                    ) != std::mem::size_of_val(&pid) as isize
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let mut release = 0u8;
+                    if libc::read(fd, (&mut release as *mut u8).cast(), 1) != 1 {
+                        return Err(io::Error::from_raw_os_error(libc::ECANCELED));
+                    }
+                }
                 child_launch_gate(child_fd)?;
                 Err(image.execute())
             });
@@ -3062,6 +3694,8 @@ mod unix {
         // Always join the launch gate before returning, including spawn errors.
         // Command has already reaped a rejected pre_exec child at this point.
         let decision = gate.join();
+        #[cfg(all(test, target_os = "macos"))]
+        drop(launch_pause);
         let child = match spawned {
             Ok(child) => child,
             Err(error) => {
@@ -3088,7 +3722,26 @@ mod unix {
             admission_closed,
             termination_sent: false,
             reaped: false,
+            observer,
+            observed: BTreeSet::new(),
+            records_closed: false,
+            ledger,
         };
+        #[cfg(target_os = "macos")]
+        {
+            let original = ProcessIdentity::observe(group.child.id())
+                .map_err(|error| DeviceError::io("capture process startup identity", error))?;
+            if original.process_group != original.pid {
+                return Err(DeviceError::io(
+                    "capture process startup identity",
+                    io::Error::other("child is not its managed process group leader"),
+                ));
+            }
+            lock(&group.identity).original = Some(original);
+            group
+                .record_started()
+                .map_err(|error| DeviceError::io("record process start", error))?;
+        }
         #[cfg(all(test, target_os = "macos"))]
         tests::panic_after_spawn(group.child.id());
         let out_sink = interactive.as_ref().map_or(PipeSink::Collected, |shared| {
@@ -3099,17 +3752,55 @@ mod unix {
         } else {
             PipeSink::Collected
         };
-        let mut stdout = Pipe::new(
-            group.child.stdout.take().expect("stdout was piped"),
-            out_sink,
-        )
-        .map_err(|error| DeviceError::io("configure stdout pipe", error))?;
-        let mut stderr = Pipe::new(
-            group.child.stderr.take().expect("stderr was piped"),
-            err_sink,
-        )
-        .map_err(|error| DeviceError::io("configure stderr pipe", error))?;
-        let mut stdin = group.child.stdin.take();
+        // Consume Command here: its replica copies must not hold PTY EOF open.
+        drop(command);
+        let mut terminal_primary: Option<fs::File> = None;
+        #[cfg(target_os = "macos")]
+        if let Some(Terminal { primary, replica }) = terminal {
+            drop(replica);
+            terminal_primary = Some(primary);
+        }
+        let (mut stdout, mut stderr, mut stdin): (
+            Pipe<fs::File>,
+            Pipe<fs::File>,
+            Option<fs::File>,
+        ) = if let Some(primary) = terminal_primary {
+            let writer = if interactive.is_some() {
+                Some(
+                    primary
+                        .try_clone()
+                        .map_err(|error| DeviceError::io("clone terminal primary", error))?,
+                )
+            } else {
+                None
+            };
+            let mut output = Pipe::new(primary, out_sink)
+                .map_err(|error| DeviceError::io("configure terminal output", error))?;
+            output.terminal_eof = true;
+            (output, Pipe::absent(err_sink), writer)
+        } else {
+            (
+                Pipe::new(
+                    fs::File::from(std::os::fd::OwnedFd::from(
+                        group.child.stdout.take().expect("stdout was piped"),
+                    )),
+                    out_sink,
+                )
+                .map_err(|error| DeviceError::io("configure stdout pipe", error))?,
+                Pipe::new(
+                    fs::File::from(std::os::fd::OwnedFd::from(
+                        group.child.stderr.take().expect("stderr was piped"),
+                    )),
+                    err_sink,
+                )
+                .map_err(|error| DeviceError::io("configure stderr pipe", error))?,
+                group
+                    .child
+                    .stdin
+                    .take()
+                    .map(|stdin| fs::File::from(std::os::fd::OwnedFd::from(stdin))),
+            )
+        };
         if let Some(stdin) = &stdin {
             nonblocking(stdin).map_err(|error| DeviceError::io("configure stdin pipe", error))?;
         }
@@ -3127,6 +3818,10 @@ mod unix {
             if Instant::now() >= deadline {
                 break TerminationReason::TimedOut;
             }
+            #[cfg(target_os = "macos")]
+            group
+                .record_members()
+                .map_err(|error| DeviceError::io("record process members", error))?;
             if let (Some(stdin), Some(shared)) = (&mut stdin, &interactive) {
                 write_pending(stdin, shared)
                     .map_err(|error| DeviceError::io("write stdin", error))?;
@@ -3192,6 +3887,9 @@ mod unix {
         let status = group
             .finish()
             .map_err(|error| DeviceError::io("reap process", error))?;
+        group
+            .record_stopped()
+            .map_err(|error| DeviceError::io("record process cleanup", error))?;
         Ok(ProcessResult {
             status,
             termination,

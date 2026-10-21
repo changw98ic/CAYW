@@ -262,6 +262,55 @@ impl cayw_host::AuditSink for CallScope {
     }
 }
 
+impl std::fmt::Debug for CallScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallScope")
+            .field("name", &self.name)
+            .field("execution_id", &self.key.execution_id)
+            .field("sequence", &self.key.sequence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CallScope {
+    fn process_call_identity(&self) -> crate::processes::ProcessCallIdentity<'_> {
+        crate::processes::ProcessCallIdentity {
+            task: &self.context.task.id,
+            lease: &self.context.lease,
+            execution_id: &self.key.execution_id,
+            sequence: self.key.sequence,
+        }
+    }
+
+    fn record_process_identity(
+        &self,
+        write: impl FnOnce(
+            &crate::processes::ProcessJournal,
+            &crate::processes::ProcessCallIdentity<'_>,
+        ) -> Result<(), RuntimeError>,
+    ) -> std::io::Result<()> {
+        let journal = &self.context.inner.process_journal;
+        write(journal, &self.process_call_identity()).map_err(|error| {
+            std::io::Error::other(format!("process identity record is not durable: {error}"))
+        })
+    }
+}
+
+/// Durable OS process identity for exactly this planned call. A failed record
+/// stops the same supervisor and returns an error; it never releases an unknown
+/// scope, skips capacity accounting, or avoids the true supervisor join.
+impl cayw_host::ProcessObserver for CallScope {
+    fn started(&self, identity: &cayw_host::ProcessIdentity) -> std::io::Result<()> {
+        self.record_process_identity(|journal, call| journal.identity_started(call, identity))
+    }
+    fn observed(&self, identities: &[cayw_host::ProcessIdentity]) -> std::io::Result<()> {
+        self.record_process_identity(|journal, call| journal.identity_observed(call, identities))
+    }
+    fn stopped(&self, identity: &cayw_host::ProcessIdentity) -> std::io::Result<()> {
+        self.record_process_identity(|journal, call| journal.identity_stopped(call, identity))
+    }
+}
+
 struct CatalogGate;
 #[async_trait]
 impl cayw_host::PermissionGate for CatalogGate {

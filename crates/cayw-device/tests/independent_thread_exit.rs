@@ -53,6 +53,7 @@ async fn drain_poll_must_yield_while_supervisor_thread_local_destructor_is_block
             env: BTreeMap::new(),
             timeout: Duration::from_secs(10),
             max_output_bytes: 1024,
+            io: cayw_device::ProcessIo::Pipes,
         },
         CancellationToken::new(),
         resource,

@@ -170,7 +170,9 @@ pub(crate) fn scoped_host(
         scope: scope.clone(),
     });
     let Some(origin) = &scope.bridge_origin else {
-        return base.scoped(gate, scope.clone());
+        return base
+            .scoped(gate, scope.clone())
+            .map(|host| host.with_process_observer(scope.clone()));
     };
     let bridge = scope
         .context
@@ -186,6 +188,7 @@ pub(crate) fn scoped_host(
     });
     let external = bridge.scoped(&scope.name, origin.context()?, journal)?;
     base.scoped_external(gate, scope.clone(), external)
+        .map(|host| host.with_process_observer(scope.clone()))
 }
 
 #[derive(Default)]
