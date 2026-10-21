@@ -24126,6 +24126,106 @@ var ROLE_LABELS = {
   toolResult: "\u5DE5\u5177\u7ED3\u679C",
   custom: "\u5BBF\u4E3B\u8BB0\u5F55"
 };
+var STARTER_PROMPTS = [
+  {
+    title: "\u{1F4C4} \u8BFB\u53D6\u5DE5\u4F5C\u533A\u8BF4\u660E",
+    desc: "\u8BFB\u53D6 README.md \u5E76\u7528\u4E00\u53E5\u8BDD\u6982\u62EC\u5F53\u524D\u9879\u76EE",
+    prompt: "\u8BFB\u53D6\u5F53\u524D\u5DE5\u4F5C\u533A\u7684 README.md\uFF0C\u5E76\u7528\u4E00\u53E5\u8BDD\u603B\u7ED3\u9879\u76EE\u5185\u5BB9\u3002"
+  },
+  {
+    title: "\u270D\uFE0F \u521B\u5EFA\u5E76\u9A8C\u8BC1\u6587\u4EF6",
+    desc: "\u5199\u5165\u4E00\u4EFD\u6D4B\u8BD5\u7B14\u8BB0\u5E76\u8BFB\u56DE\u6821\u9A8C\u5185\u5BB9",
+    prompt: "\u5728\u5F53\u524D\u5DE5\u4F5C\u533A\u521B\u5EFA hello-cayw.txt\uFF0C\u5199\u5165 Hello from CAYW\uFF0C\u518D\u8BFB\u53D6\u786E\u8BA4\u5185\u5BB9\u3002"
+  },
+  {
+    title: "\u{1F50D} \u67E5\u770B\u5DE5\u4F5C\u533A\u6587\u4EF6\u5217\u8868",
+    desc: "\u5217\u51FA\u5F53\u524D\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\u7684\u5168\u90E8\u6587\u4EF6",
+    prompt: "\u5217\u51FA\u5F53\u524D\u5DE5\u4F5C\u533A\u6839\u76EE\u5F55\u4E0B\u7684\u6240\u6709\u6587\u4EF6\uFF0C\u5E76\u7B80\u8981\u8BF4\u660E\u5404\u81EA\u7528\u9014\u3002"
+  }
+];
+var BUILTIN_CAPABILITY_GROUPS = [
+  {
+    title: "\u6587\u4EF6\u4E0E\u76EE\u5F55\uFF08fs.*\uFF09",
+    badge: "\u5199\u64CD\u4F5C\u9700\u6388\u6743",
+    items: [
+      ["fs.read", "\u8BFB\u53D6\u6587\u4EF6\u5185\u5BB9\u4E0E SHA-256"],
+      ["fs.write", "\u539F\u5B50\u521B\u5EFA\u6216\u51ED\u6458\u8981\u8986\u76D6\u6587\u4EF6"],
+      ["fs.patch", "\u6309\u7CBE\u786E\u4E0A\u4E0B\u6587\u66FF\u6362\u6587\u4EF6\u7247\u6BB5"],
+      ["fs.list / fs.stat", "\u5217\u51FA\u76EE\u5F55\u9879\u4E0E\u8BFB\u53D6\u6587\u4EF6\u5143\u6570\u636E"]
+    ]
+  },
+  {
+    title: "\u4EE3\u7801\u68C0\u7D22\u4E0E\u8BED\u6CD5\uFF08fs / code\uFF09",
+    badge: "\u53D7\u63A7\u53EA\u8BFB",
+    items: [
+      ["fs.grep / fs.glob", "\u5DE5\u4F5C\u533A\u6709\u754C\u6587\u672C\u68C0\u7D22\u4E0E\u8DEF\u5F84\u5339\u914D"],
+      ["code.outline", "\u63D0\u53D6\u6E90\u7801\u7ED3\u6784\u4E0E\u7B26\u53F7\u5927\u7EB2"],
+      ["code.diff_hunks", "\u8BA1\u7B97\u6587\u4EF6\u6539\u52A8\u5DEE\u5F02\u7247\u6BB5"]
+    ]
+  },
+  {
+    title: "Git \u7248\u672C\u63A7\u5236\uFF08git.*\uFF09",
+    badge: "\u53EA\u8BFB\u68C0\u89C6",
+    items: [
+      ["git.status", "\u67E5\u770B\u5DE5\u4F5C\u533A\u5F53\u524D\u53D8\u66F4\u72B6\u6001"],
+      ["git.diff", "\u67E5\u770B\u672A\u63D0\u4EA4\u6216\u6307\u5B9A\u8303\u56F4\u7684\u4EE3\u7801\u5DEE\u5F02"],
+      ["git.log / git.show", "\u67E5\u770B\u63D0\u4EA4\u5386\u53F2\u4E0E\u5355\u6B21\u63D0\u4EA4\u8BE6\u60C5"]
+    ]
+  },
+  {
+    title: "\u9884\u8BBE\u6784\u5EFA\u4E0E\u6D4B\u8BD5\uFF08build / test\uFF09",
+    badge: "\u6267\u884C\u9700\u6388\u6743",
+    items: [
+      ["build.run", "\u8FD0\u884C\u5BBF\u4E3B\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6784\u5EFA\u4EFB\u52A1"],
+      ["test.run", "\u8FD0\u884C\u5BBF\u4E3B\u663E\u5F0F\u914D\u7F6E\u7684\u9884\u8BBE\u6D4B\u8BD5\u4EFB\u52A1"]
+    ]
+  }
+];
+var OPTIONAL_PLUGIN_CATALOG = [
+  {
+    name: "StrongFlow",
+    role: "\u5F3A\u6D41\u7A0B\u7F16\u6392\u63D2\u4EF6",
+    desc: "\u4E3A\u590D\u6742\u4EFB\u52A1\u63D0\u4F9B\u9636\u6BB5\u95E8\u7981\u4E0E\u8BA1\u5212\u68C0\u67E5\u70B9\uFF1B\u5378\u8F7D\u540E\u5DF2\u7ED1\u5B9A\u4F1A\u8BDD\u4FDD\u6301\u51BB\u7ED3\uFF0C\u652F\u6301\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929\u3002"
+  },
+  {
+    name: "JEv",
+    role: "\u6267\u884C\u9A8C\u8BC1\u63D2\u4EF6",
+    desc: "\u5BF9\u5173\u952E\u6B65\u9AA4\u4EA7\u7269\u4E0E\u65AD\u8A00\u8FDB\u884C\u72EC\u7ACB\u6838\u9A8C\uFF0C\u4E0D\u76F4\u63A5\u8BFB\u5199 Core \u6570\u636E\u5E93\u3002"
+  },
+  {
+    name: "Fusion",
+    role: "\u591A\u8DEF\u63A2\u7D22\u4E0E\u878D\u5408\u63D2\u4EF6",
+    desc: "\u5728\u53D7\u63A7\u9884\u7B97\u5185\u5BF9\u6BD4\u5019\u9009\u65B9\u6848\u5E76\u6C47\u603B\u9A8C\u8BC1\u8BC1\u636E\u3002"
+  },
+  {
+    name: "Observer",
+    role: "\u8FD0\u884C\u8F68\u8FF9\u89C2\u6D4B\u63D2\u4EF6",
+    desc: "\u8BA2\u9605\u4F1A\u8BDD\u4E8B\u4EF6\u6D41\u8FDB\u884C\u53EA\u8BFB\u5BA1\u8BA1\u4E0E\u8BCA\u65AD\u7EDF\u8BA1\uFF0C\u4E0D\u5E72\u9884\u666E\u901A\u804A\u5929\u3002"
+  }
+];
+function renderInlineTokens(text) {
+  const parts = String(text ?? "").split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
+  return parts.map((part, idx) => {
+    if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
+      return /* @__PURE__ */ import_react2.default.createElement("code", { key: idx, className: "inline-code" }, part.slice(1, -1));
+    }
+    if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+      return /* @__PURE__ */ import_react2.default.createElement("strong", { key: idx }, part.slice(2, -2));
+    }
+    return part;
+  });
+}
+function FormattedBody({ text }) {
+  const raw = String(text ?? "");
+  const blocks = raw.split(/(```[\s\S]*?```)/g);
+  return /* @__PURE__ */ import_react2.default.createElement("div", { className: "body" }, blocks.map((block, bIdx) => {
+    if (block.startsWith("```") && block.endsWith("```") && block.length >= 6) {
+      const inner = block.slice(3, -3).replace(/^[a-zA-Z0-9_-]+\n/, "");
+      return /* @__PURE__ */ import_react2.default.createElement("pre", { key: bIdx, className: "code-block" }, /* @__PURE__ */ import_react2.default.createElement("code", null, inner));
+    }
+    return /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, { key: bIdx }, renderInlineTokens(block));
+  }));
+}
 function errorText(error) {
   return clip(
     {
@@ -24309,6 +24409,7 @@ function CAYWApp({ env } = {}) {
     const summary = sessionSummary(snapshot2);
     if (index >= 0) s.sessions[index] = summary;
     else s.sessions = [...s.sessions, summary].slice(-200);
+    s.listStatus = s.sessions.length === 200 ? "\u663E\u793A\u6700\u8FD1 200 \u4E2A\u4F1A\u8BDD\u3002" : `${s.sessions.length} \u4E2A\u4F1A\u8BDD`;
   };
   const rpc = async (method, params = {}) => {
     const controller = new AbortController();
@@ -25174,7 +25275,23 @@ function CAYWApp({ env } = {}) {
         /* @__PURE__ */ import_react2.default.createElement("span", null, `${stateLabel(session, s.views.get(session.id))} \xB7 ${shortId}`)
       );
     })))
-  )), /* @__PURE__ */ import_react2.default.createElement("main", { id: "conversation", className: "conversation", tabIndex: -1 }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "conversation-view", hidden: s.activePage !== "conversation" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u5DE5\u4F5C\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "session-title" }, snapshot ? displayLabel(snapshot) : s.selected ? "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026" : "\u70B9\u51FB\u5DE6\u4FA7\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5F00\u59CB")), /* @__PURE__ */ import_react2.default.createElement("span", { id: "session-state", className: "state-label" }, snapshot ? stateLabel(snapshot, view) : "\u7B49\u5F85\u9009\u62E9")), /* @__PURE__ */ import_react2.default.createElement("p", { id: "global-error", className: "error", role: "alert", hidden: !s.globalError }, s.globalError), /* @__PURE__ */ import_react2.default.createElement("p", { id: "poll-status", className: "small muted", role: "status" }, s.pollStatus), /* @__PURE__ */ import_react2.default.createElement(
+  )), /* @__PURE__ */ import_react2.default.createElement("main", { id: "conversation", className: "conversation", tabIndex: -1 }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "conversation-view", hidden: s.activePage !== "conversation" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", null, /* @__PURE__ */ import_react2.default.createElement(ShinyText, null, "\u5DE5\u4F5C\u7A7A\u95F4"), /* @__PURE__ */ import_react2.default.createElement(GradientText, { id: "session-title" }, snapshot ? displayLabel(snapshot) : s.selected ? "\u6B63\u5728\u8BFB\u53D6\u4F1A\u8BDD\u2026" : "\u70B9\u51FB\u5DE6\u4FA7\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u5F00\u59CB")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "conversation-meta" }, /* @__PURE__ */ import_react2.default.createElement("span", { id: "history-note", className: "meta-pill muted", hidden: !historyNote }, historyNote), /* @__PURE__ */ import_react2.default.createElement(
+    "span",
+    {
+      id: "poll-status",
+      className: "meta-pill muted",
+      role: "status",
+      hidden: !s.pollStatus || s.pollStatus === "\u5DF2\u540C\u6B65"
+    },
+    s.pollStatus
+  ), /* @__PURE__ */ import_react2.default.createElement(
+    "span",
+    {
+      id: "session-state",
+      className: `state-label state-${stateName(snapshot)}`
+    },
+    snapshot ? stateLabel(snapshot, view) : "\u7B49\u5F85\u9009\u62E9"
+  ))), /* @__PURE__ */ import_react2.default.createElement("p", { id: "global-error", className: "error", role: "alert", hidden: !s.globalError }, s.globalError), /* @__PURE__ */ import_react2.default.createElement(
     SpotlightCard,
     {
       as: "section",
@@ -25276,14 +25393,37 @@ function CAYWApp({ env } = {}) {
         )))
       );
     })
-  ), /* @__PURE__ */ import_react2.default.createElement("section", { "aria-label": "\u4F1A\u8BDD\u5386\u53F2", className: "history-section" }, /* @__PURE__ */ import_react2.default.createElement("p", { id: "history-note", className: "small muted" }, historyNote), /* @__PURE__ */ import_react2.default.createElement("div", { id: "messages", className: "messages" }, !messages.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty-heading" }, /* @__PURE__ */ import_react2.default.createElement("h2", null, view?.snapshot ? "\u4ECE\u4E00\u6761\u6D88\u606F\u5F00\u59CB" : "\u7EE7\u7EED\u4E00\u6BB5\u5BF9\u8BDD"), /* @__PURE__ */ import_react2.default.createElement(
+  ), /* @__PURE__ */ import_react2.default.createElement("section", { "aria-label": "\u4F1A\u8BDD\u5386\u53F2", className: "history-section" }, /* @__PURE__ */ import_react2.default.createElement("div", { id: "messages", className: "messages" }, !messages.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty-heading" }, /* @__PURE__ */ import_react2.default.createElement("h2", null, view?.snapshot ? "\u4ECE\u4E00\u6761\u6D88\u606F\u5F00\u59CB" : "\u7EE7\u7EED\u4E00\u6BB5\u5BF9\u8BDD"), /* @__PURE__ */ import_react2.default.createElement(
     TooltipBadge,
     {
       className: "hint-trigger",
       label: "?",
       tip: view?.snapshot ? "\u8F93\u5165\u4EFB\u52A1\u540E\uFF0CRuntime \u4F1A\u5728\u6B64\u4FDD\u7559\u5BF9\u8BDD\u548C\u5DE5\u5177\u8BB0\u5F55\u3002" : "\u4ECE\u5DE6\u4FA7\u9009\u62E9\u5DF2\u6709\u4F1A\u8BDD\uFF0C\u6216\u70B9\u51FB\u201C+ \u65B0\u5EFA\u4F1A\u8BDD\u201D\u3002"
     }
-  ))) : messages.map((message, index) => {
+  )), /* @__PURE__ */ import_react2.default.createElement("p", { className: "empty-sub" }, "\u9009\u62E9\u4E00\u4E2A\u5E38\u7528\u4EFB\u52A1\u5FEB\u901F\u586B\u5165\uFF0C\u6216\u5728\u4E0B\u65B9\u8F93\u5165\u6846\u76F4\u63A5\u63CF\u8FF0\u4F60\u7684\u9700\u6C42\uFF1A"), /* @__PURE__ */ import_react2.default.createElement("div", { className: "starter-grid" }, STARTER_PROMPTS.map((item, idx) => /* @__PURE__ */ import_react2.default.createElement(
+    SpotlightCard,
+    {
+      as: "button",
+      key: idx,
+      type: "button",
+      className: "starter-card",
+      onClick: () => trackAsync(
+        (async () => {
+          if (!s.selected) {
+            await createNewSession();
+          }
+          s.promptText = item.prompt;
+          if (promptInputRef.current) {
+            promptInputRef.current.value = item.prompt;
+            promptInputRef.current.focus();
+          }
+          forceRender();
+        })()
+      )
+    },
+    /* @__PURE__ */ import_react2.default.createElement("strong", null, item.title),
+    /* @__PURE__ */ import_react2.default.createElement("span", null, item.desc)
+  )))) : messages.map((message, index) => {
     const role = [
       "user",
       "assistant",
@@ -25302,9 +25442,9 @@ function CAYWApp({ env } = {}) {
         className: `message ${role}${isOp ? " operation-record" : ""}`
       },
       /* @__PURE__ */ import_react2.default.createElement("div", { className: "role" }, ROLE_LABELS[role]),
-      presentation.kind === "text" ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "body" }, presentation.text) : presentation.kind === "tool_call" ? /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, presentation.text ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "body" }, presentation.text) : null, presentation.calls.map((call, callIndex) => {
+      presentation.kind === "text" ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : presentation.kind === "tool_call" ? /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, presentation.text ? /* @__PURE__ */ import_react2.default.createElement(FormattedBody, { text: presentation.text }) : null, presentation.calls.map((call, callIndex) => {
         const callKey = `${key}/${callIndex}`;
-        const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "\u7B49\u5F85\u4EFB\u52A1\u7ED3\u679C" : "\u8FD0\u884C\u4EFB\u52A1" : `\u4F7F\u7528\u5DE5\u5177\uFF1A${clip(call.name, 100)}`;
+        const title = call.name === "execute_code" ? call.arguments?.action === "wait" ? "\u7B49\u5F85\u4EFB\u52A1\u7ED3\u679C" : "\u8FD0\u884C Luau \u4EE3\u7801\u5355\u5143\uFF08execute_code\uFF09" : `\u4F7F\u7528\u5DE5\u5177\uFF1A${clip(call.name, 100)}`;
         return /* @__PURE__ */ import_react2.default.createElement(
           "details",
           {
@@ -25316,22 +25456,22 @@ function CAYWApp({ env } = {}) {
           /* @__PURE__ */ import_react2.default.createElement("summary", null, title),
           /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(call))
         );
-      })) : /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, /* @__PURE__ */ import_react2.default.createElement(
+      })) : /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, null, /* @__PURE__ */ import_react2.default.createElement("div", { className: "result-header" }, /* @__PURE__ */ import_react2.default.createElement(
         "strong",
         {
           className: `result-title ${presentation.status ?? ""}`
         },
         presentation.title
-      ), presentation.text ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "result-description" }, presentation.text) : null, (presentation.values ?? []).map((val, vIdx) => /* @__PURE__ */ import_react2.default.createElement(import_react2.default.Fragment, { key: vIdx }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "output-label" }, val.label), /* @__PURE__ */ import_react2.default.createElement("div", { className: "body output-value" }, val.text))), /* @__PURE__ */ import_react2.default.createElement(
+      ), /* @__PURE__ */ import_react2.default.createElement(
         "details",
         {
-          className: "record-details",
+          className: "record-details inline-details",
           open: expandedSet.has(key),
           onToggle: (e) => toggleRecordExpand(key, e.currentTarget.open)
         },
         /* @__PURE__ */ import_react2.default.createElement("summary", null, "\u67E5\u770B\u5B8C\u6574\u6267\u884C\u8BB0\u5F55"),
         /* @__PURE__ */ import_react2.default.createElement("pre", null, presentation.raw)
-      )),
+      )), presentation.text ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "result-description" }, presentation.text) : null, (presentation.values ?? []).map((val, vIdx) => /* @__PURE__ */ import_react2.default.createElement("div", { key: vIdx, className: "file-output-box" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "output-label" }, `\u{1F4C4} ${val.label}`), /* @__PURE__ */ import_react2.default.createElement("div", { className: "body output-value" }, val.text)))),
       message.error_message ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, clip(message.error_message, 2e3)) : null,
       message.outcome_unknown ? /* @__PURE__ */ import_react2.default.createElement("p", { className: "effect-warning" }, "\u6B64\u5DE5\u5177\u8C03\u7528\u7684\u771F\u5B9E\u7ED3\u679C\u5F85\u5BBF\u4E3B\u6838\u5BF9\u3002") : null
     );
@@ -25345,7 +25485,7 @@ function CAYWApp({ env } = {}) {
     },
     /* @__PURE__ */ import_react2.default.createElement("h2", { id: "live-heading", className: "small" }, "\u6B63\u5728\u63A5\u6536"),
     /* @__PURE__ */ import_react2.default.createElement("pre", { id: "live-text", "aria-live": "off" }, view?.liveText ?? "")
-  ), /* @__PURE__ */ import_react2.default.createElement("details", { className: "event-details" }, /* @__PURE__ */ import_react2.default.createElement("summary", { "data-tip": "\u6700\u8FD1 120 \u6761\u5DF2\u6D88\u8D39\u4E8B\u4EF6\uFF1B\u672A\u8BC6\u522B\u4E8B\u4EF6\u6309\u539F\u59CB\u8BB0\u5F55\u5C55\u793A" }, "\u4E8B\u4EF6\u8BB0\u5F55", " ", /* @__PURE__ */ import_react2.default.createElement("span", { id: "event-count", className: "muted" }, `${events.length} \xB7 \u6E38\u6807 ${view?.cursor ?? 0}`)), /* @__PURE__ */ import_react2.default.createElement("div", { id: "event-log" }, events.map((record) => /* @__PURE__ */ import_react2.default.createElement("details", { key: record.cursor }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${record.cursor} \xB7 ${clip(record.event?.type ?? record.event?.kind ?? "\u4E8B\u4EF6", 100)}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(record.event)))))), /* @__PURE__ */ import_react2.default.createElement(
+  ), /* @__PURE__ */ import_react2.default.createElement(
     SpotlightCard,
     {
       as: "form",
@@ -25359,7 +25499,7 @@ function CAYWApp({ env } = {}) {
       TooltipBadge,
       {
         label: "\u5FEB\u6377\u952E ?",
-        tip: "Enter \u6362\u884C \xB7 Ctrl / \u2318 + Enter \u53D1\u9001"
+        tip: "Enter \u76F4\u63A5\u53D1\u9001 \xB7 Shift + Enter \u6362\u884C"
       }
     )),
     /* @__PURE__ */ import_react2.default.createElement(
@@ -25389,7 +25529,7 @@ function CAYWApp({ env } = {}) {
           forceRender();
         },
         onKeyDown: (e) => {
-          if (e.key === "Enter" && !e.nativeEvent?.isComposing && (e.ctrlKey || e.metaKey)) {
+          if (e.key === "Enter" && !e.nativeEvent?.isComposing && !e.shiftKey) {
             e.preventDefault();
             if (!sendDisabled) trackAsync(handleSendPrompt(e));
           }
@@ -25408,7 +25548,7 @@ function CAYWApp({ env } = {}) {
       },
       s.cancelPending ? "\u6B63\u5728\u505C\u6B62\u2026" : "\u505C\u6B62\u8FD0\u884C"
     ), /* @__PURE__ */ import_react2.default.createElement("button", { id: "send-button", type: "submit", disabled: sendDisabled }, pending ? "\u7B49\u5F85\u5B8C\u6210\u2026" : "\u53D1\u9001")))
-  )), /* @__PURE__ */ import_react2.default.createElement(
+  ), /* @__PURE__ */ import_react2.default.createElement("details", { className: "event-details" }, /* @__PURE__ */ import_react2.default.createElement("summary", { "data-tip": "\u6700\u8FD1 120 \u6761\u5DF2\u6D88\u8D39\u4E8B\u4EF6\uFF1B\u672A\u8BC6\u522B\u4E8B\u4EF6\u6309\u539F\u59CB\u8BB0\u5F55\u5C55\u793A" }, /* @__PURE__ */ import_react2.default.createElement("span", null, "\u8BCA\u65AD\u4E0E\u4E8B\u4EF6\u8BB0\u5F55"), /* @__PURE__ */ import_react2.default.createElement("span", { id: "event-count", className: "muted" }, `${events.length} \xB7 \u6E38\u6807 ${view?.cursor ?? 0}`)), /* @__PURE__ */ import_react2.default.createElement("div", { id: "event-log" }, events.map((record) => /* @__PURE__ */ import_react2.default.createElement("details", { key: record.cursor }, /* @__PURE__ */ import_react2.default.createElement("summary", null, `#${record.cursor} \xB7 ${clip(record.event?.type ?? record.event?.kind ?? "\u4E8B\u4EF6", 100)}`), /* @__PURE__ */ import_react2.default.createElement("pre", null, recordText(record.event))))))), /* @__PURE__ */ import_react2.default.createElement(
     "section",
     {
       id: "projects-page",
@@ -25479,6 +25619,26 @@ function CAYWApp({ env } = {}) {
         s.addProjectBusy ? "\u6DFB\u52A0\u4E2D\u2026" : "+ \u6DFB\u52A0\u9879\u76EE\u7A7A\u95F4"
       )
     ),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "quick-paths" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, "\u5E38\u7528\u76EE\u5F55\u5FEB\u586B\uFF1A"), [
+      ["/Volumes/ORICO/CAYW", "CAYW \u4E3B\u4ED3\u5E93"],
+      ["/Volumes/ORICO/CAYW-tui", "CAYW TUI \u5206\u652F"],
+      ["/Volumes/ORICO/CAYW-webui", "CAYW WebUI \u5206\u652F"]
+    ].map(([p, lbl]) => /* @__PURE__ */ import_react2.default.createElement(
+      "button",
+      {
+        key: p,
+        type: "button",
+        className: "quiet path-chip",
+        onClick: () => {
+          s.projectWorkspaceInput = p;
+          s.projectLabelInput = lbl;
+          if (projectWsInputRef.current) projectWsInputRef.current.value = p;
+          if (projectLabelInputRef.current) projectLabelInputRef.current.value = lbl;
+          forceRender();
+        }
+      },
+      `\u{1F4C1} ${lbl}`
+    ))),
     /* @__PURE__ */ import_react2.default.createElement("p", { id: "projects-status", className: "small muted", role: "status" }, projectsStatusText),
     /* @__PURE__ */ import_react2.default.createElement("div", { id: "project-list", className: "management-grid" }, projectSummaries.map((item) => {
       const isCurrent = item.id === currentProjectId();
@@ -25491,14 +25651,14 @@ function CAYWApp({ env } = {}) {
           border: true,
           className: `management-card${isCurrent ? " is-active" : ""}`
         },
-        /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, item.label), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, isCurrent ? "\u5F53\u524D\u7A7A\u95F4" : item.id)),
+        /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, item.label), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, isCurrent ? "\u5F53\u524D\u4F7F\u7528\u4E2D" : "\u53EF\u5207\u6362")),
         /* @__PURE__ */ import_react2.default.createElement("div", { className: "stat-pills" }, item.workspace ? /* @__PURE__ */ import_react2.default.createElement(
           "span",
           {
             className: "stat-pill mono",
-            "data-tip": `\u672C\u5730\u9879\u76EE\u76EE\u5F55\uFF1A${item.workspace}`
+            "data-tip": `\u672C\u5730\u9879\u76EE\u76EE\u5F55\uFF1A${item.workspace}\uFF08IPC \u7AEF\u70B9\uFF1A${item.address}\uFF09`
           },
-          item.workspace
+          `\u{1F4C1} ${item.workspace}`
         ) : null, /* @__PURE__ */ import_react2.default.createElement(
           "span",
           {
@@ -25510,16 +25670,9 @@ function CAYWApp({ env } = {}) {
           "span",
           {
             className: "stat-pill",
-            "data-tip": `\u9879\u76EE\u8FD0\u884C\u72B6\u6001\uFF1A${item.statusLabel}`
+            "data-tip": `\u9879\u76EE\u8FD0\u884C\u72B6\u6001\uFF1A${item.statusLabel}\uFF08IPC\uFF1A${item.address}\uFF09`
           },
           item.statusLabel
-        ), /* @__PURE__ */ import_react2.default.createElement(
-          "span",
-          {
-            className: "stat-pill mono",
-            "data-tip": `\u672C\u673A IPC \u7AEF\u70B9\uFF1A${item.address}`
-          },
-          item.address
         ), item.frozenCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill warn" }, `${item.frozenCount} \u5DF2\u51BB\u7ED3`) : null, item.unresolvedCount ? /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill danger" }, `${item.unresolvedCount} \u5F85\u6838\u5BF9`) : null),
         /* @__PURE__ */ import_react2.default.createElement("div", { className: "approval-actions" }, /* @__PURE__ */ import_react2.default.createElement(
           "button",
@@ -25588,14 +25741,19 @@ function CAYWApp({ env } = {}) {
       "\u5237\u65B0\u63D2\u4EF6\u72B6\u6001"
     )),
     /* @__PURE__ */ import_react2.default.createElement("p", { id: "plugins-status", className: "small muted", role: "status" }, pluginsStatusText),
-    /* @__PURE__ */ import_react2.default.createElement("div", { id: "plugin-list", className: "management-grid" }, !pluginItems.length ? /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "empty-heading" }, /* @__PURE__ */ import_react2.default.createElement("h2", null, "\u5F53\u524D\u9879\u76EE\u6682\u65E0\u63D2\u4EF6\u8BB0\u5F55"), /* @__PURE__ */ import_react2.default.createElement(
-      TooltipBadge,
+    /* @__PURE__ */ import_react2.default.createElement("div", { id: "plugin-list", className: "management-grid" }, !pluginItems.length ? OPTIONAL_PLUGIN_CATALOG.map((mod) => /* @__PURE__ */ import_react2.default.createElement(
+      SpotlightCard,
       {
-        className: "hint-trigger",
-        label: "?",
-        tip: "\u5F53\u4F1A\u8BDD\u7ED1\u5B9A StrongFlow \u6216\u5176\u4ED6 plugin\uFF0C\u6216\u5BBF\u4E3B\u516C\u5F00\u63D2\u4EF6\u80FD\u529B\u540E\uFF0C\u53EF\u5728\u6B64\u67E5\u770B\u7248\u672C\u3001\u72B6\u6001\u4E0E\u5173\u8054\u4F1A\u8BDD\u3002"
-      }
-    ))) : pluginItems.map((plugin) => {
+        as: "article",
+        key: mod.name,
+        tilt: true,
+        border: true,
+        className: "management-card"
+      },
+      /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, mod.name), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, "\u6309\u9700\u63D2\u62D4")),
+      /* @__PURE__ */ import_react2.default.createElement("div", { className: "stat-pills" }, /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill" }, mod.role), /* @__PURE__ */ import_react2.default.createElement("span", { className: "stat-pill" }, "0 \u4E2A\u7ED1\u5B9A\u4F1A\u8BDD")),
+      /* @__PURE__ */ import_react2.default.createElement("p", { className: "small muted card-desc" }, mod.desc)
+    )) : pluginItems.map((plugin) => {
       const shortReg = plugin.registryId.length > 14 ? `${plugin.registryId.slice(0, 8)}\u2026` : plugin.registryId;
       return /* @__PURE__ */ import_react2.default.createElement(
         SpotlightCard,
@@ -25660,7 +25818,18 @@ function CAYWApp({ env } = {}) {
           "\u786E\u8BA4\u540E Fork \u4E3A\u666E\u901A\u804A\u5929"
         ) : null)))
       );
-    }))
+    })),
+    /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-catalog" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "section-heading" }, /* @__PURE__ */ import_react2.default.createElement("div", { className: "title-with-hint" }, /* @__PURE__ */ import_react2.default.createElement("h2", null, "\u5DE5\u4F5C\u533A\u5185\u7F6E\u80FD\u529B\uFF08CodeMode\uFF09"), /* @__PURE__ */ import_react2.default.createElement(HintPopover, { ariaLabel: "CodeMode \u5185\u7F6E\u80FD\u529B\u8BF4\u660E" }, "\u6A21\u578B\u901A\u8FC7 Luau \u5355\u5143\u8C03\u7528\u4EE5\u4E0B\u53D7\u63A7\u80FD\u529B\uFF1B\u6BCF\u6B21\u5177\u4F53\u8C03\u7528\u90FD\u7ECF\u8FC7\u5BBF\u4E3B\u53C2\u6570\u6821\u9A8C\u3001\u6743\u9650\u5BA1\u6279\u4E0E\u7ED3\u679C\u914D\u5BF9\u3002")), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, s.cachedCapabilities.length ? `\u5DF2\u52A0\u8F7D ${s.cachedCapabilities.length} \u9879\u5BBF\u4E3B\u80FD\u529B` : "\u5171 4 \u7EC4\u9884\u7F6E\u5DE5\u4F5C\u533A\u80FD\u529B")), /* @__PURE__ */ import_react2.default.createElement("div", { className: "management-grid" }, BUILTIN_CAPABILITY_GROUPS.map((group) => /* @__PURE__ */ import_react2.default.createElement(
+      SpotlightCard,
+      {
+        as: "article",
+        key: group.title,
+        border: true,
+        className: "management-card capability-card"
+      },
+      /* @__PURE__ */ import_react2.default.createElement("div", { className: "card-header" }, /* @__PURE__ */ import_react2.default.createElement("strong", null, group.title), /* @__PURE__ */ import_react2.default.createElement("span", { className: "state-label" }, group.badge)),
+      /* @__PURE__ */ import_react2.default.createElement("div", { className: "capability-items" }, group.items.map(([code, desc]) => /* @__PURE__ */ import_react2.default.createElement("div", { key: code, className: "capability-row" }, /* @__PURE__ */ import_react2.default.createElement("code", { className: "inline-code" }, code), /* @__PURE__ */ import_react2.default.createElement("span", { className: "small muted" }, desc))))
+    ))))
   ))), /* @__PURE__ */ import_react2.default.createElement(
     "dialog",
     {

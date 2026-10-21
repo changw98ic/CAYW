@@ -674,6 +674,11 @@ async fn execute_with_cells(
                 .max_total_tokens
                 .min(inner.model.max_output_tokens.unwrap_or(u64::MAX)),
         ),
+        thinking_level: if inner.model.provider == "openai-chat" {
+            cayw_ai::ThinkingLevel::Low
+        } else {
+            cayw_ai::ThinkingLevel::Off
+        },
         ..Default::default()
     })?;
     let listener_context = context.clone();
@@ -722,7 +727,7 @@ async fn execute_with_cells(
             Ok(())
         }
     });
-    const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
+    const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments); do not use pcall or xpcall in Luau cells. Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
     let run = agent.prompt_messages(vec![Message::system(INSTRUCTION), Message::user(text)]);
     tokio::pin!(run);
     let deadline = tokio::time::Instant::now() + inner.config.max_run_time;

@@ -65,6 +65,125 @@ const ROLE_LABELS = {
   custom: '宿主记录',
 };
 
+const STARTER_PROMPTS = [
+  {
+    title: '📄 读取工作区说明',
+    desc: '读取 README.md 并用一句话概括当前项目',
+    prompt: '读取当前工作区的 README.md，并用一句话总结项目内容。',
+  },
+  {
+    title: '✍️ 创建并验证文件',
+    desc: '写入一份测试笔记并读回校验内容',
+    prompt: '在当前工作区创建 hello-cayw.txt，写入 Hello from CAYW，再读取确认内容。',
+  },
+  {
+    title: '🔍 查看工作区文件列表',
+    desc: '列出当前工作区根目录下的全部文件',
+    prompt: '列出当前工作区根目录下的所有文件，并简要说明各自用途。',
+  },
+];
+
+const BUILTIN_CAPABILITY_GROUPS = [
+  {
+    title: '文件与目录（fs.*）',
+    badge: '写操作需授权',
+    items: [
+      ['fs.read', '读取文件内容与 SHA-256'],
+      ['fs.write', '原子创建或凭摘要覆盖文件'],
+      ['fs.patch', '按精确上下文替换文件片段'],
+      ['fs.list / fs.stat', '列出目录项与读取文件元数据'],
+    ],
+  },
+  {
+    title: '代码检索与语法（fs / code）',
+    badge: '受控只读',
+    items: [
+      ['fs.grep / fs.glob', '工作区有界文本检索与路径匹配'],
+      ['code.outline', '提取源码结构与符号大纲'],
+      ['code.diff_hunks', '计算文件改动差异片段'],
+    ],
+  },
+  {
+    title: 'Git 版本控制（git.*）',
+    badge: '只读检视',
+    items: [
+      ['git.status', '查看工作区当前变更状态'],
+      ['git.diff', '查看未提交或指定范围的代码差异'],
+      ['git.log / git.show', '查看提交历史与单次提交详情'],
+    ],
+  },
+  {
+    title: '预设构建与测试（build / test）',
+    badge: '执行需授权',
+    items: [
+      ['build.run', '运行宿主显式配置的预设构建任务'],
+      ['test.run', '运行宿主显式配置的预设测试任务'],
+    ],
+  },
+];
+
+const OPTIONAL_PLUGIN_CATALOG = [
+  {
+    name: 'StrongFlow',
+    role: '强流程编排插件',
+    desc: '为复杂任务提供阶段门禁与计划检查点；卸载后已绑定会话保持冻结，支持确认后 Fork 为普通聊天。',
+  },
+  {
+    name: 'JEv',
+    role: '执行验证插件',
+    desc: '对关键步骤产物与断言进行独立核验，不直接读写 Core 数据库。',
+  },
+  {
+    name: 'Fusion',
+    role: '多路探索与融合插件',
+    desc: '在受控预算内对比候选方案并汇总验证证据。',
+  },
+  {
+    name: 'Observer',
+    role: '运行轨迹观测插件',
+    desc: '订阅会话事件流进行只读审计与诊断统计，不干预普通聊天。',
+  },
+];
+
+function renderInlineTokens(text) {
+  const parts = String(text ?? '').split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
+  return parts.map((part, idx) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+      return (
+        <code key={idx} className="inline-code">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
+      return <strong key={idx}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
+}
+
+function FormattedBody({ text }) {
+  const raw = String(text ?? '');
+  const blocks = raw.split(/(```[\s\S]*?```)/g);
+  return (
+    <div className="body">
+      {blocks.map((block, bIdx) => {
+        if (block.startsWith('```') && block.endsWith('```') && block.length >= 6) {
+          const inner = block
+            .slice(3, -3)
+            .replace(/^[a-zA-Z0-9_-]+\n/, '');
+          return (
+            <pre key={bIdx} className="code-block">
+              <code>{inner}</code>
+            </pre>
+          );
+        }
+        return <React.Fragment key={bIdx}>{renderInlineTokens(block)}</React.Fragment>;
+      })}
+    </div>
+  );
+}
+
 function errorText(error) {
   return clip(
     {
@@ -277,6 +396,10 @@ export function CAYWApp({ env } = {}) {
     const summary = sessionSummary(snapshot);
     if (index >= 0) s.sessions[index] = summary;
     else s.sessions = [...s.sessions, summary].slice(-200);
+    s.listStatus =
+      s.sessions.length === 200
+        ? '显示最近 200 个会话。'
+        : `${s.sessions.length} 个会话`;
   };
 
   const rpc = async (method, params = {}) => {
@@ -1348,16 +1471,29 @@ export function CAYWApp({ env } = {}) {
                       : '点击左侧“+ 新建会话”开始'}
                 </GradientText>
               </div>
-              <span id="session-state" className="state-label">
-                {snapshot ? stateLabel(snapshot, view) : '等待选择'}
-              </span>
+              <div className="conversation-meta">
+                <span id="history-note" className="meta-pill muted" hidden={!historyNote}>
+                  {historyNote}
+                </span>
+                <span
+                  id="poll-status"
+                  className="meta-pill muted"
+                  role="status"
+                  hidden={!s.pollStatus || s.pollStatus === '已同步'}
+                >
+                  {s.pollStatus}
+                </span>
+                <span
+                  id="session-state"
+                  className={`state-label state-${stateName(snapshot)}`}
+                >
+                  {snapshot ? stateLabel(snapshot, view) : '等待选择'}
+                </span>
+              </div>
             </div>
 
             <p id="global-error" className="error" role="alert" hidden={!s.globalError}>
               {s.globalError}
-            </p>
-            <p id="poll-status" className="small muted" role="status">
-              {s.pollStatus}
             </p>
 
             <SpotlightCard
@@ -1486,9 +1622,6 @@ export function CAYWApp({ env } = {}) {
             </section>
 
             <section aria-label="会话历史" className="history-section">
-              <p id="history-note" className="small muted">
-                {historyNote}
-              </p>
               <div id="messages" className="messages">
                 {!messages.length ? (
                   <div className="empty">
@@ -1503,6 +1636,37 @@ export function CAYWApp({ env } = {}) {
                             : '从左侧选择已有会话，或点击“+ 新建会话”。'
                         }
                       />
+                    </div>
+                    <p className="empty-sub">
+                      选择一个常用任务快速填入，或在下方输入框直接描述你的需求：
+                    </p>
+                    <div className="starter-grid">
+                      {STARTER_PROMPTS.map((item, idx) => (
+                        <SpotlightCard
+                          as="button"
+                          key={idx}
+                          type="button"
+                          className="starter-card"
+                          onClick={() =>
+                            trackAsync(
+                              (async () => {
+                                if (!s.selected) {
+                                  await createNewSession();
+                                }
+                                s.promptText = item.prompt;
+                                if (promptInputRef.current) {
+                                  promptInputRef.current.value = item.prompt;
+                                  promptInputRef.current.focus();
+                                }
+                                forceRender();
+                              })(),
+                            )
+                          }
+                        >
+                          <strong>{item.title}</strong>
+                          <span>{item.desc}</span>
+                        </SpotlightCard>
+                      ))}
                     </div>
                   </div>
                 ) : (
@@ -1527,11 +1691,11 @@ export function CAYWApp({ env } = {}) {
                       >
                         <div className="role">{ROLE_LABELS[role]}</div>
                         {presentation.kind === 'text' ? (
-                          <div className="body">{presentation.text}</div>
+                          <FormattedBody text={presentation.text} />
                         ) : presentation.kind === 'tool_call' ? (
                           <>
                             {presentation.text ? (
-                              <div className="body">{presentation.text}</div>
+                              <FormattedBody text={presentation.text} />
                             ) : null}
                             {presentation.calls.map((call, callIndex) => {
                               const callKey = `${key}/${callIndex}`;
@@ -1539,7 +1703,7 @@ export function CAYWApp({ env } = {}) {
                                 call.name === 'execute_code'
                                   ? call.arguments?.action === 'wait'
                                     ? '等待任务结果'
-                                    : '运行任务'
+                                    : '运行 Luau 代码单元（execute_code）'
                                   : `使用工具：${clip(call.name, 100)}`;
                               return (
                                 <details
@@ -1558,32 +1722,34 @@ export function CAYWApp({ env } = {}) {
                           </>
                         ) : (
                           <>
-                            <strong
-                              className={`result-title ${presentation.status ?? ''}`}
-                            >
-                              {presentation.title}
-                            </strong>
+                            <div className="result-header">
+                              <strong
+                                className={`result-title ${presentation.status ?? ''}`}
+                              >
+                                {presentation.title}
+                              </strong>
+                              <details
+                                className="record-details inline-details"
+                                open={expandedSet.has(key)}
+                                onToggle={e =>
+                                  toggleRecordExpand(key, e.currentTarget.open)
+                                }
+                              >
+                                <summary>查看完整执行记录</summary>
+                                <pre>{presentation.raw}</pre>
+                              </details>
+                            </div>
                             {presentation.text ? (
                               <p className="result-description">
                                 {presentation.text}
                               </p>
                             ) : null}
                             {(presentation.values ?? []).map((val, vIdx) => (
-                              <React.Fragment key={vIdx}>
-                                <div className="output-label">{val.label}</div>
+                              <div key={vIdx} className="file-output-box">
+                                <div className="output-label">{`📄 ${val.label}`}</div>
                                 <div className="body output-value">{val.text}</div>
-                              </React.Fragment>
+                              </div>
                             ))}
-                            <details
-                              className="record-details"
-                              open={expandedSet.has(key)}
-                              onToggle={e =>
-                                toggleRecordExpand(key, e.currentTarget.open)
-                              }
-                            >
-                              <summary>查看完整执行记录</summary>
-                              <pre>{presentation.raw}</pre>
-                            </details>
                           </>
                         )}
                         {message.error_message ? (
@@ -1617,25 +1783,6 @@ export function CAYWApp({ env } = {}) {
               </pre>
             </section>
 
-            <details className="event-details">
-              <summary data-tip="最近 120 条已消费事件；未识别事件按原始记录展示">
-                事件记录{' '}
-                <span id="event-count" className="muted">
-                  {`${events.length} · 游标 ${view?.cursor ?? 0}`}
-                </span>
-              </summary>
-              <div id="event-log">
-                {events.map(record => (
-                  <details key={record.cursor}>
-                    <summary>
-                      {`#${record.cursor} · ${clip(record.event?.type ?? record.event?.kind ?? '事件', 100)}`}
-                    </summary>
-                    <pre>{recordText(record.event)}</pre>
-                  </details>
-                ))}
-              </div>
-            </details>
-
             <SpotlightCard
               as="form"
               id="prompt-form"
@@ -1648,7 +1795,7 @@ export function CAYWApp({ env } = {}) {
                 <label htmlFor="prompt">发送消息</label>
                 <TooltipBadge
                   label="快捷键 ?"
-                  tip="Enter 换行 · Ctrl / ⌘ + Enter 发送"
+                  tip="Enter 直接发送 · Shift + Enter 换行"
                 />
               </div>
               <textarea
@@ -1679,7 +1826,7 @@ export function CAYWApp({ env } = {}) {
                   if (
                     e.key === 'Enter' &&
                     !e.nativeEvent?.isComposing &&
-                    (e.ctrlKey || e.metaKey)
+                    !e.shiftKey
                   ) {
                     e.preventDefault();
                     if (!sendDisabled) trackAsync(handleSendPrompt(e));
@@ -1707,6 +1854,25 @@ export function CAYWApp({ env } = {}) {
                 </div>
               </div>
             </SpotlightCard>
+
+            <details className="event-details">
+              <summary data-tip="最近 120 条已消费事件；未识别事件按原始记录展示">
+                <span>诊断与事件记录</span>
+                <span id="event-count" className="muted">
+                  {`${events.length} · 游标 ${view?.cursor ?? 0}`}
+                </span>
+              </summary>
+              <div id="event-log">
+                {events.map(record => (
+                  <details key={record.cursor}>
+                    <summary>
+                      {`#${record.cursor} · ${clip(record.event?.type ?? record.event?.kind ?? '事件', 100)}`}
+                    </summary>
+                    <pre>{recordText(record.event)}</pre>
+                  </details>
+                ))}
+              </div>
+            </details>
           </div>
 
           <section
@@ -1779,6 +1945,30 @@ export function CAYWApp({ env } = {}) {
               </button>
             </SpotlightCard>
 
+            <div className="quick-paths">
+              <span className="small muted">常用目录快填：</span>
+              {[
+                ['/Volumes/ORICO/CAYW', 'CAYW 主仓库'],
+                ['/Volumes/ORICO/CAYW-tui', 'CAYW TUI 分支'],
+                ['/Volumes/ORICO/CAYW-webui', 'CAYW WebUI 分支'],
+              ].map(([p, lbl]) => (
+                <button
+                  key={p}
+                  type="button"
+                  className="quiet path-chip"
+                  onClick={() => {
+                    s.projectWorkspaceInput = p;
+                    s.projectLabelInput = lbl;
+                    if (projectWsInputRef.current) projectWsInputRef.current.value = p;
+                    if (projectLabelInputRef.current) projectLabelInputRef.current.value = lbl;
+                    forceRender();
+                  }}
+                >
+                  {`📁 ${lbl}`}
+                </button>
+              ))}
+            </div>
+
             <p id="projects-status" className="small muted" role="status">
               {projectsStatusText}
             </p>
@@ -1797,16 +1987,16 @@ export function CAYWApp({ env } = {}) {
                     <div className="card-header">
                       <strong>{item.label}</strong>
                       <span className="state-label">
-                        {isCurrent ? '当前空间' : item.id}
+                        {isCurrent ? '当前使用中' : '可切换'}
                       </span>
                     </div>
                     <div className="stat-pills">
                       {item.workspace ? (
                         <span
                           className="stat-pill mono"
-                          data-tip={`本地项目目录：${item.workspace}`}
+                          data-tip={`本地项目目录：${item.workspace}（IPC 端点：${item.address}）`}
                         >
-                          {item.workspace}
+                          {`📁 ${item.workspace}`}
                         </span>
                       ) : null}
                       <span
@@ -1817,15 +2007,9 @@ export function CAYWApp({ env } = {}) {
                       </span>
                       <span
                         className="stat-pill"
-                        data-tip={`项目运行状态：${item.statusLabel}`}
+                        data-tip={`项目运行状态：${item.statusLabel}（IPC：${item.address}）`}
                       >
                         {item.statusLabel}
-                      </span>
-                      <span
-                        className="stat-pill mono"
-                        data-tip={`本机 IPC 端点：${item.address}`}
-                      >
-                        {item.address}
                       </span>
                       {item.frozenCount ? (
                         <span className="stat-pill warn">
@@ -1927,16 +2111,25 @@ export function CAYWApp({ env } = {}) {
 
             <div id="plugin-list" className="management-grid">
               {!pluginItems.length ? (
-                <div className="empty">
-                  <div className="empty-heading">
-                    <h2>当前项目暂无插件记录</h2>
-                    <TooltipBadge
-                      className="hint-trigger"
-                      label="?"
-                      tip="当会话绑定 StrongFlow 或其他 plugin，或宿主公开插件能力后，可在此查看版本、状态与关联会话。"
-                    />
-                  </div>
-                </div>
+                OPTIONAL_PLUGIN_CATALOG.map(mod => (
+                  <SpotlightCard
+                    as="article"
+                    key={mod.name}
+                    tilt
+                    border
+                    className="management-card"
+                  >
+                    <div className="card-header">
+                      <strong>{mod.name}</strong>
+                      <span className="state-label">按需插拔</span>
+                    </div>
+                    <div className="stat-pills">
+                      <span className="stat-pill">{mod.role}</span>
+                      <span className="stat-pill">0 个绑定会话</span>
+                    </div>
+                    <p className="small muted card-desc">{mod.desc}</p>
+                  </SpotlightCard>
+                ))
               ) : (
                 pluginItems.map(plugin => {
                   const shortReg =
@@ -2039,6 +2232,45 @@ export function CAYWApp({ env } = {}) {
                   );
                 })
               )}
+            </div>
+
+            <div className="capability-catalog">
+              <div className="section-heading">
+                <div className="title-with-hint">
+                  <h2>工作区内置能力（CodeMode）</h2>
+                  <HintPopover ariaLabel="CodeMode 内置能力说明">
+                    模型通过 Luau 单元调用以下受控能力；每次具体调用都经过宿主参数校验、权限审批与结果配对。
+                  </HintPopover>
+                </div>
+                <span className="small muted">
+                  {s.cachedCapabilities.length
+                    ? `已加载 ${s.cachedCapabilities.length} 项宿主能力`
+                    : '共 4 组预置工作区能力'}
+                </span>
+              </div>
+              <div className="management-grid">
+                {BUILTIN_CAPABILITY_GROUPS.map(group => (
+                  <SpotlightCard
+                    as="article"
+                    key={group.title}
+                    border
+                    className="management-card capability-card"
+                  >
+                    <div className="card-header">
+                      <strong>{group.title}</strong>
+                      <span className="state-label">{group.badge}</span>
+                    </div>
+                    <div className="capability-items">
+                      {group.items.map(([code, desc]) => (
+                        <div key={code} className="capability-row">
+                          <code className="inline-code">{code}</code>
+                          <span className="small muted">{desc}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </SpotlightCard>
+                ))}
+              </div>
             </div>
           </section>
         </main>

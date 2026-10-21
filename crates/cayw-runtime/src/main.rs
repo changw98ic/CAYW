@@ -82,10 +82,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
         let key = std::env::var("CAYW_PROVIDER_API_KEY")
             .map_err(|_| "CAYW_PROVIDER_API_KEY is required")?;
         let id = std::env::var("CAYW_MODEL").map_err(|_| "CAYW_MODEL is required")?;
-        (
-            Arc::new(OpenAiProvider::new(base, key)?),
-            Model::new("openai-chat", id),
-        )
+        let mut model = Model::new("openai-chat", id);
+        model.max_output_tokens = Some(4096);
+        (Arc::new(OpenAiProvider::new(base, key)?), model)
     };
     let mut config = RuntimeConfig::default();
     if demo_authorized {
@@ -111,6 +110,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     });
     let mut ipc = ServerConfig::new(token);
     ipc.request_timeout = std::time::Duration::from_secs(360);
+    ipc.frame_timeout = std::time::Duration::from_secs(360);
     serve(listener, Arc::new(runtime), ipc, shutdown).await?;
     Ok(())
 }
