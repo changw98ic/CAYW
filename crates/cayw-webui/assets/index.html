@@ -26,9 +26,13 @@
     <aside class="sidebar" aria-labelledby="sessions-heading">
       <nav class="page-nav" aria-label="界面视图">
         <button id="nav-conversation" class="page-tab" type="button" aria-current="true">会话</button>
-        <button id="nav-projects" class="page-tab" type="button" aria-current="false">项目管理</button>
+        <button id="nav-projects" class="page-tab" type="button" aria-current="false">项目空间</button>
         <button id="nav-plugins" class="page-tab" type="button" aria-current="false">插件管理</button>
       </nav>
+      <button id="current-workspace-btn" class="workspace-switcher bits-spotlight" type="button" data-tip="点击切换或管理本地项目空间">
+        <span class="small muted">当前项目空间</span>
+        <strong id="current-workspace-label">默认项目空间</strong>
+      </button>
       <details id="session-picker" class="session-picker" open>
       <summary class="session-picker-summary"><span>会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
       <div class="session-picker-content">
@@ -40,15 +44,13 @@
             <div class="hint-bubble">对话保存在本机。断线后从已消费游标继续接收结果，消息不会自动重发。</div>
           </details>
         </div>
-        <button id="refresh-sessions" class="quiet" type="button">刷新</button>
+        <div class="session-actions">
+          <button id="refresh-sessions" class="quiet" type="button">刷新</button>
+          <button id="create-button" class="create-btn" type="button" aria-label="新建会话">+ 新建会话</button>
+        </div>
       </div>
-      <form id="create-form" class="create-form">
-        <label for="session-label" class="small">新会话名称</label>
-        <div class="create-row"><input id="session-label" type="text" maxlength="160" required placeholder="今天想做什么？"><button id="create-button" type="submit" aria-label="创建会话">新建</button></div>
-      </form>
       <p id="list-status" class="small muted" role="status"></p>
       <nav id="session-list" class="session-list" aria-label="选择会话"></nav>
-      <details class="capabilities"><summary data-tip="按需读取当前宿主公开的工具目录">宿主能力</summary><button id="refresh-capabilities" class="quiet" type="button">读取能力</button><pre id="capability-content" class="small muted"></pre></details>
       </div>
       </details>
     </aside>
@@ -87,17 +89,22 @@
       <section id="projects-page" class="management-page" hidden aria-labelledby="projects-heading">
         <div class="conversation-heading">
           <div>
-            <p class="eyebrow bits-shiny">多项目管理</p>
+            <p class="eyebrow bits-shiny">项目空间管理</p>
             <div class="title-with-hint">
-              <h1 id="projects-heading" class="bits-gradient-text">本机项目</h1>
+              <h1 id="projects-heading" class="bits-gradient-text">本地项目空间</h1>
               <details class="hint-popover">
-                <summary class="hint-trigger" aria-label="多项目管理说明">?</summary>
-                <div class="hint-bubble">切换当前本机轻网关接入的多个 Runtime 项目；各项目会话、事件游标与未确认请求锁相互独立。多设备管理暂不提供。</div>
+                <summary class="hint-trigger" aria-label="项目空间管理说明">?</summary>
+                <div class="hint-bubble">添加、切换或移除本地项目工作目录；各项目空间的会话列表、事件游标与未确认请求锁相互独立。</div>
               </details>
             </div>
           </div>
-          <button id="refresh-projects" class="secondary" type="button">刷新项目</button>
+          <button id="refresh-projects" class="secondary" type="button">刷新空间</button>
         </div>
+        <form id="add-project-form" class="project-add-bar bits-spotlight bits-border">
+          <input id="project-workspace-input" type="text" maxlength="1024" required placeholder="输入本地项目目录路径，例如 /Volumes/ORICO/CAYW">
+          <input id="project-label-input" type="text" maxlength="160" placeholder="空间名称（可选，默认取目录名）">
+          <button id="add-project-button" type="submit">+ 添加项目空间</button>
+        </form>
         <p id="projects-status" class="small muted" role="status"></p>
         <div id="project-list" class="management-grid"></div>
       </section>

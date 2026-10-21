@@ -13,7 +13,13 @@ use axum::{
 use cayw_ipc::{Client, ClientConfig, ClientError};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{fmt, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt, io,
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +30,8 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
     "projects.list",
+    "projects.create",
+    "projects.remove",
     "session.create",
     "session.list",
     "session.get",
@@ -95,6 +103,7 @@ impl GatewayLimits {
 /// Explicit host credentials stay exclusively on the gateway. Each HTTP call
 /// gets its own IPC connection, so a dropped prompt cannot cancel event reads.
 /// Opening a connection never repeats a previous call.
+#[derive(Clone)]
 pub struct IpcEndpoint {
     address: SocketAddr,
     token: String,
@@ -136,9 +145,11 @@ impl fmt::Debug for IpcEndpoint {
 }
 
 /// Named local runtime project served by the loopback gateway.
+#[derive(Clone)]
 pub struct ProjectEndpoint {
     id: String,
     label: String,
+    workspace: Option<String>,
     ipc: IpcEndpoint,
 }
 
@@ -169,8 +180,22 @@ impl ProjectEndpoint {
         Ok(Self {
             id,
             label: trimmed_label.to_owned(),
+            workspace: None,
             ipc,
         })
+    }
+
+    pub fn with_workspace(mut self, workspace: impl Into<String>) -> io::Result<Self> {
+        let ws = workspace.into();
+        let trimmed = ws.trim();
+        if trimmed.is_empty() || trimmed.len() > 1024 || trimmed.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "workspace requires 1..1024 characters without control characters",
+            ));
+        }
+        self.workspace = Some(trimmed.to_owned());
+        Ok(self)
     }
 
     pub fn id(&self) -> &str {
@@ -179,6 +204,10 @@ impl ProjectEndpoint {
 
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    pub fn workspace(&self) -> Option<&str> {
+        self.workspace.as_deref()
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -191,13 +220,15 @@ impl fmt::Debug for ProjectEndpoint {
         f.debug_struct("ProjectEndpoint")
             .field("id", &self.id)
             .field("label", &self.label)
+            .field("workspace", &self.workspace)
             .field("ipc", &self.ipc)
             .finish()
     }
 }
 
 struct Gateway {
-    projects: Vec<ProjectEndpoint>,
+    projects: RwLock<Vec<ProjectEndpoint>>,
+    session_projects: RwLock<HashMap<String, String>>,
     authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
@@ -263,7 +294,8 @@ pub async fn serve_projects_with_limits(
     }
     limits.validate()?;
     let state = Arc::new(Gateway {
-        projects,
+        projects: RwLock::new(projects),
+        session_projects: RwLock::new(HashMap::new()),
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
@@ -442,20 +474,6 @@ async fn rpc(
             false,
         );
     }
-    let project = match request.project.as_deref() {
-        None => &state.projects[0],
-        Some(id) => {
-            let Some(project) = state.projects.iter().find(|project| project.id == id) else {
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_params",
-                    "Unknown project id",
-                    false,
-                );
-            };
-            project
-        }
-    };
     let prompt = request.method == "session.prompt";
     let _prompt_pending = if prompt {
         match state.pending_prompts.try_acquire() {
@@ -501,21 +519,40 @@ async fn rpc(
                 false,
             );
         }
-        let list: Vec<Value> = state
-            .projects
-            .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                json!({
-                    "id": item.id,
-                    "label": item.label,
-                    "address": item.ipc.address.to_string(),
-                    "default": index == 0,
-                })
-            })
-            .collect();
+        let list = project_list_json(&state);
         return Json(json!({ "result": list })).into_response();
     }
+    if request.method == "projects.create" {
+        return handle_projects_create(&state, &request.params);
+    }
+    if request.method == "projects.remove" {
+        return handle_projects_remove(&state, &request.params);
+    }
+    let (project, shares_earlier_ipc) = {
+        let projects = state
+            .projects
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let index = match request.project.as_deref() {
+            None => 0,
+            Some(id) => {
+                let Some(pos) = projects.iter().position(|project| project.id == id) else {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_params",
+                        "Unknown project id",
+                        false,
+                    );
+                };
+                pos
+            }
+        };
+        let item = projects[index].clone();
+        let shares_earlier = projects[..index]
+            .iter()
+            .any(|earlier| earlier.ipc.address == item.ipc.address);
+        (item, shares_earlier)
+    };
     let budget = if prompt {
         state.limits.prompt_timeout
     } else {
@@ -528,26 +565,240 @@ async fn rpc(
             Err(error) => return upstream_error(&state, error),
         }
     };
+    let method_name = request.method.clone();
     // The outer deadline drops this connection's request guard; no other HTTP
     // request shares the connection or can lose its event response as a result.
     tokio::select! {
         biased;
-        _ = state.cancel.cancelled() => shutting_down(side_effecting(&request.method)),
+        _ = state.cancel.cancelled() => shutting_down(side_effecting(&method_name)),
         result = timeout(budget, client.request(&request.method, request.params)) => match result {
-            Ok(Ok(result)) => {
+            Ok(Ok(mut result)) => {
                 // Successful RPC data is a protocol value, never diagnostic
                 // text. Reject an accidental credential disclosure as a whole
                 // rather than rewriting keys, ids, statuses or user content.
                 if contains_credential(&result, &state) {
-                    error_response(StatusCode::BAD_GATEWAY, "credential_in_result", "Runtime result contained a gateway credential and was withheld; inspect session events before taking further action", side_effecting(&request.method))
+                    error_response(StatusCode::BAD_GATEWAY, "credential_in_result", "Runtime result contained a gateway credential and was withheld; inspect session events before taking further action", side_effecting(&method_name))
                 } else {
+                    if matches!(method_name.as_str(), "session.create" | "session.fork")
+                        && let Some(session_id) = result.get("id").and_then(Value::as_str)
+                    {
+                        state
+                            .session_projects
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(session_id.to_owned(), project.id.clone());
+                    } else if method_name == "session.list"
+                        && let Some(items) = result.as_array_mut()
+                    {
+                        let map = state
+                            .session_projects
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if !map.is_empty() || shares_earlier_ipc {
+                            items.retain(|session| {
+                                let Some(sid) = session.get("id").and_then(Value::as_str) else {
+                                    return true;
+                                };
+                                match map.get(sid) {
+                                    Some(owner) => owner == &project.id,
+                                    None => !shares_earlier_ipc,
+                                }
+                            });
+                        }
+                    }
                     Json(json!({"result":result})).into_response()
                 }
             },
             Ok(Err(error)) => upstream_error(&state, error),
-            Err(_) => error_response(StatusCode::GATEWAY_TIMEOUT, "request_timeout", "Runtime request timed out; check session events before taking further action", side_effecting(&request.method)),
+            Err(_) => error_response(StatusCode::GATEWAY_TIMEOUT, "request_timeout", "Runtime request timed out; check session events before taking further action", side_effecting(&method_name)),
         }
     }
+}
+
+fn project_list_json(state: &Gateway) -> Vec<Value> {
+    let projects = state
+        .projects
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    projects
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            json!({
+                "id": item.id,
+                "label": item.label,
+                "workspace": item.workspace,
+                "address": item.ipc.address.to_string(),
+                "default": index == 0,
+            })
+        })
+        .collect()
+}
+
+fn derive_project_id(raw: &str, existing: &[ProjectEndpoint]) -> String {
+    let mut slug = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if (ch == '-' || ch == '_') && !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() >= 40 {
+            break;
+        }
+    }
+    let base = slug.trim_matches('-');
+    let base = if base.is_empty() || base == "default" {
+        "workspace"
+    } else {
+        base
+    };
+    if !existing.iter().any(|p| p.id == base) {
+        return base.to_owned();
+    }
+    for n in 2..=64 {
+        let candidate = format!("{base}-{n}");
+        if !existing.iter().any(|p| p.id == candidate) {
+            return candidate;
+        }
+    }
+    format!("workspace-{}", existing.len() + 1)
+}
+
+fn handle_projects_create(state: &Gateway, params: &Value) -> Response {
+    let Some(workspace_raw) = params.get("workspace").and_then(Value::as_str) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "projects.create requires a workspace path string",
+            false,
+        );
+    };
+    let workspace = workspace_raw.trim();
+    if workspace.is_empty() || workspace.len() > 1024 || workspace.chars().any(char::is_control) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "workspace path must be 1..1024 characters without control characters",
+            false,
+        );
+    }
+    let inferred_label = workspace
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(workspace);
+    let label = params
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(inferred_label);
+    let mut projects = state
+        .projects
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if projects.len() >= 32 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "Maximum of 32 local project workspaces reached",
+            false,
+        );
+    }
+    if projects
+        .iter()
+        .any(|p| p.workspace.as_deref() == Some(workspace))
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "该本地项目路径已存在于项目空间列表中",
+            false,
+        );
+    }
+    let requested_id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let id = match requested_id {
+        Some(explicit) => {
+            if projects.iter().any(|p| p.id == explicit) {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_params",
+                    "Project id already exists",
+                    false,
+                );
+            }
+            explicit.to_owned()
+        }
+        None => derive_project_id(inferred_label, &projects),
+    };
+    let ipc = projects[0].ipc.clone();
+    let endpoint = match ProjectEndpoint::new(id, label, ipc)
+        .and_then(|p| p.with_workspace(workspace.to_owned()))
+    {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_params",
+                "Invalid project id, label or workspace path",
+                false,
+            );
+        }
+    };
+    let created = json!({
+        "id": endpoint.id,
+        "label": endpoint.label,
+        "workspace": endpoint.workspace,
+        "address": endpoint.ipc.address.to_string(),
+        "default": false,
+    });
+    projects.push(endpoint);
+    Json(json!({ "result": created })).into_response()
+}
+
+fn handle_projects_remove(state: &Gateway, params: &Value) -> Response {
+    let Some(id) = params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "projects.remove requires a project id",
+            false,
+        );
+    };
+    let mut projects = state
+        .projects
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(index) = projects.iter().position(|p| p.id == id) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "Unknown project id",
+            false,
+        );
+    };
+    if index == 0 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "默认项目空间不能移除",
+            false,
+        );
+    }
+    projects.remove(index);
+    drop(projects);
+    Json(json!({ "result": project_list_json(state) })).into_response()
 }
 
 fn side_effecting(method: &str) -> bool {
@@ -559,7 +810,11 @@ fn side_effecting(method: &str) -> bool {
 
 fn redact(text: &str, state: &Gateway) -> String {
     let mut out = text.to_owned();
-    for project in &state.projects {
+    let projects = state
+        .projects
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for project in projects.iter() {
         out = out.replace(&project.ipc.token, "[redacted]");
     }
     out
@@ -568,6 +823,8 @@ fn redact(text: &str, state: &Gateway) -> String {
 fn contains_token(text: &str, state: &Gateway) -> bool {
     state
         .projects
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|project| text.contains(&project.ipc.token))
 }

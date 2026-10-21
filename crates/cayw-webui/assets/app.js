@@ -359,6 +359,7 @@ export function summarizeProjects(projects = [], projectSessions = {}, projectVi
     return {
       id,
       label: clip(project.label || id, 160),
+      workspace: clip(project.workspace || '', 240),
       address: clip(project.address || '本机 loopback IPC', 120),
       default: Boolean(project.default ?? index === 0),
       sessionCount: sessions.length,
@@ -447,13 +448,15 @@ async function boot() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
     'workspace', 'reconnect', 'connection-status',
+    'current-workspace-btn', 'current-workspace-label',
     'nav-conversation', 'nav-projects', 'nav-plugins', 'conversation-view', 'projects-page', 'plugins-page',
+    'add-project-form', 'project-workspace-input', 'project-label-input', 'add-project-button',
     'refresh-projects', 'projects-status', 'project-list', 'refresh-plugins', 'plugins-status', 'plugin-list',
-    'create-form', 'session-label', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
+    'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
-    'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork', 'refresh-capabilities', 'capability-content',
+    'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork',
   ].map(id => [id, $(id)]));
   let loginGeneration = 0;
   let selected = null;
@@ -463,10 +466,11 @@ async function boot() {
   let approvalPending = new Set();
   let activePage = 'conversation';
   let activeProject = null;
-  let projects = [{ id: 'default', label: '默认项目', address: '本机 IPC', default: true }];
+  let projects = [{ id: 'default', label: '默认项目空间', workspace: '', address: '本机 IPC', default: true }];
   let projectStates = new Map();
   let cachedCapabilities = [];
   let openPluginHints = new Set();
+  let sessionTitleOverrides = new Map();
   let selectionGeneration = 0;
   let listGeneration = 0;
   let timer;
@@ -577,7 +581,6 @@ async function boot() {
       renderView();
       await refreshSessions();
       if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
-      else if (ui['session-label']) ui['session-label'].focus();
     } catch (error) {
       if (login !== loginGeneration) return;
       ui['connection-status'].textContent = '未连接本机';
@@ -604,13 +607,13 @@ async function boot() {
 
   function renderSessionList() {
     const fragment = document.createDocumentFragment();
-    if (!sessions.length) fragment.append(el('p', 'small muted', '暂无会话。新建一个即可开始。'));
+    if (!sessions.length) fragment.append(el('p', 'small muted', '暂无会话，点击上方“+ 新建会话”即可开始。'));
     for (const session of sessions) {
       const button = el('button', 'session-item bits-spotlight');
       button.type = 'button';
       button.setAttribute('aria-current', String(session.id === selected));
       const shortId = String(session.id ?? '').slice(0, 8);
-      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${shortId}`));
+      button.append(el('strong', '', displayLabel(session)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${shortId}`));
       button.addEventListener('click', () => selectSession(session.id));
       fragment.append(button);
     }
@@ -689,8 +692,8 @@ async function boot() {
   function renderView() {
     const view = activeView();
     const snapshot = view?.snapshot;
-    ui['session-title'].textContent = clip(snapshot?.label || (selected ? '正在读取会话…' : '选择或创建会话'), 160);
-    ui['session-picker-label'].textContent = clip(snapshot?.label || '选择或新建', 60);
+    ui['session-title'].textContent = snapshot ? displayLabel(snapshot) : (selected ? '正在读取会话…' : '点击左侧“+ 新建会话”开始');
+    ui['session-picker-label'].textContent = clip(snapshot ? displayLabel(snapshot) : '选择或新建', 60);
     ui['session-state'].textContent = snapshot ? stateLabel(snapshot, view) : '等待选择';
     const attention = snapshot && (unresolved(snapshot) || view?.faults.reconciliation || frozen(snapshot, view) || view?.writes.some(write => write.phase === 'uncertain') || !['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot)));
     ui['blocked-text'].textContent = attention ? sessionBlocked(snapshot, view) : '';
@@ -734,6 +737,18 @@ async function boot() {
     const sessionMap = Object.fromEntries([...projectStates.entries()].map(([id, state]) => [id, state.sessions]));
     const viewMap = Object.fromEntries([...projectStates.entries()].map(([id, state]) => [id, state.views]));
     const summaries = summarizeProjects(projects, sessionMap, viewMap);
+    const currentSummary = summaries.find(item => item.id === currentProjectId()) ?? summaries[0];
+    if (ui['current-workspace-label'] && currentSummary) {
+      ui['current-workspace-label'].textContent = currentSummary.label;
+    }
+    if (ui['current-workspace-btn'] && currentSummary) {
+      ui['current-workspace-btn'].setAttribute(
+        'data-tip',
+        currentSummary.workspace
+          ? `当前目录：${currentSummary.workspace}（点击管理项目空间）`
+          : `点击切换或添加本地项目空间（${currentSummary.address}）`,
+      );
+    }
     const fragment = document.createDocumentFragment();
     for (const item of summaries) {
       const card = el('article', 'management-card bits-spotlight bits-tilt bits-border');
@@ -742,9 +757,14 @@ async function boot() {
       const header = el('div', 'card-header');
       header.append(
         el('strong', '', item.label),
-        el('span', 'state-label', isCurrent ? '当前项目' : item.id),
+        el('span', 'state-label', isCurrent ? '当前空间' : item.id),
       );
       const pills = el('div', 'stat-pills');
+      if (item.workspace) {
+        const wsPill = el('span', 'stat-pill mono', item.workspace);
+        wsPill.setAttribute('data-tip', `本地项目目录：${item.workspace}`);
+        pills.append(wsPill);
+      }
       const sessionPill = el('span', 'stat-pill', `${item.sessionCount} 个会话`);
       sessionPill.setAttribute('data-tip', `该项目当前共有 ${item.sessionCount} 个会话`);
       const statusPill = el('span', 'stat-pill', item.statusLabel);
@@ -763,16 +783,29 @@ async function boot() {
         pills,
       );
       const actions = el('div', 'approval-actions');
-      const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看该项目会话' : '切换到此项目');
+      const button = el('button', isCurrent ? 'secondary' : '', isCurrent ? '查看空间会话' : '切换到此空间');
       button.type = 'button';
       button.addEventListener('click', () => selectProject(item.id));
       actions.append(button);
+      const newSessionBtn = el('button', 'secondary', '+ 在此空间新建会话');
+      newSessionBtn.type = 'button';
+      newSessionBtn.addEventListener('click', async () => {
+        await selectProject(item.id);
+        await createNewSession();
+      });
+      actions.append(newSessionBtn);
+      if (!item.default) {
+        const removeBtn = el('button', 'secondary deny', '移除');
+        removeBtn.type = 'button';
+        removeBtn.addEventListener('click', () => removeProject(item.id));
+        actions.append(removeBtn);
+      }
       card.append(actions);
       fragment.append(card);
     }
     ui['project-list'].replaceChildren(fragment);
     if (ui['projects-status']) {
-      ui['projects-status'].textContent = `共 ${summaries.length} 个本机项目 · 当前项目：${summaries.find(item => item.id === currentProjectId())?.label ?? currentProjectId()}`;
+      ui['projects-status'].textContent = `共 ${summaries.length} 个本机项目空间 · 当前空间：${currentSummary?.label ?? currentProjectId()}`;
     }
   }
 
@@ -919,7 +952,6 @@ async function boot() {
       if (login !== loginGeneration) return;
       if (Array.isArray(capabilities)) {
         cachedCapabilities = capabilities;
-        if (ui['capability-content']) ui['capability-content'].textContent = recordText(capabilities);
       }
       renderPluginsPage();
     } catch (error) {
@@ -1211,28 +1243,38 @@ async function boot() {
 
   if (ui['reconnect']) ui['reconnect'].addEventListener('click', () => connectLocal());
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
-  ui['create-form'].addEventListener('submit', async event => {
-    event.preventDefault();
-    if (ui['create-button'].disabled || !ui['session-label'].value.trim()) return;
-    const login = loginGeneration;
-    ui['create-button'].disabled = true;
-    ui['create-button'].textContent = '创建中…';
-    report(null);
-    try {
-      const snapshot = await rpc('session.create', { label: ui['session-label'].value.trim() });
-      if (login !== loginGeneration) return;
-      const view = applySnapshot(createView(snapshot.id), snapshot, true);
-      rememberView(view);
-      ui['session-label'].value = '';
-      updateSessionSummary(snapshot);
-      await selectSession(snapshot.id);
-    } catch (error) {
-      if (login === loginGeneration) handleError(error);
-    } finally {
-      ui['create-button'].disabled = false;
-      ui['create-button'].textContent = '新建';
-    }
-  });
+  if (ui['create-button']) ui['create-button'].addEventListener('click', createNewSession);
+  if (ui['current-workspace-btn']) ui['current-workspace-btn'].addEventListener('click', () => switchPage('projects'));
+  if (ui['add-project-form']) {
+    ui['add-project-form'].addEventListener('submit', async event => {
+      event.preventDefault();
+      const ws = ui['project-workspace-input']?.value.trim() ?? '';
+      const label = ui['project-label-input']?.value.trim() ?? '';
+      if (!ws || ui['add-project-button']?.disabled) return;
+      const login = loginGeneration;
+      ui['add-project-button'].disabled = true;
+      ui['add-project-button'].textContent = '添加中…';
+      report(null);
+      try {
+        const created = await rpc('projects.create', label ? { workspace: ws, label } : { workspace: ws });
+        if (login !== loginGeneration) return;
+        if (ui['project-workspace-input']) ui['project-workspace-input'].value = '';
+        if (ui['project-label-input']) ui['project-label-input'].value = '';
+        await refreshProjects();
+        if (created?.id) renderProjectsPage();
+      } catch (error) {
+        if (login === loginGeneration) {
+          if (ui['projects-status']) ui['projects-status'].textContent = errorText(error);
+          handleError(error);
+        }
+      } finally {
+        if (ui['add-project-button']) {
+          ui['add-project-button'].disabled = false;
+          ui['add-project-button'].textContent = '+ 添加项目空间';
+        }
+      }
+    });
+  }
 
   ui['prompt'].addEventListener('input', renderComposer);
   ui['prompt'].addEventListener('keydown', event => {
@@ -1246,6 +1288,10 @@ async function boot() {
     if (ui['send-button'].disabled || !selected) return;
     const id = selected;
     const text = ui['prompt'].value.trim();
+    const currentSnap = views.get(id)?.snapshot;
+    if (currentSnap && /^新会话(\s+\d+)?$/.test(currentSnap.label || '') && !sessionTitleOverrides.has(id)) {
+      sessionTitleOverrides.set(id, clip(text.replace(/\s+/g, ' '), 36));
+    }
     const login = loginGeneration;
     const requestedAfter = views.get(id)?.cursor ?? 0;
     const requestedEpoch = views.get(id)?.proofEpoch ?? 0;
@@ -1338,24 +1384,6 @@ async function boot() {
     }
   });
 
-  ui['refresh-capabilities'].addEventListener('click', async () => {
-    const login = loginGeneration;
-    ui['refresh-capabilities'].disabled = true;
-    ui['capability-content'].textContent = '正在读取…';
-    try {
-      const capabilities = await rpc('capabilities.list');
-      if (login === loginGeneration) {
-        if (Array.isArray(capabilities)) cachedCapabilities = capabilities;
-        ui['capability-content'].textContent = recordText(capabilities);
-        renderPluginsPage();
-      }
-    } catch (error) {
-      if (login === loginGeneration) {
-        ui['capability-content'].textContent = errorText(error);
-      }
-    } finally { ui['refresh-capabilities'].disabled = false; }
-  });
-
   if (ui['nav-conversation']) ui['nav-conversation'].addEventListener('click', () => switchPage('conversation'));
   if (ui['nav-projects']) ui['nav-projects'].addEventListener('click', () => switchPage('projects'));
   if (ui['nav-plugins']) ui['nav-plugins'].addEventListener('click', () => switchPage('plugins'));
@@ -1417,6 +1445,55 @@ async function boot() {
   });
   window.addEventListener('online', () => { if (selected) schedulePoll(0); });
   window.addEventListener('pagehide', () => { for (const controller of controllers) controller.abort(); });
+  const displayLabel = sessionOrSnap => {
+    const id = sessionOrSnap?.id;
+    if (id && sessionTitleOverrides.has(id)) return sessionTitleOverrides.get(id);
+    return clip(sessionOrSnap?.label || '新会话', 160);
+  };
+  async function removeProject(projectId) {
+    const login = loginGeneration;
+    try {
+      const list = await rpc('projects.remove', { id: projectId });
+      if (login !== loginGeneration) return;
+      projectStates.delete(projectId);
+      if (Array.isArray(list) && list.length) projects = list;
+      if (currentProjectId() === projectId) {
+        await selectProject(projects[0]?.id ?? 'default');
+      }
+      renderProjectsPage();
+    } catch (error) {
+      if (login === loginGeneration) {
+        if (ui['projects-status']) ui['projects-status'].textContent = errorText(error);
+        handleError(error);
+      }
+    }
+  }
+
+  async function createNewSession() {
+    if (!ui['create-button'] || ui['create-button'].disabled) return;
+    const login = loginGeneration;
+    ui['create-button'].disabled = true;
+    ui['create-button'].textContent = '创建中…';
+    report(null);
+    try {
+      const label = `新会话 ${sessions.length + 1}`;
+      const snapshot = await rpc('session.create', { label });
+      if (login !== loginGeneration) return;
+      const view = applySnapshot(createView(snapshot.id), snapshot, true);
+      rememberView(view);
+      updateSessionSummary(snapshot);
+      switchPage('conversation');
+      await selectSession(snapshot.id);
+      if (ui['prompt'] && !ui['prompt'].disabled) ui['prompt'].focus();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    } finally {
+      if (ui['create-button']) {
+        ui['create-button'].disabled = false;
+        ui['create-button'].textContent = '+ 新建会话';
+      }
+    }
+  }
   await connectLocal();
 }
 

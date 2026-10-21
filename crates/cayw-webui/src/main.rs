@@ -115,17 +115,33 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     )?;
     let default_client = IpcEndpoint::new(config.ipc_addr, config.ipc_token.clone())
         .map_err(|_| "本机 IPC 地址或令牌无效".to_owned())?;
-    let mut projects = vec![
-        ProjectEndpoint::new("default", "默认项目", default_client)
-            .map_err(|_| "默认项目配置无效".to_owned())?,
-    ];
+    let default_ws = env::var("CAYW_WORKSPACE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| env::current_dir().ok().map(|p| p.display().to_string()));
+    let mut default_project = ProjectEndpoint::new("default", "默认项目空间", default_client)
+        .map_err(|_| "默认项目配置无效".to_owned())?;
+    if let Some(ws) = default_ws
+        && let Ok(with_ws) = default_project.clone().with_workspace(ws)
+    {
+        default_project = with_ws;
+    }
+    let mut projects = vec![default_project];
     for (id, label, addr) in config.extra_projects {
         let endpoint = IpcEndpoint::new(addr, config.ipc_token.clone())
             .map_err(|_| "项目 IPC 地址或令牌无效".to_owned())?;
-        projects.push(
-            ProjectEndpoint::new(id, label, endpoint)
-                .map_err(|_| "项目名称或 ID 无效".to_owned())?,
-        );
+        let (clean_label, ws_opt) = match label.split_once('|') {
+            Some((l, w)) => (l.to_owned(), Some(w.to_owned())),
+            None => (label, None),
+        };
+        let mut proj = ProjectEndpoint::new(id, clean_label, endpoint)
+            .map_err(|_| "项目名称或 ID 无效".to_owned())?;
+        if let Some(ws) = ws_opt {
+            proj = proj
+                .with_workspace(ws)
+                .map_err(|_| "项目路径无效".to_owned())?;
+        }
+        projects.push(proj);
     }
     let listener = TcpListener::bind(config.web_addr)
         .await
