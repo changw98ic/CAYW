@@ -1655,12 +1655,15 @@ fn collect_value_entry(
     if !path.is_empty()
         && let Some(content) = value["content"].as_str()
     {
-        files.push(FileEntry {
-            path: clip_text(path, 240),
-            action: value["action"].as_str().unwrap_or("file").into(),
-            status: status.into(),
-            preview: clip_text(content, MAX_PREVIEW_BYTES),
-        });
+        let clean_path = clip_text(path, 240);
+        if !files.iter().any(|existing| existing.path == clean_path) {
+            files.push(FileEntry {
+                path: clean_path,
+                action: value["action"].as_str().unwrap_or("file").into(),
+                status: status.into(),
+                preview: format_numbered_lines(content),
+            });
+        }
     }
 }
 

@@ -466,7 +466,15 @@ fn chat_message_summary(message: &serde_json::Value) -> String {
         }
         return raw;
     }
-    message_text(message)
+    let raw = message_text(message);
+    if let Some(json_part) = raw.strip_prefix("Offline fixture: ")
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_part.trim())
+        && parsed["cell_id"].is_string()
+        && let Some(status) = parsed["status"].as_str().filter(|s| !s.is_empty())
+    {
+        return format!("Offline fixture ({status}) · see Alt+2 Files / Alt+3 Diff / Alt+4 Logs");
+    }
+    raw
 }
 
 fn append(lines: &mut Vec<Line<'static>>, text: &str, width: u16, color: Color) {
