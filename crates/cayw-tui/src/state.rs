@@ -778,10 +778,17 @@ impl App {
                 }
             }
             next.event(event, cursor > next.snapshot_cursor)?;
-            push_log(
-                &mut next.logs,
-                format_event_log(cursor, record.get("attempt"), event),
-            );
+            let is_delta = event["type"] == "agent"
+                && matches!(
+                    event["event"]["type"].as_str(),
+                    Some("message_update" | "tool_execution_update")
+                );
+            if !is_delta {
+                push_log(
+                    &mut next.logs,
+                    format_event_log(cursor, record.get("attempt"), event),
+                );
+            }
             if !next.synced {
                 next.refresh_after = Some(next.refresh_after.unwrap_or(0).max(cursor));
             }
