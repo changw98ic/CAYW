@@ -5,6 +5,8 @@
 ## plugin 注册
 
 - `PluginManifest` 声明名称、版本、协议版本、Native / External 类型、工具参数和逐工具权限。`PluginContext::new` 的能力与权限只能由宿主提供，默认不授权。
+- 外部 plugin 的名称或工具若已被占用，注册会直接拒绝，进程不会启动。正在握手的注册也会占住名称和工具，失败或取消后立刻放开。
+- Native plugin 跟着编译开关走，换版本必须重新编译，不能在运行中换进同一份程序。External plugin 停掉或版本对不上时，已经绑定的会话保持冻结；只有明确确认后才能分出新的普通会话。没加载的能力会在原来的那次调用上返回明确错误，不会转成设备命令。进程隔离不是安全沙箱，这套接口还不能称为稳定。
 - `Plugin` 是可信 Rust 实现的异步调用接口。`PluginRegistry::load_native`、`load_external`、`describe`、`list`、`call`、`unload` 提供实际注册和执行。plugin 名称和工具名称均拒绝冲突；参数不做隐式转换；schema 外部引用不可读取文件或访问网络。
 - 每次调用取得 plugin 代际快照；卸载取消旧代际中的请求，返回结果前再次检查代际。注册表不持锁等待 plugin 代码，不同 plugin 可以并行运行。同一个 External plugin 顺序处理协议请求。
 - plugin 返回的 JSON 仅是数据，不会变成权限或用户审批。宿主必须保持这条边界；恶意 Native Rust 代码和 External 进程本身都不能靠此库获得安全隔离。

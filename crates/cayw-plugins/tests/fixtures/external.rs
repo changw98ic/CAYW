@@ -7,6 +7,12 @@ use std::io::{BufRead, Write};
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "echo".into());
+    // Write before handshake so a rejected registration can prove the process
+    // never started. handshake_hang only writes when a test passes a path.
+    if mode == "record_pid" || (mode == "handshake_hang" && std::env::args().nth(2).is_some()) {
+        let path = std::env::args().nth(2).expect("pid path");
+        std::fs::write(path, std::process::id().to_string()).expect("pid");
+    }
     if mode == "descendant" {
         std::thread::sleep(std::time::Duration::from_secs(300));
         return;

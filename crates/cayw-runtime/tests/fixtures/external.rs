@@ -51,6 +51,17 @@ fn main() {
         if mode == "call-exit" {
             std::process::exit(7)
         }
+        if mode == "touch" {
+            std::fs::write(std::env::args().nth(2).expect("marker"), b"called").unwrap();
+        }
+        if mode == "hang" {
+            std::fs::write(
+                std::env::args().nth(2).expect("marker"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(300));
+        }
         emit(ExternalMessage::Response {
             request_id,
             result: ExternalResult::Ok {

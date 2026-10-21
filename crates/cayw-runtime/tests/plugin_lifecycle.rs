@@ -414,3 +414,316 @@ mod strongflow {
         );
     }
 }
+
+fn settled_calls(rt: &Runtime, id: &str) -> Vec<cayw_core::CapabilityCallRecord> {
+    rt.events(id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match record.event {
+            CoreEvent::CapabilitySettled { call } => Some(call),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stopped_external_plugin_keeps_the_session_frozen_until_a_confirmed_fork() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("workspace")).unwrap();
+    let mut config = RuntimeConfig::default();
+    config.permissions = vec![
+        ScopedPermission::exact(
+            "fs.write",
+            json!({"path":"cayw-demo.txt","content":"headless runtime demo"}),
+        ),
+        ScopedPermission::exact("fs.read", json!({"path":"cayw-demo.txt"})),
+    ];
+    let rt = Runtime::open(
+        dir.path().join("sessions.db"),
+        dir.path().join("workspace"),
+        Arc::new(Script(
+            "cayw.call('fs.write', {path='cayw-demo.txt', content='headless runtime demo'})\nlocal result = cayw.call('fs.read', {path='cayw-demo.txt'})\nreturn result",
+        )),
+        Model::new("fixture", "lifecycle"),
+        config,
+    )
+    .unwrap();
+    rt.load_external(
+        external("idle-exit", &dir.path().join("unused")),
+        PluginContext::new(["process.echo".into()], []),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    rt.bind_plugin(&id, "process").unwrap();
+    rt.unload_plugin("process").unwrap();
+    let view = rt
+        .call(
+            "session.get",
+            json!({"session_id":id}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(view["frozen"], true);
+    assert!(
+        view["binding"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unloaded")
+    );
+    assert!(matches!(
+        rt.prompt(&id, "blocked", CancellationToken::new()).await,
+        Err(RuntimeError::Frozen(_))
+    ));
+    assert!(rt.fork(&id, "unconfirmed", false).is_err());
+    let wrong = external("idle-exit", &dir.path().join("other"));
+    let mut mismatched = wrong;
+    mismatched.expected_manifest.version = "2.0.0".into();
+    assert!(
+        rt.load_external(
+            mismatched,
+            PluginContext::default(),
+            CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    rt.load_external(
+        external("idle-exit", &dir.path().join("again")),
+        PluginContext::new(["process.echo".into()], []),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(rt.get(&id).unwrap().frozen);
+    let fork = rt.fork(&id, "ordinary", true).unwrap();
+    assert_ne!(fork.id, id);
+    assert!(fork.binding.is_none());
+    let result = rt
+        .prompt(&fork.id, "ordinary fork", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.state, SessionState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("workspace/cayw-demo.txt")).unwrap(),
+        "headless runtime demo"
+    );
+    assert!(matches!(
+        rt.prompt(&id, "source stays frozen", CancellationToken::new())
+            .await,
+        Err(RuntimeError::Frozen(_))
+    ));
+}
+
+#[tokio::test]
+async fn missing_external_capability_fails_on_the_original_call_without_a_process() {
+    use cayw_ai::Message;
+    use cayw_core::ExecutionOutcome;
+    let dir = tempfile::tempdir().unwrap();
+    let rt = runtime(&dir, "return cayw.call('process.echo',{})", None);
+    let id = rt.create(None).unwrap().id;
+    let view = rt
+        .prompt(&id, "missing capability", CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!view.frozen);
+    assert!(view.unresolved_calls.is_empty());
+    assert!(rt.list_plugins().is_empty());
+    let execution = view
+        .executions
+        .iter()
+        .find(|execution| execution.parent_call_id == "plugin-3")
+        .expect("the original model call must own the failed execution");
+    assert!(matches!(
+        &execution.terminal,
+        Some(ExecutionOutcome::Failed { error }) if error.contains("Unknown capability: process.echo")
+    ));
+    let tool = view
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_call_id == "plugin-3" => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    assert!(tool.is_error);
+    assert!(!tool.outcome_unknown);
+    assert_eq!(
+        tool.structured_content.as_ref().unwrap()["error"],
+        "UnknownCapability: Unknown capability: process.echo"
+    );
+}
+
+#[tokio::test]
+async fn unauthorized_external_call_does_not_start_work_and_keeps_the_call_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("called");
+    let rt = runtime(&dir, "return cayw.call('process.echo',{})", None);
+    rt.load_external(
+        external("touch", &marker),
+        PluginContext::new(["process.echo".into()], []),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    rt.bind_plugin(&id, "process").unwrap();
+    rt.prompt(&id, "denied", CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!marker.exists());
+    let call = settled_calls(&rt, &id)
+        .into_iter()
+        .find(|call| call.name == "process.echo")
+        .unwrap();
+    assert!(call.parent_call_id.starts_with("plugin-"));
+    assert!(matches!(
+        call.outcome,
+        Some(
+            cayw_core::CapabilityOutcome::Failed { .. }
+                | cayw_core::CapabilityOutcome::NotExecuted { .. }
+        )
+    ));
+}
+
+#[tokio::test]
+async fn external_call_over_the_capability_budget_stays_on_the_original_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = RuntimeConfig {
+        permissions: vec![ScopedPermission::exact("process.echo", json!({}))],
+        max_capability_calls: 1,
+        ..Default::default()
+    };
+    let rt = Runtime::open(
+        dir.path().join("sessions.db"),
+        dir.path(),
+        Arc::new(Script(
+            "cayw.call('process.echo',{}); return cayw.call('process.echo',{})",
+        )),
+        Model::new("fixture", "lifecycle"),
+        config,
+    )
+    .unwrap();
+    rt.load_external(
+        external("echo", &dir.path().join("unused")),
+        PluginContext::new(["process.echo".into()], []),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    rt.bind_plugin(&id, "process").unwrap();
+    let _ = rt
+        .prompt(&id, "over budget", CancellationToken::new())
+        .await;
+    let calls = settled_calls(&rt, &id);
+    let limited = calls.iter().find(|call| {
+        call.name == "process.echo"
+            && call.parent_call_id.starts_with("plugin-")
+            && matches!(
+                &call.outcome,
+                Some(cayw_core::CapabilityOutcome::Failed { error } | cayw_core::CapabilityOutcome::NotExecuted { reason: error })
+                if error.contains("budget") || error.contains("capability count")
+            )
+    });
+    assert!(limited.is_some(), "{calls:?}");
+}
+
+#[tokio::test]
+async fn cancelled_and_crashed_external_calls_remain_tied_to_the_original_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pid");
+    let rt = runtime(
+        &dir,
+        "return cayw.call('process.echo',{})",
+        Some("process.echo"),
+    );
+    rt.load_external(
+        external("hang", &marker),
+        PluginContext::new(["process.echo".into()], []),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    rt.bind_plugin(&id, "process").unwrap();
+    let running = {
+        let rt = rt.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            rt.prompt(&id, "cancel the plugin call", CancellationToken::new())
+                .await
+        })
+    };
+    let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(value) = tokio::fs::read_to_string(&marker).await
+                && let Ok(pid) = value.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(rt.cancel(&id).unwrap());
+    let _ = running.await.unwrap();
+    let call = settled_calls(&rt, &id)
+        .into_iter()
+        .find(|call| call.name == "process.echo")
+        .unwrap();
+    assert!(call.parent_call_id.starts_with("plugin-"));
+    assert!(matches!(
+        call.outcome,
+        Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
+    ));
+    #[cfg(unix)]
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let alive = std::process::Command::new("/bin/ps")
+                .args(["-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            if !String::from_utf8_lossy(&alive.stdout).contains(&pid.to_string()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled plugin process stayed alive"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+    let crashed = runtime(
+        &dir,
+        "return cayw.call('process.echo',{})",
+        Some("process.echo"),
+    );
+    crashed
+        .load_external(
+            external("call-exit", &dir.path().join("unused")),
+            PluginContext::new(["process.echo".into()], []),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let crash_id = crashed.create(None).unwrap().id;
+    crashed.bind_plugin(&crash_id, "process").unwrap();
+    crashed
+        .prompt(&crash_id, "crash", CancellationToken::new())
+        .await
+        .unwrap();
+    let crash = settled_calls(&crashed, &crash_id)
+        .into_iter()
+        .find(|call| call.name == "process.echo")
+        .unwrap();
+    assert!(crash.parent_call_id.starts_with("plugin-"));
+    assert!(matches!(
+        crash.outcome,
+        Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
+    ));
+}

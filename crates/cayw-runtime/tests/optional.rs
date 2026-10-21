@@ -176,3 +176,41 @@ async fn ordinary_chat_opens_without_optional_plugins_or_relay() {
     token.cancel();
     assert!(rt.prompt(&id, "cancel before model", token).await.is_err());
 }
+
+#[cfg(not(feature = "plugins"))]
+#[tokio::test]
+async fn ordinary_chat_completes_when_native_plugins_are_not_compiled() {
+    use cayw_runtime::ScopedPermission;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("workspace")).unwrap();
+    let config = RuntimeConfig {
+        permissions: vec![
+            ScopedPermission::exact(
+                "fs.write",
+                json!({"path":"cayw-demo.txt","content":"headless runtime demo"}),
+            ),
+            ScopedPermission::exact("fs.read", json!({"path":"cayw-demo.txt"})),
+        ],
+        ..Default::default()
+    };
+    let rt = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(OfflineProvider::default()),
+        Model::new("fixture", "optional"),
+        config,
+    )
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    let result = rt
+        .prompt(&id, "ordinary chat", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.state, cayw_core::SessionState::Idle);
+    assert!(result.binding.is_none());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("workspace/cayw-demo.txt")).unwrap(),
+        "headless runtime demo"
+    );
+}

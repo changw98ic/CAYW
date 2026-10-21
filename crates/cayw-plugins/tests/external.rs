@@ -675,6 +675,132 @@ async fn own_process_timeout_is_terminal() {
     ));
 }
 
+fn recording_config(name: &str, capability: &str, pid: &std::path::Path) -> ExternalConfig {
+    ExternalConfig::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_cayw-plugin-fixture")),
+        vec!["record_pid".into(), pid.to_str().unwrap().into()],
+        PluginManifest {
+            name: name.into(),
+            version: "1.0.0".into(),
+            protocol_version: PLUGIN_PROTOCOL_VERSION,
+            kind: PluginKind::External,
+            capabilities: vec![ToolDefinition {
+                name: capability.into(),
+                description: "Echo offline JSON".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            permissions: Default::default(),
+        },
+    )
+}
+
+fn native_echo() -> PluginManifest {
+    let mut manifest = config("echo").expected_manifest;
+    manifest.kind = PluginKind::Native;
+    manifest
+}
+
+#[tokio::test]
+async fn rejected_duplicate_external_load_does_not_start_the_process() {
+    let registry = load("echo").await;
+    for (name, capability) in [("fixture", "fixture.echo"), ("other", "fixture.echo")] {
+        let pid_path = marker();
+        let error = registry
+            .load_external(
+                recording_config(name, capability, &pid_path),
+                context(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PluginError::Conflict(_)),
+            "{name} {error:?}"
+        );
+        assert!(!error.outcome_unknown());
+        assert!(
+            !pid_path.exists(),
+            "{name} started a process after registration was already impossible"
+        );
+    }
+    assert_eq!(registry.list().len(), 1);
+}
+
+struct NativeEcho {
+    manifest: PluginManifest,
+}
+#[async_trait]
+impl Plugin for NativeEcho {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+    async fn call(
+        &self,
+        _method: &str,
+        arguments: serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<serde_json::Value, PluginError> {
+        Ok(arguments)
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn in_flight_external_load_reserves_its_name_and_capabilities() {
+    let registry = Arc::new(PluginRegistry::new());
+    let pid_path = marker();
+    let mut configuration = config("handshake_hang");
+    configuration.argv.push(pid_path.to_str().unwrap().into());
+    configuration.handshake_timeout = Duration::from_secs(20);
+    let cancel = CancellationToken::new();
+    let loading = {
+        let registry = registry.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            registry
+                .load_external(configuration, context(), cancel)
+                .await
+        })
+    };
+    let pid = wait_started(&pid_path).await;
+    assert!(registry.list().is_empty());
+    let error = registry
+        .load_native(
+            Arc::new(NativeEcho {
+                manifest: native_echo(),
+            }),
+            context(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, PluginError::Conflict(_)), "{error:?}");
+    let mut other = native_echo();
+    other.name = "other".into();
+    let error = registry
+        .load_native(Arc::new(NativeEcho { manifest: other }), context())
+        .unwrap_err();
+    assert!(
+        matches!(error, PluginError::Conflict(ref message) if message.contains("capability")),
+        "{error:?}"
+    );
+    assert!(registry.list().is_empty());
+    cancel.cancel();
+    assert!(matches!(
+        loading.await.unwrap(),
+        Err(PluginError::Cancelled)
+    ));
+    wait_dead(pid).await;
+    registry
+        .load_native(
+            Arc::new(NativeEcho {
+                manifest: native_echo(),
+            }),
+            context(),
+        )
+        .unwrap();
+    assert_eq!(registry.list().len(), 1);
+    let _ = tokio::fs::remove_file(pid_path).await;
+}
+
 static MARKER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn marker() -> PathBuf {
     std::env::temp_dir().join(format!(

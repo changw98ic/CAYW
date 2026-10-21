@@ -1,5 +1,6 @@
 use crate::*;
 use cayw_ai::ArgumentValidator;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,7 +22,30 @@ impl Drop for Entry {
 #[derive(Default)]
 struct State {
     entries: BTreeMap<String, Arc<Entry>>,
+    /// Names claimed before an external process is running. Not visible in list.
+    reservations: BTreeMap<String, BTreeSet<String>>,
     next_generation: u64,
+}
+
+/// Removed on drop unless registration finishes. Keeps the registry lock off the
+/// process handshake.
+struct NameReservation<'a> {
+    registry: &'a PluginRegistry,
+    name: String,
+    active: bool,
+}
+
+impl Drop for NameReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.registry
+                .state
+                .lock()
+                .expect("plugin registry poisoned")
+                .reservations
+                .remove(&self.name);
+        }
+    }
 }
 
 /// Independent plugins can run concurrently. No registry lock is held across
@@ -71,8 +95,64 @@ impl PluginRegistry {
         context: PluginContext,
         cancel: CancellationToken,
     ) -> Result<PluginDescription, PluginError> {
+        // The host already declared the manifest. Reject a known clash before
+        // starting a process, and hold that claim until handshake finishes.
+        let reservation = self.reserve(&config.expected_manifest)?;
         let plugin = ExternalPlugin::spawn(config, cancel).await?;
-        self.insert(Arc::new(plugin), context)
+        self.finish(reservation, Arc::new(plugin), context)
+    }
+
+    fn reserve(&self, manifest: &PluginManifest) -> Result<NameReservation<'_>, PluginError> {
+        if manifest.kind != PluginKind::External {
+            return Err(PluginError::InvalidManifest(
+                "expected external plugin".into(),
+            ));
+        }
+        let capabilities = validate_manifest(manifest)?.into_keys().collect();
+        let mut state = self.state.lock().expect("plugin registry poisoned");
+        admit(&state, &manifest.name, &capabilities, None)?;
+        state
+            .reservations
+            .insert(manifest.name.clone(), capabilities);
+        Ok(NameReservation {
+            registry: self,
+            name: manifest.name.clone(),
+            active: true,
+        })
+    }
+
+    fn finish(
+        &self,
+        mut reservation: NameReservation<'_>,
+        plugin: Arc<dyn Plugin>,
+        context: PluginContext,
+    ) -> Result<PluginDescription, PluginError> {
+        let manifest = plugin.manifest().clone();
+        if manifest.name != reservation.name || manifest.kind != PluginKind::External {
+            return Err(PluginError::Protocol(
+                "handshake manifest differs from host declaration".into(),
+            ));
+        }
+        let validators = validate_manifest(&manifest)?;
+        let capabilities = validators.keys().cloned().collect();
+        let mut state = self.state.lock().expect("plugin registry poisoned");
+        admit(
+            &state,
+            &manifest.name,
+            &capabilities,
+            Some(reservation.name.as_str()),
+        )?;
+        let description = store(
+            &self.registry_id,
+            &mut state,
+            plugin,
+            manifest,
+            validators,
+            context,
+        )?;
+        state.reservations.remove(&reservation.name);
+        reservation.active = false;
+        Ok(description)
     }
 
     fn insert(
@@ -82,40 +162,17 @@ impl PluginRegistry {
     ) -> Result<PluginDescription, PluginError> {
         let manifest = plugin.manifest().clone();
         let validators = validate_manifest(&manifest)?;
+        let capabilities = validators.keys().cloned().collect();
         let mut state = self.state.lock().expect("plugin registry poisoned");
-        if state.entries.contains_key(&manifest.name) {
-            return Err(PluginError::Conflict(manifest.name));
-        }
-        for other in state.entries.values() {
-            if let Some(name) = validators
-                .keys()
-                .find(|name| other.validators.contains_key(*name))
-            {
-                return Err(PluginError::Conflict(format!("capability {name}")));
-            }
-        }
-        state.next_generation = state
-            .next_generation
-            .checked_add(1)
-            .ok_or_else(|| PluginError::Unavailable("generation exhausted".into()))?;
-        let generation = state.next_generation;
-        let description = PluginDescription {
-            manifest: manifest.clone(),
-            registry_id: self.registry_id.clone(),
-            generation,
-        };
-        state.entries.insert(
-            manifest.name.clone(),
-            Arc::new(Entry {
-                plugin,
-                manifest,
-                validators,
-                context,
-                generation,
-                cancel: CancellationToken::new(),
-            }),
-        );
-        Ok(description)
+        admit(&state, &manifest.name, &capabilities, None)?;
+        store(
+            &self.registry_id,
+            &mut state,
+            plugin,
+            manifest,
+            validators,
+            context,
+        )
     }
 
     pub fn describe(&self, name: &str) -> Result<PluginDescription, PluginError> {
@@ -325,6 +382,62 @@ impl Drop for PluginRegistry {
             entry.plugin.shutdown();
         }
     }
+}
+
+fn admit(
+    state: &State,
+    name: &str,
+    capabilities: &BTreeSet<String>,
+    own_reservation: Option<&str>,
+) -> Result<(), PluginError> {
+    let name_reserved = state.reservations.contains_key(name) && own_reservation != Some(name);
+    if state.entries.contains_key(name) || name_reserved {
+        return Err(PluginError::Conflict(name.into()));
+    }
+    if let Some(capability) = capabilities.iter().find(|capability| {
+        state
+            .entries
+            .values()
+            .any(|entry| entry.validators.contains_key(*capability))
+            || state.reservations.iter().any(|(reserved_name, reserved)| {
+                own_reservation != Some(reserved_name.as_str()) && reserved.contains(*capability)
+            })
+    }) {
+        return Err(PluginError::Conflict(format!("capability {capability}")));
+    }
+    Ok(())
+}
+
+fn store(
+    registry_id: &str,
+    state: &mut State,
+    plugin: Arc<dyn Plugin>,
+    manifest: PluginManifest,
+    validators: BTreeMap<String, ArgumentValidator>,
+    context: PluginContext,
+) -> Result<PluginDescription, PluginError> {
+    state.next_generation = state
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| PluginError::Unavailable("generation exhausted".into()))?;
+    let generation = state.next_generation;
+    let description = PluginDescription {
+        manifest: manifest.clone(),
+        registry_id: registry_id.to_owned(),
+        generation,
+    };
+    state.entries.insert(
+        manifest.name.clone(),
+        Arc::new(Entry {
+            plugin,
+            manifest,
+            validators,
+            context,
+            generation,
+            cancel: CancellationToken::new(),
+        }),
+    );
+    Ok(description)
 }
 
 pub(crate) fn validate_manifest(
