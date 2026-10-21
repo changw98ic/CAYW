@@ -136,6 +136,7 @@ impl Command {
 pub enum Dialog {
     Create(Editor),
     Fork { session_id: String, label: String },
+    Help,
 }
 
 #[derive(Clone, Debug)]
@@ -912,6 +913,15 @@ impl App {
         if self.dialog.is_some() {
             return self.dialog_key(key);
         }
+        if key.code == KeyCode::F(1)
+            || (alt && matches!(key.code, KeyCode::Char('h' | '/' | '?')))
+            || (self.focus != Focus::Composer
+                && key.code == KeyCode::Char('?')
+                && key.modifiers.is_empty())
+        {
+            self.dialog = Some(Dialog::Help);
+            return vec![];
+        }
         if ctrl {
             match key.code {
                 KeyCode::Char('r') => return vec![Command::Reconnect],
@@ -1046,7 +1056,7 @@ impl App {
     pub fn paste(&mut self, text: &str) {
         match &mut self.dialog {
             Some(Dialog::Create(editor)) => editor.insert(&text.replace(['\r', '\n'], " ")),
-            Some(Dialog::Fork { .. }) => {}
+            Some(Dialog::Fork { .. } | Dialog::Help) => {}
             None if self.focus == Focus::Composer => self.input.insert(text),
             None => {}
         }
@@ -1120,6 +1130,14 @@ impl App {
             return vec![];
         }
         match dialog {
+            Dialog::Help => {
+                if !matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Char('q' | '?') | KeyCode::F(1)
+                ) {
+                    self.dialog = Some(Dialog::Help);
+                }
+            }
             Dialog::Fork { session_id, label } => {
                 if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
                     if self.connected

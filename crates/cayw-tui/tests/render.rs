@@ -169,7 +169,7 @@ fn read_only_files_diff_and_logs_views_render_projected_data_and_preserve_unknow
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(files_text.contains("Files (1) [read-only]"));
+    assert!(files_text.contains("Files (1)"));
     assert!(files_text.contains("src/lib.rs"));
     assert!(files_text.contains("pub fn ready() {}"));
 
@@ -187,7 +187,7 @@ fn read_only_files_diff_and_logs_views_render_projected_data_and_preserve_unknow
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(diff_text.contains("Diff (1) [read-only]"));
+    assert!(diff_text.contains("Diff (1)"));
     assert!(diff_text.contains("-fn old() {}"));
     assert!(diff_text.contains("+pub fn ready() {}"));
 
@@ -204,8 +204,61 @@ fn read_only_files_diff_and_logs_views_render_projected_data_and_preserve_unknow
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(logs_text.contains("Logs (3) [read-only]"));
+    assert!(logs_text.contains("Logs (3)"));
     assert!(logs_text.contains("cell cell-1"));
     assert!(logs_text.contains("attempt_started"));
     assert!(logs_text.contains("attempt_finished"));
+}
+
+#[test]
+fn frozen_binding_renders_compact_summary_and_f1_opens_interactive_help_dialog() {
+    let mut app = App::default();
+    app.set_connected();
+    app.upsert_snapshot(
+        json!({
+            "id": "s1",
+            "label": "flow",
+            "cursor": 0,
+            "state": "idle",
+            "frozen": true,
+            "binding": {
+                "plugin": "strongflow",
+                "version": "1.0.0",
+                "registry_id": "f4d8cc10-9530-4536-ac3c-1cf08e8d980d",
+                "generation": 1,
+                "manifest": {"capabilities": [{"name": "strongflow.plan", "description": "raw_manifest_noise"}]},
+                "frozen": true,
+                "reason": "host unloaded plugin",
+                "workflow_state": null
+            },
+            "messages": [],
+            "pending_approvals": [],
+            "unresolved_calls": []
+        }),
+        true,
+    )
+    .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| draw(frame, &app)).unwrap();
+    let chat_text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(chat_text.contains("Session frozen (strongflow: host unloaded plugin)"));
+    assert!(!chat_text.contains("raw_manifest_noise"));
+
+    app.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    terminal.draw(|frame| draw(frame, &app)).unwrap();
+    let help_text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(help_text.contains("Help & Shortcuts"));
+    assert!(help_text.contains("Esc / Enter / ? close"));
 }
