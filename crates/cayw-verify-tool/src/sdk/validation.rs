@@ -75,6 +75,57 @@ pub(crate) fn validate_recorded_sample(report: &ScenarioReport, root: &Path) -> 
         if report.status == "passed" && !sample.semantic_passed {
             return Err("Luau task does not satisfy its recorded result".into());
         }
+        let workspace: Value = serde_json::from_slice(&attachment(
+            root,
+            report.artifacts["workspace"]["path"]
+                .as_str()
+                .ok_or("Luau workspace snapshot absent")?,
+        )?)?;
+        if workspace["before"] != sample.workspace_before
+            || workspace["after"] != sample.workspace_after
+            || workspace["host_before"] != sample.workspace_host_before
+            || workspace["host_after"] != sample.workspace_host_after
+        {
+            return Err("Luau workspace snapshot differs from original execution".into());
+        }
+        let mut expected_files = BTreeSet::new();
+        for (index, entry) in sample
+            .workspace_after
+            .as_array()
+            .ok_or("Luau workspace after absent")?
+            .iter()
+            .enumerate()
+        {
+            if entry["kind"] == "file" {
+                let key = format!("workspace_{index}");
+                expected_files.insert(key.clone());
+                let name = entry["path"]
+                    .as_str()
+                    .ok_or("Luau workspace filename absent")?;
+                if report.artifacts[&key]["path"] != format!("workspace/{name}") {
+                    return Err("Luau result file attachment absent or unrelated".into());
+                }
+                let bytes = attachment(root, report.artifacts[&key]["path"].as_str().unwrap())?;
+                if entry["bytes"] != bytes.len()
+                    || entry["sha256"] != sha256(&bytes)
+                    || entry["content"].as_str().map(str::as_bytes) != Some(bytes.as_slice())
+                {
+                    return Err("Luau actual file bytes differ from original result".into());
+                }
+            }
+        }
+        if report
+            .artifacts
+            .as_object()
+            .ok_or("Luau artifacts absent")?
+            .keys()
+            .filter(|name| name.starts_with("workspace_"))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != expected_files
+        {
+            return Err("Luau workspace attachment set differs from original files".into());
+        }
         return Ok(());
     }
     if super::BuiltinScenario::parse(&report.scenario).is_err() {

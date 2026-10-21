@@ -1,5 +1,5 @@
 use crate::{
-    cases::{Case, PIPELINE_CONTENT, REPAIR_CONTENT},
+    cases::{BEFORE_LIMIT, Case, NUMBERS, PIPELINE_CONTENT, REPAIR_CONTENT},
     fixtures::{
         AuditEvent, BlockingFixture, BlockingObservation, FixtureAudit, FixtureGate,
         PermissionRecord, SOURCE, lock,
@@ -7,7 +7,9 @@ use crate::{
     measurement::{ProcessPeakRss, elapsed_ns, process_peak_rss, sha256},
 };
 use cayw_ai::CancellationToken;
-use cayw_codemode::{CallStatus, CodeMode, CodeModeError, ErrorKind, ExecutionReport, Limits};
+use cayw_codemode::{
+    CallStatus, CapabilityHost, CodeMode, CodeModeError, ErrorKind, ExecutionReport, Limits,
+};
 use cayw_host::{Host, HostConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -57,6 +59,11 @@ pub struct Sample {
     pub config: Value,
     pub workspace: String,
     pub audit_path: String,
+    pub host_signatures: Value,
+    pub workspace_before: Value,
+    pub workspace_after: Value,
+    pub workspace_host_before: Value,
+    pub workspace_host_after: Value,
     pub execution_status: String,
     pub error: Option<RecordedError>,
     pub report: ExecutionReport,
@@ -66,6 +73,7 @@ pub struct Sample {
     pub audit_events: Vec<AuditEvent>,
     pub warmup: Option<ExecutionReport>,
     pub cancellation: Option<BlockingObservation>,
+    pub caller_cancelled_after: Option<bool>,
     pub repair: Option<RepairPair>,
     pub timing: Timings,
     pub process_peak_rss: Option<ProcessPeakRss>,
@@ -145,7 +153,7 @@ pub fn config_json(case: Case) -> Value {
                 "syntax_validator":"cayw_workspace::JsonTomlValidator",
             })),
             "git_program":null,"profiles":{},
-            "external":if case == Case::Cancel { json!({"source":SOURCE,"name":"blocking search.query fixture; no network"}) } else { Value::Null },
+            "external":if matches!(case, Case::Cancel | Case::HostTimeout) { json!({"source":SOURCE,"name":"blocking search.query fixture; no network"}) } else { Value::Null },
         },
         "runtime":"tokio current_thread",
         "warmup_script":if case == Case::Warm { Some("return {warmup = true}") } else { None },
@@ -179,16 +187,18 @@ pub fn empty_sample(case: Case, iteration: u32, workspace: &Path, audit_path: &P
         process_id: std::process::id(),
         input: json!({"script_sha256":sha256(script.as_bytes()),"script":script,
         "fixture_files":[],"expected_error":case.expected_error(),
-        "expected_output":match case {
-            Case::Files => json!({"path":"pipeline.txt","content":PIPELINE_CONTENT,"sha256":sha256(PIPELINE_CONTENT.as_bytes())}),
-            Case::SyntaxRepair => json!({"path":"repair.txt","content":REPAIR_CONTENT,"sha256":sha256(REPAIR_CONTENT.as_bytes())}),
-            _ => Value::Null,
-        }}),
+        "expected_output":case.expected_output(),"tool_signatures":case.tool_signatures(),
+        "expected_workspace_before":[],"expected_workspace_after":case.expected_workspace()}),
         permission: json!({"source":SOURCE,"policy":"exact capability plus exact validated arguments; default deny",
             "grants":grants,"product_approval":false}),
         config: config_json(case),
         workspace: workspace.display().to_string(),
         audit_path: audit_path.display().to_string(),
+        host_signatures: Value::Null,
+        workspace_before: Value::Null,
+        workspace_after: Value::Null,
+        workspace_host_before: Value::Null,
+        workspace_host_after: Value::Null,
         execution_status: "not_started".into(),
         error: None,
         report: ExecutionReport::default(),
@@ -198,6 +208,7 @@ pub fn empty_sample(case: Case, iteration: u32, workspace: &Path, audit_path: &P
         audit_events: vec![],
         warmup: None,
         cancellation: None,
+        caller_cancelled_after: None,
         repair,
         timing: Timings::default(),
         process_peak_rss: None,
@@ -206,9 +217,82 @@ pub fn empty_sample(case: Case, iteration: u32, workspace: &Path, audit_path: &P
     }
 }
 
+pub fn workspace_snapshot(workspace: &Path) -> std::io::Result<Value> {
+    fn collect(root: &Path, relative: &Path, rows: &mut Vec<Value>) -> std::io::Result<()> {
+        let mut entries =
+            std::fs::read_dir(root.join(relative))?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if rows.len() >= 32 || relative.components().count() > 3 {
+                return Err(std::io::Error::other(
+                    "offline workspace snapshot exceeds its bound",
+                ));
+            }
+            let path = relative.join(entry.file_name());
+            let name = path
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("offline filename is not UTF-8"))?;
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if metadata.is_dir() {
+                rows.push(json!({"path":name,"kind":"directory"}));
+                collect(root, &path, rows)?;
+            } else if metadata.is_file() && metadata.len() <= 64 * 1024 {
+                let bytes = std::fs::read(entry.path())?;
+                let content = std::str::from_utf8(&bytes).map_err(std::io::Error::other)?;
+                rows.push(json!({"path":name,"kind":"file","content":content,"bytes":bytes.len(),"sha256":sha256(&bytes)}));
+            } else {
+                return Err(std::io::Error::other(
+                    "offline workspace needs bounded regular files and directories",
+                ));
+            }
+        }
+        Ok(())
+    }
+    let mut rows = vec![];
+    collect(workspace, Path::new(""), &mut rows)?;
+    Ok(Value::Array(rows))
+}
+
+pub fn is_host_workspace_entry(entry: &Value) -> bool {
+    entry["path"].as_str().is_some_and(|path| {
+        let first = path.split('/').next().unwrap_or("");
+        matches!(
+            first,
+            ".cayw-host-lock"
+                | ".cayw-host-read-fence"
+                | ".cayw-host-read-state"
+                | ".cayw-host-read-fault"
+                | ".cayw-host-read-faults"
+                | ".cayw-workspace"
+        )
+    })
+}
+
+fn partition_workspace(snapshot: Value) -> (Value, Value) {
+    let (host, task): (Vec<_>, Vec<_>) = snapshot
+        .as_array()
+        .expect("snapshot array")
+        .iter()
+        .cloned()
+        .partition(is_host_workspace_entry);
+    (Value::Array(task), Value::Array(host))
+}
+
 pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: &Path) -> Sample {
     let start = Instant::now();
     let mut sample = empty_sample(case, iteration, workspace, audit_path);
+    sample.workspace_before = match workspace_snapshot(workspace) {
+        Ok(snapshot) => {
+            let (task, host) = partition_workspace(snapshot);
+            sample.workspace_host_before = host;
+            task
+        }
+        Err(error) => {
+            sample.fail("workspace_before", error.to_string());
+            sample.timing.case_total_ns = Some(elapsed_ns(start));
+            return sample;
+        }
+    };
     let gate = Arc::new(FixtureGate {
         grants: case.grants(),
         decisions: Default::default(),
@@ -223,7 +307,7 @@ pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: 
     };
     let blocker = Arc::new(BlockingFixture::default());
     let config = HostConfig {
-        external: (case == Case::Cancel)
+        external: matches!(case, Case::Cancel | Case::HostTimeout)
             .then(|| blocker.clone() as Arc<dyn cayw_host::ExternalHost>),
         ..HostConfig::default()
     };
@@ -238,6 +322,20 @@ pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: 
         }
     };
     sample.timing.host_setup_ns = Some(elapsed_ns(setup));
+    let catalog = host.capabilities();
+    sample.host_signatures = Value::Array(
+        case.signature_names()
+            .iter()
+            .filter_map(|name| {
+                catalog
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .map(|definition| {
+                        serde_json::to_value(definition).expect("serialize actual tool signature")
+                    })
+            })
+            .collect(),
+    );
     let setup = Instant::now();
     let mode = match CodeMode::new(host.clone(), case.limits()) {
         Ok(mode) => mode,
@@ -263,8 +361,8 @@ pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: 
     }
     let script = case.script();
     let execute = Instant::now();
+    let cancel = CancellationToken::new();
     let result = if case == Case::Cancel {
-        let cancel = CancellationToken::new();
         let mut cancel_start = None;
         let future = mode.execute(&script, cancel.clone());
         tokio::pin!(future);
@@ -288,8 +386,9 @@ pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: 
         sample.cancellation = Some(observation);
         result
     } else {
-        mode.execute(&script, CancellationToken::new()).await
+        mode.execute(&script, cancel.clone()).await
     };
+    sample.caller_cancelled_after = Some(cancel.is_cancelled());
     sample.timing.case_execute_ns = Some(elapsed_ns(execute));
     if case != Case::Warm {
         sample.timing.first_execute_ns = sample.timing.case_execute_ns;
@@ -316,6 +415,23 @@ pub async fn run_case(case: Case, iteration: u32, workspace: &Path, audit_path: 
                 message,
             });
             Some(kind)
+        }
+    };
+    if case == Case::HostTimeout {
+        let mut observation = lock(&blocker.state).clone();
+        observation.settled_before_execute_return =
+            audit.events().iter().any(|event| event.event == "settled");
+        sample.cancellation = Some(observation);
+    }
+    sample.workspace_after = match workspace_snapshot(workspace) {
+        Ok(snapshot) => {
+            let (task, host) = partition_workspace(snapshot);
+            sample.workspace_host_after = host;
+            task
+        }
+        Err(error) => {
+            sample.check("workspace_after_observed", false, error.to_string());
+            Value::Null
         }
     };
     sample.permission_decisions = lock(&gate.decisions).clone();
@@ -345,6 +461,37 @@ pub fn revalidate(sample: &mut Sample) -> crate::sdk::Result<()> {
 }
 
 fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
+    let declaration = empty_sample(
+        case,
+        sample.iteration,
+        Path::new("<workspace>"),
+        Path::new("<audit>"),
+    );
+    sample.check("frozen_input_permissions_and_limits", sample.input == declaration.input
+        && sample.permission == declaration.permission && sample.config == declaration.config
+        && sample.source == SOURCE && sample.case == case.name()
+        && sample.iteration > 0 && sample.sample_id == sample_id(case, sample.iteration),
+        "Script, complete finite signatures, inputs, permissions and limits match this executable's fixed case declaration.");
+    sample.check("actual_host_signatures", sample.host_signatures == case.tool_signatures(),
+        "Complete advertised signatures were captured from the same Host passed to CodeMode, and match the frozen finite contract.");
+    sample.check("observed_workspace_effects", sample.workspace_before == json!([])
+        && sample.workspace_after == case.expected_workspace(),
+        "The declared new workspace was read before and after execution; exact file bytes, length and hash match the expected effects, with no later file.");
+    sample.check("host_recovery_records_match_outcome", host_records_match(sample),
+        "Original Host metadata remains separate from task files; any unknown mutation retains its matching durable call identity and arguments.");
+    sample.check("caller_cancellation_observed", sample.caller_cancelled_after == Some(case == Case::Cancel),
+        "The original caller token is read after execute settles: explicit cancellation changes it, while a deadline cancels CodeMode's child without cancelling its caller.");
+    sample.check(
+        "terminal_status_matches_error",
+        sample.execution_status == if kind.is_some() { "error" } else { "success" }
+            && sample.error.is_some() == kind.is_some(),
+        "The returned execution status agrees with the observed terminal error kind.",
+    );
+    sample.check(
+        "payload_stays_within_limit",
+        sample.report.output_bytes <= case.limits().output_bytes,
+        "Recorded shared JSON payload bytes do not exceed the configured hard limit.",
+    );
     sample.check(
         "expected_execution_result",
         kind == case.expected_error(),
@@ -397,7 +544,7 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
         format!("Expected {} actual {decision} decisions in call order, with exact capability and arguments; declared grants alone are not execution evidence.", expected.len()));
 
     let expected_status = match case {
-        Case::Cancel => CallStatus::OutcomeUnknown,
+        Case::Cancel | Case::HostTimeout => CallStatus::OutcomeUnknown,
         Case::GateDenial => CallStatus::Failed,
         _ => CallStatus::Succeeded,
     };
@@ -438,6 +585,19 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
     );
     if case == Case::Cancel {
         validate_cancel(sample);
+    } else if case == Case::HostTimeout {
+        let settled = sample.cancellation.as_ref().is_some_and(|state| {
+            state.entered
+                && state.stopped
+                && !state.active
+                && state.cancellation_observed_on_stop
+                && !state.cancellation_requested_after_entry
+                && state.settled_before_execute_return
+        });
+        sample.check("timeout_started_host_synchronously_settled", settled,
+            "The original pending Host received deadline cancellation and durably settled before execute returned; no explicit cancel was issued by the fixture.");
+        sample.check("timeout_preserves_unknown_effects", sample.report.outcome_unknown && sample.host_outcome_unknown,
+            "The real Host's conservative unknown outcome remains recorded after an interrupted external operation.");
     } else {
         sample.check(
             "known_outcome",
@@ -502,7 +662,128 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
         Case::UnknownCapability | Case::Arguments => sample.check("rejected_before_host",
             sample.audit_events.is_empty() && sample.permission_decisions.is_empty(),
             "The invalid request never reached the Host or its permission gate."),
-        Case::Cancel => {},
+        Case::Calculation => {
+            let read = sample.report.calls.get(1).and_then(|call| call.result.as_ref());
+            sample.check("computed_even_sum", sample.report.return_value == json!({"even_sum":30,"even_count":5,"input_bytes":21})
+                && read.is_some_and(|value| value["content"] == NUMBERS && value["sha256"] == sha256(NUMBERS.as_bytes())),
+                "Luau branches and loops over the real Host file contents; the even values 2+4+6+8+10 independently total 30.");
+        }
+        Case::Signatures => sample.check("vm_descriptions_match_actual_host", sample.report.return_value == sample.host_signatures
+            && sample.report.return_value == case.tool_signatures(),
+            "cayw.describe executed inside this VM returns all four complete frozen file signatures from this Host catalog."),
+        Case::OutputBudget | Case::MemoryBudget | Case::CallBudget => {
+            let written = sample.report.calls.first().and_then(|call| call.result.as_ref());
+            sample.check("completed_file_preserved_after_limit", written.is_some_and(|value| value["sha256"] == sha256(BEFORE_LIMIT.as_bytes()))
+                && sample.report.return_value.is_null(),
+                "The first real write completed with its original SHA-256; the script terminated before a return or later write.");
+            if case == Case::OutputBudget {
+                sample.check("prior_output_retained", sample.report.outputs == vec![json!({"phase":"before_limit"})]
+                    && sample.report.output_bytes > 0,
+                    "The small emit remains; the next 8192-byte string exceeds the 4096-byte shared JSON budget.");
+            } else if case == Case::MemoryBudget {
+                sample.check("allocator_limit_during_execution", sample.input["script"].as_str().is_some_and(|script| script.len() < case.limits().memory_bytes / 4),
+                    "A real Host write preceded the 8 MiB allocation against a 1 MiB VM allocator cap; this is not a pre-compilation source-size rejection. Per-script allocation peak is not measured.");
+            } else {
+                sample.check("third_call_not_dispatched", sample.report.calls.len() == case.limits().host_calls,
+                    "Exactly two calls settled; the advertised and permitted third operation did not reach Host or its permission gate.");
+            }
+        }
+        Case::ActiveTimeout => sample.check("active_deadline_terminal", sample.report.instruction_checkpoints > 0
+            && sample.report.calls.is_empty() && sample.report.return_value.is_null(),
+            "The running CPU loop reached its active deadline with no Host effects; elapsed milliseconds are observations, not pass thresholds."),
+        Case::Cancel | Case::HostTimeout => {},
+    }
+}
+
+fn host_records_match(sample: &Sample) -> bool {
+    for snapshot in [&sample.workspace_host_before, &sample.workspace_host_after] {
+        let Some(entries) = snapshot.as_array() else {
+            return false;
+        };
+        let mut names = std::collections::BTreeSet::new();
+        for entry in entries {
+            let Some(path) = entry["path"].as_str() else {
+                return false;
+            };
+            if !is_host_workspace_entry(entry) || !names.insert(path) {
+                return false;
+            }
+            if entry["kind"] == "directory" {
+                if path != ".cayw-workspace" {
+                    return false;
+                }
+            } else if entry["kind"] == "file" {
+                let Some(content) = entry["content"].as_str() else {
+                    return false;
+                };
+                if entry["bytes"] != content.len() || entry["sha256"] != sha256(content.as_bytes())
+                {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+    let entries = sample.workspace_host_after.as_array().unwrap();
+    let state = match entries
+        .iter()
+        .find(|row| row["path"] == ".cayw-host-read-state")
+    {
+        Some(entry) => match entry["content"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        {
+            Some(state) => Some(state),
+            None => return false,
+        },
+        None => None,
+    };
+    if sample.host_outcome_unknown {
+        let Some(state) = state else { return false };
+        let Some(start) = sample.audit_events.first() else {
+            return false;
+        };
+        let Some(arguments) = start.arguments.as_ref() else {
+            return false;
+        };
+        let pending = &state["pending"];
+        state["version"] == 1
+            && state["reuse_disabled"] == true
+            && state["workspace"].as_str().is_some_and(|s| !s.is_empty())
+            && state["incarnation"].as_str().is_some_and(|s| !s.is_empty())
+            && pending["workspace"] == state["workspace"]
+            && pending["incarnation"] == state["incarnation"]
+            && pending["generation"] == state["generation"]
+            && pending["audit_id"] == start.call_id
+            && start
+                .capability
+                .as_ref()
+                .is_some_and(|name| pending["capability"] == *name)
+            && pending["arguments_sha256"]
+                == format!(
+                    "sha256:{}",
+                    sha256(&serde_json::to_vec(arguments).expect("JSON arguments"))
+                )
+    } else {
+        let completed_writes = sample
+            .report
+            .calls
+            .iter()
+            .filter(|call| call.name == "fs.write" && call.status == CallStatus::Succeeded)
+            .count();
+        if completed_writes == 0 {
+            state.is_none()
+        } else {
+            state.is_some_and(|state| {
+                state["version"] == 1
+                    && state["workspace"].as_str().is_some_and(|s| !s.is_empty())
+                    && state["incarnation"].as_str().is_some_and(|s| !s.is_empty())
+                    && state["generation"] == completed_writes
+                    && state["reuse_disabled"] == false
+                    && state["pending"].is_null()
+            })
+        }
     }
 }
 
@@ -892,66 +1173,7 @@ mod tests {
 
     #[test]
     fn unknown_cancelled_call_still_requires_a_matching_durable_settlement() {
-        // Synthetic validator input, not a measured cancellation result. The CLI
-        // test separately requires the actual runtime to settle before returning.
-        let mut sample = empty_sample(Case::Cancel, 1, Path::new("unused"), Path::new("unused"));
-        let arguments = json!({"query":"cayw-verify-tool.blocking-fixture"});
-        let message = "external capability cancelled after admission";
-        sample.execution_status = "error".into();
-        sample.error = Some(RecordedError {
-            kind: "cancelled".into(),
-            message: "CodeMode execution cancelled".into(),
-        });
-        sample.report.calls.push(cayw_codemode::CapabilityCall {
-            sequence: 1,
-            name: "search.query".into(),
-            arguments: Some(arguments.clone()),
-            status: CallStatus::OutcomeUnknown,
-            result: None,
-            result_omitted: false,
-            error: Some(message.into()),
-        });
-        sample.report.outcome_unknown = true;
-        sample.host_outcome_unknown = true;
-        sample.permission_decisions.push(PermissionRecord {
-            source: SOURCE.into(),
-            capability: "search.query".into(),
-            arguments: arguments.clone(),
-            decision: "fixture_grant".into(),
-        });
-        sample.audit_events = vec![
-            AuditEvent {
-                source: SOURCE.into(),
-                event: "started".into(),
-                call_id: "call-0001".into(),
-                capability: Some("search.query".into()),
-                arguments: Some(arguments),
-                result: None,
-                error: None,
-                outcome_unknown: false,
-            },
-            AuditEvent {
-                source: SOURCE.into(),
-                event: "settled".into(),
-                call_id: "call-0001".into(),
-                capability: None,
-                arguments: None,
-                result: None,
-                error: Some(message.into()),
-                outcome_unknown: true,
-            },
-        ];
-        sample.cancellation = Some(BlockingObservation {
-            source: SOURCE.into(),
-            entered: true,
-            active: false,
-            stopped: true,
-            cancellation_observed_on_stop: true,
-            cancellation_requested_after_entry: true,
-            settled_before_execute_return: true,
-            cancel_to_execute_return_ns: Some(1),
-        });
-        validate(&mut sample, Case::Cancel, Some(ErrorKind::Cancelled));
+        let sample = observed(Case::Cancel);
         assert!(sample.semantic_passed, "{sample:?}");
         type Corruption = (&'static str, fn(&mut Sample));
         let corruptions: &[Corruption] = &[
