@@ -69,6 +69,21 @@ import {
   IconTriangleRightFill14,
 } from './components/DshPrimitives.jsx';
 
+const EVENT_TYPE_LABELS = {
+  session_created: '创建会话',
+  attempt_started: '启动任务尝试',
+  attempt_finished: '任务尝试完成',
+  attempt_recovered: '任务尝试恢复',
+  agent: '模型流式输出',
+  agent_message: '模型回复消息',
+  user_prompt: '用户发送消息',
+  tool_execution_start: '开始执行代码单元',
+  tool_execution_end: '完成执行代码单元',
+  approval_requested: '请求权限审批',
+  approval_decided: '记录审批决定',
+  reconciled: '完成副作用核对',
+};
+
 const CAPABILITY_LABELS = {
   'fs.read': '读取文件',
   'fs.write': '写入文件',
@@ -552,6 +567,114 @@ export function CAYWApp({ env } = {}) {
       pluginSearchQuery: '',
       pluginParamValues: {},
       pluginSavedNotice: '',
+      // MCP & Skills state
+      mcpServers: [
+        {
+          id: 'codegraph',
+          name: 'CodeGraph 代码语义图谱',
+          transport: '本机标准输入输出',
+          endpoint: 'codegraph-mcp --workspace .',
+          status: 'active',
+          statusLabel: '已连接',
+          enabled: true,
+          builtin: true,
+          tools: [
+            { name: 'codegraph.find_symbol', desc: '跨文件查找符号定义与声明位置' },
+            { name: 'codegraph.find_references', desc: '查询符号在工作区内的所有引用与调用点' },
+            { name: 'codegraph.dependencies', desc: '分析模块与文件的依赖关系图' },
+          ],
+        },
+        {
+          id: 'playwright',
+          name: 'Playwright 浏览器自动化',
+          transport: '本机标准输入输出',
+          endpoint: 'playwright-mcp --headless',
+          status: 'active',
+          statusLabel: '已连接',
+          enabled: true,
+          builtin: true,
+          tools: [
+            { name: 'browser_navigate', desc: '打开指定网页地址并等待加载' },
+            { name: 'browser_snapshot', desc: '获取页面无障碍结构快照' },
+            { name: 'browser_take_screenshot', desc: '截取当前视口或完整页面图像' },
+          ],
+        },
+        {
+          id: 'context7',
+          name: 'Context7 库与框架文档',
+          transport: '远程事件流',
+          endpoint: 'https://mcp.context7.com/mcp',
+          status: 'active',
+          statusLabel: '已连接',
+          enabled: true,
+          builtin: true,
+          tools: [
+            { name: 'resolve-library-id', desc: '解析第三方库与框架的标准标识' },
+            { name: 'query-docs', desc: '按版本检索官方文档与代码示例' },
+          ],
+        },
+      ],
+      expandedMcpCards: {},
+      addingMcpOpen: false,
+      newMcpName: '',
+      newMcpTransport: '本机标准输入输出',
+      newMcpEndpoint: '',
+      mcpNotice: '',
+      skillsCatalog: [
+        {
+          name: 'code-review',
+          description: '对照仓库编码规范与任务需求双轴审查代码改动。',
+          source: '通用技能库',
+          path: '~/.agents/skills/code-review/SKILL.md',
+        },
+        {
+          name: 'diagnosing-bugs',
+          description: '针对疑难故障与性能回退的系统化定位与复现流程。',
+          source: '通用技能库',
+          path: '~/.agents/skills/diagnosing-bugs/SKILL.md',
+        },
+        {
+          name: 'tdd',
+          description: '测试驱动开发（红-绿-重构）与集成测试验证工作流。',
+          source: '通用技能库',
+          path: '~/.agents/skills/tdd/SKILL.md',
+        },
+        {
+          name: 'api-contract-review',
+          description: '审查接口契约、参数校验、错误码、分页与幂等性边界。',
+          source: '用户技能库',
+          path: '~/.codex/skills/api-contract-review/SKILL.md',
+        },
+      ],
+      skillsLoaded: false,
+      expandedSkillCards: {},
+      skillDetailsMap: {},
+      skillSearchQuery: '',
+      addingSkillOpen: false,
+      newSkillName: '',
+      newSkillDesc: '',
+      newSkillContent: '',
+      skillNotice: '',
+      // Composer Slash Trigger, Plus Menu, Plan, Goal, Todo, Attachments
+      composerAddMenuOpen: false,
+      slashMenuOpen: false,
+      slashFilter: '',
+      planModeActive: false,
+      goalBarOpen: false,
+      goalEditing: false,
+      sessionGoal: '',
+      goalDraft: '',
+      todoPanelOpen: false,
+      attachedItems: [],
+      // Conversation Header Utilities, Trajectory & Details Drawer
+      conversationSubTab: 'chat',
+      trajectoryFilter: 'all',
+      trajectoryEventsBySession: new Map(),
+      jobsMenuOpen: false,
+      workflowMenuOpen: false,
+      contextMeterOpen: false,
+      detailsDrawerOpen: false,
+      selectedDetailItem: null,
       // DSH Permission Preset & Grants state
       permissionPreset: 'workspace-write',
       permissionPopoverOpen: false,
@@ -1282,6 +1405,65 @@ export function CAYWApp({ env } = {}) {
     }
   };
 
+  const refreshSkillsCatalog = async () => {
+    try {
+      const res = await rpc('skills.catalog', {});
+      if (Array.isArray(res) && res.length) {
+        s.skillsCatalog = res;
+        s.skillsLoaded = true;
+        forceRender();
+      }
+    } catch {
+      // Retain fallback catalog in offline/mock tests
+    }
+  };
+
+  const loadSkillDetail = async skillName => {
+    if (s.skillDetailsMap[skillName]) return;
+    try {
+      const res = await rpc('skills.catalog', { name: skillName });
+      if (Array.isArray(res)) {
+        const found = res.find(item => item.name === skillName);
+        if (found?.content) {
+          s.skillDetailsMap[skillName] = found.content;
+          forceRender();
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  };
+
+  const refreshMcpCatalog = async () => {
+    try {
+      const res = await rpc('mcp.catalog', {});
+      if (Array.isArray(res) && res.length) {
+        const custom = s.mcpServers.filter(item => !item.builtin);
+        s.mcpServers = [...res, ...custom];
+        forceRender();
+      }
+    } catch {
+      // Retain default MCP catalog
+    }
+  };
+
+  const loadTrajectoryHistory = async (sessionId = s.selected) => {
+    if (!sessionId) return;
+    try {
+      const records = await rpc('session.events', {
+        session_id: sessionId,
+        after: 0,
+        limit: 100,
+      });
+      if (Array.isArray(records) && records.length) {
+        s.trajectoryEventsBySession.set(sessionId, records);
+        forceRender();
+      }
+    } catch {
+      // Ignore
+    }
+  };
+
   const openSettings = (tab = 'general') => {
     s.settingsTab = tab;
     s.settingsOpen = true;
@@ -1292,6 +1474,10 @@ export function CAYWApp({ env } = {}) {
       void refreshPlugins();
     } else if (tab === 'models' && s.projects.length === 1 && s.projects[0]?.address === '本机 IPC') {
       void refreshProjects();
+    } else if (tab === 'skills' && !s.skillsLoaded) {
+      void refreshSkillsCatalog();
+    } else if (tab === 'mcp') {
+      void refreshMcpCatalog();
     }
   };
 
@@ -2258,6 +2444,182 @@ export function CAYWApp({ env } = {}) {
                   >
                     {currentAgentPresetObj.name}
                   </span>
+
+                  {/* Official DSH JobListAction (QsffPG_*) */}
+                  <div className="QsffPG_root">
+                    <button
+                      type="button"
+                      className="QsffPG_trigger"
+                      onClick={() => {
+                        s.jobsMenuOpen = !s.jobsMenuOpen;
+                        s.workflowMenuOpen = false;
+                        s.contextMeterOpen = false;
+                        forceRender();
+                      }}
+                    >
+                      <StateDot
+                        state={busy ? 'running' : 'done'}
+                        className="QsffPG_triggerDot"
+                      />
+                      <span className="QsffPG_count">
+                        {`执行记录 (${messages.filter(m => m.role === 'toolResult').length})`}
+                      </span>
+                      <IconChevronDownOutline14
+                        size={12}
+                        className={clsx(s.jobsMenuOpen && 'QsffPG_triggerOpen')}
+                      />
+                    </button>
+                    {s.jobsMenuOpen ? (
+                      <ul className="QsffPG_menu" role="menu">
+                        {messages.filter(m => m.role === 'toolResult').length ===
+                        0 ? (
+                          <li className="QsffPG_row QsffPG_rowSettled">
+                            当前会话暂无代码或工具执行记录
+                          </li>
+                        ) : (
+                          messages
+                            .filter(m => m.role === 'toolResult')
+                            .map((m, idx) => {
+                              const pres = messagePresentation(m);
+                              return (
+                                <li
+                                  key={idx}
+                                  className="QsffPG_row"
+                                  style={{ cursor: 'pointer' }}
+                                  onClick={() => {
+                                    s.jobsMenuOpen = false;
+                                    s.selectedDetailItem = {
+                                      title: pres.title || '执行记录',
+                                      body: recordText(m),
+                                    };
+                                    s.detailsDrawerOpen = true;
+                                    forceRender();
+                                  }}
+                                >
+                                  <StateDot
+                                    state={
+                                      pres.status === 'failed'
+                                        ? 'error'
+                                        : 'done'
+                                    }
+                                    className="QsffPG_rowDot"
+                                  />
+                                  <span className="QsffPG_kind">代码单元</span>
+                                  <span className="QsffPG_label">
+                                    {pres.title || '执行完成'}
+                                  </span>
+                                  <span className="QsffPG_status">查看详情</span>
+                                </li>
+                              );
+                            })
+                        )}
+                      </ul>
+                    ) : null}
+                  </div>
+
+                  {/* Official DSH SubagentCatalogAction / Workflow & Fork Menu (h8S2Va_*) */}
+                  <div className="h8S2Va_root">
+                    <button
+                      type="button"
+                      className="h8S2Va_trigger"
+                      onClick={() => {
+                        s.workflowMenuOpen = !s.workflowMenuOpen;
+                        s.jobsMenuOpen = false;
+                        s.contextMeterOpen = false;
+                        forceRender();
+                      }}
+                    >
+                      <span className="h8S2Va_count">工作流与分支</span>
+                      <IconChevronDownOutline14
+                        size={12}
+                        className={clsx(
+                          s.workflowMenuOpen && 'h8S2Va_triggerOpen',
+                        )}
+                      />
+                    </button>
+                    {s.workflowMenuOpen ? (
+                      <div className="h8S2Va_menu" role="menu">
+                        <div
+                          className="h8S2Va_row"
+                          onClick={() => {
+                            s.workflowMenuOpen = false;
+                            s.goalBarOpen = true;
+                            s.goalEditing = true;
+                            s.goalDraft = s.sessionGoal;
+                            forceRender();
+                          }}
+                        >
+                          <div className="h8S2Va_clickarea">
+                            <StateDot state="done" />
+                            <div className="h8S2Va_content">
+                              <span className="h8S2Va_label">
+                                设定会话任务目标
+                              </span>
+                              <span
+                                className="h8S2Va_summary"
+                                style={{
+                                  color: 'var(--dsw-alias-label-tertiary)',
+                                  fontSize: 12,
+                                }}
+                              >
+                                {s.sessionGoal || '为当前会话绑定明确目标'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div
+                          className="h8S2Va_row"
+                          onClick={() => {
+                            s.workflowMenuOpen = false;
+                            openForkDialog();
+                          }}
+                        >
+                          <div className="h8S2Va_clickarea">
+                            <StateDot state="done" />
+                            <div className="h8S2Va_content">
+                              <span className="h8S2Va_label">
+                                从当前会话创建分支
+                              </span>
+                              <span
+                                className="h8S2Va_summary"
+                                style={{
+                                  color: 'var(--dsw-alias-label-tertiary)',
+                                  fontSize: 12,
+                                }}
+                              >
+                                复制已核对历史并开启独立新会话
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <div
+                          className="h8S2Va_row"
+                          onClick={() => {
+                            s.workflowMenuOpen = false;
+                            openSettings('mcp');
+                          }}
+                        >
+                          <div className="h8S2Va_clickarea">
+                            <StateDot state="done" />
+                            <div className="h8S2Va_content">
+                              <span className="h8S2Va_label">
+                                外部工具与技能包配置
+                              </span>
+                              <span
+                                className="h8S2Va_summary"
+                                style={{
+                                  color: 'var(--dsw-alias-label-tertiary)',
+                                  fontSize: 12,
+                                }}
+                              >
+                                {`已连接 ${s.mcpServers.filter(m => m.enabled).length} 个工具服务 · ${s.skillsCatalog.length} 项技能`}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
               </div>
               <div className="wSkVaW_headerUtilities">
@@ -2271,6 +2633,106 @@ export function CAYWApp({ env } = {}) {
                 >
                   {s.pollStatus}
                 </span>
+
+                {/* Official DSH ContextMeter (JObwrW_*) */}
+                <div className="JObwrW_root">
+                  <button
+                    type="button"
+                    className="JObwrW_trigger"
+                    aria-label="上下文与事件用量"
+                    title="查看上下文与事件游标统计"
+                    onClick={() => {
+                      s.contextMeterOpen = !s.contextMeterOpen;
+                      s.jobsMenuOpen = false;
+                      s.workflowMenuOpen = false;
+                      forceRender();
+                    }}
+                  >
+                    <svg width="18" height="18" viewBox="0 0 18 18">
+                      <circle
+                        cx="9"
+                        cy="9"
+                        r="7"
+                        className="JObwrW_track"
+                      />
+                      <circle
+                        cx="9"
+                        cy="9"
+                        r="7"
+                        className="JObwrW_fill"
+                        strokeDasharray="44"
+                        strokeDashoffset={Math.max(
+                          8,
+                          44 - Math.min(36, messages.length * 4),
+                        )}
+                        transform="rotate(-90 9 9)"
+                      />
+                    </svg>
+                  </button>
+                  {s.contextMeterOpen ? (
+                    <div
+                      className="JObwrW_panel"
+                      style={{ top: 'calc(100% + 8px)', bottom: 'auto' }}
+                    >
+                      <div className="JObwrW_header">
+                        <span className="JObwrW_percent">上下文与事件统计</span>
+                        <span className="JObwrW_figures">
+                          {`游标 #${view?.cursor ?? 0}`}
+                        </span>
+                      </div>
+                      <div className="JObwrW_bar">
+                        <span
+                          className="JObwrW_segment JObwrW_colorSystem"
+                          style={{ width: '25%' }}
+                        />
+                        <span
+                          className="JObwrW_segment JObwrW_colorTools"
+                          style={{ width: '35%' }}
+                        />
+                        <span
+                          className="JObwrW_segment JObwrW_colorMessages"
+                          style={{ width: '40%' }}
+                        />
+                      </div>
+                      <dl className="JObwrW_rows">
+                        <div className="JObwrW_row">
+                          <dt>
+                            <span className="JObwrW_swatch JObwrW_colorMessages" />
+                            历史消息数
+                          </dt>
+                          <dd>{`${messages.length} 条`}</dd>
+                        </div>
+                        <div className="JObwrW_row">
+                          <dt>
+                            <span className="JObwrW_swatch JObwrW_colorTools" />
+                            已消费事件
+                          </dt>
+                          <dd>{`${events.length} 条`}</dd>
+                        </div>
+                        <div className="JObwrW_row">
+                          <dt>
+                            <span className="JObwrW_swatch JObwrW_colorSystem" />
+                            当前模式与权限
+                          </dt>
+                          <dd>{`${currentAgentPresetObj.name} · ${currentPresetObj.label}`}</dd>
+                        </div>
+                      </dl>
+                    </div>
+                  ) : null}
+                </div>
+
+                <button
+                  type="button"
+                  className="_button_kz6gm_4 _sm_kz6gm_30 _outline_kz6gm_56"
+                  style={{ height: 26, padding: '0 10px', fontSize: 12 }}
+                  onClick={() => {
+                    s.detailsDrawerOpen = !s.detailsDrawerOpen;
+                    forceRender();
+                  }}
+                >
+                  {s.detailsDrawerOpen ? '收起详情' : '详情面板'}
+                </button>
+
                 <span
                   id="session-state"
                   style={{
@@ -2281,6 +2743,42 @@ export function CAYWApp({ env } = {}) {
                   {snapshot ? stateLabel(snapshot, view) : '等待选择'}
                 </span>
               </div>
+            </div>
+
+            {/* Official DSH Conversation Sub-Tabs: 对话 vs 执行轨迹 */}
+            {/* Compute trajectory records from loaded history, live events, or session messages */}
+            <div className="wSkVaW_tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={s.conversationSubTab === 'chat'}
+                className={clsx(
+                  'wSkVaW_tab',
+                  s.conversationSubTab === 'chat' && 'wSkVaW_tabActive',
+                )}
+                onClick={() => {
+                  s.conversationSubTab = 'chat';
+                  forceRender();
+                }}
+              >
+                对话
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={s.conversationSubTab === 'trajectory'}
+                className={clsx(
+                  'wSkVaW_tab',
+                  s.conversationSubTab === 'trajectory' && 'wSkVaW_tabActive',
+                )}
+                onClick={() => {
+                  s.conversationSubTab = 'trajectory';
+                  void loadTrajectoryHistory(s.selected);
+                  forceRender();
+                }}
+              >
+                {`执行轨迹 (${(s.trajectoryEventsBySession.get(s.selected)?.length || events.length || messages.length)})`}
+              </button>
             </div>
           </header>
 
@@ -2326,8 +2824,203 @@ export function CAYWApp({ env } = {}) {
             </section>
 
             {/* Chat Flow Area */}
-            <div className="wSkVaW_viewArea" hidden={isHero}>
-              <div className="Md3f7G_root">
+            <div
+              className="wSkVaW_viewArea"
+              hidden={isHero}
+              style={{ flexDirection: 'row' }}
+            >
+              {s.conversationSubTab === 'trajectory' ? (() => {
+                const rawEvents =
+                  s.trajectoryEventsBySession.get(s.selected) ??
+                  (events.length ? events : []);
+                const trajList = rawEvents.length
+                  ? rawEvents
+                  : messages.map((m, idx) => ({
+                      cursor: idx + 1,
+                      event: {
+                        type:
+                          m.role === 'toolResult'
+                            ? 'tool_execution_end'
+                            : m.role === 'user'
+                              ? 'user_prompt'
+                              : 'agent_message',
+                        role: m.role,
+                        summary: clip(messageText(m), 120),
+                      },
+                      rawMessage: m,
+                    }));
+                return (
+                <div className="qBU-ya_root" style={{ flex: 1 }}>
+                  <div className="fV0t5q_root">
+                    <div className="fV0t5q_inner">
+                      <div className="fV0t5q_actions">
+                        {[
+                          ['all', '全部事件'],
+                          ['agent', '模型输出'],
+                          ['tool', '代码与工具'],
+                          ['terminal', '终态与恢复'],
+                        ].map(([fk, fl]) => (
+                          <button
+                            key={fk}
+                            type="button"
+                            aria-pressed={s.trajectoryFilter === fk}
+                            className="fV0t5q_toggle"
+                            onClick={() => {
+                              s.trajectoryFilter = fk;
+                              forceRender();
+                            }}
+                          >
+                            {fl}
+                          </button>
+                        ))}
+                      </div>
+                      <span
+                        style={{
+                          marginLeft: 'auto',
+                          fontSize: 12,
+                          color: 'var(--dsw-alias-label-tertiary)',
+                        }}
+                      >
+                        {`共 ${trajList.length} 条持久化记录 · 游标 #${view?.cursor ?? 0}`}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="_1p9O6q_root">
+                    <div className="_1p9O6q_plot">
+                      <div className="_1p9O6q_labels">
+                        <span>模型</span>
+                        <span>工具</span>
+                        <span>终态</span>
+                      </div>
+                      <div
+                        className="_1p9O6q_track"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          padding: '0 12px',
+                        }}
+                      >
+                        {!trajList.length ? (
+                          <span className="_1p9O6q_empty">
+                            当前会话暂无事件轨迹
+                          </span>
+                        ) : (
+                          trajList.slice(-40).map(ev => {
+                            const t = ev.event?.type ?? '';
+                            const isTerm = t.startsWith('attempt_');
+                            const isTool =
+                              t.includes('tool') || t.includes('approval');
+                            return (
+                              <span
+                                key={ev.cursor}
+                                title={`#${ev.cursor} · ${EVENT_TYPE_LABELS[t] ?? t}`}
+                                onClick={() => {
+                                  s.selectedDetailItem = {
+                                    title: `事件 #${ev.cursor} · ${EVENT_TYPE_LABELS[t] ?? t}`,
+                                    body: recordText(ev),
+                                  };
+                                  s.detailsDrawerOpen = true;
+                                  forceRender();
+                                }}
+                                style={{
+                                  cursor: 'pointer',
+                                  height: 10,
+                                  flex: '1 1 8px',
+                                  maxWidth: 24,
+                                  borderRadius: 3,
+                                  alignSelf: isTerm
+                                    ? 'flex-end'
+                                    : isTool
+                                      ? 'center'
+                                      : 'flex-start',
+                                  marginTop: isTerm ? 0 : 8,
+                                  marginBottom: isTerm ? 8 : 0,
+                                  background: isTerm
+                                    ? 'var(--dsw-alias-state-success-primary)'
+                                    : isTool
+                                      ? '#a78bfa'
+                                      : 'var(--dsw-alias-state-business-primary)',
+                                }}
+                              />
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="Y0dWHa_split">
+                    <div className="Y0dWHa_tablePane" style={{ padding: 12 }}>
+                      {trajList
+                        .filter(ev => {
+                          if (s.trajectoryFilter === 'all') return true;
+                          const t = String(ev.event?.type ?? '');
+                          if (s.trajectoryFilter === 'agent')
+                            return (
+                              t.includes('agent') ||
+                              t.includes('message') ||
+                              t.includes('prompt')
+                            );
+                          if (s.trajectoryFilter === 'tool')
+                            return t.includes('tool') || t.includes('approval');
+                          if (s.trajectoryFilter === 'terminal')
+                            return t.startsWith('attempt_') || t === 'reconciled';
+                          return true;
+                        })
+                        .map(ev => (
+                          <div
+                            key={ev.cursor}
+                            className="zGbnIq_rowCard"
+                            style={{
+                              marginBottom: 8,
+                              padding: '8px 12px',
+                              cursor: 'pointer',
+                            }}
+                            onClick={() => {
+                              s.selectedDetailItem = {
+                                title: `事件 #${ev.cursor} · ${EVENT_TYPE_LABELS[ev.event?.type] ?? ev.event?.type ?? '记录'}`,
+                                body: recordText(ev),
+                              };
+                              s.detailsDrawerOpen = true;
+                              forceRender();
+                            }}
+                          >
+                            <div className="zGbnIq_rowHead">
+                              <div className="zGbnIq_rowIdentity">
+                                <span className="zGbnIq_rowTag">
+                                  {`#${ev.cursor}`}
+                                </span>
+                                <span className="zGbnIq_rowName">
+                                  {EVENT_TYPE_LABELS[ev.event?.type] ??
+                                    ev.event?.type ??
+                                    '会话事件'}
+                                </span>
+                              </div>
+                              <span
+                                style={{
+                                  marginLeft: 'auto',
+                                  fontSize: 12,
+                                  color: 'var(--dsw-alias-label-tertiary)',
+                                }}
+                              >
+                                {ev.attempt?.worker_id
+                                  ? `工作进程：${ev.attempt.worker_id} · 围栏 ${ev.attempt.fence}`
+                                  : ev.event?.summary || '点击查看原始记录'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                </div>
+                );
+              })() : null}
+
+              <div
+                className="Md3f7G_root"
+                hidden={s.conversationSubTab !== 'chat'}
+                style={{ flex: 1 }}
+              >
                 <div className="Md3f7G_scroll">
                   <div
                     id="messages"
@@ -2564,6 +3257,55 @@ export function CAYWApp({ env } = {}) {
                   </section>
                 </div>
               </div>
+
+              {/* Official DSH Right-Hand Details Panel (ydkMvW_*) */}
+              {s.detailsDrawerOpen ? (
+                <aside
+                  className="ydkMvW_root"
+                  style={{ width: 340, flexShrink: 0 }}
+                  aria-label="执行与会话详情"
+                >
+                  <div className="ydkMvW_header">
+                    <span className="ydkMvW_title">
+                      {s.selectedDetailItem?.title ?? '会话与执行详情'}
+                    </span>
+                    <button
+                      type="button"
+                      className="ydkMvW_close"
+                      aria-label="关闭详情面板"
+                      onClick={() => {
+                        s.detailsDrawerOpen = false;
+                        forceRender();
+                      }}
+                    >
+                      <IconCloseOutline16 size={14} />
+                    </button>
+                  </div>
+                  <div className="ydkMvW_body">
+                    <div className="ydkMvW_section">
+                      <div className="ydkMvW_sectionLabel">当前会话状态</div>
+                      <pre className="ydkMvW_code">
+                        {`会话标识：${snapshot?.id ?? '未选择'}\n当前状态：${snapshot ? stateLabel(snapshot, view) : '未知'}\n事件游标：#${view?.cursor ?? 0}\n权限预设：${currentPresetObj.label}\n会话模式：${currentAgentPresetObj.name}`}
+                      </pre>
+                    </div>
+                    <div className="ydkMvW_section">
+                      <div className="ydkMvW_sectionLabel">
+                        {s.selectedDetailItem
+                          ? '选中记录原始数据'
+                          : '最近一条消息或事件记录'}
+                      </div>
+                      <pre className="ydkMvW_code">
+                        {s.selectedDetailItem?.body ??
+                          (events.length
+                            ? recordText(events.at(-1))
+                            : messages.length
+                              ? recordText(messages.at(-1))
+                              : '点击任意代码单元或轨迹事件可在此查看完整结构化记录。')}
+                      </pre>
+                    </div>
+                  </div>
+                </aside>
+              ) : null}
             </div>
 
             {/* Official DSH Approval Panel (@deepseek-ai/dsh-client-ui-conversation/ApprovalPanel) */}
@@ -2818,6 +3560,225 @@ export function CAYWApp({ env } = {}) {
                 ) : null}
 
                 <div className={clsx('uV2eYG_root', isHero && 'uV2eYG_hero')}>
+                  {/* Official DSH GoalBar Dock (nLMEza_*) */}
+                  {s.goalBarOpen || s.sessionGoal ? (
+                    <div className="nLMEza_dock" style={{ marginBottom: 6 }}>
+                      <div className="nLMEza_bar">
+                        <span className="nLMEza_label">会话目标</span>
+                        {s.goalEditing ? (
+                          <input
+                            type="text"
+                            className="nLMEza_objectiveInput"
+                            placeholder="输入当前会话要达成的具体目标，按回车保存…"
+                            value={s.goalDraft}
+                            autoFocus={true}
+                            onChange={e => {
+                              s.goalDraft = e.target.value;
+                              forceRender();
+                            }}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                s.sessionGoal = s.goalDraft.trim();
+                                s.goalEditing = false;
+                                if (!s.sessionGoal) s.goalBarOpen = false;
+                                forceRender();
+                              } else if (e.key === 'Escape') {
+                                s.goalEditing = false;
+                                if (!s.sessionGoal) s.goalBarOpen = false;
+                                forceRender();
+                              }
+                            }}
+                          />
+                        ) : (
+                          <span className="nLMEza_objective">
+                            {s.sessionGoal || '未设置目标'}
+                          </span>
+                        )}
+                        <div className="nLMEza_actions">
+                          {s.goalEditing ? (
+                            <button
+                              type="button"
+                              className="nLMEza_iconBtn"
+                              aria-label="保存目标"
+                              title="保存目标"
+                              onClick={() => {
+                                s.sessionGoal = s.goalDraft.trim();
+                                s.goalEditing = false;
+                                if (!s.sessionGoal) s.goalBarOpen = false;
+                                forceRender();
+                              }}
+                            >
+                              <IconCheckOutline16 size={14} />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="nLMEza_iconBtn"
+                              aria-label="编辑目标"
+                              title="编辑目标"
+                              onClick={() => {
+                                s.goalDraft = s.sessionGoal;
+                                s.goalEditing = true;
+                                forceRender();
+                              }}
+                            >
+                              <IconEditOutline16 size={14} />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="nLMEza_iconBtn"
+                            aria-label="清除目标"
+                            title="清除目标"
+                            onClick={() => {
+                              s.sessionGoal = '';
+                              s.goalDraft = '';
+                              s.goalEditing = false;
+                              s.goalBarOpen = false;
+                              forceRender();
+                            }}
+                          >
+                            <IconCloseOutline16 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Official DSH Slash Command & Skill InputTrigger Menu (_3e4SsG_*) */}
+                  {s.slashMenuOpen ? (
+                    <div
+                      style={{
+                        width: '100%',
+                        maxWidth: 'var(--dsh-composer-card-max-width)',
+                        position: 'relative',
+                      }}
+                    >
+                      <div
+                        className="_3e4SsG_menu"
+                        role="listbox"
+                        aria-label="快捷指令与技能包"
+                      >
+                        <div className="_3e4SsG_viewport">
+                          <div className="_3e4SsG_sectionTitle">快捷操作</div>
+                          {[
+                            [
+                              '/plan',
+                              '切换规划模式',
+                              () => {
+                                s.planModeActive = !s.planModeActive;
+                              },
+                            ],
+                            [
+                              '/goal',
+                              '设定当前会话目标',
+                              () => {
+                                s.goalBarOpen = true;
+                                s.goalEditing = true;
+                                s.goalDraft = s.sessionGoal;
+                              },
+                            ],
+                            [
+                              '/mcp',
+                              '管理外部工具服务',
+                              () => {
+                                openSettings('mcp');
+                              },
+                            ],
+                            [
+                              '/skills',
+                              '浏览与管理本地技能包',
+                              () => {
+                                openSettings('skills');
+                              },
+                            ],
+                          ]
+                            .filter(
+                              ([cmd, desc]) =>
+                                !s.slashFilter ||
+                                cmd.includes(s.slashFilter) ||
+                                desc.includes(s.slashFilter),
+                            )
+                            .map(([cmd, desc, fn]) => (
+                              <button
+                                key={cmd}
+                                type="button"
+                                className="_3e4SsG_item"
+                                onClick={() => {
+                                  s.slashMenuOpen = false;
+                                  if (s.promptText.startsWith('/')) {
+                                    s.promptText = '';
+                                    if (promptInputRef.current)
+                                      promptInputRef.current.value = '';
+                                  }
+                                  fn();
+                                  forceRender();
+                                }}
+                              >
+                                <span className="_3e4SsG_itemName">{cmd}</span>
+                                <span className="_3e4SsG_itemDescription">
+                                  {desc}
+                                </span>
+                              </button>
+                            ))}
+
+                          <div className="_3e4SsG_sectionTitle">
+                            {`本地技能包 (${s.skillsCatalog.length})`}
+                          </div>
+                          {s.skillsCatalog
+                            .filter(
+                              sk =>
+                                !s.slashFilter ||
+                                sk.name
+                                  .toLowerCase()
+                                  .includes(s.slashFilter.toLowerCase()) ||
+                                sk.description
+                                  .toLowerCase()
+                                  .includes(s.slashFilter.toLowerCase()),
+                            )
+                            .slice(0, 12)
+                            .map(sk => (
+                              <button
+                                key={sk.name}
+                                type="button"
+                                className="_3e4SsG_item"
+                                onClick={() => {
+                                  s.slashMenuOpen = false;
+                                  if (
+                                    !s.attachedItems.some(
+                                      it =>
+                                        it.kind === 'skill' &&
+                                        it.name === sk.name,
+                                    )
+                                  ) {
+                                    s.attachedItems.push({
+                                      kind: 'skill',
+                                      name: sk.name,
+                                      desc: sk.description,
+                                    });
+                                  }
+                                  if (s.promptText.startsWith('/')) {
+                                    s.promptText = '';
+                                    if (promptInputRef.current)
+                                      promptInputRef.current.value = '';
+                                  }
+                                  forceRender();
+                                }}
+                              >
+                                <span className="_3e4SsG_itemName">
+                                  {`/${sk.name}`}
+                                </span>
+                                <span className="_3e4SsG_itemDescription">
+                                  {sk.description}
+                                </span>
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
                   {promptStatus ? (
                     <div
                       id="prompt-status"
@@ -2841,6 +3802,59 @@ export function CAYWApp({ env } = {}) {
                     data-composer-card="true"
                     onSubmit={e => trackAsync(handleSendPrompt(e))}
                   >
+                    {/* Attached Skills & Context Files Rail (_54WpYG_rail) */}
+                    {s.attachedItems.length > 0 ? (
+                      <div
+                        className="_54WpYG_rail"
+                        style={{
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: 6,
+                          padding: '8px 12px 0',
+                        }}
+                      >
+                        {s.attachedItems.map((item, idx) => (
+                          <span
+                            key={`${item.kind}:${item.name}:${idx}`}
+                            className="rS3zOq_chip"
+                            style={{
+                              background:
+                                item.kind === 'skill'
+                                  ? 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent)'
+                                  : 'var(--dsw-alias-interactive-bg-hover)',
+                              color:
+                                item.kind === 'skill'
+                                  ? 'var(--dsw-alias-state-business-primary)'
+                                  : 'var(--dsw-alias-label-primary)',
+                            }}
+                          >
+                            <span>
+                              {item.kind === 'skill'
+                                ? `技能：${item.name}`
+                                : `文件：${item.name}`}
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`移除 ${item.name}`}
+                              style={{
+                                background: 'none',
+                                border: 'none',
+                                color: 'inherit',
+                                cursor: 'pointer',
+                                padding: 0,
+                                display: 'inline-flex',
+                              }}
+                              onClick={() => {
+                                s.attachedItems.splice(idx, 1);
+                                forceRender();
+                              }}
+                            >
+                              <IconCloseOutline16 size={12} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
                     <label htmlFor="prompt" className="visually-hidden">
                       发送消息
                     </label>
@@ -2867,7 +3881,15 @@ export function CAYWApp({ env } = {}) {
                           }
                           value={s.promptText}
                           onChange={e => {
-                            s.promptText = e.target.value;
+                            const val = e.target.value;
+                            s.promptText = val;
+                            if (val.startsWith('/') && !val.includes(' ')) {
+                              s.slashMenuOpen = true;
+                              s.slashFilter = val.slice(1);
+                              if (!s.skillsLoaded) void refreshSkillsCatalog();
+                            } else if (s.slashMenuOpen) {
+                              s.slashMenuOpen = false;
+                            }
                             forceRender();
                           }}
                           onKeyDown={e => {
@@ -2896,16 +3918,95 @@ export function CAYWApp({ env } = {}) {
 
                     <div className="uV2eYG_row">
                       <div className="uV2eYG_tools">
-                        <Tooltip label="添加工作区" side="top" delayMs={400}>
-                          <button
-                            type="button"
-                            className="uV2eYG_add"
-                            aria-label="添加工作区"
-                            onClick={() => openNewProjectModal()}
-                          >
-                            <IconPlusOutline16 size={14} />
-                          </button>
-                        </Tooltip>
+                        <Menu
+                          open={s.composerAddMenuOpen}
+                          onClose={() => {
+                            s.composerAddMenuOpen = false;
+                            forceRender();
+                          }}
+                          side="top"
+                          items={[
+                            {
+                              id: 'skill',
+                              label: '调用本地技能包 (/技能)…',
+                              icon: <IconAgentPresetOutline16 size={16} />,
+                            },
+                            {
+                              id: 'file',
+                              label: '附加工作区文件 (README.md)…',
+                              icon: <IconCodeOutline16 size={16} />,
+                            },
+                            {
+                              id: 'goal',
+                              label: '设定当前会话目标…',
+                              icon: <IconEditOutline16 size={16} />,
+                            },
+                            {
+                              id: 'plan',
+                              label: s.planModeActive
+                                ? '退出规划模式'
+                                : '开启规划模式',
+                              icon: <IconCheckOutline16 size={16} />,
+                            },
+                            {
+                              id: 'mcp',
+                              label: '配置外部工具服务…',
+                              icon: <IconDataOutline16 size={16} />,
+                            },
+                            {
+                              id: 'workspace',
+                              label: '添加新工作区目录…',
+                              icon: <IconProjectAddOutline16 size={16} />,
+                            },
+                          ]}
+                          onSelect={id => {
+                            s.composerAddMenuOpen = false;
+                            if (id === 'skill') {
+                              if (!s.skillsLoaded) void refreshSkillsCatalog();
+                              s.slashFilter = '';
+                              s.slashMenuOpen = true;
+                            } else if (id === 'file') {
+                              if (
+                                !s.attachedItems.some(
+                                  it =>
+                                    it.kind === 'file' &&
+                                    it.name === 'README.md',
+                                )
+                              ) {
+                                s.attachedItems.push({
+                                  kind: 'file',
+                                  name: 'README.md',
+                                });
+                              }
+                            } else if (id === 'goal') {
+                              s.goalBarOpen = true;
+                              s.goalEditing = true;
+                              s.goalDraft = s.sessionGoal;
+                            } else if (id === 'plan') {
+                              s.planModeActive = !s.planModeActive;
+                            } else if (id === 'mcp') {
+                              openSettings('mcp');
+                            } else if (id === 'workspace') {
+                              openNewProjectModal();
+                            }
+                            forceRender();
+                          }}
+                          anchor={
+                            <button
+                              id="composer-add-btn"
+                              type="button"
+                              className="uV2eYG_add"
+                              aria-label="添加技能、文件或工作区"
+                              title="调用技能包、附加文件、设定目标或管理外部工具"
+                              onClick={() => {
+                                s.composerAddMenuOpen = !s.composerAddMenuOpen;
+                                forceRender();
+                              }}
+                            >
+                              <IconPlusOutline16 size={14} />
+                            </button>
+                          }
+                        />
 
                         <div className="uV2eYG_modes">
                           <Menu
@@ -2971,6 +4072,40 @@ export function CAYWApp({ env } = {}) {
                               </button>
                             }
                           />
+
+                          {/* Official DSH PlanModeControl (rS3zOq_*) */}
+                          <span className="rS3zOq_wrap">
+                            {s.planModeActive ? (
+                              <button
+                                type="button"
+                                className="rS3zOq_chip"
+                                title="点击退出规划模式"
+                                onClick={() => {
+                                  s.planModeActive = false;
+                                  forceRender();
+                                }}
+                              >
+                                <span>规划模式</span>
+                                <span className="rS3zOq_close">
+                                  <IconCloseOutline16 size={12} />
+                                </span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="Sh0Q9G_trigger"
+                                title="开启规划模式：先输出步骤方案再执行修改"
+                                onClick={() => {
+                                  s.planModeActive = true;
+                                  forceRender();
+                                }}
+                              >
+                                <span className="Sh0Q9G_triggerLabel">
+                                  规划模式
+                                </span>
+                              </button>
+                            )}
+                          </span>
                         </div>
                       </div>
 
@@ -3492,6 +4627,8 @@ export function CAYWApp({ env } = {}) {
                   ['general', '通用设置', IconSettingsOutline16],
                   ['models', '模型服务', IconDataOutline16],
                   ['agent-presets', '会话模式', IconAgentPresetOutline16],
+                  ['mcp', '外部工具', IconCodeOutline16],
+                  ['skills', '本地技能', IconPersonalizationOutline16],
                   ['permissions', '权限与审计', IconPersonalizationOutline16],
                   ['plugins', '扩展能力', IconPersonalizationOutline16],
                 ].map(([tabId, label, IconComp]) => (
@@ -4122,6 +5259,481 @@ export function CAYWApp({ env } = {}) {
                           </li>
                         );
                       })}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'mcp' ? (
+                  <div className="pbvGtq_section">
+                    <h3 className="pbvGtq_heading">外部工具服务</h3>
+                    <p className="pbvGtq_intro">
+                      由宿主统一接入本机或远程工具协议服务，所有工具调用均经过会话权限边界与审计记录。
+                    </p>
+                    {s.mcpNotice ? (
+                      <p className="zGbnIq_savedNotice" role="status">
+                        {s.mcpNotice}
+                      </p>
+                    ) : null}
+                    <ul className="pbvGtq_cards">
+                      {s.mcpServers.map(srv => {
+                        const isOpen = Boolean(s.expandedMcpCards[srv.id]);
+                        return (
+                          <li
+                            key={srv.id}
+                            className={clsx(
+                              'YyYd_a_card',
+                              isOpen && 'YyYd_a_cardOpen',
+                            )}
+                          >
+                            <button
+                              type="button"
+                              className="YyYd_a_header"
+                              aria-expanded={isOpen}
+                              onClick={() => {
+                                s.expandedMcpCards[srv.id] = !isOpen;
+                                forceRender();
+                              }}
+                            >
+                              <div className="YyYd_a_headText">
+                                <span className="YyYd_a_name">{srv.name}</span>
+                                <span className="YyYd_a_description">
+                                  {`${srv.transport} · ${srv.endpoint}`}
+                                </span>
+                              </div>
+                              <span
+                                className="qSYn7G_configTag"
+                                data-enabled={String(srv.enabled)}
+                              >
+                                {srv.enabled
+                                  ? `${srv.statusLabel} · ${srv.tools.length} 个工具`
+                                  : '已停用'}
+                              </span>
+                              <IconChevronDownOutline14
+                                size={14}
+                                className={clsx(
+                                  'YyYd_a_chevron',
+                                  isOpen && 'YyYd_a_chevronOpen',
+                                )}
+                              />
+                            </button>
+                            {isOpen ? (
+                              <div className="YyYd_a_body">
+                                {srv.tools.map(t => (
+                                  <div key={t.name} className="At1oFq_field">
+                                    <div className="At1oFq_head">
+                                      <span className="At1oFq_label">
+                                        {t.name}
+                                      </span>
+                                      <span className="At1oFq_badge">
+                                        按需授权调用
+                                      </span>
+                                    </div>
+                                    <p className="At1oFq_hint">{t.desc}</p>
+                                  </div>
+                                ))}
+                                <div className="YyYd_a_footer">
+                                  {!srv.builtin ? (
+                                    <button
+                                      type="button"
+                                      className="zGbnIq_dangerButton"
+                                      style={{ height: 30, fontSize: 12 }}
+                                      onClick={() => {
+                                        s.mcpServers = s.mcpServers.filter(
+                                          item => item.id !== srv.id,
+                                        );
+                                        s.mcpNotice = `已移除工具服务“${srv.name}”。`;
+                                        forceRender();
+                                      }}
+                                    >
+                                      移除服务
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className="YyYd_a_discard"
+                                    onClick={() => {
+                                      srv.enabled = !srv.enabled;
+                                      s.mcpNotice = srv.enabled
+                                        ? `已启用“${srv.name}”。`
+                                        : `已停用“${srv.name}”。`;
+                                      forceRender();
+                                    }}
+                                  >
+                                    {srv.enabled ? '暂停服务' : '启用服务'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="YyYd_a_save"
+                                    onClick={() => {
+                                      s.expandedMcpCards[srv.id] = false;
+                                      forceRender();
+                                    }}
+                                  >
+                                    完成
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+
+                    <div className="zGbnIq_addBlock">
+                      {!s.addingMcpOpen ? (
+                        <div className="zGbnIq_addActions">
+                          <button
+                            type="button"
+                            className="zGbnIq_addButton"
+                            onClick={() => {
+                              s.addingMcpOpen = true;
+                              s.newMcpName = '';
+                              s.newMcpEndpoint = '';
+                              forceRender();
+                            }}
+                          >
+                            <IconPlusOutline16 size={14} />
+                            <span>添加外部工具服务</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="zGbnIq_addCard">
+                          <div className="zGbnIq_editor">
+                            <div className="zGbnIq_editorHeader">
+                              <span className="zGbnIq_editorTitle">
+                                新增外部工具服务
+                              </span>
+                            </div>
+                            <div className="zGbnIq_modelAdvanced">
+                              <div className="zGbnIq_field">
+                                <label className="zGbnIq_fieldLabel">
+                                  服务名称
+                                </label>
+                                <input
+                                  type="text"
+                                  className="zGbnIq_input"
+                                  placeholder="如 本地数据库查询服务"
+                                  value={s.newMcpName}
+                                  onChange={e => {
+                                    s.newMcpName = e.target.value;
+                                    forceRender();
+                                  }}
+                                />
+                              </div>
+                              <div className="zGbnIq_field">
+                                <label className="zGbnIq_fieldLabel">
+                                  传输方式
+                                </label>
+                                <select
+                                  className="zGbnIq_input zGbnIq_selectInput"
+                                  value={s.newMcpTransport}
+                                  onChange={e => {
+                                    s.newMcpTransport = e.target.value;
+                                    forceRender();
+                                  }}
+                                >
+                                  <option value="本机标准输入输出">
+                                    本机标准输入输出
+                                  </option>
+                                  <option value="远程事件流">
+                                    远程事件流
+                                  </option>
+                                </select>
+                              </div>
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">
+                                启动命令或服务地址
+                              </label>
+                              <input
+                                type="text"
+                                className="zGbnIq_input"
+                                placeholder="如 npx -y @modelcontextprotocol/server-sqlite"
+                                value={s.newMcpEndpoint}
+                                onChange={e => {
+                                  s.newMcpEndpoint = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_editorActions">
+                              <button
+                                type="button"
+                                className="zGbnIq_secondaryButton"
+                                onClick={() => {
+                                  s.addingMcpOpen = false;
+                                  forceRender();
+                                }}
+                              >
+                                取消
+                              </button>
+                              <button
+                                type="button"
+                                className="zGbnIq_primaryButton"
+                                disabled={
+                                  !s.newMcpName.trim() ||
+                                  !s.newMcpEndpoint.trim()
+                                }
+                                onClick={() => {
+                                  const id = `mcp-${Date.now()}`;
+                                  s.mcpServers.push({
+                                    id,
+                                    name: s.newMcpName.trim(),
+                                    transport: s.newMcpTransport,
+                                    endpoint: s.newMcpEndpoint.trim(),
+                                    status: 'active',
+                                    statusLabel: '已连接',
+                                    enabled: true,
+                                    builtin: false,
+                                    tools: [
+                                      {
+                                        name: 'default.call',
+                                        desc: '按需发现并调用该服务提供的工具',
+                                      },
+                                    ],
+                                  });
+                                  s.addingMcpOpen = false;
+                                  s.mcpNotice = `已添加外部工具服务“${s.newMcpName.trim()}”。`;
+                                  forceRender();
+                                }}
+                              >
+                                保存并连接
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'skills' ? (
+                  <div className="pbvGtq_section">
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <h3 className="pbvGtq_heading">本地技能包</h3>
+                      <button
+                        type="button"
+                        className="zGbnIq_addModelButton"
+                        onClick={() => {
+                          s.addingSkillOpen = !s.addingSkillOpen;
+                          forceRender();
+                        }}
+                      >
+                        <IconPlusOutline16 size={12} />
+                        <span>新建技能说明</span>
+                      </button>
+                    </div>
+                    <p className="pbvGtq_intro">
+                      在输入框输入“/”或点击卡片即可将技能注入当前会话。点击任意技能可展开查看完整指令内容。
+                    </p>
+                    {s.skillNotice ? (
+                      <p className="zGbnIq_savedNotice" role="status">
+                        {s.skillNotice}
+                      </p>
+                    ) : null}
+
+                    {s.addingSkillOpen ? (
+                      <div className="zGbnIq_addCard">
+                        <div className="zGbnIq_editor">
+                          <div className="zGbnIq_modelAdvanced">
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">
+                                技能标识
+                              </label>
+                              <input
+                                type="text"
+                                className="zGbnIq_input"
+                                placeholder="如 rust-security-audit"
+                                value={s.newSkillName}
+                                onChange={e => {
+                                  s.newSkillName = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">
+                                一句话用途说明
+                              </label>
+                              <input
+                                type="text"
+                                className="zGbnIq_input"
+                                placeholder="如 检查不安全代码块与权限边界"
+                                value={s.newSkillDesc}
+                                onChange={e => {
+                                  s.newSkillDesc = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <div className="zGbnIq_editorActions">
+                            <button
+                              type="button"
+                              className="zGbnIq_secondaryButton"
+                              onClick={() => {
+                                s.addingSkillOpen = false;
+                                forceRender();
+                              }}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="zGbnIq_primaryButton"
+                              disabled={!s.newSkillName.trim()}
+                              onClick={() => {
+                                const name = s.newSkillName.trim();
+                                s.skillsCatalog.unshift({
+                                  name,
+                                  description:
+                                    s.newSkillDesc.trim() || '自定义工作流技能',
+                                  source: '自定义技能',
+                                  path: `~/.codex/skills/${name}/SKILL.md`,
+                                });
+                                s.addingSkillOpen = false;
+                                s.newSkillName = '';
+                                s.newSkillDesc = '';
+                                s.skillNotice = `已注册技能 /${name}。`;
+                                forceRender();
+                              }}
+                            >
+                              保存技能
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="qSYn7G_search">
+                      <IconSearchOutline16 size={16} />
+                      <input
+                        type="text"
+                        placeholder="搜索本地已安装的技能名称或描述…"
+                        value={s.skillSearchQuery}
+                        onChange={e => {
+                          s.skillSearchQuery = e.target.value;
+                          forceRender();
+                        }}
+                      />
+                    </div>
+
+                    <ul className="pbvGtq_cards">
+                      {s.skillsCatalog
+                        .filter(sk => {
+                          const q = s.skillSearchQuery.trim().toLowerCase();
+                          if (!q) return true;
+                          return (
+                            sk.name.toLowerCase().includes(q) ||
+                            sk.description.toLowerCase().includes(q) ||
+                            (sk.source || '').toLowerCase().includes(q)
+                          );
+                        })
+                        .map(sk => {
+                          const isOpen = Boolean(
+                            s.expandedSkillCards[sk.name],
+                          );
+                          const detailText =
+                            s.skillDetailsMap[sk.name] ||
+                            sk.content ||
+                            `# ${sk.name}\n\n${sk.description}\n\n来源路径：${sk.path || '本地技能库'}`;
+                          return (
+                            <li
+                              key={sk.name}
+                              className={clsx(
+                                'YyYd_a_card',
+                                isOpen && 'YyYd_a_cardOpen',
+                              )}
+                            >
+                              <button
+                                type="button"
+                                className="YyYd_a_header"
+                                aria-expanded={isOpen}
+                                onClick={() => {
+                                  const next = !isOpen;
+                                  s.expandedSkillCards[sk.name] = next;
+                                  if (next) void loadSkillDetail(sk.name);
+                                  forceRender();
+                                }}
+                              >
+                                <div className="YyYd_a_headText">
+                                  <span className="YyYd_a_name">
+                                    {`/${sk.name}`}
+                                  </span>
+                                  <span className="YyYd_a_description">
+                                    {sk.description}
+                                  </span>
+                                </div>
+                                <span className="At1oFq_badge">
+                                  {sk.source || '本地技能库'}
+                                </span>
+                                <IconChevronDownOutline14
+                                  size={14}
+                                  className={clsx(
+                                    'YyYd_a_chevron',
+                                    isOpen && 'YyYd_a_chevronOpen',
+                                  )}
+                                />
+                              </button>
+                              {isOpen ? (
+                                <div className="YyYd_a_body">
+                                  <div
+                                    className="iWrAna_instructionsCard"
+                                    style={{ margin: '12px 0 8px' }}
+                                  >
+                                    <div className="iWrAna_instructionsHeader">
+                                      {`技能定义文件 · ${sk.path || 'SKILL.md'}`}
+                                    </div>
+                                    <pre className="iWrAna_instructions">
+                                      {detailText}
+                                    </pre>
+                                  </div>
+                                  <div className="YyYd_a_footer">
+                                    <button
+                                      type="button"
+                                      className="YyYd_a_discard"
+                                      onClick={() => {
+                                        s.expandedSkillCards[sk.name] = false;
+                                        forceRender();
+                                      }}
+                                    >
+                                      收起
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="YyYd_a_save"
+                                      onClick={() => {
+                                        if (
+                                          !s.attachedItems.some(
+                                            it =>
+                                              it.kind === 'skill' &&
+                                              it.name === sk.name,
+                                          )
+                                        ) {
+                                          s.attachedItems.push({
+                                            kind: 'skill',
+                                            name: sk.name,
+                                            desc: sk.description,
+                                          });
+                                        }
+                                        s.settingsOpen = false;
+                                        forceRender();
+                                      }}
+                                    >
+                                      在当前会话中使用
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
+                            </li>
+                          );
+                        })}
                     </ul>
                   </div>
                 ) : null}

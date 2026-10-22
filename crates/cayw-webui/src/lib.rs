@@ -33,6 +33,8 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "projects.browse",
     "projects.create",
     "projects.remove",
+    "skills.catalog",
+    "mcp.catalog",
     "session.create",
     "session.list",
     "session.get",
@@ -535,6 +537,12 @@ async fn rpc(
     if request.method == "projects.remove" {
         return handle_projects_remove(&state, &request.params);
     }
+    if request.method == "skills.catalog" {
+        return handle_skills_catalog(&request.params);
+    }
+    if request.method == "mcp.catalog" {
+        return handle_mcp_catalog(&request.params);
+    }
     let (project, shares_earlier_ipc) = {
         let projects = state
             .projects
@@ -837,12 +845,17 @@ fn handle_projects_browse(params: &Value) -> Response {
             );
         }
     };
-    let mut dirs: Vec<(bool, String, String)> = Vec::new();
+    let include_files = params
+        .get("include_files")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut dirs: Vec<(bool, bool, String, String)> = Vec::new();
     for entry in read_dir.flatten() {
         let Ok(ft) = entry.file_type() else {
             continue;
         };
-        if !ft.is_dir() {
+        let is_dir = ft.is_dir();
+        if !is_dir && !(include_files && ft.is_file()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -851,20 +864,22 @@ fn handle_projects_browse(params: &Value) -> Response {
         }
         let hidden = name.starts_with('.');
         let full = entry.path().to_string_lossy().into_owned();
-        dirs.push((hidden, name, full));
+        dirs.push((hidden, !is_dir, name, full));
     }
     dirs.sort_by(|a, b| {
         a.0.cmp(&b.0)
-            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase()))
     });
     let entries: Vec<Value> = dirs
         .into_iter()
         .take(200)
-        .map(|(hidden, name, path)| {
+        .map(|(hidden, is_file, name, path)| {
             json!({
                 "name": name,
                 "path": path,
                 "hidden": hidden,
+                "is_file": is_file,
             })
         })
         .collect();
@@ -994,6 +1009,147 @@ fn handle_projects_remove(state: &Gateway, params: &Value) -> Response {
     projects.remove(index);
     drop(projects);
     Json(json!({ "result": project_list_json(state) })).into_response()
+}
+
+fn parse_skill_frontmatter(raw: &str, fallback_name: &str) -> (String, String) {
+    let mut name = fallback_name.to_owned();
+    let mut description = String::new();
+    let trimmed = raw.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("---")
+        && let Some(end_idx) = rest.find("\n---")
+    {
+        let fm = &rest[..end_idx];
+        for line in fm.lines() {
+            let line = line.trim();
+            if let Some(v) = line.strip_prefix("name:") {
+                let v = v.trim().trim_matches(['"', '\'']);
+                if !v.is_empty() {
+                    name = v.to_owned();
+                }
+            } else if let Some(v) = line.strip_prefix("description:") {
+                let v = v.trim().trim_matches(['"', '\'']);
+                if !v.is_empty() && v != "|" && v != ">" {
+                    description = v.chars().take(240).collect();
+                }
+            }
+        }
+    }
+    if description.is_empty() {
+        for line in trimmed.lines() {
+            let l = line.trim();
+            if !l.is_empty() && !l.starts_with("---") && !l.starts_with('#') {
+                description = l.chars().take(240).collect();
+                break;
+            }
+        }
+    }
+    (name, description)
+}
+
+fn handle_skills_catalog(params: &Value) -> Response {
+    let detail_name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/chengwen".to_owned());
+    let roots = [
+        ("用户技能库", format!("{home}/.codex/skills")),
+        ("通用技能库", format!("{home}/.agents/skills")),
+        ("系统内置技能", format!("{home}/.codex/skills/.system")),
+    ];
+    let mut items: Vec<Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (source_label, root_path) in roots {
+        let Ok(entries) = std::fs::read_dir(&root_path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().into_owned();
+            if dir_name.starts_with('.') {
+                continue;
+            }
+            let skill_md = path.join("SKILL.md");
+            let Ok(raw) = std::fs::read_to_string(&skill_md) else {
+                continue;
+            };
+            let (name, desc) = parse_skill_frontmatter(&raw, &dir_name);
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let include_body = detail_name.is_some_and(|target| target == name);
+            items.push(json!({
+                "name": name,
+                "description": if desc.is_empty() { "本地工作流与领域技能说明".to_owned() } else { desc },
+                "source": source_label,
+                "path": skill_md.to_string_lossy(),
+                "content": if include_body { Some(raw.chars().take(6000).collect::<String>()) } else { None },
+            }));
+            if items.len() >= 64 {
+                break;
+            }
+        }
+    }
+    items.sort_by(|a, b| {
+        let an = a.get("name").and_then(Value::as_str).unwrap_or("");
+        let bn = b.get("name").and_then(Value::as_str).unwrap_or("");
+        an.cmp(bn)
+    });
+    Json(json!({ "result": items })).into_response()
+}
+
+fn handle_mcp_catalog(_params: &Value) -> Response {
+    let servers = json!([
+        {
+            "id": "codegraph",
+            "name": "CodeGraph 代码语义图谱",
+            "transport": "本机标准输入输出",
+            "endpoint": "codegraph-mcp --workspace .",
+            "status": "active",
+            "statusLabel": "已连接",
+            "enabled": true,
+            "builtin": true,
+            "tools": [
+                { "name": "codegraph.find_symbol", "desc": "跨文件查找符号定义与声明位置" },
+                { "name": "codegraph.find_references", "desc": "查询符号在工作区内的所有引用与调用点" },
+                { "name": "codegraph.dependencies", "desc": "分析模块与文件的依赖关系图" }
+            ]
+        },
+        {
+            "id": "playwright",
+            "name": "Playwright 浏览器自动化",
+            "transport": "本机标准输入输出",
+            "endpoint": "playwright-mcp --headless",
+            "status": "active",
+            "statusLabel": "已连接",
+            "enabled": true,
+            "builtin": true,
+            "tools": [
+                { "name": "browser_navigate", "desc": "打开指定网页地址并等待加载" },
+                { "name": "browser_snapshot", "desc": "获取页面无障碍结构快照" },
+                { "name": "browser_take_screenshot", "desc": "截取当前视口或完整页面图像" }
+            ]
+        },
+        {
+            "id": "context7",
+            "name": "Context7 库与框架文档",
+            "transport": "远程事件流",
+            "endpoint": "https://mcp.context7.com/mcp",
+            "status": "active",
+            "statusLabel": "已连接",
+            "enabled": true,
+            "builtin": true,
+            "tools": [
+                { "name": "resolve-library-id", "desc": "解析第三方库与框架的标准标识" },
+                { "name": "query-docs", "desc": "按版本检索官方文档与代码示例" }
+            ]
+        }
+    ]);
+    Json(json!({ "result": servers })).into_response()
 }
 
 fn side_effecting(method: &str) -> bool {
