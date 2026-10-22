@@ -12,6 +12,52 @@ pub enum Focus {
     Composer,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ViewTab {
+    #[default]
+    Chat,
+    Files,
+    Diff,
+    Logs,
+}
+
+impl ViewTab {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Chat => Self::Files,
+            Self::Files => Self::Diff,
+            Self::Diff => Self::Logs,
+            Self::Logs => Self::Chat,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Chat => Self::Logs,
+            Self::Files => Self::Chat,
+            Self::Diff => Self::Files,
+            Self::Logs => Self::Diff,
+        }
+    }
+}
+
+/// Read-only file inspection entry projected from runtime snapshots and events.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileEntry {
+    pub path: String,
+    pub action: String,
+    pub status: String,
+    pub preview: String,
+}
+
+/// Read-only diff inspection entry projected from runtime snapshots and events.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffEntry {
+    pub path: String,
+    pub status: String,
+    pub diff: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     AllowOnce,
@@ -90,6 +136,7 @@ impl Command {
 pub enum Dialog {
     Create(Editor),
     Fork { session_id: String, label: String },
+    Help,
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +270,9 @@ pub struct SessionView {
     pub frozen: bool,
     pub binding: Option<Value>,
     pub tool_status: Option<String>,
+    pub files: Vec<FileEntry>,
+    pub diffs: Vec<DiffEntry>,
+    pub logs: Vec<String>,
     pub scroll: u16,
     pub synced: bool,
     pub request_pending: bool,
@@ -232,6 +282,8 @@ pub struct SessionView {
     active_attempt: Option<AttemptIdentity>,
     stream_replay: StreamReplay,
     refresh_after: Option<u64>,
+    snapshot_executions: Vec<Value>,
+    settled_capabilities: Vec<Value>,
 }
 
 impl SessionView {
@@ -261,6 +313,7 @@ impl SessionView {
             required_string(approval, "id")?;
         }
         let unresolved_calls = array(&value, "unresolved_calls")?;
+        let snapshot_executions = value["executions"].as_array().cloned().unwrap_or_default();
         let frozen = value["frozen"]
             .as_bool()
             .ok_or("Snapshot frozen flag must be a boolean")?;
@@ -286,6 +339,9 @@ impl SessionView {
             frozen,
             binding,
             tool_status: None,
+            files: Vec::new(),
+            diffs: Vec::new(),
+            logs: Vec::new(),
             scroll: 0,
             synced: true,
             request_pending: false,
@@ -295,8 +351,11 @@ impl SessionView {
             active_attempt,
             stream_replay: StreamReplay::default(),
             refresh_after: None,
+            snapshot_executions,
+            settled_capabilities: Vec::new(),
         };
         view.protect_unknown();
+        view.rebuild_inspectors();
         Ok(view)
     }
 
@@ -340,6 +399,29 @@ impl SessionView {
         }
     }
 
+    fn rebuild_inspectors(&mut self) {
+        let (files, diffs) = project_files_and_diffs(
+            &self.messages,
+            &self.approvals,
+            &self.unresolved_calls,
+            &self.settled_capabilities,
+        );
+        self.files = files;
+        self.diffs = diffs;
+        if self.logs.is_empty() {
+            for execution in &self.snapshot_executions {
+                let cell = execution["cell_id"]
+                    .as_str()
+                    .or_else(|| execution["execution_id"].as_str())
+                    .unwrap_or("");
+                let state = string(execution, "state");
+                if !cell.is_empty() {
+                    push_log(&mut self.logs, format!("cell {cell} · {state}"));
+                }
+            }
+        }
+    }
+
     fn project_stream(&mut self) {
         self.streaming_text = (self.cursor >= self.snapshot_cursor
             && self.active_attempt.is_some()
@@ -355,6 +437,19 @@ impl SessionView {
                 event.get("event").ok_or("Agent wrapper is missing event")?,
                 project,
             );
+        }
+        if kind == "capability_settled"
+            && let Some(call) = event.get("call").filter(|value| value.is_object())
+        {
+            let key = &call["key"];
+            self.settled_capabilities
+                .retain(|existing| existing["key"] != *key || key.is_null());
+            self.settled_capabilities.push(call.clone());
+            if self.settled_capabilities.len() > MAX_INSPECTOR_ITEMS {
+                let drain = self.settled_capabilities.len() - MAX_INSPECTOR_ITEMS;
+                self.settled_capabilities.drain(0..drain);
+            }
+            self.rebuild_inspectors();
         }
         // Already represented by the snapshot: consume its envelope without
         // duplicating history or rewinding approvals, bindings or effect state.
@@ -430,6 +525,7 @@ impl SessionView {
             _ => {} // Forward-compatible core events still consume their envelope.
         }
         self.protect_unknown();
+        self.rebuild_inspectors();
         Ok(())
     }
 
@@ -486,6 +582,7 @@ impl SessionView {
             }
             _ => {}
         }
+        self.rebuild_inspectors();
         Ok(())
     }
 
@@ -516,6 +613,7 @@ pub struct App {
     pub selected_id: Option<String>,
     pub input: Editor,
     pub focus: Focus,
+    pub view: ViewTab,
     pub dialog: Option<Dialog>,
     pub connected: bool,
     pub status: String,
@@ -570,6 +668,8 @@ impl App {
             }
             incoming.scroll = old.scroll;
             incoming.cursor = old.cursor;
+            incoming.logs = old.logs.clone();
+            incoming.settled_capabilities = old.settled_capabilities.clone();
             incoming.stream_replay = old.stream_replay.clone();
             incoming.project_stream();
             if matches!(incoming.state.as_str(), "running" | "awaiting_approval") {
@@ -593,6 +693,7 @@ impl App {
                 })
                 .cloned()
                 .collect();
+            incoming.rebuild_inspectors();
             self.sessions[index] = incoming;
         } else {
             self.sessions.push(incoming);
@@ -677,6 +778,17 @@ impl App {
                 }
             }
             next.event(event, cursor > next.snapshot_cursor)?;
+            let is_delta = event["type"] == "agent"
+                && matches!(
+                    event["event"]["type"].as_str(),
+                    Some("message_update" | "tool_execution_update")
+                );
+            if !is_delta {
+                push_log(
+                    &mut next.logs,
+                    format_event_log(cursor, record.get("attempt"), event),
+                );
+            }
             if !next.synced {
                 next.refresh_after = Some(next.refresh_after.unwrap_or(0).max(cursor));
             }
@@ -808,6 +920,15 @@ impl App {
         if self.dialog.is_some() {
             return self.dialog_key(key);
         }
+        if key.code == KeyCode::F(1)
+            || (alt && matches!(key.code, KeyCode::Char('h' | '/' | '?')))
+            || (self.focus != Focus::Composer
+                && key.code == KeyCode::Char('?')
+                && key.modifiers.is_empty())
+        {
+            self.dialog = Some(Dialog::Help);
+            return vec![];
+        }
         if ctrl {
             match key.code {
                 KeyCode::Char('r') => return vec![Command::Reconnect],
@@ -842,6 +963,22 @@ impl App {
                     return vec![];
                 }
                 _ => {}
+            }
+        }
+        if alt {
+            let tab = match key.code {
+                KeyCode::Char('1') => Some(ViewTab::Chat),
+                KeyCode::Char('2') => Some(ViewTab::Files),
+                KeyCode::Char('3') => Some(ViewTab::Diff),
+                KeyCode::Char('4') => Some(ViewTab::Logs),
+                _ => None,
+            };
+            if let Some(tab) = tab {
+                self.view = tab;
+                if let Some(session) = self.selected_mut() {
+                    session.scroll = 0;
+                }
+                return vec![];
             }
         }
         if alt && self.connected {
@@ -886,6 +1023,18 @@ impl App {
             }
             KeyCode::Up if self.focus == Focus::History => self.scroll_history(1),
             KeyCode::Down if self.focus == Focus::History => self.scroll_history(-1),
+            KeyCode::Left | KeyCode::Char('[') if self.focus == Focus::History => {
+                self.view = self.view.previous();
+                if let Some(session) = self.selected_mut() {
+                    session.scroll = 0;
+                }
+            }
+            KeyCode::Right | KeyCode::Char(']') if self.focus == Focus::History => {
+                self.view = self.view.next();
+                if let Some(session) = self.selected_mut() {
+                    session.scroll = 0;
+                }
+            }
             KeyCode::Home if self.focus == Focus::History => {
                 if let Some(session) = self.selected_mut() {
                     session.scroll = u16::MAX;
@@ -914,7 +1063,7 @@ impl App {
     pub fn paste(&mut self, text: &str) {
         match &mut self.dialog {
             Some(Dialog::Create(editor)) => editor.insert(&text.replace(['\r', '\n'], " ")),
-            Some(Dialog::Fork { .. }) => {}
+            Some(Dialog::Fork { .. } | Dialog::Help) => {}
             None if self.focus == Focus::Composer => self.input.insert(text),
             None => {}
         }
@@ -988,6 +1137,14 @@ impl App {
             return vec![];
         }
         match dialog {
+            Dialog::Help => {
+                if !matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Char('q' | '?') | KeyCode::F(1)
+                ) {
+                    self.dialog = Some(Dialog::Help);
+                }
+            }
             Dialog::Fork { session_id, label } => {
                 if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
                     if self.connected
@@ -1003,11 +1160,14 @@ impl App {
             }
             Dialog::Create(mut editor) => {
                 if key.code == KeyCode::Enter && self.connected {
-                    let label = editor.text().trim();
-                    if !label.is_empty() && label.len() <= 1024 {
-                        return vec![Command::Create {
-                            label: label.into(),
-                        }];
+                    let trimmed = editor.text().trim();
+                    let label = if trimmed.is_empty() {
+                        format!("Session {}", self.sessions.len() + 1)
+                    } else {
+                        trimmed.to_owned()
+                    };
+                    if label.len() <= 1024 {
+                        return vec![Command::Create { label }];
                     }
                     self.status = "Session label requires 1–1024 bytes.".into();
                 } else {
@@ -1114,4 +1274,464 @@ pub fn message_text(message: &Value) -> String {
                 .join("\n")
         })
         .map_or_else(String::new, |text| sanitize(&text))
+}
+
+const MAX_LOGS: usize = 200;
+const MAX_INSPECTOR_ITEMS: usize = 64;
+const MAX_PREVIEW_BYTES: usize = 4096;
+
+fn clip_text(text: &str, max_bytes: usize) -> String {
+    let clean = sanitize(text);
+    if clean.len() <= max_bytes {
+        return clean;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… [truncated]", &clean[..end])
+}
+
+fn push_log(logs: &mut Vec<String>, entry: String) {
+    logs.push(clip_text(&entry, 512));
+    if logs.len() > MAX_LOGS {
+        logs.drain(0..logs.len() - MAX_LOGS);
+    }
+}
+
+fn format_event_log(cursor: u64, attempt: Option<&Value>, event: &Value) -> String {
+    let kind = string(event, "type");
+    let attempt_id = attempt
+        .and_then(|value| value["attempt_id"].as_str())
+        .map(short_id)
+        .unwrap_or("-");
+    let detail = match kind {
+        "agent" => {
+            let inner = &event["event"];
+            let inner_kind = string(inner, "type");
+            match inner_kind {
+                "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
+                    let name = string(&inner["call"], "name");
+                    let unknown = if inner["result"]["outcome_unknown"] == true {
+                        " [outcome_unknown]"
+                    } else {
+                        ""
+                    };
+                    format!("agent/{inner_kind} · {name}{unknown}")
+                }
+                "message_start" | "message_update" | "message_end" => {
+                    let role = string(&inner["message"], "role");
+                    format!(
+                        "agent/{inner_kind} · {}",
+                        if role.is_empty() { "assistant" } else { role }
+                    )
+                }
+                _ => format!("agent/{inner_kind}"),
+            }
+        }
+        "approval_requested" | "approval_decided" => {
+            let id = short_id(string(&event["approval"], "id"));
+            format!("{kind} · {id}")
+        }
+        "capability_planned" | "capability_started" | "capability_settled" => {
+            let call = &event["call"];
+            let name = string(call, "name");
+            let path = string(&call["arguments"], "path");
+            let outcome = call["outcome"]["type"].as_str().unwrap_or("");
+            let mut parts = vec![kind.to_owned()];
+            if !name.is_empty() {
+                parts.push(name.to_owned());
+            }
+            if !path.is_empty() {
+                parts.push(path.to_owned());
+            }
+            if !outcome.is_empty() {
+                parts.push(format!("({outcome})"));
+            }
+            parts.join(" · ")
+        }
+        "execution_started" | "execution_finished" => {
+            let exec_id = short_id(string(&event["execution"], "execution_id"));
+            let state = string(&event["execution"], "state");
+            format!("{kind} · {exec_id} ({state})")
+        }
+        "tool_started" => format!("tool_started · {}", string(event, "call_id")),
+        "host" => format!("host · {}", string(event, "kind")),
+        "reconciled" => format!(
+            "reconciled · {}",
+            string(&event["reconciliation"], "call_id")
+        ),
+        _ => kind.to_owned(),
+    };
+    format!("#{cursor} [{attempt_id}] {detail}")
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
+fn project_files_and_diffs(
+    messages: &[Value],
+    approvals: &[Value],
+    unresolved_calls: &[Value],
+    settled_capabilities: &[Value],
+) -> (Vec<FileEntry>, Vec<DiffEntry>) {
+    let mut files = Vec::new();
+    let mut diffs = Vec::new();
+    for call in settled_capabilities {
+        collect_from_settled_capability(call, &mut files, &mut diffs);
+    }
+    for message in messages {
+        if message["role"] == "toolResult" {
+            collect_from_tool_result(message, &mut files, &mut diffs);
+        }
+    }
+    for call in unresolved_calls {
+        let name = string(&call["call"], "name");
+        let state = string(call, "state");
+        let args = &call["call"]["arguments"];
+        if let Some(path) = args["path"].as_str().filter(|path| !path.is_empty()) {
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "call" } else { name }, 64),
+                status: clip_text(
+                    if state.is_empty() {
+                        "unresolved"
+                    } else {
+                        state
+                    },
+                    64,
+                ),
+                preview: "Unresolved call — awaiting runtime settlement or host reconciliation."
+                    .into(),
+            });
+        }
+    }
+    for approval in approvals {
+        let details = if approval["input"].is_object() {
+            &approval["input"]
+        } else {
+            approval
+        };
+        let capability = string(details, "capability");
+        let scope_value = details["scope"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .unwrap_or_else(|| details["scope"].clone());
+        if let Some(path) = scope_value["path"].as_str().filter(|path| !path.is_empty()) {
+            if let (Some(old), Some(new)) =
+                (scope_value["old"].as_str(), scope_value["new"].as_str())
+            {
+                diffs.push(DiffEntry {
+                    path: clip_text(path, 240),
+                    status: "awaiting_approval".into(),
+                    diff: format_replacement_diff(old, new),
+                });
+            } else if let Some(content) = scope_value["content"].as_str() {
+                files.push(FileEntry {
+                    path: clip_text(path, 240),
+                    action: clip_text(
+                        if capability.is_empty() {
+                            "approval"
+                        } else {
+                            capability
+                        },
+                        64,
+                    ),
+                    status: "awaiting_approval".into(),
+                    preview: clip_text(content, MAX_PREVIEW_BYTES),
+                });
+            }
+        }
+    }
+    if files.len() > MAX_INSPECTOR_ITEMS {
+        files.drain(0..files.len() - MAX_INSPECTOR_ITEMS);
+    }
+    if diffs.len() > MAX_INSPECTOR_ITEMS {
+        diffs.drain(0..diffs.len() - MAX_INSPECTOR_ITEMS);
+    }
+    (files, diffs)
+}
+
+fn collect_from_settled_capability(
+    call: &Value,
+    files: &mut Vec<FileEntry>,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    let name = string(call, "name");
+    let args = &call["arguments"];
+    let path = args["path"]
+        .as_str()
+        .or_else(|| args["file"].as_str())
+        .unwrap_or("");
+    let outcome_type = call["outcome"]["type"].as_str().unwrap_or("settled");
+    let result = &call["outcome"]["result"];
+    if outcome_type == "outcome_unknown" {
+        files.push(FileEntry {
+            path: clip_text(if path.is_empty() { name } else { path }, 240),
+            action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
+            status: "outcome_unknown".into(),
+            preview: "Outcome unknown — host reconciliation required; unverified output hidden."
+                .into(),
+        });
+        return;
+    }
+    if outcome_type != "completed" {
+        if !path.is_empty() {
+            let reason = call["outcome"]["reason"]
+                .as_str()
+                .or_else(|| call["outcome"]["error"].as_str())
+                .unwrap_or("not executed");
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
+                status: clip_text(outcome_type, 64),
+                preview: clip_text(reason, MAX_PREVIEW_BYTES),
+            });
+        }
+        return;
+    }
+    if !path.is_empty() {
+        if let (Some(old), Some(new)) = (args["old"].as_str(), args["new"].as_str()) {
+            diffs.push(DiffEntry {
+                path: clip_text(path, 240),
+                status: format!("{name} · completed"),
+                diff: format_unified_diff(path, Some(old), new),
+            });
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(name, 64),
+                status: "completed".into(),
+                preview: format_numbered_lines(new),
+            });
+        } else if let Some(content) = args["content"].as_str() {
+            let bytes = result["bytes"].as_u64();
+            let status = match bytes {
+                Some(b) => format!("completed · {b} B"),
+                None => "completed".into(),
+            };
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "write" } else { name }, 64),
+                status: status.clone(),
+                preview: format_numbered_lines(content),
+            });
+            diffs.push(DiffEntry {
+                path: clip_text(path, 240),
+                status: format!(
+                    "{} · {status}",
+                    if name.is_empty() { "write" } else { name }
+                ),
+                diff: format_unified_diff(path, None, content),
+            });
+        } else if let Some(content) = result["content"].as_str() {
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "read" } else { name }, 64),
+                status: "completed".into(),
+                preview: format_numbered_lines(content),
+            });
+        }
+    }
+    collect_value_entry(result, "completed", files, diffs);
+}
+
+fn collect_from_tool_result(
+    message: &Value,
+    files: &mut Vec<FileEntry>,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    let page = &message["structured_content"];
+    let page_unknown = page["outcome_unknown"] == true || page["status"] == "outcome_unknown";
+    let unknown = message["outcome_unknown"] == true || page_unknown;
+    let status = if unknown {
+        "outcome_unknown"
+    } else if message["is_error"] == true && page["status"] != "cancelled" {
+        "failed"
+    } else {
+        page["status"].as_str().unwrap_or("completed")
+    };
+    if unknown {
+        let tool = string(message, "tool_name");
+        files.push(FileEntry {
+            path: format!(
+                "{} ({})",
+                if tool.is_empty() { "tool" } else { tool },
+                string(message, "tool_call_id")
+            ),
+            action: "unknown".into(),
+            status: "outcome_unknown".into(),
+            preview: "Outcome unknown — host reconciliation required; unverified output hidden."
+                .into(),
+        });
+        return;
+    }
+    if let Some(outputs) = page["outputs"].as_array() {
+        for item in outputs {
+            let output = if item["output"].is_object() {
+                &item["output"]
+            } else {
+                item
+            };
+            collect_value_entry(&output["value"], status, files, diffs);
+            if output["type"] == "text"
+                && let Some(text) = output["text"].as_str()
+                && looks_like_diff(text)
+            {
+                diffs.push(DiffEntry {
+                    path: "cell output".into(),
+                    status: status.into(),
+                    diff: clip_text(text, MAX_PREVIEW_BYTES),
+                });
+            }
+        }
+    }
+    collect_value_entry(page, status, files, diffs);
+    let text = message_text(message);
+    if looks_like_diff(&text) {
+        diffs.push(DiffEntry {
+            path: clip_text(string(message, "tool_name"), 120),
+            status: status.into(),
+            diff: clip_text(&text, MAX_PREVIEW_BYTES),
+        });
+    }
+}
+
+fn collect_value_entry(
+    value: &Value,
+    status: &str,
+    files: &mut Vec<FileEntry>,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    if !value.is_object() {
+        return;
+    }
+    let path = value["path"]
+        .as_str()
+        .or_else(|| value["file"].as_str())
+        .unwrap_or("");
+    if let Some(diff) = value["diff"]
+        .as_str()
+        .or_else(|| value["patch"].as_str())
+        .filter(|text| !text.is_empty())
+    {
+        diffs.push(DiffEntry {
+            path: clip_text(if path.is_empty() { "diff" } else { path }, 240),
+            status: status.into(),
+            diff: clip_text(diff, MAX_PREVIEW_BYTES),
+        });
+    } else if let Some(hunks) = value["hunks"].as_array() {
+        let rendered = hunks
+            .iter()
+            .map(|hunk| {
+                if let Some(text) = hunk.as_str() {
+                    text.to_owned()
+                } else if let Some(header) = hunk["header"].as_str() {
+                    let body = hunk["lines"]
+                        .as_array()
+                        .map(|lines| {
+                            lines
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .or_else(|| hunk["patch"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    format!("{header}\n{body}")
+                } else {
+                    hunk.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !rendered.is_empty() {
+            diffs.push(DiffEntry {
+                path: clip_text(if path.is_empty() { "hunks" } else { path }, 240),
+                status: status.into(),
+                diff: clip_text(&rendered, MAX_PREVIEW_BYTES),
+            });
+        }
+    } else if let (Some(old), Some(new)) = (value["old"].as_str(), value["new"].as_str()) {
+        diffs.push(DiffEntry {
+            path: clip_text(if path.is_empty() { "patch" } else { path }, 240),
+            status: status.into(),
+            diff: format_replacement_diff(old, new),
+        });
+    }
+    if !path.is_empty()
+        && let Some(content) = value["content"].as_str()
+    {
+        let clean_path = clip_text(path, 240);
+        if !files.iter().any(|existing| existing.path == clean_path) {
+            files.push(FileEntry {
+                path: clean_path,
+                action: value["action"].as_str().unwrap_or("file").into(),
+                status: status.into(),
+                preview: format_numbered_lines(content),
+            });
+        }
+    }
+}
+
+fn format_replacement_diff(old: &str, new: &str) -> String {
+    let mut out = Vec::new();
+    for line in sanitize(old).lines() {
+        out.push(format!("-{line}"));
+    }
+    for line in sanitize(new).lines() {
+        out.push(format!("+{line}"));
+    }
+    clip_text(&out.join("\n"), MAX_PREVIEW_BYTES)
+}
+
+fn format_unified_diff(path: &str, old: Option<&str>, new: &str) -> String {
+    let clean_path = sanitize(path);
+    let new_clean = sanitize(new);
+    let new_lines: Vec<&str> = new_clean.lines().collect();
+    let mut out = Vec::new();
+    match old {
+        Some(old_text) => {
+            let old_clean = sanitize(old_text);
+            let old_lines: Vec<&str> = old_clean.lines().collect();
+            out.push(format!("--- a/{clean_path}"));
+            out.push(format!("+++ b/{clean_path}"));
+            out.push(format!(
+                "@@ -1,{} +1,{} @@",
+                old_lines.len().max(1),
+                new_lines.len().max(1)
+            ));
+            for line in old_lines {
+                out.push(format!("-{line}"));
+            }
+        }
+        None => {
+            out.push("--- /dev/null".into());
+            out.push(format!("+++ b/{clean_path}"));
+            out.push(format!("@@ -0,0 +1,{} @@", new_lines.len().max(1)));
+        }
+    }
+    for line in new_lines {
+        out.push(format!("+{line}"));
+    }
+    clip_text(&out.join("\n"), MAX_PREVIEW_BYTES)
+}
+
+fn format_numbered_lines(content: &str) -> String {
+    let clean = sanitize(content);
+    let lines: Vec<String> = clean
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| format!("{:>3} │ {line}", idx + 1))
+        .collect();
+    if lines.is_empty() {
+        "  1 │ ".into()
+    } else {
+        clip_text(&lines.join("\n"), MAX_PREVIEW_BYTES)
+    }
+}
+
+fn looks_like_diff(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.starts_with("@@ ") || line.starts_with("--- ") || line.starts_with("+++ "))
 }
