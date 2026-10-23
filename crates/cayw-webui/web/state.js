@@ -98,7 +98,12 @@ export function beginWrite(view, key, method, params = {}) {
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
   // A prompt has no accepted task identity until its own HTTP receipt returns.
   // The session's current/next attempt may belong to an entirely different client.
-  const lease = method === 'session.prompt' ? null : view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const observedLease = view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  // Queue and Core fences differ. A cancellation can use a Core terminal proof
+  // only when the original Task's Worker and Attempt match that Core lease.
+  const lease = method === 'session.prompt' ? null : method === 'session.cancel'
+    ? observedLease?.worker_id === params.worker_id && observedLease?.attempt_id === params.attempt_id ? observedLease : null
+    : observedLease;
   const target = method === 'session.cancel' && sameLease(lease, view.activeAttempt?.lease) ? view.activeAttempt : null;
   // Stop can be clicked before any attempt is visible. Remember the local
   // pending prompt, never the session's next attempt from an arbitrary client.

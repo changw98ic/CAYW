@@ -929,6 +929,11 @@ async fn execute_with_cells(
                 .token_limit()
                 .min(active_model.max_output_tokens.unwrap_or(u64::MAX)),
         ),
+        thinking_level: if inner.model.provider == "openai-chat" {
+            cayw_ai::ThinkingLevel::Low
+        } else {
+            cayw_ai::ThinkingLevel::Off
+        },
         ..Default::default()
     })?;
     let listener_context = context.clone();
