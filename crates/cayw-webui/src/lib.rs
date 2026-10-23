@@ -563,6 +563,7 @@ pub async fn serve_projects_with_limits(
         .route("/app.js", get(script))
         .route("/styles.css", get(styles))
         .route("/favicon.svg", get(favicon))
+        .route("/api/bind", get(bind_script).post(bind_cli))
         .route("/api/rpc", post(rpc))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -1929,4 +1930,41 @@ async fn favicon() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#0b0d10" stroke="#ff7a33" stroke-width="1.5"/><text x="16" y="22" text-anchor="middle" font-family="system-ui,sans-serif" font-size="18" font-weight="700" fill="#ff7a33">C</text></svg>"##,
     )
+}
+
+async fn bind_script(headers: HeaderMap) -> impl IntoResponse {
+    let host = one_header(&headers, "host").unwrap_or("127.0.0.1:4321");
+    let script = format!(
+        r#"#!/bin/sh
+set -e
+HOST_NAME="$(scutil --get ComputerName 2>/dev/null || hostname -s 2>/dev/null || uname -n 2>/dev/null || echo 'macOS-Device')"
+HOST_NAME="$(printf '%s' "$HOST_NAME" | tr -d '\r\n\"\\')"
+ARCH_INFO="$(uname -sm 2>/dev/null || echo 'macOS')"
+ARCH_INFO="$(printf '%s' "$ARCH_INFO" | tr -d '\r\n\"\\')"
+mkdir -p "$HOME/.cayw"
+chmod 700 "$HOME/.cayw" 2>/dev/null || true
+RESP="$(curl -fsSL -X POST "http://{host}/api/bind" \
+  -H "Content-Type: application/json" \
+  -d "{{\"label\":\"$HOST_NAME ($ARCH_INFO)\",\"device_address\":\"$ARCH_INFO · 命令行自动绑定\"}}")"
+printf '%s\n' "$RESP" > "$HOME/.cayw/device-rsa-binding.json"
+chmod 600 "$HOME/.cayw/device-rsa-binding.json" 2>/dev/null || true
+echo "✓ 设备 [$HOST_NAME ($ARCH_INFO)] 已通过 RSA 密钥对自动绑定到 Server (http://{host})"
+echo "  绑定凭证已持久化保存至 ~/.cayw/device-rsa-binding.json，后续自动加密连接，无需再次处理。"
+"#
+    );
+    (
+        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        script,
+    )
+}
+
+async fn bind_cli(
+    State(state): State<Arc<Gateway>>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let params = match payload {
+        Ok(Json(v)) if v.is_object() => v,
+        _ => json!({"label": "命令行绑定设备", "device_address": "命令行自动绑定"}),
+    };
+    handle_devices_add(&state, &params)
 }

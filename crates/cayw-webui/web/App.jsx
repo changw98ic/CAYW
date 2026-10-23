@@ -612,6 +612,7 @@ export function CAYWApp({ env } = {}) {
         },
       ],
       addDeviceModalOpen: false,
+      addDeviceBaselineCount: 1,
       newDeviceLabel: '',
       newDeviceAddress: '',
       newDeviceId: '',
@@ -1540,6 +1541,7 @@ export function CAYWApp({ env } = {}) {
 
   const openAddDeviceModal = () => {
     s.addDeviceModalOpen = true;
+    s.addDeviceBaselineCount = s.boundDevices.length;
     s.newDeviceLabel = '';
     s.newDeviceAddress = '';
     s.newDeviceId = '';
@@ -2101,6 +2103,23 @@ export function CAYWApp({ env } = {}) {
     applyTheme(s.themeMode, false);
     const p = trackAsync(connectLocal());
     if (env?.onInitialConnect) env.onInitialConnect(p);
+    const bindPoll =
+      typeof window !== 'undefined' && typeof window.setInterval === 'function'
+        ? window.setInterval(() => {
+            if (s.addDeviceModalOpen) {
+              void (async () => {
+                await refreshServerAuthAndBinding();
+                if (
+                  s.addDeviceModalOpen &&
+                  s.boundDevices.length > s.addDeviceBaselineCount
+                ) {
+                  s.lastCreatedDevice = s.boundDevices.at(-1);
+                  forceRender();
+                }
+              })();
+            }
+          }, 1000)
+        : null;
 
     const onVisibility = () => {
       if (!document.hidden && s.selected) schedulePoll(0);
@@ -2132,6 +2151,7 @@ export function CAYWApp({ env } = {}) {
     document.addEventListener('keydown', onKeyDown);
     return () => {
       clearTimer(s.timer);
+      if (bindPoll) window.clearInterval(bindPoll);
       for (const controller of s.controllers) controller.abort();
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('online', onOnline);
@@ -7253,147 +7273,168 @@ export function CAYWApp({ env } = {}) {
         </form>
       </Modal>
 
-      {/* Add Device Modal (Bind a new Device to current Server via automatic RSA) */}
+      {/* Bind Device Modal: Click Bind Device -> Copy CLI Command -> Run in Terminal -> Auto-Binds via RSA */}
       <Modal
         open={s.addDeviceModalOpen}
         onClose={() => {
           s.addDeviceModalOpen = false;
           forceRender();
         }}
-        title="添加并绑定设备 (Device)"
+        title="绑定设备"
         size="md"
       >
-        <form
-          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-          onSubmit={e => void handleAddDeviceSubmit(e)}
-        >
-          <div
-            className="zGbnIq_rowCard"
-            style={{
-              padding: '10px 12px',
-              background:
-                'var(--dsw-alias-bg-layer-2, rgba(255,255,255,0.03))',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 4,
-              }}
-            >
-              <strong style={{ fontSize: 13 }}>
-                方式一：在目标 Device 上提供当前 Server 地址自动连入绑定
-              </strong>
-              <button
-                type="button"
-                className="zGbnIq_secondaryButton"
-                style={{ height: 26, fontSize: 12 }}
-                onClick={() => {
-                  const cmd = `cayw device --server ${s.newDeviceServerUrl || 'ws://127.0.0.1:8787'}`;
-                  if (navigator.clipboard?.writeText) {
-                    navigator.clipboard.writeText(cmd).catch(() => {});
-                  }
-                  s.copiedServerCmd = true;
-                  forceRender();
+        {(() => {
+          const originUrl =
+            typeof window !== 'undefined' && window.location?.origin
+              ? window.location.origin
+              : 'http://127.0.0.1:4321';
+          const bindCmd = `curl -fsSL ${originUrl}/api/bind | sh`;
+          const cliBindCmd = `cayw bind --server ${originUrl}`;
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 13,
+                  color: 'var(--dsw-alias-label-secondary)',
+                  lineHeight: 1.5,
                 }}
               >
-                {s.copiedServerCmd ? '已复制命令' : '复制启动命令'}
-              </button>
+                复制下方命令并在目标设备（Device）的命令行终端中执行，设备将自动与当前 Server 生成并交换 RSA 密钥完成一次性永久绑定，后续自动通过 RSA 加密连接，无需再次处理。
+              </p>
+
+              <div
+                className="zGbnIq_rowCard"
+                style={{
+                  padding: '12px 14px',
+                  background:
+                    'var(--dsw-alias-bg-layer-2, rgba(255,255,255,0.03))',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: 8,
+                  }}
+                >
+                  <strong style={{ fontSize: 13 }}>
+                    命令行自动绑定命令
+                  </strong>
+                  <Button
+                    id="copy-bind-cmd-btn"
+                    variant="primary"
+                    size="sm"
+                    type="button"
+                    onClick={() => {
+                      if (navigator.clipboard?.writeText) {
+                        navigator.clipboard.writeText(bindCmd).catch(() => {});
+                      }
+                      s.copiedServerCmd = true;
+                      forceRender();
+                    }}
+                  >
+                    {s.copiedServerCmd ? '✓ 已复制绑定命令' : '复制绑定命令'}
+                  </Button>
+                </div>
+                <code
+                  id="bind-cli-command"
+                  style={{
+                    display: 'block',
+                    padding: '10px 12px',
+                    borderRadius: 6,
+                    background: 'rgba(0,0,0,0.32)',
+                    fontSize: 12,
+                    fontFamily: 'var(--dsw-font-family-mono, monospace)',
+                    userSelect: 'all',
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {bindCmd}
+                </code>
+                <div
+                  style={{
+                    marginTop: 8,
+                    fontSize: 12,
+                    color: 'var(--dsw-alias-label-tertiary)',
+                  }}
+                >
+                  {`或使用内置 CLI：${cliBindCmd}`}
+                </div>
+              </div>
+
+              {s.lastCreatedDevice ? (
+                <div
+                  className="zGbnIq_rowCard"
+                  style={{
+                    padding: '12px 14px',
+                    borderColor: 'var(--dsw-alias-state-success-primary)',
+                  }}
+                >
+                  <div className="zGbnIq_rowHead">
+                    <div className="zGbnIq_rowIdentity">
+                      <StateDot state="done" />
+                      <span className="zGbnIq_rowName">
+                        {`✓ 已自动绑定设备：${s.lastCreatedDevice.label}`}
+                      </span>
+                      <span className="zGbnIq_rowTag">
+                        RSA 加密连接已就绪
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: 'var(--dsw-alias-label-secondary)',
+                      marginTop: 6,
+                    }}
+                  >
+                    {`设备 ID：${s.lastCreatedDevice.device_id} · 已完成一次性 RSA 永久绑定，后续自动重连无需处理。`}
+                  </div>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    background: 'rgba(255,255,255,0.03)',
+                    fontSize: 12,
+                    color: 'var(--dsw-alias-label-secondary)',
+                  }}
+                >
+                  <StateDot state="ongoing" />
+                  <span>
+                    正在等待命令行执行绑定命令…（在终端粘贴回车后将自动绑定并显示在此处）
+                  </span>
+                </div>
+              )}
+
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  gap: 8,
+                }}
+              >
+                <Button
+                  id="close-bind-modal-btn"
+                  variant={s.lastCreatedDevice ? 'primary' : 'outline'}
+                  type="button"
+                  onClick={() => {
+                    s.addDeviceModalOpen = false;
+                    forceRender();
+                  }}
+                >
+                  {s.lastCreatedDevice ? '完成' : '关闭'}
+                </Button>
+              </div>
             </div>
-            <div
-              style={{
-                fontSize: 12,
-                color: 'var(--dsw-alias-label-secondary)',
-                marginBottom: 6,
-              }}
-            >
-              在待接入的设备（Device）上指定下方当前 Server 地址启动，Device 主动连上 Server 时会自动生成并交换 RSA 密钥完成永久绑定：
-            </div>
-            <code
-              style={{
-                display: 'block',
-                padding: '6px 10px',
-                borderRadius: 6,
-                background: 'rgba(0,0,0,0.25)',
-                fontSize: 12,
-                userSelect: 'all',
-              }}
-            >
-              {`cayw device --server ${s.newDeviceServerUrl || 'ws://127.0.0.1:8787'}`}
-            </code>
-          </div>
-
-          {s.addDeviceError ? (
-            <p className="_banner_ugy7y_1" role="alert" style={{ margin: 0 }}>
-              {s.addDeviceError}
-            </p>
-          ) : null}
-
-          <div className="zGbnIq_field">
-            <label className="zGbnIq_fieldLabel">
-              方式二：直接登记并自动绑定设备（输入设备名称）
-            </label>
-            <input
-              id="new-device-label-input"
-              type="text"
-              className="zGbnIq_input"
-              autoFocus={true}
-              placeholder="如 Mac Studio 远程开发机 / 办公室 Mac mini"
-              value={s.newDeviceLabel}
-              onChange={e => {
-                s.newDeviceLabel = e.target.value;
-                forceRender();
-              }}
-            />
-          </div>
-
-          <div className="zGbnIq_field">
-            <label className="zGbnIq_fieldLabel">
-              设备地址或主机标识（可选）
-            </label>
-            <input
-              id="new-device-address-input"
-              type="text"
-              className="zGbnIq_input"
-              placeholder="如 192.168.1.20:52628（留空则为 Device 主动出站连入）"
-              value={s.newDeviceAddress}
-              onChange={e => {
-                s.newDeviceAddress = e.target.value;
-                forceRender();
-              }}
-            />
-          </div>
-
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: 8,
-              marginTop: 4,
-            }}
-          >
-            <Button
-              variant="outline"
-              type="button"
-              onClick={() => {
-                s.addDeviceModalOpen = false;
-                forceRender();
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              id="confirm-add-device-btn"
-              variant="primary"
-              type="submit"
-              disabled={s.addDeviceBusy}
-            >
-              {s.addDeviceBusy ? '正在自动绑定设备…' : '自动绑定此设备'}
-            </Button>
-          </div>
-        </form>
+          );
+        })()}
       </Modal>
 
       <dialog

@@ -25017,6 +25017,7 @@ function CAYWApp({ env } = {}) {
         }
       ],
       addDeviceModalOpen: false,
+      addDeviceBaselineCount: 1,
       newDeviceLabel: "",
       newDeviceAddress: "",
       newDeviceId: "",
@@ -25861,6 +25862,7 @@ function CAYWApp({ env } = {}) {
   };
   const openAddDeviceModal = () => {
     s.addDeviceModalOpen = true;
+    s.addDeviceBaselineCount = s.boundDevices.length;
     s.newDeviceLabel = "";
     s.newDeviceAddress = "";
     s.newDeviceId = "";
@@ -26371,6 +26373,17 @@ function CAYWApp({ env } = {}) {
     applyTheme(s.themeMode, false);
     const p = trackAsync(connectLocal());
     if (env?.onInitialConnect) env.onInitialConnect(p);
+    const bindPoll = typeof window !== "undefined" && typeof window.setInterval === "function" ? window.setInterval(() => {
+      if (s.addDeviceModalOpen) {
+        void (async () => {
+          await refreshServerAuthAndBinding();
+          if (s.addDeviceModalOpen && s.boundDevices.length > s.addDeviceBaselineCount) {
+            s.lastCreatedDevice = s.boundDevices.at(-1);
+            forceRender();
+          }
+        })();
+      }
+    }, 1e3) : null;
     const onVisibility = () => {
       if (!document.hidden && s.selected) schedulePoll(0);
     };
@@ -26401,6 +26414,7 @@ function CAYWApp({ env } = {}) {
     document.addEventListener("keydown", onKeyDown);
     return () => {
       clearTimer(s.timer);
+      if (bindPoll) window.clearInterval(bindPoll);
       for (const controller of s.controllers) controller.abort();
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("online", onOnline);
@@ -30263,21 +30277,30 @@ ${sk.description}
           s.addDeviceModalOpen = false;
           forceRender();
         },
-        title: "\u6DFB\u52A0\u5E76\u7ED1\u5B9A\u8BBE\u5907 (Device)",
+        title: "\u7ED1\u5B9A\u8BBE\u5907",
         size: "md"
       },
-      /* @__PURE__ */ import_react.default.createElement(
-        "form",
-        {
-          style: { display: "flex", flexDirection: "column", gap: 12 },
-          onSubmit: (e) => void handleAddDeviceSubmit(e)
-        },
-        /* @__PURE__ */ import_react.default.createElement(
+      (() => {
+        const originUrl = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://127.0.0.1:4321";
+        const bindCmd = `curl -fsSL ${originUrl}/api/bind | sh`;
+        const cliBindCmd = `cayw bind --server ${originUrl}`;
+        return /* @__PURE__ */ import_react.default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 14 } }, /* @__PURE__ */ import_react.default.createElement(
+          "p",
+          {
+            style: {
+              margin: 0,
+              fontSize: 13,
+              color: "var(--dsw-alias-label-secondary)",
+              lineHeight: 1.5
+            }
+          },
+          "\u590D\u5236\u4E0B\u65B9\u547D\u4EE4\u5E76\u5728\u76EE\u6807\u8BBE\u5907\uFF08Device\uFF09\u7684\u547D\u4EE4\u884C\u7EC8\u7AEF\u4E2D\u6267\u884C\uFF0C\u8BBE\u5907\u5C06\u81EA\u52A8\u4E0E\u5F53\u524D Server \u751F\u6210\u5E76\u4EA4\u6362 RSA \u5BC6\u94A5\u5B8C\u6210\u4E00\u6B21\u6027\u6C38\u4E45\u7ED1\u5B9A\uFF0C\u540E\u7EED\u81EA\u52A8\u901A\u8FC7 RSA \u52A0\u5BC6\u8FDE\u63A5\uFF0C\u65E0\u9700\u518D\u6B21\u5904\u7406\u3002"
+        ), /* @__PURE__ */ import_react.default.createElement(
           "div",
           {
             className: "zGbnIq_rowCard",
             style: {
-              padding: "10px 12px",
+              padding: "12px 14px",
               background: "var(--dsw-alias-bg-layer-2, rgba(255,255,255,0.03))"
             }
           },
@@ -30288,119 +30311,118 @@ ${sk.description}
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
-                marginBottom: 4
+                marginBottom: 8
               }
             },
-            /* @__PURE__ */ import_react.default.createElement("strong", { style: { fontSize: 13 } }, "\u65B9\u5F0F\u4E00\uFF1A\u5728\u76EE\u6807 Device \u4E0A\u63D0\u4F9B\u5F53\u524D Server \u5730\u5740\u81EA\u52A8\u8FDE\u5165\u7ED1\u5B9A"),
+            /* @__PURE__ */ import_react.default.createElement("strong", { style: { fontSize: 13 } }, "\u547D\u4EE4\u884C\u81EA\u52A8\u7ED1\u5B9A\u547D\u4EE4"),
             /* @__PURE__ */ import_react.default.createElement(
-              "button",
+              ps,
               {
+                id: "copy-bind-cmd-btn",
+                variant: "primary",
+                size: "sm",
                 type: "button",
-                className: "zGbnIq_secondaryButton",
-                style: { height: 26, fontSize: 12 },
                 onClick: () => {
-                  const cmd = `cayw device --server ${s.newDeviceServerUrl || "ws://127.0.0.1:8787"}`;
                   if (navigator.clipboard?.writeText) {
-                    navigator.clipboard.writeText(cmd).catch(() => {
+                    navigator.clipboard.writeText(bindCmd).catch(() => {
                     });
                   }
                   s.copiedServerCmd = true;
                   forceRender();
                 }
               },
-              s.copiedServerCmd ? "\u5DF2\u590D\u5236\u547D\u4EE4" : "\u590D\u5236\u542F\u52A8\u547D\u4EE4"
+              s.copiedServerCmd ? "\u2713 \u5DF2\u590D\u5236\u7ED1\u5B9A\u547D\u4EE4" : "\u590D\u5236\u7ED1\u5B9A\u547D\u4EE4"
             )
           ),
+          /* @__PURE__ */ import_react.default.createElement(
+            "code",
+            {
+              id: "bind-cli-command",
+              style: {
+                display: "block",
+                padding: "10px 12px",
+                borderRadius: 6,
+                background: "rgba(0,0,0,0.32)",
+                fontSize: 12,
+                fontFamily: "var(--dsw-font-family-mono, monospace)",
+                userSelect: "all",
+                wordBreak: "break-all"
+              }
+            },
+            bindCmd
+          ),
+          /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              style: {
+                marginTop: 8,
+                fontSize: 12,
+                color: "var(--dsw-alias-label-tertiary)"
+              }
+            },
+            `\u6216\u4F7F\u7528\u5185\u7F6E CLI\uFF1A${cliBindCmd}`
+          )
+        ), s.lastCreatedDevice ? /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            className: "zGbnIq_rowCard",
+            style: {
+              padding: "12px 14px",
+              borderColor: "var(--dsw-alias-state-success-primary)"
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement(Pu, { state: "done" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, `\u2713 \u5DF2\u81EA\u52A8\u7ED1\u5B9A\u8BBE\u5907\uFF1A${s.lastCreatedDevice.label}`), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "RSA \u52A0\u5BC6\u8FDE\u63A5\u5DF2\u5C31\u7EEA"))),
           /* @__PURE__ */ import_react.default.createElement(
             "div",
             {
               style: {
                 fontSize: 12,
                 color: "var(--dsw-alias-label-secondary)",
-                marginBottom: 6
+                marginTop: 6
               }
             },
-            "\u5728\u5F85\u63A5\u5165\u7684\u8BBE\u5907\uFF08Device\uFF09\u4E0A\u6307\u5B9A\u4E0B\u65B9\u5F53\u524D Server \u5730\u5740\u542F\u52A8\uFF0CDevice \u4E3B\u52A8\u8FDE\u4E0A Server \u65F6\u4F1A\u81EA\u52A8\u751F\u6210\u5E76\u4EA4\u6362 RSA \u5BC6\u94A5\u5B8C\u6210\u6C38\u4E45\u7ED1\u5B9A\uFF1A"
-          ),
-          /* @__PURE__ */ import_react.default.createElement(
-            "code",
-            {
-              style: {
-                display: "block",
-                padding: "6px 10px",
-                borderRadius: 6,
-                background: "rgba(0,0,0,0.25)",
-                fontSize: 12,
-                userSelect: "all"
-              }
-            },
-            `cayw device --server ${s.newDeviceServerUrl || "ws://127.0.0.1:8787"}`
+            `\u8BBE\u5907 ID\uFF1A${s.lastCreatedDevice.device_id} \xB7 \u5DF2\u5B8C\u6210\u4E00\u6B21\u6027 RSA \u6C38\u4E45\u7ED1\u5B9A\uFF0C\u540E\u7EED\u81EA\u52A8\u91CD\u8FDE\u65E0\u9700\u5904\u7406\u3002`
           )
-        ),
-        s.addDeviceError ? /* @__PURE__ */ import_react.default.createElement("p", { className: "_banner_ugy7y_1", role: "alert", style: { margin: 0 } }, s.addDeviceError) : null,
-        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u65B9\u5F0F\u4E8C\uFF1A\u76F4\u63A5\u767B\u8BB0\u5E76\u81EA\u52A8\u7ED1\u5B9A\u8BBE\u5907\uFF08\u8F93\u5165\u8BBE\u5907\u540D\u79F0\uFF09"), /* @__PURE__ */ import_react.default.createElement(
-          "input",
+        ) : /* @__PURE__ */ import_react.default.createElement(
+          "div",
           {
-            id: "new-device-label-input",
-            type: "text",
-            className: "zGbnIq_input",
-            autoFocus: true,
-            placeholder: "\u5982 Mac Studio \u8FDC\u7A0B\u5F00\u53D1\u673A / \u529E\u516C\u5BA4 Mac mini",
-            value: s.newDeviceLabel,
-            onChange: (e) => {
-              s.newDeviceLabel = e.target.value;
-              forceRender();
+            style: {
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 12px",
+              borderRadius: 8,
+              background: "rgba(255,255,255,0.03)",
+              fontSize: 12,
+              color: "var(--dsw-alias-label-secondary)"
             }
-          }
-        )),
-        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u5730\u5740\u6216\u4E3B\u673A\u6807\u8BC6\uFF08\u53EF\u9009\uFF09"), /* @__PURE__ */ import_react.default.createElement(
-          "input",
-          {
-            id: "new-device-address-input",
-            type: "text",
-            className: "zGbnIq_input",
-            placeholder: "\u5982 192.168.1.20:52628\uFF08\u7559\u7A7A\u5219\u4E3A Device \u4E3B\u52A8\u51FA\u7AD9\u8FDE\u5165\uFF09",
-            value: s.newDeviceAddress,
-            onChange: (e) => {
-              s.newDeviceAddress = e.target.value;
-              forceRender();
-            }
-          }
-        )),
-        /* @__PURE__ */ import_react.default.createElement(
+          },
+          /* @__PURE__ */ import_react.default.createElement(Pu, { state: "ongoing" }),
+          /* @__PURE__ */ import_react.default.createElement("span", null, "\u6B63\u5728\u7B49\u5F85\u547D\u4EE4\u884C\u6267\u884C\u7ED1\u5B9A\u547D\u4EE4\u2026\uFF08\u5728\u7EC8\u7AEF\u7C98\u8D34\u56DE\u8F66\u540E\u5C06\u81EA\u52A8\u7ED1\u5B9A\u5E76\u663E\u793A\u5728\u6B64\u5904\uFF09")
+        ), /* @__PURE__ */ import_react.default.createElement(
           "div",
           {
             style: {
               display: "flex",
               justifyContent: "flex-end",
-              gap: 8,
-              marginTop: 4
+              gap: 8
             }
           },
           /* @__PURE__ */ import_react.default.createElement(
             ps,
             {
-              variant: "outline",
+              id: "close-bind-modal-btn",
+              variant: s.lastCreatedDevice ? "primary" : "outline",
               type: "button",
               onClick: () => {
                 s.addDeviceModalOpen = false;
                 forceRender();
               }
             },
-            "\u53D6\u6D88"
-          ),
-          /* @__PURE__ */ import_react.default.createElement(
-            ps,
-            {
-              id: "confirm-add-device-btn",
-              variant: "primary",
-              type: "submit",
-              disabled: s.addDeviceBusy
-            },
-            s.addDeviceBusy ? "\u6B63\u5728\u81EA\u52A8\u7ED1\u5B9A\u8BBE\u5907\u2026" : "\u81EA\u52A8\u7ED1\u5B9A\u6B64\u8BBE\u5907"
+            s.lastCreatedDevice ? "\u5B8C\u6210" : "\u5173\u95ED"
           )
-        )
-      )
+        ));
+      })()
     ),
     /* @__PURE__ */ import_react.default.createElement(
       "dialog",
