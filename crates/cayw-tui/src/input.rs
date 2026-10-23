@@ -86,6 +86,27 @@ impl Editor {
             .unwrap_or(self.text.len() - self.cursor);
     }
 
+    pub fn delete_word_back(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let before = &self.text[..self.cursor];
+        let trimmed_len = before.trim_end_matches([' ', '\t']).len();
+        let target = if trimmed_len == 0 {
+            0
+        } else {
+            before[..trimmed_len]
+                .rfind(|c: char| c.is_whitespace())
+                .map_or(0, |idx| idx + 1)
+        };
+        let start = self.next_boundary_at_or_after(target);
+        if start < self.cursor {
+            self.revision = self.revision.wrapping_add(1);
+            self.text.replace_range(start..self.cursor, "");
+            self.cursor = self.next_boundary_at_or_after(start);
+        }
+    }
+
     pub fn up(&mut self) {
         let start = self.text[..self.cursor].rfind('\n').map_or(0, |at| at + 1);
         if start == 0 {

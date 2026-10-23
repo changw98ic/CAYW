@@ -671,6 +671,7 @@ pub struct App {
     pub connected: bool,
     pub status: String,
     pub tick: u64,
+    pub mouse_disabled: bool,
     drafts: BTreeMap<String, Editor>,
     pub quitting: bool,
 }
@@ -1046,6 +1047,16 @@ impl App {
             }
         }
         if alt {
+            if key.code == KeyCode::Char('m') {
+                self.mouse_disabled = !self.mouse_disabled;
+                self.status = if self.mouse_disabled {
+                    "Mouse capture disabled (native terminal text selection enabled · Alt+M toggle)."
+                        .into()
+                } else {
+                    "Mouse capture enabled (click tabs/sessions/approvals · Alt+M toggle).".into()
+                };
+                return vec![];
+            }
             let tab = match key.code {
                 KeyCode::Char('1') => Some(ViewTab::Chat),
                 KeyCode::Char('2') => Some(ViewTab::Files),
@@ -1492,6 +1503,16 @@ fn edit_key(editor: &mut Editor, key: KeyEvent) {
     let control = key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER);
+    if control {
+        match key.code {
+            KeyCode::Char('a') => editor.home(),
+            KeyCode::Char('e') => editor.end(),
+            KeyCode::Char('u') => editor.clear(),
+            KeyCode::Char('w') => editor.delete_word_back(),
+            _ => {}
+        }
+        return;
+    }
     match key.code {
         KeyCode::Left => editor.left(),
         KeyCode::Right => editor.right(),

@@ -6,7 +6,10 @@ use cayw_tui::{
     terminal::TerminalGuard,
     transport::{Transport, Watch},
 };
-use crossterm::event::{Event, EventStream};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
+    execute,
+};
 use futures::{FutureExt, StreamExt};
 use ratatui::layout::Rect;
 use std::{
@@ -63,6 +66,7 @@ async fn run(
     let stop = shutdown_signal();
     tokio::pin!(stop);
     let mut last_watch: Option<Option<Watch>> = None;
+    let mut last_mouse_disabled = app.mouse_disabled;
     terminal.terminal().draw(|frame| draw(frame, app))?;
     loop {
         let mut consumed_events = false;
@@ -73,6 +77,14 @@ async fn run(
                 Some(Ok(Event::Key(key))) => {
                     let commands = app.handle_key(key);
                     driver.dispatch(app, transport, commands);
+                    if app.mouse_disabled != last_mouse_disabled {
+                        last_mouse_disabled = app.mouse_disabled;
+                        if app.mouse_disabled {
+                            let _ = execute!(io::stdout(), DisableMouseCapture);
+                        } else {
+                            let _ = execute!(io::stdout(), EnableMouseCapture);
+                        }
+                    }
                 }
                 Some(Ok(Event::Paste(text))) => app.paste(&text),
                 Some(Ok(Event::Mouse(mouse))) => {
