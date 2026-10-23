@@ -1515,15 +1515,34 @@ fn handle_device_bind_once(state: &Gateway, params: &Value) -> Response {
 }
 
 fn handle_devices_add(state: &Gateway, params: &Value) -> Response {
-    let Some(label_raw) = params.get("label").and_then(Value::as_str) else {
+    let server_url = params
+        .get("server_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    if server_url.is_empty() || server_url.len() > 256 || server_url.chars().any(char::is_control) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_params",
-            "请输入设备名称",
+            "请输入有效的 Server 地址",
             false,
         );
-    };
-    let label = label_raw.trim();
+    }
+    let host_part = server_url
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let default_label = format!("远程设备 ({host_part})");
+    let label = params
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&default_label);
     if label.is_empty() || label.len() > 120 || label.chars().any(char::is_control) {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -1574,13 +1593,6 @@ fn handle_devices_add(state: &Gateway, params: &Value) -> Response {
         }
         None => format!("device-rsa-{:02}", auth.devices.len() + 1),
     };
-    let server_url = params
-        .get("server_url")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("wss://127.0.0.1:8787")
-        .to_owned();
     let (_, default_dev_kp) = cached_default_rsa_keys();
     let dev_kp = RsaKeyPair::generate().unwrap_or_else(|_| default_dev_kp.clone());
     let binding = PersistentRsaDeviceBinding {

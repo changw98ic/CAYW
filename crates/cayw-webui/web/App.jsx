@@ -1540,7 +1540,7 @@ export function CAYWApp({ env } = {}) {
     s.addDeviceModalOpen = true;
     s.newDeviceLabel = '';
     s.newDeviceId = '';
-    s.newDeviceServerUrl = s.deviceServerUrlDraft || 'wss://127.0.0.1:8787';
+    s.newDeviceServerUrl = '';
     s.newDeviceMode = 'auto';
     s.newDevicePem = '';
     s.addDeviceError = '';
@@ -1552,25 +1552,24 @@ export function CAYWApp({ env } = {}) {
   const handleAddDeviceSubmit = async e => {
     e?.preventDefault?.();
     if (s.addDeviceBusy) return;
+    const rawServer = s.newDeviceServerUrl.trim();
+    if (!rawServer) {
+      s.addDeviceError = '请输入 Server 地址（如 wss://127.0.0.1:8787）。';
+      forceRender();
+      return;
+    }
+    const normalizedServer =
+      rawServer.startsWith('ws://') || rawServer.startsWith('wss://')
+        ? rawServer
+        : `wss://${rawServer}`;
     const label = s.newDeviceLabel.trim();
-    if (!label) {
-      s.addDeviceError = '请输入要绑定的设备名称（如 Mac Studio 远程工作站）。';
-      forceRender();
-      return;
-    }
-    if (s.newDeviceMode === 'pem' && !s.newDevicePem.trim()) {
-      s.addDeviceError = '请粘贴设备端生成的 RSA 公钥内容。';
-      forceRender();
-      return;
-    }
     s.addDeviceBusy = true;
     s.addDeviceError = '';
     forceRender();
     try {
       const res = await rpc('devices.add', {
-        label,
-        ...(s.newDeviceId.trim() ? { device_id: s.newDeviceId.trim() } : {}),
-        server_url: s.newDeviceServerUrl.trim() || 'wss://127.0.0.1:8787',
+        ...(label ? { label } : {}),
+        server_url: normalizedServer,
       });
       if (object(res)) {
         if (Array.isArray(res.devices) && res.devices.length) {
@@ -1580,18 +1579,21 @@ export function CAYWApp({ env } = {}) {
           s.activeDeviceId = res.active_device_id;
         }
         if (object(res.created)) {
-          s.lastCreatedDevice = res.created;
           s.deviceBinding = res.created;
         }
       } else {
+        const hostPart = normalizedServer
+          .replace(/^wss?:\/\//, '')
+          .replace(/\/$/, '');
+        const autoLabel = label || `远程设备 (${hostPart})`;
         const fallbackDev = {
-          device_id: s.newDeviceId.trim() || `device-rsa-0${s.boundDevices.length + 1}`,
-          label,
+          device_id: `device-rsa-0${s.boundDevices.length + 1}`,
+          label: autoLabel,
           kind: 'rsa_bound',
           builtin: false,
           active: true,
           bound: true,
-          server_url: s.newDeviceServerUrl.trim() || 'wss://127.0.0.1:8787',
+          server_url: normalizedServer,
           algorithm: 'RSA-OAEP-SHA256 + RSA-SHA256',
           encrypted_channel_verified: true,
           auto_reconnect: true,
@@ -1603,10 +1605,10 @@ export function CAYWApp({ env } = {}) {
           .map(d => ({ ...d, active: false }))
           .concat([fallbackDev]);
         s.activeDeviceId = fallbackDev.device_id;
-        s.lastCreatedDevice = fallbackDev;
         s.deviceBinding = fallbackDev;
       }
-      s.deviceBindingNotice = `设备“${label}”已完成一次性 RSA 密钥绑定并设为当前设备，后续自动加密连接。`;
+      s.addDeviceModalOpen = false;
+      s.deviceBindingNotice = `已连接 ${normalizedServer} 并自动完成 RSA 密钥绑定，后续自动加密连接。`;
       forceRender();
     } catch (error) {
       s.addDeviceError = errorText(error);
@@ -5225,12 +5227,12 @@ export function CAYWApp({ env } = {}) {
                         <div className="zGbnIq_rowIdentity">
                           <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
                           <span className="zGbnIq_rowName">
-                            {`Server ↔ Device 一次性 RSA 加密绑定（已绑定 ${s.boundDevices.length} 台设备）`}
+                            {`Server ↔ Device 自动绑定（已绑定 ${s.boundDevices.length} 台设备）`}
                           </span>
                           <span className="zGbnIq_rowTag">
                             {s.deviceBinding.bound
-                              ? '已永久绑定 · RSA 自动加密连接'
-                              : '待首次绑定'}
+                              ? 'RSA 自动加密连接中'
+                              : '待连接'}
                           </span>
                         </div>
                         <div className="zGbnIq_rowActions">
@@ -5242,20 +5244,10 @@ export function CAYWApp({ env } = {}) {
                           >
                             + 添加设备
                           </button>
-                          <button
-                            type="button"
-                            className="zGbnIq_secondaryButton"
-                            onClick={() => {
-                              s.showRsaPem = !s.showRsaPem;
-                              forceRender();
-                            }}
-                          >
-                            {s.showRsaPem ? '收起 RSA 公钥' : '查看 RSA 公钥'}
-                          </button>
                         </div>
                       </div>
                       <p className="At1oFq_hint" style={{ margin: '6px 0 10px' }}>
-                        2. Server 与 Device 仅需在首次接入时交换一次 RSA 公钥，绑定关系与密钥对永久保存在本机，后续连接全程采用 RSA 加密与签名核验，无需再次配置或手动干预。
+                        2. 填写 Server 地址后即自动完成一次性 RSA 密钥绑定并持久化保存，后续连接全程自动通过 RSA 加密通信，无需再次处理。
                       </p>
                       {s.deviceBindingNotice ? (
                         <p className="zGbnIq_savedNotice" role="status">
@@ -5265,9 +5257,6 @@ export function CAYWApp({ env } = {}) {
                       <div className="zGbnIq_rows" style={{ marginBottom: 10 }}>
                         {s.boundDevices.map(dev => {
                           const isCurrent = dev.device_id === s.activeDeviceId;
-                          const isPemOpen = Boolean(
-                            s.expandedDevicePemIds[dev.device_id],
-                          );
                           return (
                             <div
                               key={dev.device_id}
@@ -5286,8 +5275,8 @@ export function CAYWApp({ env } = {}) {
                                   </span>
                                   <span className="zGbnIq_rowTag">
                                     {isCurrent
-                                      ? '当前使用设备 · RSA 已加密'
-                                      : '已永久绑定 · 自动重连'}
+                                      ? '当前设备 · RSA 加密已就绪'
+                                      : '已自动绑定 · 自动重连'}
                                   </span>
                                 </div>
                                 <div className="zGbnIq_rowActions">
@@ -5299,18 +5288,7 @@ export function CAYWApp({ env } = {}) {
                                       void handleSelectDevice(dev.device_id)
                                     }
                                   >
-                                    {isCurrent ? '当前活跃' : '切换至此设备'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="zGbnIq_secondaryButton"
-                                    onClick={() => {
-                                      s.expandedDevicePemIds[dev.device_id] =
-                                        !isPemOpen;
-                                      forceRender();
-                                    }}
-                                  >
-                                    {isPemOpen ? '收起密钥' : '密钥指纹'}
+                                    {isCurrent ? '当前使用中' : '切换'}
                                   </button>
                                   {!dev.builtin ? (
                                     <button
@@ -5320,7 +5298,7 @@ export function CAYWApp({ env } = {}) {
                                         void handleRemoveDevice(dev.device_id)
                                       }
                                     >
-                                      解绑
+                                      移除
                                     </button>
                                   ) : null}
                                 </div>
@@ -5332,90 +5310,12 @@ export function CAYWApp({ env } = {}) {
                                   marginTop: 4,
                                 }}
                               >
-                                {`设备 ID：${dev.device_id} · Server：${dev.server_url} · 指纹：${dev.device_fingerprint}`}
+                                {`Server 地址：${dev.server_url} · 已自动完成 RSA 密钥绑定`}
                               </div>
-                              {isPemOpen ? (
-                                <pre
-                                  className="ydkMvW_code"
-                                  style={{ marginTop: 8, fontSize: 11 }}
-                                >
-                                  {dev.device_public_key_pem}
-                                </pre>
-                              ) : null}
                             </div>
                           );
                         })}
                       </div>
-                      <div className="zGbnIq_modelAdvanced" style={{ marginBottom: 8 }}>
-                        <div className="zGbnIq_field">
-                          <label className="zGbnIq_fieldLabel">设备唯一标识</label>
-                          <input
-                            type="text"
-                            className="zGbnIq_input"
-                            readOnly
-                            value={s.deviceBinding.device_id || 'device-macos-local-01'}
-                          />
-                        </div>
-                        <div className="zGbnIq_field">
-                          <label className="zGbnIq_fieldLabel">加密算法与通道状态</label>
-                          <input
-                            type="text"
-                            className="zGbnIq_input"
-                            readOnly
-                            value={`${s.deviceBinding.algorithm || 'RSA-OAEP-SHA256'} · ${s.deviceBinding.encrypted_channel_verified ? '加密自检通过' : '就绪'}`}
-                          />
-                        </div>
-                      </div>
-                      <div className="zGbnIq_modelAdvanced" style={{ marginBottom: 8 }}>
-                        <div className="zGbnIq_field">
-                          <label className="zGbnIq_fieldLabel">设备端 RSA 公钥指纹</label>
-                          <input
-                            type="text"
-                            className="zGbnIq_input"
-                            readOnly
-                            value={s.deviceBinding.device_fingerprint || ''}
-                          />
-                        </div>
-                        <div className="zGbnIq_field">
-                          <label className="zGbnIq_fieldLabel">Server 端 RSA 公钥指纹</label>
-                          <input
-                            type="text"
-                            className="zGbnIq_input"
-                            readOnly
-                            value={s.deviceBinding.server_fingerprint || ''}
-                          />
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-                        <div className="zGbnIq_field" style={{ flex: 1 }}>
-                          <label className="zGbnIq_fieldLabel">绑定 Server 地址</label>
-                          <input
-                            type="text"
-                            className="zGbnIq_input"
-                            placeholder="如 wss://127.0.0.1:8787"
-                            value={s.deviceServerUrlDraft}
-                            onChange={e => {
-                              s.deviceServerUrlDraft = e.target.value;
-                              forceRender();
-                            }}
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          className="zGbnIq_primaryButton"
-                          onClick={() => void handleBindDeviceOnce()}
-                        >
-                          确认一次性 RSA 绑定
-                        </button>
-                      </div>
-                      {s.showRsaPem ? (
-                        <pre
-                          className="ydkMvW_code"
-                          style={{ marginTop: 10, fontSize: 11 }}
-                        >
-                          {s.deviceBinding.device_public_key_pem}
-                        </pre>
-                      ) : null}
                     </div>
 
                     {/* Rule 3: Web <-> Server Default Account Login & Password Change */}
@@ -7354,17 +7254,20 @@ export function CAYWApp({ env } = {}) {
         </form>
       </Modal>
 
-      {/* Add Device Modal (Server <-> Device One-Time RSA Binding) */}
+      {/* Add Device Modal (Provide Server Address -> Automatic RSA Binding) */}
       <Modal
         open={s.addDeviceModalOpen}
         onClose={() => {
           s.addDeviceModalOpen = false;
           forceRender();
         }}
-        title="添加并绑定新设备（RSA 一次性加密连接）"
-        size="lg"
+        title="添加设备"
+        size="md"
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <form
+          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+          onSubmit={e => void handleAddDeviceSubmit(e)}
+        >
           <p
             style={{
               margin: 0,
@@ -7373,41 +7276,8 @@ export function CAYWApp({ env } = {}) {
               lineHeight: 1.5,
             }}
           >
-            Server 与 Device 只需在此绑定一次：生成或导入设备端 RSA 密钥对并完成公钥交换后，密钥与身份将永久保存在本机，后续所有连接均自动使用 RSA-OAEP-SHA256 加密与签名核验，无需再次配对或输入令牌。
+            填写 Server 地址后，系统将在后台自动生成并交换 RSA 密钥完成一次性永久绑定，后续均自动使用 RSA 加密连接。
           </p>
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              className={
-                s.newDeviceMode === 'auto'
-                  ? 'zGbnIq_primaryButton'
-                  : 'zGbnIq_secondaryButton'
-              }
-              onClick={() => {
-                s.newDeviceMode = 'auto';
-                s.addDeviceError = '';
-                forceRender();
-              }}
-            >
-              自动生成 RSA 密钥对并一键绑定（推荐）
-            </button>
-            <button
-              type="button"
-              className={
-                s.newDeviceMode === 'pem'
-                  ? 'zGbnIq_primaryButton'
-                  : 'zGbnIq_secondaryButton'
-              }
-              onClick={() => {
-                s.newDeviceMode = 'pem';
-                s.addDeviceError = '';
-                forceRender();
-              }}
-            >
-              导入已有设备 RSA 公钥绑定
-            </button>
-          </div>
 
           {s.addDeviceError ? (
             <p className="_banner_ugy7y_1" role="alert" style={{ margin: 0 }}>
@@ -7415,178 +7285,67 @@ export function CAYWApp({ env } = {}) {
             </p>
           ) : null}
 
-          {s.lastCreatedDevice ? (
-            <div className="zGbnIq_rowCard" style={{ padding: 14 }}>
-              <div className="zGbnIq_rowHead">
-                <div className="zGbnIq_rowIdentity">
-                  <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
-                  <span className="zGbnIq_rowName">
-                    {`已完成永久绑定：${s.lastCreatedDevice.label}`}
-                  </span>
-                  <span className="zGbnIq_rowTag">
-                    RSA-OAEP-SHA256 加密握手通过
-                  </span>
-                </div>
-              </div>
-              <div
-                style={{
-                  fontSize: 12,
-                  color: 'var(--dsw-alias-label-secondary)',
-                  marginTop: 8,
-                  lineHeight: 1.6,
-                }}
-              >
-                <div>{`设备唯一标识：${s.lastCreatedDevice.device_id}`}</div>
-                <div>{`绑定 Server 地址：${s.lastCreatedDevice.server_url}`}</div>
-                <div>{`设备端 RSA 指纹：${s.lastCreatedDevice.device_fingerprint}`}</div>
-                <div>{`服务端 RSA 指纹：${s.lastCreatedDevice.server_fingerprint}`}</div>
-              </div>
-              <pre
-                className="ydkMvW_code"
-                style={{ marginTop: 8, fontSize: 11 }}
-              >
-                {s.lastCreatedDevice.device_public_key_pem}
-              </pre>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  gap: 8,
-                  marginTop: 12,
-                }}
-              >
-                <Button
-                  variant="outline"
-                  type="button"
-                  onClick={() => {
-                    s.lastCreatedDevice = null;
-                    s.newDeviceLabel = '';
-                    s.newDeviceId = '';
-                    forceRender();
-                  }}
-                >
-                  继续添加其他设备
-                </Button>
-                <Button
-                  id="finish-add-device-btn"
-                  variant="primary"
-                  type="button"
-                  onClick={() => {
-                    s.addDeviceModalOpen = false;
-                    forceRender();
-                  }}
-                >
-                  完成并使用此设备
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <form
-              style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-              onSubmit={e => void handleAddDeviceSubmit(e)}
+          <div className="zGbnIq_field">
+            <label className="zGbnIq_fieldLabel">Server 地址</label>
+            <input
+              id="new-device-server-input"
+              type="text"
+              className="zGbnIq_input"
+              autoFocus={true}
+              placeholder="如 wss://127.0.0.1:8787 或 192.168.1.100:8787"
+              value={s.newDeviceServerUrl}
+              onChange={e => {
+                s.newDeviceServerUrl = e.target.value;
+                forceRender();
+              }}
+            />
+          </div>
+
+          <div className="zGbnIq_field">
+            <label className="zGbnIq_fieldLabel">
+              备注名称（可选，留空自动按地址生成）
+            </label>
+            <input
+              id="new-device-label-input"
+              type="text"
+              className="zGbnIq_input"
+              placeholder="如 远程开发机"
+              value={s.newDeviceLabel}
+              onChange={e => {
+                s.newDeviceLabel = e.target.value;
+                forceRender();
+              }}
+            />
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'flex-end',
+              gap: 8,
+              marginTop: 4,
+            }}
+          >
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => {
+                s.addDeviceModalOpen = false;
+                forceRender();
+              }}
             >
-              <div className="zGbnIq_modelAdvanced">
-                <div className="zGbnIq_field">
-                  <label className="zGbnIq_fieldLabel">设备显示名称</label>
-                  <input
-                    id="new-device-label-input"
-                    type="text"
-                    className="zGbnIq_input"
-                    placeholder="如 Mac Studio 远程工作站 / 办公室 Mac mini"
-                    value={s.newDeviceLabel}
-                    onChange={e => {
-                      s.newDeviceLabel = e.target.value;
-                      forceRender();
-                    }}
-                  />
-                </div>
-                <div className="zGbnIq_field">
-                  <label className="zGbnIq_fieldLabel">
-                    设备唯一标识（可选，留空自动生成）
-                  </label>
-                  <input
-                    id="new-device-id-input"
-                    type="text"
-                    className="zGbnIq_input"
-                    placeholder="如 device-mac-studio-02"
-                    value={s.newDeviceId}
-                    onChange={e => {
-                      s.newDeviceId = e.target.value;
-                      forceRender();
-                    }}
-                  />
-                </div>
-              </div>
-
-              <div className="zGbnIq_field">
-                <label className="zGbnIq_fieldLabel">
-                  所属 Server 连接地址
-                </label>
-                <input
-                  id="new-device-server-input"
-                  type="text"
-                  className="zGbnIq_input"
-                  placeholder="如 wss://127.0.0.1:8787"
-                  value={s.newDeviceServerUrl}
-                  onChange={e => {
-                    s.newDeviceServerUrl = e.target.value;
-                    forceRender();
-                  }}
-                />
-              </div>
-
-              {s.newDeviceMode === 'pem' ? (
-                <div className="zGbnIq_field">
-                  <label className="zGbnIq_fieldLabel">
-                    设备端 RSA 公钥（PEM 格式）
-                  </label>
-                  <textarea
-                    id="new-device-pem-input"
-                    className="zGbnIq_input"
-                    rows={4}
-                    style={{ height: 'auto', padding: '8px 10px' }}
-                    placeholder="-----BEGIN RSA PUBLIC KEY----- ..."
-                    value={s.newDevicePem}
-                    onChange={e => {
-                      s.newDevicePem = e.target.value;
-                      forceRender();
-                    }}
-                  />
-                </div>
-              ) : null}
-
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'flex-end',
-                  gap: 8,
-                  marginTop: 4,
-                }}
-              >
-                <Button
-                  variant="outline"
-                  type="button"
-                  onClick={() => {
-                    s.addDeviceModalOpen = false;
-                    forceRender();
-                  }}
-                >
-                  取消
-                </Button>
-                <Button
-                  id="confirm-add-device-btn"
-                  variant="primary"
-                  type="submit"
-                  disabled={s.addDeviceBusy}
-                >
-                  {s.addDeviceBusy
-                    ? '正在生成密钥并绑定…'
-                    : '生成 RSA 密钥并完成一次性永久绑定'}
-                </Button>
-              </div>
-            </form>
-          )}
-        </div>
+              取消
+            </Button>
+            <Button
+              id="confirm-add-device-btn"
+              variant="primary"
+              type="submit"
+              disabled={s.addDeviceBusy}
+            >
+              {s.addDeviceBusy ? '正在自动绑定…' : '自动绑定并连接'}
+            </Button>
+          </div>
+        </form>
       </Modal>
 
       <dialog
