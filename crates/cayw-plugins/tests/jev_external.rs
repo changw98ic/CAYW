@@ -92,9 +92,19 @@ fn ordinary_manifest() -> PluginManifest {
 #[tokio::test]
 async fn external_jev_refuses_to_score_and_unload_keeps_ordinary_calls() {
     let registry = Arc::new(PluginRegistry::new());
+    let mut process_config = config();
+    process_config.environment.insert(
+        "CAYW_JEV_PYTHON".into(),
+        process_config
+            .executable
+            .join("unavailable-python")
+            .to_str()
+            .unwrap()
+            .into(),
+    );
     registry
         .load_external(
-            config(),
+            process_config,
             PluginContext::new(["jev.score".into(), "jev.place".into()], []),
             CancellationToken::new(),
         )
@@ -191,9 +201,14 @@ async fn external_jev_refuses_to_score_and_unload_keeps_ordinary_calls() {
 #[tokio::test]
 async fn crashed_jev_does_not_block_an_ordinary_call() {
     let registry = PluginRegistry::new();
+    let mut process_config = config();
+    // Only this test's child may be killed while other JEv tests run in parallel.
+    let marker = format!("crash-fixture-{}", uuid::Uuid::new_v4());
+    process_config.argv.push(marker.clone());
+    let command = format!("{} {marker}", process_config.executable.display());
     registry
         .load_external(
-            config(),
+            process_config,
             PluginContext::new(["jev.score".into(), "jev.place".into()], []),
             CancellationToken::new(),
         )
@@ -207,17 +222,14 @@ async fn crashed_jev_does_not_block_an_ordinary_call() {
             PluginContext::new(["chat.echo".into()], []),
         )
         .unwrap();
-    let binary = jev_binary();
     let listed = std::process::Command::new("ps")
         .args(["-axo", "pid=,command="])
         .output()
         .expect("list processes");
     let listing = String::from_utf8(listed.stdout).expect("process list");
     let child = listing.lines().find_map(|line| {
-        let (pid, command) = line.trim().split_once(' ')?;
-        command
-            .starts_with(binary.to_str()?)
-            .then_some(pid.to_string())
+        let (pid, candidate) = line.trim().split_once(' ')?;
+        (candidate == command).then_some(pid.to_string())
     });
     let Some(pid) = child else {
         panic!("spawned JEv process was not listed");
