@@ -1,4 +1,4 @@
-use cayw_plugins::{fusion::*, observer::*, strongflow::*, *};
+use cayw_plugins::{fusion::*, jev::*, observer::*, strongflow::*, *};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,6 +93,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.candidates.len(),
         report.input_digest
     );
+    // JEv has no registered evaluator here. The call fails instead of inventing a score.
+    let jev = Jev::new(None, Duration::from_secs(1));
+    let jev_error = jev
+        .evaluate(
+            JevInput {
+                premise: "offline fixture".into(),
+                hypothesis: "no model call".into(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("JEv without an evaluator must fail");
+    println!("jev unavailable: {jev_error}");
     registry.unload("strongflow")?;
     println!(
         "binding availability: {:?}",
