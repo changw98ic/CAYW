@@ -158,6 +158,63 @@ fn pre_rename_binding_decisions_require_explicit_migration() {
     assert!(rt.list().is_err());
 }
 
+#[test]
+fn peer_runtime_observes_a_later_frozen_binding_without_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let open = || {
+        Runtime::open(
+            dir.path().join("sessions.db"),
+            dir.path(),
+            Arc::new(Chat),
+            Model::new("fixture", "peer-freeze"),
+            RuntimeConfig::default(),
+        )
+        .unwrap()
+    };
+    let writer = open();
+    let reader = open();
+    let id = writer.create(None).unwrap().id;
+    let before = reader.get(&id).unwrap();
+    assert!(!before.frozen);
+    assert!(before.binding.is_none());
+    let registry = uuid::Uuid::new_v4().to_string();
+    writer
+        .store()
+        .append_control_event(
+            &id,
+            before.cursor,
+            None,
+            "trusted-host",
+            "plugin_frozen",
+            json!({"binding": {
+                "manifest": {"name": "fixture", "version": "1.0.0"},
+                "registry_id": registry,
+                "generation": 1,
+                "reason": "frozen by another Runtime connection",
+                "strongflow": null
+            }}),
+        )
+        .unwrap();
+    let frozen = reader.get(&id).unwrap();
+    assert!(frozen.frozen);
+    assert_eq!(frozen.cursor, before.cursor + 1);
+    let binding = frozen.binding.as_ref().unwrap();
+    assert_eq!(binding.registry_id, registry);
+    assert_eq!(
+        binding.reason.as_deref(),
+        Some("frozen by another Runtime connection")
+    );
+    assert!(matches!(
+        reader.enqueue(&id, "must not start"),
+        Err(cayw_runtime::RuntimeError::Frozen(_))
+    ));
+    assert!(reader.tasks(&id).unwrap().is_empty());
+    let fork = reader.fork(&id, "confirmed ordinary chat", true).unwrap();
+    assert!(!fork.frozen);
+    assert!(fork.binding.is_none());
+    assert_eq!(reader.get(&id).unwrap(), frozen);
+}
+
 #[cfg(feature = "strongflow")]
 #[tokio::test]
 async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor() {

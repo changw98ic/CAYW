@@ -11,7 +11,9 @@ repository.workspace = true
 default = ["strongflow", "observer", "evaluation"]
 strongflow = []
 observer = []
-evaluation = ["dep:sha2"]
+jev = []
+fusion = ["dep:sha2"]
+evaluation = ["jev", "fusion"]
 
 [dependencies]
 cayw-ai.workspace = true

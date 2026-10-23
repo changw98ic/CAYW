@@ -96,11 +96,17 @@ pub struct OfflineRuntime {
     pub frozen_id: String,
 }
 impl OfflineRuntime {
+    #[allow(dead_code)]
     pub fn new() -> Self {
-        Self::with_stream_gate(None)
+        Self::with_config(RuntimeConfig::default(), None)
     }
 
+    #[allow(dead_code)]
     pub fn with_stream_gate(stream_gate: Option<CancellationToken>) -> Self {
+        Self::with_config(RuntimeConfig::default(), stream_gate)
+    }
+
+    pub fn with_config(config: RuntimeConfig, stream_gate: Option<CancellationToken>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let runtime = Runtime::open(
             directory.path().join("runtime.db"),
@@ -110,7 +116,7 @@ impl OfflineRuntime {
                 ..OfflineProvider::default()
             }),
             Model::new("offline-tui", "fixture"),
-            RuntimeConfig::default(),
+            config,
         )
         .unwrap();
         let frozen = runtime.create(Some("Frozen fixture".into())).unwrap();

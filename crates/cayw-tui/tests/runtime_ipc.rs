@@ -453,14 +453,12 @@ async fn busy_other_client_run_survives_rejected_tui_shutdown() {
     let owner = Client::connect(address, "runtime-fixture-token")
         .await
         .unwrap();
+    let admitted = runtime.enqueue(&id, "other client's run").unwrap();
     let owner_call = owner.clone();
-    let owner_id = id.clone();
+    let owner_task = admitted.id.clone();
     let run = tokio::spawn(async move {
         owner_call
-            .request(
-                "session.prompt",
-                json!({"session_id":owner_id,"text":"other client's run"}),
-            )
+            .request("task.resume", json!({"task_id":owner_task}))
             .await
     });
     timeout(Duration::from_secs(8), async {
@@ -515,8 +513,9 @@ async fn busy_other_client_run_survives_rejected_tui_shutdown() {
             .iter()
             .all(|task| !task.cancel_requested)
     );
+    let target = runtime.task(&admitted.id).unwrap().cancel_target();
     owner
-        .request("session.cancel", json!({"session_id":id}))
+        .request("session.cancel", serde_json::to_value(target).unwrap())
         .await
         .unwrap();
     let _ = timeout(Duration::from_secs(8), run).await.unwrap().unwrap();

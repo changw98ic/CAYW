@@ -76,9 +76,13 @@ fn known_queued_cancellation_releases_prompt_only_after_settled_snapshot() {
     let mut app = attached(snapshot("idle", 3));
     app.input.insert("queued draft");
     assert_eq!(key(&mut app, KeyCode::Enter, KeyModifiers::NONE).len(), 1);
+    assert!(app.task_admitted("s1", "original-queued-task").is_empty());
     assert_eq!(
-        key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).len(),
-        1
+        key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL),
+        vec![Command::Cancel {
+            session_id: "s1".into(),
+            task_id: "original-queued-task".into()
+        }]
     );
     let error = cayw_ipc::ClientError {
         code: "cancelled".into(),

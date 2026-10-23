@@ -1,0 +1,20 @@
+[package]
+name = "verify-tool-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+# Deliberately independent of CAYW's root workspace and lockfile.
+[workspace]
+resolver = "3"
+
+[dependencies]
+async-trait = "0.1"
+cayw-ai = { path = "../../crates/cayw-ai" }
+cayw-runtime = { path = "../../crates/cayw-runtime", default-features = false }
+cayw-verify-tool = { path = "../../crates/cayw-verify-tool", default-features = false }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }

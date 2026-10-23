@@ -16,16 +16,22 @@ pub enum BuiltinScenario {
     ColdSdk,
     SdkLifecycle,
     IpcLifecycle,
+    IpcApproval,
+    IpcRejections,
+    IpcEventReconnect,
     IpcReconnect,
     IpcCancel,
     HostRestartBeforeDispatch,
     HostRestartUnknown,
 }
 impl BuiltinScenario {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::ColdSdk,
         Self::SdkLifecycle,
         Self::IpcLifecycle,
+        Self::IpcApproval,
+        Self::IpcRejections,
+        Self::IpcEventReconnect,
         Self::IpcReconnect,
         Self::IpcCancel,
         Self::HostRestartBeforeDispatch,
@@ -61,7 +67,10 @@ impl NegativeControl {
                 scenario,
                 BuiltinScenario::ColdSdk | BuiltinScenario::SdkLifecycle
             ),
-            Self::SkipCursor => scenario == BuiltinScenario::IpcReconnect,
+            Self::SkipCursor => matches!(
+                scenario,
+                BuiltinScenario::IpcReconnect | BuiltinScenario::IpcEventReconnect
+            ),
         }
     }
 }
@@ -72,6 +81,9 @@ impl Scenario for BuiltinScenario {
             Self::ColdSdk => "cold-sdk",
             Self::SdkLifecycle => "sdk-lifecycle",
             Self::IpcLifecycle => "ipc-lifecycle",
+            Self::IpcApproval => "ipc-approval",
+            Self::IpcRejections => "ipc-rejections",
+            Self::IpcEventReconnect => "ipc-event-reconnect",
             Self::IpcReconnect => "ipc-reconnect",
             Self::IpcCancel => "ipc-cancel",
             Self::HostRestartBeforeDispatch => "host-restart-before-dispatch",
@@ -79,6 +91,9 @@ impl Scenario for BuiltinScenario {
         }
     }
     fn specification(&self, control: NegativeControl) -> Value {
+        if matches!(self, Self::IpcApproval | Self::IpcRejections) {
+            return super::access_scenarios::specification(self.name());
+        }
         let effect = *self == Self::HostRestartUnknown;
         let script = if effect { EFFECT_SCRIPT } else { PIPELINE };
         let warm = warm_pipeline();
@@ -95,10 +110,12 @@ impl Scenario for BuiltinScenario {
                     {"capability":"fs.write","arguments":write_arguments(true)},
                     {"capability":"fs.read","arguments":{"path":"result.txt"}}]) }},
             "fault_points":match self { Self::ColdSdk=>json!(["fresh independent process"]),Self::SdkLifecycle|Self::IpcLifecycle=>json!(["none"]),
+                Self::IpcEventReconnect=>json!(["Provider entered before first response; only independent event client closes after cursor fsync; original execution client completes; new event client reads exact SDK suffix without another prompt"]),
                 Self::IpcReconnect=>json!(["Provider entered before first response; client socket explicitly closed; new independent client reads persisted cursor"]),
                 Self::IpcCancel=>json!(["Provider entered before first response; authenticated rpc.cancel"]),
                 Self::HostRestartBeforeDispatch=>json!(["Provider entered before emitting script; terminate original host process; reopen and explicitly recover without dispatch or replay"]),
-                Self::HostRestartUnknown=>json!(["Core capability started and local marker fsynced; terminate original host process; explicit Runtime::recover"]),},
+                Self::HostRestartUnknown=>json!(["Core capability started and local marker fsynced; terminate original host process; explicit Runtime::recover"]),
+                Self::IpcApproval|Self::IpcRejections=>unreachable!("access scenarios have their own specification"),},
             "negative_control":control,"performance_thresholds":null})
     }
     async fn execute(&self, context: &ScenarioContext, report: &mut ScenarioReport) -> Result<()> {
@@ -106,6 +123,10 @@ impl Scenario for BuiltinScenario {
             Self::ColdSdk => children::cold(context, report).await,
             Self::SdkLifecycle => sdk_lifecycle(context, report).await,
             Self::IpcLifecycle => ipc_lifecycle(context, report).await,
+            Self::IpcApproval | Self::IpcRejections => {
+                super::access_scenarios::execute(self.name(), context, report).await
+            }
+            Self::IpcEventReconnect => ipc_event_reconnect(context, report).await,
             Self::IpcReconnect | Self::IpcCancel => ipc_fault(*self, context, report).await,
             Self::HostRestartBeforeDispatch | Self::HostRestartUnknown => {
                 children::restart(context, report, *self == Self::HostRestartUnknown).await
@@ -318,7 +339,7 @@ pub async fn sdk_executions(
         "observed_file",
         json!({"bytes":bytes,"sha256":bytes.as_ref().map(|b|sha256(b))}),
     )?;
-    report.check(
+    report.task_check(
         "actual_pipeline_effect",
         bytes.as_deref() == Some(CONTENT.as_bytes()),
         "Real Host must write and read the exact expected UTF-8 input",
@@ -347,7 +368,7 @@ pub async fn sdk_executions(
     );
     Ok(())
 }
-fn validate_pipeline(events: &[EventRecord], runs: usize, report: &mut ScenarioReport) {
+pub(crate) fn validate_pipeline(events: &[EventRecord], runs: usize, report: &mut ScenarioReport) {
     let starts: Vec<_> = events
         .iter()
         .filter_map(|e| {
@@ -542,7 +563,7 @@ async fn ipc_lifecycle(context: &ScenarioContext, report: &mut ScenarioReport) -
         "observed_file",
         json!({"content":String::from_utf8_lossy(&bytes),"sha256":sha256(&bytes)}),
     )?;
-    report.check(
+    report.task_check(
         "ipc_actual_pipeline_effect",
         bytes == CONTENT.as_bytes(),
         "Actual IPC executes the expected Luau Host write/read and returns its durable results",
@@ -583,6 +604,187 @@ async fn ipc_lifecycle(context: &ScenarioContext, report: &mut ScenarioReport) -
             }),
         "Both successful prompts retain their actual wire request and terminal response identity",
     );
+    Ok(())
+}
+
+async fn ipc_event_reconnect(context: &ScenarioContext, report: &mut ScenarioReport) -> Result<()> {
+    initialize(&context.root)?;
+    let provider = Arc::new(FixedProvider::new(
+        PIPELINE,
+        true,
+        Some(context.root.join("provider.jsonl")),
+    ));
+    let runtime = open(&context.root, provider.clone(), false)?;
+    let mut server = Server::start(runtime.clone()).await?;
+    let wire_path = context.root.join("ipc-frames.jsonl");
+    let mut proxy = super::transport::RecordingProxy::start(server.addr, &wire_path).await?;
+    let execution = Client::connect(proxy.address, ipc_config().token).await?;
+    let events_client = Client::connect(proxy.address, ipc_config().token).await?;
+    let created: SessionView = serde_json::from_value(
+        request(
+            &execution,
+            "session.create",
+            json!({"label":"Independent event connection"}),
+            report,
+        )
+        .await?,
+    )?;
+    let id = created.id;
+    let request_client = execution.clone();
+    let request_session = id.clone();
+    let mut task = tokio::spawn(async move {
+        request_client
+            .request(
+                "session.prompt",
+                json!({"session_id":request_session,"text":PROMPT}),
+            )
+            .await
+    });
+    tokio::select! {
+        () = provider.entered.cancelled() => {},
+        result = &mut task => return Err(format!("prompt ended before event disconnect: {result:?}").into()),
+        () = tokio::time::sleep(DEADLINE) => return Err("Provider gate not reached".into()),
+    }
+    let first: Vec<EventRecord> = serde_json::from_value(
+        request(
+            &events_client,
+            "session.events",
+            json!({"session_id":id,"after":0,"limit":1,"wait_ms":0}),
+            report,
+        )
+        .await?,
+    )?;
+    let cursor = first.last().ok_or("initial event page is empty")?.cursor;
+    report.check(
+        "initial_saved_cursor_is_exact",
+        first.len() == 1 && contiguous_events(&id, 0, &first, cursor),
+        "The saved position comes from the original session's actual first event",
+    );
+    report.event_page(EventPage {
+        stage: "before_event_disconnect".into(),
+        session_id: id.clone(),
+        after: 0,
+        records: first,
+    })?;
+    write_new(
+        &context.root.join("cursor.json"),
+        &json!({"session_id":id,"cursor":cursor}),
+    )?;
+    report.bind_attachment("cursor", &context.root, "cursor.json")?;
+    let before = runtime.get(&id)?;
+    report.observe("before_event_disconnect_session", &before)?;
+    report.observe("fault_injected",json!({"operation":"Client::close","connection_role":"events only","point":"after Provider entry and cursor fsync"}))?;
+    let start = Instant::now();
+    events_client.close().await;
+    let closed = events_client.request("runtime.health", json!({})).await;
+    report.observe("closed_event_client_terminal", &closed)?;
+    // Wait for the relay to observe EOF before allowing the original Provider to finish.
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let frames = fs::read_to_string(&wire_path)?;
+            if frames
+                .lines()
+                .map(serde_json::from_str::<Value>)
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .iter()
+                .any(|frame| frame["direction"] == "relay_terminal")
+            {
+                return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    let during = runtime.get(&id)?;
+    report.observe("after_event_disconnect_session", &during)?;
+    report.check("event_connection_loss_preserves_original_execution",
+        closed.is_err() && !task.is_finished() && before.attempt.is_some() && before == during,
+        "Closing the event socket leaves the original prompt and durable attempt running at the Provider gate");
+    provider.release.cancel();
+    let terminal = tokio::time::timeout(DEADLINE, task).await???;
+    let completed: SessionView = serde_json::from_value(terminal.clone())?;
+    report.observe("original_prompt_terminal", &terminal)?;
+    report
+        .timing_ns
+        .insert("event_disconnect_to_completion".into(), elapsed_ns(start));
+    let local = runtime.get(&id)?;
+    report.check(
+        "original_prompt_completed_cleanly",
+        clean(&completed) && completed == local,
+        "The original execution request completes without replacement or unresolved work",
+    );
+    let saved: Value = serde_json::from_slice(&fs::read(context.root.join("cursor.json"))?)?;
+    let saved_cursor = saved["cursor"].as_u64().ok_or("saved cursor is invalid")?;
+    let saved_session = saved["session_id"]
+        .as_str()
+        .ok_or("saved session is invalid")?;
+    let fresh = Client::connect(proxy.address, ipc_config().token).await?;
+    let after = if context.negative_control == NegativeControl::SkipCursor {
+        saved_cursor + 1
+    } else {
+        saved_cursor
+    };
+    let resumed = ipc_pages(
+        &fresh,
+        saved_session,
+        after,
+        "event_connection_resumed",
+        report,
+    )
+    .await?;
+    let original = capture(&runtime, &id, "final_sdk", report)?;
+    let suffix: Vec<_> = original
+        .iter()
+        .filter(|record| record.cursor > saved_cursor)
+        .cloned()
+        .collect();
+    report.check("saved_event_suffix_matches_sdk_exactly", saved_session == id && !suffix.is_empty() && resumed == suffix,
+        "Every resumed event equals its persisted SDK record, including content, order, timestamp and original attempt");
+    let remote: SessionView = serde_json::from_value(
+        request(&fresh, "session.get", json!({"session_id":id}), report).await?,
+    )?;
+    report.check(
+        "event_reconnect_final_state_equals_sdk",
+        remote == local && remote == completed,
+        "The new event client and SDK expose the state returned by the original prompt",
+    );
+    let bytes = fs::read(context.root.join("workspace/result.txt"))?;
+    report.observe(
+        "observed_file",
+        json!({"sha256":sha256(&bytes),"bytes":bytes}),
+    )?;
+    report.task_check("event_reconnect_actual_pipeline_effect", bytes == CONTENT.as_bytes(),
+        "The original request executes the real write/read pipeline while the event connection is absent");
+    validate_pipeline(&original, 1, report);
+    fresh.close().await;
+    execution.close().await;
+    proxy.close().await?;
+    server.close().await?;
+    let frames: Vec<Value> = fs::read_to_string(&wire_path)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    report.observe("actual_ipc_frames", &frames)?;
+    report.bind_attachment("ipc_frames", &context.root, "ipc-frames.jsonl")?;
+    let prompts: Vec<_> = frames
+        .iter()
+        .filter(|frame| {
+            frame["direction"] == "client_to_server" && frame["frame"]["method"] == "session.prompt"
+        })
+        .collect();
+    let event_connections: std::collections::BTreeSet<_> = frames
+        .iter()
+        .filter(|frame| {
+            frame["direction"] == "client_to_server" && frame["frame"]["method"] == "session.events"
+        })
+        .map(|frame| frame["connection"].clone().as_u64())
+        .collect();
+    report.check("event_reconnect_has_one_original_prompt",
+        prompts.len()==1 && event_connections.len()==2 && !event_connections.contains(&prompts[0]["connection"].as_u64())
+            && runtime.tasks(&id)?.len()==1 && frames.iter().filter(|frame|frame["direction"]=="server_to_client"
+                && frame["connection"]==prompts[0]["connection"] && frame["frame"]["id"]==prompts[0]["frame"]["id"]
+                && frame["frame"]["result"]==terminal).count()==1,
+        "The recorded wire has one prompt and its original reply, with two separate event connections and one durable task");
     Ok(())
 }
 
@@ -681,6 +883,7 @@ async fn ipc_fault(
         "cursor_saved",
         json!({"path":context.root.join("cursor.json"),"cursor":cursor}),
     )?;
+    report.bind_attachment("cursor", &context.root, "cursor.json")?;
     let start = Instant::now();
     if scenario == BuiltinScenario::IpcReconnect {
         report.observe(
@@ -702,7 +905,7 @@ async fn ipc_fault(
     let tasks = runtime.tasks(&id)?;
     report.observe("converged_session", &view)?;
     report.observe("converged_tasks", &tasks)?;
-    report.check("cancelled_task_reached_durable_idle",clean(&view)&&tasks.len()==1&&tasks[0].state==TaskState::Cancelled,"Cancellation converged to one durable cancelled task, no live attempt/approval/unknown effect");
+    report.task_check("cancelled_task_reached_durable_idle",clean(&view)&&tasks.len()==1&&tasks[0].state==TaskState::Cancelled,"Cancellation converged to one durable cancelled task, no live attempt/approval/unknown effect");
     report.check(
         "gate_prevented_tool_effects",
         !context.root.join("workspace/result.txt").exists() && view.executions.is_empty(),
@@ -793,7 +996,7 @@ async fn ipc_fault(
     Ok(())
 }
 
-fn validate_cancel_terminal(
+pub(super) fn validate_cancel_terminal(
     frames: &[Value],
     terminal: &std::result::Result<Value, cayw_ipc::ClientError>,
     report: &mut ScenarioReport,

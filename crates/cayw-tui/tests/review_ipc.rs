@@ -49,11 +49,13 @@ async fn server(
     (address, stop, task)
 }
 
-async fn next(transport: &mut Transport) -> Update {
-    timeout(Duration::from_secs(8), transport.next())
+async fn next(transport: &mut Transport, stage: &str) -> Update {
+    let update = timeout(Duration::from_secs(8), transport.next())
         .await
-        .unwrap()
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{stage}: waiting for transport update: {error}"))
+        .unwrap_or_else(|| panic!("{stage}: transport updates closed"));
+    eprintln!("TRANSPORT_UPDATE stage={stage} update={update:?}");
+    update
 }
 
 fn attached(value: Value) -> App {
@@ -65,7 +67,13 @@ fn attached(value: Value) -> App {
 
 #[tokio::test]
 async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
-    let fixture = support::OfflineRuntime::new();
+    // One held run is enough: filling default concurrency=4 races with admit
+    // between "task appears" and "attempt still none" on loaded CI runners.
+    let config = RuntimeConfig {
+        max_concurrent_runs: 1,
+        ..Default::default()
+    };
+    let fixture = support::OfflineRuntime::with_config(config, None);
     let runtime = fixture.runtime.clone();
     assert!(runtime.get(&fixture.frozen_id).unwrap().frozen);
     assert!(!fixture.directory.path().join("fixture-output.txt").exists());
@@ -75,57 +83,89 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
         .unwrap();
     let mut blockers = Vec::new();
     let mut ids = Vec::new();
-    for index in 0..4 {
-        let id = runtime.create(Some(format!("blocker {index}"))).unwrap().id;
-        let client = owner.clone();
-        let run_id = id.clone();
-        ids.push(id);
-        blockers.push(tokio::spawn(async move {
-            client
-                .request(
-                    "session.prompt",
-                    json!({"session_id":run_id,"text":"hold concurrency slot"}),
-                )
-                .await
-        }));
-    }
+    let blocker_id = runtime.create(Some("blocker 0".into())).unwrap().id;
+    let client = owner.clone();
+    let admitted = runtime
+        .enqueue(&blocker_id, "hold concurrency slot")
+        .unwrap();
+    ids.push(admitted.id.clone());
+    blockers.push(tokio::spawn(async move {
+        client
+            .request("task.resume", json!({"task_id":admitted.id}))
+            .await
+    }));
     timeout(Duration::from_secs(8), async {
-        while !ids
-            .iter()
-            .all(|id| !runtime.get(id).unwrap().pending_approvals.is_empty())
+        while runtime
+            .get(&blocker_id)
+            .unwrap()
+            .pending_approvals
+            .is_empty()
         {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
+    assert_eq!(runtime.health().unwrap().running, 1);
     let session = runtime.create(Some("queued TUI".into())).unwrap();
     let id = session.id.clone();
     let mut app = attached(serde_json::to_value(session).unwrap());
     app.input.insert("queued draft 你好");
     let mut driver = Driver::default();
     let mut transport = Transport::start(address, "review-offline-token".into());
-    while !matches!(next(&mut transport).await, Update::Connected) {}
+    while !matches!(
+        next(&mut transport, "connect queued session").await,
+        Update::Connected
+    ) {}
     let commands = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     driver.dispatch(&mut app, &transport, commands);
     timeout(Duration::from_secs(8), async {
-        while runtime.tasks(&id).unwrap().is_empty() {
+        loop {
+            let tasks = runtime.tasks(&id).unwrap();
+            let view = runtime.get(&id).unwrap();
+            let health = runtime.health().unwrap();
+            if let Some(task) = tasks.first() {
+                assert_eq!(
+                    health.running, 1,
+                    "blocker must keep the only concurrency slot"
+                );
+                if task.state == TaskState::Queued && view.attempt.is_none() && health.queued >= 1 {
+                    break;
+                }
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     assert!(runtime.get(&id).unwrap().attempt.is_none());
+    assert_eq!(runtime.tasks(&id).unwrap()[0].state, TaskState::Queued);
+    let admitted_id = loop {
+        let update = next(&mut transport, "observe queued task admission").await;
+        let admitted_id = match &update {
+            Update::TaskAdmitted {
+                session_id,
+                task_id,
+            } if session_id == &id => Some(task_id.clone()),
+            _ => None,
+        };
+        let commands = driver.update(&mut app, update);
+        driver.dispatch(&mut app, &transport, commands);
+        if let Some(task_id) = admitted_id {
+            break task_id;
+        }
+    };
     let commands = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert_eq!(
         commands,
         vec![Command::Cancel {
-            session_id: id.clone()
+            session_id: id.clone(),
+            task_id: admitted_id,
         }]
     );
     driver.dispatch(&mut app, &transport, commands);
     let error = loop {
-        let update = next(&mut transport).await;
+        let update = next(&mut transport, "cancel queued prompt").await;
         let error = match &update {
             Update::Response {
                 request,
@@ -143,7 +183,7 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     assert!(error.ends_with(" (outcome_unknown=false)"), "{error}");
     assert!(!app.selected().unwrap().can_prompt());
     loop {
-        let update = next(&mut transport).await;
+        let update = next(&mut transport, "refresh cancelled session").await;
         let got = matches!(&update, Update::Response { request, result: Ok(_) } if request.method == "session.get");
         let commands = driver.update(&mut app, update);
         driver.dispatch(&mut app, &transport, commands);
@@ -170,8 +210,9 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     );
     transport.shutdown().await;
     for id in ids {
+        let target = runtime.task(&id).unwrap().cancel_target();
         owner
-            .request("session.cancel", json!({"session_id":id}))
+            .request("session.cancel", serde_json::to_value(target).unwrap())
             .await
             .unwrap();
     }
@@ -201,6 +242,14 @@ impl Provider for PagedStream {
         if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
             message.content = vec![Content::text("committed history")];
             message.stop_reason = StopReason::Stop;
+            // Synthetic counters for accounting, not tokenizer or billing data.
+            message.usage = cayw_ai::Usage {
+                input: 4,
+                output: 4,
+                total_tokens: 8,
+                ..Default::default()
+            };
+            message.usage_status = cayw_ai::UsageStatus::Reported;
             return Box::pin(futures::stream::iter(vec![AssistantEvent::Done {
                 message,
             }]));
@@ -228,14 +277,20 @@ impl Provider for PagedStream {
 }
 
 async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
+    let mut stage = "session.get";
+    let mut cursor = 0;
+    let mut last_event = None;
     timeout(Duration::from_secs(8), async {
         loop {
+            stage = "session.get";
             let snapshot = client
                 .request("session.get", json!({"session_id":id}))
                 .await
                 .unwrap();
+            cursor = snapshot["cursor"].as_u64().unwrap();
             let mut after = 0;
             loop {
+                stage = "session.events";
                 let page = client
                     .request(
                         "session.events",
@@ -244,10 +299,14 @@ async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
                     .await
                     .unwrap();
                 let records = page.as_array().unwrap();
+                if let Some(record) = records.last() {
+                    last_event = Some(record.clone());
+                }
                 if records
                     .iter()
                     .any(|record| record["event"]["event"]["message"]["content"][0]["text"] == text)
                 {
+                    stage = "session.get after matching partial";
                     return client
                         .request("session.get", json!({"session_id":id}))
                         .await
@@ -265,7 +324,11 @@ async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
         }
     })
     .await
-    .unwrap()
+    .unwrap_or_else(|error| {
+        panic!(
+            "waiting for {text:?} in {id} at {stage}, snapshot cursor={cursor}, last event={last_event:?}: {error}"
+        )
+    })
 }
 
 async fn catch_up(client: &Client, app: &mut App) -> Vec<(u64, usize)> {
@@ -309,13 +372,14 @@ async fn catch_up(client: &Client, app: &mut App) -> Vec<(u64, usize)> {
 async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_history() {
     let directory = tempfile::tempdir().unwrap();
     let more = CancellationToken::new();
+    let provider = Arc::new(PagedStream {
+        requests: AtomicUsize::new(0),
+        more: more.clone(),
+    });
     let runtime = Runtime::open(
         directory.path().join("runtime.db"),
         directory.path(),
-        Arc::new(PagedStream {
-            requests: AtomicUsize::new(0),
-            more: more.clone(),
-        }),
+        provider.clone(),
         Model::new("offline-tui", "paged-review"),
         RuntimeConfig::default(),
     )
@@ -332,17 +396,20 @@ async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_hi
         )
         .await
         .unwrap();
+    let ledger = runtime.model_requests(&id).unwrap();
+    assert_eq!(ledger.settled_tokens, 8);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+    let admitted = runtime.enqueue(&id, "stream pages").unwrap();
     let runner = client.clone();
-    let run_id = id.clone();
+    let task_id = admitted.id.clone();
     let run = tokio::spawn(async move {
         runner
-            .request(
-                "session.prompt",
-                json!({"session_id":run_id,"text":"stream pages"}),
-            )
+            .request("task.resume", json!({"task_id":task_id}))
             .await
     });
     let snapshot = wait_partial(&client, &id, "paged fixture 110 你好").await;
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
     let committed = snapshot["messages"].clone();
     let snapshot_cursor = snapshot["cursor"].as_u64().unwrap();
     assert!(snapshot_cursor > 100);
@@ -399,8 +466,9 @@ async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_hi
         app.selected().unwrap().cursor,
         app.selected().unwrap().streaming_text
     );
+    let target = runtime.task(&admitted.id).unwrap().cancel_target();
     client
-        .request("session.cancel", json!({"session_id":id}))
+        .request("session.cancel", serde_json::to_value(target).unwrap())
         .await
         .unwrap();
     let terminal = timeout(Duration::from_secs(8), run)

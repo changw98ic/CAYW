@@ -94,6 +94,11 @@ pub enum CoreRequest {
         lease: AttemptLease,
         event: Box<cayw_agent::AgentEvent>,
     },
+    BindToolOrigin {
+        lease: AttemptLease,
+        call_id: String,
+        task_id: String,
+    },
     MarkToolStarted {
         lease: AttemptLease,
         call_id: String,
@@ -253,6 +258,11 @@ impl SessionStore {
                 let agent_event = crate::store::validation::checked_input(agent_event)?;
                 event(self.append_agent_event(&lease, &agent_event)?)
             }
+            CoreRequest::BindToolOrigin {
+                lease,
+                call_id,
+                task_id,
+            } => event(self.bind_tool_origin(&lease, &call_id, &task_id)?),
             CoreRequest::MarkToolStarted { lease, call_id } => {
                 event(self.mark_tool_started(&lease, &call_id)?)
             }

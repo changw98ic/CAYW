@@ -4,8 +4,10 @@
 mod external;
 mod registry;
 
-#[cfg(feature = "evaluation")]
-pub mod evaluation;
+#[cfg(feature = "fusion")]
+pub mod fusion;
+#[cfg(feature = "jev")]
+pub mod jev;
 #[cfg(feature = "observer")]
 pub mod observer;
 #[cfg(feature = "strongflow")]

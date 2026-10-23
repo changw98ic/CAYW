@@ -8,7 +8,27 @@ use std::{
 use tempfile::TempDir;
 
 fn workspace(temp: &TempDir, limits: Limits) -> Workspace {
-    Workspace::open(temp.path().canonicalize().unwrap(), limits).unwrap()
+    workspace_at(temp.path(), limits)
+}
+
+fn workspace_at(root: &std::path::Path, limits: Limits) -> Workspace {
+    // Host retries this same busy window: a concurrent fork can briefly inherit
+    // unrelated lock fds until exec (see Host::open_workspace). Tests must too.
+    let root = root.canonicalize().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match Workspace::open(&root, limits.clone()) {
+            Ok(workspace) => return workspace,
+            Err(error)
+                if !error.outcome_unknown
+                    && error.message.starts_with("workspace is busy:")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("workspace open failed: {error:?}"),
+        }
+    }
 }
 async fn call(workspace: &Workspace, name: &str, args: Value) -> Result<Value, CapabilityError> {
     workspace
@@ -190,8 +210,13 @@ async fn result_limits_are_deterministic_and_distinct_from_scan_failures() {
     assert_eq!(found["matches"].as_array().unwrap().len(), 1);
     assert_eq!(found["truncated"], true);
     assert_eq!(found["scan_complete"], false);
+    // Fresh root: avoid reopen on a path that may still appear busy under
+    // fork-inherited flock contention (same pattern as search_limits).
+    let bounded_temp = tempfile::tempdir().unwrap();
+    fs::write(bounded_temp.path().join("b.txt"), "aa").unwrap();
+    fs::write(bounded_temp.path().join("a.txt"), "aa").unwrap();
     let bounded = self::workspace(
-        &temp,
+        &bounded_temp,
         Limits {
             max_tree_entries: 1,
             ..Limits::default()
@@ -232,8 +257,12 @@ async fn scan_bytes_regex_complexity_and_output_are_bounded() {
         assert!(!error.outcome_unknown);
         assert!(error.message.contains("regex"));
     }
+    // Fresh root per limits case — same isolation as search_limits.
+    let small_temp = tempfile::tempdir().unwrap();
+    fs::write(small_temp.path().join("a"), "123456").unwrap();
+    fs::write(small_temp.path().join("b"), "123456").unwrap();
     let small = self::workspace(
-        &temp,
+        &small_temp,
         Limits {
             max_output_bytes: 200,
             ..Limits::default()
@@ -447,7 +476,7 @@ async fn read_scanner_uses_the_held_root_after_rename_and_replacement() {
     let root = temp.path().join("root");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("a.txt"), "original").unwrap();
-    let workspace = Workspace::open(root.canonicalize().unwrap(), Limits::default()).unwrap();
+    let workspace = workspace_at(&root, Limits::default());
     fs::rename(&root, temp.path().join("moved")).unwrap();
     fs::create_dir(&root).unwrap();
     fs::write(root.join("a.txt"), "replacement").unwrap();
