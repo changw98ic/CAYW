@@ -5,8 +5,19 @@ use cayw_core::{
     SessionState, SessionStore,
 };
 use serde_json::json;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
+
+struct ExactReceipt(cayw_core::ReconciliationRequest);
+impl cayw_core::ReconciliationVerifier for ExactReceipt {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        if request == &self.0 {
+            Ok(())
+        } else {
+            Err("this decision is not authorized by the test host".into())
+        }
+    }
+}
 
 struct Database(PathBuf);
 impl Database {
@@ -173,6 +184,9 @@ fn explicit_unknown_blocks_new_calls_but_allows_existing_calls_to_settle() {
             &AgentEvent::ToolExecutionStart { call: call.clone() },
         )
         .unwrap();
+    store
+        .bind_tool_origin(&lease, &call.id, "original-task")
+        .unwrap();
     store.mark_tool_started(&lease, &call.id).unwrap();
     store
         .append_agent_event(
@@ -192,18 +206,22 @@ fn explicit_unknown_blocks_new_calls_but_allows_existing_calls_to_settle() {
         SessionState::NeedsReconciliation
     );
     assert!(store.mark_tool_started(&lease, &call.id).is_err());
+    let reconciliation = Reconciliation {
+        expected: store.tool_reconciliation_origin(&id, &call.id).unwrap(),
+        call_id: call.id,
+        actor: "host".into(),
+        evidence: "checked".into(),
+        outcome: ReconciledOutcome::NotExecuted {
+            reason: "no effect".into(),
+        },
+    };
+    let store = store.with_reconciliation_verifier(Arc::new(ExactReceipt(
+        cayw_core::ReconciliationRequest::Tool {
+            reconciliation: reconciliation.clone(),
+        },
+    )));
     assert!(matches!(
-        store.reconcile(
-            &id,
-            Reconciliation {
-                call_id: call.id,
-                actor: "host".into(),
-                evidence: "checked".into(),
-                outcome: ReconciledOutcome::NotExecuted {
-                    reason: "no effect".into()
-                }
-            }
-        ),
+        store.reconcile(&id, reconciliation),
         Err(CoreError::Busy)
     ));
 }

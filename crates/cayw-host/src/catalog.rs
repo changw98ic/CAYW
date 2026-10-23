@@ -1,4 +1,4 @@
-use crate::{Executor, HostConfig, ProfileKind, failure, filesystem, process};
+use crate::{Executor, HostConfig, ProfileKind, failure, filesystem, git, process, terminal};
 use cayw_ai::ToolDefinition;
 use cayw_codemode::CapabilityError;
 use serde_json::{Value, json};
@@ -78,14 +78,11 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
                 .map(|definition| (definition, Executor::Workspace)),
         );
     }
-    if config.git_program.is_some() {
-        definitions.extend([
-            definition("git.status", "Read repository porcelain status with optional locks and hooks disabled.", json!({}), &[]),
-            definition("git.diff", "Read bounded diff with external diff and text conversion disabled.", json!({"path":path(), "staged":{"type":"boolean"}}), &[]),
-            definition("git.log", "Read a bounded commit log without decorations or signature commands.", json!({"limit":{"type":"integer", "minimum":1, "maximum":100}}), &[]),
-            definition("git.show", "Read one commit or file from a full commit object ID.", json!({"commit":{"type":"string", "pattern":"^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"}, "path":path()}), &["commit"]),
-        ].into_iter().map(|definition| (definition, Executor::Git)));
-    }
+    definitions.extend(
+        git::definitions(config)
+            .into_iter()
+            .map(|definition| (definition, Executor::Git)),
+    );
     for (kind, name) in [
         (ProfileKind::Build, "build.run"),
         (ProfileKind::Test, "test.run"),
@@ -108,6 +105,13 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
         }
         definitions.push((definition(name, "Run an application-selected process profile with bounded time and output. No agent argv or shell.", properties, &["profile"]), Executor::Profile));
     }
+    if let Some(config) = &config.terminal_handoffs {
+        definitions.extend(
+            terminal::definitions(config)
+                .into_iter()
+                .map(|definition| (definition, Executor::Terminal)),
+        );
+    }
     if config.external.is_some() {
         definitions.extend([
             definition("search.query", "Query the application's existing bounded search service.", json!({
@@ -118,6 +122,8 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             definition("mcp.call", "Call one tool through the application's existing MCP connection and permissions.", json!({
                 "server":string(256),"tool":string(256),"arguments":{"type":"object"}
             }), &["server","tool","arguments"]),
+            definition("mcp.resources.list", "List resource metadata pinned by the host's existing MCP sources.", json!({"server":string(256)}), &[]),
+            definition("mcp.resources.read", "Read one manifest-pinned resource through the host's existing MCP source.", json!({"server":string(256),"uri":string(2048)}), &["server","uri"]),
             definition("skills.list", "List skills from the application's existing skill source.", json!({}), &[]),
             definition("skills.read", "Read one named skill from the application's existing skill source.", json!({"name":string(256)}), &["name"]),
         ].into_iter().map(|definition| (definition, Executor::External)));
@@ -130,6 +136,10 @@ pub(crate) fn validate_arguments(
     args: &Value,
     config: &HostConfig,
 ) -> Result<(), CapabilityError> {
+    git::validate_arguments(name, args, config)?;
+    if let Some(config) = &config.terminal_handoffs {
+        terminal::validate_arguments(name, args, config)?;
+    }
     if let Some(path) = args.get("path").and_then(Value::as_str) {
         filesystem::components(
             path,
@@ -192,4 +202,5 @@ pub(crate) fn may_mutate(name: &str) -> bool {
             | "format.run"
             | "mcp.call"
     ) || name == "search.query" // External services may perform remote accounting/work.
+        || git::may_mutate(name)
 }

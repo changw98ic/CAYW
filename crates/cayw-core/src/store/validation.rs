@@ -129,10 +129,11 @@ macro_rules! json_variants {
 json_fields!(ToolCall, arguments);
 json_fields!(ToolDefinition, parameters);
 json_fields!(SystemMessage, tools_added);
-json_fields!(AssistantMessage, content);
+json_fields!(AssistantMessage, content, usage_fields);
 json_fields!(ToolResult, content, details, structured_content);
 json_fields!(ToolResultMessage, content, details, structured_content);
-json_fields!(Reconciliation, outcome);
+json_fields!(crate::ToolReconciliationOrigin, call);
+json_fields!(Reconciliation, expected, outcome);
 json_fields!(CallRecord, call, result);
 json_fields!(ExecutionRecord, terminal);
 json_fields!(ExecutionWaitRecord, arguments);
@@ -180,7 +181,8 @@ json_variants!(HistoryEntry,
 );
 json_variants!(CoreEvent,
     CoreEvent::SessionCreated { .. } | CoreEvent::AttemptStarted { .. }
-        | CoreEvent::ToolStarted { .. } | CoreEvent::AttemptFinished { .. }
+        | CoreEvent::ToolStarted { .. } | CoreEvent::ToolOriginBound { .. }
+        | CoreEvent::AttemptFinished { .. }
         | CoreEvent::ApprovalRequested { .. } | CoreEvent::ApprovalDecided { .. } => [],
     CoreEvent::SessionForked { messages, .. } => [messages],
     CoreEvent::Agent { event } => [event],
@@ -207,7 +209,8 @@ json_variants!(CoreRequest,
     CoreRequest::CreateSession { .. } | CoreRequest::ForkSession { .. }
         | CoreRequest::ListSessions | CoreRequest::Snapshot { .. } | CoreRequest::Events { .. }
         | CoreRequest::BeginAttempt { .. } | CoreRequest::ValidateLease { .. }
-        | CoreRequest::MarkToolStarted { .. } | CoreRequest::BeginExecution { .. }
+        | CoreRequest::BindToolOrigin { .. } | CoreRequest::MarkToolStarted { .. }
+        | CoreRequest::BeginExecution { .. }
         | CoreRequest::YieldExecution { .. } | CoreRequest::FinishAttempt { .. }
         | CoreRequest::Recover { .. } | CoreRequest::RequestApproval { .. }
         | CoreRequest::Approvals { .. } | CoreRequest::Approval { .. }
@@ -229,7 +232,8 @@ json_variants!(Message,
 json_variants!(AssistantEvent,
     AssistantEvent::Start { message } | AssistantEvent::Done { message }
         | AssistantEvent::Error { message } => [message],
-    AssistantEvent::TextStart { partial, .. } | AssistantEvent::TextDelta { partial, .. }
+    AssistantEvent::UsageUpdate { partial }
+        | AssistantEvent::TextStart { partial, .. } | AssistantEvent::TextDelta { partial, .. }
         | AssistantEvent::TextEnd { partial, .. } | AssistantEvent::ThinkingStart { partial, .. }
         | AssistantEvent::ThinkingDelta { partial, .. } | AssistantEvent::ThinkingEnd { partial, .. }
         | AssistantEvent::ToolCallStart { partial, .. } | AssistantEvent::ToolCallDelta { partial, .. }

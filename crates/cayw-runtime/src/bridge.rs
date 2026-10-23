@@ -28,6 +28,8 @@ pub(crate) fn is_external(name: &str) -> bool {
         "mcp.discover"
             | "mcp.describe"
             | "mcp.call"
+            | "mcp.resources.list"
+            | "mcp.resources.read"
             | "skills.list"
             | "skills.read"
             | "search.query"
@@ -170,7 +172,9 @@ pub(crate) fn scoped_host(
         scope: scope.clone(),
     });
     let Some(origin) = &scope.bridge_origin else {
-        return base.scoped(gate, scope.clone());
+        return base
+            .scoped(gate, scope.clone())
+            .map(|host| host.with_process_observer(scope.clone()));
     };
     let bridge = scope
         .context
@@ -186,6 +190,7 @@ pub(crate) fn scoped_host(
     });
     let external = bridge.scoped(&scope.name, origin.context()?, journal)?;
     base.scoped_external(gate, scope.clone(), external)
+        .map(|host| host.with_process_observer(scope.clone()))
 }
 
 #[derive(Default)]
@@ -353,6 +358,14 @@ fn verify_record(
                 && arguments["tool"].as_str() == Some(record.key.target.as_str())
                 && arguments.get("arguments") == Some(&record.arguments)
         }
+        // Listing resources is catalog-only and produces no dispatch record.
+        // Reading one must bind the exact original server and opaque URI.
+        "mcp.resources.read" => {
+            record.key.operation == Operation::ReadResource
+                && arguments["server"].as_str() == Some(source.source.id.as_str())
+                && arguments["uri"].as_str() == Some(record.key.target.as_str())
+                && record.arguments == serde_json::json!({})
+        }
         "skills.read" => {
             record.key.operation == Operation::ReadSkill
                 && arguments["name"].as_str()
@@ -397,6 +410,19 @@ fn verify_outcome(
 struct Dispatch {
     prepared: bool,
     event: BridgeDispatchEvent,
+}
+
+// Only a terminal reconstructed from the original canonical DispatchLog can
+// authorize this exact repair. It grants no authority to ordinary callers.
+struct VerifiedBridgeTerminal(cayw_core::ReconciliationRequest);
+impl cayw_core::ReconciliationVerifier for VerifiedBridgeTerminal {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        if request == &self.0 {
+            Ok(())
+        } else {
+            Err("reconciliation differs from the verified original Bridge terminal".into())
+        }
+    }
 }
 /// Reconstruct only from the canonical log, checking ordering and complete Core
 /// origins. An arbitrary Host event kind or a changed projection is no evidence.
@@ -628,11 +654,30 @@ impl DispatchLog {
                 },
                 Some(DispatchOutcome::Unknown { .. }) | None => continue,
             };
-            store.reconcile_capability(id, CapabilityReconciliation {
-                key: key.clone(), actor: "runtime-bridge-recovery".into(),
-                evidence: format!("Exact original Runtime Bridge terminal committed at Core cursor {}; full lease, parent, source hash, bindings and arguments verified against original Core events", dispatch.event.cursor),
-                outcome, external_provenance: call.external_provenance.clone(),
-            })?;
+            let reconciliation = CapabilityReconciliation {
+                key: key.clone(),
+                expected: Box::new(cayw_core::ReconciliationOrigin {
+                    lease: call.lease.clone(),
+                    task_id: call.task_id.clone(),
+                    execution_id: key.execution_id.clone(),
+                    parent_call_id: call.parent_call_id.clone(),
+                    source_hash: call.source_hash.clone(),
+                }),
+                actor: "runtime-bridge-recovery".into(),
+                evidence: format!(
+                    "Exact original Runtime Bridge terminal committed at Core cursor {}; full lease, parent, source hash, bindings and arguments verified against original Core events",
+                    dispatch.event.cursor
+                ),
+                outcome,
+                external_provenance: call.external_provenance.clone(),
+            };
+            let request = cayw_core::ReconciliationRequest::Capability {
+                reconciliation: reconciliation.clone(),
+            };
+            store
+                .clone()
+                .with_reconciliation_verifier(Arc::new(VerifiedBridgeTerminal(request)))
+                .reconcile_capability(id, reconciliation)?;
         }
         Ok(())
     }

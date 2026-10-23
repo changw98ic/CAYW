@@ -51,11 +51,63 @@ pub struct SkillSpec {
     pub content_sha256: String,
 }
 
+/// Explicit immutable resource metadata. `uri` is an opaque source-scoped key;
+/// the bridge never interprets it as a filesystem path or opens it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceSpec {
+    pub uri: String,
+    pub description: String,
+    pub mime_type: String,
+}
+
+/// Bounded content returned by a source for `SourceOperation::ReadResource`.
+/// Exactly one of `text` or `blob_base64` must be present and match the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceContent {
+    pub uri: String,
+    pub mime_type: String,
+    pub text: Option<String>,
+    pub blob_base64: Option<String>,
+}
+impl ResourceContent {
+    pub(crate) fn validate(
+        &self,
+        spec: &ResourceSpec,
+        payload_limit: usize,
+    ) -> Result<(), CapabilityError> {
+        if self.uri != spec.uri {
+            return Err(crate::bounds::failure("resource result URI mismatch"));
+        }
+        if self.mime_type != spec.mime_type {
+            return Err(crate::bounds::failure("resource result MIME mismatch"));
+        }
+        let payload = match (&self.text, &self.blob_base64) {
+            (Some(text), None) => text.len(),
+            (None, Some(blob)) => blob.len(),
+            _ => {
+                return Err(crate::bounds::failure(
+                    "resource result must contain exactly one content field",
+                ));
+            }
+        };
+        if payload > payload_limit {
+            return Err(crate::bounds::failure(
+                "resource content exceeds its byte budget",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub tools: Vec<ToolSpec>,
     pub skills: Vec<SkillSpec>,
+    /// Explicit resource metadata whose URIs stay opaque to the bridge.
+    pub resources: Vec<ResourceSpec>,
     /// At most one source can own the host's unqualified `search.query` entry.
     pub search: bool,
 }
@@ -68,6 +120,8 @@ pub enum Visibility {
     SkillName,
     SkillContent,
     Search,
+    ResourceUri,
+    ResourceContent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +133,8 @@ pub enum Operation {
     ListSkills,
     ReadSkill,
     Search,
+    ListResources,
+    ReadResource,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,9 +257,20 @@ pub trait DispatchJournal: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub enum SourceOperation {
-    InvokeTool { name: String, arguments: Value },
-    ReadSkill { name: String },
-    Search { arguments: Value },
+    InvokeTool {
+        name: String,
+        arguments: Value,
+    },
+    ReadSkill {
+        name: String,
+    },
+    Search {
+        arguments: Value,
+    },
+    /// The URI is echoed back with the bounded content for manifest validation.
+    ReadResource {
+        uri: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -256,11 +323,14 @@ pub struct Limits {
     pub max_sources: usize,
     pub max_tools_per_source: usize,
     pub max_skills_per_source: usize,
+    pub max_resources_per_source: usize,
     pub max_metadata_bytes: usize,
     pub max_all_metadata_bytes: usize,
     pub max_argument_bytes: usize,
     pub max_result_bytes: usize,
     pub max_skill_bytes: usize,
+    /// Applied to the text bytes or encoded blob bytes of one resource read.
+    pub max_resource_bytes: usize,
     /// Includes metadata operations, denied policy operations, and reconnections.
     pub max_source_operations: usize,
     /// Arguments and replies over all generations of one source.
@@ -280,11 +350,13 @@ impl Default for Limits {
             max_sources: 32,
             max_tools_per_source: 128,
             max_skills_per_source: 128,
+            max_resources_per_source: 128,
             max_metadata_bytes: 256 * 1024,
             max_all_metadata_bytes: 2 * 1024 * 1024,
             max_argument_bytes: 64 * 1024,
             max_result_bytes: 256 * 1024,
             max_skill_bytes: 64 * 1024,
+            max_resource_bytes: 64 * 1024,
             max_source_operations: 1024,
             max_source_bytes: 8 * 1024 * 1024,
             max_in_flight: 8,

@@ -158,6 +158,108 @@ fn grant(store: &RequestStore, catalog: &OperationCatalog) -> RequestRecord {
         .unwrap()
 }
 
+// Omitting the I/O mode or either PTY dimension from Host identity would let
+// an existing receipt authorize a different process configuration.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_process_io_change_invalidates_the_original_permission_receipt() {
+    use cayw_host::{ProcessIo, Profile, ProfileKind};
+    let fixture = Fixture::new();
+    let config = |io| HostConfig {
+        profiles: std::collections::BTreeMap::from([(
+            "check".into(),
+            Profile {
+                kind: ProfileKind::Check,
+                program: "/usr/bin/true".into(),
+                args: vec![],
+                env: Default::default(),
+                timeout: std::time::Duration::from_secs(10),
+                max_output_bytes: 1024,
+                allow_filter: false,
+                io,
+            },
+        )]),
+        ..Default::default()
+    };
+    let catalog = |io| {
+        let config = config(io);
+        let host = cayw_host::Host::new(
+            fixture.temp.path(),
+            Arc::new(Allow),
+            Arc::new(Audit::default()),
+            config.clone(),
+        )
+        .unwrap();
+        OperationCatalog::bind(
+            HostIdentity::from_host(&host, &config, "policy").unwrap(),
+            &host.capabilities(),
+            fixture.catalog.operations(),
+        )
+        .unwrap()
+    };
+    let original = catalog(ProcessIo::Pty {
+        columns: 80,
+        rows: 24,
+    });
+    fixture
+        .store
+        .replace_attempt(
+            &identity(),
+            "io-attempt",
+            &original,
+            &actor(),
+            "bind terminal configuration",
+        )
+        .unwrap();
+    let task = TaskIdentity::new("session", "task", "io-attempt").unwrap();
+    let request = fixture.store.request(&task, &original, input()).unwrap();
+    let ticket = fixture
+        .store
+        .evaluate(&task, &request.id, &actor())
+        .unwrap();
+    fixture
+        .store
+        .approve(&ticket, &original, 100, "verified process configuration")
+        .unwrap();
+    let receipt = fixture
+        .store
+        .admit(&task, &original, "fs.read", &input().arguments)
+        .unwrap();
+    fixture
+        .second
+        .check_receipt(
+            &receipt,
+            &catalog(ProcessIo::Pty {
+                columns: 80,
+                rows: 24,
+            }),
+        )
+        .unwrap();
+    let admitted: Vec<_> = [
+        ProcessIo::Pipes,
+        ProcessIo::Pty {
+            columns: 81,
+            rows: 24,
+        },
+        ProcessIo::Pty {
+            columns: 80,
+            rows: 25,
+        },
+    ]
+    .into_iter()
+    .filter(|io| {
+        fixture
+            .second
+            .check_receipt(&receipt, &catalog(*io))
+            .is_ok()
+    })
+    .collect();
+    assert!(
+        admitted.is_empty(),
+        "old receipt accepted changed process I/O: {admitted:?}"
+    );
+}
+
 #[test]
 fn receipt_is_exact_and_cannot_follow_a_newer_grant_on_another_connection() {
     let fixture = Fixture::new();

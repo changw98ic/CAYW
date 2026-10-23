@@ -21,6 +21,8 @@ struct Metadata {
     provenance: Provenance,
     tools: BTreeMap<String, Tool>,
     skills: BTreeMap<String, SkillSpec>,
+    /// Explicit manifest metadata keyed by the opaque resource URI.
+    resources: BTreeMap<String, ResourceSpec>,
     search: bool,
     bytes: usize,
 }
@@ -84,6 +86,7 @@ impl Registry {
             limits.max_sources,
             limits.max_tools_per_source,
             limits.max_skills_per_source,
+            limits.max_resources_per_source,
             limits.max_metadata_bytes,
             limits.max_all_metadata_bytes,
             limits.max_argument_bytes,
@@ -98,6 +101,7 @@ impl Registry {
             || limits.max_metadata_bytes > 16 * 1024 * 1024
             || limits.max_all_metadata_bytes > 64 * 1024 * 1024
             || limits.max_result_bytes > 16 * 1024 * 1024
+            || limits.max_resource_bytes > 16 * 1024 * 1024
             || limits.operation_timeout.is_zero()
             || Instant::now()
                 .checked_add(limits.operation_timeout)
@@ -254,6 +258,7 @@ impl Registry {
             || identity.origin.chars().any(char::is_control)
             || manifest.tools.len() > self.0.limits.max_tools_per_source
             || manifest.skills.len() > self.0.limits.max_skills_per_source
+            || manifest.resources.len() > self.0.limits.max_resources_per_source
         {
             return Err(failure("invalid source identity or manifest count"));
         }
@@ -304,6 +309,16 @@ impl Registry {
                 return Err(failure("invalid or duplicate skill metadata"));
             }
         }
+        let mut resources = BTreeMap::new();
+        for spec in manifest.resources {
+            if !resource_uri(&spec.uri)
+                || spec.description.len() > 8192
+                || !mime_type(&spec.mime_type)
+                || resources.insert(spec.uri.clone(), spec).is_some()
+            {
+                return Err(failure("invalid or duplicate resource metadata"));
+            }
+        }
         Ok(Metadata {
             provenance: Provenance {
                 registry_incarnation: self.0.incarnation.clone(),
@@ -313,6 +328,7 @@ impl Registry {
             },
             tools,
             skills,
+            resources,
             search: manifest.search,
             bytes,
         })
@@ -539,7 +555,18 @@ impl Registry {
                     }
                     Ok(value)
                 }
-                Operation::Invoke | Operation::ReadSkill | Operation::Search => {
+                Operation::ListResources => {
+                    let mut value = json!({"resources":[]});
+                    for resource in capture.metadata.resources.values().filter(|resource| visible(Visibility::ResourceUri, &resource.uri)) {
+                        value["resources"].as_array_mut().expect("resource list").push(json!({
+                            "uri":resource.uri, "description":resource.description,
+                            "mime_type":resource.mime_type, "source":capture.metadata.provenance
+                        }));
+                        value_size(&value, self.0.limits.max_result_bytes)?;
+                    }
+                    Ok(value)
+                }
+                Operation::Invoke | Operation::ReadSkill | Operation::Search | Operation::ReadResource => {
                     let source_operation = match operation {
                         Operation::Invoke => {
                             let tool = capture.metadata.tools.get(target).ok_or_else(|| failure("tool unavailable"))?;
@@ -560,6 +587,14 @@ impl Registry {
                                 return Err(failure("search access denied"));
                             }
                             SourceOperation::Search { arguments: arguments.clone() }
+                        }
+                        Operation::ReadResource => {
+                            let resource = capture.metadata.resources.get(target)
+                                .ok_or_else(|| failure("resource unavailable"))?;
+                            if !visible(Visibility::ResourceUri, target)
+                                || !visible(Visibility::ResourceContent, target)
+                            { return Err(failure("resource content access denied")); }
+                            SourceOperation::ReadResource { uri: resource.uri.clone() }
                         }
                         _ => unreachable!(),
                     };
@@ -628,6 +663,13 @@ impl Registry {
                         if content.len() > self.0.limits.max_skill_bytes
                             || content_sha256(content) != capture.metadata.skills[target].content_sha256
                         { return Err(failure("skill content size or digest mismatch")); }
+                    } else if operation == Operation::ReadResource {
+                        let spec = capture.metadata.resources.get(target)
+                            .ok_or_else(|| failure("resource unavailable"))?;
+                        let content: ResourceContent = serde_json::from_value(reply.value.clone())
+                            .map_err(|_| failure("resource result does not match the bridge contract"))?;
+                        content.validate(spec, self.0.limits.max_resource_bytes)
+                            .map_err(|error| interrupted(effect, &error.message))?;
                     }
                     // Keep unknown retention until the fully bounded envelope is charged.
                     Ok(json!({"request":key, "source":capture.metadata.provenance, "value":reply.value.take()}))
