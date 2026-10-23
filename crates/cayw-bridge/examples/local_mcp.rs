@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register(identity("fixture-1"), manifest, Box::new(client.handle()))?;
     let gate = Arc::new(Gate::default());
     let audit = Arc::new(Audit::default());
-    // Two independent CodeMode consumers, one registry, one initialized child.
+    // Two independent CodeMode consumers, one registry, one connected child.
     let first = mode(host(
         &workspace.0,
         consumer(&registry),
@@ -54,13 +54,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     "#, CancellationToken::new()).await?;
     assert_eq!(execution.return_value["value"]["sum"], 5);
     assert_eq!(stats.spawned.load(Ordering::Relaxed), 1);
-    assert_eq!(stats.initializations.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.connections.load(Ordering::Relaxed), 1);
     assert_eq!(stats.skill_reads.load(Ordering::Relaxed), 1);
     println!(
         "{}",
         serde_json::json!({
             "protocol":PROTOCOL, "connections":stats.spawned.load(Ordering::Relaxed),
-            "initializations":stats.initializations.load(Ordering::Relaxed),
+            "connected_sources":stats.connections.load(Ordering::Relaxed),
             "discovery":discovery.return_value, "execution":execution.return_value,
             "host_gate_calls":gate.calls.lock().unwrap().clone(),
             "audit":audit.records.lock().unwrap().clone(),

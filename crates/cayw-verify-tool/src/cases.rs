@@ -229,9 +229,13 @@ cayw.call("fs.write", {{path = "after.txt", content = "must not be written"}})
             Self::OutputBudget => limits.output_bytes = 4096,
             Self::MemoryBudget => limits.memory_bytes = 1024 * 1024,
             Self::CallBudget => limits.host_calls = 2,
-            Self::ActiveTimeout | Self::HostTimeout => {
+            Self::ActiveTimeout => {
                 limits.instruction_budget = u64::MAX;
                 limits.timeout = std::time::Duration::from_secs(1);
+            }
+            Self::HostTimeout => {
+                limits.instruction_budget = u64::MAX;
+                limits.host_wait = std::time::Duration::from_secs(1);
             }
             _ => {}
         }

@@ -1,12 +1,14 @@
 //! Explicit HTTP implementations of [`cayw_ai::Provider`].
 //!
-//! OpenAI remains in `cayw_ai::providers::OpenAiProvider`. This crate implements
-//! Anthropic Messages and the Gemini Developer API; it never loads credentials.
+//! OpenAI Chat Completions remains in `cayw_ai::providers::OpenAiProvider`. This
+//! crate implements Anthropic Messages, native OpenAI Responses and the Gemini
+//! Developer API; it never loads credentials.
 
 mod anthropic;
 mod common;
 mod gemini;
 mod json;
+mod responses;
 mod transport;
 
 use cayw_ai::{
@@ -51,6 +53,33 @@ impl Provider for AnthropicProvider {
     }
 }
 
+/// Native OpenAI Responses SSE (`base_url` normally ends in `/v1`).
+#[derive(Clone)]
+pub struct ResponsesProvider {
+    config: HttpConfig,
+}
+
+impl ResponsesProvider {
+    pub fn new(
+        base_url: impl AsRef<str>,
+        api_key: impl Into<String>,
+    ) -> Result<Self, ProviderConfigError> {
+        Ok(Self {
+            config: HttpConfig::new(base_url.as_ref(), api_key.into())?,
+        })
+    }
+
+    pub fn standard(api_key: impl Into<String>) -> Result<Self, ProviderConfigError> {
+        Self::new("https://api.openai.com/v1", api_key)
+    }
+}
+
+impl Provider for ResponsesProvider {
+    fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantStream {
+        transport::stream(self.config.clone(), Protocol::Responses, request, cancel)
+    }
+}
+
 /// Both Gemini REST methods use the same normalized event contract.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum GeminiMode {
@@ -64,6 +93,7 @@ pub enum GeminiMode {
 pub struct GeminiProvider {
     config: HttpConfig,
     mode: GeminiMode,
+    gateway_routes: bool,
 }
 
 impl GeminiProvider {
@@ -75,11 +105,18 @@ impl GeminiProvider {
         Ok(Self {
             config: HttpConfig::new(base_url.as_ref(), api_key.into())?,
             mode: GeminiMode::default(),
+            gateway_routes: false,
         })
     }
 
     pub fn standard(api_key: impl Into<String>) -> Result<Self, ProviderConfigError> {
         Self::new("https://generativelanguage.googleapis.com/v1beta", api_key)
+    }
+
+    /// Enables the host's explicit Gemini gateway routes.
+    pub fn with_gateway_routes(mut self) -> Self {
+        self.gateway_routes = true;
+        self
     }
 
     /// `GenerateContent` buffers a bounded JSON response, then emits content events.
@@ -93,7 +130,7 @@ impl Provider for GeminiProvider {
     fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantStream {
         transport::stream(
             self.config.clone(),
-            Protocol::Gemini(self.mode),
+            Protocol::Gemini(self.mode, self.gateway_routes),
             request,
             cancel,
         )

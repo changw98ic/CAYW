@@ -480,6 +480,80 @@ async fn deeply_nested_argument_values_fail_without_recursive_disposal() {
 }
 
 #[tokio::test]
+async fn shared_budgets_and_pre_cancel_cover_serialize_query_and_transform() {
+    let cases = [
+        (
+            "data.serialize",
+            json!({"format":"json","value":{"text":"x".repeat(200)}}),
+            Limits {
+                output_bytes: 32,
+                ..Limits::default()
+            },
+            "output_limit:",
+        ),
+        (
+            "data.query",
+            json!({"value":[[[[[0]]]]],"pointer":""}),
+            Limits {
+                max_depth: 4,
+                ..Limits::default()
+            },
+            "depth_limit:",
+        ),
+        (
+            "data.query",
+            json!({"value":[1,2,3,4,5],"pointer":""}),
+            Limits {
+                max_nodes: 4,
+                ..Limits::default()
+            },
+            "node_limit:",
+        ),
+        (
+            "data.transform",
+            json!({"value":[[[[[0]]]]],"operation":"select_rows","indices":[0]}),
+            Limits {
+                max_depth: 4,
+                ..Limits::default()
+            },
+            "depth_limit:",
+        ),
+        (
+            "data.transform",
+            json!({"value":{"a":1,"b":2,"c":3},"operation":"select_fields","fields":["a"]}),
+            Limits {
+                max_nodes: 4,
+                ..Limits::default()
+            },
+            "node_limit:",
+        ),
+    ];
+    for (name, args, limits, prefix) in cases {
+        check(name, args, limits, prefix).await;
+    }
+
+    for (name, args) in [
+        (
+            "data.serialize",
+            json!({"format":"json","value":{"text":"x"}}),
+        ),
+        ("data.query", json!({"value":{"a":1},"pointer":"/a"})),
+        (
+            "data.transform",
+            json!({"value":{"a":1},"operation":"select_fields","fields":["a"]}),
+        ),
+    ] {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = execute(name, args, cancel, Limits::default())
+            .await
+            .unwrap_err();
+        assert!(error.message.starts_with("cancelled:"), "{name}: {error}");
+        assert!(!error.outcome_unknown);
+    }
+}
+
+#[tokio::test]
 async fn invalid_large_arguments_produce_a_small_schema_error() {
     let args = json!({"encoding":"hex","input":{"kind":"bytes","value":vec!["not-a-byte"; 2_000]}});
     let error = execute(

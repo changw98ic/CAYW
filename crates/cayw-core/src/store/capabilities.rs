@@ -535,43 +535,71 @@ impl SessionStore {
         if let Some(provenance) = &reconciliation.external_provenance {
             bounded_value(provenance)?;
         }
-        self.mutate(session_id, |session| {
-            if session.attempt.is_some() {
-                return Err(CoreError::Busy);
-            }
-            let execution = session.execution(&reconciliation.key.execution_id)?;
-            let call = session.capability(&reconciliation.key)?;
-            if call.parent_call_id != execution.parent_call_id
-                || call.lease != execution.lease
-                || call.task_id != execution.task_id
-                || call.source_hash != execution.source_hash
-            {
-                return Err(invalid("Reconciliation origin is inconsistent"));
-            }
-            if call.stage != CapabilityStage::Settled
-                || !matches!(call.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. }))
-            {
-                return Err(invalid(
-                    "Only an unknown capability outcome can be reconciled",
-                ));
-            }
-            if call.external_provenance != reconciliation.external_provenance {
-                return Err(invalid(
-                    "Reconciliation must match the external provenance bound at execution start",
-                ));
-            }
-            let call = session.capability_mut(&reconciliation.key)?;
-            call.outcome = Some(reconciliation.outcome.clone());
-            let call = call.clone();
-            Ok((
-                (),
-                None,
-                CoreEvent::CapabilityReconciled {
-                    reconciliation,
-                    call,
-                },
-            ))
+        self.verify_reconciliation(&ReconciliationRequest::Capability {
+            reconciliation: reconciliation.clone(),
         })?;
-        self.snapshot(session_id)
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = load(&transaction, session_id)?;
+        if session.attempt.is_some() {
+            return Err(CoreError::Busy);
+        }
+        let execution = session.execution(&reconciliation.key.execution_id)?;
+        let call = session.capability(&reconciliation.key)?;
+        if call.parent_call_id != execution.parent_call_id
+            || call.lease != execution.lease
+            || call.task_id != execution.task_id
+            || call.source_hash != execution.source_hash
+            || call.lease.session_id != session.id
+            || *reconciliation.expected != ReconciliationOrigin::from(call)
+        {
+            return Err(invalid(
+                "Reconciliation differs from the complete original capability identity",
+            ));
+        }
+        if call.external_provenance != reconciliation.external_provenance {
+            return Err(invalid(
+                "Reconciliation must match the external provenance bound at execution start",
+            ));
+        }
+        if let Some(prior) = reconciliation_events(&transaction, &session)?
+            .into_iter()
+            .find_map(|event| match event {
+                CoreEvent::CapabilityReconciled {
+                    reconciliation: prior,
+                    ..
+                } if prior.key == reconciliation.key => Some(prior),
+                _ => None,
+            })
+        {
+            if prior != reconciliation {
+                return Err(invalid("Reconciliation contradicts the recorded decision"));
+            }
+            return Ok(session.snapshot());
+        }
+        if call.stage != CapabilityStage::Settled
+            || !matches!(call.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. }))
+        {
+            return Err(invalid(
+                "Only an unknown capability outcome can be reconciled",
+            ));
+        }
+        let call = session.capability_mut(&reconciliation.key)?;
+        call.outcome = Some(reconciliation.outcome.clone());
+        let call = call.clone();
+        persist(
+            &transaction,
+            &mut session,
+            None,
+            CoreEvent::CapabilityReconciled {
+                reconciliation,
+                call,
+            },
+        )?;
+        transaction.commit()?;
+        Ok(session.snapshot())
     }
 }

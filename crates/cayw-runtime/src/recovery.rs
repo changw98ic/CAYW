@@ -13,18 +13,18 @@ use cayw_core::{
 };
 use std::{collections::BTreeMap, fs::File};
 
-struct Facts {
-    snapshot: SessionSnapshot,
-    leases: BTreeMap<String, AttemptLease>,
-    calls: BTreeMap<CapabilityCallKey, CapabilityCallRecord>,
-    reconciliations: BTreeMap<CapabilityCallKey, CapabilityReconciliation>,
-    tool_reconciliations: BTreeMap<String, Reconciliation>,
+pub(crate) struct Facts {
+    pub(crate) snapshot: SessionSnapshot,
+    pub(crate) leases: BTreeMap<String, AttemptLease>,
+    pub(crate) calls: BTreeMap<CapabilityCallKey, CapabilityCallRecord>,
+    pub(crate) reconciliations: BTreeMap<CapabilityCallKey, CapabilityReconciliation>,
+    pub(crate) tool_reconciliations: BTreeMap<String, Reconciliation>,
     shared_reads: BTreeMap<CapabilityCallKey, crate::shared_read::Evidence>,
     admitted_grants: BTreeMap<CapabilityCallKey, serde_json::Value>,
     admitted_requests: BTreeMap<CapabilityCallKey, serde_json::Value>,
 }
 impl Facts {
-    fn read(runtime: &Runtime, id: &str) -> Result<Self, RuntimeError> {
+    pub(crate) fn read(runtime: &Runtime, id: &str) -> Result<Self, RuntimeError> {
         let snapshot = runtime.inner.store.snapshot(id)?;
         let mut facts = Self {
             snapshot,
@@ -298,7 +298,7 @@ impl Facts {
         }
         Ok(())
     }
-    fn execution(&self, id: &str) -> Option<&ExecutionRecord> {
+    pub(crate) fn execution(&self, id: &str) -> Option<&ExecutionRecord> {
         self.snapshot
             .executions
             .iter()
@@ -319,67 +319,91 @@ impl Facts {
     }
 }
 
-struct Owners {
+pub(crate) struct Owners {
     _tasks: Vec<File>,
-    cells: Vec<StoppedScope>,
+    pub(crate) cells: Vec<StoppedScope>,
 }
+pub(crate) struct StoppedResources<'a> {
+    pub(crate) queue: &'a crate::queue::Queue,
+    pub(crate) cells: &'a std::sync::Arc<cayw_cells::SqliteJournal>,
+    pub(crate) coordination: &'a crate::coordination::Coordination,
+    pub(crate) process_journal: &'a crate::processes::ProcessJournal,
+    pub(crate) limits: &'a cayw_cells::CellLimits,
+}
+
+/// The caller retains the process-shared lifecycle lock and supplies canonical
+/// AttemptStarted leases. Locks every original Queue Task, including unattached
+/// and terminal Tasks, before inspecting process cleanup or Cells ownership.
+pub(crate) fn stopped_owners_from(
+    resources: StoppedResources<'_>,
+    id: &str,
+    leases: &BTreeMap<String, AttemptLease>,
+) -> Result<Owners, RuntimeError> {
+    let tasks = resources.queue.list(id)?;
+    let ownership = tasks
+        .iter()
+        .map(|task| resources.coordination.task(&task.id))
+        .collect::<Result<Vec<_>, _>>()?;
+    for task in &tasks {
+        if resources.process_journal.pending(&task.id)? {
+            return Err(RuntimeError::RecoveryRequired {
+                cause: Box::new(RuntimeError::Worker(format!(
+                    "process cleanup for task {} is not confirmed; drain its original owner or submit host evidence",
+                    task.id,
+                ))),
+                cleanup: None,
+                outcome_unknown: true,
+            });
+        }
+    }
+    let frozen = resources.cells.is_frozen(id).map_err(cell_error)?;
+    let mut scopes = Vec::new();
+    for task in tasks {
+        let Some(attempt) = task.attempt_id.as_ref() else {
+            continue;
+        };
+        let lease = leases
+            .get(attempt)
+            .ok_or_else(|| corrupt("task attempt has no durable Core lease"))?;
+        if lease.session_id != id || task.worker_id.as_ref() != Some(&lease.worker_id) {
+            return Err(corrupt("task owner differs from its durable Core lease"));
+        }
+        let identity = cell_identity(lease, &task.id);
+        let records = resources
+            .cells
+            .records(&identity, resources.limits)
+            .map_err(cell_error)?;
+        if records.is_empty() && !frozen {
+            continue;
+        }
+        scopes.push(resources.cells.stopped_scope(ExecutorStopped {
+            identity,
+            evidence: format!("Runtime owns original task {} after its worker released the execution lock", task.id),
+        }, resources.limits.clone()).map_err(cell_error)?);
+    }
+    Ok(Owners {
+        _tasks: ownership,
+        cells: scopes,
+    })
+}
+
 impl Runtime {
     /// The caller holds the process-shared lifecycle lock until all commits end.
-    fn stopped_owners(&self, id: &str, facts: &Facts) -> Result<Owners, RuntimeError> {
+    pub(crate) fn stopped_owners(&self, id: &str, facts: &Facts) -> Result<Owners, RuntimeError> {
         if lock(&self.inner.active).contains_key(id) {
             return Err(RuntimeError::Busy);
         }
-        let tasks = self.inner.queue.list(id)?;
-        // Cancelled queue entries can still have a worker finishing admission.
-        // Keep every original task lock, including its known terminal entries.
-        let ownership = tasks
-            .iter()
-            .map(|task| self.inner.coordination.task(&task.id))
-            .collect::<Result<Vec<_>, _>>()?;
-        for task in &tasks {
-            if self.inner.process_journal.pending(&task.id)? {
-                return Err(RuntimeError::RecoveryRequired {
-                    cause: Box::new(RuntimeError::Worker(format!(
-                        "process cleanup for task {} is not confirmed; drain its original owner or submit host evidence",
-                        task.id,
-                    ))),
-                    cleanup: None,
-                    outcome_unknown: true,
-                });
-            }
-        }
-        let frozen = self.inner.cells.is_frozen(id).map_err(cell_error)?;
-        let mut scopes = Vec::new();
-        for task in tasks {
-            let Some(attempt) = task.attempt_id.as_ref() else {
-                continue;
-            };
-            let lease = facts
-                .leases
-                .get(attempt)
-                .ok_or_else(|| corrupt("task attempt has no durable Core lease"))?;
-            if lease.session_id != id || task.worker_id.as_ref() != Some(&lease.worker_id) {
-                return Err(corrupt("task owner differs from its durable Core lease"));
-            }
-            let identity = cell_identity(lease, &task.id);
-            let records = self
-                .inner
-                .cells
-                .records(&identity, &self.inner.config.cells)
-                .map_err(cell_error)?;
-            if records.is_empty() && !frozen {
-                continue;
-            }
-            let scope = self.inner.cells.stopped_scope(ExecutorStopped {
-                identity,
-                evidence: format!("Runtime owns original task {} after its worker released the execution lock", task.id),
-            }, self.inner.config.cells.clone()).map_err(cell_error)?;
-            scopes.push(scope);
-        }
-        Ok(Owners {
-            _tasks: ownership,
-            cells: scopes,
-        })
+        stopped_owners_from(
+            StoppedResources {
+                queue: &self.inner.queue,
+                cells: &self.inner.cells,
+                coordination: &self.inner.coordination,
+                process_journal: &self.inner.process_journal,
+                limits: &self.inner.config.cells,
+            },
+            id,
+            &facts.leases,
+        )
     }
 
     pub fn recover(&self, id: &str) -> Result<SessionView, RuntimeError> {
@@ -406,6 +430,20 @@ impl Runtime {
         if before.snapshot.attempt.is_some() {
             return Err(RuntimeError::Busy);
         }
+        self.verify_reconciliation_request(cayw_core::ReconciliationRequest::Tool {
+            reconciliation: input.clone(),
+        })?;
+        self.verify_original_task(id, &input.expected.lease, &input.expected.task_id, &before)?;
+        if self
+            .inner
+            .store
+            .tool_reconciliation_origin(id, &input.call_id)?
+            != input.expected
+        {
+            return Err(RuntimeError::InvalidInput(
+                "tool reconciliation differs from its complete original identity".into(),
+            ));
+        }
         let retry = before.tool_reconciliations.get(&input.call_id) == Some(&input);
         if !retry
             && !before.snapshot.unresolved_calls.iter().any(|call| {
@@ -415,6 +453,7 @@ impl Runtime {
             return Err(RuntimeError::InvalidInput("only the original unknown tool or its exact recorded reconciliation can be settled".into()));
         }
         let owners = self.stopped_owners(id, &before)?;
+        self.verify_tool_cells_reconciliation(&owners, &input)?;
         if !retry {
             self.inner.store.reconcile(id, input)?;
         }
@@ -434,8 +473,17 @@ impl Runtime {
         if before.snapshot.attempt.is_some() {
             return Err(RuntimeError::Busy);
         }
+        self.verify_reconciliation_request(cayw_core::ReconciliationRequest::Capability {
+            reconciliation: input.clone(),
+        })?;
+        self.verify_original_task(id, &input.expected.lease, &input.expected.task_id, &before)?;
         crate::bridge::read_log(&self.inner.store, id, &before.snapshot)?;
         if let Some(call) = before.calls.get(&input.key) {
+            if *input.expected != cayw_core::ReconciliationOrigin::from(call) {
+                return Err(RuntimeError::InvalidInput(
+                    "capability reconciliation differs from its complete original identity".into(),
+                ));
+            }
             if call.external_provenance != input.external_provenance {
                 return Err(corrupt(
                     "capability reconciliation differs from its canonical original provenance",
@@ -463,6 +511,11 @@ impl Runtime {
             return Err(RuntimeError::InvalidInput("only the original unknown capability or its exact recorded reconciliation can be settled".into()));
         }
         let owners = self.stopped_owners(id, &before)?;
+        let call = before
+            .calls
+            .get(&input.key)
+            .ok_or_else(|| corrupt("original capability is absent"))?;
+        self.verify_cells_reconciliation(&owners, &before, call, &input)?;
         if !retry {
             self.inner.store.reconcile_capability(id, input)?;
         }
@@ -742,7 +795,7 @@ impl Runtime {
     }
 }
 
-fn cell_identity(lease: &AttemptLease, task: &str) -> CellIdentity {
+pub(crate) fn cell_identity(lease: &AttemptLease, task: &str) -> CellIdentity {
     CellIdentity {
         session_id: lease.session_id.clone(),
         task_id: task.into(),
@@ -750,7 +803,10 @@ fn cell_identity(lease: &AttemptLease, task: &str) -> CellIdentity {
         permission_context: format!("{}:{}", lease.worker_id, lease.fence),
     }
 }
-fn verify_execution(cell: &CellExecution, core: &ExecutionRecord) -> Result<(), RuntimeError> {
+pub(crate) fn verify_execution(
+    cell: &CellExecution,
+    core: &ExecutionRecord,
+) -> Result<(), RuntimeError> {
     if cell.cell_id != core.execution_id
         || cell.parent_call_id != core.parent_call_id
         || cell.source_hash != core.source_hash
@@ -762,7 +818,7 @@ fn verify_execution(cell: &CellExecution, core: &ExecutionRecord) -> Result<(), 
     }
     Ok(())
 }
-fn call_terminal(
+pub(crate) fn call_terminal(
     outcome: Option<&CapabilityOutcome>,
     intent: &cayw_cells::CapabilityIntent,
     limits: &cayw_cells::CellLimits,
@@ -858,7 +914,7 @@ fn cell_message(message: &str) -> String {
     }
     message[..end].into()
 }
-fn cell_error(error: CellError) -> RuntimeError {
+pub(crate) fn cell_error(error: CellError) -> RuntimeError {
     RuntimeError::Workspace(format!("Cells recovery: {error}"))
 }
 fn hash_valid(value: &str) -> bool {

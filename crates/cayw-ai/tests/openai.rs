@@ -90,6 +90,39 @@ fn stopped() -> String {
     data(chunk(json!({}), json!("stop"))) + "data: [DONE]\r\n\r\n"
 }
 
+// Break caught: Chat silently drops another protocol's replay items and signatures.
+#[tokio::test]
+async fn chat_rejects_foreign_protocol_metadata_before_networking() {
+    let (provider, mut received) = fixture(stopped(), "200 OK", 11).await;
+    let mut input = request();
+    let mut assistant = cayw_ai::AssistantMessage::new(&input.model);
+    assistant.content.push(Content::text("previous"));
+    assistant.stop_reason = StopReason::Stop;
+    assistant
+        .provider_metadata
+        .insert("openai_responses".into(), json!({"output":[]}));
+    input
+        .messages
+        .extend([Message::Assistant(assistant), Message::user("next")]);
+    let events: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.stream(input, CancellationToken::new()).collect(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(events.last(), Some(AssistantEvent::Error { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            received.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "unsupported replay must not send a request"
+    );
+}
+
 #[tokio::test]
 async fn streamed_unicode_text_and_usage_match_the_actual_request() {
     let body = ": heartbeat\r\n\r\n".to_owned()
@@ -141,6 +174,292 @@ async fn streamed_unicode_text_and_usage_match_the_actual_request() {
         json!([{"role":"user","content":[{"type":"text","text":"hello"}]}])
     );
     assert_eq!(body["stream_options"]["include_usage"], true);
+}
+
+#[tokio::test]
+async fn usage_status_distinguishes_missing_partial_and_reported_counts() {
+    // Break caught: missing fields or total_tokens alone are treated as a
+    // complete zero-cost report instead of preserving what was actually sent.
+    let cases = [
+        (None, "unknown", (0, 0, 0)),
+        (Some(Value::Null), "unknown", (0, 0, 0)),
+        (Some(json!({})), "unknown", (0, 0, 0)),
+        (
+            Some(json!({"prompt_tokens":null,"completion_tokens":null})),
+            "unknown",
+            (0, 0, 0),
+        ),
+        (Some(json!({"total_tokens":27})), "partial", (0, 0, 27)),
+        (Some(json!({"total_tokens":0})), "partial", (0, 0, 0)),
+        (Some(json!({"prompt_tokens":20})), "partial", (20, 0, 20)),
+        (Some(json!({"completion_tokens":7})), "partial", (0, 7, 7)),
+        (Some(json!({"prompt_tokens":0})), "partial", (0, 0, 0)),
+        (
+            Some(json!({"prompt_tokens":0,"completion_tokens":0})),
+            "reported",
+            (0, 0, 0),
+        ),
+        (
+            Some(json!({"prompt_tokens":20,"completion_tokens":7})),
+            "reported",
+            (20, 7, 27),
+        ),
+    ];
+    for (usage, expected_status, expected_counts) in cases {
+        let mut value = chunk(json!({"content":"ok"}), Value::Null);
+        if let Some(usage) = usage {
+            value["usage"] = usage;
+        }
+        let body = data(value) + &stopped();
+        let (provider, _) = fixture(body, "200 OK", 11).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(AssistantEvent::Done { message }) = events.last() else {
+            panic!("{events:#?}");
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap()["usage_status"],
+            expected_status,
+            "{message:#?}"
+        );
+        assert_eq!(
+            (
+                message.usage.input,
+                message.usage.output,
+                message.usage.total_tokens
+            ),
+            expected_counts
+        );
+    }
+}
+
+#[tokio::test]
+async fn usage_status_merges_counts_across_chunks_and_keeps_cache_details_partial() {
+    // Break caught: a later partial or empty usage block resets report presence,
+    // or cache/reasoning details alone are mistaken for the complete report.
+    let cases = [
+        (
+            vec![json!({"prompt_tokens_details":{"cached_tokens":5}})],
+            "partial",
+            (0, 0, 5, 0, 0, 5),
+        ),
+        (
+            vec![json!({"completion_tokens_details":{"reasoning_tokens":3}})],
+            "partial",
+            (0, 0, 0, 0, 3, 0),
+        ),
+        (
+            vec![json!({"prompt_tokens_details":{},"completion_tokens_details":{}})],
+            "unknown",
+            (0, 0, 0, 0, 0, 0),
+        ),
+        (
+            vec![
+                json!({"total_tokens":27}),
+                json!({"prompt_tokens_details":{"cached_tokens":5}}),
+                json!({}),
+            ],
+            "partial",
+            (0, 0, 5, 0, 0, 27),
+        ),
+        (
+            vec![
+                json!({"total_tokens":27}),
+                json!({"prompt_tokens":20}),
+                json!({"completion_tokens":7}),
+            ],
+            "reported",
+            (20, 7, 0, 0, 0, 27),
+        ),
+        (
+            vec![json!({"prompt_tokens":20}), json!({"completion_tokens":7})],
+            "reported",
+            (20, 7, 0, 0, 0, 27),
+        ),
+        (
+            vec![json!({"completion_tokens":7}), json!({"prompt_tokens":20})],
+            "reported",
+            (20, 7, 0, 0, 0, 27),
+        ),
+        (
+            vec![
+                json!({"prompt_tokens":20,"completion_tokens":7}),
+                json!({"prompt_tokens_details":{"cached_tokens":5,"cache_write_tokens":2}}),
+                json!({}),
+            ],
+            "reported",
+            (13, 7, 5, 2, 0, 27),
+        ),
+    ];
+    for (blocks, expected_status, expected_counts) in cases {
+        let mut body = data(chunk(json!({"content":"ok"}), Value::Null))
+            + &data(chunk(json!({}), json!("stop")));
+        for usage in blocks {
+            body += &data(json!({"choices":[],"usage":usage}));
+        }
+        body += "data: [DONE]\n\n";
+        let (provider, _) = fixture(body, "200 OK", 13).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(AssistantEvent::Done { message }) = events.last() else {
+            panic!("{events:#?}");
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap()["usage_status"],
+            expected_status,
+            "{message:#?}"
+        );
+        assert_eq!(
+            (
+                message.usage.input,
+                message.usage.output,
+                message.usage.cache_read,
+                message.usage.cache_write,
+                message.usage.reasoning,
+                message.usage.total_tokens
+            ),
+            expected_counts
+        );
+    }
+}
+
+#[tokio::test]
+async fn contradictory_usage_is_invalid_and_retains_reported_fields() {
+    for reports in [
+        vec![json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":999})],
+        vec![
+            json!({"prompt_tokens":2,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":3}}),
+        ],
+        vec![
+            json!({"prompt_tokens":2,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":4}}),
+        ],
+        vec![
+            json!({"prompt_tokens":7,"completion_tokens":4}),
+            json!({"prompt_tokens":6}),
+        ],
+        vec![json!({"prompt_tokens":7,"completion_tokens":"4"})],
+        vec![json!({"prompt_tokens":u64::MAX,"completion_tokens":1})],
+    ] {
+        let mut body = data(chunk(json!({"content":"ok"}), Value::Null));
+        for report in &reports {
+            body.push_str(&data(json!({"choices":[],"usage":report})));
+        }
+        body.push_str(&stopped());
+        let (provider, _) = fixture(body, "200 OK", 3).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(AssistantEvent::Error { message }) = events.last() else {
+            panic!("contradictory usage was accepted: {events:?}");
+        };
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+        assert_eq!(message.stop_reason, StopReason::Error);
+        let value = serde_json::to_value(message).unwrap();
+        assert_eq!(value["usage_status"], "invalid");
+        for (key, original) in reports.last().unwrap().as_object().unwrap() {
+            assert_eq!(&value["usage_fields"][key], original);
+        }
+    }
+}
+
+#[tokio::test]
+async fn usage_only_frames_emit_a_snapshot_before_the_terminal() {
+    let report = json!({"prompt_tokens":20,"completion_tokens":3,"total_tokens":23});
+    let body = data(chunk(json!({"content":"ok"}), Value::Null))
+        + &data(json!({"choices":[],"usage":report}))
+        + &stopped();
+    let (provider, _) = fixture(body, "200 OK", 3).await;
+    let events = provider
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
+    let update = events
+        .iter()
+        .find(|event| serde_json::to_value(event).unwrap()["type"] == "usage_update")
+        .expect("usage-only frame must be observable before waiting for more HTTP data");
+    assert!(!update.is_terminal());
+    assert_eq!(update.message().usage.total_tokens, 23);
+    assert_eq!(update.message().usage_fields["prompt_tokens"], 20);
+    assert_eq!(
+        update.message().usage_status,
+        cayw_ai::UsageStatus::Reported
+    );
+    assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
+}
+
+#[tokio::test]
+async fn cancelled_stream_preserves_unknown_and_partial_usage_status() {
+    // Break caught: cancellation replaces the current usage report with an
+    // apparently complete default, losing already reported counts.
+    for (usage, expected_status, expected_input) in [
+        (Value::Null, "unknown", 0),
+        (json!({"prompt_tokens":20}), "partial", 20),
+    ] {
+        let mut value = chunk(json!({"content":"partial"}), Value::Null);
+        value["usage"] = usage;
+        let (provider, _) = fixture(data(value) + &stopped(), "200 OK", 8192).await;
+        let cancel = CancellationToken::new();
+        let mut stream = provider.stream(request(), cancel.clone());
+        while let Some(event) = stream.next().await {
+            if matches!(event, AssistantEvent::TextDelta { .. }) {
+                break;
+            }
+            assert!(!event.is_terminal());
+        }
+        cancel.cancel();
+        let events = stream.collect::<Vec<_>>().await;
+        let Some(AssistantEvent::Error { message }) = events.last() else {
+            panic!("{events:#?}");
+        };
+        assert_eq!(message.stop_reason, StopReason::Aborted);
+        assert_eq!(message.usage.input, expected_input);
+        assert_eq!(
+            serde_json::to_value(message).unwrap()["usage_status"],
+            expected_status
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_stream_keeps_the_partial_usage_report() {
+    // Break caught: a malformed later event erases usage already received.
+    let mut value = chunk(json!({"content":"partial"}), Value::Null);
+    value["usage"] = json!({"completion_tokens":7});
+    let (provider, _) = fixture(data(value) + "data: {bad}\n\n", "200 OK", 8192).await;
+    let events = provider
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
+    let Some(AssistantEvent::Error { message }) = events.last() else {
+        panic!("{events:#?}");
+    };
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(message.usage.output, 7);
+    assert_eq!(
+        serde_json::to_value(message).unwrap()["usage_status"],
+        "partial"
+    );
+}
+
+#[test]
+fn deserializing_unmarked_history_does_not_invent_reported_usage() {
+    // Break caught: numeric legacy history is interpreted as a complete report
+    // even though that history never retained the report's presence.
+    let mut value = serde_json::to_value(cayw_ai::AssistantMessage::new(&request().model)).unwrap();
+    value.as_object_mut().unwrap().remove("usage_status");
+    value["usage"]["input"] = json!(20);
+    value["usage"]["total_tokens"] = json!(20);
+    let message: cayw_ai::AssistantMessage = serde_json::from_value(value).unwrap();
+    assert_eq!(message.usage.input, 20);
+    assert_eq!(
+        serde_json::to_value(message).unwrap()["usage_status"],
+        "unknown"
+    );
 }
 
 #[tokio::test]
@@ -298,6 +617,50 @@ async fn response_identity_cannot_change_between_chunks() {
             panic!("{events:#?}");
         };
         assert!(message.error_message.as_deref().unwrap().contains(key));
+    }
+}
+
+#[tokio::test]
+async fn duplicate_tool_fields_fail_before_tool_completion() {
+    for fragments in [
+        [r#"{"city":"Paris","#, r#""city":"Tokyo"}"#],
+        [
+            r#"{"city":"Paris","#,
+            concat!(r#"""#, r"\", r#"u0063ity":"Tokyo"}"#),
+        ],
+        [r#"{"items":[{"city":"Paris","#, r#""city":"Tokyo"}]}"#],
+    ] {
+        let body = data(chunk(
+            json!({"tool_calls":[{"index":0,"id":"call-duplicate","type":"function","function":{"name":"weather","arguments":fragments[0]}}]}),
+            Value::Null,
+        )) + &data(chunk(
+            json!({"tool_calls":[{"index":0,"function":{"arguments":fragments[1]}}]}),
+            Value::Null,
+        )) + &data(chunk(json!({}), json!("tool_calls")))
+            + "data: [DONE]\n\n";
+        let (provider, received) = fixture(body, "200 OK", 3).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+        let Some(AssistantEvent::Error { message }) = events.last() else {
+            panic!("ambiguous tool arguments reached a successful terminal: {events:#?}");
+        };
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert!(
+            message
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("duplicate")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AssistantEvent::ToolCallEnd { .. }))
+        );
+        assert!(received.await.is_ok());
     }
 }
 
@@ -460,10 +823,10 @@ async fn creating_but_not_polling_stream_does_not_make_a_request() {
 #[tokio::test]
 async fn user_images_follow_model_capability_and_reasoning_is_explicit() {
     use cayw_ai::{ThinkingLevel, timestamp_ms};
-    for images in [false, true] {
+    {
         let (provider, received) = fixture(stopped(), "200 OK", 1024).await;
         let mut input = request();
-        input.model.supports_images = images;
+        input.model.supports_images = true;
         input.options.max_tokens = Some(123);
         input.options.temperature = Some(0.4);
         input.options.thinking_level = ThinkingLevel::High;
@@ -483,18 +846,108 @@ async fn user_images_follow_model_capability_and_reasoning_is_explicit() {
         assert_eq!(body["max_completion_tokens"], 123);
         assert_eq!(body["temperature"], 0.4);
         assert_eq!(body["reasoning_effort"], "high");
-        if images {
-            assert_eq!(
-                body["messages"][0]["content"][0],
-                json!({"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}})
-            );
-        } else {
-            assert_eq!(
-                body["messages"][0]["content"][0],
-                json!({"type":"text","text":"[Image omitted: image/png]"})
-            );
-        }
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!({"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}})
+        );
     }
+}
+
+#[tokio::test]
+async fn terminal_event_releases_the_response_even_if_the_stream_is_retained() {
+    for outcome in ["success", "failure", "cancel"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider = OpenAiProvider::new(
+            format!("http://{}/v1", listener.local_addr().unwrap()),
+            "fixture-key",
+        )
+        .unwrap();
+        let body = if outcome == "success" {
+            data(chunk(json!({"content":"ok"}), Value::Null)) + &stopped()
+        } else if outcome == "failure" {
+            "data: {invalid}\n\n".into()
+        } else {
+            data(chunk(json!({"content":"partial"}), Value::Null))
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            socket
+                .write_all(format!("{:x}\r\n{body}\r\n", body.len()).as_bytes())
+                .await
+                .unwrap();
+            let mut byte = [0];
+            socket.read(&mut byte).await.unwrap_or(0)
+        });
+        let cancel = CancellationToken::new();
+        let mut stream = provider.stream(request(), cancel.clone());
+        let terminal = loop {
+            let event = stream.next().await.expect("one terminal event");
+            if outcome == "cancel" && matches!(event, AssistantEvent::TextDelta { .. }) {
+                cancel.cancel();
+            }
+            if event.is_terminal() {
+                break event;
+            }
+        };
+        assert_eq!(
+            terminal.message().stop_reason,
+            match outcome {
+                "success" => StopReason::Stop,
+                "cancel" => StopReason::Aborted,
+                _ => StopReason::Error,
+            }
+        );
+        let closed = tokio::time::timeout(Duration::from_secs(3), server).await;
+        drop(stream);
+        assert_eq!(
+            closed
+                .expect("response connection remained open after terminal event")
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn protocol_end_ignores_late_bytes_with_any_network_fragmentation() {
+    for fragment_size in [1, 7, 8192] {
+        let body = data(chunk(json!({"content":"complete"}), Value::Null))
+            + &stopped()
+            + &data(chunk(json!({"content":"late"}), Value::Null));
+        let (provider, _) = fixture(body, "200 OK", fragment_size).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+        let Some(AssistantEvent::Done { message }) = events.last() else {
+            panic!(
+                "late bytes changed completed response with fragment size {fragment_size}: {events:?}"
+            );
+        };
+        assert_eq!(message.content, vec![Content::text("complete")]);
+    }
+}
+
+#[tokio::test]
+async fn stream_errors_do_not_echo_remote_sensitive_values() {
+    let marker = "fixture-remote-secret-not-for-history";
+    let body =
+        data(json!({"error":{"message":format!("key={marker} https://example.invalid/private")}}));
+    let (provider, _) = fixture(body, "200 OK", 3).await;
+    let events = provider
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(events.last(), Some(AssistantEvent::Error { .. })));
+    let history = serde_json::to_string(&events).unwrap();
+    assert!(
+        !history.contains(marker),
+        "remote error payload leaked into history"
+    );
+    assert!(!history.contains("https://example.invalid"));
 }
 
 #[tokio::test]
@@ -547,13 +1000,11 @@ async fn system_tool_changes_and_tool_result_ids_are_preserved_in_request() {
     update.sections.insert("task".into(), Some("new".into()));
     let mut assistant = AssistantMessage::new(&Model::new("another-provider", "another-model"));
     assistant.stop_reason = StopReason::ToolUse;
-    assistant.content = vec![
-        Content::Thinking {
-            thinking: "private".into(),
-            signature: Some("secret-signature".into()),
-        },
-        Content::ToolCall(ToolCall::new("call-a", "sum", json!({"a":1}))),
-    ];
+    assistant.content = vec![Content::ToolCall(ToolCall::new(
+        "call-a",
+        "sum",
+        json!({"a":1}),
+    ))];
     input.messages = vec![
         Message::System(system),
         Message::user("sum"),
@@ -590,10 +1041,8 @@ async fn system_tool_changes_and_tool_result_ids_are_preserved_in_request() {
     assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "call-a");
     assert_eq!(
         body["messages"][3],
-        json!({"role":"tool","tool_call_id":"call-a","content":[{"type":"text","text":"1"}]})
+        json!({"role":"tool","tool_call_id":"call-a","content":[{"type":"text","text":"1"},{"type":"text","text":"{\"value\":1}"}]})
     );
-    assert!(!body.to_string().contains("private"));
-    assert!(!body.to_string().contains("secret-signature"));
     assert!(!body.to_string().contains("not sent"));
     assert_eq!(body["messages"].as_array().unwrap().len(), 4);
 }

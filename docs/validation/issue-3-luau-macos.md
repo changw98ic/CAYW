@@ -2,7 +2,7 @@
 
 本项选择 Luau 作为本机 CodeMode 的脚本运行方式。有限脚本通过公开的 `cayw_codemode::CodeMode` 调用受控 Rust Host，权限决定、调用开始和结算沿用 Host 的实际路径。选择依据是这条路径能够运行真实的计算和文件组合，并对错误、预算、取消与到期保留可复核结果；不以语言微基准证明整个 Agent 更快。
 
-本文说明技术选择和复跑方法，不代替某次运行的接受决定。范围只包括实际执行记录所列的 macOS 主机、架构、源码和程序。全部十一项主线的最终同源码真实 Provider 验收另行执行。
+本文说明技术选择和复跑方法。范围只包括每份实际执行记录所列的 macOS 主机、架构、源码和程序。不同记录分别绑定自己的源码与构建，不要求全部主线任务使用同一份源码。
 
 ## 固定清单与实际结果
 
@@ -64,7 +64,7 @@ cargo +1.95.0 build -p cayw-verify-tool --locked --offline --message-format=json
 cargo +1.95.0 test -p cayw-verify-tool --locked --offline -- --test-threads=1
 ```
 
-源码清单格式和构建 receipt 的检查边界见 [VerifyTool 说明](../../crates/cayw-verify-tool/README.md)。保存实际 Cargo 参数、退出码、完整双流、锁文件、feature、编译器、macOS 版本、架构和二进制摘要。具名源码及公开 Cargo/`.d` 观察能够核对已列输入，但不追踪每个编译器、宏、原生工具或链接器的全部输入；完整构建输入仍标 pending。不能因此发布完整来源或性能优势结论。
+源码清单格式和构建记录的检查边界见 [VerifyTool 说明](../../crates/cayw-verify-tool/README.md)。保存实际 Cargo 参数、退出码、完整双流、锁文件、feature、编译器、macOS 版本、架构和二进制摘要。VerifyTool 的具名源码及公开 Cargo/`.d` 观察能够核对已列输入，但不追踪每个编译器、宏、原生工具或链接器的全部输入；该验证工具的完整构建输入仍标 pending。这个标记不描述其他独立构建，也不阻塞本项已经声明的运行与测量交付；不能据此发布完整来源或性能优势结论。
 
 2026-10-20 续接作业的原始材料位于本机独立目录 `/Volumes/ORICO/cayw-issue3-continuation-20261020-a/`，与 #2 v11 的固定程序和证据分开。读取这些记录时先核对其实际存在、摘要和命令终态，不将本文当作运行已经完成的声明：
 
@@ -77,10 +77,14 @@ cargo +1.95.0 test -p cayw-verify-tool --locked --offline -- --test-threads=1
 - `independent/`：另一执行者使用同一固定程序保留的命令、双流和内容反例，完成情况以其索引为准。
 - `issue3-offline-accepted-v1.json`：逐条条件的最终本地决定；不存在时不能声称本项已接受。
 
+2026-10-20 集成验收记录为 `/Volumes/ORICO/cayw-issue3-integration-evidence-20261020-a/issue3-final-offline-accepted-v1.json`。九项条件全部通过；十八个正式场景各运行三次。独立执行者另行核对 54 个正样本和 19 条反例命令。集成前后的八个交付文件已逐项核对摘要。
+
+2026-10-21 的真实模型记录另存于 `/Volumes/ORICO/cayw-live-234-20261021-a/final-real-model-report-v1.json`，包含公开 Agent、CodeModeTool 与 Host 的 Luau 计算和真实错误后修复。完整 Runtime 的数字参数修复与后续真实调用另见同目录 `fixes-20261021/numeric-repair-final-v1.json`。两项 Runtime 场景通过，实际使用 Magpie 的 DeepSeek V4.1 Flash，六次原始数字字符串调用进入实际执行；原参数仍保留在历史中。这些有限样本不用于推算模型总体成功率。
+
 这些绝对路径是开发机的证据位置，不是其他机器的可用入口。迁移证据时保留相对目录、原 bytes/hash 和固定程序，重新执行仍需使用新的目录。
 
 ## 取舍和未验证范围
 
 Luau 沿用现有 Rust/Host 路径，能够表达分支、循环和多调用组合，并在一份报告中保留限额和副作用结果。每次新 VM 提供隔离，也带来每次初始化与编译成本；不能把进程已经暖启动解释成没有这些成本。
 
-Monty 没有本次同机对照数据。真实模型生成脚本的成功率、自动修复成本、完整 Agent 延迟、真实 Provider 使用量、其他 macOS 架构和全部崩溃窗口都未由这些离线场景证明。未测 token 和费用保持 null，不写零费用。fixture 的默认拒绝与精确授权配置不等于产品用户审批。
+Monty 是可选对照，没有本次同机数据，不阻塞 #3 关闭。真实模型生成脚本的总体成功率、自动修复成本、完整 Agent 延迟、其他 macOS 架构和全部崩溃窗口都未由这些离线场景证明。上节的真实模型记录另有实际调用和用量；离线样本未测的 token 和费用仍保持 null，不写零费用。测试夹具的默认拒绝与精确授权配置不等于产品用户审批。

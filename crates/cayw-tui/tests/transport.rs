@@ -96,9 +96,21 @@ impl RpcHandler for Fixture {
         cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
         match method {
-            "session.prompt" => {
+            "task.enqueue" => {
                 assert_eq!(params["session_id"], "s1");
                 assert_eq!(params["text"], "fixture prompt");
+                Ok(
+                    json!({"id":"original-task","session_id":"s1","state":"queued","worker_id":null,"attempt_id":null,"fence":0}),
+                )
+            }
+            "task.get" => {
+                assert_eq!(params["task_id"], "original-task");
+                Ok(
+                    json!({"id":"original-task","session_id":"s1","state":"running","worker_id":"worker-1","attempt_id":"attempt-1","fence":7}),
+                )
+            }
+            "task.resume" => {
+                assert_eq!(params["task_id"], "original-task");
                 self.prompts.fetch_add(1, Ordering::SeqCst);
                 self.changed.notify_one();
                 if self.drop_after_admission {
@@ -124,6 +136,10 @@ impl RpcHandler for Fixture {
                 }
             }
             "session.cancel" => {
+                assert_eq!(
+                    params,
+                    json!({"session_id":"s1","task_id":"original-task","worker_id":"worker-1","attempt_id":"attempt-1","fence":7})
+                );
                 self.released.cancel();
                 Ok(json!({"cancelled":true}))
             }
@@ -248,7 +264,7 @@ async fn real_ipc_prompt_events_approval_and_cancel_run_concurrently_with_consum
         .call(Request {
             tag: 3,
             method: "session.cancel",
-            params: json!({"session_id":"s1"}),
+            params: json!({"session_id":"s1","task_id":"original-task"}),
         })
         .unwrap();
     let mut prompt_done = false;

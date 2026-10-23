@@ -1,6 +1,6 @@
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
-    ModelRequest, Provider, StopReason, ToolCall,
+    ModelRequest, Provider, StopReason, ToolCall, UsageStatus,
 };
 use cayw_cells::{CellPage, CellStatus};
 use cayw_core::{
@@ -43,8 +43,17 @@ async fn next_round(receiver: &mut mpsc::UnboundedReceiver<ModelRound>) -> Model
         .unwrap()
         .unwrap()
 }
+fn reported_reply(model: &Model) -> AssistantMessage {
+    let mut reply = AssistantMessage::new(model);
+    // Fixed synthetic counters exercise accounting, not tokenization or billing.
+    reply.usage.input = 4;
+    reply.usage.output = 4;
+    reply.usage.update_total();
+    reply.usage_status = UsageStatus::Reported;
+    reply
+}
 fn tool(round: ModelRound, id: &str, arguments: Value) {
-    let mut reply = AssistantMessage::new(&round.request.model);
+    let mut reply = reported_reply(&round.request.model);
     reply.content.push(Content::ToolCall(ToolCall::new(
         id,
         "execute_code",
@@ -179,7 +188,7 @@ async fn live_task_ownership_prevents_peer_recovery_and_slot_release() {
     tool(round, "live-lock-wait", wait(&yielded, 30_000));
     let round = next_round(&mut receiver).await;
     assert_eq!(page(&round, "live-lock-wait").status, CellStatus::Completed);
-    let mut reply = AssistantMessage::new(&round.request.model);
+    let mut reply = reported_reply(&round.request.model);
     reply
         .content
         .push(Content::text("finished with the original owner"));
@@ -331,7 +340,7 @@ async fn interleaved_cells_keep_original_parents_and_exact_approval_sequences() 
     assert_eq!(terminal_b.cell_id, b.cell_id);
     assert_eq!(terminal_b.status, CellStatus::Completed);
     assert!(!terminal_b.vm_alive && !terminal_b.has_more);
-    let mut reply = AssistantMessage::new(&round.request.model);
+    let mut reply = reported_reply(&round.request.model);
     reply.content.push(Content::text("both cells completed"));
     reply.stop_reason = StopReason::Stop;
     round.reply.send(reply).unwrap();

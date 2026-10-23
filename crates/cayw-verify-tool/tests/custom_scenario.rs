@@ -112,16 +112,19 @@ impl Scenario for Custom {
     }
 }
 fn temp() -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "cayw-custom-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir(&path).unwrap();
-    path
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    loop {
+        let path = std::env::temp_dir().join(format!(
+            "cayw-custom-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create custom scenario directory: {error}"),
+        }
+    }
 }
 #[tokio::test]
 async fn external_scenario_uses_the_same_report_and_cannot_be_vacuously_passed() {

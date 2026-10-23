@@ -41,6 +41,7 @@ async fn injected_profiles_and_git_execute_from_luau_with_exact_host_grants() {
                 timeout: Duration::from_secs(5),
                 max_output_bytes: 4096,
                 allow_filter: false,
+                io: cayw_host::ProcessIo::Pipes,
             },
         ),
         (
@@ -53,6 +54,7 @@ async fn injected_profiles_and_git_execute_from_luau_with_exact_host_grants() {
                 timeout: Duration::from_secs(5),
                 max_output_bytes: 4096,
                 allow_filter: false,
+                io: cayw_host::ProcessIo::Pipes,
             },
         ),
     ]);
