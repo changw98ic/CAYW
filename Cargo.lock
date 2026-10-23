@@ -538,6 +538,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-fusion-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cayw-ai",
+ "cayw-core",
+ "cayw-plugins",
+ "cayw-runtime",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "cayw-host"
 version = "0.1.0"
 dependencies = [

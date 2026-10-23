@@ -50,6 +50,7 @@ plugin 工具仅暴露 `strongflow.describe` 与 `strongflow.ready`。`WorkflowS
 - `FusionCandidateSource` 接收相同 `FusionInput`，包含 question、canonical context、constraints、answer schema。`collect_fusion` 要求 3–16 个不同 provider ID，并发收集盲答；不会把其他回答传给候选源。宿主负责 provider 身份和独立性。
 - 输入按递归排序 JSON object key 的确定性编码计算 SHA-256。它是本库定义的摘要格式，不宣称实现 RFC 8785 的所有数值规范。每条候选保留相同摘要、原回答或失败、可用的 usage，以及严格 schema 验证失败、取消或超时。无法获得的用量记为未知。
 - `FusionReport.disagreements` 只列出不同的有效答案供后续调查，不投票认定事实。冲突调查、真实模型服务、成本预算和高层产品接入未包含在本库。
+- 可选的 External 形态见 [`cayw-fusion-plugin`](../cayw-fusion-plugin/README.md)：独立进程按协议 v1 提供 `fusion.collect`，内部直接调用 `collect_fusion`，语义不变。它不是本库或 Runtime 默认构建的一部分。
 
 ## 可复跑验证
 

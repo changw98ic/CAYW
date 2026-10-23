@@ -1,0 +1,28 @@
+[package]
+name = "cayw-fusion-plugin"
+description = "Optional External-process Fusion plugin speaking CAYW plugin protocol v1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+cayw-ai.workspace = true
+cayw-plugins = { path = "../cayw-plugins", version = "0.1.0", default-features = false, features = ["fusion"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util", "time", "sync"] }
+
+[dev-dependencies]
+cayw-core = { path = "../cayw-core" }
+cayw-runtime = { path = "../cayw-runtime", features = ["plugins"] }
+futures.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "fs"] }
+
+[[bin]]
+name = "cayw-fusion-plugin"
+path = "src/main.rs"

@@ -260,7 +260,7 @@ plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡�
 
 恢复 plugin 须核对原绑定、版本、实例/代际及兼容条件；重新加载同版本并不当然解冻。原 Session 恢复后仍按原流程继续，不能因 Fork 或 plugin 重载跳过验收。此处规定架构约束，不把现有 plugin 库、Runtime 接线和所有卸载/清理场景统称为已验收。
 
-Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。它可以缺失，不能拦住已授权任务。执行授权、持久化和必要审计是主链事实，不能为了“诊断不阻塞”而跳过。JEv/Fusion 已有局部离线适配，结果/分歧不自动成为事实、审批或 StrongFlow 交付证据；真实服务、成本和产品集成按 [#17](https://github.com/changw98ic/CAYW/issues/17) 继续核验。
+Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。它可以缺失，不能拦住已授权任务。执行授权、持久化和必要审计是主链事实，不能为了“诊断不阻塞”而跳过。JEv/Fusion 已有局部离线适配，结果/分歧不自动成为事实、审批或 StrongFlow 交付证据；真实服务、成本和产品集成按 [#17](https://github.com/changw98ic/CAYW/issues/17) 继续核验。Fusion 另有可选的 External 形态 [`cayw-fusion-plugin`](../crates/cayw-fusion-plugin/README.md)：独立进程经协议 v1 提供 `fusion.collect`，直接复用 `collect_fusion`，provider 失败或超时只记入候选；目前只带离线 provider，真实模型 provider 仅留扩展点。它不是主链必需组件，默认构建与普通 Chat 不依赖它；宿主取消或进程崩溃按 External 协议终止进程并记为未知结果。
 
 参见[plugin 边界](../crates/cayw-plugins/README.md)、[#12](https://github.com/changw98ic/CAYW/issues/12)与[#16](https://github.com/changw98ic/CAYW/issues/16)。
 
