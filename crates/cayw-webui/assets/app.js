@@ -23936,7 +23936,8 @@ var RpcError = class extends Error {
 };
 function beginWrite(view, key, method, params = {}) {
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
-  const lease = method === "session.prompt" ? null : view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const observedLease = view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const lease = method === "session.prompt" ? null : method === "session.cancel" ? observedLease?.worker_id === params.worker_id && observedLease?.attempt_id === params.attempt_id ? observedLease : null : observedLease;
   const target = method === "session.cancel" && sameLease(lease, view.activeAttempt?.lease) ? view.activeAttempt : null;
   const prompts = method === "session.cancel" && !lease ? view.writes.filter((write2) => write2.method === "session.prompt" && write2.phase === "pending") : [];
   const promptKey = prompts.length === 1 ? prompts[0].key : null;
@@ -24874,9 +24875,9 @@ function CAYWApp({ env } = {}) {
       selected: null,
       sessions: [],
       views: /* @__PURE__ */ new Map(),
-      taskAdmissions: /* @__PURE__ */ new Map(),
       promptPending: /* @__PURE__ */ new Set(),
       approvalPending: /* @__PURE__ */ new Set(),
+      taskAdmissions: /* @__PURE__ */ new Map(),
       cancelPending: false,
       createBusy: false,
       reconnectBusy: false,
@@ -25210,6 +25211,7 @@ function CAYWApp({ env } = {}) {
       views: s.views,
       promptPending: s.promptPending,
       approvalPending: s.approvalPending,
+      taskAdmissions: s.taskAdmissions,
       cachedCapabilities: s.cachedCapabilities
     });
   };
@@ -25220,6 +25222,7 @@ function CAYWApp({ env } = {}) {
     s.views = ps2?.views ?? /* @__PURE__ */ new Map();
     s.promptPending = ps2?.promptPending ?? /* @__PURE__ */ new Set();
     s.approvalPending = ps2?.approvalPending ?? /* @__PURE__ */ new Set();
+    s.taskAdmissions = ps2?.taskAdmissions ?? /* @__PURE__ */ new Map();
     s.cachedCapabilities = ps2?.cachedCapabilities ?? [];
   };
   const rememberView = (view2) => {
@@ -25246,7 +25249,7 @@ function CAYWApp({ env } = {}) {
     s.controllers.add(controller);
     const requestBody = s.activeProject ? { method, params, project: s.activeProject } : { method, params };
     let timeout;
-    if (method !== "session.prompt") {
+    if (!["session.prompt", "task.resume"].includes(method)) {
       timeout = setTimer(() => controller.abort(), 15e3);
     }
     try {
@@ -25567,13 +25570,14 @@ function CAYWApp({ env } = {}) {
         views: retained,
         promptPending: /* @__PURE__ */ new Set(),
         approvalPending: /* @__PURE__ */ new Set(),
+        taskAdmissions: /* @__PURE__ */ new Map(),
         cachedCapabilities: []
       });
     }
     s.views = s.projectStates.get(currentProjectId())?.views ?? /* @__PURE__ */ new Map();
-    s.taskAdmissions = /* @__PURE__ */ new Map();
     s.promptPending = /* @__PURE__ */ new Set();
     s.approvalPending = /* @__PURE__ */ new Set();
+    s.taskAdmissions = s.projectStates.get(currentProjectId())?.taskAdmissions ?? /* @__PURE__ */ new Map();
     s.forkOpen = false;
     if (forkDialogRef.current?.close) forkDialogRef.current.close();
     s.reconnectBusy = true;

@@ -467,9 +467,9 @@ export function CAYWApp({ env } = {}) {
       selected: null,
       sessions: [],
       views: new Map(),
-      taskAdmissions: new Map(),
       promptPending: new Set(),
       approvalPending: new Set(),
+      taskAdmissions: new Map(),
       cancelPending: false,
       createBusy: false,
       reconnectBusy: false,
@@ -817,6 +817,7 @@ export function CAYWApp({ env } = {}) {
       views: s.views,
       promptPending: s.promptPending,
       approvalPending: s.approvalPending,
+      taskAdmissions: s.taskAdmissions,
       cachedCapabilities: s.cachedCapabilities,
     });
   };
@@ -828,6 +829,7 @@ export function CAYWApp({ env } = {}) {
     s.views = ps?.views ?? new Map();
     s.promptPending = ps?.promptPending ?? new Set();
     s.approvalPending = ps?.approvalPending ?? new Set();
+    s.taskAdmissions = ps?.taskAdmissions ?? new Map();
     s.cachedCapabilities = ps?.cachedCapabilities ?? [];
   };
 
@@ -867,7 +869,7 @@ export function CAYWApp({ env } = {}) {
       ? { method, params, project: s.activeProject }
       : { method, params };
     let timeout;
-    if (method !== 'session.prompt') {
+    if (!['session.prompt', 'task.resume'].includes(method)) {
       timeout = setTimer(() => controller.abort(), 15000);
     }
     try {
@@ -1221,13 +1223,15 @@ export function CAYWApp({ env } = {}) {
         views: retained,
         promptPending: new Set(),
         approvalPending: new Set(),
+        taskAdmissions: new Map(),
         cachedCapabilities: [],
       });
     }
     s.views = s.projectStates.get(currentProjectId())?.views ?? new Map();
-    s.taskAdmissions = new Map();
     s.promptPending = new Set();
     s.approvalPending = new Set();
+    s.taskAdmissions =
+      s.projectStates.get(currentProjectId())?.taskAdmissions ?? new Map();
     s.forkOpen = false;
     if (forkDialogRef.current?.close) forkDialogRef.current.close();
     s.reconnectBusy = true;
@@ -1277,6 +1281,8 @@ export function CAYWApp({ env } = {}) {
     try {
       let result;
       if (method === 'session.prompt') {
+        // Admission returns our Task ID before execution starts. Never select a
+        // Session's current task when a delayed stop action eventually runs.
         const admission = rpc('task.enqueue', params).then(task => {
           if (
             task?.session_id !== id ||
@@ -2043,6 +2049,8 @@ export function CAYWApp({ env } = {}) {
     report(null);
     forceRender();
     try {
+      // Capture the original admission before any await. A replacement prompt
+      // in the same Session must never become this stop action's target.
       const admission = s.taskAdmissions.get(id);
       const taskId = admission
         ? await admission
