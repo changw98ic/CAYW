@@ -613,12 +613,14 @@ export function CAYWApp({ env } = {}) {
       ],
       addDeviceModalOpen: false,
       newDeviceLabel: '',
+      newDeviceAddress: '',
       newDeviceId: '',
-      newDeviceServerUrl: 'wss://127.0.0.1:8787',
+      newDeviceServerUrl: 'ws://127.0.0.1:8787',
       newDeviceMode: 'auto',
       newDevicePem: '',
       addDeviceBusy: false,
       addDeviceError: '',
+      copiedServerCmd: false,
       lastCreatedDevice: null,
       expandedDevicePemIds: {},
       heroDeviceMenuOpen: false,
@@ -1539,11 +1541,13 @@ export function CAYWApp({ env } = {}) {
   const openAddDeviceModal = () => {
     s.addDeviceModalOpen = true;
     s.newDeviceLabel = '';
+    s.newDeviceAddress = '';
     s.newDeviceId = '';
-    s.newDeviceServerUrl = '';
+    s.newDeviceServerUrl = s.deviceServerUrlDraft || 'ws://127.0.0.1:8787';
     s.newDeviceMode = 'auto';
     s.newDevicePem = '';
     s.addDeviceError = '';
+    s.copiedServerCmd = false;
     s.lastCreatedDevice = null;
     forceRender();
     void refreshServerAuthAndBinding();
@@ -1552,24 +1556,22 @@ export function CAYWApp({ env } = {}) {
   const handleAddDeviceSubmit = async e => {
     e?.preventDefault?.();
     if (s.addDeviceBusy) return;
-    const rawServer = s.newDeviceServerUrl.trim();
-    if (!rawServer) {
-      s.addDeviceError = '请输入 Server 地址（如 wss://127.0.0.1:8787）。';
+    const label = s.newDeviceLabel.trim();
+    const devAddr = s.newDeviceAddress.trim();
+    if (!label && !devAddr) {
+      s.addDeviceError = '请输入要绑定的设备名称（如 Mac Studio 开发机）或设备地址。';
       forceRender();
       return;
     }
-    const normalizedServer =
-      rawServer.startsWith('ws://') || rawServer.startsWith('wss://')
-        ? rawServer
-        : `wss://${rawServer}`;
-    const label = s.newDeviceLabel.trim();
+    const resolvedLabel = label || `设备 (${devAddr})`;
     s.addDeviceBusy = true;
     s.addDeviceError = '';
     forceRender();
     try {
       const res = await rpc('devices.add', {
-        ...(label ? { label } : {}),
-        server_url: normalizedServer,
+        label: resolvedLabel,
+        ...(devAddr ? { device_address: devAddr } : {}),
+        server_url: s.newDeviceServerUrl.trim() || 'ws://127.0.0.1:8787',
       });
       if (object(res)) {
         if (Array.isArray(res.devices) && res.devices.length) {
@@ -1582,18 +1584,15 @@ export function CAYWApp({ env } = {}) {
           s.deviceBinding = res.created;
         }
       } else {
-        const hostPart = normalizedServer
-          .replace(/^wss?:\/\//, '')
-          .replace(/\/$/, '');
-        const autoLabel = label || `远程设备 (${hostPart})`;
         const fallbackDev = {
           device_id: `device-rsa-0${s.boundDevices.length + 1}`,
-          label: autoLabel,
+          label: resolvedLabel,
+          device_address: devAddr || '自动出站接入',
           kind: 'rsa_bound',
           builtin: false,
           active: true,
           bound: true,
-          server_url: normalizedServer,
+          server_url: s.newDeviceServerUrl.trim() || 'ws://127.0.0.1:8787',
           algorithm: 'RSA-OAEP-SHA256 + RSA-SHA256',
           encrypted_channel_verified: true,
           auto_reconnect: true,
@@ -1608,7 +1607,7 @@ export function CAYWApp({ env } = {}) {
         s.deviceBinding = fallbackDev;
       }
       s.addDeviceModalOpen = false;
-      s.deviceBindingNotice = `已连接 ${normalizedServer} 并自动完成 RSA 密钥绑定，后续自动加密连接。`;
+      s.deviceBindingNotice = `设备“${resolvedLabel}”已自动完成一次性 RSA 密钥绑定并接入当前 Server，后续无需再次处理。`;
       forceRender();
     } catch (error) {
       s.addDeviceError = errorText(error);
@@ -5227,7 +5226,7 @@ export function CAYWApp({ env } = {}) {
                         <div className="zGbnIq_rowIdentity">
                           <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
                           <span className="zGbnIq_rowName">
-                            {`Server ↔ Device 自动绑定（已绑定 ${s.boundDevices.length} 台设备）`}
+                            {`已绑定设备（Device）管理（共 ${s.boundDevices.length} 台设备）`}
                           </span>
                           <span className="zGbnIq_rowTag">
                             {s.deviceBinding.bound
@@ -5242,12 +5241,12 @@ export function CAYWApp({ env } = {}) {
                             className="zGbnIq_primaryButton"
                             onClick={() => openAddDeviceModal()}
                           >
-                            + 添加设备
+                            + 绑定新设备 (Device)
                           </button>
                         </div>
                       </div>
                       <p className="At1oFq_hint" style={{ margin: '6px 0 10px' }}>
-                        2. 填写 Server 地址后即自动完成一次性 RSA 密钥绑定并持久化保存，后续连接全程自动通过 RSA 加密通信，无需再次处理。
+                        2. 在新设备（Device）启动时提供当前 Server 地址，或在下方直接接入设备，Device 与 Server 即自动在后台完成一次性 RSA 密钥交换与永久绑定，后续全程 RSA 加密直连，无需再次处理。
                       </p>
                       {s.deviceBindingNotice ? (
                         <p className="zGbnIq_savedNotice" role="status">
@@ -5288,7 +5287,7 @@ export function CAYWApp({ env } = {}) {
                                       void handleSelectDevice(dev.device_id)
                                     }
                                   >
-                                    {isCurrent ? '当前使用中' : '切换'}
+                                    {isCurrent ? '当前使用中' : '切换到此设备'}
                                   </button>
                                   {!dev.builtin ? (
                                     <button
@@ -5298,7 +5297,7 @@ export function CAYWApp({ env } = {}) {
                                         void handleRemoveDevice(dev.device_id)
                                       }
                                     >
-                                      移除
+                                      解绑设备
                                     </button>
                                   ) : null}
                                 </div>
@@ -5310,7 +5309,7 @@ export function CAYWApp({ env } = {}) {
                                   marginTop: 4,
                                 }}
                               >
-                                {`Server 地址：${dev.server_url} · 已自动完成 RSA 密钥绑定`}
+                                {`设备 ID：${dev.device_id} · 接入方式：${dev.device_address || '自动出站连接'} · 已与当前 Server 完成 RSA 自动绑定`}
                               </div>
                             </div>
                           );
@@ -7254,30 +7253,77 @@ export function CAYWApp({ env } = {}) {
         </form>
       </Modal>
 
-      {/* Add Device Modal (Provide Server Address -> Automatic RSA Binding) */}
+      {/* Add Device Modal (Bind a new Device to current Server via automatic RSA) */}
       <Modal
         open={s.addDeviceModalOpen}
         onClose={() => {
           s.addDeviceModalOpen = false;
           forceRender();
         }}
-        title="添加设备"
+        title="添加并绑定设备 (Device)"
         size="md"
       >
         <form
           style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
           onSubmit={e => void handleAddDeviceSubmit(e)}
         >
-          <p
+          <div
+            className="zGbnIq_rowCard"
             style={{
-              margin: 0,
-              fontSize: 13,
-              color: 'var(--dsw-alias-label-secondary)',
-              lineHeight: 1.5,
+              padding: '10px 12px',
+              background:
+                'var(--dsw-alias-bg-layer-2, rgba(255,255,255,0.03))',
             }}
           >
-            填写 Server 地址后，系统将在后台自动生成并交换 RSA 密钥完成一次性永久绑定，后续均自动使用 RSA 加密连接。
-          </p>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 4,
+              }}
+            >
+              <strong style={{ fontSize: 13 }}>
+                方式一：在目标 Device 上提供当前 Server 地址自动连入绑定
+              </strong>
+              <button
+                type="button"
+                className="zGbnIq_secondaryButton"
+                style={{ height: 26, fontSize: 12 }}
+                onClick={() => {
+                  const cmd = `cayw device --server ${s.newDeviceServerUrl || 'ws://127.0.0.1:8787'}`;
+                  if (navigator.clipboard?.writeText) {
+                    navigator.clipboard.writeText(cmd).catch(() => {});
+                  }
+                  s.copiedServerCmd = true;
+                  forceRender();
+                }}
+              >
+                {s.copiedServerCmd ? '已复制命令' : '复制启动命令'}
+              </button>
+            </div>
+            <div
+              style={{
+                fontSize: 12,
+                color: 'var(--dsw-alias-label-secondary)',
+                marginBottom: 6,
+              }}
+            >
+              在待接入的设备（Device）上指定下方当前 Server 地址启动，Device 主动连上 Server 时会自动生成并交换 RSA 密钥完成永久绑定：
+            </div>
+            <code
+              style={{
+                display: 'block',
+                padding: '6px 10px',
+                borderRadius: 6,
+                background: 'rgba(0,0,0,0.25)',
+                fontSize: 12,
+                userSelect: 'all',
+              }}
+            >
+              {`cayw device --server ${s.newDeviceServerUrl || 'ws://127.0.0.1:8787'}`}
+            </code>
+          </div>
 
           {s.addDeviceError ? (
             <p className="_banner_ugy7y_1" role="alert" style={{ margin: 0 }}>
@@ -7286,16 +7332,18 @@ export function CAYWApp({ env } = {}) {
           ) : null}
 
           <div className="zGbnIq_field">
-            <label className="zGbnIq_fieldLabel">Server 地址</label>
+            <label className="zGbnIq_fieldLabel">
+              方式二：直接登记并自动绑定设备（输入设备名称）
+            </label>
             <input
-              id="new-device-server-input"
+              id="new-device-label-input"
               type="text"
               className="zGbnIq_input"
               autoFocus={true}
-              placeholder="如 wss://127.0.0.1:8787 或 192.168.1.100:8787"
-              value={s.newDeviceServerUrl}
+              placeholder="如 Mac Studio 远程开发机 / 办公室 Mac mini"
+              value={s.newDeviceLabel}
               onChange={e => {
-                s.newDeviceServerUrl = e.target.value;
+                s.newDeviceLabel = e.target.value;
                 forceRender();
               }}
             />
@@ -7303,16 +7351,16 @@ export function CAYWApp({ env } = {}) {
 
           <div className="zGbnIq_field">
             <label className="zGbnIq_fieldLabel">
-              备注名称（可选，留空自动按地址生成）
+              设备地址或主机标识（可选）
             </label>
             <input
-              id="new-device-label-input"
+              id="new-device-address-input"
               type="text"
               className="zGbnIq_input"
-              placeholder="如 远程开发机"
-              value={s.newDeviceLabel}
+              placeholder="如 192.168.1.20:52628（留空则为 Device 主动出站连入）"
+              value={s.newDeviceAddress}
               onChange={e => {
-                s.newDeviceLabel = e.target.value;
+                s.newDeviceAddress = e.target.value;
                 forceRender();
               }}
             />
@@ -7342,7 +7390,7 @@ export function CAYWApp({ env } = {}) {
               type="submit"
               disabled={s.addDeviceBusy}
             >
-              {s.addDeviceBusy ? '正在自动绑定…' : '自动绑定并连接'}
+              {s.addDeviceBusy ? '正在自动绑定设备…' : '自动绑定此设备'}
             </Button>
           </div>
         </form>

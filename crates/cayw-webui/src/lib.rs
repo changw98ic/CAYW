@@ -279,6 +279,8 @@ struct Gateway {
 struct BoundDeviceEntry {
     device_id: String,
     label: String,
+    #[serde(default)]
+    device_address: String,
     kind: String,
     builtin: bool,
     binding: PersistentRsaDeviceBinding,
@@ -369,6 +371,7 @@ impl GatewayServerAuth {
         let default_entry = BoundDeviceEntry {
             device_id: device_binding.device_id.clone(),
             label: "本机 macOS 设备".to_owned(),
+            device_address: "127.0.0.1 (本机直连)".to_owned(),
             kind: "local_and_rsa".to_owned(),
             builtin: true,
             binding: device_binding.clone(),
@@ -420,6 +423,7 @@ impl GatewayServerAuth {
         json!({
             "device_id": entry.device_id,
             "label": entry.label,
+            "device_address": if entry.device_address.is_empty() { "自动出站连接".to_owned() } else { entry.device_address.clone() },
             "kind": entry.kind,
             "builtin": entry.builtin,
             "active": entry.device_id == self.active_device_id,
@@ -1515,28 +1519,25 @@ fn handle_device_bind_once(state: &Gateway, params: &Value) -> Response {
 }
 
 fn handle_devices_add(state: &Gateway, params: &Value) -> Response {
+    let device_address = params
+        .get("device_address")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("自动出站接入")
+        .to_owned();
     let server_url = params
         .get("server_url")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("")
+        .unwrap_or("ws://127.0.0.1:8787")
         .to_owned();
-    if server_url.is_empty() || server_url.len() > 256 || server_url.chars().any(char::is_control) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_params",
-            "请输入有效的 Server 地址",
-            false,
-        );
-    }
-    let host_part = server_url
-        .trim_start_matches("wss://")
-        .trim_start_matches("ws://")
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
-    let default_label = format!("远程设备 ({host_part})");
+    let default_label = if device_address != "自动出站接入" {
+        format!("设备 ({device_address})")
+    } else {
+        "新增绑定设备".to_owned()
+    };
     let label = params
         .get("label")
         .and_then(Value::as_str)
@@ -1608,6 +1609,7 @@ fn handle_devices_add(state: &Gateway, params: &Value) -> Response {
     let entry = BoundDeviceEntry {
         device_id: device_id.clone(),
         label: label.to_owned(),
+        device_address,
         kind: "rsa_bound".to_owned(),
         builtin: false,
         binding: binding.clone(),
