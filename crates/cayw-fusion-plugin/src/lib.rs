@@ -112,6 +112,14 @@ pub enum ProviderSpec {
         provider_id: String,
         behavior: OfflineBehavior,
     },
+    /// One OpenAI-compatible chat completion. The host passes the address, key and model
+    /// in this call. The process does not read a credential file or inherit one.
+    OpenaiCompatible {
+        provider_id: String,
+        base_url: String,
+        api_key: String,
+        model: String,
+    },
 }
 
 /// What an offline provider does with the identical input it receives.
@@ -139,7 +147,9 @@ pub enum OfflineBehavior {
 impl ProviderSpec {
     pub fn provider_id(&self) -> &str {
         match self {
-            Self::Offline { provider_id, .. } => provider_id,
+            Self::Offline { provider_id, .. } | Self::OpenaiCompatible { provider_id, .. } => {
+                provider_id
+            }
         }
     }
 
@@ -163,9 +173,149 @@ impl ProviderSpec {
                     behavior,
                 })
             }
+            Self::OpenaiCompatible {
+                provider_id,
+                base_url,
+                api_key,
+                model,
+            } => Arc::new(OpenAiSource::new(provider_id, base_url, api_key, model)?),
         };
         Ok(Arc::new(Isolated(source)))
     }
+}
+
+struct OpenAiSource {
+    provider_id: String,
+    endpoint: reqwest::Url,
+    api_key: String,
+    model: String,
+    client: reqwest::Client,
+}
+
+impl OpenAiSource {
+    fn new(
+        provider_id: String,
+        base_url: String,
+        api_key: String,
+        model: String,
+    ) -> Result<Self, String> {
+        if provider_id.trim().is_empty() || api_key.trim().is_empty() || model.trim().is_empty() {
+            return Err(format!(
+                "provider {provider_id}: address, key and model are required"
+            ));
+        }
+        let mut endpoint = reqwest::Url::parse(&base_url)
+            .map_err(|_| format!("provider {provider_id}: invalid address"))?;
+        if !matches!(endpoint.scheme(), "http" | "https")
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(format!(
+                "provider {provider_id}: address must be HTTP(S), without credentials or query"
+            ));
+        }
+        let path = format!("{}/chat/completions", endpoint.path().trim_end_matches('/'));
+        endpoint.set_path(&path);
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| format!("provider {provider_id}: HTTP client is unavailable"))?;
+        Ok(Self {
+            provider_id,
+            endpoint,
+            api_key,
+            model,
+            client,
+        })
+    }
+}
+
+#[async_trait]
+impl FusionCandidateSource for OpenAiSource {
+    fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    async fn answer(
+        &self,
+        input: Arc<FusionInput>,
+        cancel: CancellationToken,
+    ) -> CandidateResponse {
+        let request = json!({
+            "model": self.model,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": "Answer only with one JSON object that matches the schema. Do not add Markdown."},
+                {"role": "user", "content": format!("{}\n\nContext:\n{}\n\nConstraints:\n{}\n\nSchema:\n{}", input.question, input.canonical_context, input.constraints.join("\n"), input.answer_schema)}
+            ]
+        });
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return CandidateResponse::Failed { message: "cancelled".into(), usage: None },
+            response = self.client.post(self.endpoint.clone()).bearer_auth(&self.api_key).json(&request).send() => response,
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(_) => {
+                return CandidateResponse::Failed {
+                    message: "provider did not answer".into(),
+                    usage: None,
+                };
+            }
+        };
+        if !response.status().is_success() {
+            return CandidateResponse::Failed {
+                message: format!("provider returned HTTP {}", response.status()),
+                usage: None,
+            };
+        }
+        let body: Value = match response.json().await {
+            Ok(body) => body,
+            Err(_) => {
+                return CandidateResponse::Failed {
+                    message: "provider returned invalid JSON".into(),
+                    usage: None,
+                };
+            }
+        };
+        let usage = parse_usage(&body["usage"]);
+        let text = body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim();
+        let text = text
+            .strip_prefix("```json")
+            .unwrap_or(text)
+            .strip_prefix("```")
+            .unwrap_or(text)
+            .trim()
+            .trim_end_matches("```")
+            .trim();
+        match serde_json::from_str::<Value>(text) {
+            Ok(value) => CandidateResponse::Answer { value, usage },
+            Err(_) => CandidateResponse::Failed {
+                message: "provider did not return a JSON object".into(),
+                usage,
+            },
+        }
+    }
+}
+
+fn parse_usage(value: &Value) -> Option<Usage> {
+    let input = value.get("prompt_tokens").and_then(Value::as_u64)?;
+    let output = value.get("completion_tokens").and_then(Value::as_u64)?;
+    Some(Usage {
+        input,
+        output,
+        total_tokens: value
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(input.saturating_add(output)),
+        ..Usage::default()
+    })
 }
 
 struct OfflineSource {

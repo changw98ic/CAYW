@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["strongflow", "observer", "evaluation"]
+default = []
 strongflow = []
 observer = []
 jev = []
@@ -32,6 +32,11 @@ nix = { version = "0.30", default-features = false, features = ["process", "sign
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+
+[[bin]]
+name = "cayw-plugin-fusion"
+path = "src/bin/cayw-plugin-fusion.rs"
+required-features = ["fusion"]
 
 [[bin]]
 name = "cayw-plugin-fixture"

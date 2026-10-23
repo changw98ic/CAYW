@@ -545,6 +545,7 @@ dependencies = [
  "cayw-plugins",
  "cayw-runtime",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
