@@ -2,7 +2,7 @@ use base64::Engine;
 use cayw_ai::{
     ArgumentValidator, AssistantEvent, AssistantMessage, CancellationToken, Content, Message,
     ModelRequest, StopReason, ThinkingLevel, ToolCall, ToolDefinition, ToolResultMessage,
-    current_system,
+    UsageStatus, current_system,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +58,7 @@ pub(crate) async fn checkpoint(cancel: &CancellationToken) -> Result<()> {
 pub(crate) enum Format {
     Anthropic,
     Gemini,
+    Responses,
 }
 
 pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result<()> {
@@ -130,6 +131,18 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
                     );
                 }
                 awaiting_model = false;
+                let metadata_key = match format {
+                    Format::Anthropic => Some("anthropic"),
+                    Format::Gemini => Some("gemini"),
+                    Format::Responses => Some("openai_responses"),
+                };
+                if assistant
+                    .provider_metadata
+                    .keys()
+                    .any(|key| Some(key.as_str()) != metadata_key)
+                {
+                    return Err("Assistant replay metadata belongs to another protocol".into());
+                }
                 if matches!(
                     assistant.stop_reason,
                     StopReason::Pending | StopReason::Error | StopReason::Aborted
@@ -197,7 +210,7 @@ fn require_results(pending: &BTreeMap<String, String>) -> Result<()> {
 }
 
 fn validate_definition(tool: &ToolDefinition, format: Format) -> Result<()> {
-    let max_len = if format == Format::Anthropic { 64 } else { 128 };
+    let max_len = if format == Format::Gemini { 128 } else { 64 };
     if tool.name.is_empty()
         || tool.name.len() > max_len
         || !tool
@@ -251,6 +264,7 @@ pub(crate) fn input_parts(content: &[Content], images: bool, format: Format) -> 
         Content::Text { text } => Ok(match format {
             Format::Anthropic => json!({"type":"text","text":text}),
             Format::Gemini => json!({"text":text}),
+            Format::Responses => json!({"type":"input_text","text":text}),
         }),
         Content::Image { data, mime_type } => {
             if !images { return Err("The requested model is not declared to support user images".into()); }
@@ -263,6 +277,7 @@ pub(crate) fn input_parts(content: &[Content], images: bool, format: Format) -> 
             Ok(match format {
                 Format::Anthropic => json!({"type":"image","source":{"type":"base64","media_type":mime_type,"data":data}}),
                 Format::Gemini => json!({"inlineData":{"mimeType":mime_type,"data":data}}),
+                Format::Responses => json!({"type":"input_image","image_url":format!("data:{mime_type};base64,{data}")}),
             })
         }
         _ => Err("User content supports text and explicitly enabled images only".into()),
@@ -324,11 +339,59 @@ pub(crate) fn stable(slot: &mut Option<String>, value: &Value, field: &str) -> R
     Ok(())
 }
 
-pub(crate) fn counter(value: &Value, field: &str, slot: &mut u64) -> Result<()> {
-    if let Some(value) = value.get(field).filter(|v| !v.is_null()) {
-        *slot = value.as_u64().ok_or("Invalid nonnegative usage counter")?;
+#[derive(Default)]
+pub(crate) struct UsageReport {
+    fields: BTreeMap<&'static str, u64>,
+}
+
+impl UsageReport {
+    pub fn update(
+        &mut self,
+        message: &mut AssistantMessage,
+        value: &Value,
+        fields: &[&'static str],
+    ) -> Result<()> {
+        if value.is_null() {
+            return Err("Missing provider usage report".into());
+        }
+        message.usage_status = UsageStatus::Invalid;
+        object(value)?;
+        for &field in fields {
+            if let Some(value) = value.get(field) {
+                message.usage_fields.insert(field.to_owned(), value.clone());
+            }
+        }
+        let mut updated = self.fields.clone();
+        for &field in fields {
+            if let Some(value) = value.get(field).filter(|value| !value.is_null()) {
+                let value = value.as_u64().ok_or("Invalid nonnegative usage counter")?;
+                if self
+                    .fields
+                    .get(field)
+                    .is_some_and(|previous| value < *previous)
+                {
+                    return Err("Cumulative usage counter decreased".into());
+                }
+                updated.insert(field, value);
+            }
+        }
+        self.fields = updated;
+        Ok(())
     }
-    Ok(())
+
+    pub fn get(&self, field: &str) -> Option<u64> {
+        self.fields.get(field).copied()
+    }
+
+    pub fn status(&self, input: &str, output: &str) -> UsageStatus {
+        if self.get(input).is_some() && self.get(output).is_some() {
+            UsageStatus::Reported
+        } else if self.fields.is_empty() {
+            UsageStatus::Unknown
+        } else {
+            UsageStatus::Partial
+        }
+    }
 }
 
 pub(crate) fn text_delta(

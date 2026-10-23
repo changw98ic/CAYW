@@ -162,6 +162,19 @@ impl Usage {
     }
 }
 
+/// Availability of the provider's usage report; numeric defaults are not a cost report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageStatus {
+    #[default]
+    Unknown,
+    Partial,
+    /// The provider supplied both input and output token counts, including explicit zeroes.
+    Reported,
+    /// The provider supplied a malformed, contradictory or decreasing report.
+    Invalid,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub content: Vec<Content>,
@@ -170,6 +183,16 @@ pub struct AssistantMessage {
     pub response_id: Option<String>,
     pub response_model: Option<String>,
     pub usage: Usage,
+    /// Missing historical availability remains unknown; counts alone cannot recover it.
+    #[serde(default)]
+    pub usage_status: UsageStatus,
+    /// Present protocol usage fields, including a rejected report's values.
+    #[serde(default)]
+    pub usage_fields: BTreeMap<String, Value>,
+    /// Adapter-owned replay data, including original item identities and opaque signatures.
+    /// Adapters validate it against normalized content before sending it to a service.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_metadata: BTreeMap<String, Value>,
     pub stop_reason: StopReason,
     pub error_message: Option<String>,
     pub timestamp: u64,
@@ -185,6 +208,9 @@ impl AssistantMessage {
             response_id: None,
             response_model: None,
             usage: Usage::default(),
+            usage_status: UsageStatus::Unknown,
+            usage_fields: BTreeMap::new(),
+            provider_metadata: BTreeMap::new(),
             stop_reason: StopReason::Pending,
             error_message: None,
             timestamp: timestamp_ms(),
@@ -276,6 +302,10 @@ pub enum AssistantEvent {
     Start {
         message: AssistantMessage,
     },
+    /// A usage report was received, even when the wire frame has no content.
+    UsageUpdate {
+        partial: AssistantMessage,
+    },
     TextStart {
         index: usize,
         partial: AssistantMessage,
@@ -327,7 +357,8 @@ impl AssistantEvent {
     pub fn message(&self) -> &AssistantMessage {
         match self {
             Self::Start { message } | Self::Done { message } | Self::Error { message } => message,
-            Self::TextStart { partial, .. }
+            Self::UsageUpdate { partial }
+            | Self::TextStart { partial, .. }
             | Self::TextDelta { partial, .. }
             | Self::TextEnd { partial, .. }
             | Self::ThinkingStart { partial, .. }

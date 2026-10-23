@@ -1,27 +1,51 @@
 //! Headless runtime with one durable session history and explicit host authority.
 mod audit;
 mod bridge;
+mod cancellation;
 mod cells;
+mod children;
+mod collaboration;
+mod completion;
 mod coordination;
 mod execution;
 pub mod fixture;
+mod input;
+mod launch;
+mod model_requests;
 mod permissions;
 #[cfg(feature = "plugins")]
 mod plugins;
 mod processes;
+mod provider;
 mod queue;
+mod reconciliation;
 mod recovery;
 #[cfg(feature = "remote")]
 mod remote;
+mod request_recovery;
 mod requests;
 mod rpc;
 mod session;
 mod shared_read;
+mod values;
 
 pub use audit::{AuditRecord, GrantRecord};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
+pub use cancellation::CancelTarget;
 pub use cayw_requests::TaskIntent;
+pub use children::LocalAgents;
+pub use collaboration::{
+    PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
+};
+pub use input::{ImageInput, TaskInput};
+pub use launch::HeadlessConfig;
+pub use model_requests::{
+    ModelCostStatus, ModelRequestIdentity, ModelRequestLedger, ModelRequestObservation,
+    ModelRequestRecord, ModelRequestTerminal, ModelReservationPolicy, ModelUsageObservation,
+};
 pub use permissions::{ApprovalChoice, ScopedPermission};
+pub use processes::{ProcessCleanupInspection, ProcessCleanupProcess};
+pub use provider::{ConfiguredProvider, ProviderApi, ProviderConfig, ProviderService};
 pub use queue::{TaskRecord, TaskState};
 pub use requests::RequestPolicy;
 pub use session::{SessionBindingView, SessionView};
@@ -55,6 +79,8 @@ pub enum RuntimeError {
     Frozen(String),
     #[error("approval is no longer pending for an active attempt")]
     StaleApproval,
+    #[error("cancellation does not match the original task execution identity")]
+    StaleCancellation,
     #[error("persistent session error: {0}")]
     Core(#[from] CoreError),
     #[error("runtime journal error: {0}")]
@@ -97,6 +123,8 @@ pub struct RuntimeConfig {
     pub cells: cayw_cells::CellLimits,
     /// Process profiles, Git executable and existing host services are explicit.
     pub host: cayw_host::HostConfig,
+    /// Explicit opt-in to local child sessions with independent permissions.
+    pub local_agents: Option<LocalAgents>,
     /// Trusted SDK input: the host's already-created Registry.consumer(). Each
     /// external call receives its own immutable scope; Runtime creates no source.
     /// Cannot be combined with host.external, the raw platform service boundary.
@@ -107,6 +135,8 @@ pub struct RuntimeConfig {
     pub request_policy: Option<RequestPolicy>,
     /// Persisted authority configuration must agree across Runtime connections.
     pub request_limits: cayw_requests::RequestConfig,
+    /// Trusted host policy for original-effect receipts. Absence denies reconciliation.
+    pub reconciliation_verifier: Option<Arc<dyn cayw_core::ReconciliationVerifier>>,
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -126,16 +156,19 @@ impl Default for RuntimeConfig {
             codemode: Default::default(),
             cells: Default::default(),
             host: Default::default(),
+            local_agents: None,
             bridge: None,
             permissions: vec![],
             request_policy: None,
             request_limits: Default::default(),
+            reconciliation_verifier: None,
         }
     }
 }
 impl RuntimeConfig {
     fn validate(&self) -> Result<(), RuntimeError> {
         bridge::validate_config(self)?;
+        children::validate(self.local_agents.as_ref())?;
         if self.max_concurrent_runs == 0
             || self.max_concurrent_runs > 1024
             || self.max_queued_runs < self.max_concurrent_runs
@@ -222,6 +255,11 @@ impl Runtime {
                 "model and provider must be explicit".into(),
             ));
         }
+        if model.max_output_tokens == Some(0) {
+            return Err(RuntimeError::InvalidInput(
+                "model output token limit must be positive".into(),
+            ));
+        }
         let root = workspace
             .as_ref()
             .canonicalize()
@@ -232,7 +270,11 @@ impl Runtime {
             ));
         }
         let host_root = cells::catalog_host(&root, bridge::effective_host_config(&config))?;
-        let store = Arc::new(SessionStore::open(store_path.as_ref())?);
+        let store = SessionStore::open(store_path.as_ref())?;
+        let store = Arc::new(match &config.reconciliation_verifier {
+            Some(verifier) => store.with_reconciliation_verifier(verifier.clone()),
+            None => store,
+        });
         let coordination = coordination::Coordination::new(store_path.as_ref())?;
         let cells = Arc::new(
             cayw_cells::SqliteJournal::open(
@@ -261,14 +303,8 @@ impl Runtime {
         )?;
         // RequestStore owns its authority fence and database as one unit. It
         // must not mistake the pre-existing Core database for a new authority.
-        let mut request_path = store_path
-            .as_ref()
-            .canonicalize()
-            .map_err(|error| RuntimeError::Workspace(error.to_string()))?
-            .into_os_string();
-        request_path.push(".requests.sqlite");
         let requests = Arc::new(cayw_requests::RequestStore::open(
-            PathBuf::from(request_path),
+            request_recovery::request_path(store_path.as_ref())?,
             config.request_limits.clone(),
         )?);
         let rt = Self {
@@ -394,20 +430,6 @@ impl Runtime {
     pub fn task(&self, id: &str) -> Result<TaskRecord, RuntimeError> {
         self.inner.queue.get(id)
     }
-    pub fn cancel(&self, id: &str) -> Result<bool, RuntimeError> {
-        self.get(id)?;
-        let _coordinate = self.inner.coordination.enter()?;
-        requests::check_cancel(&self.inner, id)?;
-        let closing = requests::close_session(&self.inner, id);
-        let cancelled = self.inner.queue.cancel(id);
-        if let Some(run) = lock(&self.inner.active).get(id) {
-            run.cancel.cancel();
-        }
-        self.inner.approvals.notify_waiters();
-        self.inner.changed.notify_waiters();
-        closing?;
-        cancelled
-    }
     pub async fn wait_idle(&self, id: &str) {
         loop {
             let wait = self.inner.changed.notified();
@@ -437,6 +459,14 @@ impl Runtime {
         }) {
             return Err(RuntimeError::Busy);
         }
+        if self
+            .inner
+            .cells
+            .is_frozen(id)
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?
+        {
+            return Err(RuntimeError::NeedsReconciliation);
+        }
         let fork = self.inner.store.fork_session(id, label, confirmed)?;
         self.get(&fork.id)
     }
@@ -453,8 +483,17 @@ impl Runtime {
         if actor.trim().is_empty() {
             return Err(RuntimeError::InvalidInput("actor is required".into()));
         }
+        let _coordinate = self.inner.coordination.enter()?;
         self.inner.journal.revoke(id, grant, actor)?;
-        self.cancel(id)?;
+        self.inner.reads.invalidate(id);
+        for task in self.inner.queue.list(id)? {
+            if matches!(
+                task.state,
+                TaskState::Queued | TaskState::Running | TaskState::Draining
+            ) {
+                self.cancel_coordinated(&task.cancel_target())?;
+            }
+        }
         self.inner.approvals.notify_waiters();
         Ok(())
     }

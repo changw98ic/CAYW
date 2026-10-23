@@ -477,8 +477,9 @@ async fn shutdown_of_prompt_rejected_busy_never_sends_session_cancel() {
             let method = call["method"].as_str().unwrap();
             match method {
                 "hello" => reply(&mut writer, &call["id"], json!({"version":1,"max_frame_bytes":1048576,"max_in_flight":64,"max_requests_per_connection":65536,"max_id_bytes":128})).await,
-                "session.prompt" => {
-                    methods.push("prompt_rejected_busy");
+                "task.enqueue" => {
+                    assert_eq!(call["params"], json!({"session_id":"s1","text":"question"}));
+                    methods.push("enqueue_rejected_busy");
                     // Busy has already been decided, but the response can still be in flight
                     // when the terminal exits. No run ownership has been established.
                     rejected.take().unwrap().send(()).unwrap();
@@ -518,5 +519,5 @@ async fn shutdown_of_prompt_rejected_busy_never_sends_session_cancel() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(methods, vec!["prompt_rejected_busy"]);
+    assert_eq!(methods, vec!["enqueue_rejected_busy"]);
 }

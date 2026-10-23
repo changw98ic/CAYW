@@ -27,8 +27,11 @@ impl ProcessIdentity {
             && self.started_microseconds == other.started_microseconds
     }
 
+    /// Observe whether this original incarnation is still running. This never
+    /// signals a process. An unreadable identity remains an error; a changed
+    /// process group does not prove that the original process stopped.
     #[cfg(target_os = "macos")]
-    pub(super) fn is_running(self) -> io::Result<bool> {
+    pub fn is_running(self) -> io::Result<bool> {
         let info = match inspect(self.pid) {
             Ok(info) => info,
             Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(false),

@@ -28,6 +28,8 @@ pub(crate) struct CallScope {
     pub arguments: Value,
     pub request: crate::requests::Admission,
     pub bridge_origin: Option<crate::bridge::BridgeDispatchOrigin>,
+    #[cfg(feature = "fault-injection")]
+    fault_origin: Value,
     state: Mutex<CallState>,
 }
 #[derive(Default)]
@@ -138,12 +140,16 @@ impl CallScope {
             )?;
         }
         self.request.check(&self.context)?;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit("core.start.before", self.fault_origin.clone());
         self.context
             .inner
             .store
             .start_capability(&self.context.lease, &self.key, proof)
             .map_err(|error| self.context.persistence_failed(error))?;
         state.started = true;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit("core.start.committed", self.fault_origin.clone());
         self.context.inner.changed.notify_waiters();
         Ok(())
     }
@@ -175,12 +181,19 @@ impl CallScope {
                 },
             }
         };
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit("core.capability_terminal.before", self.fault_origin.clone());
         self.context
             .inner
             .store
             .settle_capability(&self.context.lease, &self.key, outcome)
             .map_err(|error| self.context.persistence_failed(error))?;
         state.settled = true;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "core.capability_terminal.committed",
+            self.fault_origin.clone(),
+        );
         self.context.inner.changed.notify_waiters();
         if result.as_ref().is_err_and(|error| error.outcome_unknown) && state.started {
             self.context.unknown.store(true, Ordering::Release);
@@ -366,7 +379,7 @@ impl Backend {
                 .map_err(|error| RuntimeError::Workspace(error.to_string()))?,
         );
         let requests = crate::requests::start(&context, &base)?;
-        let mut catalog = base.capabilities();
+        let mut catalog = crate::requests::operation_definitions(&context.inner, &base);
         catalog.extend(crate::requests::definitions(&context.inner));
         #[cfg(feature = "plugins")]
         let plugins = Arc::new(crate::plugins::PluginCatalog::new(&context)?);
@@ -438,6 +451,15 @@ impl CellBackend for Backend {
             execution_id: execution.cell_id.clone(),
             sequence,
         };
+        #[cfg(feature = "fault-injection")]
+        let fault_origin = json!({
+            "session_id":self.context.lease.session_id,"task_id":self.context.task.id,
+            "lease":self.context.lease,"key":key,"execution":execution,
+            "parent_call_id":execution.parent_call_id,"source_hash":execution.source_hash,
+            "name":name,"arguments":arguments,
+        });
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit("core.plan.before", fault_origin.clone());
         let call = self
             .context
             .inner
@@ -451,6 +473,12 @@ impl CellBackend for Backend {
                 },
             )
             .map_err(|error| self.context.persistence_failed(error))?;
+        #[cfg(feature = "fault-injection")]
+        {
+            let mut committed = fault_origin.clone();
+            committed["call"] = serde_json::to_value(&call).expect("original call serializes");
+            cayw_ai::faults::hit("core.plan.committed", committed);
+        }
         self.context.inner.changed.notify_waiters();
         let scope = Arc::new(CallScope {
             context: self.context.clone(),
@@ -467,6 +495,8 @@ impl CellBackend for Backend {
                 name,
                 &arguments,
             ),
+            #[cfg(feature = "fault-injection")]
+            fault_origin,
             state: Mutex::default(),
         });
         let _pending = Pending(scope.clone());
@@ -485,6 +515,21 @@ impl CellBackend for Backend {
                     cancel,
                 )
                 .await
+            }
+            Ok(()) if crate::values::is_value(name) => {
+                crate::values::invoke(&scope, &self.base, execution, arguments, cancel).await
+            }
+            Ok(()) if crate::collaboration::is_tool(name) => {
+                crate::collaboration::invoke(&scope, &self.base, arguments, cancel).await
+            }
+            Ok(())
+                if crate::children::is_capability(name)
+                    && self.context.inner.config.local_agents.is_some() =>
+            {
+                match crate::bridge::scoped_host(&self.base, &scope) {
+                    Ok(host) => crate::children::call(host, &scope, arguments, cancel).await,
+                    Err(error) => Err(error),
+                }
             }
             Ok(()) if name == "fs.read" && self.context.inner.config.host.frozen_reads => {
                 return match crate::shared_read::call(
@@ -582,6 +627,11 @@ impl CellBackend for Backend {
                 }),
             },
         };
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "core.execution_terminal.before",
+            json!({"session_id":self.context.lease.session_id,"task_id":self.context.task.id,"lease":self.context.lease,"execution":execution,"outcome":outcome}),
+        );
         self.context
             .inner
             .store
@@ -589,6 +639,17 @@ impl CellBackend for Backend {
             .map_err(|error| {
                 CellError::Journal(self.context.persistence_failed(error).to_string())
             })?;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "core.execution_terminal.committed",
+            json!({
+                "session_id": self.context.lease.session_id,
+                "task_id": self.context.task.id,
+                "lease": self.context.lease,
+                "execution": execution,
+                "terminal": terminal,
+            }),
+        );
         self.context.inner.changed.notify_waiters();
         Ok(())
     }

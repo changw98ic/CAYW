@@ -45,6 +45,13 @@ async (page) => {
     check(!before.stopDisabled, 'Stop should be available before observing the attempt');
     await page.locator('#cancel-button').click();
     await until(async () => (await status()).observed.cancel?.result?.cancelled === true, 'Runtime did not return cancelled:true');
+    const cancelled = (await status()).observed;
+    const originalTask = cancelled.originalTask?.result;
+    const target = cancelled.cancelTarget;
+    check(originalTask?.id === cancelled.admitted?.result?.id && originalTask?.session_id === session.id, 'Stop selected a different admitted Task');
+    check(target?.task_id === originalTask.id && target.session_id === session.id
+      && target.worker_id === originalTask.worker_id && target.attempt_id === originalTask.attempt_id
+      && target.fence === originalTask.fence && target.fence > 0, 'Stop omitted or changed original claimed identity');
     await until(async () => (await status()).held && Boolean((await status()).observed.withheldTerminal), 'real prompt receipt or exact terminal missing');
     await until(async () => !(await status()).observed.lastSnapshot?.result?.attempt, 'Runtime did not reach idle');
     check(await page.locator('#prompt').isDisabled(), 'pending original prompt must remain locked');

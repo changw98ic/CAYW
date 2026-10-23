@@ -312,7 +312,11 @@ impl Runtime {
                 .store(true, std::sync::atomic::Ordering::Release);
             run.cancel.cancel();
         }
-        let _ = self.inner.queue.cancel(session);
+        if let Ok(tasks) = self.inner.queue.list(session) {
+            for task in tasks {
+                let _ = self.inner.queue.cancel(&task.cancel_target());
+            }
+        }
         self.inner.approvals.notify_waiters();
         self.inner.changed.notify_waiters();
     }
@@ -321,7 +325,9 @@ impl Runtime {
         if let Some(run) = lock(&self.inner.active).get(session) {
             run.cancel.cancel();
         }
-        self.inner.queue.cancel(session)?;
+        for task in self.inner.queue.list(session)? {
+            self.inner.queue.cancel(&task.cancel_target())?;
+        }
         self.inner
             .journal
             .revoke_session(session, "plugin binding frozen")?;

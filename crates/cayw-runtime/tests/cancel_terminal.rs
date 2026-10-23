@@ -56,8 +56,9 @@ impl Provider for CancelBeforeReply {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
         // Run in the same poll after request preparation passed its fence. The
         // separate connection accepts cancellation before this ready model reply.
-        let (peer, id) = self.0.lock().unwrap().take().unwrap();
-        assert!(peer.cancel(&id).unwrap());
+        let (peer, task_id) = self.0.lock().unwrap().take().unwrap();
+        let target = peer.task(&task_id).unwrap().cancel_target();
+        assert!(peer.cancel(&target).unwrap());
         let mut message = AssistantMessage::new(&request.model);
         message.content = vec![Content::text(
             "synthetic terminal after accepted cancellation",
@@ -73,15 +74,14 @@ async fn peer_sdk_cancel_before_ready_provider_terminal_ends_both_authorities_ca
     let rt = open(root.path(), provider.clone(), config());
     let peer = open(root.path(), provider.clone(), config());
     let id = rt.create(None).unwrap().id;
-    *provider.0.lock().unwrap() = Some((peer.clone(), id.clone()));
-    rt.prompt(
-        &id,
-        "synthetic cancellation at final reply",
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    let task = rt.tasks(&id).unwrap().remove(0);
+    let admitted = rt
+        .enqueue(&id, "synthetic cancellation at final reply")
+        .unwrap();
+    *provider.0.lock().unwrap() = Some((peer.clone(), admitted.id.clone()));
+    rt.resume(&admitted.id, CancellationToken::new())
+        .await
+        .unwrap();
+    let task = rt.task(&admitted.id).unwrap();
     assert_eq!(task.state, TaskState::Cancelled);
     assert!(task.cancel_requested);
     assert!(matches!(
@@ -103,7 +103,7 @@ async fn peer_sdk_cancel_before_ready_provider_terminal_ends_both_authorities_ca
         requests.iter().filter(|e| e.kind == "task_ended").count(),
         1
     );
-    assert!(!peer.cancel(&id).unwrap());
+    assert!(!peer.cancel(&task.cancel_target()).unwrap());
     assert_eq!(peer.task(&task.id).unwrap(), task);
 }
 
@@ -148,26 +148,25 @@ async fn peer_cancel_before_allow(ipc: bool) {
     ));
     let client = Client::connect(addr, TOKEN).await.unwrap();
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "synthetic pending write").unwrap();
     let run = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "synthetic pending write", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let approval = pending(&rt, &id).await;
     let old = rt.get(&id).unwrap().attempt.unwrap();
+    let target = rt.task(&admitted.id).unwrap().cancel_target();
     if ipc {
         assert_eq!(
             client
-                .request("session.cancel", json!({"session_id":id}))
+                .request("session.cancel", serde_json::to_value(&target).unwrap())
                 .await
                 .unwrap()["cancelled"],
             true
         );
     } else {
-        assert!(peer.cancel(&id).unwrap());
+        assert!(peer.cancel(&target).unwrap());
     }
     assert!(
         rt.approve(
@@ -184,7 +183,7 @@ async fn peer_cancel_before_allow(ipc: bool) {
         .unwrap()
         .unwrap();
     assert!(!root.path().join("workspace/cancel.txt").exists());
-    let first = rt.tasks(&id).unwrap().remove(0);
+    let first = rt.task(&admitted.id).unwrap();
     assert_eq!(first.state, TaskState::Cancelled);
     assert!(matches!(
         rt.request_task_state(&first.id).unwrap(),
@@ -223,19 +222,47 @@ async fn peer_cancel_before_allow(ipc: bool) {
         .collect();
     assert_eq!(terminals.len(), 1);
     assert_eq!(terminals[0].kind, "run_cancelled");
+    // A delayed full target for the original terminal Task must not cancel the
+    // next Task, either before it is claimed or after it is running.
+    let replacement = rt.enqueue(&id, "explicit synthetic replacement").unwrap();
+    if ipc {
+        assert_eq!(
+            client
+                .request("session.cancel", serde_json::to_value(&target).unwrap())
+                .await
+                .unwrap()["cancelled"],
+            false
+        );
+    } else {
+        assert!(!peer.cancel(&target).unwrap());
+    }
+    assert_eq!(rt.task(&replacement.id).unwrap(), replacement);
     let run = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(
-                &id,
-                "explicit synthetic replacement",
-                CancellationToken::new(),
-            )
-            .await
-        })
+        let task_id = replacement.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let next = pending(&rt, &id).await;
+    let active = rt.task(&replacement.id).unwrap();
+    if ipc {
+        assert_eq!(
+            client
+                .request("session.cancel", serde_json::to_value(&target).unwrap())
+                .await
+                .unwrap()["cancelled"],
+            false
+        );
+    } else {
+        assert!(!peer.cancel(&target).unwrap());
+    }
+    assert_eq!(rt.task(&replacement.id).unwrap(), active);
+    assert!(!active.cancel_requested);
+    let mut stale = active.cancel_target();
+    stale.fence += 1;
+    assert!(matches!(
+        peer.cancel(&stale),
+        Err(RuntimeError::StaleCancellation)
+    ));
     let lease = rt.get(&id).unwrap().attempt.unwrap();
     assert_ne!(next.id, approval.id);
     assert_ne!(lease.attempt_id, old.attempt_id);
@@ -315,13 +342,11 @@ async fn accepted_peer_cancel_preserves_original_unknown_instead_of_success_or_c
     let rt = open(root.path(), provider.clone(), config.clone());
     let peer = open(root.path(), provider, config);
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "synthetic unknown effect").unwrap();
     let run = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "synthetic unknown effect", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     tokio::time::timeout(WATCHDOG, service.entered.acquire())
         .await
@@ -329,14 +354,15 @@ async fn accepted_peer_cancel_preserves_original_unknown_instead_of_success_or_c
         .unwrap()
         .forget();
     let original = rt.get(&id).unwrap().attempt.unwrap();
-    assert!(peer.cancel(&id).unwrap());
+    let target = rt.task(&admitted.id).unwrap().cancel_target();
+    assert!(peer.cancel(&target).unwrap());
     let result = tokio::time::timeout(WATCHDOG, run)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     assert_eq!(result.state, SessionState::NeedsReconciliation);
-    let task = rt.tasks(&id).unwrap().remove(0);
+    let task = rt.task(&admitted.id).unwrap();
     assert_eq!(task.state, TaskState::OutcomeUnknown);
     assert!(task.cancel_requested);
     assert!(matches!(
@@ -382,20 +408,19 @@ async fn accepted_peer_cancel_does_not_hide_failed_attempt_cleanup_or_release_ca
     let peer = open(root.path(), provider.clone(), settings);
     let id = rt.create(None).unwrap().id;
     let other = rt.create(None).unwrap().id;
-    *provider.0.lock().unwrap() = Some((peer, id.clone()));
+    let admitted = rt
+        .enqueue(&id, "synthetic cleanup failure after cancel")
+        .unwrap();
+    *provider.0.lock().unwrap() = Some((peer, admitted.id.clone()));
     let db = rusqlite::Connection::open(root.path().join("session.sqlite")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_attempt_finish BEFORE INSERT ON core_events WHEN json_extract(NEW.record,'$.event.type')='attempt_finished' BEGIN SELECT RAISE(ABORT,'synthetic cleanup failure'); END;").unwrap();
     let error = rt
-        .prompt(
-            &id,
-            "synthetic cleanup failure after cancel",
-            CancellationToken::new(),
-        )
+        .resume(&admitted.id, CancellationToken::new())
         .await
         .unwrap_err();
     assert!(matches!(error, RuntimeError::RecoveryRequired { .. }));
     assert!(error.to_string().contains("synthetic cleanup failure"));
-    let task = rt.tasks(&id).unwrap().remove(0);
+    let task = rt.task(&admitted.id).unwrap();
     assert!(task.cancel_requested);
     assert_eq!(task.state, TaskState::Draining);
     assert_eq!(rt.health().unwrap().running, 1);

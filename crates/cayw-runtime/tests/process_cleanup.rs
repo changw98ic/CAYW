@@ -2,7 +2,11 @@
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_core::{CoreEvent, SessionState};
 use cayw_host::{Profile, ProfileKind};
-use cayw_runtime::{Runtime, RuntimeConfig, RuntimeError, ScopedPermission, TaskState};
+use cayw_requests::HostActor;
+use cayw_runtime::{
+    CancelTarget, ProcessCleanupInspection, Runtime, RuntimeConfig, RuntimeError, ScopedPermission,
+    TaskState,
+};
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
@@ -167,6 +171,76 @@ fn verify_incarnation(recorded: &cayw_host::ProcessIdentity, label: &str) -> Inc
         },
     }
 }
+fn verify_lost_cleanup(
+    inspection: &ProcessCleanupInspection,
+    target: &CancelTarget,
+    original: &cayw_core::CapabilityCallRecord,
+    supervisor: &cayw_host::ProcessIdentity,
+    processes: &[cayw_host::ProcessIdentity],
+    label: &str,
+) -> Result<(), String> {
+    if inspection.target != *target
+        || inspection.lease != original.lease
+        || inspection.supervisor != *supervisor
+        || original.task_id != target.task_id
+        || original.lease.session_id != target.session_id
+        || Some(&original.lease.worker_id) != target.worker_id.as_ref()
+        || Some(&original.lease.attempt_id) != target.attempt_id.as_ref()
+        || original.stage != cayw_core::CapabilityStage::Started
+        || original.outcome.is_some()
+    {
+        return Err("cleanup inspection differs from the original observed execution".into());
+    }
+    if inspection.processes.len() != processes.len()
+        || inspection
+            .processes
+            .iter()
+            .any(|process| process.key != original.key)
+        || !processes.iter().all(|identity| {
+            inspection
+                .processes
+                .iter()
+                .filter(|process| process.identity == *identity)
+                .count()
+                == 1
+        })
+    {
+        return Err("cleanup inspection differs from the original PID/start/group records".into());
+    }
+    let mut verdicts = Vec::new();
+    for identity in std::iter::once(supervisor).chain(processes) {
+        match verify_incarnation(identity, label) {
+            Incarnation::NotAlive(detail) => verdicts.push(detail),
+            Incarnation::Alive(detail) => return Err(detail),
+        }
+    }
+    eprintln!(
+        "LOST_PROCESS_CLEANUP_VERIFIED {}",
+        json!({
+            "scenario": label,
+            "target": target,
+            "lease": inspection.lease,
+            "supervisor": {
+                "pid": supervisor.pid,
+                "parent_pid": supervisor.parent_pid,
+                "process_group": supervisor.process_group,
+                "started_seconds": supervisor.started_seconds,
+                "started_microseconds": supervisor.started_microseconds,
+            },
+            "processes": processes.iter().map(|identity| json!({
+                "pid": identity.pid,
+                "parent_pid": identity.parent_pid,
+                "process_group": identity.process_group,
+                "started_seconds": identity.started_seconds,
+                "started_microseconds": identity.started_microseconds,
+            })).collect::<Vec<_>>(),
+            "original_call": original.key,
+            "per_incarnation_verdicts": verdicts,
+        })
+    );
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_suspended_original_incarnation_is_not_cleanup_evidence() {
@@ -289,18 +363,16 @@ async fn runtime_records_the_complete_os_identity_of_every_owned_process() {
     let rt = open(dir.path());
     let peer = open(dir.path());
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "run process tree").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "run process tree", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
-    let task = rt.tasks(&id).unwrap().remove(0);
-    assert!(peer.cancel(&id).unwrap());
+    let task = rt.task(&admitted.id).unwrap();
+    assert!(peer.cancel(&task.cancel_target()).unwrap());
     let _ = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
         .unwrap()
@@ -558,17 +630,11 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
         BEGIN SELECT RAISE(ABORT, 'injected process identity cleanup recording failure'); END;",
     )
     .unwrap();
+    let admitted = rt.enqueue(&id, "record a started process tree").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(
-                &id,
-                "record a started process tree",
-                CancellationToken::new(),
-            )
-            .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
@@ -578,8 +644,8 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
         live(&leader) && live(&leaf),
         "the fixture tree must really be running before its record is denied"
     );
-    let task = rt.tasks(&id).unwrap().remove(0);
-    assert!(peer.cancel(&id).unwrap());
+    let task = rt.task(&admitted.id).unwrap();
+    assert!(peer.cancel(&task.cancel_target()).unwrap());
     let error = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
         .unwrap()
@@ -671,21 +737,19 @@ async fn cancelled_profile_joins_process_tree_before_freeing_the_task_slot() {
     let rt = open(dir.path());
     let peer = open(dir.path());
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "run process tree").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "run process tree", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
     assert!(live(&leader) && live(&leaf));
-    let task = rt.tasks(&id).unwrap().remove(0);
+    let task = rt.task(&admitted.id).unwrap();
     assert_eq!(peer.health().unwrap().running, 1);
     assert!(matches!(peer.recover(&id), Err(RuntimeError::Busy)));
-    assert!(peer.cancel(&id).unwrap());
+    assert!(peer.cancel(&task.cancel_target()).unwrap());
     let _ = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
         .unwrap()
@@ -774,6 +838,14 @@ impl Provider for PanicAfterLaunch {
             }));
         }
         let mut message = cayw_ai::AssistantMessage::new(&request.model);
+        // Fixed synthetic usage for this successful launch or wait request.
+        message.usage = cayw_ai::Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = cayw_ai::UsageStatus::Reported;
         message
             .content
             .push(cayw_ai::Content::ToolCall(cayw_ai::ToolCall::new(
@@ -863,22 +935,18 @@ async fn failed_cleanup_record_keeps_capacity_until_the_original_owner_retries()
         BEGIN SELECT RAISE(ABORT, 'injected process cleanup recording failure'); END;",
     )
     .unwrap();
+    let admitted = rt
+        .enqueue(&id, "retain the original process owner")
+        .unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(
-                &id,
-                "retain the original process owner",
-                CancellationToken::new(),
-            )
-            .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
-    let task = rt.tasks(&id).unwrap().remove(0);
-    peer.cancel(&id).unwrap();
+    let task = rt.task(&admitted.id).unwrap();
+    peer.cancel(&task.cancel_target()).unwrap();
     let error = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
         .unwrap()
@@ -1043,19 +1111,17 @@ async fn cancelled_task_terminal_and_ownership_stay_stable_after_process_cleanup
     let rt = open(dir.path());
     let peer = open(dir.path());
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "cancel then exit late").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "cancel then exit late", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
     assert!(live(&leader) && live(&leaf));
-    let task = rt.tasks(&id).unwrap().remove(0);
-    assert!(peer.cancel(&id).unwrap());
+    let task = rt.task(&admitted.id).unwrap();
+    assert!(peer.cancel(&task.cancel_target()).unwrap());
     let _ = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
         .unwrap()
@@ -1112,10 +1178,25 @@ async fn killed_host_requires_observed_process_cleanup_before_recovery_releases_
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
     assert!(live(&leader) && live(&leaf));
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    let supervisor = cayw_host::ProcessIdentity::observe(child.id().unwrap()).unwrap();
+    let pids = [leader.trim().parse().unwrap(), leaf.trim().parse().unwrap()];
+    let observed = wait_recorded_and_observed(dir.path(), &pids).await;
+    assert_eq!(observed[0].parent_pid, supervisor.pid);
+    assert_eq!(observed[0].process_group, observed[0].pid);
+    assert_eq!(observed[1].parent_pid, observed[0].pid);
+    assert_eq!(observed[1].process_group, observed[0].process_group);
     let rt = open(dir.path());
     let task = rt.tasks(&id).unwrap().remove(0);
+    let target = task.cancel_target();
+    let original = rt
+        .get(&id)
+        .unwrap()
+        .unresolved_capabilities
+        .into_iter()
+        .find(|call| call.name == "test.run" && call.task_id == task.id)
+        .expect("the original running process call must be recorded");
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
     let before = rt.get(&id).unwrap();
     assert_eq!(rt.health().unwrap().running, 1);
     let error = rt.recover(&id).unwrap_err();
@@ -1142,9 +1223,24 @@ async fn killed_host_requires_observed_process_cleanup_before_recovery_releases_
     std::fs::write(dir.path().join("release"), b"explicit fixture cleanup").unwrap();
     wait_stopped(&leader).await;
     wait_stopped(&leaf).await;
-    rt.confirm_processes_stopped(&task.id, "fixture-host", &format!(
-        "Released the original fixture and observed leader {leader} and child {leaf} absent or zombie via ps",
-    )).unwrap();
+    Runtime::confirm_lost_processes_stopped(
+        dir.path().join("session.db"),
+        settings(dir.path()),
+        &target,
+        &HostActor::new("fixture-host").unwrap(),
+        "Test host released its original fixture; independent callback rechecked its recorded supervisor and every original PID/start/group",
+        |inspection| {
+            verify_lost_cleanup(
+                inspection,
+                &target,
+                &original,
+                &supervisor,
+                &observed,
+                "tree/host-kill",
+            )
+        },
+    )
+    .unwrap();
     assert_eq!(
         rt.health().unwrap().running,
         1,
@@ -1354,13 +1450,11 @@ async fn pipe_and_pty_process_chains_record_and_clean_all_three_generations() {
         .unwrap();
         let peer = open(dir.path());
         let id = rt.create(None).unwrap().id;
+        let admitted = rt.enqueue(&id, "run a process chain").unwrap();
         let worker = {
             let rt = rt.clone();
-            let id = id.clone();
-            tokio::spawn(async move {
-                rt.prompt(&id, "run a process chain", CancellationToken::new())
-                    .await
-            })
+            let task_id = admitted.id.clone();
+            tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
         };
         let mut pids = Vec::new();
         for depth in 0..3 {
@@ -1377,8 +1471,8 @@ async fn pipe_and_pty_process_chains_record_and_clean_all_three_generations() {
             "{label}: all three real generations must be running"
         );
         let observed = wait_recorded_and_observed(dir.path(), &pids).await;
-        let task = rt.tasks(&id).unwrap().remove(0);
-        assert!(peer.cancel(&id).unwrap());
+        let task = rt.task(&admitted.id).unwrap();
+        assert!(peer.cancel(&task.cancel_target()).unwrap());
         let _ = tokio::time::timeout(Duration::from_secs(10), worker)
             .await
             .unwrap()
@@ -1630,13 +1724,11 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
             )
             .unwrap();
             let id = rt.create(None).unwrap().id;
+            let admitted = rt.enqueue(&id, "run a process chain").unwrap();
             let worker = {
                 let rt = rt.clone();
-                let id = id.clone();
-                tokio::spawn(async move {
-                    rt.prompt(&id, "run a process chain", CancellationToken::new())
-                        .await
-                })
+                let task_id = admitted.id.clone();
+                tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
             };
             let chain_started = std::time::Instant::now();
             let mut pids = Vec::new();
@@ -1652,12 +1744,12 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
             // The trigger may not fire before all three identities are recorded.
             let observed = wait_recorded_and_observed(dir.path(), &pids).await;
             let recorded_after = chain_started.elapsed();
-            let task = rt.tasks(&id).unwrap().remove(0);
+            let task = rt.task(&admitted.id).unwrap();
             match trigger {
                 ChainTrigger::Normal => {
                     std::fs::write(dir.path().join("release"), "release").unwrap();
                 }
-                ChainTrigger::Cancel => assert!(rt.cancel(&id).unwrap()),
+                ChainTrigger::Cancel => assert!(rt.cancel(&task.cancel_target()).unwrap()),
                 ChainTrigger::OutputBudget => {
                     // The leader emits only after this file appears, so the output
                     // budget cannot fire before all three generations are durably
@@ -1947,6 +2039,14 @@ impl Provider for ChainPanicProvider {
             }));
         }
         let mut message = cayw_ai::AssistantMessage::new(&request.model);
+        // Fixed synthetic usage for this successful launch or wait request.
+        message.usage = cayw_ai::Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = cayw_ai::UsageStatus::Reported;
         message
             .content
             .push(cayw_ai::Content::ToolCall(cayw_ai::ToolCall::new(
@@ -2177,16 +2277,27 @@ async fn a_real_host_process_cancels_and_waits_for_every_generation_before_exiti
 /// product behaviour: nothing in the Runtime releases another owner's process.
 #[tokio::test]
 async fn a_killed_host_keeps_the_chain_draining_until_every_identity_is_verified_stopped() {
-    for (io_label, _io) in io_modes() {
+    for (io_label, io) in io_modes() {
         let label = format!("{io_label}/host-kill");
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("workspace")).unwrap();
         let mut host = spawn_chain_host(dir.path(), io_label, false);
         let host_pid = i64::from(host.id().unwrap());
+        let supervisor = cayw_host::ProcessIdentity::observe(host.id().unwrap()).unwrap();
         let id = marker(&dir.path().join("session.id")).await;
         marker(&dir.path().join("host.ready")).await;
         let pids = chain_generations(dir.path()).await;
         let observed = wait_recorded_and_observed(dir.path(), &pids).await;
+        let rt = open(dir.path());
+        let task = rt.tasks(&id).unwrap().remove(0);
+        let target = task.cancel_target();
+        let original = rt
+            .get(&id)
+            .unwrap()
+            .unresolved_capabilities
+            .into_iter()
+            .find(|call| call.name == "test.run" && call.task_id == task.id)
+            .expect("the original running chain call must be recorded");
         host.kill().await.unwrap();
         host.wait().await.unwrap();
         let alive_after_kill: Vec<bool> = pids.iter().map(|pid| live(&pid.to_string())).collect();
@@ -2194,8 +2305,6 @@ async fn a_killed_host_keeps_the_chain_draining_until_every_identity_is_verified
         // killed, saved as evidence. A bare PID list would not say which
         // incarnation the Runtime owned.
         let identities_after_kill: Vec<_> = observed.iter().map(incarnation_snapshot).collect();
-        let rt = open(dir.path());
-        let task = rt.tasks(&id).unwrap().remove(0);
         let before = rt.get(&id).unwrap();
         assert_eq!(
             rt.health().unwrap().running,
@@ -2273,8 +2382,24 @@ async fn a_killed_host_keeps_the_chain_draining_until_every_identity_is_verified
              stopped, one by one, from the kernel identity plus ps: {}",
             verified.join("; ")
         );
-        rt.confirm_processes_stopped(&task.id, "fixture-host", &evidence)
-            .unwrap();
+        Runtime::confirm_lost_processes_stopped(
+            dir.path().join("session.db"),
+            chain_settings(dir.path(), io, Duration::from_secs(60), 4096, false),
+            &target,
+            &HostActor::new("fixture-host").unwrap(),
+            &evidence,
+            |inspection| {
+                verify_lost_cleanup(
+                    inspection,
+                    &target,
+                    &original,
+                    &supervisor,
+                    &observed,
+                    &label,
+                )
+            },
+        )
+        .unwrap();
         assert_eq!(
             rt.health().unwrap().running,
             1,
@@ -2359,6 +2484,14 @@ fn first_cell_id(rt: &Runtime, id: &str) -> String {
 
 fn plain_answer(model: &Model, text: &str) -> cayw_ai::AssistantMessage {
     let mut message = cayw_ai::AssistantMessage::new(model);
+    // Counters describe this synthetic successful reply, never an aborted stream.
+    message.usage = cayw_ai::Usage {
+        input: 4,
+        output: 4,
+        total_tokens: 8,
+        ..Default::default()
+    };
+    message.usage_status = cayw_ai::UsageStatus::Reported;
     message.content.push(cayw_ai::Content::text(text));
     message.stop_reason = cayw_ai::StopReason::Stop;
     message
@@ -2405,6 +2538,14 @@ impl Provider for YieldChainProvider {
             }));
         }
         let mut message = cayw_ai::AssistantMessage::new(&request.model);
+        // Fixed synthetic usage for this successful launch or wait request.
+        message.usage = cayw_ai::Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = cayw_ai::UsageStatus::Reported;
         message
             .content
             .push(cayw_ai::Content::ToolCall(cayw_ai::ToolCall::new(
@@ -2439,6 +2580,14 @@ impl Provider for WaitOldCellProvider {
             }]));
         }
         let mut message = cayw_ai::AssistantMessage::new(&request.model);
+        // Fixed synthetic usage for this successful launch or wait request.
+        message.usage = cayw_ai::Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = cayw_ai::UsageStatus::Reported;
         message
             .content
             .push(cayw_ai::Content::ToolCall(cayw_ai::ToolCall::new(
@@ -2482,18 +2631,19 @@ async fn a_cancelled_run_terminates_the_vm_instead_of_recording_a_late_success()
     )
     .unwrap();
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "cancel while the chain runs").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "cancel while the chain runs", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let pids = chain_generations(dir.path()).await;
     let observed = wait_recorded_and_observed(dir.path(), &pids).await;
     let task = rt.tasks(&id).unwrap().remove(0);
-    assert!(rt.cancel(&id).unwrap());
+    assert!(
+        rt.cancel(&rt.task(&admitted.id).unwrap().cancel_target())
+            .unwrap()
+    );
     std::fs::write(dir.path().join("release"), b"released after the cancel").unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(40), worker)
         .await
@@ -2629,13 +2779,11 @@ async fn an_already_durable_success_is_not_rewritten_by_a_later_cancel_or_adopte
     )
     .unwrap();
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "yield then cancel").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "yield then cancel", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let pids = chain_generations(dir.path()).await;
     let observed = wait_recorded_and_observed(dir.path(), &pids).await;
@@ -2661,7 +2809,10 @@ async fn an_already_durable_success_is_not_rewritten_by_a_later_cancel_or_adopte
         pids.iter().all(|pid| !live(&pid.to_string())),
         "the released chain must have exited on its own"
     );
-    assert!(rt.cancel(&id).unwrap());
+    assert!(
+        rt.cancel(&rt.task(&admitted.id).unwrap().cancel_target())
+            .unwrap()
+    );
     // The real completion gate: the model's late answer is released only now,
     // strictly after the cancel above returned. It is therefore a genuine
     // post-cancel model event, not a fixed sleep that merely makes the cancel
@@ -3217,13 +3368,11 @@ async fn a_success_submitted_after_the_cancel_through_the_original_sink_is_refus
 
     // The run that will be cancelled, in its own session.
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "run a chain then cancel it").unwrap();
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(&id, "run a chain then cancel it", CancellationToken::new())
-                .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let pids = chain_generations(dir.path()).await;
     let observed = wait_recorded_and_observed(dir.path(), &pids).await;
@@ -3244,7 +3393,10 @@ async fn a_success_submitted_after_the_cancel_through_the_original_sink_is_refus
     assert_eq!(Some(&original.lease.attempt_id), task.attempt_id.as_ref());
     assert_eq!(Some(&original.lease.worker_id), task.worker_id.as_ref());
     assert_eq!(original.lease.fence, task.fence);
-    assert!(rt.cancel(&id).unwrap());
+    assert!(
+        rt.cancel(&rt.task(&admitted.id).unwrap().cancel_target())
+            .unwrap()
+    );
     let _ = tokio::time::timeout(Duration::from_secs(40), worker)
         .await
         .expect("the cancelled run must reach a terminal")

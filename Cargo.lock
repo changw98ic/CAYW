@@ -410,6 +410,7 @@ name = "cayw-ai"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "base64 0.22.1",
  "futures",
  "jsonschema",
  "reqwest",
@@ -430,6 +431,7 @@ dependencies = [
  "cayw-codemode",
  "cayw-core",
  "cayw-host",
+ "cayw-sources",
  "futures",
  "serde",
  "serde_json",
@@ -609,6 +611,7 @@ dependencies = [
  "cayw-ai",
  "futures",
  "reqwest",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -658,6 +661,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "cayw-agent",
  "cayw-ai",
  "cayw-bridge",
@@ -667,9 +671,12 @@ dependencies = [
  "cayw-host",
  "cayw-ipc",
  "cayw-plugins",
+ "cayw-providers",
  "cayw-remote",
  "cayw-requests",
+ "cayw-sources",
  "futures",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -677,6 +684,23 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "cayw-sources"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cayw-ai",
+ "cayw-bridge",
+ "cayw-codemode",
+ "cayw-workspace",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 

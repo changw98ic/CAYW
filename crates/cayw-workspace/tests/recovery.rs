@@ -384,6 +384,62 @@ async fn corrupt_candidate_does_not_change_user_files() {
     assert!(!temp.path().join("b.json").exists());
 }
 #[tokio::test]
+async fn recursive_remove_failure_and_cancellation_keep_partial_effects_unknown() {
+    for action in [FaultAction::Error, FaultAction::Cancel] {
+        for after_first in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("tree");
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("a"), b"a").unwrap();
+            fs::write(target.join("b"), b"b").unwrap();
+            let workspace = open(temp.path());
+            let snapshot = call(
+                &workspace,
+                "fs.tree",
+                json!({"path":"tree","max_entries":3}),
+            )
+            .await
+            .unwrap();
+            let fault = if after_first {
+                FaultPoint::AfterRemove(0)
+            } else {
+                FaultPoint::BeforeRemove(0)
+            };
+            workspace.inject_fault(fault, action);
+            let error = call(
+                &workspace,
+                "fs.remove",
+                json!({
+                    "path":"tree",
+                    "recursive":true,
+                    "expected_root_sha256":snapshot["root_sha256"],
+                    "max_entries":3,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.outcome_unknown, after_first, "{error:?}");
+            assert!(target.is_dir());
+            assert_eq!(fs::read(target.join("a")).unwrap(), b"a");
+            if after_first {
+                assert!(!target.join("b").exists());
+            } else {
+                assert_eq!(fs::read(target.join("b")).unwrap(), b"b");
+            }
+            let reopened = open(temp.path());
+            let remaining = call(&reopened, "fs.tree", json!({"path":"tree","max_entries":3}))
+                .await
+                .unwrap();
+            assert_eq!(
+                remaining["entries"].as_array().unwrap().len(),
+                if after_first { 2 } else { 3 }
+            );
+            assert!(target.exists(), "opening must not replay the deletion");
+        }
+    }
+}
+
+#[tokio::test]
 async fn crash_worker() {
     let Ok(root) = std::env::var("CAYW_WORKSPACE_CRASH_ROOT") else {
         return;

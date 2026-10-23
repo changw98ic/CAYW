@@ -152,7 +152,7 @@ const proxy = createServer(async (req, res) => {
     }
     let body=''; for await(const chunk of req) body+=chunk;
     const call=req.url==='/api/rpc'?JSON.parse(body):null;
-    if (call?.method==='session.prompt' && mode==='drop') {
+    if (call?.method==='task.enqueue' && mode==='drop') {
       observed.dropped=(observed.dropped??0)+1;
       await trace({client:'browser',method:call.method,params:call.params,forwarded:false,fault:'drop before upstream dispatch'});
       // Send a partial response first so Chromium cannot transparently replay
@@ -170,8 +170,17 @@ const proxy = createServer(async (req, res) => {
         const data=Buffer.concat(chunks);
         const result=call?JSON.parse(data.toString()):null;
         if(call) await trace({client:'browser',method:call.method,params:call.params,status:response.statusCode,body:result});
-        if(call?.method==='session.prompt') lastPromptResult=result;
-        if(call?.method==='session.cancel') observed.cancel=result;
+        if(call?.method==='task.resume') lastPromptResult=result;
+        if(call?.method==='task.enqueue') observed.admitted=result;
+        if(call?.method==='task.get') observed.originalTask=result;
+        if(call?.method==='session.cancel') {
+          const task=observed.originalTask?.result;
+          if(!task || call.params.session_id!==task.session_id || call.params.task_id!==task.id
+              || call.params.worker_id!==task.worker_id || call.params.attempt_id!==task.attempt_id
+              || call.params.fence!==task.fence) throw new Error('Browser cancellation differs from its original Task target');
+          observed.cancelTarget=call.params;
+          observed.cancel=result;
+        }
         if(call?.method==='session.events') observed.lastEvents=result;
         if(call?.method==='session.get') observed.lastSnapshot=result;
         if(call?.method==='session.get' && mode==='early-cancel' && !observed.cancel?.result?.cancelled && !lastPromptResult) {
@@ -193,7 +202,7 @@ const proxy = createServer(async (req, res) => {
           await trace({client:'fault-injection',operation:'withhold-exact-terminal',terminal:withheldTerminal,delivered:delivered.map(record=>record.cursor)});
           res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({result:delivered}));return;
         }
-        if(call?.method==='session.prompt' && ['hold','early-cancel'].includes(mode)) {
+        if(call?.method==='task.resume' && ['hold','early-cancel'].includes(mode)) {
           held={response:res,status:response.statusCode,headers:response.headers,body:data}; return;
         }
         if(call?.method==='session.get' && delayedSnapshot) {

@@ -9,6 +9,7 @@ description = "Headless runtime integrating durable sessions, bounded Luau tools
 
 [features]
 default = []
+fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection"]
 plugins = ["dep:cayw-plugins"]
 strongflow = ["plugins", "cayw-plugins/strongflow"]
 remote = ["dep:cayw-remote"]
@@ -16,6 +17,7 @@ remote = ["dep:cayw-remote"]
 [dependencies]
 async-trait.workspace = true
 async-stream.workspace = true
+base64 = "0.22.1"
 cayw-ai.workspace = true
 cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
 cayw-core = { path = "../cayw-core", version = "0.1.0" }
@@ -24,10 +26,12 @@ cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }
+cayw-providers = { path = "../cayw-providers", version = "0.1.0" }
 cayw-requests = { path = "../cayw-requests", version = "0.1.0" }
 cayw-plugins = { path = "../cayw-plugins", version = "0.1.0", default-features = false, optional = true }
 cayw-remote = { path = "../cayw-remote", version = "0.1.0", optional = true }
 futures.workspace = true
+reqwest.workspace = true
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -37,6 +41,7 @@ tokio-util.workspace = true
 uuid = { version = "=1.27.0", features = ["v4"] }
 
 [dev-dependencies]
+cayw-sources = { path = "../cayw-sources", version = "0.1.0" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 
@@ -45,8 +50,21 @@ name = "cayw"
 path = "src/main.rs"
 
 [[bin]]
+name = "cayw-runtime-mcp-fixture"
+path = "../cayw-bridge/src/bin/local_mcp_fixture.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cayw-runtime-process-fixture"
 path = "tests/fixtures/process.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cayw-runtime-recovery-fixture"
+path = "tests/fixtures/recovery.rs"
+required-features = ["fault-injection"]
 test = false
 doc = false
 

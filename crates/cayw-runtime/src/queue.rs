@@ -2,6 +2,7 @@
 use crate::{
     RuntimeError,
     audit::{read_u64, sql_u64},
+    input::TaskInput,
     lock,
 };
 use cayw_ai::timestamp_ms;
@@ -29,7 +30,7 @@ pub enum TaskState {
 pub struct TaskRecord {
     pub id: String,
     pub session_id: String,
-    pub text: String,
+    pub input: TaskInput,
     pub intent: TaskIntent,
     pub state: TaskState,
     pub queued_at: u64,
@@ -93,7 +94,13 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     Ok(TaskRecord {
         id: row.get(0)?,
         session_id: row.get(1)?,
-        text: row.get(2)?,
+        input: serde_json::from_str(&row.get::<_, String>(2)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
         state: state(&row.get::<_, String>(3)?)?,
         queued_at: read_u64(row, 4)?,
         worker_id: row.get(5)?,
@@ -111,7 +118,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     })
 }
 const COLUMNS: &str =
-    "id,session,text,state,queued_at,worker,attempt,fence,cancel_requested,error,intent";
+    "id,session,input_json,state,queued_at,worker,attempt,fence,cancel_requested,error,intent";
 
 impl Queue {
     pub(crate) fn open(
@@ -127,21 +134,44 @@ impl Queue {
             singleton INTEGER PRIMARY KEY CHECK(singleton=1), concurrency INTEGER NOT NULL, capacity INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS runtime_tasks (
             ticket INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session TEXT NOT NULL,
-            text TEXT NOT NULL, state TEXT NOT NULL, queued_at INTEGER NOT NULL,
+            input_json TEXT NOT NULL, state TEXT NOT NULL, queued_at INTEGER NOT NULL,
             worker TEXT, attempt TEXT, fence INTEGER NOT NULL DEFAULT 0,
-            cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT, intent TEXT NOT NULL DEFAULT '{\"kind\":\"general\"}');
-            DROP INDEX IF EXISTS runtime_one_live_task;
-            CREATE UNIQUE INDEX runtime_one_live_task ON runtime_tasks(session) WHERE state IN ('queued','running','draining');")?;
-        let has_intent: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='intent')",
+            cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT, intent TEXT NOT NULL DEFAULT '{\"kind\":\"general\"}');")?;
+        let (has_intent, has_text, has_input): (bool, bool, bool) = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='intent'),
+             EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='text'),
+             EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='input_json')",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if !has_intent {
             // Existing tasks had no explicit host intent. Migrate them to the
             // canonical General value; never infer permission from prompt text.
             tx.execute_batch("ALTER TABLE runtime_tasks ADD COLUMN intent TEXT NOT NULL DEFAULT '{\"kind\":\"general\"}';")?;
         }
+        if has_text {
+            if has_input {
+                return Err(RuntimeError::InvalidInput(
+                    "runtime task schema has both text and input_json".into(),
+                ));
+            }
+            // One migration replaces the old text-only column. A temporary
+            // default fills existing rows before their real text is copied.
+            tx.execute_batch("ALTER TABLE runtime_tasks ADD COLUMN input_json TEXT NOT NULL DEFAULT '{\"text\":\"\",\"images\":[]}';")?;
+            tx.execute(
+                "UPDATE runtime_tasks SET input_json=json_object('text',text,'images',json('[]'))",
+                [],
+            )?;
+            tx.execute_batch("ALTER TABLE runtime_tasks DROP COLUMN text;")?;
+        } else if !has_input {
+            return Err(RuntimeError::InvalidInput(
+                "runtime task schema has no input_json column".into(),
+            ));
+        }
+        tx.execute_batch(
+            "DROP INDEX IF EXISTS runtime_one_live_task;
+             CREATE UNIQUE INDEX runtime_one_live_task ON runtime_tasks(session) WHERE state IN ('queued','running','draining');",
+        )?;
         tx.execute(
             "INSERT OR IGNORE INTO runtime_queue_config VALUES (1,?1,?2)",
             params![concurrency as i64, capacity as i64],
@@ -161,13 +191,14 @@ impl Queue {
             connection: Mutex::new(db),
         })
     }
-    pub(crate) fn enqueue(
+    pub(crate) fn enqueue_input(
         &self,
         session: &str,
-        text: &str,
+        input: &TaskInput,
         intent: &TaskIntent,
         capacity: usize,
     ) -> Result<TaskRecord, RuntimeError> {
+        let input_json = serde_json::to_string(input)?;
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE session=?1 AND state IN ('queued','running','draining'))",[session],|r|r.get(0))?;
@@ -183,7 +214,7 @@ impl Queue {
             return Err(RuntimeError::QueueFull);
         }
         let id = Uuid::new_v4().to_string();
-        tx.execute("INSERT INTO runtime_tasks(id,session,text,state,queued_at,intent) VALUES (?1,?2,?3,'queued',?4,?5)",params![id,session,text,sql_u64(timestamp_ms())?,serde_json::to_string(intent)?])?;
+        tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,intent) VALUES (?1,?2,?3,'queued',?4,?5)",params![id,session,input_json,sql_u64(timestamp_ms())?,serde_json::to_string(intent)?])?;
         let task = tx.query_row(
             &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE id=?1"),
             [id],
@@ -191,6 +222,54 @@ impl Queue {
         )?;
         tx.commit()?;
         Ok(task)
+    }
+    /// Child work starts as running in one IMMEDIATE transaction. Capacity and
+    /// concurrency are checked without waiting, so the caller can return to its
+    /// parent instead of occupying a queued slot.
+    pub(crate) fn try_start_child(
+        &self,
+        session: &str,
+        text: &str,
+        intent: &TaskIntent,
+        capacity: usize,
+        concurrency: usize,
+    ) -> Result<TaskLease, RuntimeError> {
+        let input = TaskInput {
+            text: text.into(),
+            images: vec![],
+        };
+        let input_json = serde_json::to_string(&input)?;
+        let mut db = lock(&self.connection);
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE session=?1 AND state IN ('queued','running','draining'))",[session],|r|r.get(0))?;
+        if duplicate {
+            return Err(RuntimeError::Busy);
+        }
+        let live: i64 = tx.query_row(
+            "SELECT count(*) FROM runtime_tasks WHERE state IN ('queued','running','draining')",
+            [],
+            |r| r.get(0),
+        )?;
+        if live >= capacity as i64 {
+            return Err(RuntimeError::QueueFull);
+        }
+        let active: i64 = tx.query_row(
+            "SELECT count(*) FROM runtime_tasks WHERE state IN ('running','draining')",
+            [],
+            |r| r.get(0),
+        )?;
+        if active >= concurrency as i64 {
+            return Err(RuntimeError::QueueFull);
+        }
+        let id = Uuid::new_v4().to_string();
+        let worker = Uuid::new_v4().to_string();
+        tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,worker,fence,intent) VALUES (?1,?2,?3,'running',?4,?5,1,?6)",params![id,session,input_json,sql_u64(timestamp_ms())?,worker,serde_json::to_string(intent)?])?;
+        tx.commit()?;
+        Ok(TaskLease {
+            id,
+            worker,
+            fence: 1,
+        })
     }
     pub(crate) fn get(&self, id: &str) -> Result<TaskRecord, RuntimeError> {
         lock(&self.connection)
@@ -243,6 +322,24 @@ impl Queue {
             Some(true) => Err(RuntimeError::Cancelled),
             None => Err(RuntimeError::Worker("task worker was fenced".into())),
         }
+    }
+    /// Model admission/settlement reads this under lifecycle coordination, the
+    /// same fence used by peer cancellation. Cancellation may still be recorded
+    /// while cleanup is draining; never infer it from a local token alone.
+    pub(crate) fn model_cancelled(
+        &self,
+        task: &TaskLease,
+        attempt: &cayw_core::AttemptLease,
+    ) -> Result<bool, RuntimeError> {
+        let cancelled = lock(&self.connection)
+            .query_row(
+                "SELECT cancel_requested FROM runtime_tasks WHERE id=?1 AND session=?2 AND worker=?3 AND attempt=?4 AND fence=?5 AND state IN ('running','draining')",
+                params![task.id, attempt.session_id, task.worker, attempt.attempt_id, sql_u64(task.fence)?],
+                |row| row.get(0),
+            )
+            .optional()?;
+        cancelled
+            .ok_or_else(|| RuntimeError::Worker("model request task identity was fenced".into()))
     }
     pub(crate) fn admit(
         &self,
@@ -315,7 +412,17 @@ impl Queue {
             params![lease.id, lease.worker, sql_u64(lease.fence)?, state, error],
         )?;
         settle(terminal)?;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "queue.task_terminal.commit.before",
+            serde_json::json!({"session_id":session,"task_id":lease.id,"worker_id":lease.worker,"fence":lease.fence,"state":state}),
+        );
         tx.commit()?;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "queue.task_terminal.commit.committed",
+            serde_json::json!({"session_id":session,"task_id":lease.id,"worker_id":lease.worker,"fence":lease.fence,"state":state}),
+        );
         Ok(())
     }
     pub(crate) fn block(&self, lease: &TaskLease, error: &str) -> Result<(), RuntimeError> {
@@ -330,18 +437,34 @@ impl Queue {
         }
         Ok(())
     }
-    pub(crate) fn cancel(&self, session: &str) -> Result<bool, RuntimeError> {
+    pub(crate) fn cancel(&self, target: &crate::CancelTarget) -> Result<bool, RuntimeError> {
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A claimed queue entry still has an original worker that must settle.
-        // Only an unclaimed entry can release capacity immediately.
-        tx.execute(
-            "INSERT INTO runtime_audit(session,task,kind,timestamp,payload)
-             SELECT session,id,'run_cancelled',?2,'{\"worker_id\":null,\"error\":null}'
-             FROM runtime_tasks WHERE session=?1 AND state='queued' AND worker IS NULL",
-            params![session, sql_u64(timestamp_ms())?],
+        let task = tx.query_row(
+            &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE id=?1"),
+            [&target.task_id],
+            row,
         )?;
-        let changed = tx.execute("UPDATE runtime_tasks SET cancel_requested=1,state=CASE WHEN state='queued' AND worker IS NULL THEN 'cancelled' ELSE state END WHERE session=?1 AND state IN ('queued','running','draining')",[session])?;
+        if task.cancel_target() != *target {
+            return Err(RuntimeError::StaleCancellation);
+        }
+        if !matches!(
+            task.state,
+            TaskState::Queued | TaskState::Running | TaskState::Draining
+        ) {
+            return Ok(false);
+        }
+        // A claimed entry retains its original worker and capacity until cleanup.
+        if task.state == TaskState::Queued && task.worker_id.is_none() {
+            tx.execute(
+                "INSERT INTO runtime_audit(session,task,kind,timestamp,payload) VALUES (?1,?2,'run_cancelled',?3,'{\"worker_id\":null,\"error\":null}')",
+                params![target.session_id, target.task_id, sql_u64(timestamp_ms())?],
+            )?;
+        }
+        let changed = tx.execute(
+            "UPDATE runtime_tasks SET cancel_requested=1,state=CASE WHEN state='queued' AND worker IS NULL THEN 'cancelled' ELSE state END WHERE id=?1 AND session=?2 AND worker IS ?3 AND attempt IS ?4 AND fence=?5 AND state IN ('queued','running','draining')",
+            params![target.task_id, target.session_id, target.worker_id, target.attempt_id, sql_u64(target.fence)?],
+        )?;
         tx.commit()?;
         Ok(changed != 0)
     }
@@ -370,12 +493,23 @@ mod tests {
         let owner = Queue::open(&path, 1, 4).unwrap();
         let peer = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
         let lease = owner.claim(&task.id).unwrap();
         assert!(owner.admit(&lease, 1).unwrap());
         owner.attach(&lease, "original-attempt").unwrap();
-        assert!(peer.cancel("session").unwrap());
+        assert!(
+            peer.cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
         owner
             .finish(&lease, TaskTerminal::Completed, None, |_| Ok(()))
             .unwrap();
@@ -395,7 +529,11 @@ mod tests {
                 .finish(&lease, TaskTerminal::Completed, None, |_| Ok(()))
                 .is_err()
         );
-        assert!(!peer.cancel("session").unwrap());
+        assert!(
+            !peer
+                .cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
         assert_eq!(peer.get(&task.id).unwrap(), terminal);
         assert_eq!(audit.events("session", 0, 100).unwrap().len(), 1);
     }
@@ -408,14 +546,26 @@ mod tests {
         let owner = Queue::open(&path, 1, 4).unwrap();
         let peer = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
         let lease = owner.claim(&task.id).unwrap();
         assert!(owner.admit(&lease, 1).unwrap());
         owner
             .finish(&lease, TaskTerminal::Completed, None, |_| Ok(()))
             .unwrap();
-        assert!(!peer.cancel("session").unwrap());
+        assert!(
+            !peer
+                .cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
         assert_eq!(owner.get(&task.id).unwrap().state, TaskState::Completed);
         assert_eq!(
             audit.events("session", 0, 100).unwrap()[0].kind,
@@ -431,11 +581,22 @@ mod tests {
         let owner = Queue::open(&path, 1, 4).unwrap();
         let peer = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
         let lease = owner.claim(&task.id).unwrap();
         assert!(owner.admit(&lease, 1).unwrap());
-        assert!(peer.cancel("session").unwrap());
+        assert!(
+            peer.cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
         owner
             .finish(&lease, TaskTerminal::OutcomeUnknown, None, |terminal| {
                 assert_eq!(
@@ -463,10 +624,25 @@ mod tests {
         let owner = Queue::open(&path, 1, 4).unwrap();
         let peer = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
-        assert!(peer.cancel("session").unwrap());
-        assert!(!peer.cancel("session").unwrap());
+        assert!(
+            peer.cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
+        assert!(
+            !peer
+                .cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
         assert!(owner.claim(&task.id).is_err());
         assert_eq!(owner.get(&task.id).unwrap().state, TaskState::Cancelled);
         assert_eq!(owner.counts().unwrap(), (0, 0));
@@ -484,7 +660,15 @@ mod tests {
         let owner = Queue::open(&path, 1, 4).unwrap();
         let peer = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
         let lease = owner.claim(&task.id).unwrap();
         assert!(owner.admit(&lease, 1).unwrap());
@@ -518,7 +702,15 @@ mod tests {
         let audit = AuditDb::open(&path).unwrap();
         let owner = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
         let lease = owner.claim(&task.id).unwrap();
         assert!(owner.admit(&lease, 1).unwrap());
@@ -621,7 +813,10 @@ mod tests {
                 .any(|event| event.kind.starts_with("run_"))
         );
         assert!(
-            matches!(peer.cancel(&id), Err(RuntimeError::RecoveryRequired { .. })),
+            matches!(
+                peer.cancel(&task.cancel_target()),
+                Err(RuntimeError::RecoveryRequired { .. })
+            ),
             "a committed authority terminal must not acknowledge a conflicting cancellation"
         );
         lock(&rt.inner.queue.connection)
@@ -646,10 +841,21 @@ mod tests {
         let owner = Queue::open(&path, 1, 4).unwrap();
         let peer = Queue::open(&path, 1, 4).unwrap();
         let task = owner
-            .enqueue("session", "synthetic input", &TaskIntent::General, 4)
+            .enqueue_input(
+                "session",
+                &TaskInput {
+                    text: "synthetic input".into(),
+                    images: vec![],
+                },
+                &TaskIntent::General,
+                4,
+            )
             .unwrap();
         let lease = owner.claim(&task.id).unwrap();
-        assert!(peer.cancel("session").unwrap());
+        assert!(
+            peer.cancel(&owner.get(&task.id).unwrap().cancel_target())
+                .unwrap()
+        );
         owner
             .finish(&lease, TaskTerminal::Cancelled, None, |_| Ok(()))
             .unwrap();
@@ -659,5 +865,111 @@ mod tests {
                 .is_err()
         );
         assert_eq!(audit.events("session", 0, 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_text_column_migrates_once_into_task_input_json() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("queue.sqlite");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE runtime_queue_config (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    concurrency INTEGER NOT NULL, capacity INTEGER NOT NULL);
+                 CREATE TABLE runtime_tasks (
+                    ticket INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                    session TEXT NOT NULL, text TEXT NOT NULL, state TEXT NOT NULL,
+                    queued_at INTEGER NOT NULL, worker TEXT, attempt TEXT,
+                    fence INTEGER NOT NULL DEFAULT 0,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0, error TEXT,
+                    intent TEXT NOT NULL DEFAULT '{\"kind\":\"general\"}');
+                 INSERT INTO runtime_queue_config VALUES (1,1,4);
+                 INSERT INTO runtime_tasks(id,session,text,state,queued_at,intent)
+                 VALUES ('legacy','session','legacy text','queued',1,'{\"kind\":\"general\"}');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let queue = Queue::open(&path, 1, 4).unwrap();
+        let tasks = queue.list("session").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].input,
+            TaskInput {
+                text: "legacy text".into(),
+                images: vec![],
+            }
+        );
+        let db = Connection::open(&path).unwrap();
+        let text_columns: i64 = db
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('runtime_tasks') WHERE name='text'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text_columns, 0);
+        let input_columns: i64 = db
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('runtime_tasks') WHERE name='input_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(input_columns, 1);
+        drop(db);
+        drop(queue);
+
+        // Reopening performs no second migration and keeps the same record.
+        let reopened = Queue::open(&path, 1, 4).unwrap();
+        assert_eq!(reopened.list("session").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn try_start_child_starts_running_without_waiting_and_enforces_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("queue.sqlite");
+        let _audit = AuditDb::open(&path).unwrap();
+        let queue = Queue::open(&path, 2, 2).unwrap();
+
+        let first = queue
+            .try_start_child("child-a", "first child", &TaskIntent::General, 2, 1)
+            .unwrap();
+        assert_eq!(first.fence, 1);
+        let record = queue.get(&first.id).unwrap();
+        assert_eq!(record.state, TaskState::Running);
+        assert_eq!(record.worker_id.as_deref(), Some(first.worker.as_str()));
+        assert_eq!(
+            record.input,
+            TaskInput {
+                text: "first child".into(),
+                images: vec![],
+            }
+        );
+        assert!(matches!(
+            queue.try_start_child("child-b", "blocked", &TaskIntent::General, 2, 1),
+            Err(RuntimeError::QueueFull)
+        ));
+        assert!(matches!(
+            queue.try_start_child("child-a", "duplicate", &TaskIntent::General, 2, 2),
+            Err(RuntimeError::Busy)
+        ));
+        queue
+            .finish(&first, TaskTerminal::Completed, None, |_| Ok(()))
+            .unwrap();
+
+        let second = queue
+            .try_start_child("child-b", "second child", &TaskIntent::General, 2, 2)
+            .unwrap();
+        let third = queue
+            .try_start_child("child-c", "third child", &TaskIntent::General, 2, 2)
+            .unwrap();
+        assert_eq!(second.fence, 1);
+        assert_eq!(third.fence, 1);
+        assert!(matches!(
+            queue.try_start_child("child-d", "fourth child", &TaskIntent::General, 2, 2),
+            Err(RuntimeError::QueueFull)
+        ));
     }
 }

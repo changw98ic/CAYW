@@ -85,14 +85,13 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     let mut ids = Vec::new();
     let blocker_id = runtime.create(Some("blocker 0".into())).unwrap().id;
     let client = owner.clone();
-    let run_id = blocker_id.clone();
-    ids.push(blocker_id.clone());
+    let admitted = runtime
+        .enqueue(&blocker_id, "hold concurrency slot")
+        .unwrap();
+    ids.push(admitted.id.clone());
     blockers.push(tokio::spawn(async move {
         client
-            .request(
-                "session.prompt",
-                json!({"session_id":run_id,"text":"hold concurrency slot"}),
-            )
+            .request("task.resume", json!({"task_id":admitted.id}))
             .await
     }));
     timeout(Duration::from_secs(8), async {
@@ -141,11 +140,27 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     .unwrap();
     assert!(runtime.get(&id).unwrap().attempt.is_none());
     assert_eq!(runtime.tasks(&id).unwrap()[0].state, TaskState::Queued);
+    let admitted_id = loop {
+        let update = next(&mut transport, "observe queued task admission").await;
+        let admitted_id = match &update {
+            Update::TaskAdmitted {
+                session_id,
+                task_id,
+            } if session_id == &id => Some(task_id.clone()),
+            _ => None,
+        };
+        let commands = driver.update(&mut app, update);
+        driver.dispatch(&mut app, &transport, commands);
+        if let Some(task_id) = admitted_id {
+            break task_id;
+        }
+    };
     let commands = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert_eq!(
         commands,
         vec![Command::Cancel {
-            session_id: id.clone()
+            session_id: id.clone(),
+            task_id: admitted_id,
         }]
     );
     driver.dispatch(&mut app, &transport, commands);
@@ -195,8 +210,9 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
     );
     transport.shutdown().await;
     for id in ids {
+        let target = runtime.task(&id).unwrap().cancel_target();
         owner
-            .request("session.cancel", json!({"session_id":id}))
+            .request("session.cancel", serde_json::to_value(target).unwrap())
             .await
             .unwrap();
     }
@@ -226,6 +242,14 @@ impl Provider for PagedStream {
         if self.requests.fetch_add(1, Ordering::SeqCst) == 0 {
             message.content = vec![Content::text("committed history")];
             message.stop_reason = StopReason::Stop;
+            // Synthetic counters for accounting, not tokenizer or billing data.
+            message.usage = cayw_ai::Usage {
+                input: 4,
+                output: 4,
+                total_tokens: 8,
+                ..Default::default()
+            };
+            message.usage_status = cayw_ai::UsageStatus::Reported;
             return Box::pin(futures::stream::iter(vec![AssistantEvent::Done {
                 message,
             }]));
@@ -348,13 +372,14 @@ async fn catch_up(client: &Client, app: &mut App) -> Vec<(u64, usize)> {
 async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_history() {
     let directory = tempfile::tempdir().unwrap();
     let more = CancellationToken::new();
+    let provider = Arc::new(PagedStream {
+        requests: AtomicUsize::new(0),
+        more: more.clone(),
+    });
     let runtime = Runtime::open(
         directory.path().join("runtime.db"),
         directory.path(),
-        Arc::new(PagedStream {
-            requests: AtomicUsize::new(0),
-            more: more.clone(),
-        }),
+        provider.clone(),
         Model::new("offline-tui", "paged-review"),
         RuntimeConfig::default(),
     )
@@ -371,17 +396,20 @@ async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_hi
         )
         .await
         .unwrap();
+    let ledger = runtime.model_requests(&id).unwrap();
+    assert_eq!(ledger.settled_tokens, 8);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+    let admitted = runtime.enqueue(&id, "stream pages").unwrap();
     let runner = client.clone();
-    let run_id = id.clone();
+    let task_id = admitted.id.clone();
     let run = tokio::spawn(async move {
         runner
-            .request(
-                "session.prompt",
-                json!({"session_id":run_id,"text":"stream pages"}),
-            )
+            .request("task.resume", json!({"task_id":task_id}))
             .await
     });
     let snapshot = wait_partial(&client, &id, "paged fixture 110 你好").await;
+    assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
     let committed = snapshot["messages"].clone();
     let snapshot_cursor = snapshot["cursor"].as_u64().unwrap();
     assert!(snapshot_cursor > 100);
@@ -438,8 +466,9 @@ async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_hi
         app.selected().unwrap().cursor,
         app.selected().unwrap().streaming_text
     );
+    let target = runtime.task(&admitted.id).unwrap().cancel_target();
     client
-        .request("session.cancel", json!({"session_id":id}))
+        .request("session.cancel", serde_json::to_value(target).unwrap())
         .await
         .unwrap();
     let terminal = timeout(Duration::from_secs(8), run)
