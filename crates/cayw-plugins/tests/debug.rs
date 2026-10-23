@@ -1,6 +1,6 @@
 #![cfg(feature = "debug")]
 use cayw_plugins::{debug::*, *};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 fn record(n: u64) -> BTreeMap<String, Value> {
@@ -94,7 +94,10 @@ fn source(cursor: u64) -> SourceEvent {
             ("tool".into(), json!("fs.read")),
             ("call_id".into(), json!(format!("call-{cursor}"))),
             ("failed".into(), json!(false)),
-            ("conversation".into(), json!([{"role":"user","text":"read the file"}])),
+            (
+                "conversation".into(),
+                json!([{"role":"user","text":"read the file"}]),
+            ),
             ("api_key".into(), json!("hidden")),
         ]
         .into(),
@@ -135,7 +138,10 @@ async fn follow_copies_runtime_events_and_disable_stops_copying() {
 async fn sensitive_keys_are_removed_without_caller_classification() {
     let (debug, mut reader) = DebugLog::channel(DebugConfig::default()).unwrap();
     let fields = BTreeMap::from([
-        ("conversation".into(), json!([{"role":"user","text":"read the file"}])),
+        (
+            "conversation".into(),
+            json!([{"role":"user","text":"read the file"}]),
+        ),
         ("reason".into(), json!("read failed: missing file")),
         (
             "data".into(),
@@ -150,7 +156,10 @@ async fn sensitive_keys_are_removed_without_caller_classification() {
     assert_eq!(event.fields["reason"], "read failed: missing file");
     assert_eq!(event.fields["data"]["safe"], 1);
     assert_eq!(event.fields["data"]["nested"][0]["api_key"], "[redacted]");
-    assert_eq!(event.fields["data"]["nested"][0]["Authorization"], "[redacted]");
+    assert_eq!(
+        event.fields["data"]["nested"][0]["Authorization"],
+        "[redacted]"
+    );
     assert_eq!(event.fields["data"]["nested"][0]["reasoning"], "[redacted]");
     assert_eq!(event.fields["password"], "[redacted]");
 }

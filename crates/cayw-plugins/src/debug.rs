@@ -168,7 +168,8 @@ impl DebugLog {
                 })
                 .collect(),
         };
-        if serde_json::to_vec(&record).map_or(true, |bytes| bytes.len() > self.config.max_record_bytes)
+        if serde_json::to_vec(&record)
+            .map_or(true, |bytes| bytes.len() > self.config.max_record_bytes)
         {
             self.counters.oversize.fetch_add(1, Ordering::Relaxed);
             return Err(PublishOutcome::DroppedOversize);

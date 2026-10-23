@@ -4,12 +4,12 @@
 mod external;
 mod registry;
 
+#[cfg(feature = "debug")]
+pub mod debug;
 #[cfg(feature = "fusion")]
 pub mod fusion;
 #[cfg(feature = "jev")]
 pub mod jev;
-#[cfg(feature = "debug")]
-pub mod debug;
 #[cfg(feature = "strongflow")]
 pub mod strongflow;
 
