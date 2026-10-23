@@ -18,7 +18,12 @@ async function page(t, handler) {
     for await (const chunk of req) body += chunk;
     const call = JSON.parse(body);
     calls.push(call);
-    let result = await handler(call.method, call.params);
+    let result;
+    if (call.method === 'task.enqueue') {
+      result = { id: 'original-task', session_id: call.params.session_id, state: 'queued', worker_id: null, attempt_id: null, fence: 0 };
+    } else if (call.method === 'task.resume') result = await handler('session.prompt', call.params);
+    else if (call.method === 'task.get') result = { id: 'original-task', session_id: 's1', state: 'running', worker_id: 'worker-1', attempt_id: 'attempt-1', fence: 7 };
+    else result = await handler(call.method, call.params);
     if (result?.disconnect) { req.socket.destroy(); return; }
     if (call.method === 'runtime.health') result = { status: 'ok', protocol_version: 3 };
     const error = result?.error;
@@ -114,7 +119,7 @@ test('unknown prompt stays locked through old idle, unrelated terminal and uncov
   current = snapshot({ cursor: 15 });
   await app.poll();
   assert.equal(app.ui.prompt.disabled, true, 'no attempt fact correlates an unknown prompt to its request');
-  assert.equal(app.calls.filter(call => call.method === 'session.prompt').length, 1);
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
 });
 
 test('successful prompt response waits for consumed durable terminal before next send', async t => {
@@ -223,7 +228,7 @@ test('a dropped HTTP write retains an uncertain lock even after disconnect and r
   assert.equal(app.ui.prompt.disabled,true,'reconnection is not settlement');
   await app.poll();
   assert.equal(app.ui.prompt.disabled,true);
-  assert.equal(app.calls.filter(call=>call.method==='session.prompt').length,1);
+  assert.equal(app.calls.filter(call=>call.method==='task.resume').length,1);
 });
 
 test('cancel response is not execution settlement and cannot unlock a pending prompt', async t => {
@@ -237,7 +242,10 @@ test('cancel response is not execution settlement and cannot unlock a pending pr
     if (method === 'session.get') return current;
     if (method === 'session.events') return events.filter(event=>event.cursor>params.after);
     if (method === 'session.prompt') { started(); return await new Promise(resolve=>{resolvePrompt=resolve;}); }
-    if (method === 'session.cancel') return {cancelled:true};
+    if (method === 'session.cancel') {
+      assert.deepEqual(params, {session_id:'s1',task_id:'original-task',worker_id:'worker-1',attempt_id:'attempt-1',fence:7});
+      return {cancelled:true};
+    }
   });
   const pending = app.send();
   await promptStarted;
@@ -332,7 +340,7 @@ test('a lost prompt response cannot borrow the first execution from another clie
   assert.match(app.ui['blocked-text'].textContent, /事件记录/);
   assert.match(app.ui['blocked-text'].textContent, /新建会话/);
   assert.equal(app.ui['create-button'].disabled, false, 'independent work still has a usable route');
-  assert.equal(app.calls.filter(call => call.method === 'session.prompt').length, 1);
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
 });
 
 test('a no-op cancel after the terminal cannot strand a delayed successful prompt receipt', async t => {
@@ -362,7 +370,7 @@ test('a no-op cancel after the terminal cannot strand a delayed successful promp
   assert.equal(app.ui.prompt.disabled, false, 'cancelled:false must not demand a new execution terminal');
   assert.equal(app.ui['cancel-button'].disabled, true);
   assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
-  assert.equal(app.calls.filter(call => call.method === 'session.prompt').length, 1);
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
 });
 
 for (const order of ['receipt-first', 'events-first', 'cancel-receipt-last']) {
@@ -407,7 +415,7 @@ for (const order of ['receipt-first', 'events-first', 'cancel-receipt-last']) {
     await app.poll();
     assert.equal(app.ui['open-fork'].disabled, false, 'the settled cancel must not strand a later frozen session');
     assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
-    assert.equal(app.calls.filter(call => call.method === 'session.prompt').length, 1);
+    assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
   });
 }
 
@@ -427,7 +435,10 @@ async function delayedEarlyCancel(t, otherCount = 121, replay = records => recor
       return params.limit === 1 ? replay(records) : records;
     }
     if (method === 'session.prompt') { entered(); return new Promise(resolve => { releasePrompt = resolve; }); }
-    if (method === 'session.cancel') return {cancelled:true};
+    if (method === 'session.cancel') {
+      assert.deepEqual(params, {session_id:'s1',task_id:'original-task',worker_id:'worker-1',attempt_id:'attempt-1',fence:7});
+      return {cancelled:true};
+    }
   });
   const sending = app.send();
   await started;
@@ -455,7 +466,7 @@ for (const count of [119, 120, 121, 4096]) {
     const read = app.calls.findLastIndex(call => call.method === 'session.events' && call.params.after === 11 && call.params.limit === 1);
     assert.ok(read >= 0, 'retrieve only the receipt cursor, without replaying intervening history');
     assert.ok(app.calls.slice(read + 1).some(call => call.method === 'session.get'), 'request idle after retrieving the terminal');
-    assert.equal(app.calls.filter(call => call.method === 'session.prompt').length, 1);
+    assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
     assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
     assert.match(app.ui['event-count'].textContent, /^120 ·/);
   });
@@ -483,7 +494,7 @@ for (const [name, corrupt] of [
     invalid = false;
     await app.poll();
     assert.equal(app.ui.prompt.disabled, false, 'a later valid read can recover without resending any write');
-    assert.equal(app.calls.filter(call => call.method === 'session.prompt').length, 1);
+    assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
     assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
   });
 }

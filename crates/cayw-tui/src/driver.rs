@@ -76,6 +76,10 @@ impl Driver {
                 app.set_disconnected(&reason);
                 vec![]
             }
+            Update::TaskAdmitted {
+                session_id,
+                task_id,
+            } => app.task_admitted(&session_id, &task_id),
             Update::Events { watch, result } => {
                 if app
                     .selected()

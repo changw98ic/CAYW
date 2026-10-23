@@ -180,16 +180,36 @@ impl SessionView {
     }
 }
 
-impl Runtime {
-    pub(crate) fn binding_at(
+// Keep only the most recently read session prefix. Core events are append-only;
+// every caller still supplies a fresh snapshot and checks live plugin identity.
+#[derive(Default)]
+pub(crate) struct BindingCache(std::sync::Mutex<Option<BindingPrefix>>);
+
+#[derive(Clone)]
+struct BindingPrefix {
+    session: String,
+    cursor: u64,
+    binding: Option<BindingRecord>,
+}
+
+impl BindingCache {
+    fn read(
         &self,
         snapshot: &SessionSnapshot,
+        mut events: impl FnMut(u64, usize) -> Result<Vec<cayw_core::EventRecord>, RuntimeError>,
     ) -> Result<Option<BindingRecord>, RuntimeError> {
-        let mut cursor = 0;
-        let mut binding = None;
+        let prefix = lock(&self.0)
+            .as_ref()
+            .filter(|prefix| prefix.session == snapshot.id && prefix.cursor <= snapshot.cursor)
+            .cloned();
+        let (mut cursor, mut binding) = match prefix {
+            Some(prefix) if prefix.cursor == snapshot.cursor => return Ok(prefix.binding),
+            Some(prefix) => (prefix.cursor, prefix.binding),
+            None => (0, None),
+        };
         while cursor < snapshot.cursor {
             let limit = (snapshot.cursor - cursor).min(cayw_core::MAX_EVENT_PAGE as u64) as usize;
-            for record in self.inner.store.events(&snapshot.id, cursor, limit)? {
+            for record in events(cursor, limit)? {
                 cursor = record.cursor;
                 // Decisions recorded before the module -> plugin rename are not
                 // replayed; skipping them would silently thaw a frozen session.
@@ -224,7 +244,34 @@ impl Runtime {
                 }
             }
         }
+        // Do not hold the cache lock during store reads, and do not let an older
+        // concurrent snapshot replace the newer prefix for the same session.
+        let mut cached = lock(&self.0);
+        if cached
+            .as_ref()
+            .is_none_or(|prefix| prefix.session != snapshot.id || prefix.cursor <= cursor)
+        {
+            *cached = Some(BindingPrefix {
+                session: snapshot.id.clone(),
+                cursor,
+                binding: binding.clone(),
+            });
+        }
         Ok(binding)
+    }
+}
+
+impl Runtime {
+    pub(crate) fn binding_at(
+        &self,
+        snapshot: &SessionSnapshot,
+    ) -> Result<Option<BindingRecord>, RuntimeError> {
+        self.inner.binding_cache.read(snapshot, |after, limit| {
+            self.inner
+                .store
+                .events(&snapshot.id, after, limit)
+                .map_err(Into::into)
+        })
     }
 
     pub(crate) fn record_binding(
@@ -265,7 +312,11 @@ impl Runtime {
                 .store(true, std::sync::atomic::Ordering::Release);
             run.cancel.cancel();
         }
-        let _ = self.inner.queue.cancel(session);
+        if let Ok(tasks) = self.inner.queue.list(session) {
+            for task in tasks {
+                let _ = self.inner.queue.cancel(&task.cancel_target());
+            }
+        }
         self.inner.approvals.notify_waiters();
         self.inner.changed.notify_waiters();
     }
@@ -274,7 +325,9 @@ impl Runtime {
         if let Some(run) = lock(&self.inner.active).get(session) {
             run.cancel.cancel();
         }
-        self.inner.queue.cancel(session)?;
+        for task in self.inner.queue.list(session)? {
+            self.inner.queue.cancel(&task.cancel_target())?;
+        }
         self.inner
             .journal
             .revoke_session(session, "plugin binding frozen")?;
@@ -330,4 +383,208 @@ impl Runtime {
 
 pub(crate) fn cursor_conflict(error: &CoreError) -> bool {
     matches!(error, CoreError::InvalidEvent(reason) if reason == "Host decision requires the current session cursor")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cayw_core::SessionStore;
+    use std::cell::RefCell;
+
+    fn frozen_binding() -> BindingRecord {
+        BindingRecord {
+            manifest: serde_json::json!({"name": "fixture", "version": "1.0.0"}),
+            registry_id: uuid::Uuid::new_v4().to_string(),
+            generation: 1,
+            reason: Some("frozen by the test host".into()),
+            strongflow: None,
+        }
+    }
+
+    fn read(
+        cache: &BindingCache,
+        store: &SessionStore,
+        snapshot: &SessionSnapshot,
+        pages: &RefCell<Vec<(u64, usize)>>,
+    ) -> Result<Option<BindingRecord>, RuntimeError> {
+        cache.read(snapshot, |after, limit| {
+            pages.borrow_mut().push((after, limit));
+            store.events(&snapshot.id, after, limit).map_err(Into::into)
+        })
+    }
+
+    fn append(
+        store: &SessionStore,
+        snapshot: &SessionSnapshot,
+        kind: &str,
+        value: Value,
+    ) -> SessionSnapshot {
+        store
+            .append_control_event(&snapshot.id, snapshot.cursor, None, "host", kind, value)
+            .unwrap();
+        store.snapshot(&snapshot.id).unwrap()
+    }
+
+    #[test]
+    fn unchanged_binding_cursor_does_not_read_the_log_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let snapshot = store.create_session("unchanged").unwrap();
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        assert_eq!(read(&cache, &store, &snapshot, &pages).unwrap(), None);
+        assert!(!pages.borrow().is_empty());
+        pages.borrow_mut().clear();
+        assert_eq!(read(&cache, &store, &snapshot, &pages).unwrap(), None);
+        assert!(
+            pages.borrow().is_empty(),
+            "unchanged history was read again"
+        );
+    }
+
+    #[test]
+    fn appended_binding_reads_only_the_new_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let before = store.create_session("delta").unwrap();
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        read(&cache, &store, &before, &pages).unwrap();
+        let binding = frozen_binding();
+        let after = append(
+            &store,
+            &before,
+            "plugin_frozen",
+            serde_json::json!({"binding": binding}),
+        );
+        pages.borrow_mut().clear();
+        assert_eq!(read(&cache, &store, &after, &pages).unwrap(), Some(binding));
+        assert_eq!(*pages.borrow(), vec![(before.cursor, 1)]);
+    }
+
+    #[test]
+    fn older_snapshot_never_reads_a_newer_binding_or_replaces_its_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let before = store.create_session("older").unwrap();
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        read(&cache, &store, &before, &pages).unwrap();
+        let binding = frozen_binding();
+        let after = append(
+            &store,
+            &before,
+            "plugin_frozen",
+            serde_json::json!({"binding": binding}),
+        );
+        assert_eq!(
+            read(&cache, &store, &after, &pages).unwrap(),
+            Some(binding.clone())
+        );
+        assert_eq!(read(&cache, &store, &before, &pages).unwrap(), None);
+        pages.borrow_mut().clear();
+        assert_eq!(read(&cache, &store, &after, &pages).unwrap(), Some(binding));
+        assert!(
+            pages.borrow().is_empty(),
+            "an older read replaced the newer prefix"
+        );
+    }
+
+    #[test]
+    fn an_older_in_flight_read_cannot_replace_a_newer_cached_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let before = store.create_session("interleaved").unwrap();
+        let binding = frozen_binding();
+        let after = append(
+            &store,
+            &before,
+            "plugin_frozen",
+            serde_json::json!({"binding": binding}),
+        );
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        let older = cache
+            .read(&before, |cursor, limit| {
+                // Complete the newer read while the older store read is in flight.
+                assert_eq!(read(&cache, &store, &after, &pages)?, Some(binding.clone()));
+                store.events(&before.id, cursor, limit).map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(older, None);
+        pages.borrow_mut().clear();
+        assert_eq!(read(&cache, &store, &after, &pages).unwrap(), Some(binding));
+        assert!(
+            pages.borrow().is_empty(),
+            "an older in-flight read replaced the newer prefix"
+        );
+    }
+
+    #[test]
+    fn invalid_binding_in_a_delta_is_rejected_on_every_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let before = store.create_session("invalid").unwrap();
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        read(&cache, &store, &before, &pages).unwrap();
+        let mut invalid = frozen_binding();
+        invalid.generation = 0;
+        let invalid = append(
+            &store,
+            &before,
+            "plugin_checkpoint",
+            serde_json::json!({"binding": invalid}),
+        );
+        let after = append(
+            &store,
+            &invalid,
+            "plugin_frozen",
+            serde_json::json!({"binding": frozen_binding()}),
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                read(&cache, &store, &after, &pages),
+                Err(RuntimeError::Core(CoreError::CorruptStore(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn later_pre_rename_decision_is_never_hidden_by_a_cached_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let before = store.create_session("legacy").unwrap();
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        read(&cache, &store, &before, &pages).unwrap();
+        let after = append(&store, &before, "module_frozen", serde_json::json!({}));
+        for _ in 0..2 {
+            assert!(matches!(
+                read(&cache, &store, &after, &pages),
+                Err(RuntimeError::Core(CoreError::MigrationRequired(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn another_session_at_the_same_cursor_cannot_reuse_a_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let frozen = store.create_session("frozen").unwrap();
+        let frozen = append(
+            &store,
+            &frozen,
+            "plugin_frozen",
+            serde_json::json!({"binding": frozen_binding()}),
+        );
+        let ordinary = store.create_session("ordinary").unwrap();
+        let ordinary = append(&store, &ordinary, "fixture_progress", serde_json::json!({}));
+        assert_eq!(ordinary.cursor, frozen.cursor);
+        let cache = BindingCache::default();
+        let pages = RefCell::new(vec![]);
+        assert!(read(&cache, &store, &frozen, &pages).unwrap().is_some());
+        assert_eq!(read(&cache, &store, &ordinary, &pages).unwrap(), None);
+        assert!(read(&cache, &store, &frozen, &pages).unwrap().is_some());
+    }
 }

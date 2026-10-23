@@ -37,7 +37,8 @@ fn tasks(
         || task.worker_id.as_ref() != Some(&lease.worker_id)
         || task.state != state
         || task.id.is_empty()
-        || task.text
+        || !task.input.images.is_empty()
+        || task.input.text
             != report.specification["input"]["prompt"]
                 .as_str()
                 .ok_or("prompt absent")?

@@ -81,8 +81,8 @@ const attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-const readMethods = new Set(['runtime.health', 'devices.list', 'devices.bind_status', 'device.binding.status', 'server.auth.status', 'projects.list', 'projects.browse', 'skills.catalog', 'mcp.catalog', 'session.list', 'session.get', 'session.events', 'session.grants', 'session.audit', 'capabilities.list']);
-const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'cancelled']);
+const readMethods = new Set(['runtime.health', 'devices.list', 'devices.bind_status', 'device.binding.status', 'server.auth.status', 'projects.list', 'projects.browse', 'skills.catalog', 'mcp.catalog', 'models.config', 'session.list', 'session.get', 'session.events', 'session.grants', 'session.audit', 'session.plan', 'session.questions', 'session.pending_questions', 'task.get', 'capabilities.list']);
+const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'needs_reconciliation_outcome_unknown', 'stale_approval', 'stale_cancellation', 'cancelled']);
 
 export class RpcError extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -112,7 +112,7 @@ export function noteSessionError(view, error) {
   const faults = { ...view.faults };
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
   if (error.code === 'session_frozen') faults.frozen = { after };
-  if ((error.code === 'needs_reconciliation' || error.code === 'tool_outcome_unknown') && !faults.reconciliation) faults.reconciliation = { after, callIds: [], terminal: null };
+  if ((error.code === 'needs_reconciliation' || error.code === 'needs_reconciliation_outcome_unknown' || error.code === 'tool_outcome_unknown') && !faults.reconciliation) faults.reconciliation = { after, callIds: [], terminal: null };
   return { ...view, faults };
 }
 

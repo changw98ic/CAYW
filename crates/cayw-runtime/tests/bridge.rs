@@ -117,6 +117,9 @@ impl SourceHandle for Source {
             (_, Behavior::Large(bytes)) => json!("x".repeat(*bytes)),
             (SourceOperation::InvokeTool { arguments, .. }, _) => json!({"echo":arguments["text"]}),
             (SourceOperation::ReadSkill { .. }, _) => json!("fixture skill body"),
+            (SourceOperation::ReadResource { uri }, _) => {
+                json!({"uri":uri,"mime_type":"text/markdown","text":"fixture resource body"})
+            }
             (SourceOperation::Search { arguments }, _) => json!({"matches":[arguments["query"]]}),
         };
         Ok(SourceReply {
@@ -148,6 +151,7 @@ fn manifest() -> Manifest {
             description: "Fixed local skill".into(),
             content_sha256: content_sha256("fixture skill body"),
         }],
+        resources: Vec::new(),
         search: true,
     }
 }
@@ -336,18 +340,63 @@ async fn interleaved_cells_retain_distinct_execution_parent_and_source_hash_on_o
         fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
             let stage = self.stage.fetch_add(1, Ordering::AcqRel);
             let mut message = cayw_ai::AssistantMessage::new(&request.model);
+            // Fixed synthetic counters exercise accounting, not tokenization or billing.
+            message.usage.input = 4;
+            message.usage.output = 4;
+            message.usage.update_total();
+            message.usage_status = cayw_ai::UsageStatus::Reported;
             if stage < 2 {
                 message.stop_reason = cayw_ai::StopReason::ToolUse;
                 let text = if stage == 0 { "first" } else { "second" };
                 message.content.push(cayw_ai::Content::ToolCall(cayw_ai::ToolCall::new(format!("parent-{stage}"), "execute_code", json!({"action":"exec","script":format!("return cayw.call('mcp.call',{{server='local',tool='echo',arguments={{text='{text}'}}}})"),"yield_time_ms":1,"max_output_tokens":1024}))));
             } else {
-                // The first cell still owns the Host lane. Wait for both source
-                // calls before ending the task and closing its active cells.
-                message = cayw_runtime::fixture::script_response(
-                    &request,
-                    "return 1",
-                    &format!("wait-{stage}"),
-                );
+                // Both execs are outstanding: one cell started first and the
+                // other started before the first was waited. Track every real
+                // cell page independently so each VM is resumed until all of
+                // its output is read and it is no longer alive.
+                let mut pages = std::collections::BTreeMap::new();
+                for prior in &request.messages {
+                    let cayw_ai::Message::ToolResult(result) = prior else {
+                        continue;
+                    };
+                    if result.tool_name != "execute_code" {
+                        continue;
+                    }
+                    let Some(page) = result.structured_content.as_ref().and_then(|value| {
+                        serde_json::from_value::<cayw_cells::CellPage>(value.clone()).ok()
+                    }) else {
+                        continue;
+                    };
+                    pages.insert(page.cell_id.clone(), page);
+                }
+                let pending = pages
+                    .values()
+                    .find(|page| page.vm_alive || page.has_more || !page.status.is_terminal());
+                match pending {
+                    Some(page) => {
+                        message.stop_reason = cayw_ai::StopReason::ToolUse;
+                        message
+                            .content
+                            .push(cayw_ai::Content::ToolCall(cayw_ai::ToolCall::new(
+                                format!("wait-{}-{}-{}", page.cell_id, page.next_cursor, stage),
+                                "execute_code",
+                                json!({
+                                    "action":"wait",
+                                    "cell_id":page.cell_id,
+                                    "cursor":page.next_cursor,
+                                    "yield_time_ms":1000,
+                                    "max_output_tokens":1024,
+                                    "continue_execution":true,
+                                }),
+                            )));
+                    }
+                    None => {
+                        message
+                            .content
+                            .push(cayw_ai::Content::text("both cells completed"));
+                        message.stop_reason = cayw_ai::StopReason::Stop;
+                    }
+                }
             }
             Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
         }
@@ -581,17 +630,15 @@ async fn source_cancellation_retains_unknown_across_reopen_and_rejects_wrong_pro
         None,
     );
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "cancel source").unwrap();
     let run_rt = rt.clone();
-    let run_id = id.clone();
-    let run = tokio::spawn(async move {
-        run_rt
-            .prompt(&run_id, "cancel source", CancellationToken::new())
-            .await
-    });
+    let task_id = admitted.id.clone();
+    let run = tokio::spawn(async move { run_rt.resume(&task_id, CancellationToken::new()).await });
     tokio::time::timeout(Duration::from_secs(8), state.entered.notified())
         .await
         .unwrap();
-    rt.cancel(&id).unwrap();
+    rt.cancel(&rt.task(&admitted.id).unwrap().cancel_target())
+        .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(8), run)
         .await
         .unwrap()
@@ -612,6 +659,7 @@ async fn source_cancellation_retains_unknown_across_reopen_and_rejects_wrong_pro
             &id,
             CapabilityReconciliation {
                 key: call.key.clone(),
+                expected: Box::new(cayw_core::ReconciliationOrigin::from(call)),
                 actor: "fixture-host".into(),
                 evidence: "wrong catalog cannot reconcile".into(),
                 outcome: CapabilityOutcome::NotExecuted {

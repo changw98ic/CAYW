@@ -93,6 +93,7 @@ pub enum Command {
     },
     Cancel {
         session_id: String,
+        task_id: String,
     },
     Decide {
         session_id: String,
@@ -117,7 +118,14 @@ impl Command {
                 "session.prompt",
                 json!({"session_id":session_id,"text":text}),
             ),
-            Self::Cancel { session_id } => ("session.cancel", json!({"session_id":session_id})),
+            // Transport resolves only this retained Task into its full queue identity.
+            Self::Cancel {
+                session_id,
+                task_id,
+            } => (
+                "session.cancel",
+                json!({"session_id":session_id,"task_id":task_id}),
+            ),
             Self::Decide {
                 session_id,
                 approval_id,
@@ -280,6 +288,8 @@ pub struct SessionView {
     pub synced: bool,
     pub request_pending: bool,
     pub cancel_pending: bool,
+    /// Identity returned by this client's enqueue; never inferred from a Session lease.
+    original_task_id: Option<String>,
     decisions_pending: BTreeSet<String>,
     pending_prompt: Option<PendingPrompt>,
     active_attempt: Option<AttemptIdentity>,
@@ -349,6 +359,7 @@ impl SessionView {
             synced: true,
             request_pending: false,
             cancel_pending: false,
+            original_task_id: None,
             decisions_pending: BTreeSet::new(),
             pending_prompt: None,
             active_attempt,
@@ -750,6 +761,7 @@ impl App {
                 .filter(|cursor| *cursor > incoming.snapshot_cursor);
             incoming.synced = incoming.refresh_after.is_none();
             incoming.pending_prompt = old.pending_prompt.clone();
+            incoming.original_task_id = old.original_task_id.clone();
             incoming.request_pending = old.request_pending;
             incoming.cancel_pending = old.cancel_pending && incoming.state != "idle";
             incoming.decisions_pending = old
@@ -909,6 +921,21 @@ impl App {
         }
     }
 
+    pub fn task_admitted(&mut self, id: &str, task_id: &str) -> Vec<Command> {
+        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else {
+            return vec![];
+        };
+        session.original_task_id = Some(task_id.into());
+        if session.cancel_pending {
+            vec![Command::Cancel {
+                session_id: id.into(),
+                task_id: task_id.into(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
     pub fn prompt_completed(&mut self, id: &str) {
         self.clear_admitted_draft(id);
         if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
@@ -1025,9 +1052,14 @@ impl App {
                             || matches!(session.state.as_str(), "running" | "awaiting_approval"))
                     {
                         session.cancel_pending = true;
-                        return vec![Command::Cancel {
-                            session_id: session.id.clone(),
-                        }];
+                        if let Some(task_id) = &session.original_task_id {
+                            return vec![Command::Cancel {
+                                session_id: session.id.clone(),
+                                task_id: task_id.clone(),
+                            }];
+                        }
+                        self.status =
+                            "Waiting for the original task admission before cancellation.".into();
                     }
                     return vec![];
                 }
@@ -1374,6 +1406,8 @@ impl App {
         let text = self.input.text().to_owned();
         let editor_revision = self.input.revision();
         if let Some(session) = self.selected_mut() {
+            session.original_task_id = None;
+            session.cancel_pending = false;
             session.pending_prompt = Some(PendingPrompt {
                 text: text.clone(),
                 editor_revision,

@@ -50,11 +50,19 @@ struct State {
     report: ExecutionReport,
     fault: Option<Fault>,
 }
-// Keep the started Host outside the suspended Luau coroutine. Luau can run an
-// interrupt before polling an async callback again; retaining it here lets Rust
-// settle that exact invocation even when the interrupt ends the coroutine.
+// Keep the started Host or cell service outside the suspended Luau coroutine.
+// Luau can run an interrupt before polling an async callback again; retaining
+// it here lets Rust settle that exact invocation even when the interrupt ends
+// the coroutine. `started` records the first actual poll: an unstarted future
+// is dropped, never dispatched during shutdown grace.
+#[derive(Clone, Copy)]
+enum PendingTarget {
+    Host(usize),
+    Service,
+}
 struct PendingCall {
-    index: usize,
+    target: PendingTarget,
+    started: bool,
     cancel: CancellationToken,
     shutdown_deadline: Option<tokio::time::Instant>,
     future:
@@ -212,14 +220,36 @@ pub(crate) async fn execute(
         pending: tokio::sync::Mutex::new(None),
     });
     let result = execute_vm(mode, script, run.clone(), services).await;
-    // The coroutine may have ended on its interrupt while a Host was suspended.
-    // Preserve that original fault before settlement can encounter payload errors.
+    // The coroutine may have ended on its interrupt while a Host or cell service
+    // was suspended. Preserve that original fault before settlement can
+    // encounter payload errors.
     if let Err(fault) = &result {
         run.fail(fault.clone());
     }
-    if let Some(mut pending) = run.pending.lock().await.take() {
-        let result = settle_host(&run, &mut pending).await;
-        let _ = record_host(&run, pending.index, result);
+    let pending = run.pending.lock().await.take();
+    if let Some(mut pending) = pending {
+        match pending.target {
+            PendingTarget::Host(index) => {
+                if pending.started {
+                    let settled = settle_pending(&run, &mut pending).await;
+                    let _ = record_host(&run, index, settled);
+                } else {
+                    // The callback ended before its first poll: no call started,
+                    // so remove the audit placeholder instead of inventing an
+                    // unknown outcome.
+                    let mut state = run.state.lock().expect("execution state poisoned");
+                    if state.report.calls.len() == index + 1 {
+                        state.report.calls.pop();
+                    }
+                }
+            }
+            PendingTarget::Service => {
+                if pending.started {
+                    let settled = settle_pending(&run, &mut pending).await;
+                    record_service(&run, settled);
+                }
+            }
+        }
     }
     match result {
         Ok(()) => Ok(run
@@ -232,7 +262,7 @@ pub(crate) async fn execute(
     }
 }
 
-async fn settle_host(
+async fn settle_pending(
     run: &Run,
     pending: &mut PendingCall,
 ) -> Option<Result<Value, CapabilityError>> {
@@ -326,8 +356,29 @@ fn record_host(
     }
 }
 
+fn record_service(run: &Run, result: Option<Result<Value, CapabilityError>>) {
+    match result {
+        Some(Ok(value)) => json::discard(value),
+        Some(Err(error)) if error.outcome_unknown => {
+            run.state
+                .lock()
+                .expect("execution state poisoned")
+                .report
+                .outcome_unknown = true;
+        }
+        Some(Err(_)) => {}
+        None => {
+            run.state
+                .lock()
+                .expect("execution state poisoned")
+                .report
+                .outcome_unknown = true;
+        }
+    }
+}
+
 async fn call_host(
-    run: &Run,
+    run: &Arc<Run>,
     host: Arc<dyn CapabilityHost>,
     name: String,
     arguments: Value,
@@ -367,31 +418,35 @@ async fn call_host(
     let host_cancel = cancel.clone();
     let mut pending = run.pending.lock().await;
     *pending = Some(PendingCall {
-        index,
+        target: PendingTarget::Host(index),
+        started: false,
         cancel,
         shutdown_deadline: None,
         future: Box::pin(async move { host.call(&name, arguments, host_cancel).await }),
     });
-    let mut started = false;
-    let deadline = run.clock.lock().expect("VM clock poisoned").deadline;
+    run.clock.lock().expect("VM clock poisoned").paused = Some(Instant::now());
+    let pause = Pause(run.clone());
+    let deadline = tokio::time::Instant::now() + run.limits.host_wait;
     let result = {
-        let invocation = pending.as_mut().expect("registered pending Host");
+        let PendingCall {
+            started, future, ..
+        } = pending.as_mut().expect("registered pending Host");
         tokio::select! {
             biased;
             _ = run.cancel.cancelled() => Err(run.fail(Fault::new(ErrorKind::Cancelled, "CodeMode execution cancelled"))),
-            _ = tokio::time::sleep_until(deadline.into()) => Err(run.fail(Fault::new(ErrorKind::Timeout, "CodeMode time limit reached"))),
+            _ = tokio::time::sleep_until(deadline) => Err(run.fail(Fault::new(ErrorKind::Timeout, "CodeMode Host wait limit reached"))),
             result = std::future::poll_fn(|cx| {
-                // Recheck before every actual host poll, including a ready result
-                // after synchronous argument/audit work consumed the deadline.
+                // Cancellation is checked before every original Host poll.
+                // Argument preparation was checked before pausing the VM clock.
                 if let Err(fault) = run.check() {
                     return std::task::Poll::Ready(Err(fault));
                 }
-                started = true;
-                invocation.future.as_mut().poll(cx).map(Ok)
+                *started = true;
+                future.as_mut().poll(cx).map(Ok)
             }) => result,
         }
     };
-    if !started {
+    if !pending.as_ref().expect("registered pending Host").started {
         pending.take();
         run.state
             .lock()
@@ -405,7 +460,7 @@ async fn call_host(
         Ok(result) => Some(result),
         Err(_) => {
             // The selected branch already latched its original stop reason.
-            settle_host(
+            settle_pending(
                 run,
                 pending.as_mut().expect("started Host remains registered"),
             )
@@ -417,6 +472,7 @@ async fn call_host(
     let invocation = pending.take().expect("Host settlement finished");
     drop(pending);
     drop(invocation);
+    drop(pause);
     let value = record_host(run, index, result)?;
     run.check()?;
     Ok(value)
@@ -433,6 +489,142 @@ fn service_fault(error: CapabilityError) -> Fault {
     )
 }
 
+async fn call_service(
+    run: &Arc<Run>,
+    services: Arc<dyn VmServices>,
+    operation: VmOperation,
+    arguments: Value,
+) -> Result<Value, Fault> {
+    let mut pending = run.pending.lock().await;
+    // Store/Load wait on host-owned state and Yield waits for an explicit
+    // resume, so neither consumes the VM calculation clock. Store/Load are
+    // bounded by host_wait; Yield has no deadline of its own. Local helpers
+    // stay synchronous and keep the ordinary VM deadline.
+    let paused = matches!(
+        operation,
+        VmOperation::Store | VmOperation::Load | VmOperation::Yield
+    );
+    let pause = if paused {
+        run.clock.lock().expect("VM clock poisoned").paused = Some(Instant::now());
+        Some(Pause(run.clone()))
+    } else {
+        None
+    };
+    let host_wait = matches!(operation, VmOperation::Store | VmOperation::Load);
+    let deadline = if host_wait {
+        Some(tokio::time::Instant::now() + run.limits.host_wait)
+    } else if operation == VmOperation::Yield {
+        None
+    } else {
+        Some(run.clock.lock().expect("VM clock poisoned").deadline.into())
+    };
+    let cancel = run.cancel.child_token();
+    let service_cancel = cancel.clone();
+    *pending = Some(PendingCall {
+        target: PendingTarget::Service,
+        started: false,
+        cancel,
+        shutdown_deadline: None,
+        future: Box::pin(
+            async move { services.invoke(operation, arguments, service_cancel).await },
+        ),
+    });
+    // `pending` owns the future across every await, including shutdown grace,
+    // so a Luau interrupt cannot drop it or restart the grace period.
+    let driven: Result<Result<Value, CapabilityError>, Fault> = {
+        let PendingCall {
+            started, future, ..
+        } = pending.as_mut().expect("registered pending service");
+        tokio::select! {
+            biased;
+            _ = run.cancel.cancelled() => Err(run.fail(Fault::new(
+                ErrorKind::Cancelled,
+                "CodeMode execution cancelled",
+            ))),
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err(run.fail(Fault::new(
+                ErrorKind::Timeout,
+                if host_wait {
+                    "CodeMode Host wait limit reached"
+                } else {
+                    "CodeMode time limit reached"
+                },
+            ))),
+            result = std::future::poll_fn(|cx| {
+                // Cancellation is checked before every original service poll.
+                // The clock is paused for Store/Load and Yield, so run.check
+                // only counts local helpers against the VM deadline.
+                if let Err(fault) = run.check() {
+                    return std::task::Poll::Ready(Err(fault));
+                }
+                *started = true;
+                future.as_mut().poll(cx).map(Ok)
+            }) => result,
+        }
+    };
+    if !pending
+        .as_ref()
+        .expect("registered pending service")
+        .started
+    {
+        // Cancellation or the VM deadline ended the callback before its first
+        // service poll. Nothing started, so nothing is dispatched or replayed.
+        pending.take();
+        drop(pause);
+        return Err(driven.expect_err("a service result requires a first poll"));
+    }
+    match driven {
+        Ok(Ok(value)) => {
+            let invocation = pending.take().expect("settled service remains registered");
+            drop(pending);
+            drop(invocation);
+            drop(pause);
+            let value = json::from_host(value, run.remaining())?;
+            run.charge(&value)?;
+            run.check()?;
+            Ok(value)
+        }
+        Ok(Err(error)) => {
+            let invocation = pending.take().expect("settled service remains registered");
+            drop(pending);
+            drop(invocation);
+            drop(pause);
+            if error.outcome_unknown {
+                run.state
+                    .lock()
+                    .expect("execution state poisoned")
+                    .report
+                    .outcome_unknown = true;
+            }
+            run.charge(error.message.as_str())?;
+            Err(service_fault(error))
+        }
+        Err(stop) => {
+            // The selected branch already latched its original stop reason.
+            // Poll this exact started future for the shutdown grace; a Pending
+            // poll lets the timer end grace. Never dispatch or replay a new
+            // service call during this interval.
+            let settled = settle_pending(
+                run,
+                pending
+                    .as_mut()
+                    .expect("started service remains registered"),
+            )
+            .await;
+            record_service(run, settled);
+            let invocation = pending.take().expect("service settlement finished");
+            drop(pending);
+            drop(invocation);
+            drop(pause);
+            Err(stop)
+        }
+    }
+}
+
 fn install_services(
     lua: &Lua,
     environment: &mlua::Table,
@@ -441,58 +633,43 @@ fn install_services(
     services: Arc<dyn VmServices>,
 ) -> Result<(), Fault> {
     let service_run = run.clone();
-    let dispatcher = lua.create_async_function(move |lua, (name, arguments): (String, LuaValue)| {
-        let run = service_run.clone();
-        let services = services.clone();
-        async move {
-            let action = async {
-                run.check()?;
-                let operation = match name.as_str() {
-                    "store" => VmOperation::Store,
-                    "load" => VmOperation::Load,
-                    "output" => VmOperation::Output,
-                    "exit" => VmOperation::Exit,
-                    "yield" => VmOperation::Yield,
-                    "definition" => VmOperation::Definition,
-                    "search" => VmOperation::Search,
-                    _ => return Err(Fault::new(ErrorKind::Script, "Unknown trusted VM service")),
-                };
-                let arguments = json::from_lua(&lua, arguments, run.remaining())?;
-                run.charge(&arguments)?;
-                run.check()?;
-                // Only this private Yield dispatch controls the clock; a host
-                // capability's name or arguments can never opt into pausing it.
-                let pause = if operation == VmOperation::Yield {
-                    run.clock.lock().expect("VM clock poisoned").paused = Some(Instant::now());
-                    Some(Pause(run.clone()))
-                } else { None };
-                let cancel = run.cancel.child_token();
-                let cancel_guard = cancel.clone().drop_guard();
-                let invocation = services.invoke(operation, arguments, cancel);
-                tokio::pin!(invocation);
-                let deadline = run.clock.lock().expect("VM clock poisoned").deadline;
-                let result = tokio::select! {
-                    biased;
-                    _ = run.cancel.cancelled() => Err(Fault::new(ErrorKind::Cancelled, "CodeMode execution cancelled")),
-                    _ = tokio::time::sleep_until(deadline.into()), if pause.is_none() => Err(Fault::new(ErrorKind::Timeout, "CodeMode time limit reached")),
-                    result = &mut invocation => match result {
-                        Ok(value) => json::from_host(value, run.remaining()),
-                        Err(error) => {
-                            run.charge(error.message.as_str())?;
-                            Err(service_fault(error))
+    let dispatcher = lua
+        .create_async_function(move |lua, (name, arguments): (String, LuaValue)| {
+            let run = service_run.clone();
+            let services = services.clone();
+            async move {
+                let action = async {
+                    run.check()?;
+                    let operation = match name.as_str() {
+                        "store" => VmOperation::Store,
+                        "load" => VmOperation::Load,
+                        "output" => VmOperation::Output,
+                        "exit" => VmOperation::Exit,
+                        "yield" => VmOperation::Yield,
+                        "definition" => VmOperation::Definition,
+                        "search" => VmOperation::Search,
+                        _ => {
+                            return Err(Fault::new(
+                                ErrorKind::Script,
+                                "Unknown trusted VM service",
+                            ));
                         }
-                    },
-                };
-                drop(cancel_guard);
-                drop(pause);
-                let value = result?;
-                run.charge(&value)?;
-                run.check()?;
-                json::to_lua(&lua, &value)
-            }.await;
-            lua_result(&run, action)
-        }
-    }).map_err(Fault::from_lua)?;
+                    };
+                    let arguments = json::from_lua(&lua, arguments, run.remaining())?;
+                    run.charge(&arguments)?;
+                    run.check()?;
+                    // Only the private dispatcher can choose a wait policy; a Host
+                    // capability name or user argument never opts into pausing it.
+                    // Store/Load and Yield pause the calculation clock; only
+                    // Store/Load use host_wait. Local helpers keep the VM deadline.
+                    let value = call_service(&run, services.clone(), operation, arguments).await?;
+                    json::to_lua(&lua, &value)
+                }
+                .await;
+                lua_result(&run, action)
+            }
+        })
+        .map_err(Fault::from_lua)?;
     // This separately compiled bootstrap returns closures; its private local
     // dispatcher is not in the user source's lexical or global environment.
     let factory = lua.load(r#"
