@@ -1,12 +1,13 @@
 use crate::{RequestError, Result, types::*};
 use cayw_ai::{ArgumentValidator, ToolDefinition};
-use cayw_host::{Host, HostConfig};
+use cayw_host::{Host, HostConfig, Profile, TerminalLimits};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-/// Identity of the actual workspace, configured profiles, budgets, and upstream
+/// Identity of the actual workspace, configured process and terminal profiles,
+/// Git writer identities and switches, frozen-read mode, budgets, and upstream
 /// permission policy. Rotate permission_policy_id when an external service,
 /// Device authority, or upstream permission policy changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,13 +30,35 @@ impl HostIdentity {
                 "invalid Host workspace identity".into(),
             ));
         }
-        let profiles: BTreeMap<_, _> = config.profiles.iter().map(|(id, profile)| {
-            (id, json!({
-                "kind":format!("{:?}",profile.kind), "program":profile.program,
-                "args":profile.args,"env":profile.env,"timeout_ns":profile.timeout.as_nanos().to_string(),
-                "max_output_bytes":profile.max_output_bytes,"allow_filter":profile.allow_filter,
-            }))
-        }).collect();
+        let profiles: BTreeMap<_, _> = config
+            .profiles
+            .iter()
+            .map(|(id, profile)| (id, profile_json(profile)))
+            .collect();
+        // Terminal profiles are a separate execution allowlist. Both every
+        // selected profile and the manager-wide limits change what an admitted
+        // call may execute, so both belong to the authority identity.
+        let terminal_handoffs = config.terminal_handoffs.as_ref().map(|terminal| {
+            let profiles: BTreeMap<_, _> = terminal
+                .profiles
+                .iter()
+                .map(|(id, profile)| (id, profile_json(profile)))
+                .collect();
+            json!({
+                "profiles":profiles,
+                "limits":terminal_limits(terminal.limits),
+            })
+        });
+        let git_writes = config.git_writes.as_ref().map(|policy| {
+            json!({
+                "identity_name":policy.identity_name,
+                "identity_email":policy.identity_email,
+                "allow_stage":policy.allow_stage,
+                "allow_commit":policy.allow_commit,
+                "allow_branch":policy.allow_branch,
+                "allow_worktree":policy.allow_worktree,
+            })
+        });
         let data = config.data.as_ref().map(|limits| json!({
             "input_bytes":limits.input_bytes,"output_bytes":limits.output_bytes,
             "max_depth":limits.max_depth,"max_nodes":limits.max_nodes,"max_rows":limits.max_rows,
@@ -53,7 +76,10 @@ impl HostIdentity {
             "max_compression_ratio":limits.max_compression_ratio,"timeout_ns":limits.timeout.as_nanos().to_string(),
         }));
         let configuration = json!({
-            "profiles":profiles,"git_program":config.git_program,"external":config.external.is_some(),
+            "frozen_reads":config.frozen_reads,
+            "profiles":profiles,"git_program":config.git_program,
+            "git_writes":git_writes,"terminal_handoffs":terminal_handoffs,
+            "external":config.external.is_some(),
             "data":data,"workspace_limits":workspace_limits,
             "max_argument_bytes":config.max_argument_bytes,"max_result_bytes":config.max_result_bytes,
             "max_total_bytes":config.max_total_bytes,"max_calls":config.max_calls,
@@ -218,4 +244,34 @@ impl OperationCatalog {
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Every field that can change which executable, arguments, environment, I/O
+/// mode, time, or output budget a selected profile uses.
+fn profile_json(profile: &Profile) -> Value {
+    json!({
+        "kind":format!("{:?}", profile.kind),
+        "program":profile.program,
+        "args":profile.args,
+        "env":profile.env,
+        "timeout_ns":profile.timeout.as_nanos().to_string(),
+        "max_output_bytes":profile.max_output_bytes,
+        "allow_filter":profile.allow_filter,
+        "io":match profile.io {
+            cayw_host::ProcessIo::Pipes => json!({"mode":"pipes"}),
+            cayw_host::ProcessIo::Pty { columns, rows } => json!({"mode":"pty","columns":columns,"rows":rows}),
+        },
+    })
+}
+
+fn terminal_limits(limits: TerminalLimits) -> Value {
+    json!({
+        "max_sessions":limits.max_sessions,
+        "max_sessions_total":limits.max_sessions_total,
+        "max_input_bytes_per_write":limits.max_input_bytes_per_write,
+        "max_input_bytes_per_session":limits.max_input_bytes_per_session,
+        "max_output_bytes_per_session":limits.max_output_bytes_per_session,
+        "max_read_bytes":limits.max_read_bytes,
+        "max_wait_ns":limits.max_wait.as_nanos().to_string(),
+    })
 }

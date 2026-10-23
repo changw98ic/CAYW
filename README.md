@@ -86,6 +86,8 @@ assistant: 2 + 3 = 5
 completed: 5 messages, running=false
 ```
 
+安装独立 Runtime 和 Rust 客户端后，可以通过 Rust SDK 或认证本机 IPC 使用同一个持久会话。安装、宿主配置、两回合文件任务、审批与取消的用法见[无界面对话指南](docs/headless-chat.md)。
+
 ## 文档与参与
 
 - [架构设计](docs/architecture.md)：组件职责、执行流程与恢复规则。

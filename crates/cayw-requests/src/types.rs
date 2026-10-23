@@ -44,6 +44,81 @@ pub enum RequestError {
 }
 pub type Result<T> = std::result::Result<T, RequestError>;
 
+/// Identity of one file in the original Requests storage. Paths alone cannot
+/// distinguish a replacement database or authority sidecar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityTaskInspection {
+    pub identity: TaskIdentity,
+    pub state: TaskState,
+}
+
+/// Host-only observation. Inspection does not advance time, grant permission,
+/// or release the authority stop. The digest binds the original stored facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityInspection {
+    pub authority_id: String,
+    pub inspection_id: String,
+    pub tasks: Vec<AuthorityTaskInspection>,
+    pub database: AuthorityFileIdentity,
+    pub sidecar: AuthorityFileIdentity,
+    pub marker: Vec<u8>,
+    pub stopped: bool,
+    pub last_now_ms: u64,
+}
+
+/// Trusted host proof owner. Implementations must retain every original Task
+/// execution lock, Cells stopped scope, and confirmed Device cleanup through
+/// Drop. Returning task names alone is not proof. No unit/blanket implementation
+/// is provided, and this trait has no model-facing deserialization path.
+pub trait AuthorityRecoveryGuard {
+    fn verified_tasks(&self) -> &[TaskIdentity];
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorityRepairRequest {
+    pub inspection: AuthorityInspection,
+    pub repair_id: String,
+    pub actor: HostActor,
+    pub evidence: String,
+}
+impl AuthorityRepairRequest {
+    pub fn new(
+        inspection: AuthorityInspection,
+        repair_id: impl Into<String>,
+        actor: HostActor,
+        evidence: impl Into<String>,
+    ) -> Result<Self> {
+        let repair_id = repair_id.into();
+        let evidence = evidence.into();
+        identifier(&repair_id)?;
+        text(&evidence)?;
+        Ok(Self {
+            inspection,
+            repair_id,
+            actor,
+            evidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorityRepairReceipt {
+    pub repair_id: String,
+    pub previous_authority_id: String,
+    pub authority_id: String,
+    pub inspection_id: String,
+}
+
 /// All fields come from the host's active execution lease, never tool arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -269,7 +344,7 @@ impl EvaluationTicket {
 /// Threshold is an eligibility experiment, never an authorization guarantee.
 /// Configuration is persisted and must match on every connection/reopen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct RequestConfig {
     pub repeated_valid_threshold: u32,
     pub request_lifetime_ms: u64,
@@ -303,7 +378,8 @@ impl Default for RequestConfig {
     }
 }
 impl RequestConfig {
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// Check persisted authority limits without opening storage or issuing a grant.
+    pub fn validate(&self) -> Result<()> {
         if self.repeated_valid_threshold == 0
             || self.repeated_valid_threshold > 1000
             || self.max_tasks == 0

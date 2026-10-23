@@ -68,6 +68,10 @@ impl RpcHandler for RuntimeFixture {
                 Ok(json!([{"cursor":1,"event":{"type":"text_delta","delta":"正在执行"}}]))
             }
             "session.cancel" => {
+                assert_eq!(
+                    params,
+                    json!({"session_id":"s1","task_id":"original-task","worker_id":"worker-1","attempt_id":"attempt-1","fence":7})
+                );
                 self.prompt_release.add_permits(1);
                 Ok(json!({"cancelled":true}))
             }
@@ -528,7 +532,7 @@ async fn long_prompt_does_not_block_events_cancel_or_approval() {
     .await;
     envelope(
         fixture
-            .rpc("session.cancel", json!({"session_id":"s1"}))
+            .rpc("session.cancel", json!({"session_id":"s1","task_id":"original-task","worker_id":"worker-1","attempt_id":"attempt-1","fence":7}))
             .send()
             .await
             .unwrap(),
@@ -662,7 +666,7 @@ async fn saturated_prompt_lane_rejects_queue_timeout_but_keeps_control_lane_avai
     .await;
     envelope(
         fixture
-            .rpc("session.cancel", json!({"session_id":"s1"}))
+            .rpc("session.cancel", json!({"session_id":"s1","task_id":"original-task","worker_id":"worker-1","attempt_id":"attempt-1","fence":7}))
             .send()
             .await
             .unwrap(),

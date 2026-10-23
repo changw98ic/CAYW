@@ -63,6 +63,7 @@ fn spec(directory: &Path, mode: &str) -> ProcessSpec {
         env: BTreeMap::new(),
         timeout: Duration::from_secs(20),
         max_output_bytes: 1024 * 1024,
+        io: cayw_device::ProcessIo::Pipes,
     }
 }
 
@@ -156,6 +157,7 @@ async fn unrelated_non_utf8_process_name_does_not_retain_a_resource_permit() {
         env: BTreeMap::new(),
         timeout: Duration::from_secs(5),
         max_output_bytes: 1024,
+        io: cayw_device::ProcessIo::Pipes,
     };
     let result = tokio::time::timeout(
         Duration::from_secs(10),
@@ -369,6 +371,7 @@ async fn directory_launch_failure_and_invalid_file_handle_release_reservations()
             env: BTreeMap::new(),
             timeout: Duration::from_secs(10),
             max_output_bytes: 1024,
+            io: cayw_device::ProcessIo::Pipes,
         };
         let error = runner
             .run_in_directory_with_permit(process_spec, CancellationToken::new(), permit)
@@ -408,6 +411,7 @@ async fn executable_text_without_shebang_never_implicitly_runs_a_shell() {
                 env: BTreeMap::new(),
                 timeout: Duration::from_secs(10),
                 max_output_bytes: 1024,
+                io: cayw_device::ProcessIo::Pipes,
             },
             CancellationToken::new(),
         )
@@ -840,6 +844,7 @@ async fn cleanup_failure_waits_for_supervisor_join_and_retains_resource_after_la
             env: process_spec.env,
             timeout: process_spec.timeout,
             max_output_bytes: process_spec.max_output_bytes,
+            io: cayw_device::ProcessIo::Pipes,
         };
         cloned
             .run_in_directory_with_resources(spec, CancellationToken::new(), resource)
@@ -900,6 +905,7 @@ async fn last_runner_drop_cancels_supervisor_and_successful_cleanup_releases_res
             env: BTreeMap::new(),
             timeout: Duration::from_secs(10),
             max_output_bytes: 1024,
+            io: cayw_device::ProcessIo::Pipes,
         },
         CancellationToken::new(),
         resource,

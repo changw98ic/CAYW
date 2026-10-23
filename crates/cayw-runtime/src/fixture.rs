@@ -2,7 +2,7 @@
 //! It emits Luau; the actual Host performs the operations under approval.
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message,
-    ModelRequest, Provider, StopReason, ToolCall, current_system,
+    ModelRequest, Provider, StopReason, ToolCall, Usage, UsageStatus, current_system,
 };
 use cayw_cells::{CellPage, CellStatus};
 use futures::stream;
@@ -14,8 +14,17 @@ pub const DEMO_SCRIPT: &str = "cayw.call('fs.write', {path='cayw-demo.txt', cont
 /// Synthetic model response using the same exec/wait contract as a real model.
 /// It reads every output page and waits for VM completion before reporting done.
 /// The fixture never grants permission, performs an effect, or replays a cell.
+/// Every response reports fixed synthetic usage of 4 input and 4 output tokens.
+/// These counters exercise accounting; they are not tokenizer or billing data.
 pub fn script_response(request: &ModelRequest, script: &str, call_id: &str) -> AssistantMessage {
     let mut message = AssistantMessage::new(&request.model);
+    message.usage = Usage {
+        input: 4,
+        output: 4,
+        total_tokens: 8,
+        ..Default::default()
+    };
+    message.usage_status = UsageStatus::Reported;
     let declarations = current_system(&request.messages);
     let limits = declarations
         .tools
@@ -106,12 +115,11 @@ impl Provider for OfflineProvider {
                 .failure(StopReason::Aborted, "offline fixture cancelled");
             return Box::pin(stream::iter(vec![AssistantEvent::Error { message }]));
         }
-        let mut message = script_response(
+        let message = script_response(
             &request,
             DEMO_SCRIPT,
             &format!("offline-{}", Uuid::new_v4()),
         );
-        message.usage.total_tokens = 8;
         Box::pin(stream::iter(vec![AssistantEvent::Done { message }]))
     }
 }

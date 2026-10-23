@@ -7,8 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+fault-injection = []
+
 [dependencies]
 async-stream.workspace = true
+base64.workspace = true
 futures.workspace = true
 jsonschema.workspace = true
 reqwest.workspace = true

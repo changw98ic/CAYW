@@ -40,6 +40,7 @@ fn spec(root: &Path, program: PathBuf) -> DirectoryProcessSpec {
         env: BTreeMap::new(),
         timeout: Duration::from_secs(10),
         max_output_bytes: 1024,
+        io: cayw_device::ProcessIo::Pipes,
     }
 }
 
