@@ -5,18 +5,22 @@
 
 mod catalog;
 mod filesystem;
+mod git;
 mod process;
 mod read_fence;
+pub mod terminal;
+pub use git::GitWritePolicy;
 pub use read_fence::{
     FenceRecovery, FrozenReadStamp, FrozenReadTicket, FrozenReadValue, PendingMutation,
     ReadFenceFault, ReadFenceRecovery,
 };
+pub use terminal::{TerminalConfig, TerminalLimits};
 
 use async_trait::async_trait;
 use cap_std::fs::Dir;
 use cayw_ai::{ArgumentValidator, CancellationToken, ToolDefinition};
 use cayw_codemode::{CapabilityError, CapabilityHost};
-pub use cayw_device::DeviceError;
+pub use cayw_device::{DeviceError, ProcessIdentity, ProcessIo, ProcessObserver};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -98,6 +102,7 @@ pub struct Profile {
     pub timeout: Duration,
     pub max_output_bytes: usize,
     pub allow_filter: bool,
+    pub io: cayw_device::ProcessIo,
 }
 
 #[derive(Clone)]
@@ -124,9 +129,14 @@ pub struct HostConfig {
     /// hooks and object alternates. Worktree symlinks/special files are refused.
     /// Concurrent in-place source edits do not have transaction snapshot semantics.
     pub git_program: Option<PathBuf>,
+    /// Opt-in for real-repository Git writes. Absent means no write capability.
+    /// The identity is host-owned; capabilities are individually policy-gated.
+    pub git_writes: Option<GitWritePolicy>,
     pub process_timeout: Duration,
     pub max_process_output_bytes: usize,
     pub profiles: BTreeMap<String, Profile>,
+    /// Host-selected interactive profiles. None omits terminal handoffs.
+    pub terminal_handoffs: Option<TerminalConfig>,
     /// Pure, bounded data capabilities. None omits them from the catalog.
     pub data: Option<cayw_data::Limits>,
     /// Tree, change-batch and archive capabilities. Opening is deferred until an
@@ -147,9 +157,11 @@ impl Default for HostConfig {
             max_list_entries: 4096,
             call_timeout: Duration::from_secs(60),
             git_program: None,
+            git_writes: None,
             process_timeout: Duration::from_secs(30),
             max_process_output_bytes: 256 * 1024,
             profiles: BTreeMap::new(),
+            terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
             external: None,
@@ -185,11 +197,33 @@ impl HostConfig {
         if let Some(program) = &self.git_program {
             process::validate_program(program)?;
         }
+        git::validate_config(self)?;
+        if let Some(config) = &self.terminal_handoffs {
+            terminal::validate_config(config)?;
+            if config
+                .limits
+                .max_read_bytes
+                .saturating_mul(4)
+                .saturating_add(4096)
+                > self.max_result_bytes
+            {
+                return Err(failure("terminal read page exceeds host result budget"));
+            }
+        }
         for (name, profile) in &self.profiles {
             if !process::valid_name(name) {
                 return Err(failure("invalid profile name"));
             }
             process::validate_program(&profile.program)?;
+            if let cayw_device::ProcessIo::Pty { columns, rows } = profile.io
+                && (columns == 0 || rows == 0)
+            {
+                return Err(failure("terminal dimensions must be positive"));
+            }
+            #[cfg(not(target_os = "macos"))]
+            if matches!(profile.io, cayw_device::ProcessIo::Pty { .. }) {
+                return Err(failure("terminal execution is only supported on macOS"));
+            }
             if profile.timeout.is_zero()
                 || Instant::now().checked_add(profile.timeout).is_none()
                 || profile.max_output_bytes == 0
@@ -220,6 +254,7 @@ pub(crate) enum Executor {
     Filesystem,
     Git,
     Profile,
+    Terminal,
     Data,
     Workspace,
     External,
@@ -254,6 +289,7 @@ pub struct Host {
     execution: Arc<tokio::sync::Mutex<()>>,
     safety: Arc<Safety>,
     runner: Arc<cayw_device::ProcessRunner>,
+    terminal: Option<Arc<terminal::TerminalManager>>,
     external: Option<Arc<dyn ExternalHost>>,
 }
 impl Host {
@@ -310,6 +346,12 @@ impl Host {
             }
         }
         let runner = process::runner(&config)?;
+        let terminal = config
+            .terminal_handoffs
+            .clone()
+            .map(terminal::TerminalManager::new)
+            .transpose()?
+            .map(Arc::new);
         let external = config.external.clone();
         Ok(Self {
             root: Arc::new(root),
@@ -321,6 +363,7 @@ impl Host {
             execution: Arc::new(tokio::sync::Mutex::new(())),
             safety: Arc::default(),
             runner: Arc::new(runner),
+            terminal,
             external,
         })
     }
@@ -398,8 +441,17 @@ impl Host {
             execution: self.execution.clone(),
             safety: self.safety.clone(),
             runner: self.runner.clone(),
+            terminal: self.terminal.clone(),
             external: self.external.clone(),
         })
+    }
+
+    /// Adds durable OS process observations to this scope. The original runner's
+    /// ownership, admission, cancellation and cleanup ledger remain shared.
+    pub fn with_process_observer(&self, observer: Arc<dyn ProcessObserver>) -> Self {
+        let mut scope = self.clone();
+        scope.runner = Arc::new(self.runner.observed(observer));
+        scope
     }
 
     /// Overrides this scope's application service while sharing the original
@@ -459,6 +511,9 @@ impl Host {
     /// Permanently closes process admission across this task's host scopes and
     /// requests cancellation. Cells should be closed first by the runtime.
     pub fn close_processes(&self) {
+        if let Some(terminal) = &self.terminal {
+            terminal.close();
+        }
         self.runner.close();
     }
 
@@ -467,17 +522,50 @@ impl Host {
         self.runner.active_count()
     }
 
+    /// Terminal sessions whose original supervisor has not joined.
+    pub fn active_terminal_sessions(&self) -> usize {
+        self.terminal
+            .as_ref()
+            .map_or(0, |terminal| terminal.active_sessions())
+    }
+
+    /// Checks terminal completion before cleanup cancels any remaining sessions.
+    pub fn terminal_completion_error(&self) -> Option<String> {
+        self.terminal
+            .as_ref()
+            .and_then(|terminal| terminal.completion_error())
+    }
+
     /// Waits for actual process cleanup and supervisor exit across all scopes.
     /// Runtime task reservations must remain held until this returns Ok. Dropping
     /// this future only requests cancellation; call again to establish cleanup.
     pub async fn drain_processes(&self) -> Result<(), cayw_device::DeviceError> {
-        self.runner.drain().await
+        if let Some(terminal) = &self.terminal {
+            terminal.close();
+        }
+        let terminal_result = match &self.terminal {
+            Some(terminal) => terminal.drain().await,
+            None => Ok(()),
+        };
+        let process_result = self.runner.drain().await;
+        match (terminal_result, process_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(terminal), Err(process)) => Err(cayw_device::DeviceError::CleanupUnconfirmed(
+                format!("terminal cleanup: {terminal}; process cleanup: {process}"),
+            )),
+        }
     }
 
     /// Unknown effects cannot be cleared by resetting budgets or reusing a host.
     /// The application must reconcile its durable records before creating another.
     pub fn outcome_unknown(&self) -> bool {
-        self.safety.unknown.load(Ordering::Acquire) || self.runner.cleanup_failure().is_some()
+        self.safety.unknown.load(Ordering::Acquire)
+            || self.runner.cleanup_failure().is_some()
+            || self
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.unknown().is_some())
     }
     pub fn audit_failure(&self) -> Option<String> {
         lock(&self.safety.audit_failure).clone()
@@ -549,7 +637,23 @@ impl Host {
                     filesystem::execute(self, name, &args, cancel, deadline).await
                 }
             }
-            Executor::Git => process::execute(self, name, &args, cancel, deadline).await,
+            Executor::Git => git::execute(self, name, &args, cancel, deadline).await,
+            Executor::Terminal => {
+                let manager = self
+                    .terminal
+                    .as_ref()
+                    .ok_or_else(|| failure("terminal handoffs are disabled"))?;
+                terminal::execute(
+                    manager,
+                    &self.root,
+                    self.runner.clone(),
+                    name,
+                    &args,
+                    cancel,
+                    deadline,
+                )
+                .await
+            }
             Executor::Profile => {
                 let (workspace, workspace_deadline) = self.open_workspace(cancel, deadline).await?;
                 let _lock = filesystem::write_lock(&self.root, cancel, deadline).await?;

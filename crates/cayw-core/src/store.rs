@@ -30,6 +30,7 @@ use validation::{check_values, checked_input, encode_readable};
 #[derive(Clone)]
 pub struct SessionStore {
     connection: Arc<Mutex<Connection>>,
+    reconciliation_verifier: Option<Arc<dyn ReconciliationVerifier>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -366,6 +367,28 @@ impl SessionStore {
                 2 => migration::migrate_v2(&transaction)?,
                 _ => {}
             }
+            // A current schema cannot make an older weak reconciliation valid.
+            // Decode these records before DDL or persistent pragma changes, so a
+            // rejected missing-origin event leaves the database bytes untouched.
+            {
+                let mut query = transaction.prepare("SELECT session_id,cursor,record FROM core_events WHERE json_extract(record,'$.event.type') IN ('reconciled','capability_reconciled')")?;
+                let mut rows = query.query([])?;
+                while let Some(row) = rows.next()? {
+                    let id: String = row.get(0)?;
+                    let cursor: i64 = row.get(1)?;
+                    let json: String = row.get(2)?;
+                    let record = checked_input(serde_json::from_str::<EventRecord>(&json)?)?;
+                    if record.protocol_version != PROTOCOL_VERSION
+                        || record.session_id != id
+                        || cursor <= 0
+                        || record.cursor != cursor as u64
+                    {
+                        return Err(CoreError::CorruptStore(
+                            "Reconciliation event envelope is inconsistent".into(),
+                        ));
+                    }
+                }
+            }
             // REPLACE can delete a conflicting row without firing DELETE guards
             // on an ordinary SQLite connection. Reject the conflict before that
             // deletion, including databases created by earlier v3 builds. This
@@ -389,7 +412,50 @@ impl SessionStore {
         connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            reconciliation_verifier: None,
         })
+    }
+
+    /// Read the already committed decision for an original unknown observation.
+    /// Forks retain their source cursor; this follows only that recorded prefix
+    /// and never manufactures a new decision or reauthorizes an uncommitted one.
+    pub fn committed_tool_reconciliation(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<Reconciliation, CoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction()?;
+        let reconciliation = committed_tool_reconciliation(&transaction, session_id, call_id)?;
+        transaction.commit()?;
+        Ok(reconciliation)
+    }
+
+    /// Install host authority in memory. It cannot be supplied by protocol input
+    /// or read from caller-owned actor/evidence fields. Clones retain the policy.
+    pub fn with_reconciliation_verifier(
+        mut self,
+        verifier: Arc<dyn ReconciliationVerifier>,
+    ) -> Self {
+        self.reconciliation_verifier = Some(verifier);
+        self
+    }
+
+    pub fn verify_reconciliation(&self, request: &ReconciliationRequest) -> Result<(), CoreError> {
+        match request {
+            ReconciliationRequest::Tool { reconciliation } => check_values(reconciliation)?,
+            ReconciliationRequest::Capability { reconciliation } => check_values(reconciliation)?,
+        }
+        let verifier = self
+            .reconciliation_verifier
+            .as_ref()
+            .ok_or(CoreError::ApprovalDenied)?;
+        verifier
+            .verify(request)
+            .map_err(|_| CoreError::ApprovalDenied)
     }
 
     pub fn create_session(&self, label: impl Into<String>) -> Result<SessionSnapshot, CoreError> {
@@ -447,7 +513,15 @@ impl SessionStore {
         if original.approvals.iter().any(|a| a.decision.is_none()) {
             return Err(CoreError::PendingApproval);
         }
-        validate_paired_history(&original.messages())?;
+        validate_paired_history(&original.messages(), |result| {
+            if original.call(&result.tool_call_id)?.record.result.as_ref() != Some(result) {
+                return Err(invalid(
+                    "Fork tool result differs from its original stored observation",
+                ));
+            }
+            committed_tool_reconciliation(&transaction, &original.id, &result.tool_call_id)?;
+            Ok(())
+        })?;
         let mut session = StoredSession::new(Uuid::new_v4().to_string(), label.into());
         session.history = original.history.clone();
         session.calls = original.calls.clone();
@@ -986,8 +1060,86 @@ impl SessionStore {
         .map(|(approval, _)| approval)
     }
 
-    /// Update only the projection for a verified unknown call. Original execution
-    /// events and errors remain intact; reconciliation is a new audit event.
+    /// Bind the original host Task before the tool execution boundary. Exact
+    /// retries are read-only; a replacement Task or lease cannot take this call.
+    pub fn bind_tool_origin(
+        &self,
+        lease: &AttemptLease,
+        call_id: &str,
+        task_id: &str,
+    ) -> Result<EventRecord, CoreError> {
+        identifier(call_id, "call_id")?;
+        identifier(task_id, "task_id")?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = load(&transaction, &lease.session_id)?;
+        session.verify_lease(lease)?;
+        let call = session.call(call_id)?;
+        if call.record.attempt_id != lease.attempt_id {
+            return Err(CoreError::StaleLease);
+        }
+        if let Some(record) = tool_origin_event(&transaction, &session, call_id)? {
+            if matches!(&record.event, CoreEvent::ToolOriginBound { lease: old, task_id: old_task, .. } if old == lease && old_task == task_id)
+            {
+                return Ok(record);
+            }
+            return Err(invalid(
+                "Tool origin is already bound to another Task or lease",
+            ));
+        }
+        session.admit_work(lease)?;
+        if call.record.state != CallState::Prepared || call.record.execution_started {
+            return Err(invalid("Tool origin must be bound before execution starts"));
+        }
+        if session.approvals.iter().any(|approval| {
+            approval.attempt_id == lease.attempt_id
+                && approval.input.target
+                    == ApprovalTarget::ToolCall {
+                        call_id: call_id.into(),
+                    }
+                && approval.input.task_id != task_id
+        }) {
+            return Err(invalid(
+                "Tool origin differs from its original approval Task",
+            ));
+        }
+        let record = persist(
+            &transaction,
+            &mut session,
+            Some(lease.clone()),
+            CoreEvent::ToolOriginBound {
+                call_id: call_id.into(),
+                lease: lease.clone(),
+                task_id: task_id.into(),
+            },
+        )?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
+    /// Read the immutable origin for a reconciliation request. This supplies no
+    /// permission; submission checks the origin again and requires a verifier.
+    pub fn tool_reconciliation_origin(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<Box<ToolReconciliationOrigin>, CoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let session = load(&transaction, session_id)?;
+        let origin = tool_origin(&transaction, &session, call_id)?;
+        transaction.commit()?;
+        Ok(Box::new(origin))
+    }
+
+    /// Record a new decision without replacing the original model tool reply.
+    /// The host verifier authorizes the actor and checks its own evidence format.
     pub fn reconcile(
         &self,
         session_id: &str,
@@ -996,35 +1148,84 @@ impl SessionStore {
         let reconciliation = checked_input(reconciliation)?;
         nonempty(&reconciliation.actor, "actor")?;
         nonempty(&reconciliation.evidence, "evidence")?;
-        self.mutate(session_id, |session| {
-            if session.attempt.is_some() {
-                return Err(CoreError::Busy);
-            }
-            let call = session.call_mut(&reconciliation.call_id)?;
-            if call.record.state != CallState::OutcomeUnknown {
-                return Err(invalid("Only an unknown tool outcome can be reconciled"));
-            }
-            let result = match &reconciliation.outcome {
-                ReconciledOutcome::Completed { result } => {
-                    if result.outcome_unknown {
-                        return Err(invalid("A reconciled result must have a known outcome"));
-                    }
-                    validate_result(result)?;
-                    result.clone()
+        match &reconciliation.outcome {
+            ReconciledOutcome::Completed { result } => {
+                if result.outcome_unknown {
+                    return Err(invalid("A reconciled result must have a known outcome"));
                 }
-                ReconciledOutcome::NotExecuted { reason } => {
-                    nonempty(reason, "reason")?;
-                    ToolResult::error(format!(
-                        "Host verified this call was not executed: {reason}"
-                    ))
-                }
-            };
-            call.record.result = Some(result_message(&call.record.call, &result, None));
-            call.record.state = CallState::Completed;
-            call.batch_settled = true;
-            Ok(((), None, CoreEvent::Reconciled { reconciliation }))
+                validate_result(result)?;
+            }
+            ReconciledOutcome::NotExecuted { reason } => nonempty(reason, "reason")?,
+        }
+        self.verify_reconciliation(&ReconciliationRequest::Tool {
+            reconciliation: reconciliation.clone(),
         })?;
-        self.snapshot(session_id)
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = load(&transaction, session_id)?;
+        if session.attempt.is_some() {
+            return Err(CoreError::Busy);
+        }
+        if tool_origin(&transaction, &session, &reconciliation.call_id)? != *reconciliation.expected
+        {
+            return Err(invalid(
+                "Reconciliation differs from the complete original tool identity",
+            ));
+        }
+        // A known child terminal proves its launch executed. It does not prove
+        // that a later wait observing that execution was itself dispatched.
+        if matches!(
+            reconciliation.outcome,
+            ReconciledOutcome::NotExecuted { .. }
+        ) && let Some(execution) = &reconciliation.expected.execution
+            && execution.parent_call_id == reconciliation.call_id
+            && session.capabilities.iter().any(|call| {
+                call.key.execution_id == execution.execution_id
+                    && matches!(
+                        call.outcome,
+                        Some(
+                            CapabilityOutcome::Completed { .. } | CapabilityOutcome::Failed { .. }
+                        )
+                    )
+            })
+        {
+            return Err(invalid(
+                "Tool nonexecution claim contradicts its reliable original capability terminal",
+            ));
+        }
+        if let Some(prior) = reconciliation_events(&transaction, &session)?
+            .into_iter()
+            .find_map(|event| match event {
+                CoreEvent::Reconciled {
+                    reconciliation: prior,
+                } if prior.call_id == reconciliation.call_id => Some(prior),
+                _ => None,
+            })
+        {
+            if prior != reconciliation {
+                return Err(invalid("Reconciliation contradicts the recorded decision"));
+            }
+            return Ok(session.snapshot());
+        }
+        let call = session.call_mut(&reconciliation.call_id)?;
+        if call.record.state != CallState::OutcomeUnknown {
+            return Err(invalid("Only an unknown tool outcome can be reconciled"));
+        }
+        // The execution decision is new. The original model reply is evidence
+        // of what the worker observed and must remain byte-for-byte intact.
+        call.record.state = CallState::Completed;
+        call.batch_settled = true;
+        persist(
+            &transaction,
+            &mut session,
+            None,
+            CoreEvent::Reconciled { reconciliation },
+        )?;
+        transaction.commit()?;
+        Ok(session.snapshot())
     }
 
     fn mutate<T>(
@@ -1042,8 +1243,280 @@ impl SessionStore {
         let mut session = load(&transaction, session_id)?;
         let (result, lease, event) = change(&mut session)?;
         let record = persist(&transaction, &mut session, lease, event)?;
+        #[cfg(feature = "fault-injection")]
+        let crash_point = match &record.event {
+            CoreEvent::Agent { event } => match event.as_ref() {
+                AgentEvent::ToolExecutionEnd { call, .. } => Some((
+                    "core.tool_result.before",
+                    "core.tool_result.committed",
+                    serde_json::json!({
+                        "session_id": record.session_id, "lease": record.attempt, "call_id": call.id, "cursor": record.cursor,
+                    }),
+                )),
+                _ => None,
+            },
+            CoreEvent::AttemptFinished { lease } => Some((
+                "core.attempt_terminal.before",
+                "core.attempt_terminal.committed",
+                serde_json::json!({
+                    "session_id": record.session_id, "lease": lease, "cursor": record.cursor,
+                }),
+            )),
+            _ => None,
+        };
+        #[cfg(feature = "fault-injection")]
+        if let Some((before, _, data)) = &crash_point {
+            cayw_ai::faults::hit(before, data.clone());
+        }
         transaction.commit()?;
+        #[cfg(feature = "fault-injection")]
+        if let Some((_, committed, data)) = crash_point {
+            cayw_ai::faults::hit(committed, data);
+        }
         Ok((result, record))
+    }
+}
+
+fn recorded_events(
+    connection: &Connection,
+    session: &StoredSession,
+    kind: &str,
+) -> Result<Vec<EventRecord>, CoreError> {
+    let mut query = connection.prepare(
+        "SELECT cursor,record FROM core_events WHERE session_id=?1 AND json_extract(record,'$.event.type')=?2 ORDER BY cursor",
+    )?;
+    let rows = query.query_map(params![session.id, kind], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (cursor, json) = row?;
+        let record = checked_input(serde_json::from_str::<EventRecord>(&json)?)?;
+        if record.session_id != session.id
+            || record.protocol_version != PROTOCOL_VERSION
+            || cursor < 1
+            || record.cursor != cursor as u64
+            || cursor as u64 > session.cursor
+        {
+            return Err(CoreError::CorruptStore(
+                "Original event envelope is inconsistent".into(),
+            ));
+        }
+        events.push(record);
+    }
+    Ok(events)
+}
+
+fn reconciliation_events(
+    connection: &Connection,
+    session: &StoredSession,
+) -> Result<Vec<CoreEvent>, CoreError> {
+    Ok(recorded_events(connection, session, "reconciled")?
+        .into_iter()
+        .chain(recorded_events(
+            connection,
+            session,
+            "capability_reconciled",
+        )?)
+        .map(|record| record.event)
+        .collect())
+}
+
+fn tool_origin_event(
+    connection: &Connection,
+    session: &StoredSession,
+    call_id: &str,
+) -> Result<Option<EventRecord>, CoreError> {
+    let mut found = None;
+    for record in recorded_events(connection, session, "tool_origin_bound")? {
+        if let CoreEvent::ToolOriginBound {
+            call_id: id,
+            lease,
+            task_id,
+        } = &record.event
+            && id == call_id
+        {
+            if found.is_some()
+                || record.attempt.as_ref() != Some(lease)
+                || lease.session_id != session.id
+                || task_id.is_empty()
+            {
+                return Err(CoreError::CorruptStore(
+                    "Tool origin registration is inconsistent".into(),
+                ));
+            }
+            found = Some(record);
+        }
+    }
+    Ok(found)
+}
+
+fn tool_origin(
+    connection: &Connection,
+    session: &StoredSession,
+    call_id: &str,
+) -> Result<ToolReconciliationOrigin, CoreError> {
+    let call = &session.call(call_id)?.record;
+    let execution = session
+        .executions
+        .iter()
+        .find(|execution| execution.parent_call_id == call_id)
+        .or_else(|| {
+            session
+                .execution_waits
+                .iter()
+                .find(|wait| wait.call_id == call_id)
+                .and_then(|wait| {
+                    session
+                        .executions
+                        .iter()
+                        .find(|execution| execution.execution_id == wait.execution_id)
+                })
+        });
+    let bound = tool_origin_event(connection, session, call_id)?;
+    let (lease, task_id) = match bound.as_ref().map(|record| &record.event) {
+        Some(CoreEvent::ToolOriginBound { lease, task_id, .. }) => (lease.clone(), task_id.clone()),
+        _ => execution
+            .map(|execution| (execution.lease.clone(), execution.task_id.clone()))
+            .ok_or_else(|| invalid("Tool has no original host Task binding"))?,
+    };
+    if lease.session_id != session.id
+        || lease.attempt_id != call.attempt_id
+        || !call.execution_started
+    {
+        return Err(invalid(
+            "Tool identity differs from its original execution boundary",
+        ));
+    }
+    let started = recorded_events(connection, session, "attempt_started")?;
+    if started.iter().filter(|record| matches!(&record.event, CoreEvent::AttemptStarted { lease: original } if original == &lease) && record.attempt.as_ref() == Some(&lease)).count() != 1 {
+        return Err(CoreError::CorruptStore("Tool has no unique original attempt lease".into()));
+    }
+    let execution = execution.map(|execution| -> Result<ExecutionInput, CoreError> {
+        if execution.lease != lease || execution.task_id != task_id {
+            return Err(invalid("Tool Task binding differs from its original execution"));
+        }
+        let events = recorded_events(connection, session, "execution_started")?;
+        if events.iter().filter(|record| matches!(&record.event, CoreEvent::ExecutionStarted { execution: original }
+            if original.execution_id == execution.execution_id && original.parent_call_id == execution.parent_call_id
+                && original.task_id == task_id && original.source_hash == execution.source_hash && original.lease == lease)
+            && record.attempt.as_ref() == Some(&lease)).count() != 1 {
+            return Err(CoreError::CorruptStore("Tool execution has no unique original registration".into()));
+        }
+        Ok(ExecutionInput {
+            execution_id: execution.execution_id.clone(), parent_call_id: execution.parent_call_id.clone(),
+            task_id: task_id.clone(), source_hash: execution.source_hash.clone(),
+        })
+    }).transpose()?;
+    Ok(ToolReconciliationOrigin {
+        lease,
+        task_id,
+        call: call.call.clone(),
+        execution,
+    })
+}
+
+fn committed_tool_reconciliation(
+    connection: &Connection,
+    session_id: &str,
+    call_id: &str,
+) -> Result<Reconciliation, CoreError> {
+    let mut session = load(connection, session_id)?;
+    let mut cutoff = session.cursor;
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(session.id.clone()) || cutoff > session.cursor {
+            return Err(CoreError::CorruptStore(
+                "Fork reconciliation source is cyclic or beyond its recorded cursor".into(),
+            ));
+        }
+        let stored = session.call(call_id)?;
+        let result = stored
+            .record
+            .result
+            .as_ref()
+            .ok_or(CoreError::NeedsReconciliation)?;
+        if stored.record.state != CallState::Completed
+            || !stored.batch_settled
+            || !result.outcome_unknown
+            || result.tool_call_id != call_id
+            || result.tool_name != stored.record.call.name
+        {
+            return Err(CoreError::NeedsReconciliation);
+        }
+        let decisions: Vec<_> = recorded_events(connection, &session, "reconciled")?
+            .into_iter()
+            .filter(|event| event.cursor <= cutoff)
+            .filter_map(|event| match event.event {
+                CoreEvent::Reconciled { reconciliation } if reconciliation.call_id == call_id => {
+                    Some(reconciliation)
+                }
+                _ => None,
+            })
+            .collect();
+        if !decisions.is_empty() {
+            if decisions.len() != 1 {
+                return Err(CoreError::CorruptStore(
+                    "Original tool has duplicate committed decisions".into(),
+                ));
+            }
+            let decision = decisions.into_iter().next().expect("one decision");
+            if *decision.expected != tool_origin(connection, &session, call_id)? {
+                return Err(CoreError::CorruptStore(
+                    "Committed tool decision differs from its complete original identity".into(),
+                ));
+            }
+            let known = match &decision.outcome {
+                ReconciledOutcome::Completed { result } => {
+                    validate_result(result)?;
+                    !result.outcome_unknown
+                }
+                ReconciledOutcome::NotExecuted { reason } => {
+                    nonempty(reason, "reason")?;
+                    true
+                }
+            };
+            if !known {
+                return Err(CoreError::NeedsReconciliation);
+            }
+            return Ok(decision);
+        }
+        let forks: Vec<_> = recorded_events(connection, &session, "session_forked")?
+            .into_iter()
+            .filter(|event| event.cursor <= cutoff)
+            .collect();
+        if forks.len() != 1 {
+            return Err(CoreError::NeedsReconciliation);
+        }
+        let CoreEvent::SessionForked {
+            source_session_id,
+            source_cursor,
+            messages,
+        } = &forks[0].event
+        else {
+            unreachable!("selected fork event")
+        };
+        if !messages
+            .iter()
+            .any(|message| matches!(message, Message::ToolResult(original) if original == result))
+        {
+            return Err(CoreError::NeedsReconciliation);
+        }
+        let source = load(connection, source_session_id)?;
+        let source_call = source.call(call_id)?;
+        if *source_cursor == 0
+            || *source_cursor > source.cursor
+            || source_call.record != stored.record
+            || source_call.batch_settled != stored.batch_settled
+            || source_call.result_acknowledged != stored.result_acknowledged
+            || !source.messages().starts_with(messages)
+        {
+            return Err(CoreError::CorruptStore(
+                "Fork reconciliation differs from its recorded original history".into(),
+            ));
+        }
+        cutoff = *source_cursor;
+        session = source;
     }
 }
 
@@ -1478,7 +1951,10 @@ fn append_message(
     Ok(())
 }
 
-fn validate_paired_history(messages: &[Message]) -> Result<(), CoreError> {
+fn validate_paired_history(
+    messages: &[Message],
+    mut verify_unknown: impl FnMut(&ToolResultMessage) -> Result<(), CoreError>,
+) -> Result<(), CoreError> {
     let mut ids = BTreeSet::new();
     let mut pending = std::collections::VecDeque::new();
     for message in messages {
@@ -1501,13 +1977,11 @@ fn validate_paired_history(messages: &[Message]) -> Result<(), CoreError> {
                 let call = pending
                     .pop_front()
                     .ok_or_else(|| invalid("Fork history has an unpaired tool result"))?;
-                if call.id != result.tool_call_id
-                    || call.name != result.tool_name
-                    || result.outcome_unknown
-                {
-                    return Err(invalid(
-                        "Fork history has a mismatched or unknown tool result",
-                    ));
+                if call.id != result.tool_call_id || call.name != result.tool_name {
+                    return Err(invalid("Fork history has a mismatched tool result"));
+                }
+                if result.outcome_unknown {
+                    verify_unknown(result)?;
                 }
             }
             _ if !pending.is_empty() => {

@@ -542,9 +542,10 @@ pub(crate) fn mutate(
                     return Err(failure("recursive removal root hash conflict"));
                 }
                 let mut removed = 0;
-                for node in entries.iter().rev() {
+                for (index, node) in entries.iter().rev().enumerate() {
                     let result = (|| {
                         context.check()?;
+                        workspace.fault("before_remove", index, context)?;
                         let parts = components(&node.path, false)?;
                         let (dir, name) = parent(&workspace.root, &parts)?;
                         if node.kind == "file" {
@@ -557,6 +558,7 @@ pub(crate) fn mutate(
                             dir.remove_dir(name).map_err(io_error)?;
                         }
                         removed += 1;
+                        workspace.fault("after_remove", index, context)?;
                         sync(&dir)
                     })();
                     if let Err(error) = result {

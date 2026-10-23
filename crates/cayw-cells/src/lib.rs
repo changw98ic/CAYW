@@ -30,6 +30,7 @@ mod manager;
 mod settlement;
 mod tool;
 mod types;
+pub mod values;
 
 pub use backend::{BackendCompletion, BackendResponse, CellBackend};
 pub use cache::{
@@ -40,3 +41,7 @@ pub use manager::CellManager;
 pub use settlement::StoppedScope;
 pub use tool::CellTool;
 pub use types::*;
+pub use values::{
+    AuthorizedCellBackend, CELL_LOAD, CELL_STORE, CellValueAuthorizer, CellValueExecutor,
+    CellValueOperation, authorized_cell_backend,
+};

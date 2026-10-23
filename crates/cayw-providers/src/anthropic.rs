@@ -25,11 +25,7 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 common::input_parts(content, request.model.supports_images, Format::Anthropic)?,
             ),
             Message::Assistant(assistant) => {
-                let content = assistant.content.iter().map(|part| match part {
-                    Content::Text { text } => Ok(json!({"type":"text","text":text})),
-                    Content::ToolCall(call) => Ok(json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.arguments})),
-                    _ => Err("Unsupported assistant content".to_owned()),
-                }).collect::<Result<Vec<_>>>()?;
+                let content = history_content(assistant)?;
                 common::append_turn(&mut messages, "assistant", "content", content);
             }
             Message::ToolResult(result) => common::append_turn(
@@ -64,6 +60,109 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
     Ok(body)
 }
 
+// Keep signed blocks out of normalized answer content. Replay uses the original
+// wire block order and checks that text and calls still match the saved message.
+fn history_content(assistant: &AssistantMessage) -> Result<Vec<Value>> {
+    if assistant.provider_metadata.is_empty() {
+        return assistant
+            .content
+            .iter()
+            .map(|part| match part {
+                Content::Text { text } => Ok(json!({"type":"text","text":text})),
+                Content::ToolCall(call) => Ok(
+                    json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.arguments}),
+                ),
+                _ => Err("Unsupported Anthropic assistant history".to_owned()),
+            })
+            .collect();
+    }
+    if assistant.provider_metadata.len() != 1 {
+        return Err("Unsupported Anthropic history metadata".into());
+    }
+    let metadata = assistant
+        .provider_metadata
+        .get("anthropic")
+        .ok_or("Unsupported Anthropic history metadata")?;
+    let fields = common::object(metadata)?;
+    if fields.len() != 1 || !fields.contains_key("content") {
+        return Err("Invalid Anthropic history metadata fields".into());
+    }
+    let content = metadata["content"]
+        .as_array()
+        .filter(|content| !content.is_empty())
+        .ok_or("Invalid Anthropic history content")?;
+    let mut normalized = Vec::new();
+    let mut limits = common::ResponseLimits::default();
+    for block in content {
+        limits.fragment()?;
+        validate_block(block, true)?;
+        match common::string(block, "type")? {
+            "text" => normalized.push(Content::text(common::string(block, "text")?)),
+            "tool_use" => {
+                limits.tool_call()?;
+                normalized.push(Content::ToolCall(ToolCall::new(
+                    common::string(block, "id")?,
+                    common::string(block, "name")?,
+                    block["input"].clone(),
+                )));
+            }
+            "thinking" | "redacted_thinking" => {}
+            _ => unreachable!("validated block type"),
+        }
+    }
+    if normalized != assistant.content {
+        return Err("Anthropic history metadata does not match assistant content".into());
+    }
+    Ok(content.clone())
+}
+
+fn validate_block(block: &Value, complete: bool) -> Result<()> {
+    let fields = common::object(block)?;
+    let allowed: &[&str] = match common::string(block, "type")? {
+        "text" => {
+            common::string(block, "text")?;
+            &["type", "text"]
+        }
+        "tool_use" => {
+            for field in ["id", "name"] {
+                if common::string(block, field)?.trim().is_empty() {
+                    return Err("Invalid Anthropic tool identity".into());
+                }
+            }
+            common::object(block.get("input").ok_or("Missing Anthropic tool input")?)?;
+            if let Some(caller) = block.get("caller") {
+                let fields = common::object(caller)?;
+                if fields.len() != 1 || caller["type"] != "direct" {
+                    return Err("Server-side Anthropic tool callers are unsupported".into());
+                }
+            }
+            &["type", "id", "name", "input", "caller"]
+        }
+        "thinking" => {
+            common::string(block, "thinking")?;
+            let signature = common::string(block, "signature")?;
+            if complete && signature.is_empty() {
+                return Err("Completed Anthropic thinking requires its signature".into());
+            }
+            &["type", "thinking", "signature"]
+        }
+        "redacted_thinking" => {
+            if common::string(block, "data")?.is_empty() {
+                return Err("Invalid Anthropic redacted thinking data".into());
+            }
+            &["type", "data"]
+        }
+        _ => return Err("Unsupported Anthropic content block".into()),
+    };
+    if fields
+        .keys()
+        .any(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err("Unsupported Anthropic content block fields".into());
+    }
+    Ok(())
+}
+
 enum Block {
     Text {
         index: usize,
@@ -73,6 +172,10 @@ enum Block {
         initial: Value,
         json: String,
     },
+    Thinking {
+        signature_started: bool,
+    },
+    RedactedThinking,
 }
 
 pub(crate) struct State {
@@ -85,6 +188,7 @@ pub(crate) struct State {
     stopped: bool,
     finish: Option<StopReason>,
     limits: common::ResponseLimits,
+    usage: common::UsageReport,
 }
 
 impl State {
@@ -107,6 +211,7 @@ impl State {
             stopped: false,
             finish: None,
             limits: common::ResponseLimits::default(),
+            usage: common::UsageReport::default(),
         }
     }
 
@@ -155,7 +260,9 @@ impl State {
             }
             self.usage(message.get("usage").ok_or("Missing Anthropic usage")?)?;
             self.started = true;
-            return Ok(Vec::new());
+            return Ok(vec![AssistantEvent::UsageUpdate {
+                partial: self.message.clone(),
+            }]);
         }
         if !self.started {
             return Err("Anthropic event arrived before message_start".into());
@@ -168,10 +275,17 @@ impl State {
             "content_block_start" => {
                 self.limits.fragment()?;
                 let wire_index = index(&value)?;
-                if !self.seen_blocks.insert(wire_index) || !self.blocks.is_empty() {
-                    return Err("Duplicate or overlapping Anthropic content block".into());
+                if wire_index != self.seen_blocks.len() as u64
+                    || !self.seen_blocks.insert(wire_index)
+                    || !self.blocks.is_empty()
+                {
+                    return Err(
+                        "Out-of-order, duplicate or overlapping Anthropic content block".into(),
+                    );
                 }
                 let block = value.get("content_block").ok_or("Missing content block")?;
+                validate_block(block, false)?;
+                stored_content(&mut self.message).push(block.clone());
                 let index = self.message.content.len();
                 match common::string(block, "type")? {
                     "text" => {
@@ -219,10 +333,18 @@ impl State {
                             partial: self.message.clone(),
                         });
                     }
-                    _ => return Err(
-                        "Anthropic thinking, signatures and non-text/tool blocks are unsupported"
-                            .into(),
-                    ),
+                    "thinking" => {
+                        self.blocks.insert(
+                            wire_index,
+                            Block::Thinking {
+                                signature_started: !common::string(block, "signature")?.is_empty(),
+                            },
+                        );
+                    }
+                    "redacted_thinking" => {
+                        self.blocks.insert(wire_index, Block::RedactedThinking);
+                    }
+                    _ => unreachable!("validated block type"),
                 }
             }
             "content_block_delta" => {
@@ -234,11 +356,15 @@ impl State {
                     .get_mut(&wire_index)
                     .ok_or("Delta for an unopened content block")?;
                 match (block, common::string(delta, "type")?) {
-                    (Block::Text { index }, "text_delta") => events.push(common::text_delta(
-                        &mut self.message,
-                        *index,
-                        common::string(delta, "text")?,
-                    )),
+                    (Block::Text { index }, "text_delta") => {
+                        let text = common::string(delta, "text")?;
+                        if let Value::String(previous) =
+                            &mut stored_content(&mut self.message)[wire_index as usize]["text"]
+                        {
+                            previous.push_str(text);
+                        }
+                        events.push(common::text_delta(&mut self.message, *index, text));
+                    }
                     (
                         Block::Tool {
                             index,
@@ -260,13 +386,33 @@ impl State {
                             partial: self.message.clone(),
                         });
                     }
+                    (Block::Thinking { signature_started }, "thinking_delta") => {
+                        if *signature_started {
+                            return Err("Anthropic thinking changed after its signature".into());
+                        }
+                        let text = common::string(delta, "thinking")?;
+                        if let Value::String(previous) =
+                            &mut stored_content(&mut self.message)[wire_index as usize]["thinking"]
+                        {
+                            previous.push_str(text);
+                        }
+                    }
+                    (Block::Thinking { signature_started }, "signature_delta") => {
+                        let signature = common::string(delta, "signature")?;
+                        // Signature deltas replace rather than append, as in the
+                        // native Messages accumulator. The value stays opaque.
+                        stored_content(&mut self.message)[wire_index as usize]["signature"] =
+                            signature.into();
+                        *signature_started = true;
+                    }
                     _ => return Err("Content delta does not match its block type".into()),
                 }
             }
             "content_block_stop" => {
+                let wire_index = index(&value)?;
                 let block = self
                     .blocks
-                    .remove(&index(&value)?)
+                    .remove(&wire_index)
                     .ok_or("Stop for an unopened content block")?;
                 match block {
                     Block::Text { index } => events.push(AssistantEvent::TextEnd {
@@ -288,12 +434,19 @@ impl State {
                         };
                         call.arguments = arguments;
                         common::validate_call(call, &self.tools)?;
+                        let arguments = call.arguments.clone();
+                        stored_content(&mut self.message)[wire_index as usize]["input"] = arguments;
                         events.push(AssistantEvent::ToolCallEnd {
                             index,
                             partial: self.message.clone(),
                         });
                     }
+                    Block::Thinking { .. } | Block::RedactedThinking => {}
                 }
+                validate_block(
+                    &stored_content(&mut self.message)[wire_index as usize],
+                    true,
+                )?;
             }
             "message_delta" => {
                 if !self.blocks.is_empty() {
@@ -325,6 +478,9 @@ impl State {
                 }
                 if let Some(usage) = value.get("usage") {
                     self.usage(usage)?;
+                    events.push(AssistantEvent::UsageUpdate {
+                        partial: self.message.clone(),
+                    });
                 }
             }
             "message_stop" => {
@@ -344,20 +500,51 @@ impl State {
         } else if self.message.content.is_empty() {
             Err("Anthropic returned no supported content".into())
         } else {
+            history_content(&self.message)?;
             Ok(())
         }
     }
 
     fn usage(&mut self, usage: &Value) -> Result<()> {
-        common::object(usage)?;
+        self.usage.update(
+            &mut self.message,
+            usage,
+            &[
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            ],
+        )?;
         let u = &mut self.message.usage;
-        common::counter(usage, "input_tokens", &mut u.input)?;
-        common::counter(usage, "output_tokens", &mut u.output)?;
-        common::counter(usage, "cache_read_input_tokens", &mut u.cache_read)?;
-        common::counter(usage, "cache_creation_input_tokens", &mut u.cache_write)?;
-        u.update_total();
+        u.input = self.usage.get("input_tokens").unwrap_or_default();
+        u.output = self.usage.get("output_tokens").unwrap_or_default();
+        u.cache_read = self
+            .usage
+            .get("cache_read_input_tokens")
+            .unwrap_or_default();
+        u.cache_write = self
+            .usage
+            .get("cache_creation_input_tokens")
+            .unwrap_or_default();
+        u.total_tokens = u
+            .input
+            .checked_add(u.output)
+            .and_then(|total| total.checked_add(u.cache_read))
+            .and_then(|total| total.checked_add(u.cache_write))
+            .ok_or("Anthropic usage total overflows")?;
+        self.message.usage_status = self.usage.status("input_tokens", "output_tokens");
         Ok(())
     }
+}
+
+fn stored_content(message: &mut AssistantMessage) -> &mut Vec<Value> {
+    message
+        .provider_metadata
+        .entry("anthropic".into())
+        .or_insert_with(|| json!({"content":[]}))["content"]
+        .as_array_mut()
+        .expect("constructed Anthropic content")
 }
 
 fn index(value: &Value) -> Result<u64> {

@@ -799,6 +799,7 @@ async fn exec_permission_denied_is_a_known_failure_and_leaves_host_usable() {
                     timeout: Duration::from_secs(10),
                     max_output_bytes: 1024,
                     allow_filter: false,
+                    io: cayw_device::ProcessIo::Pipes,
                 },
             )]),
             ..Default::default()
@@ -863,6 +864,7 @@ async fn replaced_root_keeps_profiles_and_git_in_the_opened_directory() {
                     timeout: Duration::from_secs(5),
                     max_output_bytes: 4096,
                     allow_filter: false,
+                    io: cayw_device::ProcessIo::Pipes,
                 },
             )]),
             ..Default::default()
@@ -915,6 +917,7 @@ async fn host_scopes_drain_dropped_processes_and_keep_other_tasks_independent() 
                 timeout: Duration::from_secs(30),
                 max_output_bytes: 4096,
                 allow_filter: false,
+                io: cayw_device::ProcessIo::Pipes,
             },
         )]),
         ..Default::default()

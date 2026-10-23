@@ -1,6 +1,7 @@
 use cayw_ai::{
     AssistantEvent, AssistantMessage, CancellationToken, Content, Message, Model, ModelRequest,
     Provider, StopReason, StreamOptions, SystemMessage, ToolDefinition, ToolResultMessage,
+    UsageStatus,
 };
 use cayw_providers::{AnthropicProvider, GeminiMode, GeminiProvider, ProviderRegistry};
 use futures::StreamExt;
@@ -162,6 +163,273 @@ fn assert_error(events: &[AssistantEvent]) {
     assert!(!error.contains(KEY));
     assert!(!error.contains("http://"));
     assert!(!error.contains("https://"));
+}
+
+#[tokio::test]
+async fn usage_presence_keeps_unknown_partial_and_reported_distinct() {
+    for kind in ["anthropic", "gemini", "gemini-json"] {
+        let (input, output, total, cache) = if kind == "anthropic" {
+            (
+                "input_tokens",
+                "output_tokens",
+                "unused_total",
+                "cache_read_input_tokens",
+            )
+        } else {
+            (
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "totalTokenCount",
+                "cachedContentTokenCount",
+            )
+        };
+        for (usage, expected, expected_total) in [
+            (None, UsageStatus::Unknown, 0),
+            (Some(Value::Null), UsageStatus::Unknown, 0),
+            (Some(json!({})), UsageStatus::Unknown, 0),
+            (Some(json!({input:7})), UsageStatus::Partial, 7),
+            (Some(json!({output:4})), UsageStatus::Partial, 4),
+            (Some(json!({cache:0})), UsageStatus::Partial, 0),
+            (
+                Some(json!({input:null,output:null})),
+                UsageStatus::Unknown,
+                0,
+            ),
+            (Some(json!({input:0,output:0})), UsageStatus::Reported, 0),
+            (Some(json!({input:7,output:4})), UsageStatus::Reported, 11),
+        ] {
+            let missing_required_usage =
+                kind == "anthropic" && usage.as_ref().is_none_or(Value::is_null);
+            let (body, content_type) = if kind == "anthropic" {
+                let mut start = json!({"type":"message_start","message":{"id":"usage-msg","type":"message","role":"assistant","model":"usage-model","content":[]}});
+                if let Some(usage) = usage {
+                    start["message"]["usage"] = usage;
+                }
+                (
+                    sse(vec![
+                        start,
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}),
+                        json!({"type":"content_block_stop","index":0}),
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+                        json!({"type":"message_stop"}),
+                    ]),
+                    "text/event-stream",
+                )
+            } else {
+                let mut response = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]});
+                if let Some(usage) = usage {
+                    response["usageMetadata"] = usage;
+                }
+                if kind == "gemini-json" {
+                    (response.to_string(), "application/json")
+                } else {
+                    (sse(vec![response]), "text/event-stream")
+                }
+            };
+            let (base, _, server) = http_server("200 OK", content_type, body).await;
+            let provider: Arc<dyn Provider> = if kind == "gemini-json" {
+                Arc::new(
+                    GeminiProvider::new(&base, KEY)
+                        .unwrap()
+                        .with_mode(GeminiMode::GenerateContent),
+                )
+            } else {
+                adapter(kind, &base)
+            };
+            let events = collect(provider.as_ref(), request(kind)).await;
+            let message = terminal(&events);
+            assert_eq!(
+                message.stop_reason,
+                if missing_required_usage {
+                    StopReason::Error
+                } else {
+                    StopReason::Stop
+                },
+                "{kind}: {events:?}"
+            );
+            assert_eq!(message.usage_status, expected, "{kind}: {message:?}");
+            assert_eq!(
+                message.usage.total_tokens, expected_total,
+                "{kind}: {message:?}"
+            );
+            server.await.unwrap();
+        }
+        if kind != "anthropic" {
+            let response = json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{total:11}});
+            let (body, mime) = if kind == "gemini-json" {
+                (response.to_string(), "application/json")
+            } else {
+                (sse(vec![response]), "text/event-stream")
+            };
+            let (base, _, server) = http_server("200 OK", mime, body).await;
+            let provider =
+                GeminiProvider::new(&base, KEY)
+                    .unwrap()
+                    .with_mode(if kind == "gemini-json" {
+                        GeminiMode::GenerateContent
+                    } else {
+                        GeminiMode::StreamGenerateContent
+                    });
+            let events = collect(&provider, request("gemini")).await;
+            assert_eq!(terminal(&events).usage_status, UsageStatus::Partial);
+            assert_eq!(terminal(&events).usage.total_tokens, 11);
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn contradictory_usage_keeps_invalid_status_and_raw_fields() {
+    for kind in ["anthropic", "gemini", "gemini-json"] {
+        let reports = if kind == "anthropic" {
+            vec![
+                vec![
+                    json!({"input_tokens":7,"output_tokens":4}),
+                    json!({"output_tokens":3}),
+                ],
+                vec![json!({"input_tokens":7,"output_tokens":"4"})],
+                vec![json!({"input_tokens":u64::MAX,"output_tokens":1})],
+            ]
+        } else {
+            vec![
+                vec![json!({"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":999})],
+                vec![
+                    json!({"promptTokenCount":2,"candidatesTokenCount":3,"cachedContentTokenCount":3}),
+                ],
+                vec![
+                    json!({"promptTokenCount":7,"candidatesTokenCount":4}),
+                    json!({"candidatesTokenCount":3}),
+                ],
+                vec![json!({"promptTokenCount":7,"candidatesTokenCount":"4"})],
+                vec![json!({"promptTokenCount":u64::MAX,"candidatesTokenCount":1})],
+            ]
+        };
+        for reports in reports {
+            if kind == "gemini-json" && reports.len() != 1 {
+                continue;
+            }
+            let (body, mime) = if kind == "anthropic" {
+                let mut frames = vec![
+                    json!({"type":"message_start","message":{"id":"invalid-usage","type":"message","role":"assistant","model":"fixture","content":[],"usage":reports[0]}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"ok"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                ];
+                for report in reports.iter().skip(1) {
+                    frames.push(json!({"type":"message_delta","delta":{},"usage":report}));
+                }
+                frames.extend([
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+                    json!({"type":"message_stop"}),
+                ]);
+                (sse(frames), "text/event-stream")
+            } else {
+                let mut frames = vec![
+                    json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":reports[0]}),
+                ];
+                for report in reports.iter().skip(1) {
+                    frames.push(json!({"usageMetadata":report}));
+                }
+                if kind == "gemini-json" {
+                    (frames[0].to_string(), "application/json")
+                } else {
+                    (sse(frames), "text/event-stream")
+                }
+            };
+            let (base, _, server) = http_server("200 OK", mime, body).await;
+            let provider: Arc<dyn Provider> = if kind == "gemini-json" {
+                Arc::new(
+                    GeminiProvider::new(&base, KEY)
+                        .unwrap()
+                        .with_mode(GeminiMode::GenerateContent),
+                )
+            } else {
+                adapter(kind, &base)
+            };
+            let events = collect(provider.as_ref(), request(kind)).await;
+            assert_error(&events);
+            let message = serde_json::to_value(terminal(&events)).unwrap();
+            assert_eq!(message["usage_status"], "invalid", "{kind}: {events:?}");
+            for (key, value) in reports.last().unwrap().as_object().unwrap() {
+                assert_eq!(&message["usage_fields"][key], value);
+            }
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn gemini_tool_prompt_tokens_are_included_once() {
+    for mode in [
+        GeminiMode::StreamGenerateContent,
+        GeminiMode::GenerateContent,
+    ] {
+        let response = json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"cachedContentTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2,"toolUsePromptTokenCount":5,"totalTokenCount":23}});
+        let (mime, body) = gemini_body(mode, response);
+        let (base, _, server) = http_server("200 OK", mime, body).await;
+        let provider = GeminiProvider::new(&base, KEY).unwrap().with_mode(mode);
+        let events = collect(&provider, request("gemini")).await;
+        let message = terminal(&events);
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(message.usage_status, UsageStatus::Reported);
+        assert_eq!(
+            (
+                message.usage.input,
+                message.usage.cache_read,
+                message.usage.output,
+                message.usage.total_tokens
+            ),
+            (14, 3, 6, 23)
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn usage_reports_emit_snapshots_without_requiring_more_content() {
+    for kind in ["anthropic", "gemini", "gemini-json"] {
+        let (body, mime, report) = if kind == "anthropic" {
+            (
+                anthropic_text(),
+                "text/event-stream",
+                json!({"input_tokens":7,"output_tokens":4,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}),
+            )
+        } else if kind == "gemini-json" {
+            let report =
+                json!({"promptTokenCount":7,"candidatesTokenCount":4,"totalTokenCount":11});
+            (json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":report}).to_string(), "application/json", report)
+        } else {
+            (
+                gemini_text(),
+                "text/event-stream",
+                json!({"promptTokenCount":12,"cachedContentTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":18}),
+            )
+        };
+        let (base, _, server) = http_server("200 OK", mime, body).await;
+        let provider: Arc<dyn Provider> = if kind == "gemini-json" {
+            Arc::new(
+                GeminiProvider::new(&base, KEY)
+                    .unwrap()
+                    .with_mode(GeminiMode::GenerateContent),
+            )
+        } else {
+            adapter(kind, &base)
+        };
+        let events = collect(provider.as_ref(), request(kind)).await;
+        let update = events
+            .iter()
+            .rev()
+            .find(|event| serde_json::to_value(event).unwrap()["type"] == "usage_update")
+            .unwrap_or_else(|| {
+                panic!("{kind}: usage was hidden until a later content or terminal event")
+            });
+        assert!(!update.is_terminal());
+        assert_eq!(update.message().usage_status, UsageStatus::Reported);
+        for (field, expected) in report.as_object().unwrap() {
+            assert_eq!(&update.message().usage_fields[field], expected);
+        }
+        assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -392,12 +660,21 @@ async fn gemini_parallel_same_name_calls_get_distinct_ids_and_replay_correct_nam
     let body = rx.await.unwrap().body;
     assert_eq!(body["contents"][1]["role"], "model");
     assert_eq!(
-        body["contents"][1]["parts"][1]["functionCall"]["id"],
-        calls[1].id
+        body["contents"][1]["parts"],
+        json!([
+            {"functionCall":{"name":"weather","args":{"city":"Paris"}}},
+            {"functionCall":{"name":"weather","args":{"city":"Tokyo"}}}
+        ])
     );
-    assert_eq!(
-        body["contents"][2]["parts"][0]["functionResponse"]["id"],
-        calls[1].id
+    assert!(
+        body["contents"][2]["parts"][0]["functionResponse"]
+            .get("id")
+            .is_none()
+    );
+    assert!(
+        body["contents"][2]["parts"][1]["functionResponse"]
+            .get("id")
+            .is_none()
     );
     assert_eq!(
         body["contents"][2]["parts"][0]["functionResponse"]["name"],
@@ -719,6 +996,159 @@ async fn anthropic_accepts_incremental_message_usage_without_erasing_prior_count
     );
     rx.await.unwrap();
     server.await.unwrap();
+}
+
+// These loopback cases cover existing stop mappings; no live service is used.
+#[tokio::test]
+async fn anthropic_stop_sequence_and_token_limits_preserve_usage_and_identity() {
+    for (reason, expected) in [
+        ("stop_sequence", StopReason::Stop),
+        ("max_tokens", StopReason::Length),
+        ("model_context_window_exceeded", StopReason::Length),
+    ] {
+        let response_id = format!("anthropic-{reason}");
+        let body = sse(vec![
+            json!({"type":"message_start","message":{"id":response_id,"type":"message","role":"assistant","model":"claude-length-returned","content":[],"usage":{"input_tokens":7,"output_tokens":1,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"bounded response 你好"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":reason,"stop_sequence":if reason == "stop_sequence" { Some("fixture-stop") } else { None }},"usage":{"output_tokens":4}}),
+            json!({"type":"message_stop"}),
+        ]);
+        let (base, rx, server) = http_server("200 OK", "text/event-stream", body).await;
+        let events = collect(adapter("anthropic", &base).as_ref(), request("anthropic")).await;
+        let message = terminal(&events);
+        assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
+        assert_eq!(message.stop_reason, expected, "{reason}: {events:?}");
+        assert_eq!(
+            message.content,
+            vec![Content::text("bounded response 你好")]
+        );
+        assert_eq!(message.model, "claude-requested");
+        assert_eq!(message.response_id.as_deref(), Some(response_id.as_str()));
+        assert_eq!(
+            message.response_model.as_deref(),
+            Some("claude-length-returned")
+        );
+        assert_eq!(message.usage_status, UsageStatus::Reported);
+        assert_eq!(
+            (
+                message.usage.input,
+                message.usage.output,
+                message.usage.cache_read,
+                message.usage.cache_write,
+                message.usage.total_tokens
+            ),
+            (7, 4, 3, 2, 16)
+        );
+        assert_eq!(
+            serde_json::to_value(&message.usage_fields).unwrap(),
+            json!({"input_tokens":7,"output_tokens":4,"cache_read_input_tokens":3,"cache_creation_input_tokens":2})
+        );
+        let update = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                AssistantEvent::UsageUpdate { partial } => Some(partial),
+                _ => None,
+            })
+            .expect("received usage must be observable before the terminal");
+        assert_eq!(update.usage_status, message.usage_status);
+        assert_eq!(update.usage, message.usage);
+        assert_eq!(update.usage_fields, message.usage_fields);
+        assert_eq!(update.response_id, message.response_id);
+        assert_eq!(update.response_model, message.response_model);
+        assert!(
+            rx.await
+                .unwrap()
+                .head
+                .starts_with("POST /api/messages HTTP/1.1")
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn gemini_max_tokens_rejects_function_calls_and_preserves_usage_and_identity() {
+    for mode in [
+        GeminiMode::StreamGenerateContent,
+        GeminiMode::GenerateContent,
+    ] {
+        for has_call in [false, true] {
+            let response_id = format!("gemini-{mode:?}-{has_call}");
+            let mut parts = vec![json!({"text":"bounded response 你好"})];
+            if has_call {
+                parts.push(json!({"functionCall":{"id":"complete-call","name":"weather","args":{"city":"Paris"}}}));
+            }
+            let usage = json!({"promptTokenCount":12,"cachedContentTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":2,"toolUsePromptTokenCount":5,"totalTokenCount":23});
+            let value = json!({"responseId":response_id,"modelVersion":"gemini-length-returned","candidates":[{"content":{"role":"model","parts":parts},"finishReason":"MAX_TOKENS"}],"usageMetadata":usage});
+            let (mime, body) = gemini_body(mode, value);
+            let (base, rx, server) = http_server("200 OK", mime, body).await;
+            let provider = GeminiProvider::new(&base, KEY).unwrap().with_mode(mode);
+            let events = collect(&provider, tools_request("gemini")).await;
+            let message = terminal(&events);
+            if has_call {
+                // ToolCallEnd only completes argument parsing; it is not a success terminal.
+                assert_error(&events);
+                assert!(matches!(events.last(), Some(AssistantEvent::Error { .. })));
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, AssistantEvent::Done { .. })),
+                    "{mode:?}: MAX_TOKENS must not report successful tool use"
+                );
+                let calls = message.tool_calls();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "complete-call");
+                assert_eq!(calls[0].name, "weather");
+                assert_eq!(calls[0].arguments, json!({"city":"Paris"}));
+                assert!(calls[0].arguments_error.is_none());
+            } else {
+                assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
+                assert_eq!(message.stop_reason, StopReason::Length);
+                assert!(message.tool_calls().is_empty());
+            }
+            assert_eq!(message.content[0], Content::text("bounded response 你好"));
+            assert_eq!(message.model, "gemini-requested");
+            assert_eq!(message.response_id.as_deref(), Some(response_id.as_str()));
+            assert_eq!(
+                message.response_model.as_deref(),
+                Some("gemini-length-returned")
+            );
+            assert_eq!(message.usage_status, UsageStatus::Reported);
+            assert_eq!(
+                (
+                    message.usage.input,
+                    message.usage.output,
+                    message.usage.cache_read,
+                    message.usage.cache_write,
+                    message.usage.reasoning,
+                    message.usage.total_tokens
+                ),
+                (14, 6, 3, 0, 2, 23)
+            );
+            assert_eq!(serde_json::to_value(&message.usage_fields).unwrap(), usage);
+            let update = events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    AssistantEvent::UsageUpdate { partial } => Some(partial),
+                    _ => None,
+                })
+                .expect("received usage must survive MAX_TOKENS processing");
+            assert_eq!(update.usage_status, message.usage_status);
+            assert_eq!(update.usage, message.usage);
+            assert_eq!(update.usage_fields, message.usage_fields);
+            assert_eq!(update.response_id, message.response_id);
+            assert_eq!(update.response_model, message.response_model);
+            let endpoint = if mode == GeminiMode::GenerateContent {
+                "POST /api/models/gemini-requested:generateContent HTTP/1.1"
+            } else {
+                "POST /api/models/gemini-requested:streamGenerateContent?alt=sse HTTP/1.1"
+            };
+            assert!(rx.await.unwrap().head.starts_with(endpoint));
+            server.await.unwrap();
+        }
+    }
 }
 
 #[tokio::test]
@@ -1596,17 +2026,18 @@ async fn gemini_generate_content_replays_paired_tool_results_with_original_ids()
         body["contents"][1]["parts"][0]["functionCall"]["id"],
         "native_1"
     );
-    assert_eq!(
-        body["contents"][1]["parts"][1]["functionCall"]["id"],
-        calls[1].id
+    assert!(
+        body["contents"][1]["parts"][1]["functionCall"]
+            .get("id")
+            .is_none()
     );
     assert_eq!(
         body["contents"][2]["parts"][0]["functionResponse"],
-        json!({"id":calls[1].id,"name":"weather","response":{"error":{"temperature":21},"text":"sunny"}})
+        json!({"id":"native_1","name":"weather","response":{"output":{"temperature":21},"text":"sunny"}})
     );
     assert_eq!(
         body["contents"][2]["parts"][1]["functionResponse"],
-        json!({"id":"native_1","name":"weather","response":{"output":{"temperature":21},"text":"sunny"}})
+        json!({"name":"weather","response":{"error":{"temperature":21},"text":"sunny"}})
     );
     server.await.unwrap();
 }

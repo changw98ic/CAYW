@@ -410,6 +410,17 @@ async fn digests_match_published_vectors() {
 }
 
 #[tokio::test]
+async fn hash_rejects_unknown_algorithms_and_input_kinds() {
+    for args in [
+        json!({"algorithm":"md5","input":{"kind":"utf8","value":"abc"}}),
+        json!({"algorithm":"sha256","input":{"kind":"text","value":"abc"}}),
+        json!({"algorithm":"sha256","input":{"kind":"utf8","value":"abc"},"extra":true}),
+    ] {
+        rejects("hash.digest", args, "arguments:").await;
+    }
+}
+
+#[tokio::test]
 async fn unified_diff_has_correct_ranges_context_and_newline_markers() {
     assert_eq!(
         call(

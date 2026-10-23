@@ -190,10 +190,40 @@ pub struct CapabilityCallRecord {
     pub external_provenance: Option<Value>,
 }
 
+/// The host must identify the complete original execution, never a replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconciliationOrigin {
+    pub lease: AttemptLease,
+    pub task_id: String,
+    pub execution_id: String,
+    pub parent_call_id: String,
+    pub source_hash: String,
+}
+
+impl From<&CapabilityCallRecord> for Box<ReconciliationOrigin> {
+    fn from(call: &CapabilityCallRecord) -> Self {
+        Box::new(ReconciliationOrigin::from(call))
+    }
+}
+
+impl From<&CapabilityCallRecord> for ReconciliationOrigin {
+    fn from(call: &CapabilityCallRecord) -> Self {
+        Self {
+            lease: call.lease.clone(),
+            task_id: call.task_id.clone(),
+            execution_id: call.key.execution_id.clone(),
+            parent_call_id: call.parent_call_id.clone(),
+            source_hash: call.source_hash.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityReconciliation {
     pub key: CapabilityCallKey,
+    pub expected: Box<ReconciliationOrigin>,
     pub actor: String,
     pub evidence: String,
     /// Must be a known outcome. Reconciliation never edits a model tool reply.
@@ -253,8 +283,37 @@ pub enum ReconciledOutcome {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ToolReconciliationOrigin {
+    pub lease: AttemptLease,
+    pub task_id: String,
+    pub call: ToolCall,
+    /// Present only when the original host registered an execution or wait.
+    pub execution: Option<ExecutionInput>,
+}
+
+/// A trusted host must authorize the actor and verify evidence for this exact
+/// identity and proposed outcome. A nonempty actor/evidence string grants nothing.
+/// Implementations understand their own receipt format; this is not a general
+/// detector for arbitrary forged text. No verifier is installed by default.
+pub trait ReconciliationVerifier: Send + Sync {
+    fn verify(&self, request: &ReconciliationRequest) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReconciliationRequest {
+    Tool {
+        reconciliation: Reconciliation,
+    },
+    Capability {
+        reconciliation: CapabilityReconciliation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Reconciliation {
     pub call_id: String,
+    pub expected: Box<ToolReconciliationOrigin>,
     pub actor: String,
     /// Evidence supplied by the trusted host, retained in the append-only log.
     pub evidence: String,
@@ -292,6 +351,11 @@ pub enum CoreEvent {
     },
     Agent {
         event: Box<AgentEvent>,
+    },
+    ToolOriginBound {
+        call_id: String,
+        lease: AttemptLease,
+        task_id: String,
     },
     ToolStarted {
         call_id: String,

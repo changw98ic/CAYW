@@ -333,10 +333,12 @@ fn unknown_frozen_cancel_and_prompt_ownership_survive_catchup_and_reconnect() {
             .len(),
         1
     );
+    app.task_admitted("s1", "original-task");
     assert_eq!(
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
         vec![Command::Cancel {
-            session_id: "s1".into()
+            session_id: "s1".into(),
+            task_id: "original-task".into(),
         }]
     );
     let mut value = snapshot("needs_reconciliation", 2, attempt.clone());

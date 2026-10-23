@@ -391,6 +391,48 @@ async fn run(
                 );
                 sampling_stopped = true;
             }
+            for (index, entry) in sample
+                .workspace_after
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if entry["kind"] == "file" {
+                    let relative = format!(
+                        "workspace/{}",
+                        entry["path"].as_str().ok_or("workspace filename absent")?
+                    );
+                    let destination = sample_root.join(&relative);
+                    fs::create_dir_all(
+                        destination
+                            .parent()
+                            .ok_or("workspace attachment parent absent")?,
+                    )?;
+                    let bytes = cayw_verify_tool::evidence::attachment(
+                        &workspace,
+                        entry["path"].as_str().unwrap(),
+                    )?;
+                    if sha256(&bytes) != entry["sha256"] {
+                        return Err("workspace changed after execution snapshot".into());
+                    }
+                    fs::write(&destination, bytes)?;
+                    report.bind_attachment(
+                        &format!("workspace_{index}"),
+                        &sample_root,
+                        &relative,
+                    )?;
+                }
+            }
+            write_json_new(
+                &sample_root.join("workspace.json"),
+                &json!({
+                    "before":sample.workspace_before,"after":sample.workspace_after,
+                    "host_before":sample.workspace_host_before,"host_after":sample.workspace_host_after,
+                    "scope":"Declared fixture workspace only; Host recovery records are separate from task files. No external editor or outside path coverage."
+                }),
+            )?;
+            report.bind_attachment("workspace", &sample_root, "workspace.json")?;
             write_json_new(&sample_root.join("luau.json"), &sample)?;
             report.bind_attachment("luau", &sample_root, "luau.json")?;
             if audit_path.is_file() {

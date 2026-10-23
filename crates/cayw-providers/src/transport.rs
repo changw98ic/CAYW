@@ -1,10 +1,10 @@
 use crate::common::{self, Result};
-use crate::{GeminiMode, ProviderConfigError, anthropic, gemini};
+use crate::{GeminiMode, ProviderConfigError, anthropic, gemini, responses};
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, ModelRequest, StopReason,
 };
 use futures::{StreamExt, stream::BoxStream};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use reqwest::{Client, Url};
 use std::time::Instant;
 
@@ -57,20 +57,9 @@ impl HttpConfig {
         let mut endpoint = self.base.clone();
         let suffix = match protocol {
             Protocol::Anthropic => "messages".to_owned(),
-            Protocol::Gemini(mode) => {
-                let id = request
-                    .model
-                    .id
-                    .strip_prefix("models/")
-                    .unwrap_or(&request.model.id);
-                if id.is_empty()
-                    || !id
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
-                    || matches!(id, "." | "..")
-                {
-                    return Err("Gemini model ID must be a model name or models/name".into());
-                }
+            Protocol::Responses => "responses".to_owned(),
+            Protocol::Gemini(mode, gateway_routes) => {
+                let id = gemini_model(&request.model.id, gateway_routes)?;
                 let method = if mode == GeminiMode::GenerateContent {
                     "generateContent"
                 } else {
@@ -86,7 +75,7 @@ impl HttpConfig {
         ));
         if matches!(
             protocol,
-            Protocol::Gemini(GeminiMode::StreamGenerateContent)
+            Protocol::Gemini(GeminiMode::StreamGenerateContent, _)
         ) {
             endpoint.set_query(Some("alt=sse"));
         }
@@ -94,16 +83,43 @@ impl HttpConfig {
     }
 }
 
+// The default Gemini route is one model segment, optionally prefixed by
+// `models/`. Explicit gateway routing additionally permits a safe two-segment
+// `provider/model` path; neither form accepts empty, `.` or `..` segments.
+fn gemini_model(id: &str, gateway_routes: bool) -> Result<&str> {
+    let id = id.strip_prefix("models/").unwrap_or(id);
+    let segments = id.split('/').collect::<Vec<_>>();
+    let limit = if gateway_routes { 2 } else { 1 };
+    if segments.len() > limit
+        || segments.iter().any(|segment| {
+            segment.is_empty()
+                || matches!(*segment, "." | "..")
+                || !segment
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(if gateway_routes {
+            "Gemini model ID must be a model name or safe provider/model route".into()
+        } else {
+            "Gemini model ID must be a model name or models/name".into()
+        });
+    }
+    Ok(id)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Protocol {
     Anthropic,
-    Gemini(GeminiMode),
+    Responses,
+    Gemini(GeminiMode, bool),
 }
 
 // The protocol state owns normalized messages, not a network task. Dropping the
 // returned stream drops send/read futures and sockets; nothing is spawned.
 enum State {
     Anthropic(anthropic::State),
+    Responses(responses::State),
     Gemini(gemini::State),
 }
 
@@ -111,12 +127,14 @@ impl State {
     fn new(protocol: Protocol, request: &ModelRequest) -> Self {
         match protocol {
             Protocol::Anthropic => Self::Anthropic(anthropic::State::new(request)),
-            Protocol::Gemini(_) => Self::Gemini(gemini::State::new(request)),
+            Protocol::Responses => Self::Responses(responses::State::new(request)),
+            Protocol::Gemini(..) => Self::Gemini(gemini::State::new(request)),
         }
     }
     fn message(&self) -> &AssistantMessage {
         match self {
             Self::Anthropic(s) => &s.message,
+            Self::Responses(s) => &s.message,
             Self::Gemini(s) => &s.message,
         }
     }
@@ -137,6 +155,12 @@ impl State {
                         yield update;
                     }
                 }
+                Self::Responses(state) => {
+                    let mut updates = state.accept(value, event, cancel);
+                    while let Some(update) = updates.next().await {
+                        yield update?;
+                    }
+                }
                 Self::Gemini(state) => {
                     let mut updates = state.accept(value, cancel);
                     while let Some(update) = updates.next().await {
@@ -148,11 +172,16 @@ impl State {
         .boxed()
     }
     fn done(&self) -> bool {
-        matches!(self, Self::Anthropic(s) if s.done())
+        match self {
+            Self::Anthropic(s) => s.done(),
+            Self::Responses(s) => s.done(),
+            Self::Gemini(_) => false,
+        }
     }
     fn finish(&mut self) -> Result<()> {
         match self {
             Self::Anthropic(s) => s.finish(),
+            Self::Responses(s) => s.finish(),
             Self::Gemini(s) => s.finish(),
         }
     }
@@ -172,14 +201,23 @@ pub(crate) fn stream(
             if cancel.is_cancelled() { return Err("Request cancelled".into()); }
             let body = match protocol {
                 Protocol::Anthropic => anthropic::request_body(&request)?,
-                Protocol::Gemini(_) => gemini::request_body(&request)?,
+                Protocol::Responses => responses::request_body(&request)?,
+                Protocol::Gemini(..) => gemini::request_body(&request)?,
             };
             let endpoint = config.endpoint(protocol, &request)?;
-            let json = matches!(protocol, Protocol::Gemini(GeminiMode::GenerateContent));
+            let json = matches!(protocol, Protocol::Gemini(GeminiMode::GenerateContent, _));
             let mut builder = config.client.post(endpoint).header(ACCEPT, if json { "application/json" } else { "text/event-stream" }).json(&body);
             builder = match protocol {
                 Protocol::Anthropic => builder.header("x-api-key", config.key.clone()).header("anthropic-version", "2023-06-01"),
-                Protocol::Gemini(_) => builder.header("x-goog-api-key", config.key.clone()),
+                Protocol::Responses => {
+                    let mut bearer = Vec::with_capacity(7 + config.key.as_bytes().len());
+                    bearer.extend_from_slice(b"Bearer ");
+                    bearer.extend_from_slice(config.key.as_bytes());
+                    let mut bearer = HeaderValue::from_bytes(&bearer).map_err(|_| "Invalid provider authorization header".to_owned())?;
+                    bearer.set_sensitive(true);
+                    builder.header(AUTHORIZATION, bearer)
+                }
+                Protocol::Gemini(..) => builder.header("x-goog-api-key", config.key.clone()),
             };
             let response = tokio::select! {
                 biased;
@@ -200,7 +238,7 @@ pub(crate) fn stream(
             let mut body = response.bytes_stream();
             let mut decoder = SseDecoder::default();
             let mut json_body = Vec::new();
-            let is_json = matches!(protocol, Protocol::Gemini(GeminiMode::GenerateContent));
+            let is_json = matches!(protocol, Protocol::Gemini(GeminiMode::GenerateContent, _));
             let mut received = 0usize;
             let mut frame_count = 0usize;
             'body: loop {
@@ -213,20 +251,28 @@ pub(crate) fn stream(
                 let frames = match next {
                     Some(Err(_)) => { failure = Some("Provider response stream failed".into()); break; }
                     Some(Ok(bytes)) => {
-                        received = received.saturating_add(bytes.len());
-                        let limit = if is_json { MAX_JSON_BYTES } else { MAX_RESPONSE_BYTES };
-                        if received > limit { failure = Some("Provider response exceeds the size limit".into()); break; }
                         if is_json {
+                            received = received.saturating_add(bytes.len());
+                            if received > MAX_JSON_BYTES { failure = Some("Provider response exceeds the size limit".into()); break; }
                             json_body.extend_from_slice(&bytes);
                             continue;
                         }
-                        // Decode a bounded byte batch before yielding to the
-                        // scheduler. No network chunk can create an unbounded
-                        // batch of parsed frames or normalized events.
-                        for batch in bytes.chunks(DECODE_BATCH_BYTES) {
+                        // Consume one frame at a time. Protocol completion must
+                        // be observed before decoding or counting trailing bytes.
+                        let mut offset = 0;
+                        while offset < bytes.len() {
                             if let Err(error) = common::checkpoint(&cancel).await { failure = Some(error); break 'body; }
-                            let frames = match decoder.push(batch) { Ok(frames) => frames, Err(error) => { failure = Some(error); break 'body; } };
-                            for frame in frames {
+                            let count = (bytes.len() - offset)
+                                .min(DECODE_BATCH_BYTES)
+                                .min(MAX_RESPONSE_BYTES.saturating_sub(received) + 1);
+                            let (consumed, frame) = match decoder.push(&bytes[offset..offset + count]) {
+                                Ok(decoded) => decoded,
+                                Err(error) => { failure = Some(error); break 'body; }
+                            };
+                            received += consumed;
+                            offset += consumed;
+                            if received > MAX_RESPONSE_BYTES { failure = Some("Provider response exceeds the size limit".into()); break 'body; }
+                            if let Some(frame) = frame {
                                 frame_count += 1;
                                 if frame_count > MAX_RESPONSE_FRAMES { failure = Some("Provider response exceeds the frame limit".into()); break 'body; }
                                 let mut updates = state.accept(&frame.data, frame.event.as_deref(), &cancel);
@@ -239,9 +285,10 @@ pub(crate) fn stream(
                                         Err(error) => { failure = Some(error); break 'body; }
                                     }
                                 }
+                                drop(updates);
+                                if state.done() { break 'body; }
                             }
                         }
-                        if state.done() { break; }
                         continue;
                     }
                     None if is_json => {
@@ -307,9 +354,8 @@ struct SseDecoder {
 }
 
 impl SseDecoder {
-    fn push(&mut self, input: &[u8]) -> Result<Vec<Frame>> {
-        let mut frames = Vec::new();
-        for &byte in input {
+    fn push(&mut self, input: &[u8]) -> Result<(usize, Option<Frame>)> {
+        for (index, &byte) in input.iter().enumerate() {
             if self.skip_lf {
                 self.skip_lf = false;
                 if byte == b'\n' {
@@ -320,26 +366,37 @@ impl SseDecoder {
             if self.bytes > MAX_EVENT_BYTES {
                 return Err("SSE event exceeds the 8 MiB limit".into());
             }
-            match byte {
+            let frame = match byte {
                 b'\r' => {
-                    self.end_line(&mut frames)?;
+                    let frame = self.end_line()?;
                     self.skip_lf = true;
+                    frame
                 }
-                b'\n' => self.end_line(&mut frames)?,
-                _ => self.line.push(byte),
+                b'\n' => self.end_line()?,
+                _ => {
+                    self.line.push(byte);
+                    None
+                }
+            };
+            if let Some(frame) = frame {
+                return Ok((index + 1, Some(frame)));
             }
         }
-        Ok(frames)
+        Ok((input.len(), None))
     }
     fn finish(&mut self) -> Result<Vec<Frame>> {
         let mut frames = Vec::new();
-        if !self.line.is_empty() {
-            self.end_line(&mut frames)?;
+        if !self.line.is_empty()
+            && let Some(frame) = self.end_line()?
+        {
+            frames.push(frame);
         }
-        self.dispatch(&mut frames);
+        if let Some(frame) = self.dispatch() {
+            frames.push(frame);
+        }
         Ok(frames)
     }
-    fn end_line(&mut self, frames: &mut Vec<Frame>) -> Result<()> {
+    fn end_line(&mut self) -> Result<Option<Frame>> {
         let line = std::mem::take(&mut self.line);
         let mut line = std::str::from_utf8(&line).map_err(|_| "Invalid UTF-8 in SSE")?;
         if self.lines == 0 {
@@ -347,8 +404,8 @@ impl SseDecoder {
         }
         self.lines = self.lines.saturating_add(1);
         if line.is_empty() {
-            self.dispatch(frames);
             self.bytes = 0;
+            return Ok(self.dispatch());
         } else if !line.starts_with(':') {
             let (field, value) = line.split_once(':').unwrap_or((line, ""));
             let value = value.strip_prefix(' ').unwrap_or(value);
@@ -358,15 +415,13 @@ impl SseDecoder {
                 _ => {}
             }
         }
-        Ok(())
+        Ok(None)
     }
-    fn dispatch(&mut self, frames: &mut Vec<Frame>) {
+    fn dispatch(&mut self) -> Option<Frame> {
         let event = self.event.take();
-        if !self.data.is_empty() {
-            frames.push(Frame {
-                data: std::mem::take(&mut self.data).join("\n"),
-                event,
-            });
-        }
+        (!self.data.is_empty()).then(|| Frame {
+            data: std::mem::take(&mut self.data).join("\n"),
+            event,
+        })
     }
 }
