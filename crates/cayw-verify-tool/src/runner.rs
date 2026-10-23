@@ -115,6 +115,7 @@ pub fn limits_json(limits: &Limits) -> Value {
         "memory_bytes":limits.memory_bytes,
         "instruction_checkpoint_budget":limits.instruction_budget,
         "timeout_ns":u64::try_from(limits.timeout.as_nanos()).unwrap_or(u64::MAX),
+        "host_wait_ns":u64::try_from(limits.host_wait.as_nanos()).unwrap_or(u64::MAX),
         "shutdown_grace_ns":u64::try_from(limits.shutdown_grace.as_nanos()).unwrap_or(u64::MAX),
         "host_calls":limits.host_calls,
         "output_bytes":limits.output_bytes,
@@ -471,7 +472,7 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
         && sample.permission == declaration.permission && sample.config == declaration.config
         && sample.source == SOURCE && sample.case == case.name()
         && sample.iteration > 0 && sample.sample_id == sample_id(case, sample.iteration),
-        "Script, complete finite signatures, inputs, permissions and limits match this executable's fixed case declaration.");
+        "Script, complete finite signatures, inputs, permissions, active timeout, host wait and limits match this executable's fixed case declaration.");
     sample.check("actual_host_signatures", sample.host_signatures == case.tool_signatures(),
         "Complete advertised signatures were captured from the same Host passed to CodeMode, and match the frozen finite contract.");
     sample.check("observed_workspace_effects", sample.workspace_before == json!([])
@@ -1233,6 +1234,19 @@ mod tests {
             config_json(Case::Cancel)["codemode"]["shutdown_grace_ns"],
             recorded["shutdown_grace_ns"]
         );
+    }
+
+    #[test]
+    fn configuration_records_host_wait_separately_from_active_timeout() {
+        let host = Case::HostTimeout.limits();
+        assert_eq!(host.host_wait, std::time::Duration::from_secs(1));
+        assert_eq!(host.timeout, std::time::Duration::from_secs(5));
+        let recorded = config_json(Case::HostTimeout)["codemode"].clone();
+        assert_eq!(recorded["host_wait_ns"], json!(1_000_000_000_u64));
+        assert_eq!(recorded["timeout_ns"], json!(5_000_000_000_u64));
+        let active = config_json(Case::ActiveTimeout)["codemode"].clone();
+        assert_eq!(active["host_wait_ns"], json!(60_000_000_000_u64));
+        assert_eq!(active["timeout_ns"], json!(1_000_000_000_u64));
     }
 
     #[test]

@@ -60,6 +60,60 @@ fn main() {
                 wait_for(&root.join("release"));
             }
         }
+        Some("project") => {
+            use std::io::Write;
+            assert_eq!(
+                args.len(),
+                2,
+                "the host must supply the whole argument list"
+            );
+            assert_eq!(
+                std::env::var("CAYW_REQUEST_PROJECT").unwrap(),
+                "exact-project"
+            );
+            assert!(std::env::var_os("HOME").is_none());
+            assert!(std::env::var_os("PATH").is_none());
+            assert_eq!(
+                std::fs::read_to_string("project-input.txt").unwrap(),
+                "project test input\n"
+            );
+            let root = std::env::current_dir().unwrap();
+            std::fs::write(
+                "project-observed.json",
+                serde_json::to_vec(&serde_json::json!({
+                    "pid":std::process::id(),"cwd":root,"args":args,
+                    "env":std::env::vars().collect::<BTreeMap<_, _>>()
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut effects = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("project-effects.log")
+                .unwrap();
+            effects.write_all(b"project test effect\n").unwrap();
+            effects.sync_all().unwrap();
+            // Publish readiness only after the real input, environment and effect
+            // have been checked. Rename keeps the PID marker complete for readers.
+            std::fs::write("project.pid.pending", std::process::id().to_string()).unwrap();
+            std::fs::rename("project.pid.pending", "project.pid").unwrap();
+            match args[1].as_str() {
+                "complete" => {}
+                "wait" => wait_for(&root.join("release")),
+                "flood" => {
+                    wait_for(&root.join("output-release"));
+                    let mut stdout = std::io::stdout().lock();
+                    stdout.write_all(&[b'x'; 8192]).unwrap();
+                    stdout.flush().unwrap();
+                    wait_for(&root.join("release"));
+                }
+                _ => panic!("unknown project fixture mode"),
+            }
+            std::fs::write("project-result.txt", "project test passed\n").unwrap();
+            std::fs::write("project-finished", "finished").unwrap();
+            println!("project-test-complete");
+        }
         Some("tree") => {
             let root = PathBuf::from(&args[1]);
             std::fs::write(root.join("leader.pid"), std::process::id().to_string()).unwrap();
@@ -183,28 +237,26 @@ fn main() {
                 .unwrap();
                 let id = runtime.create(None).unwrap().id;
                 std::fs::write(root.join("session.id"), &id).unwrap();
+                let admitted = runtime.enqueue(&id, "run a process chain").unwrap();
                 let prompt = {
                     let runtime = runtime.clone();
-                    let id = id.clone();
+                    let task_id = admitted.id.clone();
                     tokio::spawn(async move {
                         runtime
-                            .prompt(
-                                &id,
-                                "run a process chain",
-                                cayw_ai::CancellationToken::new(),
-                            )
+                            .resume(&task_id, cayw_ai::CancellationToken::new())
                             .await
                     })
                 };
                 std::fs::write(root.join("host.ready"), "ready").unwrap();
                 if shutdown {
                     wait_for(&root.join("shutdown"));
-                    runtime.cancel(&id).unwrap();
+                    let target = runtime.task(&admitted.id).unwrap().cancel_target();
+                    runtime.cancel(&target).unwrap();
                     // The original graceful path: cancel, then wait until the owned
                     // worker has finished its own process cleanup and left the
                     // active set. Only then does this real host process exit.
                     runtime.wait_idle(&id).await;
-                    let task = runtime.tasks(&id).unwrap().remove(0);
+                    let task = runtime.task(&admitted.id).unwrap();
                     let drained = runtime.drain_task_processes(&task.id).await;
                     std::fs::write(
                         root.join("host.exited"),

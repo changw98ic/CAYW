@@ -1,0 +1,28 @@
+[package]
+name = "cayw-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+description = "Independent Rust client for the local CAYW headless runtime"
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[dependencies]
+cayw-ai = { path = "../../crates/cayw-ai" }
+cayw-core = { path = "../../crates/cayw-core" }
+cayw-ipc = { path = "../../crates/cayw-ipc" }
+cayw-runtime = { path = "../../crates/cayw-runtime", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "process", "signal", "time", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "cayw-client"
+path = "src/main.rs"

@@ -165,15 +165,51 @@ impl AuditDb {
         lock(&self.connection).execute("INSERT INTO runtime_grants(id,session,attempt,approval,capability,scope,mode,actor,expires,state) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![record.id,record.session_id,record.attempt_id,record.approval_id,record.capability,record.scope,record.mode,record.actor,sql_u64(record.expires_at)?,record.state])?;
         Ok(record)
     }
-    pub(crate) fn activate_grant(&self, id: &str, allow: bool) -> Result<(), RuntimeError> {
-        let n = lock(&self.connection).execute(
-            "UPDATE runtime_grants SET state=?2 WHERE id=?1 AND state='preparing'",
-            params![id, if allow { "active" } else { "denied" }],
+    pub(crate) fn begin_decision(
+        &self,
+        approval: &cayw_core::ApprovalRequest,
+        choice: &str,
+        actor: &str,
+    ) -> Result<u64, RuntimeError> {
+        let db = lock(&self.connection);
+        db.execute(
+            "INSERT INTO runtime_audit(session,task,kind,timestamp,payload) VALUES (?1,?2,'approval_decision_started',?3,?4)",
+            params![approval.session_id, approval.input.task_id, sql_u64(timestamp_ms())?, serde_json::to_string(&serde_json::json!({"approval_id":approval.id,"attempt_id":approval.attempt_id,"choice":choice,"actor":actor}))?],
+        )?;
+        u64::try_from(db.last_insert_rowid())
+            .map_err(|_| RuntimeError::Worker("approval decision cursor is invalid".into()))
+    }
+    pub(crate) fn activate_grant(
+        &self,
+        id: &str,
+        allow: bool,
+        decision: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut db = lock(&self.connection);
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let decision = sql_u64(decision)?;
+        let n = tx.execute(
+            "UPDATE runtime_grants SET state=?2 WHERE id=?1 AND state='preparing' AND EXISTS(SELECT 1 FROM runtime_audit a WHERE a.seq=?3 AND a.kind='approval_decision_started' AND a.session=runtime_grants.session AND json_extract(a.payload,'$.attempt_id')=runtime_grants.attempt AND json_extract(a.payload,'$.approval_id')=runtime_grants.approval)",
+            params![id, if allow { "active" } else { "denied" }, decision],
         )?;
         if n != 1 {
             return Err(RuntimeError::StaleApproval);
         }
+        // Permission and its completed decision become visible together. A
+        // failed commit cannot leave an active grant without this evidence.
+        tx.execute(
+            "INSERT INTO runtime_audit(session,task,kind,timestamp,payload) SELECT session,task,'approval_decision_committed',?2,?3 FROM runtime_audit WHERE seq=?1",
+            params![decision, sql_u64(timestamp_ms())?, serde_json::to_string(&serde_json::json!({"decision_cursor":decision,"grant_id":id}))?],
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+    pub(crate) fn decision_pending(&self, task: &str) -> Result<bool, RuntimeError> {
+        Ok(lock(&self.connection).query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_audit s WHERE s.task=?1 AND s.kind='approval_decision_started' AND NOT EXISTS(SELECT 1 FROM runtime_audit c WHERE c.session=s.session AND c.task=s.task AND c.kind='approval_decision_committed' AND json_extract(c.payload,'$.decision_cursor')=s.seq))",
+            [task],
+            |row| row.get(0),
+        )?)
     }
     pub(crate) fn grants(&self, session: &str) -> Result<Vec<GrantRecord>, RuntimeError> {
         let db = lock(&self.connection);

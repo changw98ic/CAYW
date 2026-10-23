@@ -46,6 +46,24 @@ fn tool_arguments_require_complete_objects() {
 }
 
 #[test]
+fn duplicate_object_fields_are_rejected_at_every_depth() {
+    for input in [
+        r#"{"city":"Paris","city":"Tokyo"}"#,
+        concat!(r#"{"city":"Paris",""#, r"\", r#"u0063ity":"Tokyo"}"#),
+        r#"{"items":[{"n":1,"n":2}]}"#,
+        r#"{"outer":{"n":1,"n":1}}"#,
+    ] {
+        let error = parse_tool_arguments(input).expect_err(input);
+        assert!(error.to_string().contains("duplicate"), "{error}");
+    }
+    let input = r#"{"items":[{"n":1},{"n":2}],"nullable":null,"flag":true,"text":"你好","signed":-3,"fraction":1.25,"large":18446744073709551615}"#;
+    assert_eq!(
+        parse_tool_arguments(input).unwrap(),
+        json!({"items":[{"n":1},{"n":2}],"nullable":null,"flag":true,"text":"你好","signed":-3,"fraction":1.25,"large":u64::MAX})
+    );
+}
+
+#[test]
 fn validation_is_strict_and_local_only() {
     let validator = ArgumentValidator::new(&json!({"type":"object", "properties":{"n":{"type":"integer"}}, "required":["n"], "additionalProperties":false})).unwrap();
     assert!(validator.validate(&json!({"n":2})).is_ok());
@@ -137,6 +155,28 @@ fn alternative_schema_errors_identify_fields_without_converting_arguments() {
     assert!(error.contains("/options/max_output_tokens"), "{error}");
     assert_eq!(invalid, original);
     assert!(validator.validate(&json!({"action": "exec", "options": {"yield_time_ms": 30000, "max_output_tokens": 8192}})).is_ok());
+}
+
+// Break caught: protocol replay identities and opaque signatures disappear after persistence.
+#[test]
+fn assistant_protocol_metadata_survives_serialization_without_entering_content() {
+    let assistant = AssistantMessage::new(&Model::new("magpie", "test"));
+    let mut value = serde_json::to_value(&assistant).unwrap();
+    let metadata = json!({"openai_responses":{"output":[
+        {"type":"reasoning","id":"rs-original","encrypted_content":"opaque-synthetic","summary":[]},
+        {"type":"function_call","id":"fc-original","call_id":"call-original","name":"read","arguments":"{}","status":"completed"}
+    ]}});
+    value["provider_metadata"] = metadata.clone();
+    let restored: AssistantMessage = serde_json::from_value(value).unwrap();
+    let encoded = serde_json::to_value(&restored).unwrap();
+    assert_eq!(encoded["provider_metadata"], metadata);
+    assert_eq!(encoded["content"], json!([]));
+    assert!(
+        serde_json::to_value(assistant)
+            .unwrap()
+            .get("provider_metadata")
+            .is_none()
+    );
 }
 
 #[test]
