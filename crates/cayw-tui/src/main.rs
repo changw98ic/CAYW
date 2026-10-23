@@ -6,8 +6,9 @@ use cayw_tui::{
     terminal::TerminalGuard,
     transport::{Transport, Watch},
 };
-use crossterm::event::{Event, EventStream, MouseEventKind};
+use crossterm::event::{Event, EventStream};
 use futures::{FutureExt, StreamExt};
+use ratatui::layout::Rect;
 use std::{
     any::Any,
     io::{self, IsTerminal},
@@ -62,8 +63,10 @@ async fn run(
     let stop = shutdown_signal();
     tokio::pin!(stop);
     let mut last_watch: Option<Option<Watch>> = None;
+    terminal.terminal().draw(|frame| draw(frame, app))?;
     loop {
         let mut consumed_events = false;
+        let mut needs_draw = true;
         tokio::select! {
             _ = &mut stop => { app.quitting = true; }
             event = events.next() => match event {
@@ -72,11 +75,12 @@ async fn run(
                     driver.dispatch(app, transport, commands);
                 }
                 Some(Ok(Event::Paste(text))) => app.paste(&text),
-                Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
-                    MouseEventKind::ScrollUp => app.scroll_history(3),
-                    MouseEventKind::ScrollDown => app.scroll_history(-3),
-                    _ => {},
-                },
+                Some(Ok(Event::Mouse(mouse))) => {
+                    let size = terminal.terminal().size()?;
+                    let area = Rect::new(0, 0, size.width, size.height);
+                    let commands = app.handle_mouse(mouse, area);
+                    driver.dispatch(app, transport, commands);
+                }
                 Some(Ok(_)) => {},
                 Some(Err(error)) => return Err(error),
                 None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")),
@@ -89,7 +93,13 @@ async fn run(
                 }
                 None => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "IPC worker stopped")),
             },
-            _ = redraw.tick() => {},
+            _ = redraw.tick() => {
+                if app.is_animating() {
+                    app.advance_tick();
+                } else {
+                    needs_draw = false;
+                }
+            }
         }
         if app.quitting {
             break;
@@ -101,7 +111,9 @@ async fn run(
                 Err(error) => app.status = error.into(),
             }
         }
-        terminal.terminal().draw(|frame| draw(frame, app))?;
+        if needs_draw {
+            terminal.terminal().draw(|frame| draw(frame, app))?;
+        }
     }
     Ok(())
 }

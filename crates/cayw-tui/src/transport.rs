@@ -13,6 +13,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const EVENT_DELAY: Duration = Duration::from_millis(250);
+const STREAM_EVENT_DELAY: Duration = Duration::from_millis(40);
 const MAX_JOBS: usize = 16;
 
 #[derive(Clone, Debug)]
@@ -249,7 +250,14 @@ async fn run(
                     if watch.as_ref() != Some(&polled) { continue; }
                     let mut result = result.map_err(|error| redact(&error.message, &token));
                     match &result {
-                        Ok(Value::Array(records)) => { awaiting_consumption = !records.is_empty(); }
+                        Ok(Value::Array(records)) => {
+                            awaiting_consumption = !records.is_empty();
+                            if records.len() >= 100 {
+                                next_poll = Instant::now();
+                            } else if !records.is_empty() {
+                                next_poll = Instant::now() + STREAM_EVENT_DELAY;
+                            }
+                        }
                         Ok(_) => { result = Err("session.events returned a non-array result; cursor retained".into()); awaiting_consumption = true; }
                         Err(_) => { awaiting_consumption = true; }
                     }

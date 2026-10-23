@@ -12,6 +12,12 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner_frame(tick: u64) -> &'static str {
+    SPINNER[(tick as usize) % SPINNER.len()]
+}
+
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     if area.is_empty() {
@@ -118,14 +124,17 @@ fn session_display_label(session: &crate::SessionView) -> String {
 }
 
 fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let spin = spinner_frame(app.tick);
     let items: Vec<_> = app
         .sessions
         .iter()
         .map(|session| {
             let state = if session.frozen {
-                "frozen"
+                "frozen".to_owned()
+            } else if session.state == "running" || session.request_pending {
+                format!("{spin} {}", session.state)
             } else {
-                &session.state
+                session.state.clone()
             };
             ListItem::new(format!("{}\n{}", session_display_label(session), state))
         })
@@ -150,6 +159,7 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let spin = spinner_frame(app.tick);
     let view_label = match app.view {
         ViewTab::Chat => "Chat".to_owned(),
         ViewTab::Files => format!("Files ({})", app.selected().map_or(0, |s| s.files.len())),
@@ -166,10 +176,19 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 ""
             };
+            let scroll_flag = if session.scroll > 0 {
+                format!(" · scroll locked (+{} · End follow)", session.scroll)
+            } else {
+                String::new()
+            };
+            let state_display = if session.state == "running" || session.request_pending {
+                format!("{spin} {}", session.state)
+            } else {
+                session.state.clone()
+            };
             format!(
-                "{} · {}{flag} · {view_label}",
+                "{} · {state_display}{flag} · {view_label}{scroll_flag}",
                 session_display_label(session),
-                session.state
             )
         },
     );
@@ -257,7 +276,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
             if let Some(text) = &session.streaming_text {
                 append(
                     &mut lines,
-                    "assistant · streaming",
+                    &format!("{spin} assistant · streaming"),
                     inner.width,
                     Color::Green,
                 );

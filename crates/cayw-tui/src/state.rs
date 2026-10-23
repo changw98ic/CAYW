@@ -1,6 +1,9 @@
 //! UI projection of the shared runtime contract. The runtime owns all effects.
 use crate::input::{Editor, sanitize};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -332,7 +335,7 @@ impl SessionView {
             // committed history, approvals, bindings and effects along the way.
             cursor: 0,
             snapshot_cursor: cursor,
-            messages,
+            messages: bound_messages(messages),
             streaming_text: None,
             approvals,
             unresolved_calls,
@@ -426,8 +429,52 @@ impl SessionView {
         self.streaming_text = (self.cursor >= self.snapshot_cursor
             && self.active_attempt.is_some()
             && self.active_attempt == self.stream_replay.attempt)
-            .then(|| self.stream_replay.message.as_ref().map(message_text))
+            .then(|| {
+                self.stream_replay
+                    .message
+                    .as_ref()
+                    .map(message_text)
+                    .map(bound_stream_text)
+            })
             .flatten();
+    }
+
+    fn estimated_view_lines(&self, view: ViewTab) -> usize {
+        match view {
+            ViewTab::Chat => {
+                let mut total = 0_usize;
+                for msg in &self.messages {
+                    let role = string(msg, "role");
+                    if role == "system" {
+                        continue;
+                    }
+                    let text = message_text(msg);
+                    if text.trim().is_empty() && msg["error_message"].is_null() {
+                        continue;
+                    }
+                    total += 2 + text.lines().count().max(1);
+                }
+                if let Some(stream) = &self.streaming_text {
+                    total += 1 + stream.lines().count().max(1);
+                }
+                if self.tool_status.is_some() {
+                    total += 1;
+                }
+                total += self.approvals.len() * 4;
+                total
+            }
+            ViewTab::Files => self
+                .files
+                .iter()
+                .map(|f| 2 + f.preview.lines().count().max(1))
+                .sum(),
+            ViewTab::Diff => self
+                .diffs
+                .iter()
+                .map(|d| 2 + d.diff.lines().count().max(1))
+                .sum(),
+            ViewTab::Logs => self.logs.len(),
+        }
     }
 
     fn event(&mut self, event: &Value, project: bool) -> Result<(), String> {
@@ -510,10 +557,12 @@ impl SessionView {
                 self.synced = false;
             }
             "session_forked" => {
-                self.messages = event["messages"]
-                    .as_array()
-                    .cloned()
-                    .ok_or("Fork event is missing messages")?;
+                self.messages = bound_messages(
+                    event["messages"]
+                        .as_array()
+                        .cloned()
+                        .ok_or("Fork event is missing messages")?,
+                );
             }
             "host" => {
                 // Host extensions can change the plugin binding or frozen flag.
@@ -553,6 +602,10 @@ impl SessionView {
                     .ok_or("Missing completed message")?;
                 self.observe_unknown_message(message);
                 self.messages.push(message.clone());
+                if self.messages.len() > MAX_MESSAGES {
+                    let drain = self.messages.len() - MAX_MESSAGES;
+                    self.messages.drain(0..drain);
+                }
             }
             "agent_end" => {
                 if let Some(messages) = event["messages"].as_array() {
@@ -617,11 +670,27 @@ pub struct App {
     pub dialog: Option<Dialog>,
     pub connected: bool,
     pub status: String,
+    pub tick: u64,
     drafts: BTreeMap<String, Editor>,
     pub quitting: bool,
 }
 
 impl App {
+    pub fn advance_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+    }
+
+    pub fn is_animating(&self) -> bool {
+        !self.connected
+            || self.sessions.iter().any(|session| {
+                session.request_pending
+                    || session.cancel_pending
+                    || session.streaming_text.is_some()
+                    || session.tool_status.is_some()
+                    || session.state == "running"
+            })
+    }
+
     pub fn selected(&self) -> Option<&SessionView> {
         let id = self.selected_id.as_ref()?;
         self.sessions.iter().find(|session| &session.id == id)
@@ -732,12 +801,14 @@ impl App {
         let records = value
             .as_array()
             .ok_or("session.events did not return an array")?;
+        let active_view = self.view;
         let session = self
             .sessions
             .iter_mut()
             .find(|session| session.id == id)
             .ok_or("Events reference an unknown session")?;
         let mut next = session.clone();
+        let old_lines = (next.scroll > 0).then(|| next.estimated_view_lines(active_view));
         let mut previous = None;
         for record in records {
             let cursor = record["cursor"]
@@ -794,6 +865,15 @@ impl App {
             }
             next.cursor = cursor;
             next.project_stream();
+        }
+        // Anti-flood scroll lock: when the user has scrolled up (scroll > 0),
+        // compensate for newly arrived lines so the reading viewport never jumps.
+        if let Some(before) = old_lines {
+            let after = next.estimated_view_lines(active_view);
+            if after > before {
+                let added = (after - before).min(u16::MAX as usize) as u16;
+                next.scroll = next.scroll.saturating_add(added);
+            }
         }
         *session = next;
         Ok(())
@@ -1079,6 +1159,198 @@ impl App {
         }
     }
 
+    pub fn handle_mouse(&mut self, mouse: MouseEvent, area: Rect) -> Vec<Command> {
+        if area.is_empty() {
+            return vec![];
+        }
+        let col = mouse.column;
+        let row = mouse.row;
+        let has_sidebar = area.width >= 70 && area.height > 3;
+        let sidebar_right = if has_sidebar { area.x + 24 } else { area.x };
+        let body_top = area.y.saturating_add(1);
+        let body_bottom = area.bottom().saturating_sub(2);
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if self.dialog.is_none()
+                    && has_sidebar
+                    && col >= area.x
+                    && col < sidebar_right
+                    && row >= body_top
+                    && row < body_bottom
+                {
+                    self.focus = Focus::Sessions;
+                    return self.select_relative(-1);
+                }
+                self.scroll_history(3);
+                return vec![];
+            }
+            MouseEventKind::ScrollDown => {
+                if self.dialog.is_none()
+                    && has_sidebar
+                    && col >= area.x
+                    && col < sidebar_right
+                    && row >= body_top
+                    && row < body_bottom
+                {
+                    self.focus = Focus::Sessions;
+                    return self.select_relative(1);
+                }
+                self.scroll_history(-3);
+                return vec![];
+            }
+            MouseEventKind::Down(MouseButton::Left) => {}
+            _ => return vec![],
+        }
+
+        if let Some(dialog) = self.dialog.take() {
+            let (max_w, max_h) = match dialog {
+                Dialog::Help => (74, 13),
+                _ => (68, 9),
+            };
+            let width = area.width.min(max_w);
+            let height = area.height.min(max_h);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            );
+            let inside =
+                col >= popup.x && col < popup.right() && row >= popup.y && row < popup.bottom();
+            if !inside {
+                return vec![];
+            }
+            match dialog {
+                Dialog::Help => return vec![],
+                Dialog::Create(editor) => {
+                    if self.connected {
+                        let trimmed = editor.text().trim();
+                        let label = if trimmed.is_empty() {
+                            format!("Session {}", self.sessions.len() + 1)
+                        } else {
+                            trimmed.to_owned()
+                        };
+                        if label.len() <= 1024 {
+                            return vec![Command::Create { label }];
+                        }
+                    }
+                    self.dialog = Some(Dialog::Create(editor));
+                    return vec![];
+                }
+                Dialog::Fork { session_id, label } => {
+                    if self.connected
+                        && self
+                            .selected()
+                            .is_some_and(|session| session.id == session_id && session.can_fork())
+                    {
+                        return vec![Command::Fork { session_id, label }];
+                    }
+                    return vec![];
+                }
+            }
+        }
+
+        // Top bar click: switch ViewTab or trigger reconnect
+        if row == area.y {
+            let files_count = self.selected().map_or(0, |s| s.files.len());
+            let diffs_count = self.selected().map_or(0, |s| s.diffs.len());
+            let logs_count = self.selected().map_or(0, |s| s.logs.len());
+            let tab_str = |target: ViewTab, label: String| {
+                if self.view == target {
+                    format!("[{label}]")
+                } else {
+                    format!(" {label} ")
+                }
+            };
+            let t1 = tab_str(ViewTab::Chat, "1:Chat".into());
+            let t2 = tab_str(ViewTab::Files, format!("2:Files({files_count})"));
+            let t3 = tab_str(ViewTab::Diff, format!("3:Diff({diffs_count})"));
+            let t4 = tab_str(ViewTab::Logs, format!("4:Logs({logs_count})"));
+            let prefix = if self.connected {
+                "CAYW  •  connected   "
+            } else {
+                "CAYW  •  disconnected — Ctrl+R reconnect   "
+            };
+            let start = area.x + prefix.chars().count() as u16;
+            let mut cursor_x = start;
+            for (tab, text) in [
+                (ViewTab::Chat, &t1),
+                (ViewTab::Files, &t2),
+                (ViewTab::Diff, &t3),
+                (ViewTab::Logs, &t4),
+            ] {
+                let end_x = cursor_x + text.chars().count() as u16;
+                if col >= cursor_x && col < end_x {
+                    self.view = tab;
+                    if let Some(session) = self.selected_mut() {
+                        session.scroll = 0;
+                    }
+                    return vec![];
+                }
+                cursor_x = end_x + 1;
+            }
+            if !self.connected && col < start {
+                return vec![Command::Reconnect];
+            }
+            return vec![];
+        }
+
+        // Bottom status bar click: open Help or New Session dialog
+        if row >= body_bottom {
+            if col < area.x + 14 {
+                self.dialog = Some(Dialog::Help);
+            } else if self.connected && col >= area.x + 43 && col < area.x + 56 {
+                self.dialog = Some(Dialog::Create(Editor::default()));
+            }
+            return vec![];
+        }
+
+        // Left Sessions Sidebar click
+        if has_sidebar && col >= area.x && col < sidebar_right {
+            self.focus = Focus::Sessions;
+            let inner_top = body_top.saturating_add(1);
+            let inner_bottom = body_bottom.saturating_sub(1);
+            if row >= inner_top && row < inner_bottom {
+                let index = ((row - inner_top) / 2) as usize;
+                if let Some(session) = self.sessions.get(index) {
+                    let id = session.id.clone();
+                    self.select_id(&id);
+                    if self.connected {
+                        return vec![Command::Get { session_id: id }];
+                    }
+                }
+            }
+            return vec![];
+        }
+
+        // Main body click: History vs Composer
+        let body_height = body_bottom.saturating_sub(body_top);
+        let composer_height = body_height.saturating_div(3).clamp(3, 7).min(body_height);
+        let composer_top = body_bottom.saturating_sub(composer_height);
+        if row >= composer_top {
+            self.focus = Focus::Composer;
+        } else {
+            self.focus = Focus::History;
+            // If an approval is active and user clicks near the bottom of History pane
+            if self.connected
+                && self.view == ViewTab::Chat
+                && self.selected().is_some_and(|s| !s.approvals.is_empty())
+                && row >= body_top.saturating_add(1)
+            {
+                let rel_x = col.saturating_sub(sidebar_right);
+                if rel_x < 18 {
+                    return self.decide(Decision::AllowOnce);
+                } else if rel_x < 40 {
+                    return self.decide(Decision::AllowTask);
+                } else if rel_x < 56 {
+                    return self.decide(Decision::Deny);
+                }
+            }
+        }
+        vec![]
+    }
+
     fn send_prompt(&mut self) -> Vec<Command> {
         if !self.connected || self.input.text().trim().is_empty() {
             return vec![];
@@ -1278,6 +1550,25 @@ pub fn message_text(message: &Value) -> String {
 
 const MAX_LOGS: usize = 200;
 const MAX_INSPECTOR_ITEMS: usize = 64;
+const MAX_MESSAGES: usize = 200;
+const MAX_STREAM_CHARS: usize = 32_768;
+
+fn bound_messages(mut messages: Vec<Value>) -> Vec<Value> {
+    if messages.len() > MAX_MESSAGES {
+        let drain = messages.len() - MAX_MESSAGES;
+        messages.drain(0..drain);
+    }
+    messages
+}
+
+fn bound_stream_text(text: String) -> String {
+    let char_count = text.chars().count();
+    if char_count <= MAX_STREAM_CHARS {
+        return text;
+    }
+    let tail: String = text.chars().skip(char_count - MAX_STREAM_CHARS).collect();
+    format!("…[earlier stream output truncated]\n{tail}")
+}
 const MAX_PREVIEW_BYTES: usize = 4096;
 
 fn clip_text(text: &str, max_bytes: usize) -> String {

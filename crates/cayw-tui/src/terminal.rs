@@ -1,7 +1,7 @@
 //! RAII ownership of terminal modes. Every normal error and unwind restores them.
 use crossterm::{
     cursor::{Hide, Show},
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -28,6 +28,11 @@ impl<W: Write> ScreenGuard<W> {
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
             Err(error) => return Err(error),
         }
+        match execute!(guard.writer, EnableMouseCapture) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+            Err(error) => return Err(error),
+        }
         Ok(guard)
     }
 }
@@ -35,6 +40,7 @@ impl<W: Write> ScreenGuard<W> {
 impl<W: Write> Drop for ScreenGuard<W> {
     fn drop(&mut self) {
         // Try every cleanup even when an earlier terminal command failed.
+        let _ = execute!(self.writer, DisableMouseCapture);
         let _ = execute!(self.writer, DisableBracketedPaste);
         let _ = execute!(self.writer, Show);
         let _ = execute!(self.writer, LeaveAlternateScreen);
@@ -69,6 +75,7 @@ impl TerminalGuard {
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 let _ = disable_raw_mode();
+                let _ = execute!(io::stdout(), DisableMouseCapture);
                 let _ = execute!(io::stdout(), DisableBracketedPaste);
                 let _ = execute!(io::stdout(), Show);
                 let _ = execute!(io::stdout(), LeaveAlternateScreen);
