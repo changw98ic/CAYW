@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "tokio"] }
 cayw-ipc = { path = "../cayw-ipc" }
+cayw-remote = { path = "../cayw-remote" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "signal"] }

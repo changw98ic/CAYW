@@ -21,6 +21,10 @@ use tokio_util::sync::CancellationToken;
 /// The only wire version accepted by this crate.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Canonical loopback direct handshake marker used when a local consumer
+/// connects to a local Device on the same machine without a user token.
+pub const LOOPBACK_DIRECT_HANDSHAKE: &str = "cayw-loopback-direct-v1-no-token";
+
 /// A terminal RPC error. Codes ending in `_outcome_unknown` (or `outcome_unknown`)
 /// explicitly mean that side effects may have happened.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -78,6 +82,11 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// Loopback direct configuration that accepts local connections without requiring a token.
+    pub fn loopback() -> Self {
+        Self::new(LOOPBACK_DIRECT_HANDSHAKE)
+    }
+
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),

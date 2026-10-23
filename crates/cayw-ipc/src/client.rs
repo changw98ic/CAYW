@@ -294,6 +294,24 @@ impl Drop for RequestGuard {
 }
 
 impl Client {
+    /// Connect directly to a local loopback Device without requiring a token.
+    pub async fn connect_loopback(addr: std::net::SocketAddr) -> Result<Self, ClientError> {
+        Self::connect_with_config(
+            addr,
+            crate::LOOPBACK_DIRECT_HANDSHAKE,
+            ClientConfig::default(),
+        )
+        .await
+    }
+
+    /// Connect directly to a local loopback Device with custom limits and no token.
+    pub async fn connect_loopback_with_config(
+        addr: SocketAddr,
+        config: ClientConfig,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_config(addr, crate::LOOPBACK_DIRECT_HANDSHAKE, config).await
+    }
+
     /// Connect and authenticate. Only loopback addresses are accepted, without DNS lookup.
     pub async fn connect(
         addr: std::net::SocketAddr,

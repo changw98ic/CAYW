@@ -1,4 +1,8 @@
-use crate::{protocol::*, store::Store};
+use crate::{
+    protocol::*,
+    rsa::{RsaPublicKey, RsaSealedFrame, ServerAccountStatus},
+    store::Store,
+};
 use axum::{
     Router,
     extract::{
@@ -75,6 +79,49 @@ impl ServerState {
             shutdown: CancellationToken::new(),
         })
     }
+
+    /// One-time RSA device binding: registers `device_id` with `device_pub` and returns the
+    /// Server's persistent RSA public key. Subsequent calls with the same key are idempotent.
+    pub fn bind_rsa_once(
+        &self,
+        device_id: &str,
+        device_pub: &RsaPublicKey,
+    ) -> Result<RsaPublicKey, RemoteError> {
+        self.with(|inner| inner.store.bind_rsa_once(device_id, device_pub))
+    }
+
+    /// Verifies the Device RSA signature and decrypts an RSA-sealed payload sent to this Server.
+    pub fn open_from_rsa_device(&self, frame: &RsaSealedFrame) -> Result<Vec<u8>, RemoteError> {
+        self.with(|inner| inner.store.open_from_rsa_device(frame))
+    }
+
+    /// Authenticates a Web <-> Server login using the stored account (defaults to `admin` / `admin`).
+    pub fn login_web_account(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<ServerAccountStatus, RemoteError> {
+        self.with(|inner| inner.store.verify_web_account(username, password))
+    }
+
+    /// Updates the Web <-> Server login username and password after verifying `current_password`.
+    pub fn update_web_account(
+        &self,
+        current_password: &str,
+        new_username: &str,
+        new_password: &str,
+    ) -> Result<ServerAccountStatus, RemoteError> {
+        self.with(|inner| {
+            inner
+                .store
+                .update_web_account(current_password, new_username, new_password)
+        })
+    }
+
+    pub fn web_account_status(&self) -> Result<ServerAccountStatus, RemoteError> {
+        self.with(|inner| Ok(inner.store.web_account_record()?.status()))
+    }
+
     fn with<T>(
         &self,
         operation: impl FnOnce(&mut Inner) -> Result<T, RemoteError>,

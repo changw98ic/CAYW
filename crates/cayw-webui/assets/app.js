@@ -23923,7 +23923,7 @@ var attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-var readMethods = /* @__PURE__ */ new Set(["runtime.health", "projects.list", "projects.browse", "skills.catalog", "mcp.catalog", "session.list", "session.get", "session.events", "session.grants", "session.audit", "capabilities.list"]);
+var readMethods = /* @__PURE__ */ new Set(["runtime.health", "device.binding.status", "server.auth.status", "projects.list", "projects.browse", "skills.catalog", "mcp.catalog", "session.list", "session.get", "session.events", "session.grants", "session.audit", "capabilities.list"]);
 var rejectedCodes = /* @__PURE__ */ new Set(["forbidden", "invalid_params", "invalid_request", "invalid_json", "method_not_allowed", "queue_full", "queue_timeout", "body_timeout", "invalid_body", "busy", "session_frozen", "needs_reconciliation", "stale_approval", "cancelled"]);
 var RpcError = class extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -24968,6 +24968,36 @@ function CAYWApp({ env } = {}) {
       settingsTab: "general",
       themeMode: "dark",
       enterBehavior: "enter",
+      // Connection & Account (Web<->Device tokenless, Server<->Device one-time RSA, Web<->Server account login)
+      connectionMode: "local_device",
+      serverLoggedIn: false,
+      serverUsername: "admin",
+      serverIsDefaultCredentials: true,
+      serverLoginUserDraft: "admin",
+      serverLoginPassDraft: "admin",
+      serverLoginError: "",
+      serverLoginBusy: false,
+      serverEditingCredentials: false,
+      serverCurrentPassDraft: "",
+      serverNewUserDraft: "",
+      serverNewPassDraft: "",
+      serverConfirmPassDraft: "",
+      serverAccountNotice: "",
+      deviceBinding: {
+        bound: true,
+        reused_persisted_binding: true,
+        device_id: "device-macos-local-01",
+        server_url: "wss://127.0.0.1:8787",
+        algorithm: "RSA-OAEP-SHA256 + RSA-SHA256",
+        encrypted_channel_verified: true,
+        auto_reconnect: true,
+        device_fingerprint: "SHA256:8f9d1a0b3e7c4f219a6b5c8d0e1f2a3b",
+        server_fingerprint: "SHA256:1c4e7b2a9d0f6e3c8b5a2d1f4c7e9a0b",
+        device_public_key_pem: "-----BEGIN RSA PUBLIC KEY-----\nUlNBLVBVQjowMTAwMDE6YzlmM2E4...\n-----END RSA PUBLIC KEY-----"
+      },
+      deviceServerUrlDraft: "wss://127.0.0.1:8787",
+      deviceBindingNotice: "",
+      showRsaPem: false,
       pluginsSubTab: "config",
       expandedPluginCards: {},
       expandedInventoryCards: {},
@@ -25773,6 +25803,145 @@ function CAYWApp({ env } = {}) {
     } catch {
     }
   };
+  const refreshServerAuthAndBinding = async () => {
+    try {
+      const res = await rpc("server.auth.status", {});
+      if (object(res)) {
+        s.connectionMode = res.connection_mode || "local_device";
+        s.serverLoggedIn = Boolean(res.logged_in);
+        if (typeof res.username === "string" && res.username) {
+          s.serverUsername = res.username;
+        }
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+        if (object(res.device_binding)) {
+          s.deviceBinding = res.device_binding;
+          s.deviceServerUrlDraft = res.device_binding.server_url || s.deviceServerUrlDraft;
+        }
+        forceRender();
+      }
+    } catch {
+    }
+  };
+  const switchConnectionMode = async (mode) => {
+    s.serverLoginError = "";
+    s.serverAccountNotice = "";
+    try {
+      const res = await rpc("server.auth.set_mode", { mode });
+      if (object(res)) {
+        s.connectionMode = res.connection_mode || mode;
+        s.serverLoggedIn = Boolean(res.logged_in);
+        if (typeof res.username === "string" && res.username) {
+          s.serverUsername = res.username;
+        }
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+      } else {
+        s.connectionMode = mode;
+      }
+    } catch {
+      s.connectionMode = mode;
+    }
+    forceRender();
+    if (s.connectionMode === "local_device" || s.serverLoggedIn) {
+      await connectLocal();
+    }
+  };
+  const handleServerLogin = async (e) => {
+    e?.preventDefault?.();
+    if (s.serverLoginBusy) return;
+    s.serverLoginBusy = true;
+    s.serverLoginError = "";
+    s.serverAccountNotice = "";
+    forceRender();
+    try {
+      const res = await rpc("server.auth.login", {
+        username: s.serverLoginUserDraft.trim(),
+        password: s.serverLoginPassDraft
+      });
+      if (object(res)) {
+        s.serverLoggedIn = true;
+        s.serverUsername = res.username || s.serverLoginUserDraft.trim();
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+      } else {
+        s.serverLoggedIn = true;
+      }
+      s.serverLoginPassDraft = "";
+      s.serverAccountNotice = s.serverIsDefaultCredentials ? "\u5DF2\u4F7F\u7528\u521D\u59CB\u9ED8\u8BA4\u8D26\u53F7\u767B\u5F55\u3002\u4E3A\u4E86\u5B89\u5168\uFF0C\u5EFA\u8BAE\u5728\u4E0B\u65B9\u4FEE\u6539\u767B\u5F55\u8D26\u53F7\u4E0E\u5BC6\u7801\u3002" : "\u5DF2\u767B\u5F55\u8FDC\u7A0B Server\u3002";
+      forceRender();
+      await connectLocal();
+    } catch (error) {
+      s.serverLoginError = errorText(error);
+      forceRender();
+    } finally {
+      s.serverLoginBusy = false;
+      forceRender();
+    }
+  };
+  const handleServerLogout = async () => {
+    try {
+      await rpc("server.auth.logout", {});
+    } catch {
+    }
+    s.serverLoggedIn = false;
+    s.serverEditingCredentials = false;
+    s.serverAccountNotice = "\u5DF2\u9000\u51FA\u8FDC\u7A0B Server \u8D26\u53F7\u767B\u5F55\u3002";
+    forceRender();
+  };
+  const handleServerUpdateCredentials = async (e) => {
+    e?.preventDefault?.();
+    s.serverAccountNotice = "";
+    s.serverLoginError = "";
+    if (!s.serverNewUserDraft.trim() || !s.serverNewPassDraft) {
+      s.serverLoginError = "\u65B0\u767B\u5F55\u8D26\u53F7\u548C\u65B0\u767B\u5F55\u5BC6\u7801\u4E0D\u80FD\u4E3A\u7A7A\u3002";
+      forceRender();
+      return;
+    }
+    if (s.serverNewPassDraft !== s.serverConfirmPassDraft) {
+      s.serverLoginError = "\u4E24\u6B21\u8F93\u5165\u7684\u65B0\u5BC6\u7801\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u6838\u5BF9\u3002";
+      forceRender();
+      return;
+    }
+    try {
+      const res = await rpc("server.auth.update_credentials", {
+        current_password: s.serverCurrentPassDraft,
+        new_username: s.serverNewUserDraft.trim(),
+        new_password: s.serverNewPassDraft
+      });
+      if (object(res)) {
+        s.serverUsername = res.username || s.serverNewUserDraft.trim();
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+      } else {
+        s.serverUsername = s.serverNewUserDraft.trim();
+        s.serverIsDefaultCredentials = false;
+      }
+      s.serverEditingCredentials = false;
+      s.serverCurrentPassDraft = "";
+      s.serverNewPassDraft = "";
+      s.serverConfirmPassDraft = "";
+      s.serverLoginUserDraft = s.serverUsername;
+      s.serverAccountNotice = `\u5DF2\u4FEE\u6539\u767B\u5F55\u8D26\u53F7\u4E3A\u201C${s.serverUsername}\u201D\u5E76\u66F4\u65B0\u5BC6\u7801\uFF0C\u540E\u7EED\u767B\u5F55\u8BF7\u4F7F\u7528\u65B0\u8D26\u53F7\u5BC6\u7801\u3002`;
+      forceRender();
+    } catch (error) {
+      s.serverLoginError = errorText(error);
+      forceRender();
+    }
+  };
+  const handleBindDeviceOnce = async () => {
+    s.deviceBindingNotice = "";
+    try {
+      const res = await rpc("device.binding.bind_once", {
+        server_url: s.deviceServerUrlDraft.trim() || "wss://127.0.0.1:8787",
+        rebind: false
+      });
+      if (object(res)) {
+        s.deviceBinding = res;
+      }
+      s.deviceBindingNotice = "Server \u4E0E Device \u5DF2\u5B8C\u6210\u4E00\u6B21\u6027 RSA \u5BC6\u94A5\u5BF9\u6C38\u4E45\u7ED1\u5B9A\u5E76\u6301\u4E45\u5316\u4FDD\u5B58\uFF0C\u540E\u7EED\u5747\u901A\u8FC7 RSA \u81EA\u52A8\u52A0\u5BC6\u8FDE\u63A5\uFF0C\u65E0\u9700\u518D\u624B\u52A8\u5904\u7406\u3002";
+      forceRender();
+    } catch (error) {
+      s.deviceBindingNotice = errorText(error);
+      forceRender();
+    }
+  };
   const loadTrajectoryHistory = async (sessionId = s.selected) => {
     if (!sessionId) return;
     try {
@@ -25794,6 +25963,8 @@ function CAYWApp({ env } = {}) {
     forceRender();
     if (tab === "permissions") {
       void refreshPermissions();
+    } else if (tab === "connection") {
+      void refreshServerAuthAndBinding();
     } else if (tab === "plugins" && !s.cachedCapabilities.length) {
       void refreshPlugins();
     } else if (tab === "models" && s.projects.length === 1 && s.projects[0]?.address === "\u672C\u673A IPC") {
@@ -28272,6 +28443,7 @@ function CAYWApp({ env } = {}) {
       },
       /* @__PURE__ */ import_react.default.createElement("nav", { className: "VOzbGW_nav" }, /* @__PURE__ */ import_react.default.createElement("div", { id: "settings-title", className: "VOzbGW_navTitle" }, "\u8BBE\u7F6E"), /* @__PURE__ */ import_react.default.createElement("div", { className: "VOzbGW_navList" }, [
         ["general", "\u901A\u7528\u8BBE\u7F6E", A9],
+        ["connection", "\u8FDE\u63A5\u4E0E\u8D26\u53F7", E7],
         ["models", "\u6A21\u578B\u670D\u52A1", I7],
         ["agent-presets", "\u4F1A\u8BDD\u6A21\u5F0F", s7],
         ["mcp", "\u5916\u90E8\u5DE5\u5177", k7],
@@ -28350,7 +28522,262 @@ function CAYWApp({ env } = {}) {
         },
         /* @__PURE__ */ import_react.default.createElement("span", null, s.enterBehavior === "enter" ? "\u6309\u56DE\u8F66\u76F4\u63A5\u53D1\u9001" : "\u6309\u7EC4\u5408\u952E\u53D1\u9001"),
         /* @__PURE__ */ import_react.default.createElement(hs, { className: "T1PP_q_chevron" })
-      ))) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B\u670D\u52A1\u914D\u7F6E"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u7BA1\u7406\u6A21\u578B\u670D\u52A1\u5730\u5740\u3001\u63A5\u53E3\u5BC6\u94A5\u4E0E\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002\u5BC6\u94A5\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u3002"), s.modelNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.modelNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, s.modelProviders.map((provider) => {
+      ))) : null, s.settingsTab === "connection" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u8FDE\u63A5\u67B6\u6784\u4E0E\u8D26\u53F7\u5B89\u5168"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u7BA1\u7406\u672C\u673A\u514D\u4EE4\u724C\u76F4\u8FDE\u3001\u8FDC\u7A0B Server \u4E0E Device \u7684\u4E00\u6B21\u6027 RSA \u52A0\u5BC6\u7ED1\u5B9A\uFF0C\u4EE5\u53CA\u8FDC\u7A0B Server \u7684\u767B\u5F55\u8D26\u53F7\u4E0E\u5BC6\u7801\u3002"), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard", style: { marginBottom: 14 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "\u5F53\u524D\u524D\u7AEF\u8FDE\u63A5\u901A\u9053"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, s.connectionMode === "local_device" ? "Web \u2194 Device \u672C\u673A\u76F4\u8FDE\uFF08\u65E0\u4EE4\u724C\uFF09" : "Web \u2194 Server \u8FDC\u7A0B\u8D26\u53F7\u767B\u5F55")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: s.connectionMode === "local_device" ? "zGbnIq_primaryButton" : "zGbnIq_secondaryButton",
+          onClick: () => void switchConnectionMode("local_device")
+        },
+        "Web \u2194 Device \u672C\u673A\u76F4\u8FDE"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: s.connectionMode === "remote_server" ? "zGbnIq_primaryButton" : "zGbnIq_secondaryButton",
+          onClick: () => void switchConnectionMode("remote_server")
+        },
+        "Web \u2194 Server \u8FDC\u7A0B\u8FDE\u63A5"
+      ))), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 0" } }, "1. Web \u4E0E\u672C\u673A Device \u8FDE\u63A5\u6C38\u8FDC\u4E0D\u4F7F\u7528\u3001\u4E0D\u51FA\u73B0\u4EFB\u4F55\u4EE4\u724C\uFF0C\u6253\u5F00\u9875\u9762\u5373\u523B\u76F4\u8FDE\u3002")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard", style: { marginBottom: 14 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "Server \u2194 Device \u4E00\u6B21\u6027 RSA \u52A0\u5BC6\u7ED1\u5B9A"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, s.deviceBinding.bound ? "\u5DF2\u6C38\u4E45\u7ED1\u5B9A \xB7 RSA \u81EA\u52A8\u52A0\u5BC6\u8FDE\u63A5" : "\u5F85\u9996\u6B21\u7ED1\u5B9A")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "zGbnIq_secondaryButton",
+          onClick: () => {
+            s.showRsaPem = !s.showRsaPem;
+            forceRender();
+          }
+        },
+        s.showRsaPem ? "\u6536\u8D77 RSA \u516C\u94A5" : "\u67E5\u770B RSA \u516C\u94A5"
+      ))), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 10px" } }, "2. Server \u4E0E Device \u4EC5\u9700\u5728\u9996\u6B21\u63A5\u5165\u65F6\u4EA4\u6362\u4E00\u6B21 RSA \u516C\u94A5\uFF0C\u7ED1\u5B9A\u5173\u7CFB\u4E0E\u5BC6\u94A5\u5BF9\u6C38\u4E45\u4FDD\u5B58\u5728\u672C\u673A\uFF0C\u540E\u7EED\u8FDE\u63A5\u5168\u7A0B\u91C7\u7528 RSA \u52A0\u5BC6\u4E0E\u7B7E\u540D\u6838\u9A8C\uFF0C\u65E0\u9700\u518D\u6B21\u914D\u7F6E\u6216\u624B\u52A8\u5E72\u9884\u3002"), s.deviceBindingNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.deviceBindingNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced", style: { marginBottom: 8 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u552F\u4E00\u6807\u8BC6"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          readOnly: true,
+          value: s.deviceBinding.device_id || "device-macos-local-01"
+        }
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u52A0\u5BC6\u7B97\u6CD5\u4E0E\u901A\u9053\u72B6\u6001"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          readOnly: true,
+          value: `${s.deviceBinding.algorithm || "RSA-OAEP-SHA256"} \xB7 ${s.deviceBinding.encrypted_channel_verified ? "\u52A0\u5BC6\u81EA\u68C0\u901A\u8FC7" : "\u5C31\u7EEA"}`
+        }
+      ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced", style: { marginBottom: 8 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u7AEF RSA \u516C\u94A5\u6307\u7EB9"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          readOnly: true,
+          value: s.deviceBinding.device_fingerprint || ""
+        }
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "Server \u7AEF RSA \u516C\u94A5\u6307\u7EB9"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          readOnly: true,
+          value: s.deviceBinding.server_fingerprint || ""
+        }
+      ))), /* @__PURE__ */ import_react.default.createElement("div", { style: { display: "flex", gap: 8, alignItems: "flex-end" } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field", style: { flex: 1 } }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u7ED1\u5B9A Server \u5730\u5740"), /* @__PURE__ */ import_react.default.createElement(
+        "input",
+        {
+          type: "text",
+          className: "zGbnIq_input",
+          placeholder: "\u5982 wss://127.0.0.1:8787",
+          value: s.deviceServerUrlDraft,
+          onChange: (e) => {
+            s.deviceServerUrlDraft = e.target.value;
+            forceRender();
+          }
+        }
+      )), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "zGbnIq_primaryButton",
+          onClick: () => void handleBindDeviceOnce()
+        },
+        "\u786E\u8BA4\u4E00\u6B21\u6027 RSA \u7ED1\u5B9A"
+      )), s.showRsaPem ? /* @__PURE__ */ import_react.default.createElement(
+        "pre",
+        {
+          className: "ydkMvW_code",
+          style: { marginTop: 10, fontSize: 11 }
+        },
+        s.deviceBinding.device_public_key_pem
+      ) : null), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement(
+        "span",
+        {
+          className: we(
+            "zGbnIq_credentialDot",
+            s.serverLoggedIn ? "zGbnIq_credentialDotConfigured" : "zGbnIq_credentialDotMissing"
+          )
+        }
+      ), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "Web \u2194 Server \u8D26\u53F7\u767B\u5F55\u4E0E\u5BC6\u7801\u7BA1\u7406"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, s.serverLoggedIn ? `\u5DF2\u767B\u5F55\uFF08${s.serverUsername}\uFF09` : `\u672A\u767B\u5F55 \xB7 \u9ED8\u8BA4\u8D26\u53F7 ${s.serverUsername}`)), s.serverLoggedIn ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "zGbnIq_secondaryButton",
+          onClick: () => {
+            s.serverEditingCredentials = !s.serverEditingCredentials;
+            s.serverNewUserDraft = s.serverUsername;
+            s.serverCurrentPassDraft = "";
+            s.serverNewPassDraft = "";
+            s.serverConfirmPassDraft = "";
+            s.serverLoginError = "";
+            forceRender();
+          }
+        },
+        s.serverEditingCredentials ? "\u6536\u8D77\u4FEE\u6539\u8868\u5355" : "\u4FEE\u6539\u767B\u5F55\u8D26\u53F7\u5BC6\u7801"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: "zGbnIq_dangerButton",
+          onClick: () => void handleServerLogout()
+        },
+        "\u9000\u51FA\u767B\u5F55"
+      )) : null), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 10px" } }, "3. Web \u4E0E Server \u8FDE\u63A5\u91C7\u7528\u8D26\u53F7\u5BC6\u7801\u8BA4\u8BC1\uFF1A\u9996\u6B21\u4F7F\u7528\u9ED8\u8BA4\u521D\u59CB\u8D26\u53F7\uFF08\u8D26\u53F7\uFF1Aadmin / \u5BC6\u7801\uFF1Aadmin\uFF09\u76F4\u63A5\u767B\u5F55\uFF0C\u767B\u5F55\u540E\u53EF\u968F\u65F6\u4FEE\u6539\u4E3A\u81EA\u5B9A\u4E49\u8D26\u53F7\u4E0E\u5BC6\u7801\u3002"), s.serverAccountNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.serverAccountNotice) : null, s.serverLoginError ? /* @__PURE__ */ import_react.default.createElement("p", { className: "_banner_ugy7y_1", role: "alert", style: { margin: "0 0 10px" } }, s.serverLoginError) : null, !s.serverLoggedIn ? /* @__PURE__ */ import_react.default.createElement(
+        "form",
+        {
+          className: "zGbnIq_editor",
+          onSubmit: (e) => void handleServerLogin(e)
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorHeader" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_editorTitle" }, "\u767B\u5F55\u8FDC\u7A0B Server"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_editorRoute" }, s.serverIsDefaultCredentials ? "\u521D\u59CB\u9ED8\u8BA4\u8D26\u53F7\uFF1Aadmin / \u9ED8\u8BA4\u5BC6\u7801\uFF1Aadmin" : `\u5F53\u524D\u8D26\u53F7\uFF1A${s.serverUsername}`)),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u767B\u5F55\u8D26\u53F7"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "server-login-username",
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u9ED8\u8BA4\u8D26\u53F7 admin",
+            value: s.serverLoginUserDraft,
+            onChange: (e) => {
+              s.serverLoginUserDraft = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u767B\u5F55\u5BC6\u7801"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "server-login-password",
+            type: "password",
+            className: "zGbnIq_input",
+            placeholder: "\u9ED8\u8BA4\u5BC6\u7801 admin",
+            value: s.serverLoginPassDraft,
+            onChange: (e) => {
+              s.serverLoginPassDraft = e.target.value;
+              forceRender();
+            }
+          }
+        ))),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, s.serverIsDefaultCredentials ? /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_secondaryButton",
+            onClick: () => {
+              s.serverLoginUserDraft = "admin";
+              s.serverLoginPassDraft = "admin";
+              forceRender();
+            }
+          },
+          "\u586B\u5165\u9ED8\u8BA4\u8D26\u53F7 (admin / admin)"
+        ) : null, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            id: "server-login-submit",
+            type: "submit",
+            className: "zGbnIq_primaryButton",
+            disabled: s.serverLoginBusy
+          },
+          s.serverLoginBusy ? "\u6B63\u5728\u767B\u5F55\u2026" : "\u767B\u5F55 Server"
+        ))
+      ) : s.serverEditingCredentials ? /* @__PURE__ */ import_react.default.createElement(
+        "form",
+        {
+          className: "zGbnIq_editor",
+          onSubmit: (e) => void handleServerUpdateCredentials(e)
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorHeader" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_editorTitle" }, "\u4FEE\u6539 Server \u767B\u5F55\u8D26\u53F7\u4E0E\u5BC6\u7801")),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u5F53\u524D\u5BC6\u7801"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "server-current-password",
+            type: "password",
+            className: "zGbnIq_input",
+            placeholder: "\u8F93\u5165\u5F53\u524D\u767B\u5F55\u5BC6\u7801\uFF08\u9ED8\u8BA4 admin\uFF09",
+            value: s.serverCurrentPassDraft,
+            onChange: (e) => {
+              s.serverCurrentPassDraft = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u65B0\u767B\u5F55\u8D26\u53F7"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "server-new-username",
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u8F93\u5165\u65B0\u767B\u5F55\u8D26\u53F7\u540D\u79F0",
+            value: s.serverNewUserDraft,
+            onChange: (e) => {
+              s.serverNewUserDraft = e.target.value;
+              forceRender();
+            }
+          }
+        ))),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u65B0\u767B\u5F55\u5BC6\u7801"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "server-new-password",
+            type: "password",
+            className: "zGbnIq_input",
+            placeholder: "\u8F93\u5165\u65B0\u767B\u5F55\u5BC6\u7801",
+            value: s.serverNewPassDraft,
+            onChange: (e) => {
+              s.serverNewPassDraft = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u786E\u8BA4\u65B0\u5BC6\u7801"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "server-confirm-password",
+            type: "password",
+            className: "zGbnIq_input",
+            placeholder: "\u518D\u6B21\u8F93\u5165\u65B0\u767B\u5F55\u5BC6\u7801",
+            value: s.serverConfirmPassDraft,
+            onChange: (e) => {
+              s.serverConfirmPassDraft = e.target.value;
+              forceRender();
+            }
+          }
+        ))),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            type: "button",
+            className: "zGbnIq_secondaryButton",
+            onClick: () => {
+              s.serverEditingCredentials = false;
+              forceRender();
+            }
+          },
+          "\u53D6\u6D88"
+        ), /* @__PURE__ */ import_react.default.createElement(
+          "button",
+          {
+            id: "server-save-credentials",
+            type: "submit",
+            className: "zGbnIq_primaryButton"
+          },
+          "\u4FDD\u5B58\u65B0\u8D26\u53F7\u5BC6\u7801"
+        ))
+      ) : null)) : null, s.settingsTab === "models" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_section" }, /* @__PURE__ */ import_react.default.createElement("h3", { className: "zGbnIq_title" }, "\u6A21\u578B\u670D\u52A1\u914D\u7F6E"), /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_intro" }, "\u7BA1\u7406\u6A21\u578B\u670D\u52A1\u5730\u5740\u3001\u63A5\u53E3\u5BC6\u94A5\u4E0E\u53EF\u7528\u6A21\u578B\u76EE\u5F55\u3002\u5BC6\u94A5\u4EC5\u4FDD\u5B58\u5728\u672C\u673A\u3002"), s.modelNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.modelNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows" }, s.modelProviders.map((provider) => {
         const isEditing = s.editingProviderId === provider.id;
         const isAddingModel = s.addingModelProviderId === provider.id;
         return /* @__PURE__ */ import_react.default.createElement("div", { key: provider.id, className: "zGbnIq_rowCard" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement(
@@ -29553,6 +29980,57 @@ ${sk.description}
         },
         onConfirm: confirmFullAccess
       }
+    ),
+    /* @__PURE__ */ import_react.default.createElement(
+      $u,
+      {
+        open: s.connectionMode === "remote_server" && !s.serverLoggedIn && !s.settingsOpen,
+        onClose: () => void switchConnectionMode("local_device"),
+        title: "\u767B\u5F55\u8FDC\u7A0B CAYW Server",
+        size: "md"
+      },
+      /* @__PURE__ */ import_react.default.createElement(
+        "form",
+        {
+          style: { display: "flex", flexDirection: "column", gap: 12 },
+          onSubmit: (e) => void handleServerLogin(e)
+        },
+        /* @__PURE__ */ import_react.default.createElement("p", { style: { margin: 0, fontSize: 13, color: "var(--dsw-alias-label-secondary)" } }, s.serverIsDefaultCredentials ? "\u5F53\u524D\u4F7F\u7528\u9ED8\u8BA4\u521D\u59CB\u8D26\u53F7\u767B\u5F55\uFF08\u9ED8\u8BA4\u8D26\u53F7\uFF1Aadmin\uFF0C\u9ED8\u8BA4\u5BC6\u7801\uFF1Aadmin\uFF09\u3002\u767B\u5F55\u540E\u53EF\u5728\u201C\u8BBE\u7F6E \u2192 \u8FDE\u63A5\u4E0E\u8D26\u53F7\u201D\u4E2D\u4FEE\u6539\u8D26\u53F7\u4E0E\u5BC6\u7801\u3002" : `\u8BF7\u8F93\u5165\u8FDC\u7A0B Server \u767B\u5F55\u8D26\u53F7\uFF08${s.serverUsername}\uFF09\u4E0E\u5BC6\u7801\u3002`),
+        s.serverLoginError ? /* @__PURE__ */ import_react.default.createElement("p", { className: "_banner_ugy7y_1", role: "alert", style: { margin: 0 } }, s.serverLoginError) : null,
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u767B\u5F55\u8D26\u53F7"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            type: "text",
+            className: "zGbnIq_input",
+            value: s.serverLoginUserDraft,
+            onChange: (e) => {
+              s.serverLoginUserDraft = e.target.value;
+              forceRender();
+            }
+          }
+        )),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u767B\u5F55\u5BC6\u7801"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            type: "password",
+            className: "zGbnIq_input",
+            value: s.serverLoginPassDraft,
+            onChange: (e) => {
+              s.serverLoginPassDraft = e.target.value;
+              forceRender();
+            }
+          }
+        )),
+        /* @__PURE__ */ import_react.default.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 } }, /* @__PURE__ */ import_react.default.createElement(
+          ps,
+          {
+            variant: "outline",
+            type: "button",
+            onClick: () => void switchConnectionMode("local_device")
+          },
+          "\u5207\u56DE\u672C\u673A\u8BBE\u5907\u76F4\u8FDE\uFF08\u65E0\u4EE4\u724C\uFF09"
+        ), /* @__PURE__ */ import_react.default.createElement(ps, { variant: "primary", type: "submit", disabled: s.serverLoginBusy }, s.serverLoginBusy ? "\u6B63\u5728\u767B\u5F55\u2026" : "\u767B\u5F55 Server"))
+      )
     ),
     /* @__PURE__ */ import_react.default.createElement(
       "dialog",

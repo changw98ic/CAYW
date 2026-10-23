@@ -3,12 +3,12 @@ use std::{collections::HashMap, env, net::SocketAddr, process::ExitCode};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--project ID=名称@127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机默认 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供本机网关使用\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_PROJECTS   额外本机项目列表（格式：id=名称@127.0.0.1:PORT，用分号分隔）\n\n只接受 loopback 地址；打开本机网页后直接连接会话，无需手动输入网页令牌。Ctrl+C 停止网关。\n";
+const HELP: &str = "CAYW 网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--project ID=名称@127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n必需配置：\n  CAYW_IPC_ADDR   本机默认 Device Runtime 地址；--ipc-addr 可覆盖\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_PROJECTS   额外本机项目列表（格式：id=名称@127.0.0.1:PORT，用分号分隔）\n\n连接策略：\n  1. Web 与本机 Device 直连免令牌，永远不需要任何访问令牌。\n  2. Server 与 Device 通过 RSA 密钥对一次性永久绑定并加密传输，后续自动连接无需处理。\n  3. Web 与远程 Server 连接使用默认初始账号（admin / admin）登录，登录后可在页面修改账号密码。\n";
 
 struct Config {
     ipc_addr: SocketAddr,
     web_addr: SocketAddr,
-    ipc_token: String,
+    ipc_token: Option<String>,
     extra_projects: Vec<(String, String, SocketAddr)>,
 }
 
@@ -52,16 +52,14 @@ impl Config {
         };
         let ipc_addr = address("CAYW_IPC_ADDR", None)?;
         let web_addr = address("CAYW_WEB_ADDR", Some("127.0.0.1:0"))?;
-        let mut token = |name: &str| -> Result<String, String> {
-            let value = values.remove(name).ok_or_else(|| format!("缺少 {name}"))?;
+        let ipc_token = if let Some(value) = values.remove("CAYW_IPC_TOKEN") {
             if !cayw_webui::valid_token(&value) {
-                return Err(format!(
-                    "{name} 必须是 32..4096 字节且不含空格的 ASCII 字符串"
-                ));
+                return Err("IPC 配置参数格式无效".to_owned());
             }
-            Ok(value)
+            Some(value)
+        } else {
+            None
         };
-        let ipc_token = token("CAYW_IPC_TOKEN")?;
         let mut extra_projects = Vec::new();
         for spec in project_specs {
             let (left, addr_str) = spec
@@ -107,14 +105,27 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Vec<String>) -> Result<(), String> {
+    if env::var("CAYW_STATE_DIR").is_err()
+        && let Ok(home) = env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        let default_state = std::path::Path::new(&home).join(".cayw").join("webui");
+        let _ = std::fs::create_dir_all(&default_state);
+    }
     let config = Config::parse(
         args,
         env::vars()
             .filter(|(name, _)| name.starts_with("CAYW_"))
             .collect(),
     )?;
-    let default_client = IpcEndpoint::new(config.ipc_addr, config.ipc_token.clone())
-        .map_err(|_| "本机 IPC 地址或令牌无效".to_owned())?;
+    let make_endpoint = |addr: SocketAddr| -> Result<IpcEndpoint, String> {
+        match &config.ipc_token {
+            Some(tok) => IpcEndpoint::new(addr, tok.clone())
+                .map_err(|_| "本机 Device 连接配置无效".to_owned()),
+            None => IpcEndpoint::loopback(addr).map_err(|_| "本机 Device 连接地址无效".to_owned()),
+        }
+    };
+    let default_client = make_endpoint(config.ipc_addr)?;
     let default_ws = env::var("CAYW_WORKSPACE")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -128,8 +139,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     }
     let mut projects = vec![default_project];
     for (id, label, addr) in config.extra_projects {
-        let endpoint = IpcEndpoint::new(addr, config.ipc_token.clone())
-            .map_err(|_| "项目 IPC 地址或令牌无效".to_owned())?;
+        let endpoint = make_endpoint(addr)?;
         let (clean_label, ws_opt) = match label.split_once('|') {
             Some((l, w)) => (l.to_owned(), Some(w.to_owned())),
             None => (label, None),
@@ -174,13 +184,10 @@ mod tests {
     use super::*;
 
     fn environment() -> HashMap<String, String> {
-        [
-            ("CAYW_IPC_ADDR", "127.0.0.1:4100"),
-            ("CAYW_IPC_TOKEN", "fedcba9876543210fedcba9876543210"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect()
+        [("CAYW_IPC_ADDR", "127.0.0.1:4100")]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
     }
 
     #[test]

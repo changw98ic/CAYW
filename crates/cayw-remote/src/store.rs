@@ -1,4 +1,7 @@
 use crate::protocol::*;
+use crate::rsa::{
+    RsaKeyPair, RsaPublicKey, RsaSealedFrame, ServerAccountRecord, ServerAccountStatus,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{path::Path, time::Duration};
 
@@ -23,10 +26,29 @@ impl Store {
             BEGIN EXCLUSIVE;
             CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,secret_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS rsa_devices(id TEXT PRIMARY KEY,public_key_json TEXT NOT NULL,bound_at_ms INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS codes(hash TEXT PRIMARY KEY,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS bindings(id TEXT PRIMARY KEY,code_hash TEXT NOT NULL,secret_hash TEXT NOT NULL,device TEXT NOT NULL,expires INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS requests(device TEXT NOT NULL,id TEXT NOT NULL,hash TEXT NOT NULL,record TEXT NOT NULL,PRIMARY KEY(device,id));
             COMMIT;").map_err(storage)?;
+        let existing_acct: Option<String> = db
+            .query_row(
+                "SELECT value FROM metadata WHERE key='web_account'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if existing_acct.is_none() {
+            let default_acct = ServerAccountRecord::default_account()?;
+            let acct_json =
+                serde_json::to_string(&default_acct).map_err(|_| RemoteError::Storage)?;
+            db.execute(
+                "INSERT INTO metadata VALUES('web_account',?1)",
+                [&acct_json],
+            )
+            .map_err(storage)?;
+        }
         let operator_hash = hash(operator.expose().as_bytes());
         let old: Option<String> = db
             .query_row("SELECT value FROM metadata WHERE key='operator'", [], |r| {
@@ -269,5 +291,138 @@ impl Store {
             )
             .map_err(storage)?;
         Ok(())
+    }
+
+    pub(crate) fn server_rsa_keypair(&mut self) -> Result<RsaKeyPair, RemoteError> {
+        let existing: Option<String> = self
+            .db
+            .query_row(
+                "SELECT value FROM metadata WHERE key='server_rsa_keypair'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some(raw) = existing {
+            return serde_json::from_str(&raw).map_err(|_| RemoteError::Storage);
+        }
+        let kp = RsaKeyPair::generate()?;
+        let json = serde_json::to_string(&kp).map_err(|_| RemoteError::Storage)?;
+        self.db
+            .execute(
+                "INSERT INTO metadata VALUES('server_rsa_keypair',?1)",
+                [&json],
+            )
+            .map_err(storage)?;
+        Ok(kp)
+    }
+
+    pub(crate) fn bind_rsa_once(
+        &mut self,
+        device_id: &str,
+        device_pub: &RsaPublicKey,
+    ) -> Result<RsaPublicKey, RemoteError> {
+        if !valid_id(device_id) {
+            return Err(RemoteError::InvalidRequest);
+        }
+        let pub_json =
+            serde_json::to_string(device_pub).map_err(|_| RemoteError::InvalidRequest)?;
+        let existing: Option<(String, bool)> = self
+            .db
+            .query_row(
+                "SELECT public_key_json,revoked FROM rsa_devices WHERE id=?1",
+                [device_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some((saved_json, revoked)) = existing {
+            if revoked {
+                return Err(RemoteError::Revoked);
+            }
+            if saved_json != pub_json {
+                return Err(RemoteError::Conflict);
+            }
+            return Ok(self.server_rsa_keypair()?.public_key());
+        }
+        let server_pub = self.server_rsa_keypair()?.public_key();
+        self.db
+            .execute(
+                "INSERT INTO rsa_devices(id,public_key_json,bound_at_ms,revoked) VALUES(?1,?2,?3,0)",
+                params![device_id, pub_json, now_ms()?],
+            )
+            .map_err(storage)?;
+        Ok(server_pub)
+    }
+
+    pub(crate) fn open_from_rsa_device(
+        &mut self,
+        frame: &RsaSealedFrame,
+    ) -> Result<Vec<u8>, RemoteError> {
+        let (pub_json, revoked): (String, bool) = self
+            .db
+            .query_row(
+                "SELECT public_key_json,revoked FROM rsa_devices WHERE id=?1",
+                [&frame.device_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?
+            .ok_or(RemoteError::Unauthorized)?;
+        if revoked {
+            return Err(RemoteError::Revoked);
+        }
+        let device_pub: RsaPublicKey =
+            serde_json::from_str(&pub_json).map_err(|_| RemoteError::Storage)?;
+        if !device_pub.verify_sha256(
+            format!("{}:{}", frame.device_id, frame.ciphertext).as_bytes(),
+            &frame.signature,
+        ) {
+            return Err(RemoteError::Unauthorized);
+        }
+        let server_kp = self.server_rsa_keypair()?;
+        server_kp.decrypt(&frame.ciphertext)
+    }
+
+    pub(crate) fn web_account_record(&self) -> Result<ServerAccountRecord, RemoteError> {
+        let raw: String = self
+            .db
+            .query_row(
+                "SELECT value FROM metadata WHERE key='web_account'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        serde_json::from_str(&raw).map_err(|_| RemoteError::Storage)
+    }
+
+    pub(crate) fn verify_web_account(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<ServerAccountStatus, RemoteError> {
+        let rec = self.web_account_record()?;
+        if !rec.verify(username, password) {
+            return Err(RemoteError::Unauthorized);
+        }
+        Ok(rec.status())
+    }
+
+    pub(crate) fn update_web_account(
+        &mut self,
+        current_password: &str,
+        new_username: &str,
+        new_password: &str,
+    ) -> Result<ServerAccountStatus, RemoteError> {
+        let mut rec = self.web_account_record()?;
+        let status = rec.update_credentials(current_password, new_username, new_password)?;
+        let json = serde_json::to_string(&rec).map_err(|_| RemoteError::Storage)?;
+        self.db
+            .execute(
+                "UPDATE metadata SET value=?1 WHERE key='web_account'",
+                [&json],
+            )
+            .map_err(storage)?;
+        Ok(status)
     }
 }

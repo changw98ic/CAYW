@@ -866,3 +866,172 @@ async fn multi_project_gateway_routes_to_selected_endpoint_and_redacts_all_proje
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
+    let stop = CancellationToken::new();
+    let runtime = Arc::new(RuntimeFixture::default());
+    let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ipc_addr = ipc_listener.local_addr().unwrap();
+    let ipc_task = tokio::spawn(cayw_ipc::serve(
+        ipc_listener,
+        runtime,
+        ServerConfig::loopback(),
+        stop.clone(),
+    ));
+    let ipc = IpcEndpoint::loopback(ipc_addr).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_limits(
+        listener,
+        ipc,
+        GatewayLimits::default(),
+        stop.clone(),
+    ));
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // 1. Web <-> Device local connection works with zero token.
+    let health = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "runtime.health", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(health["result"]["status"], "ok");
+
+    // 2. Server <-> Device one-time RSA binding is active, encrypted, and idempotent.
+    let binding = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "device.binding.status", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(binding["result"]["bound"], true);
+    assert_eq!(binding["result"]["encrypted_channel_verified"], true);
+    let first_fp = binding["result"]["device_fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(first_fp.starts_with("SHA256:"));
+    assert!(
+        binding["result"]["device_public_key_pem"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN RSA PUBLIC KEY")
+    );
+
+    let bind_again = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "device.binding.bind_once", "params": {"server_url": "wss://127.0.0.1:8787"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(bind_again["result"]["reused_persisted_binding"], true);
+    assert_eq!(bind_again["result"]["device_fingerprint"], first_fp);
+
+    // 3. Web <-> Server mode requires account login (default admin/admin) and supports changing credentials.
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "server.auth.set_mode", "params": {"mode": "remote_server"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+
+    let blocked = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "session.list", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(blocked["error"]["code"], "server_login_required");
+
+    // Login with default account (admin / admin)
+    let login = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "server.auth.login", "params": {"username": "admin", "password": "admin"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(login["result"]["logged_in"], true);
+
+    // Modify login username and password after logging in
+    let updated = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "server.auth.update_credentials",
+                "params": {
+                    "current_password": "admin",
+                    "new_username": "cayw_operator",
+                    "new_password": "NewSecurePassword2026!"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(updated["result"]["username"], "cayw_operator");
+    assert_eq!(updated["result"]["is_default_credentials"], false);
+
+    // Logout and verify old default credentials fail while new credentials succeed
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "server.auth.logout", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "server.auth.login", "params": {"username": "admin", "password": "admin"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    let relogin = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "server.auth.login", "params": {"username": "cayw_operator", "password": "NewSecurePassword2026!"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(relogin["result"]["logged_in"], true);
+
+    stop.cancel();
+    for task in [ipc_task, web_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}

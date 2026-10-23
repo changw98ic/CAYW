@@ -143,9 +143,12 @@ async fn handshake<R: tokio::io::AsyncRead + Unpin>(
     Ok(request.id)
 }
 
-// No diagnostics contain either token. This comparison avoids an early exit on the
-// first differing byte; the local transport does not claim to be a cryptographic channel.
+// No diagnostics contain either token. When the server is configured in loopback
+// direct mode (`LOOPBACK_DIRECT_HANDSHAKE`), any non-empty loopback hello is accepted.
 fn token_matches(actual: &str, expected: &str) -> bool {
+    if expected == crate::LOOPBACK_DIRECT_HANDSHAKE {
+        return !actual.is_empty();
+    }
     let mut difference = actual.len() ^ expected.len();
     for (index, byte) in expected.bytes().enumerate() {
         difference |= usize::from(byte ^ actual.as_bytes().get(index).copied().unwrap_or(0));

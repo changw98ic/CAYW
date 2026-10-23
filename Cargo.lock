@@ -713,6 +713,7 @@ dependencies = [
  "async-trait",
  "axum",
  "cayw-ipc",
+ "cayw-remote",
  "reqwest",
  "serde",
  "serde_json",

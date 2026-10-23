@@ -10,13 +10,18 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use cayw_ipc::{Client, ClientConfig, ClientError};
+use cayw_ipc::{Client, ClientConfig, ClientError, LOOPBACK_DIRECT_HANDSHAKE};
+use cayw_remote::{
+    DEFAULT_SERVER_PASSWORD, DEFAULT_SERVER_USERNAME, PersistentRsaDeviceBinding, RsaKeyPair,
+    ServerAccountRecord,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fmt, io,
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -29,6 +34,13 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
+    "device.binding.status",
+    "device.binding.bind_once",
+    "server.auth.status",
+    "server.auth.set_mode",
+    "server.auth.login",
+    "server.auth.logout",
+    "server.auth.update_credentials",
     "projects.list",
     "projects.browse",
     "projects.create",
@@ -116,6 +128,20 @@ pub struct IpcEndpoint {
 }
 
 impl IpcEndpoint {
+    /// Connects directly to a local loopback Device without any token.
+    pub fn loopback(address: SocketAddr) -> io::Result<Self> {
+        if !address.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "IPC requires a loopback address",
+            ));
+        }
+        Ok(Self {
+            address,
+            token: LOOPBACK_DIRECT_HANDSHAKE.to_owned(),
+        })
+    }
+
     pub fn new(address: SocketAddr, token: impl Into<String>) -> io::Result<Self> {
         let token = token.into();
         if !address.ip().is_loopback() || !valid_token(&token) {
@@ -235,6 +261,7 @@ impl fmt::Debug for ProjectEndpoint {
 struct Gateway {
     projects: RwLock<Vec<ProjectEndpoint>>,
     session_projects: RwLock<HashMap<String, String>>,
+    server_auth: RwLock<GatewayServerAuth>,
     authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
@@ -242,6 +269,138 @@ struct Gateway {
     in_flight: Semaphore,
     prompts: Semaphore,
     cancel: CancellationToken,
+}
+
+struct GatewayServerAuth {
+    connection_mode: String,
+    logged_in: bool,
+    account: ServerAccountRecord,
+    account_path: PathBuf,
+    server_keypair: RsaKeyPair,
+    device_binding: PersistentRsaDeviceBinding,
+    binding_path: PathBuf,
+    reused_existing_binding: bool,
+}
+
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
+
+static NEXT_GATEWAY_ID: AtomicU64 = AtomicU64::new(1);
+static DEFAULT_RSA_KEYS: OnceLock<(RsaKeyPair, RsaKeyPair)> = OnceLock::new();
+
+fn cached_default_rsa_keys() -> &'static (RsaKeyPair, RsaKeyPair) {
+    DEFAULT_RSA_KEYS.get_or_init(|| {
+        let srv = RsaKeyPair::generate().expect("server RSA keypair");
+        let dev = RsaKeyPair::generate().expect("device RSA keypair");
+        (srv, dev)
+    })
+}
+
+impl GatewayServerAuth {
+    fn load_or_init() -> Self {
+        let base_dir = std::env::var("CAYW_STATE_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let id = NEXT_GATEWAY_ID.fetch_add(1, Ordering::Relaxed);
+                std::env::temp_dir().join(format!("cayw-webui-state-{}-{id}", std::process::id()))
+            });
+        let _ = std::fs::create_dir_all(&base_dir);
+        let account_path = base_dir.join("server-account.json");
+        let binding_path = base_dir.join("device-server-rsa-binding.json");
+        let server_kp_path = base_dir.join("server-rsa-keypair.json");
+
+        let account = ServerAccountRecord::load_or_default(&account_path)
+            .unwrap_or_else(|_| ServerAccountRecord::default_account().expect("default account"));
+
+        let (default_srv_kp, default_dev_kp) = cached_default_rsa_keys();
+        let server_keypair = if server_kp_path.exists()
+            && let Ok(raw) = std::fs::read_to_string(&server_kp_path)
+            && let Ok(kp) = serde_json::from_str::<RsaKeyPair>(&raw)
+        {
+            kp
+        } else {
+            let kp = default_srv_kp.clone();
+            if let Ok(json) = serde_json::to_string_pretty(&kp) {
+                let _ = std::fs::write(&server_kp_path, json);
+            }
+            kp
+        };
+        let server_pub = server_keypair.public_key();
+        let (device_binding, reused_existing_binding) = if binding_path.exists()
+            && let Ok(raw) = std::fs::read_to_string(&binding_path)
+            && let Ok(existing) = serde_json::from_str::<PersistentRsaDeviceBinding>(&raw)
+        {
+            (existing, true)
+        } else {
+            let binding = PersistentRsaDeviceBinding {
+                device_id: "device-macos-local-01".to_owned(),
+                server_url: "wss://127.0.0.1:8787".to_owned(),
+                device_keypair: default_dev_kp.clone(),
+                server_public_key: server_pub,
+                bound_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+            };
+            let _ = binding.save(&binding_path);
+            (binding, false)
+        };
+
+        Self {
+            connection_mode: "local_device".to_owned(),
+            logged_in: false,
+            account,
+            account_path,
+            server_keypair,
+            device_binding,
+            binding_path,
+            reused_existing_binding,
+        }
+    }
+
+    fn binding_json(&self) -> Value {
+        let dev_pub = self.device_binding.device_keypair.public_key();
+        let srv_pub = &self.device_binding.server_public_key;
+        let encrypted_ok = self
+            .device_binding
+            .seal_for_server(b"cayw-rsa-channel-verify")
+            .and_then(|sealed| self.server_keypair.decrypt(&sealed.ciphertext))
+            .is_ok_and(|plain| plain == b"cayw-rsa-channel-verify");
+        json!({
+            "bound": true,
+            "reused_persisted_binding": self.reused_existing_binding,
+            "device_id": self.device_binding.device_id,
+            "server_url": self.device_binding.server_url,
+            "algorithm": "RSA-OAEP-SHA256 + RSA-SHA256",
+            "encrypted_channel_verified": encrypted_ok,
+            "auto_reconnect": true,
+            "device_fingerprint": dev_pub.fingerprint(),
+            "server_fingerprint": srv_pub.fingerprint(),
+            "device_public_key_pem": dev_pub.to_pem(),
+            "server_public_key_pem": srv_pub.to_pem(),
+            "bound_at_ms": self.device_binding.bound_at_ms,
+            "binding_file": self.binding_path.to_string_lossy(),
+        })
+    }
+
+    fn status_json(&self) -> Value {
+        let acct = self.account.status();
+        json!({
+            "connection_mode": self.connection_mode,
+            "web_device_tokenless": true,
+            "logged_in": self.logged_in,
+            "username": acct.username,
+            "is_default_credentials": acct.is_default_credentials,
+            "default_username_hint": DEFAULT_SERVER_USERNAME,
+            "default_password_hint": DEFAULT_SERVER_PASSWORD,
+            "updated_at_ms": acct.updated_at_ms,
+            "device_binding": self.binding_json(),
+        })
+    }
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
@@ -302,6 +461,7 @@ pub async fn serve_projects_with_limits(
     let state = Arc::new(Gateway {
         projects: RwLock::new(projects),
         session_projects: RwLock::new(HashMap::new()),
+        server_auth: RwLock::new(GatewayServerAuth::load_or_init()),
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
@@ -512,6 +672,54 @@ async fn rpc(
             Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "queue_timeout", "Gateway queue wait timed out; request was not dispatched", false),
         }
     };
+    if request.method == "device.binding.status" {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return Json(json!({ "result": auth.binding_json() })).into_response();
+    }
+    if request.method == "device.binding.bind_once" {
+        return handle_device_bind_once(&state, &request.params);
+    }
+    if request.method == "server.auth.status" {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return Json(json!({ "result": auth.status_json() })).into_response();
+    }
+    if request.method == "server.auth.set_mode" {
+        return handle_server_set_mode(&state, &request.params);
+    }
+    if request.method == "server.auth.login" {
+        return handle_server_login(&state, &request.params);
+    }
+    if request.method == "server.auth.logout" {
+        let mut auth = state
+            .server_auth
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        auth.logged_in = false;
+        return Json(json!({ "result": auth.status_json() })).into_response();
+    }
+    if request.method == "server.auth.update_credentials" {
+        return handle_server_update_credentials(&state, &request.params);
+    }
+    {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if auth.connection_mode == "remote_server" && !auth.logged_in {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "server_login_required",
+                "当前处于 Web ↔ Server 连接模式，请先使用账号密码登录（默认账号：admin / 默认密码：admin）",
+                false,
+            );
+        }
+    }
     if request.method == "projects.list" {
         if !request
             .params
@@ -931,11 +1139,13 @@ fn try_spawn_project_runtime(
         .arg(ws_path)
         .arg("--listen")
         .arg("127.0.0.1:0")
-        .arg("--token-env")
-        .arg("CAYW_IPC_TOKEN")
-        .env("CAYW_IPC_TOKEN", token)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if token != LOOPBACK_DIRECT_HANDSHAKE {
+        cmd.arg("--token-env")
+            .arg("CAYW_IPC_TOKEN")
+            .env("CAYW_IPC_TOKEN", token);
+    }
     if std::env::var("CAYW_PROVIDER_BASE_URL").is_err() {
         cmd.arg("--offline");
     } else if std::env::var("CAYW_PROVIDER_API_KEY").is_err() {
@@ -966,8 +1176,11 @@ fn try_spawn_project_runtime(
     let addr: SocketAddr = addr_str
         .parse()
         .map_err(|_| "项目 Runtime 监听地址无效".to_owned())?;
-    let endpoint =
-        IpcEndpoint::new(addr, token.to_owned()).map_err(|e| format!("项目 IPC 配置无效：{e}"))?;
+    let endpoint = if token == LOOPBACK_DIRECT_HANDSHAKE {
+        IpcEndpoint::loopback(addr).map_err(|e| format!("项目 IPC 配置无效：{e}"))?
+    } else {
+        IpcEndpoint::new(addr, token.to_owned()).map_err(|e| format!("项目 IPC 配置无效：{e}"))?
+    };
     std::mem::forget(child);
     Ok(Some(endpoint))
 }
@@ -1150,6 +1363,143 @@ fn handle_mcp_catalog(_params: &Value) -> Response {
         }
     ]);
     Json(json!({ "result": servers })).into_response()
+}
+
+fn handle_device_bind_once(state: &Gateway, params: &Value) -> Response {
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server_url = params
+        .get("server_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("wss://127.0.0.1:8787")
+        .to_owned();
+    let force_rebind = params
+        .get("rebind")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !force_rebind && auth.device_binding.server_url == server_url {
+        auth.reused_existing_binding = true;
+        return Json(json!({ "result": auth.binding_json() })).into_response();
+    }
+    let Ok(dev_kp) = RsaKeyPair::generate() else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rsa_error",
+            "无法生成设备端 RSA 密钥对",
+            false,
+        );
+    };
+    auth.device_binding = PersistentRsaDeviceBinding {
+        device_id: auth.device_binding.device_id.clone(),
+        server_url,
+        device_keypair: dev_kp,
+        server_public_key: auth.server_keypair.public_key(),
+        bound_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+    };
+    auth.reused_existing_binding = false;
+    let binding_path = auth.binding_path.clone();
+    let _ = auth.device_binding.save(&binding_path);
+    Json(json!({ "result": auth.binding_json() })).into_response()
+}
+
+fn handle_server_set_mode(state: &Gateway, params: &Value) -> Response {
+    let Some(mode) = params.get("mode").and_then(Value::as_str) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "mode must be 'local_device' or 'remote_server'",
+            false,
+        );
+    };
+    if !matches!(mode, "local_device" | "remote_server") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "mode must be 'local_device' or 'remote_server'",
+            false,
+        );
+    }
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    auth.connection_mode = mode.to_owned();
+    Json(json!({ "result": auth.status_json() })).into_response()
+}
+
+fn handle_server_login(state: &Gateway, params: &Value) -> Response {
+    let username = params.get("username").and_then(Value::as_str).unwrap_or("");
+    let password = params.get("password").and_then(Value::as_str).unwrap_or("");
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !auth.account.verify(username, password) {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "Server 账号或密码不正确（初始默认账号：admin，默认密码：admin）",
+            false,
+        );
+    }
+    auth.logged_in = true;
+    Json(json!({ "result": auth.status_json() })).into_response()
+}
+
+fn handle_server_update_credentials(state: &Gateway, params: &Value) -> Response {
+    let current_password = params
+        .get("current_password")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let new_username = params
+        .get("new_username")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let new_password = params
+        .get("new_password")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !auth.logged_in {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "server_login_required",
+            "请先登录 Server 账号后再修改账号密码",
+            false,
+        );
+    }
+    match auth
+        .account
+        .update_credentials(current_password, new_username, new_password)
+    {
+        Ok(_) => {
+            let account_path = auth.account_path.clone();
+            let _ = auth.account.save(&account_path);
+            Json(json!({ "result": auth.status_json() })).into_response()
+        }
+        Err(cayw_remote::RemoteError::Unauthorized) => error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "当前密码验证失败，请核对后重试",
+            false,
+        ),
+        Err(_) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "新登录账号与新密码不能为空，且不能包含控制字符",
+            false,
+        ),
+    }
 }
 
 fn side_effecting(method: &str) -> bool {

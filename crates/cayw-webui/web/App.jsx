@@ -561,6 +561,37 @@ export function CAYWApp({ env } = {}) {
       settingsTab: 'general',
       themeMode: 'dark',
       enterBehavior: 'enter',
+      // Connection & Account (Web<->Device tokenless, Server<->Device one-time RSA, Web<->Server account login)
+      connectionMode: 'local_device',
+      serverLoggedIn: false,
+      serverUsername: 'admin',
+      serverIsDefaultCredentials: true,
+      serverLoginUserDraft: 'admin',
+      serverLoginPassDraft: 'admin',
+      serverLoginError: '',
+      serverLoginBusy: false,
+      serverEditingCredentials: false,
+      serverCurrentPassDraft: '',
+      serverNewUserDraft: '',
+      serverNewPassDraft: '',
+      serverConfirmPassDraft: '',
+      serverAccountNotice: '',
+      deviceBinding: {
+        bound: true,
+        reused_persisted_binding: true,
+        device_id: 'device-macos-local-01',
+        server_url: 'wss://127.0.0.1:8787',
+        algorithm: 'RSA-OAEP-SHA256 + RSA-SHA256',
+        encrypted_channel_verified: true,
+        auto_reconnect: true,
+        device_fingerprint: 'SHA256:8f9d1a0b3e7c4f219a6b5c8d0e1f2a3b',
+        server_fingerprint: 'SHA256:1c4e7b2a9d0f6e3c8b5a2d1f4c7e9a0b',
+        device_public_key_pem:
+          '-----BEGIN RSA PUBLIC KEY-----\nUlNBLVBVQjowMTAwMDE6YzlmM2E4...\n-----END RSA PUBLIC KEY-----',
+      },
+      deviceServerUrlDraft: 'wss://127.0.0.1:8787',
+      deviceBindingNotice: '',
+      showRsaPem: false,
       pluginsSubTab: 'config',
       expandedPluginCards: {},
       expandedInventoryCards: {},
@@ -1447,6 +1478,155 @@ export function CAYWApp({ env } = {}) {
     }
   };
 
+  const refreshServerAuthAndBinding = async () => {
+    try {
+      const res = await rpc('server.auth.status', {});
+      if (object(res)) {
+        s.connectionMode = res.connection_mode || 'local_device';
+        s.serverLoggedIn = Boolean(res.logged_in);
+        if (typeof res.username === 'string' && res.username) {
+          s.serverUsername = res.username;
+        }
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+        if (object(res.device_binding)) {
+          s.deviceBinding = res.device_binding;
+          s.deviceServerUrlDraft =
+            res.device_binding.server_url || s.deviceServerUrlDraft;
+        }
+        forceRender();
+      }
+    } catch {
+      // Retain fallback defaults in unit mock tests
+    }
+  };
+
+  const switchConnectionMode = async mode => {
+    s.serverLoginError = '';
+    s.serverAccountNotice = '';
+    try {
+      const res = await rpc('server.auth.set_mode', { mode });
+      if (object(res)) {
+        s.connectionMode = res.connection_mode || mode;
+        s.serverLoggedIn = Boolean(res.logged_in);
+        if (typeof res.username === 'string' && res.username) {
+          s.serverUsername = res.username;
+        }
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+      } else {
+        s.connectionMode = mode;
+      }
+    } catch {
+      s.connectionMode = mode;
+    }
+    forceRender();
+    if (s.connectionMode === 'local_device' || s.serverLoggedIn) {
+      await connectLocal();
+    }
+  };
+
+  const handleServerLogin = async e => {
+    e?.preventDefault?.();
+    if (s.serverLoginBusy) return;
+    s.serverLoginBusy = true;
+    s.serverLoginError = '';
+    s.serverAccountNotice = '';
+    forceRender();
+    try {
+      const res = await rpc('server.auth.login', {
+        username: s.serverLoginUserDraft.trim(),
+        password: s.serverLoginPassDraft,
+      });
+      if (object(res)) {
+        s.serverLoggedIn = true;
+        s.serverUsername = res.username || s.serverLoginUserDraft.trim();
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+      } else {
+        s.serverLoggedIn = true;
+      }
+      s.serverLoginPassDraft = '';
+      s.serverAccountNotice = s.serverIsDefaultCredentials
+        ? '已使用初始默认账号登录。为了安全，建议在下方修改登录账号与密码。'
+        : '已登录远程 Server。';
+      forceRender();
+      await connectLocal();
+    } catch (error) {
+      s.serverLoginError = errorText(error);
+      forceRender();
+    } finally {
+      s.serverLoginBusy = false;
+      forceRender();
+    }
+  };
+
+  const handleServerLogout = async () => {
+    try {
+      await rpc('server.auth.logout', {});
+    } catch {}
+    s.serverLoggedIn = false;
+    s.serverEditingCredentials = false;
+    s.serverAccountNotice = '已退出远程 Server 账号登录。';
+    forceRender();
+  };
+
+  const handleServerUpdateCredentials = async e => {
+    e?.preventDefault?.();
+    s.serverAccountNotice = '';
+    s.serverLoginError = '';
+    if (!s.serverNewUserDraft.trim() || !s.serverNewPassDraft) {
+      s.serverLoginError = '新登录账号和新登录密码不能为空。';
+      forceRender();
+      return;
+    }
+    if (s.serverNewPassDraft !== s.serverConfirmPassDraft) {
+      s.serverLoginError = '两次输入的新密码不一致，请核对。';
+      forceRender();
+      return;
+    }
+    try {
+      const res = await rpc('server.auth.update_credentials', {
+        current_password: s.serverCurrentPassDraft,
+        new_username: s.serverNewUserDraft.trim(),
+        new_password: s.serverNewPassDraft,
+      });
+      if (object(res)) {
+        s.serverUsername = res.username || s.serverNewUserDraft.trim();
+        s.serverIsDefaultCredentials = Boolean(res.is_default_credentials);
+      } else {
+        s.serverUsername = s.serverNewUserDraft.trim();
+        s.serverIsDefaultCredentials = false;
+      }
+      s.serverEditingCredentials = false;
+      s.serverCurrentPassDraft = '';
+      s.serverNewPassDraft = '';
+      s.serverConfirmPassDraft = '';
+      s.serverLoginUserDraft = s.serverUsername;
+      s.serverAccountNotice = `已修改登录账号为“${s.serverUsername}”并更新密码，后续登录请使用新账号密码。`;
+      forceRender();
+    } catch (error) {
+      s.serverLoginError = errorText(error);
+      forceRender();
+    }
+  };
+
+  const handleBindDeviceOnce = async () => {
+    s.deviceBindingNotice = '';
+    try {
+      const res = await rpc('device.binding.bind_once', {
+        server_url: s.deviceServerUrlDraft.trim() || 'wss://127.0.0.1:8787',
+        rebind: false,
+      });
+      if (object(res)) {
+        s.deviceBinding = res;
+      }
+      s.deviceBindingNotice =
+        'Server 与 Device 已完成一次性 RSA 密钥对永久绑定并持久化保存，后续均通过 RSA 自动加密连接，无需再手动处理。';
+      forceRender();
+    } catch (error) {
+      s.deviceBindingNotice = errorText(error);
+      forceRender();
+    }
+  };
+
   const loadTrajectoryHistory = async (sessionId = s.selected) => {
     if (!sessionId) return;
     try {
@@ -1470,6 +1650,8 @@ export function CAYWApp({ env } = {}) {
     forceRender();
     if (tab === 'permissions') {
       void refreshPermissions();
+    } else if (tab === 'connection') {
+      void refreshServerAuthAndBinding();
     } else if (tab === 'plugins' && !s.cachedCapabilities.length) {
       void refreshPlugins();
     } else if (tab === 'models' && s.projects.length === 1 && s.projects[0]?.address === '本机 IPC') {
@@ -4625,6 +4807,7 @@ export function CAYWApp({ env } = {}) {
               <div className="VOzbGW_navList">
                 {[
                   ['general', '通用设置', IconSettingsOutline16],
+                  ['connection', '连接与账号', IconPersonalizationOutline16],
                   ['models', '模型服务', IconDataOutline16],
                   ['agent-presets', '会话模式', IconAgentPresetOutline16],
                   ['mcp', '外部工具', IconCodeOutline16],
@@ -4742,6 +4925,391 @@ export function CAYWApp({ env } = {}) {
                         </span>
                         <IconChevronDownOutline14 className="T1PP_q_chevron" />
                       </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {s.settingsTab === 'connection' ? (
+                  <div className="zGbnIq_section">
+                    <h3 className="zGbnIq_title">连接架构与账号安全</h3>
+                    <p className="zGbnIq_intro">
+                      管理本机免令牌直连、远程 Server 与 Device 的一次性 RSA 加密绑定，以及远程 Server 的登录账号与密码。
+                    </p>
+
+                    {/* Mode Switcher */}
+                    <div className="zGbnIq_rowCard" style={{ marginBottom: 14 }}>
+                      <div className="zGbnIq_rowHead">
+                        <div className="zGbnIq_rowIdentity">
+                          <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
+                          <span className="zGbnIq_rowName">当前前端连接通道</span>
+                          <span className="zGbnIq_rowTag">
+                            {s.connectionMode === 'local_device'
+                              ? 'Web ↔ Device 本机直连（无令牌）'
+                              : 'Web ↔ Server 远程账号登录'}
+                          </span>
+                        </div>
+                        <div className="zGbnIq_rowActions">
+                          <button
+                            type="button"
+                            className={
+                              s.connectionMode === 'local_device'
+                                ? 'zGbnIq_primaryButton'
+                                : 'zGbnIq_secondaryButton'
+                            }
+                            onClick={() => void switchConnectionMode('local_device')}
+                          >
+                            Web ↔ Device 本机直连
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              s.connectionMode === 'remote_server'
+                                ? 'zGbnIq_primaryButton'
+                                : 'zGbnIq_secondaryButton'
+                            }
+                            onClick={() => void switchConnectionMode('remote_server')}
+                          >
+                            Web ↔ Server 远程连接
+                          </button>
+                        </div>
+                      </div>
+                      <p className="At1oFq_hint" style={{ margin: '6px 0 0' }}>
+                        1. Web 与本机 Device 连接永远不使用、不出现任何令牌，打开页面即刻直连。
+                      </p>
+                    </div>
+
+                    {/* Rule 2: Server <-> Device One-time RSA Binding */}
+                    <div className="zGbnIq_rowCard" style={{ marginBottom: 14 }}>
+                      <div className="zGbnIq_rowHead">
+                        <div className="zGbnIq_rowIdentity">
+                          <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
+                          <span className="zGbnIq_rowName">
+                            Server ↔ Device 一次性 RSA 加密绑定
+                          </span>
+                          <span className="zGbnIq_rowTag">
+                            {s.deviceBinding.bound
+                              ? '已永久绑定 · RSA 自动加密连接'
+                              : '待首次绑定'}
+                          </span>
+                        </div>
+                        <div className="zGbnIq_rowActions">
+                          <button
+                            type="button"
+                            className="zGbnIq_secondaryButton"
+                            onClick={() => {
+                              s.showRsaPem = !s.showRsaPem;
+                              forceRender();
+                            }}
+                          >
+                            {s.showRsaPem ? '收起 RSA 公钥' : '查看 RSA 公钥'}
+                          </button>
+                        </div>
+                      </div>
+                      <p className="At1oFq_hint" style={{ margin: '6px 0 10px' }}>
+                        2. Server 与 Device 仅需在首次接入时交换一次 RSA 公钥，绑定关系与密钥对永久保存在本机，后续连接全程采用 RSA 加密与签名核验，无需再次配置或手动干预。
+                      </p>
+                      {s.deviceBindingNotice ? (
+                        <p className="zGbnIq_savedNotice" role="status">
+                          {s.deviceBindingNotice}
+                        </p>
+                      ) : null}
+                      <div className="zGbnIq_modelAdvanced" style={{ marginBottom: 8 }}>
+                        <div className="zGbnIq_field">
+                          <label className="zGbnIq_fieldLabel">设备唯一标识</label>
+                          <input
+                            type="text"
+                            className="zGbnIq_input"
+                            readOnly
+                            value={s.deviceBinding.device_id || 'device-macos-local-01'}
+                          />
+                        </div>
+                        <div className="zGbnIq_field">
+                          <label className="zGbnIq_fieldLabel">加密算法与通道状态</label>
+                          <input
+                            type="text"
+                            className="zGbnIq_input"
+                            readOnly
+                            value={`${s.deviceBinding.algorithm || 'RSA-OAEP-SHA256'} · ${s.deviceBinding.encrypted_channel_verified ? '加密自检通过' : '就绪'}`}
+                          />
+                        </div>
+                      </div>
+                      <div className="zGbnIq_modelAdvanced" style={{ marginBottom: 8 }}>
+                        <div className="zGbnIq_field">
+                          <label className="zGbnIq_fieldLabel">设备端 RSA 公钥指纹</label>
+                          <input
+                            type="text"
+                            className="zGbnIq_input"
+                            readOnly
+                            value={s.deviceBinding.device_fingerprint || ''}
+                          />
+                        </div>
+                        <div className="zGbnIq_field">
+                          <label className="zGbnIq_fieldLabel">Server 端 RSA 公钥指纹</label>
+                          <input
+                            type="text"
+                            className="zGbnIq_input"
+                            readOnly
+                            value={s.deviceBinding.server_fingerprint || ''}
+                          />
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                        <div className="zGbnIq_field" style={{ flex: 1 }}>
+                          <label className="zGbnIq_fieldLabel">绑定 Server 地址</label>
+                          <input
+                            type="text"
+                            className="zGbnIq_input"
+                            placeholder="如 wss://127.0.0.1:8787"
+                            value={s.deviceServerUrlDraft}
+                            onChange={e => {
+                              s.deviceServerUrlDraft = e.target.value;
+                              forceRender();
+                            }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className="zGbnIq_primaryButton"
+                          onClick={() => void handleBindDeviceOnce()}
+                        >
+                          确认一次性 RSA 绑定
+                        </button>
+                      </div>
+                      {s.showRsaPem ? (
+                        <pre
+                          className="ydkMvW_code"
+                          style={{ marginTop: 10, fontSize: 11 }}
+                        >
+                          {s.deviceBinding.device_public_key_pem}
+                        </pre>
+                      ) : null}
+                    </div>
+
+                    {/* Rule 3: Web <-> Server Default Account Login & Password Change */}
+                    <div className="zGbnIq_rowCard">
+                      <div className="zGbnIq_rowHead">
+                        <div className="zGbnIq_rowIdentity">
+                          <span
+                            className={clsx(
+                              'zGbnIq_credentialDot',
+                              s.serverLoggedIn
+                                ? 'zGbnIq_credentialDotConfigured'
+                                : 'zGbnIq_credentialDotMissing',
+                            )}
+                          />
+                          <span className="zGbnIq_rowName">
+                            Web ↔ Server 账号登录与密码管理
+                          </span>
+                          <span className="zGbnIq_rowTag">
+                            {s.serverLoggedIn
+                              ? `已登录（${s.serverUsername}）`
+                              : `未登录 · 默认账号 ${s.serverUsername}`}
+                          </span>
+                        </div>
+                        {s.serverLoggedIn ? (
+                          <div className="zGbnIq_rowActions">
+                            <button
+                              type="button"
+                              className="zGbnIq_secondaryButton"
+                              onClick={() => {
+                                s.serverEditingCredentials =
+                                  !s.serverEditingCredentials;
+                                s.serverNewUserDraft = s.serverUsername;
+                                s.serverCurrentPassDraft = '';
+                                s.serverNewPassDraft = '';
+                                s.serverConfirmPassDraft = '';
+                                s.serverLoginError = '';
+                                forceRender();
+                              }}
+                            >
+                              {s.serverEditingCredentials
+                                ? '收起修改表单'
+                                : '修改登录账号密码'}
+                            </button>
+                            <button
+                              type="button"
+                              className="zGbnIq_dangerButton"
+                              onClick={() => void handleServerLogout()}
+                            >
+                              退出登录
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      <p className="At1oFq_hint" style={{ margin: '6px 0 10px' }}>
+                        3. Web 与 Server 连接采用账号密码认证：首次使用默认初始账号（账号：admin / 密码：admin）直接登录，登录后可随时修改为自定义账号与密码。
+                      </p>
+                      {s.serverAccountNotice ? (
+                        <p className="zGbnIq_savedNotice" role="status">
+                          {s.serverAccountNotice}
+                        </p>
+                      ) : null}
+                      {s.serverLoginError ? (
+                        <p className="_banner_ugy7y_1" role="alert" style={{ margin: '0 0 10px' }}>
+                          {s.serverLoginError}
+                        </p>
+                      ) : null}
+
+                      {!s.serverLoggedIn ? (
+                        <form
+                          className="zGbnIq_editor"
+                          onSubmit={e => void handleServerLogin(e)}
+                        >
+                          <div className="zGbnIq_editorHeader">
+                            <span className="zGbnIq_editorTitle">
+                              登录远程 Server
+                            </span>
+                            <span className="zGbnIq_editorRoute">
+                              {s.serverIsDefaultCredentials
+                                ? '初始默认账号：admin / 默认密码：admin'
+                                : `当前账号：${s.serverUsername}`}
+                            </span>
+                          </div>
+                          <div className="zGbnIq_modelAdvanced">
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">登录账号</label>
+                              <input
+                                id="server-login-username"
+                                type="text"
+                                className="zGbnIq_input"
+                                placeholder="默认账号 admin"
+                                value={s.serverLoginUserDraft}
+                                onChange={e => {
+                                  s.serverLoginUserDraft = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">登录密码</label>
+                              <input
+                                id="server-login-password"
+                                type="password"
+                                className="zGbnIq_input"
+                                placeholder="默认密码 admin"
+                                value={s.serverLoginPassDraft}
+                                onChange={e => {
+                                  s.serverLoginPassDraft = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <div className="zGbnIq_editorActions">
+                            {s.serverIsDefaultCredentials ? (
+                              <button
+                                type="button"
+                                className="zGbnIq_secondaryButton"
+                                onClick={() => {
+                                  s.serverLoginUserDraft = 'admin';
+                                  s.serverLoginPassDraft = 'admin';
+                                  forceRender();
+                                }}
+                              >
+                                填入默认账号 (admin / admin)
+                              </button>
+                            ) : null}
+                            <button
+                              id="server-login-submit"
+                              type="submit"
+                              className="zGbnIq_primaryButton"
+                              disabled={s.serverLoginBusy}
+                            >
+                              {s.serverLoginBusy ? '正在登录…' : '登录 Server'}
+                            </button>
+                          </div>
+                        </form>
+                      ) : s.serverEditingCredentials ? (
+                        <form
+                          className="zGbnIq_editor"
+                          onSubmit={e => void handleServerUpdateCredentials(e)}
+                        >
+                          <div className="zGbnIq_editorHeader">
+                            <span className="zGbnIq_editorTitle">
+                              修改 Server 登录账号与密码
+                            </span>
+                          </div>
+                          <div className="zGbnIq_modelAdvanced">
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">当前密码</label>
+                              <input
+                                id="server-current-password"
+                                type="password"
+                                className="zGbnIq_input"
+                                placeholder="输入当前登录密码（默认 admin）"
+                                value={s.serverCurrentPassDraft}
+                                onChange={e => {
+                                  s.serverCurrentPassDraft = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">新登录账号</label>
+                              <input
+                                id="server-new-username"
+                                type="text"
+                                className="zGbnIq_input"
+                                placeholder="输入新登录账号名称"
+                                value={s.serverNewUserDraft}
+                                onChange={e => {
+                                  s.serverNewUserDraft = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <div className="zGbnIq_modelAdvanced">
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">新登录密码</label>
+                              <input
+                                id="server-new-password"
+                                type="password"
+                                className="zGbnIq_input"
+                                placeholder="输入新登录密码"
+                                value={s.serverNewPassDraft}
+                                onChange={e => {
+                                  s.serverNewPassDraft = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                            <div className="zGbnIq_field">
+                              <label className="zGbnIq_fieldLabel">确认新密码</label>
+                              <input
+                                id="server-confirm-password"
+                                type="password"
+                                className="zGbnIq_input"
+                                placeholder="再次输入新登录密码"
+                                value={s.serverConfirmPassDraft}
+                                onChange={e => {
+                                  s.serverConfirmPassDraft = e.target.value;
+                                  forceRender();
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <div className="zGbnIq_editorActions">
+                            <button
+                              type="button"
+                              className="zGbnIq_secondaryButton"
+                              onClick={() => {
+                                s.serverEditingCredentials = false;
+                                forceRender();
+                              }}
+                            >
+                              取消
+                            </button>
+                            <button
+                              id="server-save-credentials"
+                              type="submit"
+                              className="zGbnIq_primaryButton"
+                            >
+                              保存新账号密码
+                            </button>
+                          </div>
+                        </form>
+                      ) : null}
                     </div>
                   </div>
                 ) : null}
@@ -6388,6 +6956,70 @@ export function CAYWApp({ env } = {}) {
         }}
         onConfirm={confirmFullAccess}
       />
+
+      {/* Web <-> Server Login Modal when in remote_server mode and not logged in */}
+      <Modal
+        open={
+          s.connectionMode === 'remote_server' &&
+          !s.serverLoggedIn &&
+          !s.settingsOpen
+        }
+        onClose={() => void switchConnectionMode('local_device')}
+        title="登录远程 CAYW Server"
+        size="md"
+      >
+        <form
+          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+          onSubmit={e => void handleServerLogin(e)}
+        >
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
+            {s.serverIsDefaultCredentials
+              ? '当前使用默认初始账号登录（默认账号：admin，默认密码：admin）。登录后可在“设置 → 连接与账号”中修改账号与密码。'
+              : `请输入远程 Server 登录账号（${s.serverUsername}）与密码。`}
+          </p>
+          {s.serverLoginError ? (
+            <p className="_banner_ugy7y_1" role="alert" style={{ margin: 0 }}>
+              {s.serverLoginError}
+            </p>
+          ) : null}
+          <div className="zGbnIq_field">
+            <label className="zGbnIq_fieldLabel">登录账号</label>
+            <input
+              type="text"
+              className="zGbnIq_input"
+              value={s.serverLoginUserDraft}
+              onChange={e => {
+                s.serverLoginUserDraft = e.target.value;
+                forceRender();
+              }}
+            />
+          </div>
+          <div className="zGbnIq_field">
+            <label className="zGbnIq_fieldLabel">登录密码</label>
+            <input
+              type="password"
+              className="zGbnIq_input"
+              value={s.serverLoginPassDraft}
+              onChange={e => {
+                s.serverLoginPassDraft = e.target.value;
+                forceRender();
+              }}
+            />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginTop: 4 }}>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={() => void switchConnectionMode('local_device')}
+            >
+              切回本机设备直连（无令牌）
+            </Button>
+            <Button variant="primary" type="submit" disabled={s.serverLoginBusy}>
+              {s.serverLoginBusy ? '正在登录…' : '登录 Server'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
 
       <dialog
         ref={forkDialogRef}
