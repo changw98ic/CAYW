@@ -81,7 +81,7 @@ const attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-const readMethods = new Set(['runtime.health', 'device.binding.status', 'server.auth.status', 'projects.list', 'projects.browse', 'skills.catalog', 'mcp.catalog', 'session.list', 'session.get', 'session.events', 'session.grants', 'session.audit', 'capabilities.list']);
+const readMethods = new Set(['runtime.health', 'devices.list', 'device.binding.status', 'server.auth.status', 'projects.list', 'projects.browse', 'skills.catalog', 'mcp.catalog', 'session.list', 'session.get', 'session.events', 'session.grants', 'session.audit', 'capabilities.list']);
 const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'cancelled']);
 
 export class RpcError extends Error {

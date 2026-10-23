@@ -23923,7 +23923,7 @@ var attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-var readMethods = /* @__PURE__ */ new Set(["runtime.health", "device.binding.status", "server.auth.status", "projects.list", "projects.browse", "skills.catalog", "mcp.catalog", "session.list", "session.get", "session.events", "session.grants", "session.audit", "capabilities.list"]);
+var readMethods = /* @__PURE__ */ new Set(["runtime.health", "devices.list", "device.binding.status", "server.auth.status", "projects.list", "projects.browse", "skills.catalog", "mcp.catalog", "session.list", "session.get", "session.events", "session.grants", "session.audit", "capabilities.list"]);
 var rejectedCodes = /* @__PURE__ */ new Set(["forbidden", "invalid_params", "invalid_request", "invalid_json", "method_not_allowed", "queue_full", "queue_timeout", "body_timeout", "invalid_body", "busy", "session_frozen", "needs_reconciliation", "stale_approval", "cancelled"]);
 var RpcError = class extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -24998,6 +24998,35 @@ function CAYWApp({ env } = {}) {
       deviceServerUrlDraft: "wss://127.0.0.1:8787",
       deviceBindingNotice: "",
       showRsaPem: false,
+      activeDeviceId: "device-macos-local-01",
+      boundDevices: [
+        {
+          device_id: "device-macos-local-01",
+          label: "\u672C\u673A macOS \u8BBE\u5907",
+          kind: "local_and_rsa",
+          builtin: true,
+          active: true,
+          bound: true,
+          server_url: "wss://127.0.0.1:8787",
+          algorithm: "RSA-OAEP-SHA256 + RSA-SHA256",
+          encrypted_channel_verified: true,
+          auto_reconnect: true,
+          device_fingerprint: "SHA256:8f9d1a0b3e7c4f219a6b5c8d0e1f2a3b",
+          server_fingerprint: "SHA256:1c4e7b2a9d0f6e3c8b5a2d1f4c7e9a0b",
+          device_public_key_pem: "-----BEGIN RSA PUBLIC KEY-----\nUlNBLVBVQjowMTAwMDE6YzlmM2E4...\n-----END RSA PUBLIC KEY-----"
+        }
+      ],
+      addDeviceModalOpen: false,
+      newDeviceLabel: "",
+      newDeviceId: "",
+      newDeviceServerUrl: "wss://127.0.0.1:8787",
+      newDeviceMode: "auto",
+      newDevicePem: "",
+      addDeviceBusy: false,
+      addDeviceError: "",
+      lastCreatedDevice: null,
+      expandedDevicePemIds: {},
+      heroDeviceMenuOpen: false,
       pluginsSubTab: "config",
       expandedPluginCards: {},
       expandedInventoryCards: {},
@@ -25817,9 +25846,131 @@ function CAYWApp({ env } = {}) {
           s.deviceBinding = res.device_binding;
           s.deviceServerUrlDraft = res.device_binding.server_url || s.deviceServerUrlDraft;
         }
+        if (typeof res.active_device_id === "string" && res.active_device_id) {
+          s.activeDeviceId = res.active_device_id;
+        }
+        if (Array.isArray(res.devices) && res.devices.length) {
+          s.boundDevices = res.devices;
+        }
         forceRender();
       }
     } catch {
+    }
+  };
+  const openAddDeviceModal = () => {
+    s.addDeviceModalOpen = true;
+    s.newDeviceLabel = "";
+    s.newDeviceId = "";
+    s.newDeviceServerUrl = s.deviceServerUrlDraft || "wss://127.0.0.1:8787";
+    s.newDeviceMode = "auto";
+    s.newDevicePem = "";
+    s.addDeviceError = "";
+    s.lastCreatedDevice = null;
+    forceRender();
+    void refreshServerAuthAndBinding();
+  };
+  const handleAddDeviceSubmit = async (e) => {
+    e?.preventDefault?.();
+    if (s.addDeviceBusy) return;
+    const label = s.newDeviceLabel.trim();
+    if (!label) {
+      s.addDeviceError = "\u8BF7\u8F93\u5165\u8981\u7ED1\u5B9A\u7684\u8BBE\u5907\u540D\u79F0\uFF08\u5982 Mac Studio \u8FDC\u7A0B\u5DE5\u4F5C\u7AD9\uFF09\u3002";
+      forceRender();
+      return;
+    }
+    if (s.newDeviceMode === "pem" && !s.newDevicePem.trim()) {
+      s.addDeviceError = "\u8BF7\u7C98\u8D34\u8BBE\u5907\u7AEF\u751F\u6210\u7684 RSA \u516C\u94A5\u5185\u5BB9\u3002";
+      forceRender();
+      return;
+    }
+    s.addDeviceBusy = true;
+    s.addDeviceError = "";
+    forceRender();
+    try {
+      const res = await rpc("devices.add", {
+        label,
+        ...s.newDeviceId.trim() ? { device_id: s.newDeviceId.trim() } : {},
+        server_url: s.newDeviceServerUrl.trim() || "wss://127.0.0.1:8787"
+      });
+      if (object(res)) {
+        if (Array.isArray(res.devices) && res.devices.length) {
+          s.boundDevices = res.devices;
+        }
+        if (typeof res.active_device_id === "string") {
+          s.activeDeviceId = res.active_device_id;
+        }
+        if (object(res.created)) {
+          s.lastCreatedDevice = res.created;
+          s.deviceBinding = res.created;
+        }
+      } else {
+        const fallbackDev = {
+          device_id: s.newDeviceId.trim() || `device-rsa-0${s.boundDevices.length + 1}`,
+          label,
+          kind: "rsa_bound",
+          builtin: false,
+          active: true,
+          bound: true,
+          server_url: s.newDeviceServerUrl.trim() || "wss://127.0.0.1:8787",
+          algorithm: "RSA-OAEP-SHA256 + RSA-SHA256",
+          encrypted_channel_verified: true,
+          auto_reconnect: true,
+          device_fingerprint: "SHA256:c4f8a1e2d3b907561234abcd9876ef01",
+          server_fingerprint: s.deviceBinding.server_fingerprint,
+          device_public_key_pem: s.deviceBinding.device_public_key_pem
+        };
+        s.boundDevices = s.boundDevices.map((d) => ({ ...d, active: false })).concat([fallbackDev]);
+        s.activeDeviceId = fallbackDev.device_id;
+        s.lastCreatedDevice = fallbackDev;
+        s.deviceBinding = fallbackDev;
+      }
+      s.deviceBindingNotice = `\u8BBE\u5907\u201C${label}\u201D\u5DF2\u5B8C\u6210\u4E00\u6B21\u6027 RSA \u5BC6\u94A5\u7ED1\u5B9A\u5E76\u8BBE\u4E3A\u5F53\u524D\u8BBE\u5907\uFF0C\u540E\u7EED\u81EA\u52A8\u52A0\u5BC6\u8FDE\u63A5\u3002`;
+      forceRender();
+    } catch (error) {
+      s.addDeviceError = errorText(error);
+      forceRender();
+    } finally {
+      s.addDeviceBusy = false;
+      forceRender();
+    }
+  };
+  const handleSelectDevice = async (deviceId) => {
+    try {
+      const res = await rpc("devices.select", { device_id: deviceId });
+      if (object(res) && Array.isArray(res.devices)) {
+        s.boundDevices = res.devices;
+        s.activeDeviceId = res.active_device_id || deviceId;
+        const current = res.devices.find((d) => d.device_id === s.activeDeviceId);
+        if (current) s.deviceBinding = current;
+      } else {
+        s.activeDeviceId = deviceId;
+        s.boundDevices = s.boundDevices.map((d) => ({
+          ...d,
+          active: d.device_id === deviceId
+        }));
+      }
+      s.deviceBindingNotice = `\u5DF2\u5207\u6362\u81F3\u8BBE\u5907\u201C${s.boundDevices.find((d) => d.device_id === deviceId)?.label || deviceId}\u201D\u3002`;
+      forceRender();
+    } catch (error) {
+      s.deviceBindingNotice = errorText(error);
+      forceRender();
+    }
+  };
+  const handleRemoveDevice = async (deviceId) => {
+    try {
+      const res = await rpc("devices.remove", { device_id: deviceId });
+      if (object(res) && Array.isArray(res.devices)) {
+        s.boundDevices = res.devices;
+        s.activeDeviceId = res.active_device_id || s.boundDevices[0]?.device_id;
+      } else {
+        s.boundDevices = s.boundDevices.filter((d) => d.device_id !== deviceId);
+        s.activeDeviceId = s.boundDevices[0]?.device_id || "device-macos-local-01";
+      }
+      s.deviceBindingNotice = "\u5DF2\u89E3\u7ED1\u5E76\u79FB\u9664\u8BE5\u8BBE\u5907\u3002";
+      forceRender();
+    } catch (error) {
+      s.deviceBindingNotice = errorText(error);
+      forceRender();
     }
   };
   const switchConnectionMode = async (mode) => {
@@ -26671,6 +26822,25 @@ function CAYWApp({ env } = {}) {
           wide ? /* @__PURE__ */ import_react.default.createElement(A9, { size: 16 }) : /* @__PURE__ */ import_react.default.createElement(D9, { size: 18 }),
           wide ? /* @__PURE__ */ import_react.default.createElement("span", { className: "UQsH_q_triggerLabel" }, "\u8BBE\u7F6E") : null
         ),
+        wide ? /* @__PURE__ */ import_react.default.createElement(
+          sf,
+          {
+            label: "\u6DFB\u52A0\u6216\u7BA1\u7406\u7ED1\u5B9A\u8BBE\u5907\uFF08RSA \u4E00\u6B21\u6027\u52A0\u5BC6\u7ED1\u5B9A\uFF09",
+            side: "top",
+            delayMs: 400
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              id: "open-add-device-btn",
+              type: "button",
+              className: "hHd-Xa_iconButton",
+              "aria-label": "\u6DFB\u52A0\u8BBE\u5907",
+              onClick: () => openAddDeviceModal()
+            },
+            /* @__PURE__ */ import_react.default.createElement(B9, { size: 16 })
+          )
+        ) : null,
         /* @__PURE__ */ import_react.default.createElement(
           sf,
           {
@@ -27562,6 +27732,70 @@ function CAYWApp({ env } = {}) {
               )
             )
           }
+        ), /* @__PURE__ */ import_react.default.createElement(
+          Vu,
+          {
+            open: s.heroDeviceMenuOpen,
+            onClose: () => {
+              s.heroDeviceMenuOpen = false;
+              forceRender();
+            },
+            selectedId: s.activeDeviceId,
+            items: s.boundDevices.map((dev) => ({
+              id: dev.device_id,
+              label: `${dev.label} (${dev.device_id})`,
+              icon: /* @__PURE__ */ import_react.default.createElement(I7, { size: 16 })
+            })),
+            footer: [
+              {
+                id: "__add_device__",
+                label: "\u6DFB\u52A0\u65B0\u8BBE\u5907 (RSA \u4E00\u6B21\u6027\u7ED1\u5B9A)\u2026",
+                icon: /* @__PURE__ */ import_react.default.createElement(B9, { size: 16 })
+              }
+            ],
+            onSelect: (id) => {
+              s.heroDeviceMenuOpen = false;
+              if (id === "__add_device__") {
+                openAddDeviceModal();
+              } else {
+                void handleSelectDevice(id);
+              }
+              forceRender();
+            },
+            portal: true,
+            anchor: /* @__PURE__ */ import_react.default.createElement(
+              "button",
+              {
+                id: "hero-device-btn",
+                type: "button",
+                className: "pXSMma_workspace",
+                "aria-label": "\u9009\u62E9\u6216\u6DFB\u52A0\u8FD0\u884C\u8BBE\u5907",
+                "aria-haspopup": "menu",
+                "aria-expanded": s.heroDeviceMenuOpen,
+                onClick: () => {
+                  s.heroDeviceMenuOpen = !s.heroDeviceMenuOpen;
+                  forceRender();
+                }
+              },
+              /* @__PURE__ */ import_react.default.createElement(
+                I7,
+                {
+                  className: "pXSMma_folder",
+                  size: 16
+                }
+              ),
+              /* @__PURE__ */ import_react.default.createElement("span", { className: "pXSMma_workspaceLabel" }, s.boundDevices.find(
+                (d) => d.device_id === s.activeDeviceId
+              )?.label ?? "\u672C\u673A macOS \u8BBE\u5907"),
+              /* @__PURE__ */ import_react.default.createElement(
+                hs,
+                {
+                  className: "pXSMma_chevron",
+                  size: 12
+                }
+              )
+            )
+          }
         ))) : null,
         /* @__PURE__ */ import_react.default.createElement("div", { className: we("uV2eYG_root", isHero && "uV2eYG_hero") }, s.goalBarOpen || s.sessionGoal ? /* @__PURE__ */ import_react.default.createElement("div", { className: "nLMEza_dock", style: { marginBottom: 6 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "nLMEza_bar" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "nLMEza_label" }, "\u4F1A\u8BDD\u76EE\u6807"), s.goalEditing ? /* @__PURE__ */ import_react.default.createElement(
           "input",
@@ -27890,6 +28124,11 @@ function CAYWApp({ env } = {}) {
                   id: "workspace",
                   label: "\u6DFB\u52A0\u65B0\u5DE5\u4F5C\u533A\u76EE\u5F55\u2026",
                   icon: /* @__PURE__ */ import_react.default.createElement(M7, { size: 16 })
+                },
+                {
+                  id: "device",
+                  label: "\u6DFB\u52A0\u65B0\u8BBE\u5907 (RSA \u4E00\u6B21\u6027\u7ED1\u5B9A)\u2026",
+                  icon: /* @__PURE__ */ import_react.default.createElement(I7, { size: 16 })
                 }
               ],
               onSelect: (id) => {
@@ -27917,6 +28156,8 @@ function CAYWApp({ env } = {}) {
                   openSettings("mcp");
                 } else if (id === "workspace") {
                   openNewProjectModal();
+                } else if (id === "device") {
+                  openAddDeviceModal();
                 }
                 forceRender();
               },
@@ -28538,7 +28779,16 @@ function CAYWApp({ env } = {}) {
           onClick: () => void switchConnectionMode("remote_server")
         },
         "Web \u2194 Server \u8FDC\u7A0B\u8FDE\u63A5"
-      ))), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 0" } }, "1. Web \u4E0E\u672C\u673A Device \u8FDE\u63A5\u6C38\u8FDC\u4E0D\u4F7F\u7528\u3001\u4E0D\u51FA\u73B0\u4EFB\u4F55\u4EE4\u724C\uFF0C\u6253\u5F00\u9875\u9762\u5373\u523B\u76F4\u8FDE\u3002")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard", style: { marginBottom: 14 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, "Server \u2194 Device \u4E00\u6B21\u6027 RSA \u52A0\u5BC6\u7ED1\u5B9A"), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, s.deviceBinding.bound ? "\u5DF2\u6C38\u4E45\u7ED1\u5B9A \xB7 RSA \u81EA\u52A8\u52A0\u5BC6\u8FDE\u63A5" : "\u5F85\u9996\u6B21\u7ED1\u5B9A")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+      ))), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 0" } }, "1. Web \u4E0E\u672C\u673A Device \u8FDE\u63A5\u6C38\u8FDC\u4E0D\u4F7F\u7528\u3001\u4E0D\u51FA\u73B0\u4EFB\u4F55\u4EE4\u724C\uFF0C\u6253\u5F00\u9875\u9762\u5373\u523B\u76F4\u8FDE\u3002")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard", style: { marginBottom: 14 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, `Server \u2194 Device \u4E00\u6B21\u6027 RSA \u52A0\u5BC6\u7ED1\u5B9A\uFF08\u5DF2\u7ED1\u5B9A ${s.boundDevices.length} \u53F0\u8BBE\u5907\uFF09`), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, s.deviceBinding.bound ? "\u5DF2\u6C38\u4E45\u7ED1\u5B9A \xB7 RSA \u81EA\u52A8\u52A0\u5BC6\u8FDE\u63A5" : "\u5F85\u9996\u6B21\u7ED1\u5B9A")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          id: "settings-add-device-btn",
+          type: "button",
+          className: "zGbnIq_primaryButton",
+          onClick: () => openAddDeviceModal()
+        },
+        "+ \u6DFB\u52A0\u8BBE\u5907"
+      ), /* @__PURE__ */ import_react.default.createElement(
         "button",
         {
           type: "button",
@@ -28549,7 +28799,71 @@ function CAYWApp({ env } = {}) {
           }
         },
         s.showRsaPem ? "\u6536\u8D77 RSA \u516C\u94A5" : "\u67E5\u770B RSA \u516C\u94A5"
-      ))), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 10px" } }, "2. Server \u4E0E Device \u4EC5\u9700\u5728\u9996\u6B21\u63A5\u5165\u65F6\u4EA4\u6362\u4E00\u6B21 RSA \u516C\u94A5\uFF0C\u7ED1\u5B9A\u5173\u7CFB\u4E0E\u5BC6\u94A5\u5BF9\u6C38\u4E45\u4FDD\u5B58\u5728\u672C\u673A\uFF0C\u540E\u7EED\u8FDE\u63A5\u5168\u7A0B\u91C7\u7528 RSA \u52A0\u5BC6\u4E0E\u7B7E\u540D\u6838\u9A8C\uFF0C\u65E0\u9700\u518D\u6B21\u914D\u7F6E\u6216\u624B\u52A8\u5E72\u9884\u3002"), s.deviceBindingNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.deviceBindingNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced", style: { marginBottom: 8 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u552F\u4E00\u6807\u8BC6"), /* @__PURE__ */ import_react.default.createElement(
+      ))), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint", style: { margin: "6px 0 10px" } }, "2. Server \u4E0E Device \u4EC5\u9700\u5728\u9996\u6B21\u63A5\u5165\u65F6\u4EA4\u6362\u4E00\u6B21 RSA \u516C\u94A5\uFF0C\u7ED1\u5B9A\u5173\u7CFB\u4E0E\u5BC6\u94A5\u5BF9\u6C38\u4E45\u4FDD\u5B58\u5728\u672C\u673A\uFF0C\u540E\u7EED\u8FDE\u63A5\u5168\u7A0B\u91C7\u7528 RSA \u52A0\u5BC6\u4E0E\u7B7E\u540D\u6838\u9A8C\uFF0C\u65E0\u9700\u518D\u6B21\u914D\u7F6E\u6216\u624B\u52A8\u5E72\u9884\u3002"), s.deviceBindingNotice ? /* @__PURE__ */ import_react.default.createElement("p", { className: "zGbnIq_savedNotice", role: "status" }, s.deviceBindingNotice) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rows", style: { marginBottom: 10 } }, s.boundDevices.map((dev) => {
+        const isCurrent = dev.device_id === s.activeDeviceId;
+        const isPemOpen = Boolean(
+          s.expandedDevicePemIds[dev.device_id]
+        );
+        return /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            key: dev.device_id,
+            className: "zGbnIq_rowCard",
+            style: {
+              padding: "10px 12px",
+              background: "var(--dsw-alias-bg-layer-2, rgba(255,255,255,0.02))"
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, dev.label), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, isCurrent ? "\u5F53\u524D\u4F7F\u7528\u8BBE\u5907 \xB7 RSA \u5DF2\u52A0\u5BC6" : "\u5DF2\u6C38\u4E45\u7ED1\u5B9A \xB7 \u81EA\u52A8\u91CD\u8FDE")), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowActions" }, /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "zGbnIq_secondaryButton",
+              disabled: isCurrent,
+              onClick: () => void handleSelectDevice(dev.device_id)
+            },
+            isCurrent ? "\u5F53\u524D\u6D3B\u8DC3" : "\u5207\u6362\u81F3\u6B64\u8BBE\u5907"
+          ), /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "zGbnIq_secondaryButton",
+              onClick: () => {
+                s.expandedDevicePemIds[dev.device_id] = !isPemOpen;
+                forceRender();
+              }
+            },
+            isPemOpen ? "\u6536\u8D77\u5BC6\u94A5" : "\u5BC6\u94A5\u6307\u7EB9"
+          ), !dev.builtin ? /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "zGbnIq_dangerButton",
+              onClick: () => void handleRemoveDevice(dev.device_id)
+            },
+            "\u89E3\u7ED1"
+          ) : null)),
+          /* @__PURE__ */ import_react.default.createElement(
+            "div",
+            {
+              style: {
+                fontSize: 12,
+                color: "var(--dsw-alias-label-tertiary)",
+                marginTop: 4
+              }
+            },
+            `\u8BBE\u5907 ID\uFF1A${dev.device_id} \xB7 Server\uFF1A${dev.server_url} \xB7 \u6307\u7EB9\uFF1A${dev.device_fingerprint}`
+          ),
+          isPemOpen ? /* @__PURE__ */ import_react.default.createElement(
+            "pre",
+            {
+              className: "ydkMvW_code",
+              style: { marginTop: 8, fontSize: 11 }
+            },
+            dev.device_public_key_pem
+          ) : null
+        );
+      })), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced", style: { marginBottom: 8 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u552F\u4E00\u6807\u8BC6"), /* @__PURE__ */ import_react.default.createElement(
         "input",
         {
           type: "text",
@@ -30031,6 +30345,207 @@ ${sk.description}
           "\u5207\u56DE\u672C\u673A\u8BBE\u5907\u76F4\u8FDE\uFF08\u65E0\u4EE4\u724C\uFF09"
         ), /* @__PURE__ */ import_react.default.createElement(ps, { variant: "primary", type: "submit", disabled: s.serverLoginBusy }, s.serverLoginBusy ? "\u6B63\u5728\u767B\u5F55\u2026" : "\u767B\u5F55 Server"))
       )
+    ),
+    /* @__PURE__ */ import_react.default.createElement(
+      $u,
+      {
+        open: s.addDeviceModalOpen,
+        onClose: () => {
+          s.addDeviceModalOpen = false;
+          forceRender();
+        },
+        title: "\u6DFB\u52A0\u5E76\u7ED1\u5B9A\u65B0\u8BBE\u5907\uFF08RSA \u4E00\u6B21\u6027\u52A0\u5BC6\u8FDE\u63A5\uFF09",
+        size: "lg"
+      },
+      /* @__PURE__ */ import_react.default.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 14 } }, /* @__PURE__ */ import_react.default.createElement(
+        "p",
+        {
+          style: {
+            margin: 0,
+            fontSize: 13,
+            color: "var(--dsw-alias-label-secondary)",
+            lineHeight: 1.5
+          }
+        },
+        "Server \u4E0E Device \u53EA\u9700\u5728\u6B64\u7ED1\u5B9A\u4E00\u6B21\uFF1A\u751F\u6210\u6216\u5BFC\u5165\u8BBE\u5907\u7AEF RSA \u5BC6\u94A5\u5BF9\u5E76\u5B8C\u6210\u516C\u94A5\u4EA4\u6362\u540E\uFF0C\u5BC6\u94A5\u4E0E\u8EAB\u4EFD\u5C06\u6C38\u4E45\u4FDD\u5B58\u5728\u672C\u673A\uFF0C\u540E\u7EED\u6240\u6709\u8FDE\u63A5\u5747\u81EA\u52A8\u4F7F\u7528 RSA-OAEP-SHA256 \u52A0\u5BC6\u4E0E\u7B7E\u540D\u6838\u9A8C\uFF0C\u65E0\u9700\u518D\u6B21\u914D\u5BF9\u6216\u8F93\u5165\u4EE4\u724C\u3002"
+      ), /* @__PURE__ */ import_react.default.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: s.newDeviceMode === "auto" ? "zGbnIq_primaryButton" : "zGbnIq_secondaryButton",
+          onClick: () => {
+            s.newDeviceMode = "auto";
+            s.addDeviceError = "";
+            forceRender();
+          }
+        },
+        "\u81EA\u52A8\u751F\u6210 RSA \u5BC6\u94A5\u5BF9\u5E76\u4E00\u952E\u7ED1\u5B9A\uFF08\u63A8\u8350\uFF09"
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "button",
+        {
+          type: "button",
+          className: s.newDeviceMode === "pem" ? "zGbnIq_primaryButton" : "zGbnIq_secondaryButton",
+          onClick: () => {
+            s.newDeviceMode = "pem";
+            s.addDeviceError = "";
+            forceRender();
+          }
+        },
+        "\u5BFC\u5165\u5DF2\u6709\u8BBE\u5907 RSA \u516C\u94A5\u7ED1\u5B9A"
+      )), s.addDeviceError ? /* @__PURE__ */ import_react.default.createElement("p", { className: "_banner_ugy7y_1", role: "alert", style: { margin: 0 } }, s.addDeviceError) : null, s.lastCreatedDevice ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowCard", style: { padding: 14 } }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowHead" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_rowIdentity" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_credentialDot zGbnIq_credentialDotConfigured" }), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowName" }, `\u5DF2\u5B8C\u6210\u6C38\u4E45\u7ED1\u5B9A\uFF1A${s.lastCreatedDevice.label}`), /* @__PURE__ */ import_react.default.createElement("span", { className: "zGbnIq_rowTag" }, "RSA-OAEP-SHA256 \u52A0\u5BC6\u63E1\u624B\u901A\u8FC7"))), /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          style: {
+            fontSize: 12,
+            color: "var(--dsw-alias-label-secondary)",
+            marginTop: 8,
+            lineHeight: 1.6
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", null, `\u8BBE\u5907\u552F\u4E00\u6807\u8BC6\uFF1A${s.lastCreatedDevice.device_id}`),
+        /* @__PURE__ */ import_react.default.createElement("div", null, `\u7ED1\u5B9A Server \u5730\u5740\uFF1A${s.lastCreatedDevice.server_url}`),
+        /* @__PURE__ */ import_react.default.createElement("div", null, `\u8BBE\u5907\u7AEF RSA \u6307\u7EB9\uFF1A${s.lastCreatedDevice.device_fingerprint}`),
+        /* @__PURE__ */ import_react.default.createElement("div", null, `\u670D\u52A1\u7AEF RSA \u6307\u7EB9\uFF1A${s.lastCreatedDevice.server_fingerprint}`)
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "pre",
+        {
+          className: "ydkMvW_code",
+          style: { marginTop: 8, fontSize: 11 }
+        },
+        s.lastCreatedDevice.device_public_key_pem
+      ), /* @__PURE__ */ import_react.default.createElement(
+        "div",
+        {
+          style: {
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: 8,
+            marginTop: 12
+          }
+        },
+        /* @__PURE__ */ import_react.default.createElement(
+          ps,
+          {
+            variant: "outline",
+            type: "button",
+            onClick: () => {
+              s.lastCreatedDevice = null;
+              s.newDeviceLabel = "";
+              s.newDeviceId = "";
+              forceRender();
+            }
+          },
+          "\u7EE7\u7EED\u6DFB\u52A0\u5176\u4ED6\u8BBE\u5907"
+        ),
+        /* @__PURE__ */ import_react.default.createElement(
+          ps,
+          {
+            id: "finish-add-device-btn",
+            variant: "primary",
+            type: "button",
+            onClick: () => {
+              s.addDeviceModalOpen = false;
+              forceRender();
+            }
+          },
+          "\u5B8C\u6210\u5E76\u4F7F\u7528\u6B64\u8BBE\u5907"
+        )
+      )) : /* @__PURE__ */ import_react.default.createElement(
+        "form",
+        {
+          style: { display: "flex", flexDirection: "column", gap: 12 },
+          onSubmit: (e) => void handleAddDeviceSubmit(e)
+        },
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_modelAdvanced" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u663E\u793A\u540D\u79F0"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "new-device-label-input",
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u5982 Mac Studio \u8FDC\u7A0B\u5DE5\u4F5C\u7AD9 / \u529E\u516C\u5BA4 Mac mini",
+            value: s.newDeviceLabel,
+            onChange: (e) => {
+              s.newDeviceLabel = e.target.value;
+              forceRender();
+            }
+          }
+        )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u552F\u4E00\u6807\u8BC6\uFF08\u53EF\u9009\uFF0C\u7559\u7A7A\u81EA\u52A8\u751F\u6210\uFF09"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "new-device-id-input",
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u5982 device-mac-studio-02",
+            value: s.newDeviceId,
+            onChange: (e) => {
+              s.newDeviceId = e.target.value;
+              forceRender();
+            }
+          }
+        ))),
+        /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u6240\u5C5E Server \u8FDE\u63A5\u5730\u5740"), /* @__PURE__ */ import_react.default.createElement(
+          "input",
+          {
+            id: "new-device-server-input",
+            type: "text",
+            className: "zGbnIq_input",
+            placeholder: "\u5982 wss://127.0.0.1:8787",
+            value: s.newDeviceServerUrl,
+            onChange: (e) => {
+              s.newDeviceServerUrl = e.target.value;
+              forceRender();
+            }
+          }
+        )),
+        s.newDeviceMode === "pem" ? /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u8BBE\u5907\u7AEF RSA \u516C\u94A5\uFF08PEM \u683C\u5F0F\uFF09"), /* @__PURE__ */ import_react.default.createElement(
+          "textarea",
+          {
+            id: "new-device-pem-input",
+            className: "zGbnIq_input",
+            rows: 4,
+            style: { height: "auto", padding: "8px 10px" },
+            placeholder: "-----BEGIN RSA PUBLIC KEY----- ...",
+            value: s.newDevicePem,
+            onChange: (e) => {
+              s.newDevicePem = e.target.value;
+              forceRender();
+            }
+          }
+        )) : null,
+        /* @__PURE__ */ import_react.default.createElement(
+          "div",
+          {
+            style: {
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 8,
+              marginTop: 4
+            }
+          },
+          /* @__PURE__ */ import_react.default.createElement(
+            ps,
+            {
+              variant: "outline",
+              type: "button",
+              onClick: () => {
+                s.addDeviceModalOpen = false;
+                forceRender();
+              }
+            },
+            "\u53D6\u6D88"
+          ),
+          /* @__PURE__ */ import_react.default.createElement(
+            ps,
+            {
+              id: "confirm-add-device-btn",
+              variant: "primary",
+              type: "submit",
+              disabled: s.addDeviceBusy
+            },
+            s.addDeviceBusy ? "\u6B63\u5728\u751F\u6210\u5BC6\u94A5\u5E76\u7ED1\u5B9A\u2026" : "\u751F\u6210 RSA \u5BC6\u94A5\u5E76\u5B8C\u6210\u4E00\u6B21\u6027\u6C38\u4E45\u7ED1\u5B9A"
+          )
+        )
+      ))
     ),
     /* @__PURE__ */ import_react.default.createElement(
       "dialog",

@@ -34,6 +34,10 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
+    "devices.list",
+    "devices.add",
+    "devices.select",
+    "devices.remove",
     "device.binding.status",
     "device.binding.bind_once",
     "server.auth.status",
@@ -271,6 +275,15 @@ struct Gateway {
     cancel: CancellationToken,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct BoundDeviceEntry {
+    device_id: String,
+    label: String,
+    kind: String,
+    builtin: bool,
+    binding: PersistentRsaDeviceBinding,
+}
+
 struct GatewayServerAuth {
     connection_mode: String,
     logged_in: bool,
@@ -280,6 +293,9 @@ struct GatewayServerAuth {
     device_binding: PersistentRsaDeviceBinding,
     binding_path: PathBuf,
     reused_existing_binding: bool,
+    active_device_id: String,
+    devices: Vec<BoundDeviceEntry>,
+    devices_path: PathBuf,
 }
 
 use std::sync::{
@@ -312,6 +328,7 @@ impl GatewayServerAuth {
         let account_path = base_dir.join("server-account.json");
         let binding_path = base_dir.join("device-server-rsa-binding.json");
         let server_kp_path = base_dir.join("server-rsa-keypair.json");
+        let devices_path = base_dir.join("devices-rsa-bindings.json");
 
         let account = ServerAccountRecord::load_or_default(&account_path)
             .unwrap_or_else(|_| ServerAccountRecord::default_account().expect("default account"));
@@ -349,6 +366,27 @@ impl GatewayServerAuth {
             let _ = binding.save(&binding_path);
             (binding, false)
         };
+        let default_entry = BoundDeviceEntry {
+            device_id: device_binding.device_id.clone(),
+            label: "本机 macOS 设备".to_owned(),
+            kind: "local_and_rsa".to_owned(),
+            builtin: true,
+            binding: device_binding.clone(),
+        };
+        let devices = if devices_path.exists()
+            && let Ok(raw) = std::fs::read_to_string(&devices_path)
+            && let Ok(list) = serde_json::from_str::<Vec<BoundDeviceEntry>>(&raw)
+            && !list.is_empty()
+        {
+            list
+        } else {
+            let list = vec![default_entry];
+            if let Ok(json) = serde_json::to_string_pretty(&list) {
+                let _ = std::fs::write(&devices_path, json);
+            }
+            list
+        };
+        let active_device_id = devices[0].device_id.clone();
 
         Self {
             connection_mode: "local_device".to_owned(),
@@ -359,7 +397,50 @@ impl GatewayServerAuth {
             device_binding,
             binding_path,
             reused_existing_binding,
+            active_device_id,
+            devices,
+            devices_path,
         }
+    }
+
+    fn save_devices(&self) {
+        if let Ok(json) = serde_json::to_string_pretty(&self.devices) {
+            let _ = std::fs::write(&self.devices_path, json);
+        }
+    }
+
+    fn entry_json(&self, entry: &BoundDeviceEntry) -> Value {
+        let dev_pub = entry.binding.device_keypair.public_key();
+        let srv_pub = &entry.binding.server_public_key;
+        let encrypted_ok = entry
+            .binding
+            .seal_for_server(b"cayw-rsa-channel-verify")
+            .and_then(|sealed| self.server_keypair.decrypt(&sealed.ciphertext))
+            .is_ok_and(|plain| plain == b"cayw-rsa-channel-verify");
+        json!({
+            "device_id": entry.device_id,
+            "label": entry.label,
+            "kind": entry.kind,
+            "builtin": entry.builtin,
+            "active": entry.device_id == self.active_device_id,
+            "bound": true,
+            "server_url": entry.binding.server_url,
+            "algorithm": "RSA-OAEP-SHA256 + RSA-SHA256",
+            "encrypted_channel_verified": encrypted_ok,
+            "auto_reconnect": true,
+            "device_fingerprint": dev_pub.fingerprint(),
+            "server_fingerprint": srv_pub.fingerprint(),
+            "device_public_key_pem": dev_pub.to_pem(),
+            "bound_at_ms": entry.binding.bound_at_ms,
+        })
+    }
+
+    fn devices_list_json(&self) -> Value {
+        let items: Vec<Value> = self.devices.iter().map(|e| self.entry_json(e)).collect();
+        json!({
+            "active_device_id": self.active_device_id,
+            "devices": items,
+        })
     }
 
     fn binding_json(&self) -> Value {
@@ -399,6 +480,8 @@ impl GatewayServerAuth {
             "default_password_hint": DEFAULT_SERVER_PASSWORD,
             "updated_at_ms": acct.updated_at_ms,
             "device_binding": self.binding_json(),
+            "active_device_id": self.active_device_id,
+            "devices": self.devices.iter().map(|e| self.entry_json(e)).collect::<Vec<_>>(),
         })
     }
 }
@@ -678,6 +761,22 @@ async fn rpc(
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         return Json(json!({ "result": auth.binding_json() })).into_response();
+    }
+    if request.method == "devices.list" {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return Json(json!({ "result": auth.devices_list_json() })).into_response();
+    }
+    if request.method == "devices.add" {
+        return handle_devices_add(&state, &request.params);
+    }
+    if request.method == "devices.select" {
+        return handle_devices_select(&state, &request.params);
+    }
+    if request.method == "devices.remove" {
+        return handle_devices_remove(&state, &request.params);
     }
     if request.method == "device.binding.bind_once" {
         return handle_device_bind_once(&state, &request.params);
@@ -1406,7 +1505,198 @@ fn handle_device_bind_once(state: &Gateway, params: &Value) -> Response {
     auth.reused_existing_binding = false;
     let binding_path = auth.binding_path.clone();
     let _ = auth.device_binding.save(&binding_path);
+    let active_id = auth.active_device_id.clone();
+    let updated_binding = auth.device_binding.clone();
+    if let Some(entry) = auth.devices.iter_mut().find(|d| d.device_id == active_id) {
+        entry.binding = updated_binding;
+    }
+    auth.save_devices();
     Json(json!({ "result": auth.binding_json() })).into_response()
+}
+
+fn handle_devices_add(state: &Gateway, params: &Value) -> Response {
+    let Some(label_raw) = params.get("label").and_then(Value::as_str) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "请输入设备名称",
+            false,
+        );
+    };
+    let label = label_raw.trim();
+    if label.is_empty() || label.len() > 120 || label.chars().any(char::is_control) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "设备名称需为 1..120 个字符且不含控制字符",
+            false,
+        );
+    }
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if auth.devices.len() >= 32 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "最多支持绑定 32 台设备",
+            false,
+        );
+    }
+    let explicit_id = params
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let device_id = match explicit_id {
+        Some(id) => {
+            if !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_params",
+                    "设备标识只能包含英文字母、数字、连字符或下划线",
+                    false,
+                );
+            }
+            if auth.devices.iter().any(|d| d.device_id == id) {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_params",
+                    "该设备标识已存在",
+                    false,
+                );
+            }
+            id.to_owned()
+        }
+        None => format!("device-rsa-{:02}", auth.devices.len() + 1),
+    };
+    let server_url = params
+        .get("server_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("wss://127.0.0.1:8787")
+        .to_owned();
+    let (_, default_dev_kp) = cached_default_rsa_keys();
+    let dev_kp = RsaKeyPair::generate().unwrap_or_else(|_| default_dev_kp.clone());
+    let binding = PersistentRsaDeviceBinding {
+        device_id: device_id.clone(),
+        server_url,
+        device_keypair: dev_kp,
+        server_public_key: auth.server_keypair.public_key(),
+        bound_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+    };
+    let entry = BoundDeviceEntry {
+        device_id: device_id.clone(),
+        label: label.to_owned(),
+        kind: "rsa_bound".to_owned(),
+        builtin: false,
+        binding: binding.clone(),
+    };
+    auth.devices.push(entry.clone());
+    auth.active_device_id = device_id;
+    auth.device_binding = binding;
+    let binding_path = auth.binding_path.clone();
+    let _ = auth.device_binding.save(&binding_path);
+    auth.save_devices();
+    let created = auth.entry_json(&entry);
+    let list = auth.devices_list_json();
+    Json(json!({
+        "result": {
+            "created": created,
+            "active_device_id": list["active_device_id"],
+            "devices": list["devices"],
+        }
+    }))
+    .into_response()
+}
+
+fn handle_devices_select(state: &Gateway, params: &Value) -> Response {
+    let Some(device_id) = params
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "缺少要切换的 device_id",
+            false,
+        );
+    };
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(found) = auth
+        .devices
+        .iter()
+        .find(|d| d.device_id == device_id)
+        .cloned()
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "未找到指定设备",
+            false,
+        );
+    };
+    auth.active_device_id = found.device_id.clone();
+    auth.device_binding = found.binding;
+    let binding_path = auth.binding_path.clone();
+    let _ = auth.device_binding.save(&binding_path);
+    Json(json!({ "result": auth.devices_list_json() })).into_response()
+}
+
+fn handle_devices_remove(state: &Gateway, params: &Value) -> Response {
+    let Some(device_id) = params
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "缺少要移除的 device_id",
+            false,
+        );
+    };
+    let mut auth = state
+        .server_auth
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(pos) = auth.devices.iter().position(|d| d.device_id == device_id) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "未找到指定设备",
+            false,
+        );
+    };
+    if auth.devices[pos].builtin || pos == 0 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "默认本机设备不能解绑移除",
+            false,
+        );
+    }
+    auth.devices.remove(pos);
+    if auth.active_device_id == device_id {
+        auth.active_device_id = auth.devices[0].device_id.clone();
+        auth.device_binding = auth.devices[0].binding.clone();
+    }
+    auth.save_devices();
+    Json(json!({ "result": auth.devices_list_json() })).into_response()
 }
 
 fn handle_server_set_mode(state: &Gateway, params: &Value) -> Response {

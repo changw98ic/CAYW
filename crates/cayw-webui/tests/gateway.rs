@@ -942,6 +942,57 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
     assert_eq!(bind_again["result"]["reused_persisted_binding"], true);
     assert_eq!(bind_again["result"]["device_fingerprint"], first_fp);
 
+    // 2b. Multi-device add, select, and remove via devices.add / devices.select / devices.remove.
+    let added = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.add",
+                "params": {
+                    "label": "Mac Studio 远程工作站",
+                    "device_id": "device-mac-studio-02",
+                    "server_url": "wss://127.0.0.1:8787"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(added["result"]["active_device_id"], "device-mac-studio-02");
+    assert_eq!(added["result"]["devices"].as_array().unwrap().len(), 2);
+
+    let selected_back = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.select",
+                "params": { "device_id": "device-macos-local-01" }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        selected_back["result"]["active_device_id"],
+        "device-macos-local-01"
+    );
+
+    let removed = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.remove",
+                "params": { "device_id": "device-mac-studio-02" }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(removed["result"]["devices"].as_array().unwrap().len(), 1);
+
     // 3. Web <-> Server mode requires account login (default admin/admin) and supports changing credentials.
     envelope(
         http.post(format!("http://{addr}/api/rpc"))
