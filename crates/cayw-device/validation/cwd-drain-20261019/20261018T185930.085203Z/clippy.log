@@ -1,0 +1,5 @@
+error: unexpected argument 'clippy' found
+
+Usage: rustup[EXE] [OPTIONS] [+toolchain] [COMMAND]
+
+For more information, try '--help'.

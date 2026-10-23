@@ -1,0 +1,41 @@
+[workspace]
+
+[package]
+name = "cayw-device"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+[lib]
+path = "../src/lib.rs"
+
+[dependencies]
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[[bin]]
+name = "cayw-device-test-process"
+path = "../tests/fixtures/process.rs"
+test = false
+bench = false
+required-features = ["test-fixture"]
+
+[features]
+test-fixture = []
+
+[[test]]
+name = "process"
+path = "../tests/process.rs"
+required-features = ["test-fixture"]
+
+[[test]]
+name = "scheduler"
+path = "../tests/scheduler.rs"

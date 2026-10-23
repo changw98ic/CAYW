@@ -21,5 +21,9 @@ serde_json.workspace = true
 sha2 = "0.10.9"
 tokio = { workspace = true, features = ["net", "io-util", "process"] }
 
+[build-dependencies]
+serde_json.workspace = true
+sha2 = "0.10.9"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

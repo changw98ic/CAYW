@@ -1,0 +1,13 @@
+{
+  "started_utc": "2026-10-18T15:35:06.052827+00:00",
+  "source": "synthetic provider; actual Runtime, Luau, Host and WebUI binaries",
+  "permissions": "no configured grants; browser must explicitly approve each capability",
+  "runtime_sha256": "a09e32502b4a1caedd07a14ccf4de644d5722e885dd789ebef9749a9d23fa6a8",
+  "webui_sha256": "757bed9c00bb7898f5d9d8decad281dde2963bd3eb670c390a0f4caa1b71fc18",
+  "url": "http://127.0.0.1:63060/",
+  "ipc_address": "127.0.0.1:63059",
+  "web_token": "cayw-local-browser-fixture-web-only",
+  "runtime_pid": 64415,
+  "webui_pid": 64416,
+  "finished_utc": "2026-10-18T16:05:17.712839+00:00"
+}

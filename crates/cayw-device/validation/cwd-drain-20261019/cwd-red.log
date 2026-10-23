@@ -1,0 +1,22 @@
+   Compiling cayw-device v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-device)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests src/lib.rs (.local/device-host-target/debug/deps/cayw_device-102c3f5d0e594df3)
+
+running 1 test
+test process::directory_races::prepared_cwd_survives_directory_and_symlink_replacement ... FAILED
+
+failures:
+
+---- process::directory_races::prepared_cwd_survives_directory_and_symlink_replacement stdout ----
+
+thread 'process::directory_races::prepared_cwd_survives_directory_and_symlink_replacement' (459362669) panicked at crates/cayw-device/src/process.rs:453:13:
+assertion failed: result.status.success()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    process::directory_races::prepared_cwd_survives_directory_and_symlink_replacement
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p cayw-device --lib`

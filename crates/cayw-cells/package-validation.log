@@ -1,0 +1,222 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/deps/cayw_cells-c4feaba5a04807a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/agent.rs (target/debug/deps/agent-58c0b25d3adf332c)
+
+running 2 tests
+test agent_uses_one_entry_exec_then_wait_with_multiple_internal_host_operations ... ok
+test cell_exit_ends_only_the_cell_and_agent_produces_its_next_message ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/cells.rs (target/debug/deps/cells-580d794387f83b43)
+
+running 19 tests
+test cancel_close_and_drop_stop_owned_tasks_and_preserve_unknown ... ok
+test cancellation_during_independent_authorization_has_a_durable_intent ... ok
+test capacity_output_and_store_limits_are_enforced_without_cursor_overwrite ... ok
+test dropping_an_invocation_future_cancels_its_cell_and_bounds_its_task ... ok
+test exit_stops_following_real_operations_and_is_not_an_unknown_effect ... ok
+test manager_ownership_and_session_task_lookup_are_enforced ... ok
+test restart_classifies_unstarted_interrupted_and_pending_across_tasks_without_replay ... ok
+test sandbox_has_no_io_or_global_override_and_catalog_schemas_are_demanded ... ok
+test simultaneous_reads_coalesce_but_ordinary_host_calls_never_do ... ok
+test single_agent_entry_schema_has_only_exec_and_wait_and_no_session_override ... ok
+test store_load_are_durable_cas_snapshots_and_isolated_by_session ... ok
+test timed_exec_returns_without_cancelling_and_wait_does_not_repeat_host_call ... ok
+test trusted_read_reuse_authorizes_each_caller_and_write_invalidates_before_dispatch ... ok
+test typed_output_mime_base64_and_notify_are_strict ... ok
+test unknown_freezes_survives_restart_and_requires_matching_evidence ... ok
+test unknown_read_result_freezes_and_is_not_retained_for_reuse ... ok
+test vm_instruction_budget_and_cell_script_budget_stop_execution ... ok
+test write_during_coalesced_read_rejects_stale_result_for_both_callers ... ok
+test yield_is_owned_and_resumed_only_by_explicit_wait ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/hardening.rs (target/debug/deps/hardening-6c12dfda335febe8)
+
+running 14 tests
+test backend_lifecycle_is_ordered_and_failures_stay_frozen ... ok
+test cancel_and_close_preserve_actual_host_settlement_before_terminal ... ok
+test close_deadline_records_pending_unknown_without_detaching_work ... ok
+test concurrent_cells_keep_immutable_origins_when_they_settle_in_reverse ... ok
+test controlled_yield_keeps_output_instruction_and_memory_budgets ... ok
+test controlled_yield_pauses_active_time_but_keeps_other_budgets ... ok
+test every_emit_is_durable_at_yield_and_overflow_stops_the_next_write ... ok
+test helpers_raw_catalog_and_fresh_global_spoofs_cannot_start_effects ... ok
+test host_named_yield_still_consumes_absolute_call_deadline ... ok
+test independent_connections_allow_other_tasks_but_reject_live_scope_recovery ... ok
+test pending_host_deadline_settles_unknown_and_yield_cancel_is_known ... ok
+test raw_emit_item_and_total_byte_limits_stop_following_effects ... ok
+test store_load_logical_byte_boundary_and_receipt_budget_are_separate ... ok
+test store_load_round_trip_at_small_and_default_depth_boundaries ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/independent_probes.rs (target/debug/deps/independent_probes-8a26c7c8826a5a33)
+
+running 16 tests
+test crash_effect_child ... ignored, invoked by independent_crash_effect_is_durable_unknown_without_replay
+test independent_crash_effect_is_durable_unknown_without_replay ... 
+running 1 test
+ok
+test public_cache_is_isolated_and_each_cache_hit_is_authorized ... ok
+test public_output_page_fits_byte_budget_and_preserves_unread_items ... ok
+test public_session_store_and_cell_lookup_are_isolated ... ok
+test requirement_cancel_allows_host_to_settle_after_token_cancellation ... ok
+test requirement_cancelled_read_waiter_does_not_freeze_unrelated_writer_intents ... ok
+test requirement_cross_session_write_invalidates_inflight_dependency_snapshot ... ok
+test requirement_free_globals_cannot_be_overwritten ... ok
+test requirement_internal_catalog_is_unreachable_from_script ... ok
+test requirement_nil_session_store_value_roundtrips ... ok
+test requirement_prefixed_source_does_not_expose_private_bridge_binding ... ok
+test requirement_raw_emit_is_incrementally_published_before_yield ... ok
+test requirement_raw_emit_respects_output_limit_before_next_real_operation ... ok
+test requirement_store_value_accepted_at_depth_limit_can_be_loaded ... ok
+test requirement_stored_value_fitting_default_depth_can_be_loaded ... ok
+
+test result: ok. 15 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/restart.rs (target/debug/deps/restart-910b0bcf3d37d6f9)
+
+running 4 tests
+test abrupt_process_exit_recovers_unknown_without_replay ... 
+running 1 test
+ok
+test crash_child ... ignored, subprocess fixture selected by abrupt_process_exit_recovers_unknown_without_replay
+test live_process_scope_lock_is_not_stolen_and_unrelated_task_runs ... ok
+test live_scope_child ... ignored, subprocess fixture selected by live_process_scope_lock_is_not_stolen
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src/lib.rs (target/debug/deps/cayw_codemode-e734246c30b6de95)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/adversarial.rs (target/debug/deps/adversarial-87439e56417b0efa)
+
+running 8 tests
+test a_deep_json_value_is_rejected_before_stack_exhaustion ... ok
+test a_huge_return_value_is_part_of_the_output_budget ... ok
+test an_abort_cannot_be_caught_with_pcall ... ok
+test cancellation_does_not_require_a_cooperative_host ... ok
+test catalogs_reject_duplicate_names_and_external_schema_references ... ok
+test huge_arguments_are_refused_before_dispatch ... ok
+test metatables_and_array_helpers_cannot_smuggle_sparse_or_object_keys ... ok
+test timeout_drops_an_uncooperative_host_future_and_reports_unknown ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.07s
+
+     Running tests/agent_tool.rs (target/debug/deps/agent_tool-5cd801f2a9799e1e)
+
+running 2 tests
+test agent_sees_only_execute_code_and_freezes_on_unknown_effects ... ok
+test execute_code_arguments_have_one_strict_script_field ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/cancellation.rs (target/debug/deps/cancellation-07550f02e8084907)
+
+running 7 tests
+test agent_abort_keeps_codemode_running_until_host_settlement ... ok
+test cancellation_before_first_poll_has_zero_host_effects ... ok
+test cancellation_race_keeps_a_ready_known_host_result ... ok
+test cancellation_settles_the_same_host_before_return_and_starts_no_next_call ... ok
+test dropping_outer_execution_during_cleanup_cancels_without_awaiting_settlement ... ok
+test permanently_pending_host_gets_bounded_cleanup_then_explicit_unknown ... ok
+test shutdown_grace_is_validated_and_agent_grace_covers_inner_cleanup ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/execution.rs (target/debug/deps/execution-e47c2eb86d98e33c)
+
+running 19 tests
+test a_pre_cancelled_script_cannot_dispatch_a_capability ... ok
+test allocation_is_limited_by_the_vm_allocator ... ok
+test cancellation_during_async_host_keeps_unknown_effects ... ok
+test discovery_is_bound_to_the_host_catalog ... ok
+test every_limit_must_be_non_zero ... ok
+test host_call_budget_prevents_the_next_effect ... ok
+test integer_conversion_refuses_silent_precision_loss ... ok
+test invalid_or_unregistered_calls_never_reach_the_host ... ok
+test known_host_error_is_a_failed_call_with_a_clear_message ... ok
+test large_host_result_does_not_erase_a_completed_effect ... ok
+test output_limit_keeps_prior_success_and_emitted_values ... ok
+test real_luau_runs_multiple_calls_loops_and_json_round_trip ... ok
+test sandbox_has_no_ambient_execution_and_each_run_has_fresh_globals ... ok
+test script_failure_after_a_success_keeps_the_call_result ... ok
+test strict_json_rejects_cycles_sparse_tables_and_unsupported_values ... ok
+test syntax_error_is_reported_without_host_calls ... ok
+test unknown_effect_stops_further_calls_and_retains_audit ... ok
+test vm_interrupt_stops_an_infinite_cpu_loop ... ok
+test wall_time_interrupts_cpu_work_even_without_an_async_yield ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/luau_runtime.rs (target/debug/deps/luau_runtime-ed1ccd4f559a528f)
+
+running 30 tests
+test agent_keeps_unknown_when_code_times_out_waiting_for_a_started_host_call ... ok
+test agent_runs_one_code_tool_with_multiple_host_calls_and_a_structured_report ... ok
+test agent_stops_after_unknown_even_when_its_error_payload_exceeds_the_budget ... ok
+test arguments_and_catalog_are_checked_before_starting_host_effects ... ok
+test async_host_bridge_cannot_restore_ambient_coroutines_after_suspension ... ok
+test cancellation_before_execution_starts_no_capabilities ... ok
+test cancellation_during_a_started_capability_keeps_unknown_and_cancels_child ... ok
+test cpu_loop_and_pending_host_call_share_the_wall_time_limit ... ok
+test discovery_returns_only_names_and_description_is_requested_explicitly ... ok
+test dropping_the_execution_future_cancels_started_capability_tokens ... ok
+test every_execution_has_an_isolated_environment ... ok
+test host_call_limit_prevents_the_next_effect_and_preserves_completed_calls ... ok
+test host_error_payloads_share_the_budget_without_losing_unknown_status ... ok
+test infinite_cpu_loop_is_stopped_by_instruction_checkpoints ... ok
+test invalid_limits_and_catalogs_fail_before_any_execution ... ok
+test json_budget_counts_escaped_utf8_and_repeated_shared_values ... ok
+test json_conversion_stops_at_the_budget_before_expanding_more_shared_values ... ok
+test json_null_empty_arrays_and_shared_tables_round_trip_without_coercion ... ok
+test json_rejects_cycles_sparse_tables_mixed_keys_and_unsupported_values ... ok
+test known_and_unknown_host_errors_keep_prior_success_and_stop_further_calls ... ok
+test lossy_host_integer_is_rejected_after_recording_host_success ... ok
+test only_one_agent_tool_is_exposed_with_strict_script_arguments ... ok
+test output_limit_stops_emits_without_discarding_successful_audit ... ok
+test over_budget_host_results_keep_success_status_with_omitted_payload ... ok
+test pure_cpu_execution_yields_so_same_thread_cancellation_can_run ... ok
+test real_luau_branches_loops_and_multiple_calls_preserve_order ... ok
+test sandbox_exposes_no_ambient_io_or_protected_call_escape ... ok
+test script_error_text_is_bounded_without_erasing_completed_capabilities ... ok
+test script_failure_keeps_successful_calls_and_prior_emits ... ok
+test vm_allocation_and_source_are_bounded ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.20s
+
+     Running tests/regressions.rs (target/debug/deps/regressions-e4a80c018b279204)
+
+running 6 tests
+test an_error_after_the_last_payload_byte_keeps_audit_and_omits_its_message ... ok
+test argument_preparation_cannot_dispatch_after_the_deadline ... ok
+test cancellation_during_argument_preparation_starts_no_effect ... ok
+test every_host_error_is_bounded_without_losing_settled_status_or_unknown ... ok
+test unchecked_deep_host_values_do_not_abort_the_process ... ok
+test unknown_names_have_bounded_accounted_errors_for_describe_and_call ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.54s
+
+   Doc-tests cayw_cells
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cayw_codemode
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

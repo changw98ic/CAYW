@@ -1,0 +1,134 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "toolchain": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+  "tmpdir": "/Volumes/ORICO/CAYW/.local/device-host-tmp",
+  "target_dir": "/Volumes/ORICO/CAYW/.local/device-host-target",
+  "sources_before": {
+    "Cargo.toml": "76baed65b2c40b24ff5d92f2830ab88daceb2a95de1a4ffc86addcf9080d8874",
+    "Cargo.lock": "e7ac3fdf2efdc1d920b13672db612dbaf86216d4837ce4dd2763e0c93a046294",
+    "crates/cayw-device/Cargo.toml": "43660c8dc8319d79d40f6b4b53647988544e237a8ff62fb843d970d3457edb48",
+    "crates/cayw-device/src/lib.rs": "dc928d53a7b765c27291e3e42a88a7498a136b8c38e9ee2363c1dc422c4a70fa",
+    "crates/cayw-device/src/process.rs": "a0fab6b882d98f725f74a226ec3f07c7212bff03496c8a49c6611f9e27e43c3b",
+    "crates/cayw-device/src/scheduler.rs": "bdfb98ca80634ba50f8f8e714717f4a711ae75d563a55f6139bd266f11c08b9a",
+    "crates/cayw-device/tests/process.rs": "2a0affed4d2a27b8827c3dea72d9cc26c94625676ed09387d6396f12256f2ebd",
+    "crates/cayw-device/tests/scheduler.rs": "e7bd7e89c290441c23e10e78ec51a1c7d5d46ee7217ae534fb42302ca43978b3",
+    "crates/cayw-device/tests/fixtures/process.rs": "4b823ff55348db33c7c3bcebc1d34ddc12395344f7c67d26b2fe715108183010",
+    "crates/cayw-host/Cargo.toml": "2f59f91b196649c00c3a1de8994454cf68b54cdc5ba848dd7fd5315265013934",
+    "crates/cayw-host/src/lib.rs": "bdc6f413b6b7fb303a4b54469648ac1c203090026a963693937f78a4d62489df",
+    "crates/cayw-host/src/process.rs": "022a8026529bb8ea2ff0fe1ec2e9490e42f3bfe49298f53f2048f4599b2e6ea6",
+    "crates/cayw-host/src/filesystem.rs": "11e8423530ba4c63677c9699fa53db0d6f05736fddf418cc74cab8bdd9ecfe56",
+    "crates/cayw-host/src/catalog.rs": "828a61329df81c1f33ab3fdf5969d0220bf762700f3a35fa042d1b58bbff8662",
+    "crates/cayw-host/tests/host.rs": "005face45d27879b11c34bec50e197870dca80bfeafec5529a0c9b3007ed731d",
+    "crates/cayw-host/tests/repair_regressions.rs": "fadda1e45e3b1881fb9b26f49b224969c1039547a7360ca1479e937543dc3169"
+  },
+  "sources_after": {
+    "Cargo.toml": "76baed65b2c40b24ff5d92f2830ab88daceb2a95de1a4ffc86addcf9080d8874",
+    "Cargo.lock": "e7ac3fdf2efdc1d920b13672db612dbaf86216d4837ce4dd2763e0c93a046294",
+    "crates/cayw-device/Cargo.toml": "43660c8dc8319d79d40f6b4b53647988544e237a8ff62fb843d970d3457edb48",
+    "crates/cayw-device/src/lib.rs": "dc928d53a7b765c27291e3e42a88a7498a136b8c38e9ee2363c1dc422c4a70fa",
+    "crates/cayw-device/src/process.rs": "a0fab6b882d98f725f74a226ec3f07c7212bff03496c8a49c6611f9e27e43c3b",
+    "crates/cayw-device/src/scheduler.rs": "bdfb98ca80634ba50f8f8e714717f4a711ae75d563a55f6139bd266f11c08b9a",
+    "crates/cayw-device/tests/process.rs": "2a0affed4d2a27b8827c3dea72d9cc26c94625676ed09387d6396f12256f2ebd",
+    "crates/cayw-device/tests/scheduler.rs": "e7bd7e89c290441c23e10e78ec51a1c7d5d46ee7217ae534fb42302ca43978b3",
+    "crates/cayw-device/tests/fixtures/process.rs": "4b823ff55348db33c7c3bcebc1d34ddc12395344f7c67d26b2fe715108183010",
+    "crates/cayw-host/Cargo.toml": "2f59f91b196649c00c3a1de8994454cf68b54cdc5ba848dd7fd5315265013934",
+    "crates/cayw-host/src/lib.rs": "bdc6f413b6b7fb303a4b54469648ac1c203090026a963693937f78a4d62489df",
+    "crates/cayw-host/src/process.rs": "022a8026529bb8ea2ff0fe1ec2e9490e42f3bfe49298f53f2048f4599b2e6ea6",
+    "crates/cayw-host/src/filesystem.rs": "11e8423530ba4c63677c9699fa53db0d6f05736fddf418cc74cab8bdd9ecfe56",
+    "crates/cayw-host/src/catalog.rs": "828a61329df81c1f33ab3fdf5969d0220bf762700f3a35fa042d1b58bbff8662",
+    "crates/cayw-host/tests/host.rs": "005face45d27879b11c34bec50e197870dca80bfeafec5529a0c9b3007ed731d",
+    "crates/cayw-host/tests/repair_regressions.rs": "fadda1e45e3b1881fb9b26f49b224969c1039547a7360ca1479e937543dc3169"
+  },
+  "sources_stable": true,
+  "checks": [
+    {
+      "check": "format",
+      "argv": [
+        "/Users/chengwen/.cargo/bin/cargo",
+        "+1.95.0",
+        "fmt",
+        "--manifest-path",
+        "/Volumes/ORICO/CAYW/Cargo.toml",
+        "-p",
+        "cayw-device",
+        "-p",
+        "cayw-host",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "/Volumes/ORICO/CAYW/crates/cayw-device/validation/cwd-drain-20261019/20261018T185945.346316Z/format.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "check": "check",
+      "argv": [
+        "/Users/chengwen/.cargo/bin/cargo",
+        "+1.95.0",
+        "check",
+        "--manifest-path",
+        "/Volumes/ORICO/CAYW/Cargo.toml",
+        "-p",
+        "cayw-device",
+        "-p",
+        "cayw-host",
+        "--all-targets",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "/Volumes/ORICO/CAYW/crates/cayw-device/validation/cwd-drain-20261019/20261018T185945.346316Z/check.log",
+      "sha256": "9a30d54c8b16d7e49510b182028079bca120aeebb7d662e88f8566e6196a49f6"
+    },
+    {
+      "check": "test",
+      "argv": [
+        "/Users/chengwen/.cargo/bin/cargo",
+        "+1.95.0",
+        "test",
+        "--manifest-path",
+        "/Volumes/ORICO/CAYW/Cargo.toml",
+        "-p",
+        "cayw-device",
+        "-p",
+        "cayw-host",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "/Volumes/ORICO/CAYW/crates/cayw-device/validation/cwd-drain-20261019/20261018T185945.346316Z/test.log",
+      "sha256": "3a9d5e3372b30c94086fd7310b4ba8e0b295f19df7e98c10aec28e3af9fbbe61"
+    },
+    {
+      "check": "clippy",
+      "argv": [
+        "/Users/chengwen/.cargo/bin/cargo",
+        "+1.95.0",
+        "clippy",
+        "--manifest-path",
+        "/Volumes/ORICO/CAYW/Cargo.toml",
+        "-p",
+        "cayw-device",
+        "-p",
+        "cayw-host",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "/Volumes/ORICO/CAYW/crates/cayw-device/validation/cwd-drain-20261019/20261018T185945.346316Z/clippy.log",
+      "sha256": "2b34696728dc82b03cbf6311d7e3a6a41658bbde097834c3010a78bc82842c1a"
+    }
+  ],
+  "limitations": [
+    "macOS arm64 execution only; Linux Docker daemon did not answer read-only probes, Windows not executed",
+    "Non-Unix process execution remains explicitly unsupported",
+    "Git snapshots share max_file_bytes/max_list_entries across metadata, objects and worktree; links and special files are refused",
+    "Git source edits in place are observational, not an atomic repository transaction",
+    "Managed process groups cannot contain descendants that deliberately escape via setsid"
+  ]
+}

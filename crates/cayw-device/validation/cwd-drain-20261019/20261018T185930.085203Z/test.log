@@ -1,0 +1,7 @@
+error: unrecognized subcommand 'test'
+
+  tip: some similar subcommands exist: 'set', 'dump-testament'
+
+Usage: rustup[EXE] [OPTIONS] [+toolchain] [COMMAND]
+
+For more information, try '--help'.

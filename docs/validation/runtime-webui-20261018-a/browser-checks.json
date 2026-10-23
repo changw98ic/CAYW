@@ -1,0 +1,34 @@
+{
+  "mode": "Playwright MCP; Chromium; actual Runtime and WebUI binaries with synthetic offline provider",
+  "url": "http://127.0.0.1:63060/",
+  "permissions": "no configured grants; exactly two allow_once decisions through the browser for the successful file task",
+  "checks": [
+    {"name":"incorrect_token_rejected","passed":true,"actual":"网页访问令牌无效或已失效，请重新连接。"},
+    {"name":"authenticated_login","passed":true,"actual":"已连接本机"},
+    {"name":"keyboard_send","passed":true,"actual":"Control+Enter started exactly one session.prompt"},
+    {"name":"explicit_approvals","passed":true,"actual":{"session_prompt_requests":1,"approval_decide_requests":2}},
+    {"name":"real_luau_file_round_trip","passed":true,"actual":{"state":"idle","bytes":21,"content":"headless runtime demo","sha256":"40c60e79df2178318ac0f3da1c52349f9ae4774a01c1dfa35cef51eccc32d7c1"}},
+    {"name":"event_connection_recovery","passed":true,"fault":"Playwright abort of session.events with connectionreset","actual":{"before":"33 · 游标 34","after":"33 · 游标 34","additional_prompt_requests":0}},
+    {"name":"cancel_while_awaiting_approval","passed":true,"actual":{"state":"idle","pending_approval_buttons":0,"cancel_button_disabled":true}},
+    {"name":"phone_layout","passed":true,"actual":{"viewport_width":390,"viewport_height":844,"scroll_width":390}},
+    {"name":"input_labels","passed":true,"actual":{"missing_labels":[]}},
+    {"name":"token_retention","passed":true,"actual":{"local_storage_empty":true,"session_storage_empty":true,"login_input_empty":true,"token_in_url":false}}
+  ],
+  "console_errors": [
+    {"message":"favicon.ico returned 404","expected":false,"impact":"missing icon only; no page script exception"},
+    {"message":"login RPC returned 403","expected":true,"cause":"intentional incorrect token"},
+    {"message":"events RPC ERR_CONNECTION_RESET","expected":true,"cause":"intentional reconnect fault"}
+  ],
+  "limitations": [
+    "Current interface exposes raw internal system and tool records; readability correction is in progress.",
+    "A first task was left unapproved until its execution deadline; the page correctly displayed reconciliation blocking. This was not the successful file round trip.",
+    "Unknown-response send locking and actual module-frozen Fork were independently found incomplete and are not counted as passing checks.",
+    "No real model service, remote two-machine setup or Windows browser was tested.",
+    "This record binds the binaries in connection.json, not later source edits."
+  ],
+  "reproduction": [
+    "cargo +1.95.0 build -p cayw-runtime --bin cayw -p cayw-webui --bin cayw-webui --all-features --locked",
+    "python3 -I scripts/serve-webui-validation.py --out NEW_DIRECTORY --lifetime 1800",
+    "Use the printed loopback URL and public fixture web token, then run scripts/validate-webui.mjs with CAYW_WEB_VALIDATION_URL when Playwright is installed in the host development environment."
+  ]
+}

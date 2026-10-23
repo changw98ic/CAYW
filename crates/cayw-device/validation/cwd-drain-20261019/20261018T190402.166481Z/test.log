@@ -1,0 +1,155 @@
+   Compiling cayw-device v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-device)
+   Compiling cayw-host v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-host)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.43s
+     Running unittests src/lib.rs (.local/device-host-target/debug/deps/cayw_device-eb7d7648914b899b)
+
+running 9 tests
+test process::unix::tests::supervisor_start_failure_pairs_reservation_without_a_thread ... ok
+test process::unix::tests::unreadable_group_state_does_not_confirm_cleanup ... ok
+test process::unix::tests::supervisor_panic_cleans_the_live_child_before_releasing_its_permit ... ok
+test process::unix::tests::drain_waits_for_the_same_cleanup_after_run_future_drop ... ok
+test process::directory_races::prepared_cwd_survives_directory_and_symlink_replacement ... ok
+test process::unix::tests::transient_group_permission_denial_is_retried_before_cleanup_is_confirmed ... ok
+test process::unix::tests::finite_overflow_retains_its_reason_after_transient_group_permission_denial ... ok
+test process::unix::tests::persistent_permission_denial_keeps_the_group_unconfirmed ... ok
+test process::unix::tests::supervisor_holds_the_permit_during_denied_cleanup_and_reaps_before_release ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.02s
+
+     Running tests/process.rs (.local/device-host-target/debug/deps/process-6c4fc1d7ce1c5f63)
+
+running 21 tests
+test combined_output_budget_terminates_the_process_and_bounds_retained_bytes ... ok
+test concurrent_close_and_admission_cannot_leave_an_untracked_supervisor ... ok
+test directory_launch_failure_and_invalid_file_handle_release_reservations ... ok
+test both_full_pipes_are_drained_without_deadlock ... ok
+test closing_the_runner_cancels_an_active_call_and_does_not_cancel_its_input_token ... ok
+test invalid_limits_environment_and_pre_cancelled_runs_do_not_spawn ... ok
+test dropping_a_run_does_not_release_its_permit_before_the_process_has_stopped ... ok
+test cancellation_kills_children_and_grandchildren_and_reaps_the_direct_child ... ok
+test nonzero_exit_is_reported_as_a_process_result ... ok
+test programs_outside_the_host_allowlist_and_relative_paths_are_rejected ... ok
+test cancelling_a_run_returns_only_after_its_resource_permit_is_released ... ok
+test cancelling_one_run_does_not_stop_another_runs_process_group ... ok
+test exact_output_budget_is_complete_and_finite_overflow_is_reported ... ok
+test explicit_arguments_cwd_environment_and_closed_stdin_reach_the_process ... ok
+test drain_closes_admission_and_reaps_a_dropped_run ... ok
+test dropping_the_run_future_kills_the_whole_tree_without_cancelling_shared_token ... ok
+test normal_exit_stops_descendants_that_closed_output_pipes ... ok
+test normal_exit_stops_remaining_descendants_even_if_they_hold_output_pipes ... ok
+test releasing_a_permit_waits_for_descendants_that_closed_their_output_pipes ... ok
+test timeout_kills_a_running_process ... ok
+test escaped_descendant_holding_pipes_returns_incomplete_output_without_hanging ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+     Running tests/scheduler.rs (.local/device-host-target/debug/deps/scheduler-2cd1cebaff1d2942)
+
+running 10 tests
+test blocked_acquisition_wakes_on_release_and_cancel_does_not_consume_capacity ... ok
+test cancelling_the_queue_head_wakes_the_next_request_without_a_resource_release ... ok
+test concurrency_and_declared_memory_are_reserved_together_and_drop_releases_them ... ok
+test dropping_a_pending_acquisition_does_not_leave_a_reservation ... ok
+test impossible_and_unsupported_resource_requests_fail_instead_of_waiting_forever ... ok
+test dropping_the_queue_head_allows_the_next_request_to_use_available_memory ... ok
+test large_memory_budgets_do_not_overflow_during_admission ... ok
+test precancelled_admission_does_not_take_available_capacity ... ok
+test session_ownership_survives_scheduler_clones_without_cross_session_release ... ok
+test queued_large_request_is_not_bypassed_by_smaller_requests ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (.local/device-host-target/debug/deps/cayw_host-78da6ac5caec4dce)
+
+running 4 tests
+test process::tests::snapshot_copy_uses_opened_worktree_and_objects_after_source_name_replacement ... ok
+test process::tests::prepared_profile_survives_root_move_and_replacement_without_path_lookup ... ok
+test process::tests::prepared_git_survives_private_snapshot_rename_with_the_owned_directory ... ok
+test process::tests::prepared_git_uses_snapshot_after_root_subtree_and_objects_replacement ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+     Running tests/host.rs (.local/device-host-target/debug/deps/host-9d161a7f96a5af9e)
+
+running 41 tests
+test builtin_disable_switches_remove_dispatch_without_creating_a_store ... ok
+test builtin_limits_and_invalid_schemas_reject_before_permission_or_storage ... ok
+test arbitrary_json_depth_is_rejected_before_permission_or_audit ... ok
+test cancellation_while_awaiting_permission_never_starts_audit_or_writes ... ok
+test builtin_data_audit_failure_keeps_the_host_stopped ... ok
+test dropped_audit_failure_is_observable_and_permanently_blocks_host ... ok
+test archives_use_the_builtin_executor_and_cannot_reach_outside_the_root ... ok
+test dropping_an_external_call_records_unknown_and_cancels_the_host ... ok
+test dropping_while_start_audit_is_pending_still_blocks_future_execution ... ok
+test cancelled_and_over_budget_calls_do_not_reach_permission_or_storage ... ok
+test atomic_replacement_preserves_restrictive_existing_permissions ... ok
+test fixture_process ... ok
+test builtin_and_ordinary_filesystem_keep_the_same_root_after_rename ... ok
+test invalid_builtin_config_is_rejected_before_opening_a_store ... ok
+test external_error_payload_is_bounded_before_audit_and_return ... ok
+test external_services_use_strict_schemas_permission_and_settlement ... ok
+test listing_and_denied_builtins_never_create_workspace_files ... ok
+test codemode_uses_the_same_permission_and_audit_boundary ... ok
+test external_call_deadline_retains_unknown_and_cancels_child_token ... ok
+test builtin_result_or_audit_loss_preserves_unknown_and_blocks_recovery_bypass ... ok
+test failed_settlement_retains_unknown_and_stops_further_calls ... ok
+test pure_builtin_failures_settle_without_stopping_the_host ... ok
+test queued_call_cannot_execute_while_an_admitted_call_is_unsettled ... ok
+test patch_rejects_overlapping_matches_and_changed_or_missing_targets ... ok
+test named_build_profile_executes_a_real_device_process_and_rejects_argv ... ok
+test paths_symlinks_and_byte_limits_are_enforced ... ok
+test schema_permission_and_audit_failures_prevent_file_changes ... ok
+test check_lint_and_format_profiles_use_fixed_commands_and_reject_agent_argv ... ok
+test real_device_cancellation_waits_for_cleanup_and_records_unknown ... ok
+test result_and_directory_budgets_prevent_unbounded_data ... ok
+test unknown_permission_result_stops_subsequent_calls ... ok
+test real_file_round_trip_requires_compare_and_swap_and_exact_patch ... ok
+test separate_hosts_cannot_both_commit_the_same_expected_hash ... ok
+test test_filter_is_one_literal_argument_and_nonzero_exit_is_confirmed ... ok
+test luau_data_and_change_batch_share_the_host_gate_and_durable_lane ... ok
+test workspace_capabilities_do_not_fall_through_the_old_filesystem_dispatch ... ok
+test real_device_timeout_and_output_overflow_remain_unknown ... ok
+test third_party_content_blocks_recovery_and_never_releases_the_write_fence ... ok
+test pending_batches_block_named_profiles_and_denied_recovery_changes_nothing ... ok
+test pending_workspace_batches_fence_ordinary_writes_across_fresh_hosts ... ok
+test git_fixed_commands_use_real_device_without_running_repo_helpers ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/repair_regressions.rs (.local/device-host-target/debug/deps/repair_regressions-a574a17024b09b52)
+
+running 19 tests
+test budgets_must_encode_an_empty_json_diagnostic ... ok
+test fixture_process ... ok
+test gate_and_start_failures_charge_the_cumulative_budget ... ok
+test diagnostics_from_gate_start_execution_and_settlement_are_json_bounded ... ok
+test replacement_diagnostic_consumes_remaining_bytes_and_blocks_another_admission ... ok
+test host_scopes_drain_dropped_processes_and_keep_other_tasks_independent ... ok
+test scope_construction_keeps_the_pinned_directory_and_shared_unknown_audit_failure ... ok
+test scopes_share_execution_order_and_permanent_unknown_stop ... ok
+test journal_opening_observes_the_callers_cancellation_at_the_next_checkpoint ... ok
+test scopes_share_remaining_serialized_bytes_without_resetting_them ... ok
+test scopes_keep_independent_permissions_audits_and_one_cumulative_budget ... ok
+test settlement_failure_uses_reserved_bytes_and_keeps_bounded_audit_pairs ... ok
+test git_historical_and_deleted_parent_paths_work_without_following_links ... ok
+test replaced_root_keeps_profiles_and_git_in_the_opened_directory ... ok
+test failed_recovery_preserves_fence_after_a_known_refusal ... ok
+test git_passive_metadata_retains_local_excludes_and_split_indexes ... ok
+test git_snapshot_refuses_worktree_and_object_links_and_shared_budget_overflow ... ok
+test pending_refusal_does_not_poison_new_mutations_or_explicit_recovery ... ok
+test opening_journals_cannot_restart_the_host_deadline ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+
+   Doc-tests cayw_device
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cayw_host
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

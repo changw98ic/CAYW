@@ -67,7 +67,7 @@ fn full_sdk_ipc_suite_records_real_faults_and_original_call_identity() {
     );
     assert!(result.stderr.is_empty());
     assert_eq!(summary["semantic_passed"], true);
-    assert_eq!(summary["sample_count"], 7);
+    assert_eq!(summary["sample_count"], 10);
     assert_eq!(summary["issue_2_complete"], false);
     assert_eq!(summary["self_verified_source"], false);
     let meta = json(&out.join("meta.json"));
@@ -86,7 +86,7 @@ fn full_sdk_ipc_suite_records_real_faults_and_original_call_identity() {
         hash(&out.join("meta.json"))
     );
     let samples = lines(&out.join("samples.jsonl"));
-    assert_eq!(samples.len(), 7);
+    assert_eq!(samples.len(), 10);
     for sample in &samples {
         assert_eq!(sample["status"], "passed", "{sample}");
         assert_eq!(sample["run_id"], meta["run_id"]);
@@ -103,7 +103,7 @@ fn full_sdk_ipc_suite_records_real_faults_and_original_call_identity() {
         assert!(sample["specification"]["permissions"]["grants"].is_array());
         assert_eq!(
             sample["specification"]["permissions"]["product_user_approval"],
-            false
+            sample["scenario"] == "ipc-approval"
         );
         for (index, record) in raw.iter().enumerate() {
             assert_eq!(record["sequence"], index + 1);
@@ -130,11 +130,102 @@ fn full_sdk_ipc_suite_records_real_faults_and_original_call_identity() {
             "{name}: {unknown}"
         );
     }
-    for platform in summary["platforms"].as_array().unwrap() {
-        if platform["os"] != std::env::consts::OS {
-            assert_eq!(platform["status"], "unverified");
-        }
+    assert_eq!(summary["binding"]["platform"]["os"], std::env::consts::OS);
+    let read = Command::new(env!("CARGO_BIN_EXE_cayw-verify-tool"))
+        .arg("read")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stdout)
+    );
+}
+
+#[test]
+fn losing_only_the_event_connection_keeps_the_original_execution_and_suffix() {
+    let temp = Temporary::new();
+    let out = temp.0.join("events-only");
+    let result = cli(
+        &out,
+        &["--samples", "1", "--scenario", "ipc-event-reconnect"],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let samples = lines(&out.join("samples.jsonl"));
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample["status"], "passed");
+    for name in [
+        "event_connection_loss_preserves_original_execution",
+        "saved_event_suffix_matches_sdk_exactly",
+        "event_reconnect_has_one_original_prompt",
+        "event_reconnect_final_state_equals_sdk",
+    ] {
+        assert!(
+            sample["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["name"] == name && check["passed"] == true),
+            "{name}"
+        );
     }
+    let frames = lines(&out.join("samples/0001/ipc-event-reconnect/ipc-frames.jsonl"));
+    let prompts: Vec<_> = frames
+        .iter()
+        .filter(|frame| {
+            frame["direction"] == "client_to_server" && frame["frame"]["method"] == "session.prompt"
+        })
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    let execution_connection = &prompts[0]["connection"];
+    let event_connections: std::collections::BTreeSet<_> = frames
+        .iter()
+        .filter(|frame| {
+            frame["direction"] == "client_to_server" && frame["frame"]["method"] == "session.events"
+        })
+        .map(|frame| frame["connection"].as_u64().unwrap())
+        .collect();
+    assert_eq!(event_connections.len(), 2);
+    assert!(!event_connections.contains(&execution_connection.as_u64().unwrap()));
+    let resumed: Vec<_> = sample["event_pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|page| page["stage"] == "event_connection_resumed")
+        .flat_map(|page| page["records"].as_array().unwrap())
+        .collect();
+    let local = sample["event_pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|page| page["stage"] == "final_sdk")
+        .unwrap();
+    let cursor = json(&out.join("samples/0001/ipc-event-reconnect/cursor.json"))["cursor"]
+        .as_u64()
+        .unwrap();
+    let expected: Vec<_> = local["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["cursor"].as_u64().unwrap() > cursor)
+        .collect();
+    assert_eq!(resumed, expected);
+    let read = Command::new(env!("CARGO_BIN_EXE_cayw-verify-tool"))
+        .arg("read")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stdout)
+    );
 }
 
 #[test]
@@ -147,8 +238,13 @@ fn wrong_fixture_and_skipped_saved_cursor_both_exit_failure_with_raw_reports() {
             "ipc-reconnect",
             "saved_cursor_resume_is_exact",
         ),
+        (
+            "skip-cursor",
+            "ipc-event-reconnect",
+            "saved_event_suffix_matches_sdk_exactly",
+        ),
     ] {
-        let out = temp.0.join(control);
+        let out = temp.0.join(format!("{scenario}-{control}"));
         let result = cli(
             &out,
             &[

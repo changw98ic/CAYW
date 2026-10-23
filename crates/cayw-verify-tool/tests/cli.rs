@@ -7,6 +7,27 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+const CASE_NAMES: [&str; 18] = [
+    "cold_process_first_success",
+    "warm_process_first_success",
+    "file_pipeline",
+    "syntax_failure",
+    "syntax_repair_success",
+    "loop_budget",
+    "cancel_pending_host",
+    "host_permission_denied",
+    "sandbox_globals",
+    "unknown_capability",
+    "invalid_arguments",
+    "file_calculation",
+    "capability_signatures",
+    "output_budget",
+    "memory_budget",
+    "host_call_budget",
+    "active_timeout",
+    "timeout_pending_host",
+];
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Temporary(PathBuf);
 impl Temporary {
@@ -54,7 +75,17 @@ fn records(out: &Path) -> Vec<Value> {
     fs::read_to_string(out.join("samples.jsonl"))
         .unwrap()
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            let path = out
+                .join("samples")
+                .join(record["sample_id"].as_str().unwrap())
+                .join("luau.json");
+            let mut raw = read_json(&path);
+            raw["run_id"] = record["run_id"].clone();
+            raw["meta"] = record["meta"].clone();
+            raw
+        })
         .collect()
 }
 fn case<'a>(records: &'a [Value], name: &str, iteration: u64) -> &'a Value {
@@ -78,8 +109,19 @@ fn binary_records_real_host_results_failures_repairs_and_cancellation() {
     let meta = read_json(&out.join("meta.json"));
     let summary = read_json(&out.join("summary.json"));
     let samples = records(&out);
-    assert_eq!(samples.len(), 22);
-    assert_eq!(summary["sample_count"], 22);
+    assert_eq!(samples.len(), CASE_NAMES.len() * 2);
+    assert_eq!(summary["sample_count"], CASE_NAMES.len() * 2);
+    let mut expected_names = CASE_NAMES.to_vec();
+    expected_names.sort_unstable();
+    for iteration in 1..=2 {
+        let mut actual_names: Vec<_> = samples
+            .iter()
+            .filter(|sample| sample["iteration"] == iteration)
+            .map(|sample| sample["case"].as_str().unwrap())
+            .collect();
+        actual_names.sort_unstable();
+        assert_eq!(actual_names, expected_names);
+    }
     let all_passed = samples
         .iter()
         .all(|record| record["semantic_passed"] == true);
@@ -87,8 +129,7 @@ fn binary_records_real_host_results_failures_repairs_and_cancellation() {
     assert_eq!(output.status.success(), all_passed);
     if !all_passed {
         assert!(!output.status.success());
-        assert_eq!(summary["acceptance_eligible"], false);
-        assert_eq!(summary["acceptance_status"], "semantic_failure");
+        assert_eq!(summary["issue_2_complete"], false);
     }
     assert_eq!(
         summary["failed_samples"],
@@ -102,51 +143,58 @@ fn binary_records_real_host_results_failures_repairs_and_cancellation() {
     assert_eq!(meta["permission"]["product_approval"], false);
     assert_eq!(meta["input"]["model_calls"], 0);
     assert_eq!(meta["input"]["network_calls"], 0);
-    assert_eq!(meta["platform"]["os"], std::env::consts::OS);
-    assert_eq!(meta["platform"]["arch"], std::env::consts::ARCH);
+    assert_eq!(meta["binding"]["platform"]["os"], std::env::consts::OS);
+    assert_eq!(meta["binding"]["platform"]["arch"], std::env::consts::ARCH);
     assert_eq!(
-        meta["build"]["toolchain"],
+        meta["binding"]["build"]["toolchain"],
         env!("CAYW_VERIFY_TOOL_RUSTC_VERSION")
     );
     assert!(
-        meta["build"]["toolchain"]
+        meta["binding"]["build"]["toolchain"]
             .as_str()
             .unwrap()
             .starts_with("rustc ")
     );
     assert_eq!(
-        meta["build"]["build_target"],
+        meta["binding"]["build"]["build_target"],
         env!("CAYW_VERIFY_TOOL_BUILD_TARGET")
     );
     assert_eq!(
-        meta["executable"]["sha256"],
+        meta["binding"]["executable"]["sha256"],
         digest(&fs::read(env!("CARGO_BIN_EXE_cayw-verify-tool")).unwrap())
     );
     assert_eq!(
-        summary["artifacts"]["meta"]["sha256"],
+        summary["artifacts"]["meta_sha256"],
         digest(&fs::read(out.join("meta.json")).unwrap())
     );
     assert_eq!(
-        summary["artifacts"]["samples"]["sha256"],
+        summary["artifacts"]["samples_sha256"],
         digest(&fs::read(out.join("samples.jsonl")).unwrap())
     );
     let bound = env!("CAYW_VERIFY_TOOL_SOURCE_MANIFEST_SHA256");
     if bound.is_empty() {
-        assert_eq!(meta["build"]["status"], "unbound");
-        assert!(meta["build"]["source_manifest_sha256"].is_null());
-        assert_eq!(
-            summary["acceptance_status"],
-            if all_passed {
-                "unbound_not_acceptance"
-            } else {
-                "semantic_failure"
-            }
-        );
-        assert_eq!(summary["acceptance_eligible"], false);
+        assert_eq!(meta["binding"]["build"]["status"], "unbound");
+        assert!(meta["binding"]["build"]["source_manifest_sha256"].is_null());
+        assert_eq!(summary["source_bound"], false);
     } else {
-        assert_eq!(meta["build"]["status"], "explicit_build_input");
-        assert_eq!(meta["build"]["source_manifest_sha256"], bound);
-        assert_eq!(summary["acceptance_eligible"], all_passed);
+        assert_eq!(meta["binding"]["build"]["source_manifest_sha256"], bound);
+        let inputs = &meta["binding"]["build"]["source_inputs"]["files"];
+        for relative in [
+            "src/evidence.rs",
+            "src/sdk/scenarios.rs",
+            "src/sdk/provider.rs",
+        ] {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let suffix = format!("crates/cayw-verify-tool/{relative}");
+            let input = inputs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|input| input["path"] == suffix)
+                .unwrap();
+            assert_eq!(input["sha256"], digest(&fs::read(source).unwrap()));
+        }
+        assert_eq!(summary["issue_2_complete"], false);
     }
     for record in &samples {
         assert_eq!(record["run_id"], meta["run_id"]);
@@ -327,7 +375,10 @@ fn runtime_environment_cannot_forge_build_source_binding_and_default_workspace_w
         .arg("--out")
         .arg(&out)
         .args(["--samples", "1"])
-        .env("CAYW_SOURCE_MANIFEST_SHA256", "f".repeat(64))
+        .env(
+            "CAYW_SOURCE_MANIFEST_PATH",
+            temp.0.join("not-a-build-manifest.json"),
+        )
         .output()
         .unwrap();
     assert!(
@@ -340,15 +391,12 @@ fn runtime_environment_cannot_forge_build_source_binding_and_default_workspace_w
     let meta = read_json(&out.join("meta.json"));
     let bound = env!("CAYW_VERIFY_TOOL_SOURCE_MANIFEST_SHA256");
     if bound.is_empty() {
-        assert!(meta["build"]["source_manifest_sha256"].is_null());
-        assert_eq!(
-            read_json(&out.join("summary.json"))["acceptance_eligible"],
-            false
-        );
+        assert!(meta["binding"]["build"]["source_manifest_sha256"].is_null());
+        assert_eq!(read_json(&out.join("summary.json"))["source_bound"], false);
     } else {
-        assert_eq!(meta["build"]["source_manifest_sha256"], bound);
+        assert_eq!(meta["binding"]["build"]["source_manifest_sha256"], bound);
     }
-    assert_eq!(records(&out).len(), 11);
+    assert_eq!(records(&out).len(), CASE_NAMES.len());
     assert!(
         out.join("workspace/iteration-0001/file_pipeline/pipeline.txt")
             .is_file()
