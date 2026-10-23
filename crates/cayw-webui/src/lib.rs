@@ -1063,7 +1063,7 @@ fn handle_projects_browse(params: &Value) -> Response {
             continue;
         };
         let is_dir = ft.is_dir();
-        if !is_dir && !(include_files && ft.is_file()) {
+        if !(is_dir || include_files && ft.is_file()) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
