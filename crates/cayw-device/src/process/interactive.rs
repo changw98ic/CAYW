@@ -9,8 +9,9 @@ use tokio_util::sync::CancellationToken;
 /// Bounds the one pending write and unread stdout. Both limits must be positive
 /// and representable as Rust allocation sizes. The spec's timeout/output budget
 /// apply to the whole process lifetime, including idle and prefetched output.
-/// Stderr is drained and charged to that budget; interactive mode does not retain
-/// or expose its contents. Stderr read errors fail the shared process outcome.
+/// In pipe mode, stderr is drained and charged without retaining or exposing its
+/// contents; stderr read errors fail the shared outcome. PTY mode merges stderr
+/// into the raw output stream, including terminal echo and line-ending conversion.
 #[derive(Clone, Copy, Debug)]
 pub struct InteractiveLimits {
     pub max_write_bytes: usize,
@@ -81,6 +82,8 @@ pub(super) struct LeaderIdentity {
     pub exited: bool,
     #[cfg(unix)]
     pub lost: bool,
+    #[cfg(target_os = "macos")]
+    pub original: Option<super::ProcessIdentity>,
 }
 
 #[derive(Debug)]
@@ -172,7 +175,8 @@ impl InteractiveShared {
 
 impl ManagedStdin {
     /// Validates before allocating/copying. At most one pending write exists.
-    /// Success confirms every byte was written into the original OS pipe.
+    /// Success confirms every byte was written into the original pipe or PTY;
+    /// it does not establish that the child consumed the bytes.
     /// Dropping a polled write before it returns stops the original process;
     /// after a partial protocol frame no later write can be admitted.
     pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), DeviceError> {
@@ -303,7 +307,7 @@ impl ProcessControl {
 impl ProcessRunner {
     /// Starts one managed interactive process with an explicit lifetime timeout
     /// and raw stdout+stderr lifetime budget from spec. The original supervisor
-    /// retains the child, group, all OS pipes, opened cwd, and transferred permit.
+    /// retains the child, group, pipes or PTY, opened cwd, and transferred permit.
     pub async fn start_interactive_in_directory_with_permit(
         &self,
         spec: DirectoryProcessSpec,

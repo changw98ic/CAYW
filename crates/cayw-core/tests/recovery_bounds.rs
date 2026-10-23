@@ -27,6 +27,9 @@ fn assistant(call: ToolCall) -> AssistantMessage {
         response_id: None,
         response_model: None,
         usage: Usage::default(),
+        usage_status: cayw_ai::UsageStatus::Unknown,
+        usage_fields: Default::default(),
+        provider_metadata: Default::default(),
         stop_reason: StopReason::ToolUse,
         error_message: None,
         timestamp: 1,
@@ -61,6 +64,9 @@ fn started(store: &SessionStore, call: &ToolCall) -> AttemptLease {
             &AgentEvent::ToolExecutionStart { call: call.clone() },
         )
         .unwrap();
+    store
+        .bind_tool_origin(&lease, &call.id, "original-task")
+        .unwrap();
     store.mark_tool_started(&lease, &call.id).unwrap();
     lease
 }
@@ -79,6 +85,9 @@ fn deep_reconciliation_rejects_without_committing_or_poisoning_readers() {
     let response = store.reconcile(
         &lease.session_id,
         Reconciliation {
+            expected: store
+                .tool_reconciliation_origin(&lease.session_id, &call.id)
+                .unwrap(),
             call_id: call.id,
             actor: "trusted-host".into(),
             evidence: "Host inspected the original effect".into(),
@@ -170,10 +179,27 @@ fn direct_message_and_agent_end_cannot_persist_deep_unprojected_values() {
     }
 }
 
+struct BoundsVerifier;
+impl cayw_core::ReconciliationVerifier for BoundsVerifier {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        match request {
+            cayw_core::ReconciliationRequest::Tool { reconciliation }
+                if reconciliation.actor == "host"
+                    && reconciliation.evidence == "verified original effect" =>
+            {
+                Ok(())
+            }
+            _ => Err("fixture host rejected receipt".into()),
+        }
+    }
+}
+
 #[test]
 fn bounded_reconciliation_round_trips_through_all_canonical_readers() {
     let path = database();
-    let store = SessionStore::open(&path).unwrap();
+    let store = SessionStore::open(&path)
+        .unwrap()
+        .with_reconciliation_verifier(std::sync::Arc::new(BoundsVerifier));
     let call = ToolCall::new("call", "write", json!({}));
     let lease = started(&store, &call);
     store.recover(&lease.session_id).unwrap();
@@ -186,6 +212,9 @@ fn bounded_reconciliation_round_trips_through_all_canonical_readers() {
         .reconcile(
             &lease.session_id,
             Reconciliation {
+                expected: store
+                    .tool_reconciliation_origin(&lease.session_id, &call.id)
+                    .unwrap(),
                 call_id: call.id,
                 actor: "host".into(),
                 evidence: "verified original effect".into(),
@@ -239,6 +268,9 @@ fn owned_deep_input_rejection_survives_on_a_small_stack() {
             let response = store.reconcile(
                 &lease.session_id,
                 Reconciliation {
+                    expected: store
+                        .tool_reconciliation_origin(&lease.session_id, &call.id)
+                        .unwrap(),
                     call_id: call.id,
                     actor: "host".into(),
                     evidence: "verified".into(),
@@ -334,6 +366,13 @@ fn owned_deep_input_rejection_survives_on_a_small_stack() {
                     .reconcile_capability(
                         &session.id,
                         CapabilityReconciliation {
+                            expected: Box::new(cayw_core::ReconciliationOrigin {
+                                lease: lease.clone(),
+                                task_id: "task".into(),
+                                execution_id: "vm".into(),
+                                parent_call_id: "parent".into(),
+                                source_hash: "source".into()
+                            }),
                             key,
                             actor: "host".into(),
                             evidence: "verified".into(),

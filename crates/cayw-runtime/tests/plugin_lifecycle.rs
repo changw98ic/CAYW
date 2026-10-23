@@ -249,18 +249,56 @@ mod strongflow {
             |record| matches!(&record.event, CoreEvent::Host {kind,..} if kind == "plugin_resumed")
         ));
     }
+    struct FrozenReceipt(PathBuf);
+    impl cayw_core::ReconciliationVerifier for FrozenReceipt {
+        fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+            let cayw_core::ReconciliationRequest::Tool { reconciliation } = request else {
+                return Err("frozen fixture has no capability receipt".into());
+            };
+            let receipt: cayw_core::Reconciliation =
+                serde_json::from_slice(&std::fs::read(&self.0).map_err(|error| error.to_string())?)
+                    .map_err(|error| error.to_string())?;
+            if reconciliation == &receipt && receipt.actor == "rpc-user" {
+                Ok(())
+            } else {
+                Err("frozen fixture reconciliation differs from its receipt".into())
+            }
+        }
+    }
+
     #[tokio::test]
     async fn frozen_unknown_session_stays_frozen_after_recover_and_rpc_reconcile() {
         use cayw_agent::AgentEvent;
         use cayw_core::{ReconciledOutcome, Reconciliation};
         let dir = tempfile::tempdir().unwrap();
-        let rt = runtime(&dir, "", None);
+        let receipt_path = dir.path().join("frozen-receipt.json");
+        let rt = Runtime::open(
+            dir.path().join("sessions.db"),
+            dir.path(),
+            Arc::new(Script("")),
+            Model::new("fixture", "lifecycle"),
+            RuntimeConfig {
+                reconciliation_verifier: Some(Arc::new(FrozenReceipt(receipt_path.clone()))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let flow = Arc::new(StrongFlow::new());
         plan(&flow);
         rt.load_native(flow, PluginContext::default()).unwrap();
         let id = rt.create(None).unwrap().id;
         rt.bind_strongflow(&id).unwrap();
+        let original = rt
+            .enqueue(&id, "synthetic frozen pre-dispatch fixture")
+            .unwrap();
         let lease = rt.store().begin_attempt(&id, "lost-host-worker").unwrap();
+        // Seed only the original queue/Core boundary; this fixture dispatches
+        // neither Provider work nor a Host capability.
+        let db = rusqlite::Connection::open(dir.path().join("sessions.db")).unwrap();
+        assert_eq!(db.execute(
+            "UPDATE runtime_tasks SET state='running',worker=?2,attempt=?3,fence=1 WHERE id=?1 AND state='queued' AND fence=0",
+            rusqlite::params![original.id, lease.worker_id, lease.attempt_id],
+        ).unwrap(), 1);
         rt.store()
             .append_agent_event(&lease, &AgentEvent::AgentStart)
             .unwrap();
@@ -282,19 +320,25 @@ mod strongflow {
         ] {
             rt.store().append_agent_event(&lease, &event).unwrap();
         }
+        rt.store()
+            .bind_tool_origin(&lease, "lost", &original.id)
+            .unwrap();
         rt.store().mark_tool_started(&lease, "lost").unwrap();
+        let expected = rt.store().tool_reconciliation_origin(&id, "lost").unwrap();
         rt.unload_plugin("strongflow").unwrap();
         let recovered = rt.recover(&id).unwrap();
         assert!(recovered.frozen);
         assert_eq!(recovered.state, SessionState::NeedsReconciliation);
         let reconciliation = Reconciliation {
             call_id: "lost".into(),
-            actor: "fixture-host".into(),
+            expected,
+            actor: "rpc-user".into(),
             evidence: "Synthetic fixture stopped before dispatch".into(),
             outcome: ReconciledOutcome::NotExecuted {
                 reason: "test setup made no host call".into(),
             },
         };
+        std::fs::write(&receipt_path, serde_json::to_vec(&reconciliation).unwrap()).unwrap();
         let reconciled = rt
             .call(
                 "session.reconcile",

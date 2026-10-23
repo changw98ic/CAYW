@@ -48,7 +48,7 @@ pub enum VmOperation {
     Search,
 }
 
-/// Rust-owned cell services. Only `yield_control()` can pause the VM active clock.
+/// Rust-owned cell services. Yielding and bounded Host waits pause the VM clock.
 /// `emit` commits output synchronously before user code can continue. Helper
 /// closures are installed separately from the user chunk; no dispatch handle or
 /// bootstrap environment is exposed to that chunk.
@@ -91,14 +91,19 @@ pub struct Limits {
     pub memory_bytes: usize,
     /// Luau interrupt checkpoints (function entries and loop back edges), not VM opcodes.
     pub instruction_budget: u64,
-    /// Active time for VM setup, compilation, execution, and awaited host calls.
-    /// Only the trusted cell yield helper pauses this clock. Host permission
-    /// waits and ordinary host calls continue consuming it. An already-started
-    /// call may additionally use `shutdown_grace` to settle.
+    /// Active time for VM setup, compilation, argument preparation and execution.
+    /// Yielding, awaited Host calls and cell Store/Load waits preserve the
+    /// remaining calculation time.
     pub timeout: Duration,
-    /// Additional time to poll the same started host future after cancellation or
-    /// timeout. No new call is dispatched during this interval. Must be positive
-    /// and leave room for the agent's one-second settlement margin in an Instant.
+    /// Maximum time for one awaited Host call or cell Store/Load wait, including
+    /// permission waits. Cancellation and the enclosing Host/task deadlines
+    /// still apply. A started call may additionally use `shutdown_grace` to
+    /// settle its original result.
+    pub host_wait: Duration,
+    /// Additional time to poll the same started Host or cell service future
+    /// after cancellation or timeout. No new call is dispatched during this
+    /// interval. Must be positive and leave room for the agent's one-second
+    /// settlement margin in an Instant.
     pub shutdown_grace: Duration,
     pub host_calls: usize,
     /// Shared JSON payload budget: arguments, host results/errors, emits, return value
@@ -113,6 +118,7 @@ impl Default for Limits {
             memory_bytes: 16 * 1024 * 1024,
             instruction_budget: 100_000,
             timeout: Duration::from_secs(5),
+            host_wait: Duration::from_secs(60),
             shutdown_grace: Duration::from_secs(2),
             host_calls: 64,
             output_bytes: 1024 * 1024,
@@ -211,10 +217,13 @@ impl CodeMode {
         if limits.memory_bytes == 0
             || limits.instruction_budget == 0
             || limits.timeout.is_zero()
+            || limits.host_wait.is_zero()
+            || limits.host_wait > Duration::from_secs(3600)
             || limits.shutdown_grace.is_zero()
             || limits.host_calls == 0
             || limits.output_bytes == 0
             || Instant::now().checked_add(limits.timeout).is_none()
+            || Instant::now().checked_add(limits.host_wait).is_none()
             || limits
                 .shutdown_grace
                 .checked_add(Duration::from_secs(1))
@@ -223,7 +232,7 @@ impl CodeMode {
         {
             return Err(CodeModeError::empty(
                 ErrorKind::InvalidLimits,
-                "Every limit must be non-zero; timeout and shutdown grace plus the agent margin must fit an Instant",
+                "Every limit must be non-zero; Host wait is at most one hour; deadlines and shutdown grace plus the agent margin must fit an Instant",
                 limits.output_bytes,
             ));
         }
@@ -277,7 +286,9 @@ impl CodeMode {
     }
 
     /// Runs the same bounded VM with trusted cell helpers and a durable live
-    /// output observer. Services are held for the whole VM lifetime.
+    /// output observer. Services are held for the whole VM lifetime. Store/Load
+    /// waits pause the calculation clock and use `Limits::host_wait`; a started
+    /// service is settled like a Host call after cancellation or timeout.
     pub async fn execute_with_services(
         &self,
         script: &str,

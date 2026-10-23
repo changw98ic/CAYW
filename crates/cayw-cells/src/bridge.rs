@@ -12,12 +12,33 @@ pub(crate) struct Bridge {
 }
 impl Bridge {
     pub(crate) fn new(backend: Arc<dyn CellBackend>, run: Arc<Run>) -> Result<Self, CellError> {
-        let catalog = backend.capabilities();
-        for definition in &catalog {
+        let host_catalog = backend.capabilities();
+        // Catalog definitions are captured host data, not model output items.
+        // Validate their structure here; item_bytes applies when Search or
+        // Definition actually returns a result to Lua.
+        for definition in &host_catalog {
+            if CellValueOperation::from_name(&definition.name).is_some() {
+                // Canonical value definitions replace any host definition with
+                // these reserved names below.
+                continue;
+            }
             validate_json(
                 &serde_json::to_value(definition)?,
                 run.limits.json_depth,
-                run.limits.item_bytes,
+                usize::MAX,
+            )?;
+        }
+        // The canonical schemas add a fixed ToolDefinition/properties envelope.
+        // They are static and trusted, so validate them with a minimum depth
+        // that does not let a small user json_depth reject store/load. Their
+        // bytes are catalog data, not a model output item: item_bytes still
+        // applies when Definition/Search returns a result to Lua.
+        let catalog = crate::values::with_definitions(host_catalog);
+        for definition in crate::values::definitions() {
+            validate_json(
+                &serde_json::to_value(definition)?,
+                run.limits.json_depth.max(8),
+                usize::MAX,
             )?;
         }
         Ok(Self {
@@ -31,54 +52,27 @@ impl Bridge {
         operation: VmOperation,
         args: Value,
         cancel: CancellationToken,
+    ) -> Result<Value, CapabilityError> {
+        match operation {
+            VmOperation::Store => self.real_call(CELL_STORE, args, cancel).await,
+            VmOperation::Load => self.real_call(CELL_LOAD, args, cancel).await,
+            _ => self
+                .local(operation, args, cancel)
+                .await
+                .map_err(|error| CapabilityError::new(error.to_string())),
+        }
+    }
+    async fn local(
+        &self,
+        operation: VmOperation,
+        args: Value,
+        cancel: CancellationToken,
     ) -> Result<Value, CellError> {
         self.run.check()?;
-        let identity = self.run.identity();
         match operation {
-            VmOperation::Store => {
-                let key = args["key"]
-                    .as_str()
-                    .ok_or_else(|| CellError::Invalid("key requires a string".into()))?;
-                let version = args["expected_version"].as_u64().ok_or_else(|| {
-                    CellError::Invalid("expected_version requires an unsigned integer".into())
-                })?;
-                let value = args
-                    .get("value")
-                    .ok_or_else(|| CellError::Invalid("value required".into()))?
-                    .clone();
-                let snapshot = self.run.journal.store(
-                    &identity.session_id,
-                    key,
-                    version,
-                    value,
-                    &self.run.limits,
-                )?;
-                // Return a receipt rather than echoing a value potentially as
-                // large as the session store. load() retrieves the snapshot.
-                Ok(json!({"version":snapshot.version}))
-            }
-            VmOperation::Load => {
-                let key = args["key"]
-                    .as_str()
-                    .ok_or_else(|| CellError::Invalid("key requires a string".into()))?;
-                let snapshot = self.run.journal.load(&identity.session_id, key)?;
-                if let Some(snapshot) = &snapshot {
-                    // json_depth applies to the logical stored value. The
-                    // version/value receipt adds one fixed envelope level.
-                    validate_json(
-                        &snapshot.value,
-                        self.run.limits.json_depth,
-                        self.run.limits.store_bytes,
-                    )?;
-                }
-                let value = serde_json::to_value(snapshot)?;
-                validate_json(
-                    &value,
-                    self.run.limits.json_depth.saturating_add(1),
-                    self.run.limits.store_bytes.saturating_add(64),
-                )?;
-                Ok(value)
-            }
+            VmOperation::Store | VmOperation::Load => Err(CellError::Invalid(
+                "value capabilities require trusted backend dispatch".into(),
+            )),
             VmOperation::Output => {
                 let output: CellOutput =
                     serde_json::from_value(args).map_err(|e| CellError::Invalid(e.to_string()))?;
@@ -150,8 +144,34 @@ impl Bridge {
                     .iter()
                     .find(|d| d.name == name)
                     .ok_or(CellError::NotFound)?;
-                Ok(serde_json::to_value(definition)?)
+                let value = serde_json::to_value(definition)?;
+                validate_json(
+                    &value,
+                    self.run.limits.json_depth.max(8),
+                    self.run.limits.item_bytes,
+                )?;
+                Ok(value)
             }
+        }
+    }
+    fn argument_limits(&self, name: &str) -> (usize, usize) {
+        if name == CELL_STORE {
+            (
+                self.run.limits.json_depth.saturating_add(1),
+                self.run.limits.store_bytes.saturating_add(256),
+            )
+        } else {
+            (self.run.limits.json_depth, self.run.limits.item_bytes)
+        }
+    }
+    fn result_limits(&self, name: &str) -> (usize, usize) {
+        if name == CELL_LOAD {
+            (
+                self.run.limits.json_depth.saturating_add(1),
+                self.run.limits.store_bytes.saturating_add(64),
+            )
+        } else {
+            (self.run.limits.json_depth, self.run.limits.item_bytes)
         }
     }
     async fn real_call(
@@ -162,12 +182,8 @@ impl Bridge {
     ) -> Result<Value, CapabilityError> {
         let failure = |e: CellError| CapabilityError::new(e.to_string());
         self.run.check().map_err(failure)?;
-        validate_json(
-            &args,
-            self.run.limits.json_depth,
-            self.run.limits.item_bytes,
-        )
-        .map_err(failure)?;
+        let (argument_depth, argument_bytes) = self.argument_limits(name);
+        validate_json(&args, argument_depth, argument_bytes).map_err(failure)?;
         let identity = self.run.identity();
         if !self
             .catalog
@@ -178,6 +194,11 @@ impl Bridge {
                 "capability absent from the captured host catalog",
             ));
         }
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "cells.intent.before",
+            json!({"execution":self.run.execution,"name":name,"arguments":args}),
+        );
         let mut sequence = 0;
         self.run
             .update(|record| {
@@ -199,6 +220,11 @@ impl Bridge {
                 Ok(())
             })
             .map_err(failure)?;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "cells.intent.committed",
+            json!({"execution":self.run.execution,"sequence":sequence,"name":name,"arguments":args}),
+        );
         // This drop guard records unknown synchronously, even when CodeMode
         // drops a host future on timeout or when the manager aborts its VM.
         // The intent also brackets independently awaited permission checks.
@@ -225,6 +251,12 @@ impl Bridge {
                     CapabilityError::unknown(error.to_string())
                 })?;
         }
+        let (result_depth, result_bytes) = self.result_limits(name);
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "cells.call_terminal.before",
+            json!({"execution":self.run.execution,"sequence":sequence,"name":name}),
+        );
         let persist = self.run.update(|record| {
             let call = &mut record.calls[sequence as usize - 1];
             call.dependencies = response.dependencies().cloned();
@@ -232,13 +264,7 @@ impl Bridge {
                 Ok(value) => {
                     call.status = IntentStatus::Succeeded;
                     call.result_hash = Some(HostResult::value_hash(value));
-                    if validate_json(
-                        value,
-                        self.run.limits.json_depth,
-                        self.run.limits.item_bytes,
-                    )
-                    .is_ok()
-                    {
+                    if validate_json(value, result_depth, result_bytes).is_ok() {
                         call.result = Some(value.clone());
                     } else {
                         call.result_omitted = true;
@@ -263,16 +289,22 @@ impl Bridge {
         if let Err(error) = persist {
             return Err(CapabilityError::unknown(error.to_string()));
         }
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "cells.call_terminal.committed",
+            json!({"execution":self.run.execution,"sequence":sequence,"name":name}),
+        );
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "cells.response_ack.before",
+            json!({"execution":self.run.execution,"sequence":sequence,"name":name}),
+        );
         // All dependencies and the original terminal are now durable. Only this
         // infallible handoff may publish a leader and release its read fence.
         let result = response.acknowledge();
         match result {
             Ok(value) => {
-                if let Err(error) = validate_json(
-                    &value,
-                    self.run.limits.json_depth,
-                    self.run.limits.item_bytes,
-                ) {
+                if let Err(error) = validate_json(&value, result_depth, result_bytes) {
                     discard_json(value);
                     return Err(failure(error));
                 }
@@ -332,8 +364,6 @@ impl VmServices for Bridge {
         arguments: Value,
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
-        self.internal(operation, arguments, cancel)
-            .await
-            .map_err(|e| CapabilityError::new(e.to_string()))
+        self.internal(operation, arguments, cancel).await
     }
 }

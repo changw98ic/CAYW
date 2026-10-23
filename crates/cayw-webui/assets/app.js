@@ -81,8 +81,8 @@ const attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-const readMethods = new Set(['runtime.health', 'session.list', 'session.get', 'session.events', 'capabilities.list']);
-const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'cancelled']);
+const readMethods = new Set(['runtime.health', 'session.list', 'session.get', 'session.events', 'task.get', 'capabilities.list']);
+const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'stale_cancellation', 'cancelled']);
 
 export class RpcError extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -98,7 +98,12 @@ export function beginWrite(view, key, method, params = {}) {
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
   // A prompt has no accepted task identity until its own HTTP receipt returns.
   // The session's current/next attempt may belong to an entirely different client.
-  const lease = method === 'session.prompt' ? null : view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const observedLease = view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  // Queue and Core fences differ. A cancellation can use a Core terminal proof
+  // only when the original Task's Worker and Attempt match that Core lease.
+  const lease = method === 'session.prompt' ? null : method === 'session.cancel'
+    ? observedLease?.worker_id === params.worker_id && observedLease?.attempt_id === params.attempt_id ? observedLease : null
+    : observedLease;
   const target = method === 'session.cancel' && sameLease(lease, view.activeAttempt?.lease) ? view.activeAttempt : null;
   // Stop can be clicked before any attempt is visible. Remember the local
   // pending prompt, never the session's next attempt from an arbitrary client.
@@ -336,6 +341,7 @@ function boot() {
   let views = new Map();
   let promptPending = new Set();
   let approvalPending = new Set();
+  const taskAdmissions = new Map();
   let selectionGeneration = 0;
   let listGeneration = 0;
   let timer;
@@ -363,7 +369,7 @@ function boot() {
     controllers.add(controller);
     const requestToken = token;
     let timeout;
-    if (method !== 'session.prompt') timeout = setTimeout(() => controller.abort(), 15000);
+    if (!['session.prompt', 'task.resume'].includes(method)) timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch('/api/rpc', {
         method: 'POST',
@@ -406,6 +412,7 @@ function boot() {
     views = new Map([...views].filter(([,view]) => view.writes.length || view.activeAttempt || Object.keys(view.faults).length).map(([id,view]) => [id,{ ...view, writes:view.writes.map(write => ({ ...write, phase:'uncertain' })) }]));
     promptPending = new Set();
     approvalPending = new Set();
+    taskAdmissions.clear();
     ui['workspace'].hidden = true;
     ui['logout'].hidden = true;
     ui['login-panel'].hidden = false;
@@ -620,7 +627,7 @@ function boot() {
     ui['prompt'].disabled = !snapshot || Boolean(blocked) || busy;
     ui['send-button'].disabled = ui['prompt'].disabled || !ui['prompt'].value.trim();
     ui['send-button'].textContent = pending ? '等待完成…' : '发送';
-    ui['cancel-button'].disabled = !snapshot || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
+    ui['cancel-button'].disabled = !snapshot || (!taskAdmissions.has(selected) && !view?.originalTaskId) || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
     ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !unresolved(snapshot) && !view?.writes.some(write => write.phase === 'uncertain') ? '请确认上方的操作请求，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
   }
 
@@ -743,7 +750,20 @@ function boot() {
     if (view) rememberView(beginWrite(view, key, method, params));
     if (id === selected) renderView();
     try {
-      const result = await rpc(method, params);
+      let result;
+      if (method === 'session.prompt') {
+        // Admission returns our Task ID before execution starts. Never select a
+        // Session's current task when a delayed stop action eventually runs.
+        const admission = rpc('task.enqueue', params).then(task => {
+          if (task?.session_id !== id || typeof task.id !== 'string' || !task.id) throw new RpcError('invalid_response', '任务入队未返回原任务编号，请由宿主核对。', true);
+          if (login === loginGeneration && views.has(id)) rememberView({ ...views.get(id), originalTaskId: task.id });
+          return task.id;
+        });
+        taskAdmissions.set(id, admission);
+        if (id === selected) renderComposer();
+        const taskId = await admission;
+        result = await rpc('task.resume', { task_id: taskId });
+      } else result = await rpc(method, params);
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, null, result));
       return result;
     } catch (error) {
@@ -897,7 +917,16 @@ function boot() {
     renderComposer();
     report(null);
     try {
-      const result = await writeRpc(id, 'session.cancel', { session_id: id });
+      // Capture the original admission before any await. A replacement prompt
+      // in the same Session must never become this stop action's target.
+      const admission = taskAdmissions.get(id);
+      const taskId = admission ? await admission : views.get(id)?.originalTaskId;
+      if (typeof taskId !== 'string' || !taskId) throw new RpcError('invalid_params', '未保存原任务编号，请在宿主中指定原 Task 后取消。');
+      const task = await rpc('task.get', { task_id: taskId });
+      if (task?.id !== taskId || task.session_id !== id) throw new RpcError('invalid_response', '返回的任务与原取消目标不符。', true);
+      if (login !== loginGeneration) return;
+      const target = { session_id: id, task_id: taskId, worker_id: task.worker_id, attempt_id: task.attempt_id, fence: task.fence };
+      const result = await writeRpc(id, 'session.cancel', target);
       if (login !== loginGeneration) return;
       ui['poll-status'].textContent = result?.cancelled ? '已请求取消；等待 Runtime 记录实际终态。' : 'Runtime 当前没有可取消的执行；继续读取真实状态。';
       await freshSnapshot(id, login);

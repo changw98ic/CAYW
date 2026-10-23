@@ -9,7 +9,10 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
+    fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -52,6 +55,37 @@ CREATE TRIGGER IF NOT EXISTS capability_requests_no_delete BEFORE DELETE ON capa
  BEGIN SELECT RAISE(ABORT,'request tombstones are immutable'); END;
 ";
 
+// Repair preparation and activation have independent durable records. A new
+// ordinary operation may fail after activation; an old repair must not clear it.
+const REPAIR_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS request_authority_repairs (
+ repair_id TEXT PRIMARY KEY, previous_authority_id TEXT NOT NULL UNIQUE,
+ authority_id TEXT NOT NULL UNIQUE, data BLOB NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS request_authority_activations (
+ repair_id TEXT PRIMARY KEY REFERENCES request_authority_repairs(repair_id)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS request_repairs_no_update BEFORE UPDATE ON request_authority_repairs
+ BEGIN SELECT RAISE(ABORT,'authority repairs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS request_repairs_no_delete BEFORE DELETE ON request_authority_repairs
+ BEGIN SELECT RAISE(ABORT,'authority repairs are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS request_activations_no_update BEFORE UPDATE ON request_authority_activations
+ BEGIN SELECT RAISE(ABORT,'authority activations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS request_activations_no_delete BEFORE DELETE ON request_authority_activations
+ BEGIN SELECT RAISE(ABORT,'authority activations are immutable'); END;
+";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepairData {
+    inspection: AuthorityInspection,
+    actor: String,
+    evidence: String,
+    receipt: AuthorityRepairReceipt,
+    prepared_digest: String,
+    at_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TaskData {
@@ -74,8 +108,10 @@ struct StoredRequest {
 /// transaction; no in-memory grant cache can outlive a revocation or task end.
 /// The adjacent `.authority` record is part of this store and must be retained
 /// with its SQLite files. An interrupted observation or persistence failure
-/// permanently stops this authority, including reopen. After reconciliation the
-/// host must explicitly replace the store and tasks; no retry resets the stop.
+/// stops this authority, including reopen. After inspecting the retained facts
+/// and stopping every owner, the trusted host may explicitly repair it. Repair
+/// rotates the authority, closes old tasks and revokes grants; retries of normal
+/// operations never reset the stop.
 /// If both durable stop writes fail, only the process-local stop is guaranteed.
 /// The path and clock are supplied only by trusted host code.
 pub struct RequestStore {
@@ -87,6 +123,210 @@ pub struct RequestStore {
     clock: Arc<dyn Clock>,
 }
 impl RequestStore {
+    /// Inspect an existing authority without opening its admission path. No
+    /// observation of the host clock or update of stored facts is performed.
+    pub fn inspect_authority(
+        path: impl AsRef<Path>,
+        config: RequestConfig,
+    ) -> Result<AuthorityInspection> {
+        config.validate()?;
+        let path = recovery_path(path.as_ref())?;
+        let authority = AuthorityFence::inspect(&path)?;
+        let mut fence =
+            authority.inspect_lock(Duration::from_millis(config.sqlite_busy_timeout_ms))?;
+        let mut connection = recovery_connection(&path, &config, false)?;
+        let tx = connection.transaction()?;
+        let inspection = inspect_locked(&path, &config, &authority, &mut fence, &tx)?;
+        tx.commit()?;
+        Ok(inspection)
+    }
+
+    /// Explicit trusted recovery. The returned guard is retained across both
+    /// repair transactions, sidecar synchronization, and generation publication.
+    /// It must own all original Task locks, Cells scopes and Device stop proofs.
+    /// A completed repair only closes old tasks; it never replays or authorizes.
+    pub fn repair_authority<G: AuthorityRecoveryGuard>(
+        path: impl AsRef<Path>,
+        config: RequestConfig,
+        request: &AuthorityRepairRequest,
+        verify_stopped: impl FnOnce(&AuthorityInspection) -> Result<G>,
+    ) -> Result<AuthorityRepairReceipt> {
+        config.validate()?;
+        identifier(&request.repair_id)?;
+        text(&request.evidence)?;
+        let path = recovery_path(path.as_ref())?;
+        let authority = AuthorityFence::inspect(&path)?;
+        let mut fence =
+            authority.inspect_lock(Duration::from_millis(config.sqlite_busy_timeout_ms))?;
+        let mut connection = recovery_connection(&path, &config, true)?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = inspect_locked(&path, &config, &authority, &mut fence, &tx)?;
+        if current.database != request.inspection.database
+            || current.sidecar != request.inspection.sidecar
+        {
+            return Err(RequestError::Stale);
+        }
+        let existing = read_repair(&tx, &request.repair_id)?;
+        let prepared = if let Some(repair) = existing {
+            if repair.inspection != request.inspection
+                || repair.actor != request.actor.as_str()
+                || repair.evidence != request.evidence
+                || repair.receipt.authority_id != current.authority_id
+            {
+                return Err(RequestError::Stale);
+            }
+            if repair_activated(&tx, &request.repair_id)? {
+                // A later ordinary failure is a new incident, even if all of
+                // the old repair request's bytes still match its receipt.
+                let database_stopped: i64 = tx.query_row(
+                    "SELECT authority_stopped FROM request_meta WHERE singleton=1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let ready = serde_json::from_slice::<crate::authority::Record>(&current.marker)
+                    .ok()
+                    .is_some_and(|record| {
+                        record.id == current.authority_id
+                            && record.phase == Phase::Ready
+                            && record.last_now_ms == current.last_now_ms
+                    });
+                if database_stopped != 0 || !ready || authority.stopped_for(&current.authority_id) {
+                    return Err(RequestError::AuthorityStopped);
+                }
+                tx.commit()?;
+                // An older process may still retain only the previous local
+                // generation after another process committed activation.
+                if authority.is_stopped() {
+                    authority.publish_repaired(&current.authority_id)?;
+                }
+                return Ok(repair.receipt);
+            }
+            if repair.prepared_digest != current.inspection_id {
+                return Err(RequestError::Stale);
+            }
+            tx.commit()?;
+            repair
+        } else {
+            if request.inspection.authority_id != current.authority_id
+                || request.inspection.inspection_id != current.inspection_id
+                || request.inspection.tasks != current.tasks
+                || !request.inspection.stopped
+                || !current.stopped
+            {
+                return Err(RequestError::Stale);
+            }
+            // No database or marker write precedes the original owner check.
+            let owners = verify_stopped(&request.inspection)?;
+            check_recovery_owners(&owners, &request.inspection)?;
+            let now = SystemClock
+                .now_ms()?
+                .max(current.last_now_ms)
+                .max(marker_time(&current.marker));
+            let next_id = Uuid::new_v4().to_string();
+            let receipt = AuthorityRepairReceipt {
+                repair_id: request.repair_id.clone(),
+                previous_authority_id: current.authority_id.clone(),
+                authority_id: next_id.clone(),
+                inspection_id: current.inspection_id.clone(),
+            };
+            // Until activation commits, even a Ready sidecar cannot authorize.
+            let prepared_result = (|| -> Result<RepairData> {
+                fence.write(&current.authority_id, now, Phase::Pending)?;
+                tx.execute_batch(REPAIR_SCHEMA)?;
+                let inspection_bytes =
+                    bounded_json(&request.inspection, repair_record_limit(&config)?)?.len() as u64;
+                let repair_bytes = inspection_bytes
+                    .checked_mul(2)
+                    .and_then(|n| n.checked_add(16 * 1024))
+                    .ok_or(RequestError::Budget)?;
+                reserve(&tx, &config, 0, repair_bytes)?;
+                for task in &current.tasks {
+                    let mut stored = identity_task(&tx, &task.identity)?;
+                    terminalize_all(
+                        &tx,
+                        &stored,
+                        now,
+                        RequestState::Revoked,
+                        DecisionKind::Revoked,
+                        &request.actor,
+                        &request.evidence,
+                    )?;
+                    if stored.state == TaskState::Active {
+                        stored.state = TaskState::Closing {
+                            actor: request.actor.as_str().into(),
+                            reason: request.evidence.clone(),
+                            at_ms: now,
+                        };
+                        save_task(&tx, &stored)?;
+                        // Uses the lifecycle event reserved at task creation.
+                        event(
+                            &tx,
+                            now,
+                            &stored.identity,
+                            None,
+                            "task_closing",
+                            request.actor.as_str(),
+                            &stored.state,
+                        )?;
+                    }
+                }
+                tx.execute("UPDATE request_meta SET authority_id=?1,authority_stopped=1,last_now_ms=?2 WHERE singleton=1", params![next_id, sql_integer(now)?])?;
+                let repair = RepairData {
+                    inspection: request.inspection.clone(),
+                    actor: request.actor.as_str().into(),
+                    evidence: request.evidence.clone(),
+                    receipt,
+                    prepared_digest: facts_digest(&tx)?,
+                    at_ms: now,
+                };
+                let bytes = bounded_json(&repair, repair_record_limit(&config)?)?;
+                tx.execute(
+                    "INSERT INTO request_authority_repairs VALUES(?1,?2,?3,?4)",
+                    params![request.repair_id, current.authority_id, next_id, bytes],
+                )?;
+                tx.commit()?;
+                Ok(repair)
+            })();
+            let repair = match prepared_result {
+                Ok(repair) => repair,
+                Err(error) => {
+                    let _ = fence.stop(&current.authority_id, now);
+                    let _ = connection.execute(
+                        "UPDATE request_meta SET authority_stopped=1 WHERE singleton=1",
+                        [],
+                    );
+                    return Err(error);
+                }
+            };
+            #[cfg(test)]
+            recovery_tests::crash_window("prepared");
+            let result = activate_repair(
+                &path,
+                &config,
+                &authority,
+                &mut fence,
+                &mut connection,
+                &repair,
+            );
+            drop(owners);
+            return result;
+        };
+        // The preparation commit survived but activation did not. The same
+        // original inspection and owner proof must be supplied again.
+        let owners = verify_stopped(&request.inspection)?;
+        check_recovery_owners(&owners, &request.inspection)?;
+        let result = activate_repair(
+            &path,
+            &config,
+            &authority,
+            &mut fence,
+            &mut connection,
+            &prepared,
+        );
+        drop(owners);
+        result
+    }
+
     pub fn open(path: impl AsRef<Path>, config: RequestConfig) -> Result<Self> {
         Self::open_with_clock(path, config, Arc::new(SystemClock))
     }
@@ -108,12 +348,21 @@ impl RequestStore {
             .canonicalize()?
             .join(path.file_name().expect("database filename checked"));
         let authority = AuthorityFence::open(&path)?;
-        let mut fence = authority.lock()?;
+        let mut fence = authority.lock(Duration::from_millis(config.sqlite_busy_timeout_ms))?;
         let existed = path.try_exists()?;
         let previous = match fence.read() {
             Ok(record) => record,
             Err(error) => {
-                let _ = fence.stop("unavailable", 0);
+                // Retain the torn bytes for explicit inspection. Rewriting
+                // them as "unavailable" would erase the original evidence and
+                // invent a conflicting authority identity.
+                authority.stop();
+                if existed && let Ok(connection) = recovery_connection(&path, &config, true) {
+                    let _ = connection.execute(
+                        "UPDATE request_meta SET authority_stopped=1 WHERE singleton=1",
+                        [],
+                    );
+                }
                 return Err(error);
             }
         };
@@ -209,6 +458,7 @@ impl RequestStore {
             );
             return Err(error);
         }
+        authority.bind_identity(&authority_id)?;
         drop(fence);
         Ok(Self {
             path,
@@ -230,25 +480,56 @@ impl RequestStore {
         &self,
         operation: impl FnOnce(&Transaction<'_>, u64) -> Result<T>,
     ) -> Result<T> {
-        let mut fence = self.authority.lock()?;
+        let mut fence = self
+            .authority
+            .lock(Duration::from_millis(self.config.sqlite_busy_timeout_ms))?;
+        let mut connection = self.connection.lock().map_err(|_| {
+            self.authority.stop();
+            RequestError::Poisoned
+        })?;
+        let current_id: String = match connection.query_row(
+            "SELECT authority_id FROM request_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                self.authority.stop();
+                // Without a readable SQLite identity, only an intact marker
+                // bearing this handle's ID can be stopped. Never overwrite a
+                // different or torn generation with this handle's old ID.
+                if let Ok(Some(record)) = fence.read()
+                    && record.id == self.authority_id
+                {
+                    let _ = fence.stop(&self.authority_id, record.last_now_ms);
+                }
+                let _ = connection.execute("UPDATE request_meta SET authority_stopped=1 WHERE singleton=1 AND authority_id=?1", [&self.authority_id]);
+                return Err(error.into());
+            }
+        };
+        if current_id != self.authority_id {
+            // Check SQLite first: a stale process must not rewrite a torn
+            // marker belonging to the repaired generation with its own ID.
+            return Err(RequestError::AuthorityStopped);
+        }
         let record = match fence.read() {
             Ok(Some(record)) if record.id == self.authority_id && record.phase == Phase::Ready => {
                 record
             }
+            Ok(Some(record)) if record.id != self.authority_id => {
+                // A repaired generation belongs to another authority. A stale
+                // handle cannot stop or overwrite that generation's marker/DB.
+                return Err(RequestError::AuthorityStopped);
+            }
             Ok(_) => {
-                if let Ok(connection) = self.connection.lock() {
-                    self.stop_authority(&mut fence, 0, &connection);
-                } else {
-                    self.authority.stop();
-                }
+                self.authority.stop();
+                let _ = connection.execute("UPDATE request_meta SET authority_stopped=1 WHERE singleton=1 AND authority_id=?1", [&self.authority_id]);
                 return Err(RequestError::AuthorityStopped);
             }
             Err(error) => {
-                if let Ok(connection) = self.connection.lock() {
-                    self.stop_authority(&mut fence, 0, &connection);
-                } else {
-                    self.authority.stop();
-                }
+                // Keep the failed marker bytes as original inspection evidence.
+                self.authority.stop();
+                let _ = connection.execute("UPDATE request_meta SET authority_stopped=1 WHERE singleton=1 AND authority_id=?1", [&self.authority_id]);
                 return Err(error);
             }
         };
@@ -256,15 +537,9 @@ impl RequestStore {
             self.authority.stop();
             // If the sidecar failed without invalidating its old Ready bytes,
             // independently stop SQLite before releasing the authority lock.
-            if let Ok(connection) = self.connection.lock() {
-                self.stop_authority(&mut fence, record.last_now_ms, &connection);
-            }
+            self.stop_authority(&mut fence, record.last_now_ms, &connection);
             return Err(error);
         }
-        let mut connection = self.connection.lock().map_err(|_| {
-            self.authority.stop();
-            RequestError::Poisoned
-        })?;
         let mut observed = record.last_now_ms;
         let result = (|| {
             // Pending is already durable when the clock is observed. Even BEGIN
@@ -941,6 +1216,282 @@ impl RequestStore {
         })
     }
 }
+
+fn recovery_path(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(RequestError::InvalidInput(
+            "authority recovery requires an absolute existing file path".into(),
+        ));
+    }
+    let path = path
+        .parent()
+        .ok_or_else(|| RequestError::InvalidInput("database parent is missing".into()))?
+        .canonicalize()?
+        .join(path.file_name().expect("filename checked"));
+    if !fs::symlink_metadata(&path)?.file_type().is_file() {
+        return Err(RequestError::InvalidInput(
+            "authority database must be a regular file".into(),
+        ));
+    }
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(".authority");
+    if !fs::symlink_metadata(PathBuf::from(sidecar))?
+        .file_type()
+        .is_file()
+    {
+        return Err(RequestError::AuthorityStopped);
+    }
+    Ok(path)
+}
+fn recovery_connection(path: &Path, config: &RequestConfig, writable: bool) -> Result<Connection> {
+    let flags = if writable {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    };
+    let connection = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    connection.busy_timeout(Duration::from_millis(config.sqlite_busy_timeout_ms))?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    if writable {
+        connection.pragma_update(None, "synchronous", "FULL")?;
+    }
+    Ok(connection)
+}
+fn file_identity(metadata: &fs::Metadata) -> AuthorityFileIdentity {
+    AuthorityFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+fn inspect_locked(
+    path: &Path,
+    config: &RequestConfig,
+    authority: &AuthorityFence,
+    fence: &mut FenceGuard<'_>,
+    tx: &Transaction<'_>,
+) -> Result<AuthorityInspection> {
+    let (version, stored_config, authority_id, stopped, last): (i64, Vec<u8>, String, i64, i64) = tx.query_row("SELECT version,configuration,authority_id,authority_stopped,last_now_ms FROM request_meta WHERE singleton=1", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?;
+    if version != 2 || stored_config != bounded_json(config, 8192)? {
+        return Err(RequestError::PolicyMismatch);
+    }
+    identifier(&authority_id)?;
+    let last_now_ms = read_unsigned(&last)?;
+    let marker = fence.bytes()?;
+    let parsed = serde_json::from_slice::<crate::authority::Record>(&marker).ok();
+    if let Some(record) = &parsed {
+        if record.last_now_ms > i64::MAX as u64 {
+            return Err(RequestError::AuthorityStopped);
+        }
+        if record.id != authority_id {
+            // Preparation can commit before marker rotation. Only its exact,
+            // immutable repair record may explain the old marker identity.
+            let table: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='request_authority_repairs')", [], |r| r.get(0))?;
+            let repair_id: Option<String> = if table {
+                tx.query_row("SELECT repair_id FROM request_authority_repairs WHERE previous_authority_id=?1 AND authority_id=?2", params![record.id, authority_id], |r| r.get(0)).optional()?
+            } else {
+                None
+            };
+            let repair = repair_id
+                .as_deref()
+                .map(|id| read_repair(tx, id))
+                .transpose()?
+                .flatten()
+                .ok_or(RequestError::AuthorityStopped)?;
+            if record.phase != Phase::Pending && record.phase != Phase::Stopped
+                || repair_activated(tx, &repair.receipt.repair_id)?
+                || repair.prepared_digest != facts_digest(tx)?
+                || repair.inspection.database != file_identity(&fs::metadata(path)?)
+                || repair.inspection.sidecar != file_identity(&fence.metadata()?)
+            {
+                return Err(RequestError::AuthorityStopped);
+            }
+        }
+    }
+    let stopped = stopped != 0
+        || authority.is_stopped()
+        || parsed
+            .as_ref()
+            .is_none_or(|record| record.phase != Phase::Ready || record.last_now_ms != last_now_ms);
+    let mut statement = tx.prepare("SELECT id,data FROM request_tasks ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut tasks = Vec::new();
+    while let Some(row) = rows.next()? {
+        if tasks.len() >= config.max_tasks as usize {
+            return Err(RequestError::Budget);
+        }
+        let id: String = row.get(0)?;
+        let data: Vec<u8> = row.get(1)?;
+        if data.len() > TASK_BYTES {
+            return Err(RequestError::Budget);
+        }
+        let task: TaskData = serde_json::from_slice(&data)?;
+        task.identity.validate()?;
+        if task.identity.task_id != id {
+            return Err(RequestError::Stale);
+        }
+        tasks.push(AuthorityTaskInspection {
+            identity: task.identity,
+            state: task.state,
+        });
+    }
+    Ok(AuthorityInspection {
+        authority_id,
+        inspection_id: facts_digest(tx)?,
+        tasks,
+        database: file_identity(&fs::metadata(path)?),
+        sidecar: file_identity(&fence.metadata()?),
+        marker,
+        stopped,
+        last_now_ms,
+    })
+}
+fn facts_digest(tx: &Transaction<'_>) -> Result<String> {
+    let mut hash = Sha256::new();
+    // Exclude only the stop flag: normal failed reopen can set it without
+    // changing any original permission/task fact. Marker bytes are retained in
+    // the repair record but Pending->Stopped cannot destroy exact retry.
+    for sql in [
+        "SELECT singleton,version,configuration,authority_id,last_now_ms,task_count,reserved_events,reserved_bytes FROM request_meta ORDER BY singleton",
+        "SELECT id,data FROM request_tasks ORDER BY id",
+        "SELECT id,task_id,data FROM capability_requests ORDER BY id",
+        "SELECT sequence,at_ms,task_id,request_id,kind,actor,payload FROM request_events ORDER BY sequence",
+    ] {
+        hash.update(sql.as_bytes());
+        let mut statement = tx.prepare(sql)?;
+        let columns = statement.column_count();
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            for index in 0..columns {
+                use rusqlite::types::ValueRef;
+                match row.get_ref(index)? {
+                    ValueRef::Null => hash.update([0]),
+                    ValueRef::Integer(value) => {
+                        hash.update([1]);
+                        hash.update(value.to_le_bytes());
+                    }
+                    ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+                        hash.update([if matches!(row.get_ref(index)?, ValueRef::Text(_)) {
+                            2
+                        } else {
+                            3
+                        }]);
+                        hash.update((bytes.len() as u64).to_le_bytes());
+                        hash.update(bytes);
+                    }
+                    ValueRef::Real(_) => return Err(RequestError::AuthorityStopped),
+                }
+            }
+            hash.update([255]);
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn marker_time(marker: &[u8]) -> u64 {
+    serde_json::from_slice::<crate::authority::Record>(marker)
+        .ok()
+        .map_or(0, |record| record.last_now_ms)
+}
+fn repair_record_limit(config: &RequestConfig) -> Result<usize> {
+    (config.max_tasks as usize)
+        .checked_mul(4096)
+        .and_then(|n| n.checked_add(16 * 1024))
+        .ok_or(RequestError::Budget)
+}
+fn read_repair(tx: &Transaction<'_>, repair_id: &str) -> Result<Option<RepairData>> {
+    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='request_authority_repairs')", [], |r| r.get(0))?;
+    if !exists {
+        return Ok(None);
+    }
+    let bytes: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT data FROM request_authority_repairs WHERE repair_id=?1",
+            [repair_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    bytes
+        .map(|data| Ok(serde_json::from_slice(&data)?))
+        .transpose()
+}
+fn repair_activated(tx: &Transaction<'_>, repair_id: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM request_authority_activations WHERE repair_id=?1)",
+        [repair_id],
+        |r| r.get(0),
+    )?)
+}
+fn check_recovery_owners(
+    owners: &impl AuthorityRecoveryGuard,
+    inspection: &AuthorityInspection,
+) -> Result<()> {
+    let tasks = owners.verified_tasks();
+    if tasks.len() != inspection.tasks.len()
+        || inspection
+            .tasks
+            .iter()
+            .any(|task| tasks.iter().filter(|id| **id == task.identity).count() != 1)
+    {
+        return Err(RequestError::Stale);
+    }
+    Ok(())
+}
+fn activate_repair(
+    path: &Path,
+    config: &RequestConfig,
+    authority: &AuthorityFence,
+    fence: &mut FenceGuard<'_>,
+    connection: &mut Connection,
+    repair: &RepairData,
+) -> Result<AuthorityRepairReceipt> {
+    let result = (|| -> Result<()> {
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if facts_digest(&tx)? != repair.prepared_digest
+            || repair_activated(&tx, &repair.receipt.repair_id)?
+        {
+            return Err(RequestError::Stale);
+        }
+        if file_identity(&fs::metadata(path)?) != repair.inspection.database
+            || file_identity(&fence.metadata()?) != repair.inspection.sidecar
+        {
+            return Err(RequestError::Stale);
+        }
+        // Clear the old local generation before publishing a distinct one.
+        authority.stop();
+        // Ready comes first, but SQLite still has stopped=1 until the activation
+        // commit. A process loss in either window therefore cannot admit work.
+        fence.write(&repair.receipt.authority_id, repair.at_ms, Phase::Ready)?;
+        #[cfg(test)]
+        recovery_tests::crash_window("ready");
+        tx.execute(
+            "INSERT INTO request_authority_activations VALUES(?1)",
+            [&repair.receipt.repair_id],
+        )?;
+        tx.execute(
+            "UPDATE request_meta SET authority_stopped=0 WHERE singleton=1 AND authority_id=?1",
+            [&repair.receipt.authority_id],
+        )?;
+        tx.commit()?;
+        #[cfg(test)]
+        recovery_tests::crash_window("activated");
+        authority.publish_repaired(&repair.receipt.authority_id)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fence.stop(&repair.receipt.authority_id, repair.at_ms);
+        let _ = connection.execute(
+            "UPDATE request_meta SET authority_stopped=1 WHERE singleton=1",
+            [],
+        );
+        return Err(error);
+    }
+    // config was validated by the caller and kept identical across both phases.
+    let _ = config;
+    Ok(repair.receipt.clone())
+}
+
+#[cfg(test)]
+#[path = "authority_recovery_tests.rs"]
+mod recovery_tests;
 
 fn persistence_failure(error: &RequestError) -> bool {
     matches!(
