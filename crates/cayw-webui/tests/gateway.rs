@@ -906,7 +906,8 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
     .await;
     assert_eq!(health["result"]["status"], "ok");
 
-    // 2. Server <-> Device one-time RSA binding is active, encrypted, and idempotent.
+    // 2. Before any remote Device completes the 2-phase RSA challenge-response handshake,
+    //    `bound`, `connected`, and `encrypted_channel_verified` are all honestly `false`.
     let binding = envelope(
         http.post(format!("http://{addr}/api/rpc"))
             .json(&json!({"method": "device.binding.status", "params": {}}))
@@ -916,41 +917,37 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
         StatusCode::OK,
     )
     .await;
-    assert_eq!(binding["result"]["bound"], true);
-    assert_eq!(binding["result"]["encrypted_channel_verified"], true);
-    let first_fp = binding["result"]["device_fingerprint"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(first_fp.starts_with("SHA256:"));
-    assert!(
-        binding["result"]["device_public_key_pem"]
-            .as_str()
-            .unwrap()
-            .contains("BEGIN RSA PUBLIC KEY")
-    );
+    assert_eq!(binding["result"]["bound"], false);
+    assert_eq!(binding["result"]["connected"], false);
+    assert_eq!(binding["result"]["encrypted_channel_verified"], false);
 
-    let bind_again = envelope(
+    // 2a. Prepare a bind session from WebUI: still unbound (`waiting_for_hello`).
+    let prep = envelope(
         http.post(format!("http://{addr}/api/rpc"))
-            .json(&json!({"method": "device.binding.bind_once", "params": {"server_url": "wss://127.0.0.1:8787"}}))
+            .json(&json!({"method": "devices.prepare_bind", "params": {}}))
             .send()
             .await
             .unwrap(),
         StatusCode::OK,
     )
     .await;
-    assert_eq!(bind_again["result"]["reused_persisted_binding"], true);
-    assert_eq!(bind_again["result"]["device_fingerprint"], first_fp);
+    let bind_id = prep["result"]["bind_id"].as_str().unwrap().to_owned();
+    assert_eq!(prep["result"]["bound"], false);
+    assert_eq!(prep["result"]["encrypted_channel_verified"], false);
 
-    // 2b. Multi-device add, select, and remove via devices.add / devices.select / devices.remove.
-    let added = envelope(
+    // 2b. External Device generates its own RSA keypair (private key never sent to Server)
+    //     and sends `devices.bind_hello` with only its `RsaPublicKey`.
+    let dev_kp = cayw_remote::RsaKeyPair::generate().unwrap();
+    let dev_pub = dev_kp.public_key();
+    let hello = envelope(
         http.post(format!("http://{addr}/api/rpc"))
             .json(&json!({
-                "method": "devices.add",
+                "method": "devices.bind_hello",
                 "params": {
+                    "bind_id": bind_id,
                     "label": "Mac Studio 远程工作站",
-                    "device_id": "device-mac-studio-02",
-                    "server_url": "wss://127.0.0.1:8787"
+                    "device_address": "192.168.1.20 · 独立进程握手",
+                    "device_public_key": dev_pub,
                 }
             }))
             .send()
@@ -959,14 +956,52 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
         StatusCode::OK,
     )
     .await;
-    assert_eq!(added["result"]["active_device_id"], "device-mac-studio-02");
-    assert_eq!(added["result"]["devices"].as_array().unwrap().len(), 2);
+    // After hello alone, the Device is STILL not bound until it proves it decrypted the challenge!
+    assert_eq!(hello["result"]["phase"], "challenge_issued");
+    assert_eq!(hello["result"]["bound"], false);
+    assert_eq!(hello["result"]["encrypted_channel_verified"], false);
 
-    let selected_back = envelope(
+    let srv_pub: cayw_remote::RsaPublicKey =
+        serde_json::from_value(hello["result"]["server_public_key"].clone()).unwrap();
+    let encrypted_challenge = hello["result"]["encrypted_challenge"].as_str().unwrap();
+    let server_sig = hello["result"]["server_signature"].as_str().unwrap();
+    assert!(srv_pub.verify_sha256(
+        format!("{bind_id}:{encrypted_challenge}").as_bytes(),
+        server_sig
+    ));
+
+    // Tampered or wrong challenge confirmation is rejected and never marks the device bound.
+    let bad_proof = format!("confirm:{bind_id}:wrong_nonce");
+    envelope(
         http.post(format!("http://{addr}/api/rpc"))
             .json(&json!({
-                "method": "devices.select",
-                "params": { "device_id": "device-macos-local-01" }
+                "method": "devices.bind_confirm",
+                "params": {
+                    "bind_id": bind_id,
+                    "encrypted_response": srv_pub.encrypt(bad_proof.as_bytes()).unwrap(),
+                    "device_signature": dev_kp.sign_sha256(bad_proof.as_bytes()).unwrap(),
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+
+    // 2c. Device decrypts the Server's challenge with its private key, encrypts the proof to
+    //     Server's public key, and signs with Device's private key.
+    let challenge_nonce = String::from_utf8(dev_kp.decrypt(encrypted_challenge).unwrap()).unwrap();
+    let valid_proof = format!("confirm:{bind_id}:{challenge_nonce}");
+    let confirmed = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.bind_confirm",
+                "params": {
+                    "bind_id": bind_id,
+                    "encrypted_response": srv_pub.encrypt(valid_proof.as_bytes()).unwrap(),
+                    "device_signature": dev_kp.sign_sha256(valid_proof.as_bytes()).unwrap(),
+                }
             }))
             .send()
             .await
@@ -974,16 +1009,45 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
         StatusCode::OK,
     )
     .await;
+    assert_eq!(confirmed["result"]["created"]["bound"], true);
     assert_eq!(
-        selected_back["result"]["active_device_id"],
-        "device-macos-local-01"
+        confirmed["result"]["created"]["encrypted_channel_verified"],
+        true
     );
+    assert_eq!(confirmed["result"]["created"]["connected"], true);
+    let bound_device_id = confirmed["result"]["created"]["device_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 2d. Signed heartbeat from the Device private key updates live connection status.
+    let hb_ts = "1700000000000";
+    let hb_sig = dev_kp
+        .sign_sha256(format!("heartbeat:{bound_device_id}:{hb_ts}").as_bytes())
+        .unwrap();
+    let hb = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.heartbeat",
+                "params": {
+                    "device_id": bound_device_id,
+                    "timestamp": hb_ts,
+                    "signature": hb_sig,
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(hb["result"]["connected"], true);
 
     let removed = envelope(
         http.post(format!("http://{addr}/api/rpc"))
             .json(&json!({
                 "method": "devices.remove",
-                "params": { "device_id": "device-mac-studio-02" }
+                "params": { "device_id": bound_device_id }
             }))
             .send()
             .await
@@ -991,7 +1055,7 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
         StatusCode::OK,
     )
     .await;
-    assert_eq!(removed["result"]["devices"].as_array().unwrap().len(), 1);
+    assert_eq!(removed["result"]["devices"].as_array().unwrap().len(), 0);
 
     // 3. Web <-> Server mode requires account login (default admin/admin) and supports changing credentials.
     envelope(

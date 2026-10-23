@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Headless runtime integrating durable sessions, bounded Luau tools and local IPC"
 
 [features]
-default = []
+default = ["remote"]
 plugins = ["dep:cayw-plugins"]
 strongflow = ["plugins", "cayw-plugins/strongflow"]
 remote = ["dep:cayw-remote"]

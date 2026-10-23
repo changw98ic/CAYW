@@ -577,42 +577,23 @@ export function CAYWApp({ env } = {}) {
       serverConfirmPassDraft: '',
       serverAccountNotice: '',
       deviceBinding: {
-        bound: true,
-        reused_persisted_binding: true,
-        device_id: 'device-macos-local-01',
-        server_url: 'wss://127.0.0.1:8787',
+        bound: false,
+        connected: false,
+        device_id: null,
         algorithm: 'RSA-OAEP-SHA256 + RSA-SHA256',
-        encrypted_channel_verified: true,
-        auto_reconnect: true,
-        device_fingerprint: 'SHA256:8f9d1a0b3e7c4f219a6b5c8d0e1f2a3b',
-        server_fingerprint: 'SHA256:1c4e7b2a9d0f6e3c8b5a2d1f4c7e9a0b',
-        device_public_key_pem:
-          '-----BEGIN RSA PUBLIC KEY-----\nUlNBLVBVQjowMTAwMDE6YzlmM2E4...\n-----END RSA PUBLIC KEY-----',
+        encrypted_channel_verified: false,
+        device_fingerprint: '',
+        server_fingerprint: '',
       },
       deviceServerUrlDraft: 'wss://127.0.0.1:8787',
       deviceBindingNotice: '',
       showRsaPem: false,
-      activeDeviceId: 'device-macos-local-01',
-      boundDevices: [
-        {
-          device_id: 'device-macos-local-01',
-          label: '本机 macOS 设备',
-          kind: 'local_and_rsa',
-          builtin: true,
-          active: true,
-          bound: true,
-          server_url: 'wss://127.0.0.1:8787',
-          algorithm: 'RSA-OAEP-SHA256 + RSA-SHA256',
-          encrypted_channel_verified: true,
-          auto_reconnect: true,
-          device_fingerprint: 'SHA256:8f9d1a0b3e7c4f219a6b5c8d0e1f2a3b',
-          server_fingerprint: 'SHA256:1c4e7b2a9d0f6e3c8b5a2d1f4c7e9a0b',
-          device_public_key_pem:
-            '-----BEGIN RSA PUBLIC KEY-----\nUlNBLVBVQjowMTAwMDE6YzlmM2E4...\n-----END RSA PUBLIC KEY-----',
-        },
-      ],
+      activeDeviceId: '',
+      boundDevices: [],
       addDeviceModalOpen: false,
-      addDeviceBaselineCount: 1,
+      addDeviceBaselineCount: 0,
+      pendingBindId: '',
+      pendingBindPhase: 'waiting_for_hello',
       newDeviceLabel: '',
       newDeviceAddress: '',
       newDeviceId: '',
@@ -1526,10 +1507,10 @@ export function CAYWApp({ env } = {}) {
           s.deviceServerUrlDraft =
             res.device_binding.server_url || s.deviceServerUrlDraft;
         }
-        if (typeof res.active_device_id === 'string' && res.active_device_id) {
+        if (typeof res.active_device_id === 'string') {
           s.activeDeviceId = res.active_device_id;
         }
-        if (Array.isArray(res.devices) && res.devices.length) {
+        if (Array.isArray(res.devices)) {
           s.boundDevices = res.devices;
         }
         forceRender();
@@ -1542,6 +1523,8 @@ export function CAYWApp({ env } = {}) {
   const openAddDeviceModal = () => {
     s.addDeviceModalOpen = true;
     s.addDeviceBaselineCount = s.boundDevices.length;
+    s.pendingBindId = '';
+    s.pendingBindPhase = 'waiting_for_hello';
     s.newDeviceLabel = '';
     s.newDeviceAddress = '';
     s.newDeviceId = '';
@@ -1552,7 +1535,17 @@ export function CAYWApp({ env } = {}) {
     s.copiedServerCmd = false;
     s.lastCreatedDevice = null;
     forceRender();
-    void refreshServerAuthAndBinding();
+    void (async () => {
+      await refreshServerAuthAndBinding();
+      try {
+        const prep = await rpc('devices.prepare_bind', {});
+        if (object(prep) && typeof prep.bind_id === 'string') {
+          s.pendingBindId = prep.bind_id;
+          s.pendingBindPhase = prep.phase || 'waiting_for_hello';
+          forceRender();
+        }
+      } catch {}
+    })();
   };
 
   const handleAddDeviceSubmit = async e => {
@@ -2108,12 +2101,26 @@ export function CAYWApp({ env } = {}) {
         ? window.setInterval(() => {
             if (s.addDeviceModalOpen) {
               void (async () => {
+                if (s.pendingBindId) {
+                  try {
+                    const st = await rpc('devices.bind_status', {
+                      bind_id: s.pendingBindId,
+                    });
+                    if (object(st)) {
+                      s.pendingBindPhase = st.phase || s.pendingBindPhase;
+                      if (st.phase === 'confirmed' && object(st.device)) {
+                        s.lastCreatedDevice = st.device;
+                      }
+                    }
+                  } catch {}
+                }
                 await refreshServerAuthAndBinding();
                 if (
                   s.addDeviceModalOpen &&
                   s.boundDevices.length > s.addDeviceBaselineCount
                 ) {
                   s.lastCreatedDevice = s.boundDevices.at(-1);
+                  s.pendingBindPhase = 'confirmed';
                   forceRender();
                 }
               })();
@@ -3940,16 +3947,23 @@ export function CAYWApp({ env } = {}) {
                           s.heroDeviceMenuOpen = false;
                           forceRender();
                         }}
-                        selectedId={s.activeDeviceId}
-                        items={s.boundDevices.map(dev => ({
-                          id: dev.device_id,
-                          label: `${dev.label} (${dev.device_id})`,
-                          icon: <IconDataOutline16 size={16} />,
-                        }))}
+                        selectedId={s.activeDeviceId || '__local_ipc__'}
+                        items={[
+                          {
+                            id: '__local_ipc__',
+                            label: '本机直连 (Loopback IPC 免令牌)',
+                            icon: <IconDataOutline16 size={16} />,
+                          },
+                          ...s.boundDevices.map(dev => ({
+                            id: dev.device_id,
+                            label: `${dev.label} · ${dev.connected ? '在线' : '已绑定密钥'}`,
+                            icon: <IconDataOutline16 size={16} />,
+                          })),
+                        ]}
                         footer={[
                           {
                             id: '__add_device__',
-                            label: '添加新设备 (RSA 一次性绑定)…',
+                            label: '绑定新设备 (命令行 RSA 挑战握手)…',
                             icon: <IconPlusOutline16 size={16} />,
                           },
                         ]}
@@ -3957,6 +3971,8 @@ export function CAYWApp({ env } = {}) {
                           s.heroDeviceMenuOpen = false;
                           if (id === '__add_device__') {
                             openAddDeviceModal();
+                          } else if (id === '__local_ipc__') {
+                            s.activeDeviceId = '';
                           } else {
                             void handleSelectDevice(id);
                           }
@@ -3983,7 +3999,7 @@ export function CAYWApp({ env } = {}) {
                             <span className="pXSMma_workspaceLabel">
                               {s.boundDevices.find(
                                 d => d.device_id === s.activeDeviceId,
-                              )?.label ?? '本机 macOS 设备'}
+                              )?.label ?? '本机直连'}
                             </span>
                             <IconChevronDownOutline14
                               className="pXSMma_chevron"
@@ -5244,14 +5260,23 @@ export function CAYWApp({ env } = {}) {
                     <div className="zGbnIq_rowCard" style={{ marginBottom: 14 }}>
                       <div className="zGbnIq_rowHead">
                         <div className="zGbnIq_rowIdentity">
-                          <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
+                          <span
+                            className={clsx(
+                              'zGbnIq_credentialDot',
+                              s.boundDevices.length > 0
+                                ? 'zGbnIq_credentialDotConfigured'
+                                : 'zGbnIq_credentialDotMissing',
+                            )}
+                          />
                           <span className="zGbnIq_rowName">
                             {`已绑定设备（Device）管理（共 ${s.boundDevices.length} 台设备）`}
                           </span>
                           <span className="zGbnIq_rowTag">
-                            {s.deviceBinding.bound
-                              ? 'RSA 自动加密连接中'
-                              : '待连接'}
+                            {s.boundDevices.length === 0
+                              ? '暂未绑定远端设备'
+                              : s.deviceBinding.connected
+                                ? '已完成跨进程 RSA 握手 · 在线'
+                                : '已完成跨进程 RSA 绑定 · 离线'}
                           </span>
                         </div>
                         <div className="zGbnIq_rowActions">
@@ -5266,15 +5291,28 @@ export function CAYWApp({ env } = {}) {
                         </div>
                       </div>
                       <p className="At1oFq_hint" style={{ margin: '6px 0 10px' }}>
-                        2. 在新设备（Device）启动时提供当前 Server 地址，或在下方直接接入设备，Device 与 Server 即自动在后台完成一次性 RSA 密钥交换与永久绑定，后续全程 RSA 加密直连，无需再次处理。
+                        2. 点击“绑定新设备”复制终端命令并在目标 Device 执行：Device 在本地独立生成 RSA 私钥，仅向 Server 发送公钥并完成双向 RSA 加密挑战与签名确认后，才会标记为已绑定；后续根据真实 RSA 签名心跳判断在线连接状态。
                       </p>
                       {s.deviceBindingNotice ? (
                         <p className="zGbnIq_savedNotice" role="status">
                           {s.deviceBindingNotice}
                         </p>
                       ) : null}
-                      <div className="zGbnIq_rows" style={{ marginBottom: 10 }}>
-                        {s.boundDevices.map(dev => {
+                      {s.boundDevices.length === 0 ? (
+                        <div
+                          style={{
+                            padding: '10px 12px',
+                            borderRadius: 8,
+                            background: 'rgba(255,255,255,0.02)',
+                            fontSize: 12,
+                            color: 'var(--dsw-alias-label-tertiary)',
+                          }}
+                        >
+                          当前尚未绑定任何远端 Device（本机会话直接通过 Loopback IPC 免令牌直连）。点击右上角“+ 绑定新设备”并在终端执行命令，完成跨进程 RSA 握手确认后将显示在此处。
+                        </div>
+                      ) : (
+                        <div className="zGbnIq_rows" style={{ marginBottom: 10 }}>
+                          {s.boundDevices.map(dev => {
                           const isCurrent = dev.device_id === s.activeDeviceId;
                           return (
                             <div
@@ -5288,14 +5326,21 @@ export function CAYWApp({ env } = {}) {
                             >
                               <div className="zGbnIq_rowHead">
                                 <div className="zGbnIq_rowIdentity">
-                                  <span className="zGbnIq_credentialDot zGbnIq_credentialDotConfigured" />
+                                  <span
+                                    className={clsx(
+                                      'zGbnIq_credentialDot',
+                                      dev.connected
+                                        ? 'zGbnIq_credentialDotConfigured'
+                                        : 'zGbnIq_credentialDotMissing',
+                                    )}
+                                  />
                                   <span className="zGbnIq_rowName">
                                     {dev.label}
                                   </span>
                                   <span className="zGbnIq_rowTag">
-                                    {isCurrent
-                                      ? '当前设备 · RSA 加密已就绪'
-                                      : '已自动绑定 · 自动重连'}
+                                    {dev.connected
+                                      ? '在线连接中（RSA 签名心跳已验证）'
+                                      : '已绑定密钥 · 当前未建立活动连接'}
                                   </span>
                                 </div>
                                 <div className="zGbnIq_rowActions">
@@ -5329,12 +5374,13 @@ export function CAYWApp({ env } = {}) {
                                   marginTop: 4,
                                 }}
                               >
-                                {`设备 ID：${dev.device_id} · 接入方式：${dev.device_address || '自动出站连接'} · 已与当前 Server 完成 RSA 自动绑定`}
+                                {`设备 ID：${dev.device_id} · 设备公钥指纹：${dev.device_fingerprint} · 握手单号：${dev.handshake_bind_id || '已核验'}`}
                               </div>
                             </div>
                           );
                         })}
                       </div>
+                      )}
                     </div>
 
                     {/* Rule 3: Web <-> Server Default Account Login & Password Change */}
@@ -7288,8 +7334,10 @@ export function CAYWApp({ env } = {}) {
             typeof window !== 'undefined' && window.location?.origin
               ? window.location.origin
               : 'http://127.0.0.1:4321';
-          const bindCmd = `curl -fsSL ${originUrl}/api/bind | sh`;
-          const cliBindCmd = `cayw bind --server ${originUrl}`;
+          const qs = s.pendingBindId ? `?bind_id=${s.pendingBindId}` : '';
+          const flag = s.pendingBindId ? ` --bind-id ${s.pendingBindId}` : '';
+          const bindCmd = `curl -fsSL "${originUrl}/api/bind${qs}" | sh`;
+          const cliBindCmd = `cayw bind --server ${originUrl}${flag}`;
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <p
@@ -7300,7 +7348,7 @@ export function CAYWApp({ env } = {}) {
                   lineHeight: 1.5,
                 }}
               >
-                复制下方命令并在目标设备（Device）的命令行终端中执行，设备将自动与当前 Server 生成并交换 RSA 密钥完成一次性永久绑定，后续自动通过 RSA 加密连接，无需再次处理。
+                复制下方命令并在目标设备（Device）的命令行终端中执行。Device 将在本地独立生成 RSA 密钥对（私钥不离开设备），并完成“公钥上报 → 服务端 RSA 加密挑战 → 设备端私钥解密与 RSA 签名确认”的真实握手后才会完成绑定。
               </p>
 
               <div
@@ -7376,10 +7424,12 @@ export function CAYWApp({ env } = {}) {
                     <div className="zGbnIq_rowIdentity">
                       <StateDot state="done" />
                       <span className="zGbnIq_rowName">
-                        {`✓ 已自动绑定设备：${s.lastCreatedDevice.label}`}
+                        {`✓ 已完成跨进程 RSA 握手绑定：${s.lastCreatedDevice.label}`}
                       </span>
                       <span className="zGbnIq_rowTag">
-                        RSA 加密连接已就绪
+                        {s.lastCreatedDevice.connected
+                          ? '双向挑战核验通过 · 设备在线'
+                          : '双向挑战核验通过 · 已登记公钥'}
                       </span>
                     </div>
                   </div>
@@ -7390,7 +7440,7 @@ export function CAYWApp({ env } = {}) {
                       marginTop: 6,
                     }}
                   >
-                    {`设备 ID：${s.lastCreatedDevice.device_id} · 已完成一次性 RSA 永久绑定，后续自动重连无需处理。`}
+                    {`设备 ID：${s.lastCreatedDevice.device_id} · 设备端公钥指纹：${s.lastCreatedDevice.device_fingerprint}`}
                   </div>
                 </div>
               ) : (
@@ -7408,7 +7458,9 @@ export function CAYWApp({ env } = {}) {
                 >
                   <StateDot state="ongoing" />
                   <span>
-                    正在等待命令行执行绑定命令…（在终端粘贴回车后将自动绑定并显示在此处）
+                    {s.pendingBindPhase === 'challenge_issued'
+                      ? '已收到 Device 公钥并下发 RSA 加密挑战，正在等待 Device 私钥解密与签名确认…'
+                      : '等待远端 Device 执行命令并发起 RSA 挑战握手（当前未绑定、未连接）…'}
                   </span>
                 </div>
               )}
