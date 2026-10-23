@@ -1,6 +1,6 @@
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
-    ModelRequest, Provider, StopReason, ToolCall,
+    ModelRequest, Provider, StopReason, ToolCall, UsageStatus,
 };
 use cayw_cells::{CellPage, CellStatus};
 use cayw_core::{CapabilityOutcome, CoreEvent};
@@ -49,8 +49,17 @@ async fn next(receiver: &mut mpsc::UnboundedReceiver<Round>) -> Round {
         .unwrap()
         .unwrap()
 }
+fn reported_answer(model: &Model) -> AssistantMessage {
+    let mut answer = AssistantMessage::new(model);
+    // Fixed synthetic counters exercise accounting, not tokenization or billing.
+    answer.usage.input = 4;
+    answer.usage.output = 4;
+    answer.usage.update_total();
+    answer.usage_status = UsageStatus::Reported;
+    answer
+}
 fn tool(round: Round, id: &str, args: Value) {
-    let mut answer = AssistantMessage::new(&round.request.model);
+    let mut answer = reported_answer(&round.request.model);
     answer.stop_reason = StopReason::ToolUse;
     answer
         .content
@@ -159,7 +168,7 @@ async fn another_runtime_identical_write_changes_generation_for_two_original_cel
     );
     let round = next(&mut receiver).await;
     assert_eq!(page(&round).status, CellStatus::Completed);
-    let mut answer = AssistantMessage::new(&round.request.model);
+    let mut answer = reported_answer(&round.request.model);
     answer.stop_reason = StopReason::Stop;
     answer
         .content

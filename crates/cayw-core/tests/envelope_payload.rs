@@ -148,6 +148,22 @@ fn custom_versioned_payload_and_scalar_payloads_round_trip() {
 }
 
 #[test]
+fn provider_usage_fields_obey_the_existing_json_leaf_limits() {
+    for value in [
+        nested(33),
+        Value::Array(vec![Value::Null; 4096]),
+        Value::String("x".repeat(65537)),
+    ] {
+        let mut message = cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "usage"));
+        message.usage_fields.insert("reported".into(), value);
+        assert!(
+            ProtocolEnvelope::new("usage", message).is_err(),
+            "raw usage fields must not bypass Core payload limits"
+        );
+    }
+}
+
+#[test]
 fn decode_and_new_apply_the_same_json_leaf_limits() {
     for data in [
         nested(33),

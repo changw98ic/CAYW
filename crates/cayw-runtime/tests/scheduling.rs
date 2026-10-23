@@ -74,8 +74,9 @@ async fn sessions_start_in_fifo_order_and_cancelled_queued_session_never_starts(
         .await
         .unwrap();
     let b_rt = rt.clone();
-    let b_id = ids[1].clone();
-    let b = tokio::spawn(async move { b_rt.prompt(&b_id, "b", CancellationToken::new()).await });
+    let admitted_b = rt.enqueue(&ids[1], "b").unwrap();
+    let b_id = admitted_b.id.clone();
+    let b = tokio::spawn(async move { b_rt.resume(&b_id, CancellationToken::new()).await });
     wait_queued(&rt, 1).await;
     let c_rt = rt.clone();
     let c_id = ids[2].clone();
@@ -90,7 +91,8 @@ async fn sessions_start_in_fifo_order_and_cancelled_queued_session_never_starts(
             .await,
         Err(RuntimeError::Busy)
     ));
-    rt.cancel(&ids[1]).unwrap();
+    rt.cancel(&rt.task(&admitted_b.id).unwrap().cancel_target())
+        .unwrap();
     assert!(matches!(b.await.unwrap(), Err(RuntimeError::Cancelled)));
     release.add_permits(1);
     a.await.unwrap().unwrap();

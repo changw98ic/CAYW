@@ -11,7 +11,22 @@ async fn call(ws: &Workspace, name: &str, args: Value) -> Result<Value, Capabili
     ws.execute(name, &args, CancellationToken::new()).await
 }
 fn open(temp: &tempfile::TempDir, limits: Limits) -> Workspace {
-    Workspace::open(temp.path().canonicalize().unwrap(), limits).unwrap()
+    // Same fork-inherited flock busy window Host::open_workspace retries.
+    let root = temp.path().canonicalize().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match Workspace::open(&root, limits.clone()) {
+            Ok(workspace) => return workspace,
+            Err(error)
+                if !error.outcome_unknown
+                    && error.message.starts_with("workspace is busy:")
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("workspace open failed: {error:?}"),
+        }
+    }
 }
 
 #[tokio::test]

@@ -76,10 +76,16 @@ fn new_prompt_is_dispatched_once_and_cancel_does_not_claim_a_terminal_state() {
             .is_empty()
     );
     let cancel = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(
+        cancel.is_empty(),
+        "early stop waits for this prompt's Task ID"
+    );
+    let cancel = app.task_admitted("s1", "original-task");
     assert_eq!(
         cancel,
         vec![Command::Cancel {
-            session_id: "s1".into()
+            session_id: "s1".into(),
+            task_id: "original-task".into(),
         }]
     );
     assert!(!app.selected().unwrap().can_prompt());
@@ -409,9 +415,10 @@ fn rpc_commands_encode_shared_contract_for_create_prompt_approval_and_confirmed_
         (
             Command::Cancel {
                 session_id: "s1".into(),
+                task_id: "original-task".into(),
             },
             "session.cancel",
-            json!({"session_id":"s1"}),
+            json!({"session_id":"s1","task_id":"original-task"}),
         ),
         (
             Command::Decide {

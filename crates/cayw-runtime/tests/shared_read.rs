@@ -1,6 +1,6 @@
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
-    ModelRequest, Provider, StopReason, ToolCall,
+    ModelRequest, Provider, StopReason, ToolCall, UsageStatus,
 };
 use cayw_cells::{CellPage, CellStatus, IntentStatus, SqliteJournal};
 use cayw_core::{CapabilityOutcome, CoreEvent};
@@ -39,8 +39,17 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Round>) -> Round {
         .unwrap()
         .unwrap()
 }
+fn reported_reply(model: &Model) -> AssistantMessage {
+    let mut reply = AssistantMessage::new(model);
+    // Fixed synthetic counters exercise accounting, not tokenization or billing.
+    reply.usage.input = 4;
+    reply.usage.output = 4;
+    reply.usage.update_total();
+    reply.usage_status = UsageStatus::Reported;
+    reply
+}
 fn tool(round: Round, id: &str, args: Value) {
-    let mut reply = AssistantMessage::new(&round.request.model);
+    let mut reply = reported_reply(&round.request.model);
     reply
         .content
         .push(Content::ToolCall(ToolCall::new(id, "execute_code", args)));
@@ -59,7 +68,7 @@ fn page(round: &Round) -> CellPage {
     checked_page(round, false)
 }
 fn finish(round: Round) {
-    let mut reply = AssistantMessage::new(&round.request.model);
+    let mut reply = reported_reply(&round.request.model);
     reply.content.push(Content::text("done"));
     reply.stop_reason = StopReason::Stop;
     round.reply.send(reply).unwrap();

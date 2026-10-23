@@ -1,462 +1,163 @@
-//! Explicit application-owned local MCP fixture client. This is intentionally
-//! scoped to MCP 2025-11-25 stdio; the bridge library contains no transport.
+//! Test/example utilities using the reusable host-owned MCP stdio source.
+//! The fixed Skill below is only a Registry fixture, not file-loader evidence.
 #![allow(dead_code)]
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_bridge::*;
 use cayw_codemode::{CapabilityError, CapabilityHost, CodeMode, Limits as CodeLimits};
 use cayw_host::{AuditSink, ExternalHost, Host, HostConfig, PermissionGate};
+use cayw_sources::{StdioConfig, StdioControl, StdioSnapshot, StdioSource};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
-};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    sync::{Notify, mpsc, oneshot},
 };
 
-pub const PROTOCOL: &str = "2025-11-25";
+pub const PROTOCOL: &str = cayw_sources::MCP_PROTOCOL;
 pub const SKILL: &str = "# Local addition\nUse the add tool with two integer arguments.\n";
-const FRAME_LIMIT: usize = 512 * 1024;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Default)]
-pub struct Stats {
-    pub spawned: AtomicUsize,
-    pub initializations: AtomicUsize,
-    pub tool_calls: AtomicUsize,
-    pub skill_reads: AtomicUsize,
-    pub cancellations: AtomicUsize,
-    pub progress: AtomicUsize,
-    pub ignored_late: AtomicUsize,
-    pub disconnected: AtomicUsize,
+pub struct Counter {
+    control: Arc<OnceLock<StdioControl>>,
+    value: fn(&StdioSnapshot) -> u64,
 }
-enum CommandMessage {
-    Request {
-        id: u64,
-        method: String,
-        params: Value,
-        reply: oneshot::Sender<Result<Value, CapabilityError>>,
-    },
-    Cancel(u64),
-    Notify {
-        method: String,
-        params: Value,
-        reply: oneshot::Sender<Result<(), CapabilityError>>,
-    },
-}
-struct Transport {
-    commands: mpsc::Sender<CommandMessage>,
-    close: CancellationToken,
-    finished: Arc<Notify>,
-    next: AtomicU64,
-    stats: Arc<Stats>,
-    owner_key: String,
-}
-impl Drop for Transport {
-    fn drop(&mut self) {
-        self.close.cancel();
+impl Counter {
+    pub fn load(&self, _: Ordering) -> usize {
+        self.control
+            .get()
+            .map_or(0, |control| (self.value)(&control.snapshot()) as usize)
     }
 }
+pub struct Stats {
+    control: Arc<OnceLock<StdioControl>>,
+    pub spawned: Counter,
+    pub connections: Counter,
+    pub tool_calls: Counter,
+    pub skill_reads: AtomicUsize,
+    pub resource_reads: Counter,
+    pub cancellations: Counter,
+    pub progress: Counter,
+    pub ignored_late: Counter,
+    pub disconnected: Counter,
+}
+impl Default for Stats {
+    fn default() -> Self {
+        let control = Arc::new(OnceLock::new());
+        let counter = |value| Counter {
+            control: control.clone(),
+            value,
+        };
+        Self {
+            spawned: counter(|state| state.spawned),
+            connections: counter(|state| state.spawned),
+            tool_calls: counter(|state| state.tool_calls),
+            resource_reads: counter(|state| state.resource_reads),
+            cancellations: counter(|state| state.cancellations),
+            progress: counter(|state| state.progress),
+            ignored_late: counter(|state| state.ignored_late),
+            disconnected: counter(|state| state.disconnected),
+            skill_reads: AtomicUsize::new(0),
+            control,
+        }
+    }
+}
+/// Shared wrappers deliberately test Registry duplicate physical ownership.
+/// Ordinary host applications move StdioSource::into_parts() directly to Registry.
 #[derive(Clone)]
 pub struct LocalClient {
-    transport: Arc<Transport>,
+    source: Arc<dyn SourceHandle>,
+    manifest: Manifest,
+    control: StdioControl,
+    stats: Arc<Stats>,
 }
 impl LocalClient {
-    /// Caller supplies the absolute executable and working directory explicitly.
-    /// The fixture child inherits no environment and is never launched via shell.
     pub async fn spawn(
         program: &Path,
         directory: &Path,
         stats: Arc<Stats>,
     ) -> Result<Self, CapabilityError> {
-        if !program.is_absolute() || !directory.is_absolute() {
-            return Err(CapabilityError::new("fixture paths must be absolute"));
+        let prepared = StdioSource::connect(
+            StdioConfig::new(program, directory),
+            CancellationToken::new(),
+        )
+        .await?;
+        let control = prepared.control();
+        if stats.control.set(control.clone()).is_err() {
+            control.close();
+            control.wait_closed().await;
+            return Err(CapabilityError::new(
+                "fixture statistics already own a source",
+            ));
         }
-        let mut child = Command::new(program)
-            .current_dir(directory)
-            .env_clear()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| CapabilityError::new(e.to_string()))?;
-        stats.spawned.fetch_add(1, Ordering::Relaxed);
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (commands, receiver) = mpsc::channel(32);
-        let close = CancellationToken::new();
-        let finished = Arc::new(Notify::new());
-        let client = Self {
-            transport: Arc::new(Transport {
-                commands,
-                close: close.clone(),
-                finished: finished.clone(),
-                next: AtomicU64::new(1),
-                stats: stats.clone(),
-                owner_key: format!("local-fixture-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
-            }),
-        };
-        // The actor owns this one child and its streams. Closing the handle
-        // cancels the actor; the child is killed/reaped rather than abandoned.
-        tokio::spawn(async move {
-            let mut writer = stdin;
-            let mut reader = BufReader::new(stdout);
-            let mut pending: BTreeMap<u64, oneshot::Sender<Result<Value, CapabilityError>>> =
-                BTreeMap::new();
-            let mut receiver = receiver;
-            let mut line = Vec::new();
-            let outcome: Result<(), CapabilityError> = async {
-                loop {
-                    let mut bounded_reader = (&mut reader).take((FRAME_LIMIT + 1 - line.len()) as u64);
-                    tokio::select! {
-                        biased;
-                        _ = close.cancelled() => break,
-                        message = receiver.recv() => match message {
-                            Some(CommandMessage::Request { id, method, params, reply }) => {
-                                if reply.is_closed() { continue; }
-                                if pending.insert(id, reply).is_some() { return Err(CapabilityError::unknown("duplicate fixture request ID")); }
-                                let value = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-                                send(&mut writer, &value, &close).await?;
-                            }
-                            Some(CommandMessage::Notify { method, params, reply }) => {
-                                let result = send(&mut writer, &json!({"jsonrpc":"2.0","method":method,"params":params}), &close).await;
-                                let failed = result.is_err();
-                                let _ = reply.send(result);
-                                if failed { return Err(CapabilityError::unknown("fixture notification send failed")); }
-                            }
-                            Some(CommandMessage::Cancel(id)) => {
-                                if pending.remove(&id).is_some() {
-                                    stats.cancellations.fetch_add(1, Ordering::Relaxed);
-                                    send(&mut writer, &json!({"jsonrpc":"2.0","method":"notifications/cancelled",
-                                        "params":{"requestId":id,"reason":"application cancelled or dropped wait"}}), &close).await?;
-                                }
-                            }
-                            None => break,
-                        },
-                        bytes = bounded_reader.read_until(b'\n', &mut line) => {
-                            let bytes = bytes.map_err(|e| CapabilityError::unknown(e.to_string()))?;
-                            if bytes == 0 || line.len() > FRAME_LIMIT { return Err(CapabilityError::unknown("fixture closed or frame bound exceeded")); }
-                            if !line.ends_with(b"\n") { continue; }
-                            let value: Value = serde_json::from_slice(&line).map_err(|_| CapabilityError::unknown("invalid fixture JSON"))?;
-                            line.clear();
-                            if value["jsonrpc"] != "2.0" { return Err(CapabilityError::unknown("invalid JSON-RPC version")); }
-                            if let Some(id) = value.get("id").and_then(Value::as_u64) {
-                                if let Some(reply) = pending.remove(&id) {
-                                    let result = match (value.get("result"), value.get("error")) {
-                                        (Some(result), None) => Ok(result.clone()),
-                                        // This controlled fixture rejects before executing
-                                        // on JSON-RPC errors. Tool execution errors would
-                                        // need their own effect reconciliation contract.
-                                        (None, Some(_)) => Err(CapabilityError::new("fixture rejected request before execution")),
-                                        _ => Err(CapabilityError::unknown("invalid fixture response envelope")),
-                                    };
-                                    let _ = reply.send(result);
-                                } else { stats.ignored_late.fetch_add(1, Ordering::Relaxed); }
-                            } else if value["method"] == "notifications/progress" {
-                                stats.progress.fetch_add(1, Ordering::Relaxed);
-                                // Progress is observational; never resolves a request,
-                                // changes a registry policy, or authorizes execution.
-                            } else if value["method"] != "notifications/initialized" {
-                                return Err(CapabilityError::unknown("unsupported fixture message"));
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            }.await;
-            close.cancel();
-            for (_, reply) in pending {
-                let _ = reply.send(Err(CapabilityError::unknown("fixture transport ended")));
-            }
-            let _ = outcome;
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            stats.disconnected.fetch_add(1, Ordering::Relaxed);
-            finished.notify_waiters();
+        let (mut manifest, source) = prepared.into_parts();
+        manifest.skills.push(SkillSpec {
+            name: "addition".into(),
+            description: "Fixed test application Skill handle".into(),
+            content_sha256: content_sha256(SKILL),
         });
-        let initialized = client
-            .rpc(
-                "initialize",
-                json!({"protocolVersion":PROTOCOL,
-            "capabilities":{}, "clientInfo":{"name":"cayw-local-example","version":"1"}}),
-                CancellationToken::new(),
-            )
-            .await?;
-        if initialized["protocolVersion"] != PROTOCOL
-            || !initialized["capabilities"]["tools"].is_object()
-            || !initialized["capabilities"]["resources"].is_object()
-        {
-            client.close();
-            return Err(CapabilityError::new("fixture protocol mismatch"));
-        }
-        // Notification is sent through the same actor as requests, preserving order.
-        client.notify_initialized().await?;
-        client
-            .transport
-            .stats
-            .initializations
-            .fetch_add(1, Ordering::Relaxed);
-        Ok(client)
-    }
-    async fn notify_initialized(&self) -> Result<(), CapabilityError> {
-        let (reply, receiver) = oneshot::channel();
-        self.transport
-            .commands
-            .send(CommandMessage::Notify {
-                method: "notifications/initialized".into(),
-                params: json!({}),
-                reply,
-            })
-            .await
-            .map_err(|_| CapabilityError::new("fixture actor unavailable"))?;
-        receiver
-            .await
-            .map_err(|_| CapabilityError::unknown("fixture initialization notification lost"))?
+        Ok(Self {
+            source: Arc::from(source),
+            manifest,
+            control,
+            stats,
+        })
     }
     pub fn close(&self) {
-        self.transport.close.cancel();
+        self.control.close();
     }
     pub async fn wait_closed(&self) {
-        let notified = self.transport.finished.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if self.transport.stats.disconnected.load(Ordering::Acquire) == 0 {
-            notified.await;
-        }
-    }
-    pub async fn rpc(
-        &self,
-        method: &str,
-        params: Value,
-        cancel: CancellationToken,
-    ) -> Result<Value, CapabilityError> {
-        if cancel.is_cancelled() || self.transport.close.is_cancelled() {
-            return Err(CapabilityError::new("fixture cancelled before send"));
-        }
-        let id = self.transport.next.fetch_add(1, Ordering::Relaxed);
-        if id == u64::MAX {
-            self.close();
-            return Err(CapabilityError::new("fixture IDs exhausted"));
-        }
-        let (reply, receiver) = oneshot::channel();
-        let mut guard = Pending {
-            id,
-            client: self.clone(),
-            sent: false,
-            done: false,
-            initialize: method == "initialize",
-        };
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(CapabilityError::new("fixture cancelled before enqueue")),
-            _ = self.transport.close.cancelled() => return Err(CapabilityError::new("fixture disconnected before enqueue")),
-            result = self.transport.commands.send(CommandMessage::Request { id, method: method.into(), params, reply }) => {
-                result.map_err(|_| CapabilityError::new("fixture actor unavailable"))?;
-                guard.sent = true;
-            }
-        }
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(CapabilityError::unknown("fixture request cancelled after enqueue")),
-            _ = self.transport.close.cancelled() => Err(CapabilityError::unknown("fixture disconnected after enqueue")),
-            _ = tokio::time::sleep(Duration::from_secs(5)) => Err(CapabilityError::unknown("fixture request deadline")),
-            result = receiver => result.unwrap_or_else(|_| Err(CapabilityError::unknown("fixture response lost"))),
-        };
-        if result.is_ok() || result.as_ref().is_err_and(|e| !e.outcome_unknown) {
-            guard.done = true;
-        }
-        result
+        self.control.wait_closed().await;
     }
     pub async fn manifest(&self) -> Result<Manifest, CapabilityError> {
-        let listed = self
-            .rpc("tools/list", json!({}), CancellationToken::new())
-            .await?;
-        if listed.get("nextCursor").is_some() {
-            return Err(CapabilityError::new("fixture pagination unsupported"));
-        }
-        let tools = listed["tools"]
-            .as_array()
-            .ok_or_else(|| CapabilityError::new("missing tools"))?
-            .iter()
-            .map(|tool| {
-                Ok(ToolSpec {
-                    name: tool["name"]
-                        .as_str()
-                        .ok_or_else(|| CapabilityError::new("missing tool name"))?
-                        .into(),
-                    description: tool["description"].as_str().unwrap_or("").into(),
-                    input_schema: tool["inputSchema"].clone(),
-                    output_schema: tool.get("outputSchema").cloned(),
-                })
-            })
-            .collect::<Result<Vec<_>, CapabilityError>>()?;
-        let resources = self
-            .rpc("resources/list", json!({}), CancellationToken::new())
-            .await?;
-        if resources["resources"][0]["uri"] != "fixture://local/addition" {
-            return Err(CapabilityError::new("unexpected fixture resource"));
-        }
-        let resource = self
-            .rpc(
-                "resources/read",
-                json!({"uri":"fixture://local/addition"}),
-                CancellationToken::new(),
-            )
-            .await?;
-        if resource["contents"][0]["uri"] != "fixture://local/addition"
-            || resource["contents"][0]["text"] != SKILL
-        {
-            return Err(CapabilityError::new("fixture resource mismatch"));
-        }
-        Ok(Manifest {
-            tools,
-            skills: vec![SkillSpec {
-                name: "addition".into(),
-                description: "Fixed application-supplied local addition instructions".into(),
-                content_sha256: content_sha256(SKILL),
-            }],
-            search: false,
-        })
+        Ok(self.manifest.clone())
     }
     pub fn handle(&self) -> LocalHandle {
         LocalHandle {
             client: self.clone(),
-            owner_key: self.transport.owner_key.clone(),
-            skill: Arc::from(SKILL),
         }
     }
 }
-async fn send(
-    writer: &mut tokio::process::ChildStdin,
-    value: &Value,
-    close: &CancellationToken,
-) -> Result<(), CapabilityError> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|_| CapabilityError::new("fixture serialization failed"))?;
-    if bytes.len() > FRAME_LIMIT {
-        return Err(CapabilityError::new("fixture output bound exceeded"));
-    }
-    bytes.push(b'\n');
-    tokio::select! {
-        biased;
-        _ = close.cancelled() => Err(CapabilityError::unknown("fixture closed while writing")),
-        _ = tokio::time::sleep(Duration::from_secs(5)) => Err(CapabilityError::unknown("fixture write deadline")),
-        result = async { writer.write_all(&bytes).await?; writer.flush().await } => result.map_err(|_| CapabilityError::unknown("fixture write failed")),
-    }
-}
-struct Pending {
-    id: u64,
-    client: LocalClient,
-    sent: bool,
-    done: bool,
-    initialize: bool,
-}
-impl Drop for Pending {
-    fn drop(&mut self) {
-        if self.sent
-            && !self.done
-            && (self.initialize
-                || self
-                    .client
-                    .transport
-                    .commands
-                    .try_send(CommandMessage::Cancel(self.id))
-                    .is_err())
-        {
-            self.client.close();
-        }
-    }
-}
-
 pub struct LocalHandle {
     client: LocalClient,
-    owner_key: String,
-    skill: Arc<str>,
 }
 #[async_trait]
 impl SourceHandle for LocalHandle {
     fn ownership_key(&self) -> &str {
-        &self.owner_key
+        self.client.source.ownership_key()
     }
     async fn request(
         &self,
         request: SourceRequest,
         cancel: CancellationToken,
     ) -> Result<SourceReply, CapabilityError> {
-        let value = match request.operation {
-            SourceOperation::InvokeTool { name, arguments } => {
-                self.client
-                    .transport
-                    .stats
-                    .tool_calls
-                    .fetch_add(1, Ordering::Relaxed);
-                let result = self
-                    .client
-                    .rpc(
-                        "tools/call",
-                        json!({"name":name,"arguments":arguments,
-                    "_meta":{"progressToken":format!("bridge-{}",request.key.id)}}),
-                        cancel,
-                    )
-                    .await?;
-                if result["isError"] == true {
-                    return Err(CapabilityError::unknown(
-                        "fixture tool error with unconfirmed effect",
-                    ));
-                }
-                result["structuredContent"].clone()
+        if let SourceOperation::ReadSkill { name } = &request.operation {
+            if name != "addition" || cancel.is_cancelled() {
+                return Err(CapabilityError::new(
+                    "fixture skill unavailable or cancelled",
+                ));
             }
-            SourceOperation::ReadSkill { name } if name == "addition" => {
-                if cancel.is_cancelled() {
-                    return Err(CapabilityError::new("skill read cancelled"));
-                }
-                self.client
-                    .transport
-                    .stats
-                    .skill_reads
-                    .fetch_add(1, Ordering::Relaxed);
-                Value::String(self.skill.to_string())
-            }
-            _ => return Err(CapabilityError::new("fixture operation unavailable")),
-        };
-        if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > request.max_result_bytes) {
-            return Err(CapabilityError::unknown(
-                "fixture reply exceeds requested budget",
-            ));
+            self.client.stats.skill_reads.fetch_add(1, Ordering::AcqRel);
+            return Ok(SourceReply {
+                key: request.key,
+                value: json!(SKILL),
+            });
         }
-        Ok(SourceReply {
-            key: request.key,
-            value,
-        })
+        self.client.source.request(request, cancel).await
     }
     fn disconnect(&self) {
-        self.client.close();
+        self.client.source.disconnect();
     }
 }
 
+#[derive(Default)]
 pub struct Policy {
     pub hidden: Mutex<BTreeSet<(u8, String)>>,
     pub denied: Mutex<BTreeSet<String>>,
     pub calls: Mutex<Vec<AccessRequest>>,
-}
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            hidden: Mutex::new(BTreeSet::new()),
-            denied: Mutex::new(BTreeSet::new()),
-            calls: Mutex::new(vec![]),
-        }
-    }
 }
 #[async_trait]
 impl RegistryPolicy for Policy {
@@ -528,7 +229,7 @@ impl AuditSink for Audit {
             "settle:{id}:{}",
             match result {
                 Ok(_) => "success",
-                Err(e) if e.outcome_unknown => "unknown",
+                Err(error) if error.outcome_unknown => "unknown",
                 Err(_) => "failure",
             }
         ));
@@ -542,8 +243,7 @@ impl AuditSink for Audit {
         Ok(())
     }
 }
-/// Fixture-only runtime adapter. Production Runtime must derive these fields
-/// from its own durable execution state and provide real DispatchJournal storage.
+/// Test-only storage; production Runtime supplies its durable per-call journal.
 #[derive(Default)]
 pub struct FixtureJournal {
     pub records: Mutex<Vec<Value>>,
@@ -590,7 +290,7 @@ pub fn invocation(sequence: u64) -> InvocationContext {
     }
 }
 pub struct FixtureRuntime {
-    bridge: Bridge,
+    pub bridge: Bridge,
     next: AtomicU64,
     pub journal: Arc<FixtureJournal>,
 }

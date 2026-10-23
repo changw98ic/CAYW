@@ -27,13 +27,28 @@ fn main() {
         return;
     }
     match std::env::args().nth(1).as_deref() {
+        // Publish the effect marker before the pid readiness file so observers
+        // that wait on effect.pid never race a missing "effect" path.
         Some("effect") => {
-            fs::write("effect.pid", std::process::id().to_string()).unwrap();
             fs::write("effect", "started").unwrap();
+            fs::write("effect.pid", std::process::id().to_string()).unwrap();
+        }
+        Some("terminal") => {
+            use std::io::IsTerminal;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "stdin": std::io::stdin().is_terminal(),
+                    "stdout": std::io::stdout().is_terminal(),
+                    "stderr": std::io::stderr().is_terminal(),
+                    "controlling_terminal": fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_ok(),
+                })
+            );
+            eprintln!("terminal-stderr");
         }
         Some("wait") => {
-            fs::write("effect.pid", std::process::id().to_string()).unwrap();
             fs::write("effect", "started").unwrap();
+            fs::write("effect.pid", std::process::id().to_string()).unwrap();
             loop {
                 std::thread::park_timeout(Duration::from_secs(1));
             }

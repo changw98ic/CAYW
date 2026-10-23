@@ -147,6 +147,51 @@ async fn diff_hunks_validates_headers_body_and_insertion_ranges() {
 }
 
 #[tokio::test]
+async fn diff_hunks_enforces_line_and_output_bounds_and_pre_cancel() {
+    let temp = tempfile::tempdir().unwrap();
+    let diff = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+    let line_limited = Workspace::open(
+        temp.path().canonicalize().unwrap(),
+        Limits {
+            max_tree_entries: 4,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let error = call(&line_limited, "code.diff_hunks", json!({"diff":diff}))
+        .await
+        .unwrap_err();
+    assert!(!error.outcome_unknown);
+    assert!(
+        error.message.contains("diff input line limit exceeded"),
+        "{error}"
+    );
+
+    let output_limited = Workspace::open(
+        temp.path().canonicalize().unwrap(),
+        Limits {
+            max_output_bytes: 24,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let error = call(&output_limited, "code.diff_hunks", json!({"diff":diff}))
+        .await
+        .unwrap_err();
+    assert!(!error.outcome_unknown);
+    assert!(error.message.contains("JSON byte budget"), "{error}");
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = line_limited
+        .execute("code.diff_hunks", &json!({"diff":diff}), cancel)
+        .await
+        .unwrap_err();
+    assert!(!error.outcome_unknown);
+    assert!(error.message.contains("cancelled"), "{error}");
+}
+
+#[tokio::test]
 async fn diff_hunks_rejects_malformed_counts_order_paths_and_trailing_body() {
     let temp = tempfile::tempdir().unwrap();
     let ws = Workspace::open(temp.path().canonicalize().unwrap(), Limits::default()).unwrap();

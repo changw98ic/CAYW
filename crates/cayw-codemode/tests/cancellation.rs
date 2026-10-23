@@ -93,10 +93,11 @@ impl CapabilityHost for Host {
     }
 }
 
-// Break caught: cancelling the VM drops a started Host before its asynchronous
-// cleanup and durable settlement can return, losing its actual known/unknown result.
+// Break caught: cancelling the VM or reaching the Host wait limit drops a started
+// Host before its asynchronous cleanup and durable settlement can return, losing
+// its actual known/unknown result.
 #[tokio::test]
-async fn cancellation_settles_the_same_host_before_return_and_starts_no_next_call() {
+async fn cancellation_or_host_wait_settles_the_same_host_before_return_and_starts_no_next_call() {
     for timed_out in [false, true] {
         for (reply, status, unknown) in [
             (Reply::Success, CallStatus::Succeeded, false),
@@ -108,7 +109,10 @@ async fn cancellation_settles_the_same_host_before_return_and_starts_no_next_cal
                 let mode = CodeMode::new(
                     host.clone(),
                     Limits {
+                        // A VM timeout only bounds computation, so the started Host
+                        // needs an explicit short host_wait to reach its own limit.
                         timeout: if timed_out { Duration::from_millis(50) } else { Duration::from_secs(5) },
+                        host_wait: if timed_out { Duration::from_millis(300) } else { Duration::from_secs(60) },
                         shutdown_grace: Duration::from_secs(1),
                         ..Limits::default()
                     },
@@ -150,20 +154,27 @@ async fn cancellation_settles_the_same_host_before_return_and_starts_no_next_cal
     }
 }
 
-// Break caught: returning immediately on cancellation never even polls cleanup;
-// waiting forever instead never returns the explicit unknown result.
+// Break caught: returning immediately on cancellation or the Host wait limit never
+// even polls cleanup; waiting forever instead never returns the explicit unknown result.
 #[tokio::test]
-async fn permanently_pending_host_gets_bounded_cleanup_then_explicit_unknown() {
+async fn permanently_pending_host_is_bounded_by_host_wait_then_explicit_unknown() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for timed_out in [false, true] {
             let host = Arc::new(Host::new(Reply::Pending));
             let mode = CodeMode::new(
                 host.clone(),
                 Limits {
+                    // A VM timeout only bounds computation, so the started Host
+                    // needs an explicit short host_wait to reach its own limit.
                     timeout: if timed_out {
                         Duration::from_millis(50)
                     } else {
                         Duration::from_secs(5)
+                    },
+                    host_wait: if timed_out {
+                        Duration::from_millis(300)
+                    } else {
+                        Duration::from_secs(60)
                     },
                     shutdown_grace: Duration::from_millis(25),
                     ..Limits::default()

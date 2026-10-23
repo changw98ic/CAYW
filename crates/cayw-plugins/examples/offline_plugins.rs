@@ -1,4 +1,4 @@
-use cayw_plugins::{evaluation::*, observer::*, strongflow::*, *};
+use cayw_plugins::{fusion::*, observer::*, strongflow::*, *};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
