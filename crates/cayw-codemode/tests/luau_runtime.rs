@@ -504,7 +504,7 @@ async fn infinite_cpu_loop_is_stopped_by_instruction_checkpoints() {
 }
 
 #[tokio::test]
-async fn cpu_loop_and_pending_host_call_share_the_wall_time_limit() {
+async fn cpu_loop_and_pending_host_call_use_their_own_deadlines() {
     let (_, code) = mode(Limits {
         instruction_budget: u64::MAX,
         timeout: Duration::from_millis(40),
@@ -521,6 +521,7 @@ async fn cpu_loop_and_pending_host_call_share_the_wall_time_limit() {
     let (host, code) = mode(Limits {
         instruction_budget: u64::MAX,
         timeout: Duration::from_secs(1),
+        host_wait: Duration::from_secs(1),
         shutdown_grace: Duration::from_millis(100),
         ..Limits::default()
     });
@@ -780,14 +781,15 @@ async fn agent_stops_after_unknown_even_when_its_error_payload_exceeds_the_budge
 }
 
 #[tokio::test]
-async fn agent_keeps_unknown_when_code_times_out_waiting_for_a_started_host_call() {
+async fn agent_keeps_unknown_when_host_wait_times_out_for_a_started_host_call() {
     let (agent, host, provider) = agent_fixture(
         "return cayw.call('hang', {})",
         Limits {
-            // Budget must cover Luau setup under loaded macOS CI, then expire while
-            // hang remains pending. Sub-100ms hair triggers race setup with timeout
-            // and pop the call as a known failure before the first host poll.
+            // The VM timeout only bounds computation and must cover Luau setup
+            // under loaded macOS CI. The started Host wait is bounded separately
+            // by host_wait, which expires while hang remains pending.
             timeout: Duration::from_secs(1),
+            host_wait: Duration::from_millis(300),
             shutdown_grace: Duration::from_millis(100),
             ..Limits::default()
         },
@@ -795,7 +797,7 @@ async fn agent_keeps_unknown_when_code_times_out_waiting_for_a_started_host_call
     let prompt = agent.prompt(Message::user("run code"));
     tokio::pin!(prompt);
     // Prove the host call started before asserting unknown settlement. If the
-    // wall clock expires during setup, call_host pops the unstarted call.
+    // Host wait expires during setup, call_host pops the unstarted call.
     tokio::select! {
         result = &mut prompt => panic!(
             "agent returned before hang host started (timeout raced with setup): {result:?}"

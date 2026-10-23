@@ -18,6 +18,7 @@ sha2 = "0.10.9"
 tokio.workspace = true
 
 [dev-dependencies]
+cayw-sources = { path = "../cayw-sources", version = "0.1.0" }
 cayw-core = { path = "../cayw-core", version = "0.1.0" }
 cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
 futures.workspace = true

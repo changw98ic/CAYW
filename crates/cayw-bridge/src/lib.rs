@@ -28,19 +28,24 @@
 //! filesystem handles, network requests or retries. Source identity/version/origin
 //! are application assertions, not proof of trust.
 //!
-//! The `local_mcp` example and tests use one explicitly spawned local MCP
-//! **2025-11-25 stdio** fixture and fixed application-supplied Skill content. They
-//! exercise initialize/initialized, tool and resource discovery/read, cancellation,
-//! late replies and generation fencing. This fixture is not a general transport:
-//! HTTP/SSE, auth, paging, subscriptions, server requests and MCP 2026-07-28 are
-//! outside its scope. Example persistence is test-only. macOS is locally tested;
-//! Linux and Windows execution remain unverified.
+//! `mcp.resources.list` reads only manifest metadata and never polls a source.
+//! `mcp.resources.read` dispatches one journaled `ReadResource` request and
+//! validates the returned URI, MIME type and payload against the pinned manifest.
+//! Resource URIs are opaque source-scoped keys. They are never resolved, decoded
+//! or opened as local filesystem paths.
+//!
+//! The `local_mcp` example uses the explicit host-owned `cayw-sources` MCP
+//! **2026-07-28 stdio** adapter. Every request carries version/capabilities;
+//! there is no initialization handshake. Tool/resource discovery, cancellation,
+//! late replies and generation fencing use that one transport. Fixed Skill text
+//! in Bridge utilities is a Registry fixture, not evidence of file loading.
+//! Real Markdown files are loaded by the separate host adapter. HTTP/SSE, paging,
+//! subscriptions and server requests are outside this local adapter's scope.
 //!
 //! Protocol references:
-//! <https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle>,
-//! <https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation>,
-//! <https://modelcontextprotocol.io/specification/2025-11-25/server/tools>,
-//! <https://modelcontextprotocol.io/specification/2025-11-25/server/resources>.
+//! <https://modelcontextprotocol.io/specification/2026-07-28/basic>,
+//! <https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation>,
+//! <https://modelcontextprotocol.io/specification/2026-07-28/server/tools>.
 
 mod bounds;
 mod model;
@@ -50,7 +55,7 @@ pub use bounds::content_sha256;
 pub use model::*;
 pub use registry::Registry;
 
-use bounds::{OwnedJson, failure, name};
+use bounds::{OwnedJson, failure, name, resource_uri};
 use cayw_ai::CancellationToken;
 use cayw_codemode::CapabilityError;
 use cayw_host::ExternalHost;
@@ -115,6 +120,17 @@ struct Search {
     path: Option<String>,
     limit: Option<u64>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceList {
+    server: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceReadArgs {
+    server: String,
+    uri: String,
+}
 
 fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, CapabilityError> {
     serde_json::from_value(value).map_err(|_| failure("invalid bridge capability arguments"))
@@ -142,6 +158,8 @@ impl Bridge {
                 | "skills.list"
                 | "skills.read"
                 | "search.query"
+                | "mcp.resources.list"
+                | "mcp.resources.read"
         ) {
             return Err(failure("unknown external capability"));
         }
@@ -368,6 +386,37 @@ impl ScopedBridge {
                     id,
                     Operation::ReadSkill,
                     target,
+                    json!({}),
+                    cancel,
+                    deadline,
+                )
+                .await
+            }
+            "mcp.resources.list" => {
+                let args: ResourceList = parse(arguments)?;
+                if args.server.as_ref().is_some_and(|s| !name(s)) {
+                    return Err(failure("invalid source name"));
+                }
+                self.bridge
+                    .collect(
+                        self,
+                        args.server.as_deref(),
+                        Operation::ListResources,
+                        "resources",
+                        cancel,
+                        deadline,
+                    )
+                    .await
+            }
+            "mcp.resources.read" => {
+                let args: ResourceReadArgs = parse(arguments)?;
+                if !name(&args.server) || !resource_uri(&args.uri) {
+                    return Err(failure("invalid source name or resource URI"));
+                }
+                self.run(
+                    &args.server,
+                    Operation::ReadResource,
+                    &args.uri,
                     json!({}),
                     cancel,
                     deadline,

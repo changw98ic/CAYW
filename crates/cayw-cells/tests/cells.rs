@@ -12,7 +12,7 @@ use std::{
     },
     time::Duration,
 };
-use support::{TestCellExec, backend};
+use support::{TestCellExec, backend, backend_with_values, values_wrap};
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 
@@ -92,10 +92,20 @@ fn manager(
     limits: CellLimits,
     session: &str,
 ) -> Arc<CellManager> {
+    manager_with_host(journal, host, reads, limits, session)
+}
+fn manager_with_host(
+    journal: Arc<SqliteJournal>,
+    host: Arc<dyn CapabilityHost>,
+    reads: Arc<ReadCoordinator>,
+    limits: CellLimits,
+    session: &str,
+) -> Arc<CellManager> {
+    let backend = backend_with_values(host, journal.clone(), limits.clone());
     CellManager::new(
         identity(session),
         journal,
-        backend(host),
+        backend,
         reads,
         limits,
         Limits {
@@ -122,10 +132,15 @@ fn shared_manager(
         limits.clone(),
     )
     .unwrap();
+    let backend = values_wrap(
+        support::shared_backend(host, fixture, reads.clone()),
+        journal.clone(),
+        limits.clone(),
+    );
     CellManager::new(
         identity(session),
         journal,
-        support::shared_backend(host, fixture, reads.clone()),
+        backend,
         reads,
         limits,
         Limits {
@@ -513,6 +528,75 @@ async fn typed_output_mime_base64_and_notify_are_strict() {
 }
 
 #[tokio::test]
+async fn media_decoded_byte_boundary_and_notify_length_stop_before_host_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let host = Arc::new(Host::default());
+    let limits = CellLimits {
+        media_bytes: 8,
+        ..CellLimits::default()
+    };
+    let cells = manager(
+        journal,
+        host.clone(),
+        ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+        limits,
+        "session",
+    );
+    let page = cells
+        .exec_fixture(
+            exec("image('image/png','AAECAwQFBgc='); audio('audio/wav','AAECAwQFBgc='); notify(string.rep('x',512),1,2); cayw.call('write',{})"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let done = terminal(&cells, page).await;
+    assert_eq!(
+        done.status,
+        CellStatus::Completed,
+        "{:?}",
+        cells.record(&done.cell_id).unwrap()
+    );
+    assert_eq!(cells.record(&done.cell_id).unwrap().outputs.len(), 3);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    for source in [
+        "image('image/png','AAECAwQFBgcI')",
+        "image('image/png','')",
+        "audio('audio/mp3','AAECAwQFBgc=')",
+        "notify(string.rep('x',513),1,2)",
+    ] {
+        let script = format!("{source}; cayw.call('write',{{}})");
+        let page = cells
+            .exec_fixture(exec(&script), CancellationToken::new())
+            .await
+            .unwrap();
+        let done = terminal(&cells, page).await;
+        assert_eq!(
+            done.status,
+            CellStatus::Failed,
+            "{source}: {:?}",
+            cells.record(&done.cell_id).unwrap()
+        );
+        assert!(
+            cells.record(&done.cell_id).unwrap().outputs.is_empty(),
+            "{source}"
+        );
+    }
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    let done = terminal(
+        &cells,
+        cells
+            .exec_fixture(exec("text('after')"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(done.status, CellStatus::Completed);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    cells.close().await;
+}
+
+#[tokio::test]
 async fn capacity_output_and_store_limits_are_enforced_without_cursor_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
@@ -604,6 +688,94 @@ async fn capacity_output_and_store_limits_are_enforced_without_cursor_overwrite(
     ));
     let cancelled = cells.cancel(&page.cell_id).await.unwrap();
     assert_eq!(cancelled.status, CellStatus::Cancelled);
+    cells.close().await;
+}
+
+#[derive(Default)]
+struct SearchHost {
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl CapabilityHost for SearchHost {
+    fn capabilities(&self) -> Vec<ToolDefinition> {
+        (0..20)
+            .map(|index| ToolDefinition {
+                name: format!("cap{index:02}"),
+                description: format!("description only needle {index}"),
+                parameters: json!({"type":"object"}),
+            })
+            .collect()
+    }
+    async fn call(
+        &self,
+        name: &str,
+        arguments: Value,
+        _: CancellationToken,
+    ) -> Result<Value, CapabilityError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(json!({"name":name,"arguments":arguments}))
+    }
+}
+
+#[tokio::test]
+async fn tool_search_default_and_explicit_limits_truncate_description_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let host = Arc::new(SearchHost::default());
+    let limits = CellLimits::default();
+    let cells = manager_with_host(
+        journal,
+        host.clone(),
+        ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+        limits,
+        "session",
+    );
+    let page = cells
+        .exec_fixture(
+            exec("local default = tool_search('needle'); local three = tool_search('needle', 3); local wide = tool_search('needle', 64); return {default_count=#default, three_count=#three, wide_count=#wide, first=three[1].name, last=three[3].name, description=three[1].description}"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let done = terminal(&cells, page).await;
+    let record = cells.record(&done.cell_id).unwrap();
+    assert_eq!(done.status, CellStatus::Completed, "{record:?}");
+    let value = match &record.outputs[0].output {
+        CellOutput::Json { value } => value,
+        output => panic!("expected the returned search proof, got {output:?}"),
+    };
+    assert_eq!(value["default_count"], 16);
+    assert_eq!(value["three_count"], 3);
+    assert_eq!(value["wide_count"], 20);
+    assert_eq!(value["first"], "cap00");
+    assert_eq!(value["last"], "cap02");
+    assert_eq!(value["description"], "description only needle 0");
+    assert!(!value["first"].as_str().unwrap().contains("needle"));
+    assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    for source in [
+        "tool_search('needle',0)",
+        "tool_search('needle',65)",
+        "tool_search('needle',1.5)",
+        "tool_search('needle',-1)",
+        "tool_search('needle','3')",
+    ] {
+        let script = format!("{source}; cayw.call('write',{{}})");
+        let done = terminal(
+            &cells,
+            cells
+                .exec_fixture(exec(&script), CancellationToken::new())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            done.status,
+            CellStatus::Failed,
+            "{source}: {:?}",
+            cells.record(&done.cell_id).unwrap()
+        );
+    }
+    assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     cells.close().await;
 }
 

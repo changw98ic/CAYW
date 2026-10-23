@@ -192,6 +192,14 @@ fn call_limit_blocks_the_third_dispatch_even_when_it_is_authorized() {
 fn active_deadline_stops_the_loop_with_a_known_terminal_result() {
     let (_temp, sample) = observed(declared("active_timeout"));
     assert_eq!(sample.error.as_ref().unwrap().kind, "timeout");
+    assert_eq!(
+        sample.config["codemode"]["timeout_ns"],
+        json!(1_000_000_000_u64)
+    );
+    assert_eq!(
+        sample.config["codemode"]["host_wait_ns"],
+        json!(60_000_000_000_u64)
+    );
     assert!(sample.report.calls.is_empty());
     assert!(!sample.host_outcome_unknown && !sample.report.outcome_unknown);
     assert_eq!(
@@ -207,6 +215,18 @@ fn active_deadline_stops_the_loop_with_a_known_terminal_result() {
 fn host_deadline_settles_the_same_started_call_and_keeps_unknown_effects() {
     let (_temp, sample) = observed(declared("timeout_pending_host"));
     assert_eq!(sample.error.as_ref().unwrap().kind, "timeout");
+    assert_eq!(
+        sample.config["codemode"]["host_wait_ns"],
+        json!(1_000_000_000_u64)
+    );
+    assert_eq!(
+        sample.config["codemode"]["timeout_ns"],
+        json!(5_000_000_000_u64)
+    );
+    assert_ne!(
+        sample.config["codemode"]["host_wait_ns"],
+        sample.config["codemode"]["timeout_ns"]
+    );
     assert_eq!(sample.report.calls.len(), 1);
     assert_eq!(sample.audit_events.len(), 2);
     assert_eq!(sample.audit_events[1].event, "settled");
@@ -228,6 +248,18 @@ fn host_deadline_settles_the_same_started_call_and_keeps_unknown_effects() {
         value["host_outcome_unknown"] = false.into()
     });
     rejected(&sample, |value| value["workspace_host_after"] = json!([]));
+    rejected(&sample, |value| {
+        value["config"]["codemode"]["host_wait_ns"] = json!(60_000_000_000_u64)
+    });
+    rejected(&sample, |value| {
+        value["config"]["codemode"]["timeout_ns"] = json!(60_000_000_000_u64)
+    });
+    rejected(&sample, |value| {
+        value["config"]["codemode"]
+            .as_object_mut()
+            .unwrap()
+            .remove("host_wait_ns");
+    });
 }
 
 #[test]

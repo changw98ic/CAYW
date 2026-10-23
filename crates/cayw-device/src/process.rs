@@ -1223,6 +1223,52 @@ mod unix {
     #[cfg(target_os = "macos")]
     const TERMINATION_RETRY_TIMEOUT: Duration = Duration::from_secs(1);
 
+    // A fork can temporarily inherit another launch's CLOEXEC pipe writers.
+    // Serialize Device setup through exec and closure of the parent's copies;
+    // execution and cleanup remain concurrent. Host forks outside Device do not
+    // participate in this lock.
+    #[cfg(target_os = "macos")]
+    static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(target_os = "macos")]
+    fn lock_launch(
+        cancellation: &CancellationToken,
+        abandoned: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<std::sync::MutexGuard<'static, ()>, DeviceError> {
+        loop {
+            if cancellation.is_cancelled() || abandoned.is_cancelled() {
+                return Err(DeviceError::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                return Err(DeviceError::not_started(
+                    "launch deadline reached",
+                    io::Error::from_raw_os_error(libc::ETIMEDOUT),
+                ));
+            }
+            let guard = match LAUNCH_LOCK.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    tests::launch_waiting();
+                    std::thread::sleep(Duration::from_millis(POLL_MILLISECONDS as u64));
+                    continue;
+                }
+            };
+            if cancellation.is_cancelled() || abandoned.is_cancelled() {
+                return Err(DeviceError::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                return Err(DeviceError::not_started(
+                    "launch deadline reached",
+                    io::Error::from_raw_os_error(libc::ETIMEDOUT),
+                ));
+            }
+            return Ok(guard);
+        }
+    }
+
     struct ProcessGroup {
         child: Child,
         identity: Arc<Mutex<interactive::LeaderIdentity>>,
@@ -1717,6 +1763,7 @@ mod unix {
         use crate::{ResourceLimits, ResourceRequest, ResourceScheduler, SessionId};
         use std::cell::RefCell;
         use std::collections::BTreeMap;
+        use std::io::Write;
         use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
         struct PausedCleanup {
@@ -1737,6 +1784,7 @@ mod unix {
             release: Option<Receiver<()>>,
             panic_after_spawn: Option<PausedCleanup>,
             before_launch_grant: Option<std::os::unix::net::UnixStream>,
+            launch_waiting: Option<SyncSender<()>>,
         }
 
         thread_local! {
@@ -1812,6 +1860,12 @@ mod unix {
 
         pub(super) fn take_launch_pause() -> Option<std::os::unix::net::UnixStream> {
             FAULTS.with(|faults| faults.borrow_mut().before_launch_grant.take())
+        }
+
+        pub(super) fn launch_waiting() {
+            if let Some(waiting) = FAULTS.with(|faults| faults.borrow_mut().launch_waiting.take()) {
+                let _ = waiting.send(());
+            }
         }
 
         pub(super) fn panic_after_spawn(pid: u32) {
@@ -2438,6 +2492,261 @@ mod unix {
                 assert_reaped(pid as u32);
                 assert_eq!(scheduler.usage().active_tasks, 0);
                 assert_eq!(runner.active_count(), 0);
+            }
+        }
+
+        struct LaunchControl {
+            socket: std::os::unix::net::UnixStream,
+            released: bool,
+        }
+        impl LaunchControl {
+            fn pair() -> (std::os::unix::net::UnixStream, Self) {
+                let (child, socket) = std::os::unix::net::UnixStream::pair().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                (
+                    child,
+                    Self {
+                        socket,
+                        released: false,
+                    },
+                )
+            }
+            fn started(&mut self) -> libc::pid_t {
+                let mut bytes = [0; std::mem::size_of::<libc::pid_t>()];
+                self.socket.read_exact(&mut bytes).unwrap();
+                libc::pid_t::from_ne_bytes(bytes)
+            }
+            fn ready(&self) -> bool {
+                let mut descriptor = libc::pollfd {
+                    fd: self.socket.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: the one descriptor and its owned socket are live.
+                unsafe { libc::poll(&mut descriptor, 1, 0) > 0 }
+            }
+            fn release(&mut self) {
+                self.socket.write_all(&[1]).unwrap();
+                self.released = true;
+            }
+        }
+        impl Drop for LaunchControl {
+            fn drop(&mut self) {
+                if !self.released {
+                    // shutdown also wakes the child if another fork inherited
+                    // this control endpoint. A failing test cannot hang exec.
+                    let _ = self.socket.shutdown(std::net::Shutdown::Both);
+                }
+            }
+        }
+
+        // A second fork must not inherit the first launch's pipe writers or PTY
+        // replicas while that first child is waiting for its original grant.
+        #[tokio::test(flavor = "current_thread")]
+        async fn overlapping_startup_cannot_hold_another_calls_output_open() {
+            let mut observations = Vec::new();
+            for io in [
+                crate::ProcessIo::Pipes,
+                crate::ProcessIo::Pty {
+                    columns: 80,
+                    rows: 24,
+                },
+            ] {
+                let first_runner = ProcessRunner::new([PathBuf::from("/usr/bin/printf")]).unwrap();
+                let second_runner = ProcessRunner::new([PathBuf::from("/usr/bin/printf")]).unwrap();
+                let spec = || ProcessSpec {
+                    program: "/usr/bin/printf".into(),
+                    args: vec!["abc".into()],
+                    cwd: std::env::temp_dir(),
+                    env: BTreeMap::new(),
+                    timeout: Duration::from_secs(30),
+                    max_output_bytes: 3,
+                    io,
+                };
+                let (first_pause, mut first_control) = LaunchControl::pair();
+                FAULTS.with(|faults| faults.borrow_mut().before_launch_grant = Some(first_pause));
+                let mut first = Box::pin(first_runner.run(spec(), CancellationToken::new()));
+                std::future::poll_fn(|cx| {
+                    assert!(first.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                let first_pid = first_control.started();
+
+                let (second_pause, mut second_control) = LaunchControl::pair();
+                let (waiting, wait_rx) = sync_channel(1);
+                FAULTS.with(|faults| {
+                    let mut faults = faults.borrow_mut();
+                    faults.before_launch_grant = Some(second_pause);
+                    faults.launch_waiting = Some(waiting);
+                });
+                let mut second = Box::pin(second_runner.run(spec(), CancellationToken::new()));
+                std::future::poll_fn(|cx| {
+                    assert!(second.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                let waited_before_fork = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if wait_rx.try_recv().is_ok() {
+                            break true;
+                        }
+                        if second_control.ready() {
+                            break false;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("second launch reached neither lock nor child gate");
+                first_control.release();
+                let second_pid = second_control.started();
+                // Keep B stopped before exec while A must reach genuine EOF.
+                let first_result = tokio::time::timeout(Duration::from_secs(10), &mut first).await;
+                second_control.release();
+                let second_result =
+                    tokio::time::timeout(Duration::from_secs(10), &mut second).await;
+                first_runner.drain().await.unwrap();
+                second_runner.drain().await.unwrap();
+                assert_reaped(first_pid as u32);
+                assert_reaped(second_pid as u32);
+                let first_result = first_result.unwrap().unwrap();
+                let second_result = second_result.unwrap().unwrap();
+                println!(
+                    "OVERLAPPING_STARTUP io={io:?} waited_before_fork={waited_before_fork} first={first_result:?} second={second_result:?}"
+                );
+                observations.push((waited_before_fork, first_result, second_result));
+            }
+            for (waited, first, second) in observations {
+                assert!(
+                    waited,
+                    "a second Device fork entered the first launch's descriptor window"
+                );
+                assert_eq!(first.termination, TerminationReason::Exited);
+                assert!(
+                    first.output_complete,
+                    "another launch held the first output open"
+                );
+                assert_eq!(first.stdout, b"abc");
+                assert_eq!(second.termination, TerminationReason::Exited);
+                assert!(second.output_complete);
+                assert_eq!(second.stdout, b"abc");
+            }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn launch_wait_respects_original_cancel_deadline_and_reservation() {
+            for cancel_waiter in [true, false] {
+                let first_runner = ProcessRunner::new([PathBuf::from("/usr/bin/true")]).unwrap();
+                let second_runner = ProcessRunner::new([PathBuf::from("/usr/bin/true")]).unwrap();
+                let spec = |timeout| ProcessSpec {
+                    program: "/usr/bin/true".into(),
+                    args: vec![],
+                    cwd: std::env::temp_dir(),
+                    env: BTreeMap::new(),
+                    timeout,
+                    max_output_bytes: 10,
+                    io: crate::ProcessIo::Pipes,
+                };
+                let (pause, mut control) = LaunchControl::pair();
+                FAULTS.with(|faults| faults.borrow_mut().before_launch_grant = Some(pause));
+                let mut first = Box::pin(
+                    first_runner.run(spec(Duration::from_secs(30)), CancellationToken::new()),
+                );
+                std::future::poll_fn(|cx| {
+                    assert!(first.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                let first_pid = control.started();
+                let resources = scheduler();
+                let permit = resources
+                    .try_acquire(
+                        SessionId::new("launch-wait").unwrap(),
+                        ResourceRequest::default(),
+                    )
+                    .unwrap();
+                let (waiting, wait_rx) = sync_channel(1);
+                let (wait_pause, mut wait_control) = LaunchControl::pair();
+                FAULTS.with(|faults| {
+                    let mut faults = faults.borrow_mut();
+                    faults.launch_waiting = Some(waiting);
+                    faults.before_launch_grant = Some(wait_pause);
+                });
+                let cancellation = CancellationToken::new();
+                let timeout = if cancel_waiter {
+                    Duration::from_secs(20)
+                } else {
+                    Duration::from_secs(1)
+                };
+                let mut second = Box::pin(second_runner.run_with_permit(
+                    spec(timeout),
+                    cancellation.clone(),
+                    permit,
+                ));
+                std::future::poll_fn(|cx| {
+                    assert!(second.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if wait_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let reserved_while_waiting = resources.usage().active_tasks;
+                if cancel_waiter {
+                    cancellation.cancel();
+                }
+                let result = tokio::time::timeout(Duration::from_secs(10), &mut second).await;
+                // The first child still owns its original ungranted launch here.
+                let first_running = identity_running(&Mutex::new(interactive::LeaderIdentity {
+                    pid: Some(first_pid as u32),
+                    ..Default::default()
+                }))
+                .unwrap();
+                control.release();
+                let first_result = tokio::time::timeout(Duration::from_secs(10), &mut first).await;
+                first_runner.drain().await.unwrap();
+                second_runner.drain().await.unwrap();
+                assert_reaped(first_pid as u32);
+                assert!(first_result.unwrap().unwrap().status.success());
+                assert!(first_running);
+                assert_eq!(reserved_while_waiting, 1);
+                assert_eq!(resources.usage().active_tasks, 0);
+                assert_eq!(second_runner.active_count(), 0);
+                let error = result.unwrap().unwrap_err();
+                if cancel_waiter {
+                    assert!(matches!(error, DeviceError::Cancelled));
+                } else {
+                    assert!(matches!(
+                        error,
+                        DeviceError::NotStarted {
+                            operation: "launch deadline reached",
+                            ..
+                        }
+                    ));
+                }
+                wait_control.socket.set_nonblocking(true).unwrap();
+                let mut bytes = [0; std::mem::size_of::<libc::pid_t>()];
+                let read = wait_control.socket.read(&mut bytes);
+                assert!(
+                    matches!(read, Ok(0))
+                        || matches!(read, Err(ref error) if error.kind() == io::ErrorKind::WouldBlock),
+                    "waiter forked before cancel/deadline: {read:?}"
+                );
+                wait_control.released = true;
+                println!(
+                    "LAUNCH_WAIT cancel={cancel_waiter} reserved={reserved_while_waiting} remaining={} first_running={first_running}",
+                    resources.usage().active_tasks
+                );
             }
         }
 
@@ -3568,6 +3877,8 @@ mod unix {
             .ok_or(DeviceError::InvalidSpec("timeout is not representable"))?;
         let image = ExecImage::new(&program, &args, &env)?;
         #[cfg(target_os = "macos")]
+        let launch_lock = lock_launch(&cancellation, &abandoned, deadline)?;
+        #[cfg(target_os = "macos")]
         let terminal = match io {
             crate::ProcessIo::Pipes => None,
             crate::ProcessIo::Pty { columns, rows } => Some(
@@ -3696,6 +4007,16 @@ mod unix {
         let decision = gate.join();
         #[cfg(all(test, target_os = "macos"))]
         drop(launch_pause);
+        // Close every parent-side replica before another Device launch can fork.
+        drop(command);
+        let mut terminal_primary: Option<fs::File> = None;
+        #[cfg(target_os = "macos")]
+        if let Some(Terminal { primary, replica }) = terminal {
+            drop(replica);
+            terminal_primary = Some(primary);
+        }
+        #[cfg(target_os = "macos")]
+        drop(launch_lock);
         let child = match spawned {
             Ok(child) => child,
             Err(error) => {
@@ -3709,8 +4030,7 @@ mod unix {
                 });
             }
         };
-        // The closure contains only an fd number, so keep the owned directory
-        // and command alive in this supervisor scope until group cleanup ends.
+        // Keep the original directory handle alive through group cleanup.
         let identity = interactive.as_ref().map_or_else(
             || Arc::new(Mutex::new(interactive::LeaderIdentity::default())),
             |shared| shared.identity.clone(),
@@ -3752,14 +4072,6 @@ mod unix {
         } else {
             PipeSink::Collected
         };
-        // Consume Command here: its replica copies must not hold PTY EOF open.
-        drop(command);
-        let mut terminal_primary: Option<fs::File> = None;
-        #[cfg(target_os = "macos")]
-        if let Some(Terminal { primary, replica }) = terminal {
-            drop(replica);
-            terminal_primary = Some(primary);
-        }
         let (mut stdout, mut stderr, mut stdin): (
             Pipe<fs::File>,
             Pipe<fs::File>,

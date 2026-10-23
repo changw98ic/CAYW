@@ -357,6 +357,13 @@ fn v2_migration_must_preserve_authorization_provenance() {
         let result = store.reconcile_capability(
             &lease.session_id,
             CapabilityReconciliation {
+                expected: Box::new(ReconciliationOrigin {
+                    lease: lease.clone(),
+                    task_id: "original-task".into(),
+                    execution_id: "vm".into(),
+                    parent_call_id: "launch".into(),
+                    source_hash: "original-source".into(),
+                }),
                 key: key(),
                 actor: "host".into(),
                 evidence: "checked different operation".into(),
@@ -675,6 +682,13 @@ fn owned_dispatch_deep_leaf_matrix_survives_on_small_stack() {
                     _ => CoreRequest::ReconcileCapability {
                         session_id: session.id.clone(),
                         reconciliation: CapabilityReconciliation {
+                            expected: Box::new(ReconciliationOrigin {
+                                lease: lease.clone(),
+                                task_id: "task".into(),
+                                execution_id: "vm".into(),
+                                parent_call_id: "parent".into(),
+                                source_hash: "source".into(),
+                            }),
                             key: key(),
                             actor: "host".into(),
                             evidence: "checked".into(),

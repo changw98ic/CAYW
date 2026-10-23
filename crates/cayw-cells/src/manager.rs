@@ -48,19 +48,24 @@ impl CellManager {
     ) -> Result<Arc<Self>, CellError> {
         identity.validate()?;
         limits.validate()?;
-        // Validate the underlying VM/catalog before claiming ownership.
-        CodeMode::new(Arc::new(BackendCatalog(backend.clone())), vm_limits.clone())
+        let host_catalog = backend.capabilities();
+        let host_capability_count = host_catalog
+            .iter()
+            .filter(|definition| CellValueOperation::from_name(&definition.name).is_none())
+            .count();
+        let catalog = crate::values::with_definitions(host_catalog);
+        // Validate the exact VM catalog, including canonical value definitions,
+        // before claiming ownership.
+        CodeMode::new(Arc::new(BackendCatalog(catalog.clone())), vm_limits.clone())
             .map_err(|e| CellError::Invalid(e.to_string()))?;
-        if backend.capabilities().len() > 256 || vm_limits.host_calls > 4096 {
+        // The two canonical value capabilities are internal trusted helpers and
+        // do not consume the host's 256-capability budget.
+        if host_capability_count > 256 || vm_limits.host_calls > 4096 {
             return Err(CellError::Invalid(
                 "catalog or host call budget too large".into(),
             ));
         }
-        if backend
-            .capabilities()
-            .iter()
-            .any(|d| d.name.starts_with("__cells_"))
-        {
+        if catalog.iter().any(|d| d.name.starts_with("__cells_")) {
             return Err(CellError::Invalid(
                 "host capability uses reserved __cells_ prefix".into(),
             ));
@@ -118,6 +123,11 @@ impl CellManager {
     }
     pub fn limits(&self) -> &CellLimits {
         &self.limits
+    }
+    /// Scoped executor sharing this manager's journal and value limits. It does
+    /// not authorize by itself; the caller must apply its host policy first.
+    pub fn values(&self) -> CellValueExecutor {
+        CellValueExecutor::new(self.journal.clone(), self.limits.clone())
     }
     pub fn shutdown_grace(&self) -> Duration {
         self.vm_limits.shutdown_grace
@@ -549,11 +559,11 @@ struct ScopeLease {
 
 /// Catalog validation only. Deliberately cannot execute: every production call
 /// must carry a concrete immutable CellExecution through Bridge.
-struct BackendCatalog(Arc<dyn CellBackend>);
+struct BackendCatalog(Vec<cayw_ai::ToolDefinition>);
 #[async_trait::async_trait]
 impl CapabilityHost for BackendCatalog {
     fn capabilities(&self) -> Vec<cayw_ai::ToolDefinition> {
-        self.0.capabilities()
+        self.0.clone()
     }
     async fn call(
         &self,
@@ -823,6 +833,11 @@ impl Run {
                     outcome_unknown: record.status == CellStatus::OutcomeUnknown,
                 }
             };
+            #[cfg(feature = "fault-injection")]
+            cayw_ai::faults::hit(
+                "cells.execution_terminal.committed",
+                serde_json::json!({"execution":self.execution,"terminal":terminal}),
+            );
             if let Err(error) = self.backend.finished(&self.execution, &terminal) {
                 self.hook_failed(&error);
             }

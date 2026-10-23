@@ -7,6 +7,23 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Original process records presented to a trusted host's cleanup verifier.
+/// An inspection never authorizes signals, business reconciliation or new work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessCleanupInspection {
+    pub target: crate::CancelTarget,
+    pub lease: AttemptLease,
+    pub supervisor: cayw_host::ProcessIdentity,
+    pub processes: Vec<ProcessCleanupProcess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessCleanupProcess {
+    pub key: cayw_core::CapabilityCallKey,
+    pub identity: cayw_host::ProcessIdentity,
+    pub state: String,
+}
+
 pub(crate) struct ProcessJournal {
     connection: Mutex<Connection>,
 }
@@ -27,7 +44,12 @@ impl ProcessJournal {
             pid INTEGER NOT NULL, parent_pid INTEGER NOT NULL, process_group INTEGER NOT NULL,
             started_seconds INTEGER NOT NULL, started_microseconds INTEGER NOT NULL,
             state TEXT NOT NULL,
-            PRIMARY KEY (task, execution, sequence, pid, started_seconds, started_microseconds));",
+            PRIMARY KEY (task, execution, sequence, pid, started_seconds, started_microseconds));
+            CREATE TABLE IF NOT EXISTS runtime_process_supervisors (
+            task TEXT PRIMARY KEY, session TEXT NOT NULL, attempt TEXT NOT NULL,
+            worker TEXT NOT NULL, fence INTEGER NOT NULL,
+            pid INTEGER NOT NULL, parent_pid INTEGER NOT NULL, process_group INTEGER NOT NULL,
+            started_seconds INTEGER NOT NULL, started_microseconds INTEGER NOT NULL);",
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -55,6 +77,27 @@ impl ProcessJournal {
                 "process scope is closed or belongs to another attempt".into(),
             ));
         }
+        #[cfg(target_os = "macos")]
+        {
+            let supervisor =
+                cayw_host::ProcessIdentity::observe(std::process::id()).map_err(|error| {
+                    RuntimeError::Worker(format!("observe original process supervisor: {error}"))
+                })?;
+            tx.execute(
+                "INSERT OR IGNORE INTO runtime_process_supervisors(
+                task,session,attempt,worker,fence,pid,parent_pid,process_group,started_seconds,started_microseconds)
+                VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![task, lease.session_id, lease.attempt_id, lease.worker_id,
+                    crate::audit::sql_u64(lease.fence)?, i64::from(supervisor.pid),
+                    i64::from(supervisor.parent_pid), i64::from(supervisor.process_group),
+                    crate::audit::sql_u64(supervisor.started_seconds)?, i64::from(supervisor.started_microseconds)],
+            )?;
+            if original_supervisor(&tx, task, lease)? != supervisor {
+                return Err(RuntimeError::Worker(
+                    "process scope has a different original supervisor".into(),
+                ));
+            }
+        }
         tx.commit()?;
         Ok(())
     }
@@ -64,6 +107,91 @@ impl ProcessJournal {
             [task],
             |row| row.get(0),
         )?)
+    }
+
+    pub(crate) fn inspect_lost(
+        &self,
+        target: &crate::CancelTarget,
+        lease: &AttemptLease,
+    ) -> Result<ProcessCleanupInspection, RuntimeError> {
+        let connection = lock(&self.connection);
+        let owned: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_process_scopes
+            WHERE task=?1 AND session=?2 AND attempt=?3 AND worker=?4 AND fence=?5)",
+            params![
+                target.task_id,
+                lease.session_id,
+                lease.attempt_id,
+                lease.worker_id,
+                crate::audit::sql_u64(lease.fence)?
+            ],
+            |row| row.get(0),
+        )?;
+        if !owned {
+            return Err(RuntimeError::Worker(
+                "process scope differs from the original Task and Core lease".into(),
+            ));
+        }
+        let supervisor = original_supervisor(&connection, &target.task_id, lease)?;
+        let mut statement = connection.prepare(
+            "SELECT session,attempt,worker,fence,execution,sequence,
+            pid,parent_pid,process_group,started_seconds,started_microseconds,state
+            FROM runtime_process_identities WHERE task=?1
+            ORDER BY execution,sequence,pid,started_seconds,started_microseconds",
+        )?;
+        let processes = statement
+            .query_map([&target.task_id], |row| {
+                let original = AttemptLease {
+                    session_id: row.get(0)?,
+                    attempt_id: row.get(1)?,
+                    worker_id: row.get(2)?,
+                    fence: crate::audit::read_u64(row, 3)?,
+                };
+                Ok((
+                    original,
+                    ProcessCleanupProcess {
+                        key: cayw_core::CapabilityCallKey {
+                            execution_id: row.get(4)?,
+                            sequence: crate::audit::read_u64(row, 5)?,
+                        },
+                        identity: process_identity(row, 6)?,
+                        state: row.get(11)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut verified = Vec::new();
+        for (original, process) in processes {
+            if &original != lease
+                || !matches!(process.state.as_str(), "started" | "observed" | "stopped")
+            {
+                return Err(RuntimeError::Worker(
+                    "recorded process differs from its original lease or state".into(),
+                ));
+            }
+            verified.push(process);
+        }
+        Ok(ProcessCleanupInspection {
+            target: target.clone(),
+            lease: lease.clone(),
+            supervisor,
+            processes: verified,
+        })
+    }
+
+    pub(crate) fn confirm_lost(
+        &self,
+        inspection: &ProcessCleanupInspection,
+        actor: &cayw_requests::HostActor,
+        evidence: &str,
+    ) -> Result<(), RuntimeError> {
+        self.finish(
+            &inspection.target.task_id,
+            Some(&inspection.lease.worker_id),
+            "host_verified",
+            actor.as_str(),
+            evidence,
+        )
     }
 
     /// Record an OS process that actually started for this exact planned call.
@@ -245,6 +373,48 @@ impl ProcessJournal {
     }
 }
 
+fn process_identity(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<cayw_host::ProcessIdentity> {
+    let identity = cayw_host::ProcessIdentity {
+        pid: row.get(offset)?,
+        parent_pid: row.get(offset + 1)?,
+        process_group: row.get(offset + 2)?,
+        started_seconds: crate::audit::read_u64(row, offset + 3)?,
+        started_microseconds: row.get(offset + 4)?,
+    };
+    if identity.pid == 0
+        || identity.started_seconds == 0
+        || identity.started_microseconds >= 1_000_000
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(identity)
+}
+
+fn original_supervisor(
+    connection: &Connection,
+    task: &str,
+    lease: &AttemptLease,
+) -> Result<cayw_host::ProcessIdentity, RuntimeError> {
+    connection
+        .query_row(
+            "SELECT pid,parent_pid,process_group,started_seconds,started_microseconds
+        FROM runtime_process_supervisors
+        WHERE task=?1 AND session=?2 AND attempt=?3 AND worker=?4 AND fence=?5",
+            params![
+                task,
+                lease.session_id,
+                lease.attempt_id,
+                lease.worker_id,
+                crate::audit::sql_u64(lease.fence)?
+            ],
+            |row| process_identity(row, 0),
+        )
+        .map_err(RuntimeError::from)
+}
+
 /// The exact planned call that owns an observed OS process incarnation. Every
 /// identity write carries the original lease and call so a replaced attempt or a
 /// reused call sequence can never adopt another execution's process record.
@@ -330,6 +500,13 @@ pub(crate) fn is_process(name: &str) -> bool {
             | "git.diff"
             | "git.log"
             | "git.show"
+            | "git.blame"
+            | "git.stage"
+            | "git.commit"
+            | "git.branch"
+            | "git.worktree"
+            | "exec_command"
+            | "write_stdin"
             | "build.run"
             | "test.run"
             | "check.run"
@@ -398,49 +575,6 @@ impl Runtime {
             (task, ownership)
         };
         drain(&self.inner, &task).await
-    }
-
-    /// Host-only proof for an original process scope whose supervisor was lost.
-    /// This confirms cleanup only; uncertain file/remote effects remain in Core.
-    /// It is deliberately absent from model tools and the ordinary RPC methods.
-    pub fn confirm_processes_stopped(
-        &self,
-        task_id: &str,
-        actor: &str,
-        evidence: &str,
-    ) -> Result<(), RuntimeError> {
-        if actor.trim().is_empty()
-            || actor.len() > 256
-            || evidence.trim().is_empty()
-            || evidence.len() > 4096
-        {
-            return Err(RuntimeError::InvalidInput(
-                "process cleanup requires a host actor and 1..4096 bytes of observed evidence"
-                    .into(),
-            ));
-        }
-        let _coordinate = self.inner.coordination.enter()?;
-        let record = self.inner.queue.get(task_id)?;
-        if lock(&self.inner.active).contains_key(&record.session_id) {
-            return Err(RuntimeError::Busy);
-        }
-        let _ownership = self.inner.coordination.task(task_id)?;
-        if let Some(host) = lock(&self.inner.processes).get(task_id).cloned() {
-            host.close_processes();
-            if host.active_processes() != 0 {
-                return Err(RuntimeError::Busy);
-            }
-        }
-        self.inner.process_journal.finish(
-            task_id,
-            record.worker_id.as_deref(),
-            "host_verified",
-            actor,
-            evidence,
-        )?;
-        lock(&self.inner.processes).remove(task_id);
-        self.inner.changed.notify_waiters();
-        Ok(())
     }
 }
 

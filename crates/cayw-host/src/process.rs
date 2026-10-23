@@ -40,12 +40,23 @@ pub(crate) fn validate_program(program: &Path) -> Result<(), CapabilityError> {
     Ok(())
 }
 pub(crate) fn runner(config: &HostConfig) -> Result<ProcessRunner, CapabilityError> {
-    let programs = config.git_program.iter().cloned().chain(
-        config
-            .profiles
-            .values()
-            .map(|profile| profile.program.clone()),
-    );
+    let programs = config
+        .git_program
+        .iter()
+        .cloned()
+        .chain(
+            config
+                .terminal_handoffs
+                .iter()
+                .flat_map(|terminal| terminal.profiles.values())
+                .map(|profile| profile.program.clone()),
+        )
+        .chain(
+            config
+                .profiles
+                .values()
+                .map(|profile| profile.program.clone()),
+        );
     ProcessRunner::new(programs).map_err(|error| failure(error.to_string()))
 }
 
@@ -58,7 +69,7 @@ fn null_device() -> &'static str {
     "/dev/null"
 }
 
-fn git_environment() -> BTreeMap<String, String> {
+pub(crate) fn git_environment() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("GIT_CONFIG_SYSTEM".into(), null_device().into()),
@@ -73,7 +84,9 @@ fn git_environment() -> BTreeMap<String, String> {
         ("LC_ALL".into(), "C".into()),
     ])
 }
-fn git_args(name: &str, arguments: &Value) -> Vec<String> {
+/// Fixed global flags and command-scope overrides shared by snapshot reads and
+/// real-repository writes. The caller appends the subcommand and its arguments.
+pub(crate) fn git_base_args() -> Vec<String> {
     let mut args = vec![
         "--no-pager".into(),
         "--no-optional-locks".into(),
@@ -102,6 +115,10 @@ fn git_args(name: &str, arguments: &Value) -> Vec<String> {
         args.push("-c".into());
         args.push(format!("{key}={value}"));
     }
+    args
+}
+fn git_args(name: &str, arguments: &Value) -> Vec<String> {
+    let mut args = git_base_args();
     match name {
         "git.status" => args.extend(
             [
@@ -173,6 +190,20 @@ fn git_args(name: &str, arguments: &Value) -> Vec<String> {
                 args.push(commit.into());
             }
             args.push("--".into());
+        }
+        "git.blame" => {
+            args.extend(["blame", "--line-porcelain", "--no-progress"].map(str::to_string));
+            if let Some(commit) = arguments.get("commit").and_then(Value::as_str) {
+                args.push(commit.into());
+            }
+            args.push("--".into());
+            args.push(
+                arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .expect("validated blame path")
+                    .into(),
+            );
         }
         _ => unreachable!("catalog contains only fixed git commands"),
     }
@@ -539,15 +570,213 @@ fn copy_tree(
     Ok(())
 }
 
-fn git_spec(
+// Only these local settings affect a read without executing anything. The real
+// config is parsed by Git itself from the private copy; every other key,
+// including includes, filters, hooks and remotes, is never carried over.
+#[derive(Default)]
+struct SafeGitConfig {
+    filemode: Option<bool>,
+    autocrlf: Option<&'static str>,
+    ignorecase: Option<bool>,
+    precomposeunicode: Option<bool>,
+    quotepath: Option<bool>,
+    eol: Option<&'static str>,
+}
+/// Git's own boolean semantics: a key without `=` is implicit true, while an
+/// explicit empty value (`key =`) is false. `git config --list -z` preserves the
+/// difference as a missing versus present `\n` separator.
+fn parse_git_bool(value: Option<&str>) -> Result<bool, CapabilityError> {
+    match value {
+        None => Ok(true),
+        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(false),
+            "true" | "yes" | "on" | "1" => Ok(true),
+            "false" | "no" | "off" | "0" => Ok(false),
+            other => Err(failure(format!("unsupported Git boolean value {other}"))),
+        },
+    }
+}
+fn parse_git_autocrlf(value: Option<&str>) -> Result<&'static str, CapabilityError> {
+    if value.is_some_and(|value| value.trim().eq_ignore_ascii_case("input")) {
+        return Ok("input");
+    }
+    Ok(if parse_git_bool(value)? {
+        "true"
+    } else {
+        "false"
+    })
+}
+fn parse_git_eol(value: Option<&str>) -> Result<&'static str, CapabilityError> {
+    match value.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "lf" => Ok("lf"),
+        "crlf" => Ok("crlf"),
+        "native" => Ok("native"),
+        other => Err(failure(format!("unsupported Git core.eol value {other}"))),
+    }
+}
+/// Parses `git config --file <private> --no-includes --list -z` output. Formats
+/// and semantics that a SHA-1 full-worktree snapshot cannot represent are
+/// refused by name instead of being silently treated as defaults.
+fn parse_private_git_config(bytes: &[u8]) -> Result<SafeGitConfig, CapabilityError> {
+    let mut config = SafeGitConfig::default();
+    for record in bytes.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let (key, value) = match record.iter().position(|byte| *byte == b'\n') {
+            Some(position) => (&record[..position], Some(&record[position + 1..])),
+            None => (record, None),
+        };
+        let key = std::str::from_utf8(key)
+            .map_err(|_| failure("Git config keys must be UTF-8"))?
+            .to_ascii_lowercase();
+        let value = value
+            .map(|value| std::str::from_utf8(value))
+            .transpose()
+            .map_err(|_| failure(format!("Git config value for {key} must be UTF-8")))?;
+        if key == "core.repositoryformatversion" && value.unwrap_or("").trim() != "0" {
+            return Err(failure(format!(
+                "Git repository format version {} is not supported; only SHA-1 repositories at version 0 are supported",
+                value.unwrap_or("").trim()
+            )));
+        }
+        if key == "extensions.objectformat"
+            && !value.unwrap_or("").trim().eq_ignore_ascii_case("sha1")
+        {
+            return Err(failure(format!(
+                "Git object format {} is not supported; only SHA-1 repositories are supported",
+                value.unwrap_or("").trim()
+            )));
+        }
+        if key == "extensions.refstorage" {
+            return Err(failure("Git reftable reference storage is not supported"));
+        }
+        if key == "extensions.worktreeconfig" {
+            return Err(failure("Git per-worktree config is not supported"));
+        }
+        if matches!(
+            key.as_str(),
+            "core.sparsecheckout" | "core.sparsecheckoutcone"
+        ) && parse_git_bool(value)?
+        {
+            return Err(failure("Git sparse checkout is not supported"));
+        }
+        match key.as_str() {
+            "core.filemode" => config.filemode = Some(parse_git_bool(value)?),
+            "core.autocrlf" => config.autocrlf = Some(parse_git_autocrlf(value)?),
+            "core.ignorecase" => config.ignorecase = Some(parse_git_bool(value)?),
+            "core.precomposeunicode" => {
+                config.precomposeunicode = Some(parse_git_bool(value)?);
+            }
+            "core.quotepath" => config.quotepath = Some(parse_git_bool(value)?),
+            "core.eol" => config.eol = Some(parse_git_eol(value)?),
+            _ => {}
+        }
+    }
+    Ok(config)
+}
+fn snapshot_git_config(config: &SafeGitConfig) -> String {
+    let mut text = String::from("[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
+    for (key, value) in [
+        ("filemode", config.filemode.map(|value| value.to_string())),
+        ("autocrlf", config.autocrlf.map(str::to_string)),
+        (
+            "ignorecase",
+            config.ignorecase.map(|value| value.to_string()),
+        ),
+        (
+            "precomposeunicode",
+            config.precomposeunicode.map(|value| value.to_string()),
+        ),
+        ("quotepath", config.quotepath.map(|value| value.to_string())),
+        ("eol", config.eol.map(str::to_string)),
+    ] {
+        if let Some(value) = value {
+            text.push_str(&format!("\t{key} = {value}\n"));
+        }
+    }
+    text
+}
+/// A tracked path in the reserved `.cayw-*` namespace cannot be copied into the
+/// snapshot or addressed by any capability. Refuse it by name instead of either
+/// copying reserved content or reporting a false deletion.
+fn tracked_reserved_path(listed: &[u8]) -> Option<String> {
+    for path in listed.split(|byte| *byte == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        if path
+            .split(|byte| *byte == b'/')
+            .any(|part| part.len() >= 6 && part[..6].eq_ignore_ascii_case(b".cayw-"))
+        {
+            let display = String::from_utf8_lossy(path);
+            return Some(display.chars().take(160).collect());
+        }
+    }
+    None
+}
+/// Runs one fixed Git inspection command inside the private view through the
+/// original Device runner. The caller supplies a literal argv; no ambient path,
+/// shell or repository is consulted.
+async fn run_git_probe(
+    host: &Host,
+    view: &GitView,
+    args: Vec<String>,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<Vec<u8>, CapabilityError> {
+    check(cancel, deadline)?;
+    let timeout = host
+        .config
+        .process_timeout
+        .min(deadline.saturating_duration_since(Instant::now()));
+    if timeout.is_zero() {
+        return Err(failure(
+            "capability deadline reached before Git snapshot inspection",
+        ));
+    }
+    let spec = DirectoryProcessSpec {
+        program: host
+            .config
+            .git_program
+            .clone()
+            .expect("git catalog configured"),
+        args,
+        cwd: view.dir.try_clone().map_err(io_error)?.into_std_file(),
+        env: git_environment(),
+        timeout,
+        max_output_bytes: host.config.max_process_output_bytes,
+        io: cayw_device::ProcessIo::Pipes,
+    };
+    let result = host
+        .runner
+        .run_in_directory(spec, cancel.clone())
+        .await
+        .map_err(device_error)?;
+    if result.termination != TerminationReason::Exited || !result.output_complete {
+        return Err(failure(
+            "Git snapshot inspection stopped before a complete result",
+        ));
+    }
+    if !result.status.success() {
+        return Err(failure(format!(
+            "Git snapshot inspection failed with exit {:?}",
+            result.status.code()
+        )));
+    }
+    Ok(result.stdout)
+}
+async fn git_spec(
     host: &Host,
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<(DirectoryProcessSpec, CleanupResource<GitView>), CapabilityError> {
-    // Git's local config can run clean filters even for status/diff. Do not read
-    // it at all: construct a private metadata view containing only passive data.
+    // Git's local config can run clean filters even for status/diff. Copy it into
+    // the private view, parse it with Git itself from that fixed private file
+    // without includes, and carry over only explicitly passive keys. The real
+    // repository config, hooks and filters never run or enter the view.
     let source = host.root.open_dir_nofollow(".git").map_err(|_| {
         failure("git capabilities require a direct .git directory in the workspace")
     })?;
@@ -560,16 +789,45 @@ fn git_spec(
     let git_dir = view.dir.open_dir_nofollow(".git").map_err(io_error)?;
     git_dir.create_dir("objects").map_err(io_error)?;
     git_dir.create_dir("refs").map_err(io_error)?;
-    git_dir
-        .write(
-            "config",
-            b"[core]\n repositoryformatversion = 0\n bare = false\n",
-        )
-        .map_err(io_error)?;
     let mut budget = MetadataBudget {
         bytes: host.config.max_file_bytes,
         entries: host.config.max_list_entries,
     };
+    copy_metadata(
+        &source,
+        &git_dir,
+        "config",
+        false,
+        &mut budget,
+        cancel,
+        deadline,
+    )?;
+    let config = match git_dir.symlink_metadata("config") {
+        Ok(metadata) if metadata.is_file() => {
+            let parsed = run_git_probe(
+                host,
+                &view,
+                vec![
+                    "config".into(),
+                    "--file".into(),
+                    ".git/config".into(),
+                    "--no-includes".into(),
+                    "--list".into(),
+                    "-z".into(),
+                ],
+                cancel,
+                deadline,
+            )
+            .await?;
+            parse_private_git_config(&parsed)?
+        }
+        Ok(_) => return Err(failure("Git config must be a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => SafeGitConfig::default(),
+        Err(error) => return Err(io_error(error)),
+    };
+    git_dir
+        .write("config", snapshot_git_config(&config).into_bytes())
+        .map_err(io_error)?;
     copy_metadata(
         &source,
         &git_dir,
@@ -617,6 +875,35 @@ fn git_spec(
                 deadline,
             )?;
         }
+    }
+    // The copied index is the authority for tracked reserved paths. Refuse them
+    // before any worktree copy so reserved content never enters the snapshot and
+    // no false deletion is reported. Untracked internal `.cayw-*` files are
+    // skipped as before and cannot trigger this refusal.
+    match git_dir.symlink_metadata("index") {
+        Ok(metadata) if metadata.is_file() => {
+            let listed = run_git_probe(
+                host,
+                &view,
+                vec![
+                    "--git-dir=.git".into(),
+                    "ls-files".into(),
+                    "-z".into(),
+                    "--cached".into(),
+                ],
+                cancel,
+                deadline,
+            )
+            .await?;
+            if let Some(path) = tracked_reserved_path(&listed) {
+                return Err(failure(format!(
+                    "Git snapshot cannot represent tracked reserved path {path}; committed .cayw-* entries are not addressable"
+                )));
+            }
+        }
+        Ok(_) => return Err(failure("Git index must be a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
     }
     match source.open_dir_nofollow("info") {
         Ok(info) => {
@@ -717,7 +1004,7 @@ fn profile_spec(
         io: profile.io,
     })
 }
-fn device_error(error: DeviceError) -> CapabilityError {
+pub(crate) fn device_error(error: DeviceError) -> CapabilityError {
     match error {
         DeviceError::NotStarted { .. }
         | DeviceError::InvalidSpec(_)
@@ -743,20 +1030,49 @@ pub(crate) async fn execute(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<Value, CapabilityError> {
+    match name {
+        "git.status" | "git.diff" | "git.log" | "git.show" | "git.blame" => {
+            execute_git_read(host, name, arguments, cancel, deadline).await
+        }
+        "build.run" | "test.run" | "check.run" | "lint.run" | "format.run" => {
+            check(cancel, deadline)?;
+            if host.runner.is_closed() {
+                return Err(failure("process runner is closed"));
+            }
+            let mut spec = profile_spec(host, name, arguments)?;
+            check(cancel, deadline)?;
+            spec.timeout = spec
+                .timeout
+                .min(deadline.saturating_duration_since(Instant::now()));
+            if spec.timeout.is_zero() {
+                return Err(failure("capability deadline reached before process launch"));
+            }
+            let result = host
+                .runner
+                .run_in_directory_with_resources(spec, cancel.clone(), None::<()>)
+                .await
+                .map_err(device_error)?;
+            process_value(result)
+        }
+        _ => Err(failure("unknown process capability")),
+    }
+}
+
+/// Read-only Git always observes a bounded private snapshot. The real repository
+/// is never the working directory for these commands, so local config, hooks,
+/// filters and object alternates cannot run or redirect a read.
+pub(crate) async fn execute_git_read(
+    host: &Host,
+    name: &str,
+    arguments: &Value,
+    cancel: &CancellationToken,
+    deadline: Instant,
+) -> Result<Value, CapabilityError> {
     check(cancel, deadline)?;
     if host.runner.is_closed() {
         return Err(failure("process runner is closed"));
     }
-    let (mut spec, git_view) = match name {
-        "git.status" | "git.diff" | "git.log" | "git.show" => {
-            let (spec, view) = git_spec(host, name, arguments, cancel, deadline)?;
-            (spec, Some(view))
-        }
-        "build.run" | "test.run" | "check.run" | "lint.run" | "format.run" => {
-            (profile_spec(host, name, arguments)?, None)
-        }
-        _ => return Err(failure("unknown process capability")),
-    };
+    let (mut spec, git_view) = git_spec(host, name, arguments, cancel, deadline).await?;
     check(cancel, deadline)?;
     spec.timeout = spec
         .timeout
@@ -769,6 +1085,10 @@ pub(crate) async fn execute(
         .run_in_directory_with_resources(spec, cancel.clone(), git_view)
         .await
         .map_err(device_error)?;
+    process_value(result)
+}
+
+fn process_value(result: cayw_device::ProcessResult) -> Result<Value, CapabilityError> {
     if result.termination != TerminationReason::Exited || !result.output_complete {
         return Err(CapabilityError::unknown(format!(
             "process stopped with {:?}; exit={:?}, stdout_bytes={}, stderr_bytes={}, complete={}",
@@ -1028,6 +1348,7 @@ mod tests {
             &cancel,
             Instant::now() + Duration::from_secs(10),
         )
+        .await
         .unwrap();
         let moved = format!("{}-moved", view.name);
         let owner = view.parent.try_clone().unwrap();
@@ -1111,6 +1432,7 @@ mod tests {
                 &cancel,
                 deadline,
             )
+            .await
             .unwrap();
             let (show_spec, show_view) = git_spec(
                 &host,
@@ -1119,6 +1441,7 @@ mod tests {
                 &cancel,
                 deadline,
             )
+            .await
             .unwrap();
             match replacement {
                 "root" => {

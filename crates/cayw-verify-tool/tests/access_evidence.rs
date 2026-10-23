@@ -350,6 +350,122 @@ fn approval_reader_rejects_missing_or_changed_original_execution_evidence() {
     );
 }
 
+// Ignoring decision audits would accept erased, replayed or retargeted approval
+// evidence even when the original capability events and outer digests are intact.
+#[test]
+fn approval_reader_rejects_missing_changed_or_reordered_decision_audit() {
+    let mut accepted = Vec::new();
+    for label in [
+        "missing-start",
+        "missing-commit",
+        "duplicate-pair",
+        "commit-before-start",
+        "swapped-decisions",
+        "start-session",
+        "start-task",
+        "start-attempt",
+        "start-approval",
+        "start-actor",
+        "start-choice",
+        "start-missing-actor",
+        "start-extra-field",
+        "commit-task",
+        "commit-cursor",
+        "commit-grant",
+        "commit-extra-field",
+        "first-pause-decided",
+        "read-pause-missing",
+        "read-pause-extra",
+        "read-pause-timestamp",
+        "final-missing-decisions",
+        "final-worker",
+        "final-reason",
+    ] {
+        if !mutation("ipc-approval", label, |_, sample| {
+            let final_state = observation(sample, "access_approval_final", 0)["snapshot"].clone();
+            for row in sample["observations"].as_array_mut().unwrap() {
+                let waiting = row["kind"] == "access_approval_waiting";
+                if !waiting && row["kind"] != "access_approval_final" {
+                    continue;
+                }
+                let audit = row["value"]["snapshot"]["audit"].as_array_mut().unwrap();
+                if label == "first-pause-decided" {
+                    if waiting && audit.is_empty() {
+                        audit.extend_from_slice(&final_state["audit"].as_array().unwrap()[..2]);
+                    }
+                    continue;
+                }
+                if audit.is_empty() {
+                    continue;
+                }
+                match label {
+                    "missing-start" => {
+                        audit.remove(0);
+                    }
+                    "missing-commit" => {
+                        audit.remove(1);
+                    }
+                    "duplicate-pair" => {
+                        let pair = audit[..2].to_vec();
+                        audit.splice(2..2, pair);
+                    }
+                    "commit-before-start" => audit.swap(0, 1),
+                    "swapped-decisions" if !waiting => {
+                        audit.swap(0, 2);
+                        audit.swap(1, 3);
+                        audit[1]["data"]["decision_cursor"] = json!(1);
+                        audit[3]["data"]["decision_cursor"] = json!(3);
+                    }
+                    "start-session" => audit[0]["session_id"] = json!("other-session"),
+                    "start-task" => audit[0]["task_id"] = json!("other-task"),
+                    "start-attempt" => audit[0]["data"]["attempt_id"] = json!("other-attempt"),
+                    "start-approval" => audit[0]["data"]["approval_id"] = json!("other-approval"),
+                    "start-actor" => audit[0]["data"]["actor"] = json!("model"),
+                    "start-choice" => audit[0]["data"]["choice"] = json!("allow_task"),
+                    "start-missing-actor" => {
+                        audit[0]["data"].as_object_mut().unwrap().remove("actor");
+                    }
+                    "start-extra-field" => audit[0]["data"]["extra"] = json!(true),
+                    "commit-task" => audit[1]["task_id"] = json!("other-task"),
+                    "commit-cursor" => audit[1]["data"]["decision_cursor"] = json!(3),
+                    "commit-grant" => {
+                        audit[1]["data"]["grant_id"] = final_state["grants"][1]["id"].clone()
+                    }
+                    "commit-extra-field" => audit[1]["data"]["extra"] = json!(true),
+                    "read-pause-missing" if waiting => audit.clear(),
+                    "read-pause-extra" if waiting => {
+                        audit.extend_from_slice(&final_state["audit"].as_array().unwrap()[2..4]);
+                    }
+                    "read-pause-timestamp" if waiting => {
+                        audit[0]["timestamp"] = json!(audit[0]["timestamp"].as_u64().unwrap() + 1);
+                    }
+                    "final-missing-decisions" if !waiting => {
+                        audit.drain(..4);
+                    }
+                    "final-worker" if !waiting => {
+                        audit[5]["data"]["worker_id"] = json!("other-worker")
+                    }
+                    "final-reason" if !waiting => {
+                        audit[4]["data"]["reason"] = json!("other-reason")
+                    }
+                    _ => (),
+                }
+                // Preserve a contiguous envelope so semantic damage reaches the
+                // decision sequence and full payload checks rather than a gap.
+                for (index, record) in audit.iter_mut().enumerate() {
+                    record["cursor"] = json!(index + 1);
+                }
+            }
+        }) {
+            accepted.push(label);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "decision audit damage still accepted: {accepted:?}"
+    );
+}
+
 // Each rejection needs its own original request/closure and complete unchanged
 // facts; a list of passed check names cannot prove that a request was tested.
 #[test]

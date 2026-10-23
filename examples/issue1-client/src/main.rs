@@ -1,10 +1,12 @@
 use cayw_ai::{CancellationToken, Message};
 use cayw_core::{
     ApprovalRequest, CapabilityOutcome, CapabilityReconciliation, CoreEvent, EventRecord,
-    SessionState,
+    ReconciliationOrigin, ReconciliationRequest, ReconciliationVerifier, SessionState,
 };
 use cayw_ipc::{Client, ServerConfig, serve};
-use cayw_runtime::{ApprovalChoice, Runtime, RuntimeConfig, SessionView, TaskRecord, TaskState};
+use cayw_runtime::{
+    ApprovalChoice, CancelTarget, Runtime, RuntimeConfig, SessionView, TaskRecord, TaskState,
+};
 use issue1_client::{
     FILE_SCRIPT, FixedProvider, InterruptedService, Result, SavedCursor, TOKEN, UNKNOWN_SCRIPT,
     WATCHDOG, check_origin, open, require, save,
@@ -104,13 +106,38 @@ impl Api {
             }
         }
     }
-    async fn cancel(&self, id: &str) -> Result<bool> {
+    async fn cancel(&self, target: &CancelTarget) -> Result<bool> {
         match self {
-            Self::Sdk(rt) => Ok(rt.cancel(id)?),
+            Self::Sdk(rt) => Ok(rt.cancel(target)?),
             Self::Ipc(c) => Ok(c
-                .request("session.cancel", json!({"session_id":id}))
+                .request("session.cancel", serde_json::to_value(target)?)
                 .await?["cancelled"]
                 == true),
+        }
+    }
+    async fn enqueue(&self, id: &str) -> Result<TaskRecord> {
+        match self {
+            Self::Sdk(rt) => Ok(rt.enqueue(id, "Issue 1 fixed offline request")?),
+            Self::Ipc(c) => {
+                rpc(
+                    c,
+                    "task.enqueue",
+                    json!({"session_id":id,"text":"Issue 1 fixed offline request"}),
+                )
+                .await
+            }
+        }
+    }
+    async fn resume(&self, task_id: &str) -> Result<SessionView> {
+        match self {
+            Self::Sdk(rt) => Ok(rt.resume(task_id, CancellationToken::new()).await?),
+            Self::Ipc(c) => rpc(c, "task.resume", json!({"task_id":task_id})).await,
+        }
+    }
+    async fn task(&self, task_id: &str) -> Result<TaskRecord> {
+        match self {
+            Self::Sdk(rt) => Ok(rt.task(task_id)?),
+            Self::Ipc(c) => rpc(c, "task.get", json!({"task_id":task_id})).await,
         }
     }
     async fn tasks(&self, id: &str) -> Result<Vec<TaskRecord>> {
@@ -192,9 +219,10 @@ async fn lifecycle(root: &Path, ipc: bool) -> Result<Value> {
     let mut results = vec![];
     for decision in ["deny", "cancel", "allow"] {
         let session = api.create(decision).await?;
+        let admitted = api.enqueue(&session.id).await?;
         let run_api = api.clone();
-        let id = session.id.clone();
-        let run = tokio::spawn(async move { run_api.prompt(&id).await });
+        let task_id = admitted.id.clone();
+        let run = tokio::spawn(async move { run_api.resume(&task_id).await });
         let mut cursor = 0;
         if decision == "deny" {
             tokio::time::timeout(WATCHDOG, provider.first_started.acquire())
@@ -236,6 +264,7 @@ async fn lifecycle(root: &Path, ipc: bool) -> Result<Value> {
                 .is_err(),
             "forged approval accepted",
         )?;
+        let cancel_target = api.task(&admitted.id).await?.cancel_target();
         match decision {
             "deny" => {
                 api.approve(&session.id, &approval.id, ApprovalChoice::Deny)
@@ -243,7 +272,7 @@ async fn lifecycle(root: &Path, ipc: bool) -> Result<Value> {
             }
             "cancel" => {
                 require(
-                    cancel_api.cancel(&session.id).await?,
+                    cancel_api.cancel(&cancel_target).await?,
                     "peer cancel did not target active task",
                 )?;
                 require(
@@ -288,7 +317,7 @@ async fn lifecycle(root: &Path, ipc: bool) -> Result<Value> {
                 "cancellation lost",
             )?;
             require(
-                !api.cancel(&session.id).await?,
+                !api.cancel(&cancel_target).await?,
                 "repeat cancellation changed terminal task",
             )?;
         }
@@ -990,6 +1019,7 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
             matches!(call.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. })),
             "incomplete started effect was made known",
         )?;
+        let tasks_before_rejection = api.tasks(&session.id).await?;
         let error = reopened
             .client
             .request(
@@ -998,9 +1028,22 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
             )
             .await
             .unwrap_err();
+        save(&root.join("blocked-new-work.json"), &error)?;
+        let blocked_session = api.get(&session.id).await?;
+        let blocked_tasks = api.tasks(&session.id).await?;
+        save(
+            &root.join("blocked-new-work-state.json"),
+            &json!({"session":blocked_session,"tasks":blocked_tasks}),
+        )?;
         require(
-            error.code == "needs_reconciliation",
-            "unknown allowed a new request",
+            error.code == "needs_reconciliation_outcome_unknown"
+                && error.outcome_unknown
+                && blocked_session == recovered
+                && blocked_tasks == tasks_before_rejection,
+            &format!(
+                "unknown prompt returned an unexpected rejection or changed original records: {}",
+                error.code
+            ),
         )?;
         require(
             reopened
@@ -1025,7 +1068,6 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
                 && original_effect["arguments"] == call.arguments,
             "effect receipt does not match original dispatch",
         )?;
-        save(&root.join("blocked-new-work.json"), &error)?;
         let second: SessionView = rpc(
             &reopened.client,
             "session.recover",
@@ -1042,8 +1084,8 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
         )?;
         // Reconciliation uses the original public API and actual synced receipt.
         let repaired: SessionView = rpc(&reopened.client,"capability.reconcile",json!({"session_id":session.id,
-            "reconciliation":CapabilityReconciliation { key:call.key.clone(),actor:"synthetic-receipt-inspector".into(),
-                evidence:"Original child exit was awaited; synthetic-effect-0.json was synced before exit and records this exact capability/arguments".into(),
+            "reconciliation":CapabilityReconciliation { key:call.key.clone(),expected:Box::new(ReconciliationOrigin::from(call)),actor:"rpc-user".into(),
+                evidence:RECEIPT_EVIDENCE.into(),
                 outcome:CapabilityOutcome::Completed { result:original_effect },external_provenance:call.external_provenance.clone() }
         })).await?;
         require(
@@ -1139,6 +1181,61 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
     Ok(result)
 }
 
+const RECEIPT_EVIDENCE: &str = "Original child exit was awaited; synthetic-effect-0.json was synced before exit and records this exact capability/arguments";
+
+/// This fixture accepts only its original synced receipt and confirmed child exit.
+struct ReceiptVerifier(PathBuf);
+impl ReconciliationVerifier for ReceiptVerifier {
+    fn verify(&self, request: &ReconciliationRequest) -> std::result::Result<(), String> {
+        self.verify_receipt(request)
+            .map_err(|error| error.to_string())
+    }
+}
+impl ReceiptVerifier {
+    fn verify_receipt(&self, request: &ReconciliationRequest) -> Result<()> {
+        let ReconciliationRequest::Capability { reconciliation } = request else {
+            return Err("fixture has no model-tool receipt verifier".into());
+        };
+        require(
+            reconciliation.actor == "rpc-user" && reconciliation.evidence == RECEIPT_EVIDENCE,
+            "fixture reconciliation actor or evidence is not authorized",
+        )?;
+        let read = |name: &str| -> Result<Value> {
+            Ok(serde_json::from_slice(&std::fs::read(self.0.join(name))?)?)
+        };
+        let before: SessionView = serde_json::from_value(read("before-session.json")?)?;
+        let call = before
+            .unresolved_capabilities
+            .iter()
+            .find(|call| call.key == reconciliation.key)
+            .ok_or("receipt has no original capability")?;
+        let exit = read("original-exit.json")?;
+        let ready = read("original-ready.json")?;
+        let receipt = read("synthetic-effect-0.json")?;
+        require(
+            exit["wait_returned"] == true
+                && exit["try_wait_confirmed"] == true
+                && exit["pid"] == ready["pid"]
+                && receipt["pid"] == exit["pid"]
+                && receipt["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| pid != u64::from(std::process::id()))
+                && receipt["synthetic"] == true
+                && receipt["ordinal"] == 0,
+            "original fixture child exit or synced receipt is unconfirmed",
+        )?;
+        require(
+            *reconciliation.expected == ReconciliationOrigin::from(call)
+                && before.attempt.as_ref() == Some(&call.lease)
+                && receipt["capability"] == call.name
+                && receipt["arguments"] == call.arguments
+                && reconciliation.external_provenance == call.external_provenance
+                && reconciliation.outcome == (CapabilityOutcome::Completed { result: receipt }),
+            "reconciliation differs from the original fixture identity or receipt",
+        )
+    }
+}
+
 async fn host(root: &Path, unknown: bool) -> Result<()> {
     let provider = Arc::new(FixedProvider::new(
         if unknown { UNKNOWN_SCRIPT } else { FILE_SCRIPT },
@@ -1151,6 +1248,7 @@ async fn host(root: &Path, unknown: bool) -> Result<()> {
     let mut config = RuntimeConfig::default();
     if unknown {
         config.host.external = Some(service.clone());
+        config.reconciliation_verifier = Some(Arc::new(ReceiptVerifier(root.into())));
     }
     let rt = open(root, provider.clone(), config)?;
     let server = Server::start(rt, ServerConfig::new(TOKEN)).await?;

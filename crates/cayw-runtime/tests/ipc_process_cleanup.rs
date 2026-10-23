@@ -268,8 +268,13 @@ async fn authenticated_ipc_cancel_stops_and_records_every_chain_generation_in_bo
         let attempt = tasks[0]["attempt_id"].as_str().unwrap().to_owned();
         assert_eq!(tasks[0]["state"], "running");
 
+        let original_task: cayw_runtime::TaskRecord =
+            serde_json::from_value(tasks[0].clone()).unwrap();
         let cancelled = control_peer
-            .request("session.cancel", json!({"session_id":id}))
+            .request(
+                "session.cancel",
+                serde_json::to_value(original_task.cancel_target()).unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(cancelled["cancelled"], true, "{label}: cancel accepted");

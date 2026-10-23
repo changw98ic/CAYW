@@ -421,7 +421,7 @@ async fn actual_local_child_dispatch_and_drop_keep_fsynced_runtime_mapping() {
     registry.disconnect("local").unwrap();
     client.wait_closed().await;
     assert_eq!(stats.spawned.load(Ordering::SeqCst), 1);
-    assert_eq!(stats.initializations.load(Ordering::SeqCst), 1);
+    assert_eq!(stats.connections.load(Ordering::SeqCst), 1);
     assert_eq!(stats.disconnected.load(Ordering::SeqCst), 1);
 }
 

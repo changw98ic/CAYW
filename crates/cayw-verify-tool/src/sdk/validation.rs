@@ -1032,7 +1032,10 @@ pub(super) fn validate_calls(
                 && task["attempt_id"] == execution.lease.attempt_id
                 && task["worker_id"] == execution.lease.worker_id
                 && task["state"] == "completed"
-                && task["text"] == report.specification["input"]["prompt"]
+                && task["input"]["text"] == report.specification["input"]["prompt"]
+                && task["input"]["images"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
         }) {
             return Err("execution has no matching durable completed task".into());
         }

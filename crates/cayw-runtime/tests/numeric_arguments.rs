@@ -1,7 +1,7 @@
 //! Synthetic model replies; numeric preparation, Luau, file writes and storage are real.
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
-    ModelRequest, Provider, StopReason, ToolCall,
+    ModelRequest, Provider, StopReason, ToolCall, Usage, UsageStatus,
 };
 use cayw_core::{CoreEvent, SessionState};
 use cayw_runtime::{Runtime, RuntimeConfig, ScopedPermission, TaskState};
@@ -15,6 +15,14 @@ struct NumericArguments(AtomicUsize, bool);
 impl Provider for NumericArguments {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
         let mut message = AssistantMessage::new(&request.model);
+        // Synthetic counters let all three numeric-argument requests run.
+        message.usage = Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = UsageStatus::Reported;
         let turn = self.0.fetch_add(1, Ordering::SeqCst);
         message.stop_reason = StopReason::ToolUse;
         match turn {

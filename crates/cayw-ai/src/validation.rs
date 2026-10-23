@@ -1,4 +1,5 @@
-use serde_json::Value;
+use serde::{Deserialize, de};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -9,8 +10,9 @@ pub fn parse_tool_arguments(input: &str) -> Result<Value, ValidationError> {
     let value = if input.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(input)
+        serde_json::from_str::<UnambiguousValue>(input)
             .map_err(|error| ValidationError(format!("Invalid tool JSON: {error}")))?
+            .0
     };
     if !value.is_object() {
         return Err(ValidationError(
@@ -18,6 +20,73 @@ pub fn parse_tool_arguments(input: &str) -> Result<Value, ValidationError> {
         ));
     }
     Ok(value)
+}
+
+struct UnambiguousValue(Value);
+
+impl<'de> Deserialize<'de> for UnambiguousValue {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ValueVisitor;
+
+        impl<'de> de::Visitor<'de> for ValueVisitor {
+            type Value = UnambiguousValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON without duplicate object fields")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UnambiguousValue(Value::Null))
+            }
+
+            fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(UnambiguousValue(Value::Bool(value)))
+            }
+
+            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(UnambiguousValue(value.into()))
+            }
+
+            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(UnambiguousValue(value.into()))
+            }
+
+            fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|number| UnambiguousValue(Value::Number(number)))
+                    .ok_or_else(|| E::custom("Invalid JSON number"))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(UnambiguousValue(Value::String(value.to_owned())))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values = Vec::new();
+                while let Some(UnambiguousValue(value)) = sequence.next_element()? {
+                    values.push(value);
+                }
+                Ok(UnambiguousValue(Value::Array(values)))
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut fields = Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if fields.contains_key(&key) {
+                        return Err(de::Error::custom("duplicate JSON object field"));
+                    }
+                    let UnambiguousValue(value) = map.next_value()?;
+                    fields.insert(key, value);
+                }
+                Ok(UnambiguousValue(Value::Object(fields)))
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor)
+    }
 }
 
 /// Explicit conversion for tool-owned unsigned integer fields. Decimal strings

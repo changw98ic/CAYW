@@ -9,12 +9,17 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 // Keep failed authorities stopped for this process's lifetime, even if all store
 // connections are dropped while both durable failure-record writes fail. This
 // cannot promise survival of process loss when neither record can persist.
-static STOPPED: OnceLock<Mutex<BTreeMap<PathBuf, Arc<AtomicBool>>>> = OnceLock::new();
+struct LocalGeneration {
+    id: Option<String>,
+    stopped: Arc<AtomicBool>,
+}
+static STOPPED: OnceLock<Mutex<BTreeMap<PathBuf, LocalGeneration>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,17 +44,30 @@ pub(crate) struct Record {
 pub(crate) struct AuthorityFence {
     file: Mutex<File>,
     stopped: Arc<AtomicBool>,
+    database: PathBuf,
 }
 impl AuthorityFence {
     pub fn open(database: &Path) -> Result<Self> {
+        Self::open_inner(database, false)
+    }
+    /// Administrative access still takes the original sidecar lock. It never
+    /// creates a missing marker and never clears the old generation's stop.
+    pub fn inspect(database: &Path) -> Result<Self> {
+        Self::open_inner(database, true)
+    }
+    fn open_inner(database: &Path, administrative: bool) -> Result<Self> {
         let stopped = STOPPED
             .get_or_init(Mutex::default)
             .lock()
             .map_err(|_| RequestError::Poisoned)?
             .entry(database.to_owned())
-            .or_default()
+            .or_insert_with(|| LocalGeneration {
+                id: None,
+                stopped: Arc::new(AtomicBool::new(false)),
+            })
+            .stopped
             .clone();
-        if stopped.load(Ordering::Acquire) {
+        if !administrative && stopped.load(Ordering::Acquire) {
             return Err(RequestError::AuthorityStopped);
         }
         let mut path = database.as_os_str().to_os_string();
@@ -57,7 +75,7 @@ impl AuthorityFence {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(!administrative)
             .truncate(false)
             .open(PathBuf::from(path))
             .inspect_err(|_| stopped.store(true, Ordering::Release))?;
@@ -72,35 +90,93 @@ impl AuthorityFence {
         Ok(Self {
             file: Mutex::new(file),
             stopped,
+            database: database.to_owned(),
         })
     }
-    pub fn lock(&self) -> Result<FenceGuard<'_>> {
-        if self.stopped.load(Ordering::Acquire) {
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+    pub fn bind_identity(&self, id: &str) -> Result<()> {
+        let mut generations = STOPPED
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| RequestError::Poisoned)?;
+        if let Some(generation) = generations.get_mut(&self.database)
+            && Arc::ptr_eq(&generation.stopped, &self.stopped)
+        {
+            generation.id = Some(id.into());
+        }
+        Ok(())
+    }
+    pub fn stopped_for(&self, id: &str) -> bool {
+        let Ok(generations) = STOPPED.get_or_init(Mutex::default).lock() else {
+            return true;
+        };
+        generations.get(&self.database).is_some_and(|generation| {
+            generation.stopped.load(Ordering::Acquire)
+                && generation.id.as_deref().is_none_or(|known| known == id)
+        })
+    }
+    /// Installs a distinct process-local generation. Old Arc holders stay
+    /// stopped forever; clearing their AtomicBool would revive old store handles.
+    pub fn publish_repaired(&self, id: &str) -> Result<()> {
+        let mut generations = STOPPED
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| RequestError::Poisoned)?;
+        self.stop();
+        generations.insert(
+            self.database.clone(),
+            LocalGeneration {
+                id: Some(id.into()),
+                stopped: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        Ok(())
+    }
+    pub fn lock(&self, timeout: Duration) -> Result<FenceGuard<'_>> {
+        self.lock_inner(timeout, false)
+    }
+    pub fn inspect_lock(&self, timeout: Duration) -> Result<FenceGuard<'_>> {
+        self.lock_inner(timeout, true)
+    }
+    fn lock_inner(&self, timeout: Duration, administrative: bool) -> Result<FenceGuard<'_>> {
+        if !administrative && self.stopped.load(Ordering::Acquire) {
             return Err(RequestError::AuthorityStopped);
         }
         let file = self.file.lock().map_err(|_| {
             self.stop();
             RequestError::Poisoned
         })?;
-        match file.try_lock() {
-            Ok(()) => {
-                let guard = FenceGuard { file, fence: self };
-                if self.stopped.load(Ordering::Acquire) {
-                    return Err(RequestError::AuthorityStopped);
+        let started = Instant::now();
+        loop {
+            if !administrative && self.stopped.load(Ordering::Acquire) {
+                return Err(RequestError::AuthorityStopped);
+            }
+            match file.try_lock() {
+                Ok(()) => {
+                    let guard = FenceGuard { file, fence: self };
+                    if !administrative && self.stopped.load(Ordering::Acquire) {
+                        return Err(RequestError::AuthorityStopped);
+                    }
+                    return Ok(guard);
                 }
-                Ok(guard)
-            }
-            // No clock has been read or persistence attempted. Contention may
-            // be retried; it cannot resurrect authority or lose an observation.
-            Err(TryLockError::WouldBlock) => {
-                Err(RequestError::Database(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                    Some("request authority is busy".into()),
-                )))
-            }
-            Err(TryLockError::Error(error)) => {
-                self.stop();
-                Err(error.into())
+                // Only acquisition is retried. No record, clock, transaction,
+                // or permission is observed before the existing owner releases.
+                Err(TryLockError::WouldBlock) => {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        return Err(RequestError::Database(rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                            Some("request authority is busy".into()),
+                        )));
+                    }
+                    std::thread::sleep(remaining.min(Duration::from_millis(1)));
+                }
+                Err(TryLockError::Error(error)) => {
+                    self.stop();
+                    return Err(error.into());
+                }
             }
         }
     }
@@ -113,12 +189,12 @@ pub(crate) struct FenceGuard<'a> {
     fence: &'a AuthorityFence,
 }
 impl FenceGuard<'_> {
-    pub fn read(&mut self) -> Result<Option<Record>> {
+    pub fn metadata(&self) -> Result<std::fs::Metadata> {
+        Ok(self.file.metadata()?)
+    }
+    pub fn bytes(&mut self) -> Result<Vec<u8>> {
         self.file.seek(SeekFrom::Start(0))?;
         let size = self.file.metadata()?.len();
-        if size == 0 {
-            return Ok(None);
-        }
         if size > 1024 {
             return Err(RequestError::AuthorityStopped);
         }
@@ -126,9 +202,16 @@ impl FenceGuard<'_> {
         std::io::Read::by_ref(&mut *self.file)
             .take(1025)
             .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+    pub fn read(&mut self) -> Result<Option<Record>> {
+        let bytes = self.bytes()?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
         let record: Record =
             serde_json::from_slice(&bytes).map_err(|_| RequestError::AuthorityStopped)?;
-        if record.id.len() > 128 || record.last_now_ms > i64::MAX as u64 {
+        if record.id.is_empty() || record.id.len() > 128 || record.last_now_ms > i64::MAX as u64 {
             return Err(RequestError::AuthorityStopped);
         }
         Ok(Some(record))

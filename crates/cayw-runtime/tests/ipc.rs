@@ -280,6 +280,11 @@ async fn killed_binary_before_approval_is_recovered_as_not_executed_without_repl
         .await
         .unwrap();
     let task_id = before[0]["id"].clone();
+    let pending = client
+        .request("session.get", json!({"session_id":id}))
+        .await
+        .unwrap()["pending_approvals"][0]["id"]
+        .clone();
     child.kill().await.unwrap();
     child.wait().await.unwrap();
     assert!(prompt.await.unwrap().is_err());
@@ -291,6 +296,27 @@ async fn killed_binary_before_approval_is_recovered_as_not_executed_without_repl
         .unwrap();
     assert_eq!(tasks[0]["id"], task_id);
     assert_eq!(tasks[0]["state"], "running");
+    // Durable Running/approval rows survive the owner. They cannot authorize a
+    // new effect once the original process has released its task lock.
+    assert!(
+        client
+            .request(
+                "approval.decide",
+                json!({
+                    "session_id":id,"approval_id":pending,"decision":"allow_once"
+                })
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        client
+            .request("session.tasks", json!({"session_id":id}))
+            .await
+            .unwrap(),
+        tasks
+    );
+    assert!(!dir.path().join("workspace/cayw-demo.txt").exists());
     let health = client.request("runtime.health", json!({})).await.unwrap();
     assert_eq!(health["running"], 1);
     assert!(

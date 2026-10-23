@@ -50,6 +50,7 @@ fn manifest() -> Manifest {
             description: "Fixed skill".into(),
             content_sha256: content_sha256("fixed content"),
         }],
+        resources: Vec::new(),
         search: true,
     }
 }
@@ -105,6 +106,9 @@ impl SourceHandle for Handle {
                 })
             }
             SourceOperation::Search { arguments } => json!({"matches":[arguments["query"]]}),
+            SourceOperation::ReadResource { .. } => {
+                return Err(CapabilityError::new("unexpected resource read"));
+            }
         };
         Ok(SourceReply { key, value })
     }
