@@ -1,6 +1,8 @@
 //! Optional loopback browser gateway. The runtime owns every session, event,
 //! tool invocation and approval decision. This gateway never retries an RPC.
 
+mod host_services;
+
 use axum::http::Uri;
 use axum::{
     Json, Router,
@@ -34,12 +36,16 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
+    "runtime.model.get",
+    "runtime.model.configure",
     "devices.list",
     "devices.prepare_bind",
     "devices.bind_status",
     "devices.bind_hello",
     "devices.bind_confirm",
     "devices.heartbeat",
+    "devices.poll",
+    "devices.respond",
     "devices.select",
     "devices.remove",
     "device.binding.status",
@@ -48,18 +54,30 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "server.auth.login",
     "server.auth.logout",
     "server.auth.update_credentials",
+    "models.config",
+    "models.save_provider",
+    "models.add_model",
+    "models.select",
     "projects.list",
     "projects.browse",
     "projects.create",
     "projects.remove",
     "skills.catalog",
+    "skills.save",
     "mcp.catalog",
+    "mcp.connect",
+    "mcp.disconnect",
+    "mcp.call",
     "session.create",
     "session.list",
     "session.get",
     "session.events",
     "session.grants",
     "session.audit",
+    "session.plan",
+    "session.questions",
+    "session.pending_questions",
+    "question.answer",
     "session.prompt",
     "task.enqueue",
     "task.resume",
@@ -269,9 +287,13 @@ impl fmt::Debug for ProjectEndpoint {
 }
 
 struct Gateway {
+    state_dir: PathBuf,
     projects: RwLock<Vec<ProjectEndpoint>>,
     session_projects: RwLock<HashMap<String, String>>,
     server_auth: RwLock<GatewayServerAuth>,
+    device_channels: Arc<host_services::DeviceChannelHub>,
+    models_config: RwLock<host_services::ModelsConfigState>,
+    mcp_host: RwLock<host_services::McpHostState>,
     authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
@@ -292,6 +314,10 @@ struct BoundDeviceEntry {
     handshake_bind_id: String,
     bound_at_ms: i64,
     last_heartbeat_ms: i64,
+    #[serde(default)]
+    last_heartbeat_signed_ts_ms: i64,
+    #[serde(default)]
+    last_heartbeat_seq: u64,
 }
 
 #[derive(Clone)]
@@ -310,7 +336,6 @@ enum PendingBindPhase {
 
 #[derive(Clone)]
 struct PendingBindSession {
-    bind_id: String,
     created_at_ms: i64,
     phase: PendingBindPhase,
 }
@@ -324,6 +349,7 @@ struct GatewayServerAuth {
     active_device_id: String,
     devices: Vec<BoundDeviceEntry>,
     devices_path: PathBuf,
+    next_device_seq: u64,
     pending_binds: HashMap<String, PendingBindSession>,
 }
 
@@ -362,17 +388,26 @@ fn fresh_bind_nonce() -> String {
     format!("{h1:016x}{h2:016x}")
 }
 
+fn resolve_state_dir(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = explicit {
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+    let dir = std::env::var("CAYW_STATE_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let id = NEXT_GATEWAY_ID.fetch_add(1, Ordering::Relaxed);
+            std::env::temp_dir().join(format!("cayw-webui-state-{}-{id}", std::process::id()))
+        });
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 impl GatewayServerAuth {
-    fn load_or_init() -> Self {
-        let base_dir = std::env::var("CAYW_STATE_DIR")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let id = NEXT_GATEWAY_ID.fetch_add(1, Ordering::Relaxed);
-                std::env::temp_dir().join(format!("cayw-webui-state-{}-{id}", std::process::id()))
-            });
-        let _ = std::fs::create_dir_all(&base_dir);
+    fn load_or_init_at(base_dir: &std::path::Path) -> Self {
+        let _ = std::fs::create_dir_all(base_dir);
         let account_path = base_dir.join("server-account.json");
         let server_kp_path = base_dir.join("server-rsa-keypair.json");
         let devices_path = base_dir.join("devices-rsa-bindings.json");
@@ -405,6 +440,7 @@ impl GatewayServerAuth {
             .first()
             .map(|d| d.device_id.clone())
             .unwrap_or_default();
+        let next_device_seq = devices.len() as u64 + 1;
 
         Self {
             connection_mode: "local_device".to_owned(),
@@ -415,6 +451,7 @@ impl GatewayServerAuth {
             active_device_id,
             devices,
             devices_path,
+            next_device_seq,
             pending_binds: HashMap::new(),
         }
     }
@@ -523,6 +560,17 @@ pub async fn serve_projects_with_limits(
     limits: GatewayLimits,
     cancel: CancellationToken,
 ) -> io::Result<()> {
+    serve_projects_with_state_dir(listener, projects, limits, None, cancel).await
+}
+
+/// Serve one or more local runtime projects with an explicit state directory.
+pub async fn serve_projects_with_state_dir(
+    listener: TcpListener,
+    projects: Vec<ProjectEndpoint>,
+    limits: GatewayLimits,
+    state_dir: Option<PathBuf>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
     let address = listener.local_addr()?;
     if !address.ip().is_loopback() {
         return Err(io::Error::new(
@@ -548,10 +596,17 @@ pub async fn serve_projects_with_limits(
         }
     }
     limits.validate()?;
+    let resolved_dir = resolve_state_dir(state_dir);
     let state = Arc::new(Gateway {
+        state_dir: resolved_dir.clone(),
         projects: RwLock::new(projects),
         session_projects: RwLock::new(HashMap::new()),
-        server_auth: RwLock::new(GatewayServerAuth::load_or_init()),
+        server_auth: RwLock::new(GatewayServerAuth::load_or_init_at(&resolved_dir)),
+        device_channels: Arc::new(host_services::DeviceChannelHub::default()),
+        models_config: RwLock::new(host_services::ModelsConfigState::load_or_init(
+            &resolved_dir,
+        )),
+        mcp_host: RwLock::new(host_services::McpHostState::load_or_init(&resolved_dir)),
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
@@ -570,6 +625,8 @@ pub async fn serve_projects_with_limits(
         .route("/api/bind/hello", post(bind_hello_http))
         .route("/api/bind/confirm", post(bind_confirm_http))
         .route("/api/device/heartbeat", post(device_heartbeat_http))
+        .route("/api/device/poll", post(device_poll_http))
+        .route("/api/device/respond", post(device_respond_http))
         .route("/api/rpc", post(rpc))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -766,26 +823,6 @@ async fn rpc(
             Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "queue_timeout", "Gateway queue wait timed out; request was not dispatched", false),
         }
     };
-    if request.method == "device.binding.status" {
-        let auth = state
-            .server_auth
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        return Json(json!({ "result": auth.binding_json() })).into_response();
-    }
-    if request.method == "devices.list" {
-        let auth = state
-            .server_auth
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        return Json(json!({ "result": auth.devices_list_json() })).into_response();
-    }
-    if request.method == "devices.prepare_bind" {
-        return handle_devices_prepare_bind(&state, &request.params);
-    }
-    if request.method == "devices.bind_status" {
-        return handle_devices_bind_status(&state, &request.params);
-    }
     if request.method == "devices.bind_hello" {
         return handle_devices_bind_hello(&state, &request.params);
     }
@@ -795,11 +832,11 @@ async fn rpc(
     if request.method == "devices.heartbeat" {
         return handle_devices_heartbeat(&state, &request.params);
     }
-    if request.method == "devices.select" {
-        return handle_devices_select(&state, &request.params);
+    if request.method == "devices.poll" {
+        return handle_devices_poll(&state, &request.params).await;
     }
-    if request.method == "devices.remove" {
-        return handle_devices_remove(&state, &request.params);
+    if request.method == "devices.respond" {
+        return handle_devices_respond(&state, &request.params);
     }
     if request.method == "server.auth.status" {
         let auth = state
@@ -839,6 +876,48 @@ async fn rpc(
             );
         }
     }
+    if request.method == "device.binding.status" {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return Json(json!({ "result": auth.binding_json() })).into_response();
+    }
+    if request.method == "devices.list" {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return Json(json!({ "result": auth.devices_list_json() })).into_response();
+    }
+    if request.method == "devices.prepare_bind" {
+        return handle_devices_prepare_bind(&state, &request.params);
+    }
+    if request.method == "devices.bind_status" {
+        return handle_devices_bind_status(&state, &request.params);
+    }
+    if request.method == "devices.select" {
+        return handle_devices_select(&state, &request.params);
+    }
+    if request.method == "devices.remove" {
+        return handle_devices_remove(&state, &request.params);
+    }
+    if request.method == "models.config" {
+        let cfg = state
+            .models_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return Json(json!({ "result": cfg.public_json() })).into_response();
+    }
+    if request.method == "models.save_provider" {
+        return handle_models_save_provider(&state, &request.params).await;
+    }
+    if request.method == "models.add_model" {
+        return handle_models_add_model(&state, &request.params).await;
+    }
+    if request.method == "models.select" {
+        return handle_models_select(&state, &request.params).await;
+    }
     if request.method == "projects.list" {
         if !request
             .params
@@ -865,11 +944,66 @@ async fn rpc(
         return handle_projects_remove(&state, &request.params);
     }
     if request.method == "skills.catalog" {
-        return handle_skills_catalog(&request.params);
+        return handle_skills_catalog(&state, &request.params);
+    }
+    if request.method == "skills.save" {
+        return handle_skills_save(&state, &request.params);
     }
     if request.method == "mcp.catalog" {
-        return handle_mcp_catalog(&request.params);
+        return handle_mcp_catalog(&state, &request.params);
     }
+    if request.method == "mcp.connect" {
+        return handle_mcp_connect(&state, &request.params).await;
+    }
+    if request.method == "mcp.disconnect" {
+        return handle_mcp_disconnect(&state, &request.params).await;
+    }
+    if request.method == "mcp.call" {
+        return handle_mcp_call(&state, &request.params).await;
+    }
+
+    let mut rpc_params = request.params.clone();
+    if matches!(request.method.as_str(), "task.enqueue" | "session.prompt")
+        && let Some(obj) = rpc_params.as_object_mut()
+    {
+        let plan_mode = obj
+            .remove("plan_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let skills: Vec<String> = obj
+            .remove("skills")
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .collect();
+        if (plan_mode || !skills.is_empty())
+            && let Some(orig_text) = obj.get("text").and_then(Value::as_str).map(str::to_owned)
+        {
+            let mut prefix = String::new();
+            if plan_mode {
+                prefix.push_str(
+                    "[规划模式] 请先调用 plan.update 制定分步执行计划，再执行具体操作。\n",
+                );
+            }
+            if !skills.is_empty() {
+                let skill_prefix = resolve_skills_prompt_prefix(&state.state_dir, &skills);
+                if !skill_prefix.is_empty() {
+                    prefix.push_str(&skill_prefix);
+                }
+            }
+            obj.insert(
+                "text".to_owned(),
+                Value::String(format!("{prefix}{orig_text}")),
+            );
+        }
+    }
+
     let (project, shares_earlier_ipc) = {
         let projects = state
             .projects
@@ -900,6 +1034,12 @@ async fn rpc(
     } else {
         state.limits.request_timeout
     };
+
+    if let Some(device_id) = resolve_target_device(&state, &request.method, &rpc_params) {
+        return dispatch_to_bound_device(&state, &device_id, &request.method, rpc_params, budget)
+            .await;
+    }
+
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
         result = project.ipc.connect(budget) => match result {
@@ -913,7 +1053,7 @@ async fn rpc(
     tokio::select! {
         biased;
         _ = state.cancel.cancelled() => shutting_down(side_effecting(&method_name)),
-        result = timeout(budget, client.request(&request.method, request.params)) => match result {
+        result = timeout(budget, client.request(&request.method, rpc_params)) => match result {
             Ok(Ok(mut result)) => {
                 // Successful RPC data is a protocol value, never diagnostic
                 // text. Reject an accidental credential disclosure as a whole
@@ -1378,21 +1518,23 @@ fn parse_skill_frontmatter(raw: &str, fallback_name: &str) -> (String, String) {
     (name, description)
 }
 
-fn handle_skills_catalog(params: &Value) -> Response {
-    let detail_name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+fn skill_roots(state_dir: &std::path::Path) -> Vec<(&'static str, String)> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/chengwen".to_owned());
-    let roots = [
+    vec![
+        (
+            "自定义保存技能",
+            state_dir.join("skills").display().to_string(),
+        ),
         ("用户技能库", format!("{home}/.codex/skills")),
         ("通用技能库", format!("{home}/.agents/skills")),
         ("系统内置技能", format!("{home}/.codex/skills/.system")),
-    ];
+    ]
+}
+
+fn collect_skills_catalog(state_dir: &std::path::Path, detail_name: Option<&str>) -> Vec<Value> {
     let mut items: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (source_label, root_path) in roots {
+    for (source_label, root_path) in skill_roots(state_dir) {
         let Ok(entries) = std::fs::read_dir(&root_path) else {
             continue;
         };
@@ -1431,57 +1573,750 @@ fn handle_skills_catalog(params: &Value) -> Response {
         let bn = b.get("name").and_then(Value::as_str).unwrap_or("");
         an.cmp(bn)
     });
+    items
+}
+
+fn resolve_skills_prompt_prefix(state_dir: &std::path::Path, skill_names: &[String]) -> String {
+    let mut out = String::new();
+    for target in skill_names {
+        let items = collect_skills_catalog(state_dir, Some(target));
+        if let Some(found) = items
+            .into_iter()
+            .find(|i| i.get("name").and_then(Value::as_str) == Some(target.as_str()))
+        {
+            let path = found.get("path").and_then(Value::as_str).unwrap_or("");
+            let content = found
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .take(1500)
+                .collect::<String>();
+            out.push_str(&format!("[已启用技能: {target} ({path})]\n{content}\n\n"));
+        } else {
+            out.push_str(&format!("[已启用技能: {target}]\n"));
+        }
+    }
+    out
+}
+
+fn handle_skills_catalog(state: &Gateway, params: &Value) -> Response {
+    let detail_name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let items = collect_skills_catalog(&state.state_dir, detail_name);
     Json(json!({ "result": items })).into_response()
 }
 
-fn handle_mcp_catalog(_params: &Value) -> Response {
-    let servers = json!([
-        {
-            "id": "codegraph",
-            "name": "CodeGraph 代码语义图谱",
-            "transport": "本机标准输入输出",
-            "endpoint": "codegraph-mcp --workspace .",
-            "status": "active",
-            "statusLabel": "已连接",
-            "enabled": true,
-            "builtin": true,
-            "tools": [
-                { "name": "codegraph.find_symbol", "desc": "跨文件查找符号定义与声明位置" },
-                { "name": "codegraph.find_references", "desc": "查询符号在工作区内的所有引用与调用点" },
-                { "name": "codegraph.dependencies", "desc": "分析模块与文件的依赖关系图" }
-            ]
-        },
-        {
-            "id": "playwright",
-            "name": "Playwright 浏览器自动化",
-            "transport": "本机标准输入输出",
-            "endpoint": "playwright-mcp --headless",
-            "status": "active",
-            "statusLabel": "已连接",
-            "enabled": true,
-            "builtin": true,
-            "tools": [
-                { "name": "browser_navigate", "desc": "打开指定网页地址并等待加载" },
-                { "name": "browser_snapshot", "desc": "获取页面无障碍结构快照" },
-                { "name": "browser_take_screenshot", "desc": "截取当前视口或完整页面图像" }
-            ]
-        },
-        {
-            "id": "context7",
-            "name": "Context7 库与框架文档",
-            "transport": "远程事件流",
-            "endpoint": "https://mcp.context7.com/mcp",
-            "status": "active",
-            "statusLabel": "已连接",
-            "enabled": true,
-            "builtin": true,
-            "tools": [
-                { "name": "resolve-library-id", "desc": "解析第三方库与框架的标准标识" },
-                { "name": "query-docs", "desc": "按版本检索官方文档与代码示例" }
-            ]
+fn handle_skills_save(state: &Gateway, params: &Value) -> Response {
+    let Some(raw_name) = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "技能名称不能为空",
+            false,
+        );
+    };
+    let slug: String = raw_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if slug.is_empty() || slug.len() > 64 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "技能标识必须包含 1..64 个字母、数字或连字符",
+            false,
+        );
+    }
+    let desc = params
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("自定义工作流与规范说明");
+    let body = params
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let skill_dir = state.state_dir.join("skills").join(&slug);
+    if std::fs::create_dir_all(&skill_dir).is_err() {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+            "无法创建本地技能存储目录",
+            false,
+        );
+    }
+    let skill_md = skill_dir.join("SKILL.md");
+    let markdown = if body.starts_with("---") {
+        body.to_owned()
+    } else {
+        format!("---\nname: {slug}\ndescription: {desc}\n---\n\n# {slug}\n\n{body}\n")
+    };
+    if std::fs::write(&skill_md, &markdown).is_err() {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+            "写入 SKILL.md 失败",
+            false,
+        );
+    }
+    let catalog = collect_skills_catalog(&state.state_dir, Some(&slug));
+    let saved = catalog
+        .iter()
+        .find(|i| i.get("name").and_then(Value::as_str) == Some(slug.as_str()))
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "name": slug,
+                "description": desc,
+                "source": "自定义保存技能",
+                "path": skill_md.to_string_lossy(),
+                "content": markdown,
+            })
+        });
+    Json(json!({
+        "result": {
+            "saved": saved,
+            "catalog": collect_skills_catalog(&state.state_dir, None),
         }
-    ]);
-    Json(json!({ "result": servers })).into_response()
+    }))
+    .into_response()
+}
+
+fn handle_mcp_catalog(state: &Gateway, _params: &Value) -> Response {
+    let mut mcp = state
+        .mcp_host
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Json(json!({ "result": mcp.catalog_json() })).into_response()
+}
+
+async fn handle_mcp_connect(state: &Gateway, params: &Value) -> Response {
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("本地 MCP 服务")
+        .to_owned();
+    let transport = params
+        .get("transport")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("本机标准输入输出")
+        .to_owned();
+    let endpoint = params
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let id_opt = params.get("id").and_then(Value::as_str);
+            let mcp = state
+                .mcp_host
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            id_opt.and_then(|id| {
+                mcp.entries
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.endpoint.clone())
+            })
+        });
+    let Some(endpoint) = endpoint else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "连接 MCP 服务需要提供启动命令或可执行文件路径 (endpoint)",
+            false,
+        );
+    };
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let slug: String = name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+                .trim_matches('-')
+                .to_owned();
+            if slug.is_empty() {
+                format!("mcp-{}", &fresh_bind_nonce()[..8])
+            } else {
+                slug
+            }
+        });
+    let conn = match host_services::connect_stdio_mcp(&endpoint).await {
+        Ok(c) => Arc::new(c),
+        Err(err) => {
+            return error_response(StatusCode::BAD_REQUEST, "mcp_connect_failed", &err, false);
+        }
+    };
+    let mut mcp = state
+        .mcp_host
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(old) = mcp.live.remove(&id) {
+        old.control.close();
+    }
+    let entry = host_services::McpServerEntry {
+        id: id.clone(),
+        name,
+        transport,
+        endpoint,
+        builtin: id == "local-mcp",
+        tools: conn.tools.clone(),
+    };
+    if let Some(pos) = mcp.entries.iter().position(|e| e.id == id) {
+        mcp.entries[pos] = entry;
+    } else {
+        mcp.entries.push(entry);
+    }
+    mcp.live.insert(id.clone(), conn);
+    mcp.save();
+    let catalog = mcp.catalog_json();
+    Json(json!({
+        "result": {
+            "connected_id": id,
+            "servers": catalog,
+        }
+    }))
+    .into_response()
+}
+
+async fn handle_mcp_disconnect(state: &Gateway, params: &Value) -> Response {
+    let Some(id) = params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "mcp.disconnect requires server id",
+            false,
+        );
+    };
+    let removed = {
+        let mut mcp = state
+            .mcp_host
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mcp.live.remove(id)
+    };
+    if let Some(conn) = removed {
+        conn.control.close();
+        conn.control.wait_closed().await;
+    }
+    let mut mcp = state
+        .mcp_host
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Json(json!({
+        "result": {
+            "disconnected_id": id,
+            "servers": mcp.catalog_json(),
+        }
+    }))
+    .into_response()
+}
+
+async fn handle_mcp_call(state: &Gateway, params: &Value) -> Response {
+    let Some(id) = params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "mcp.call requires server id",
+            false,
+        );
+    };
+    let Some(tool_name) = params
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "mcp.call requires tool name",
+            false,
+        );
+    };
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let conn = {
+        let mcp = state
+            .mcp_host
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        mcp.live.get(id).cloned()
+    };
+    let Some(conn) = conn else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "mcp_not_connected",
+            "该 MCP 服务当前未连接，请先建立连接",
+            false,
+        );
+    };
+    match host_services::invoke_stdio_mcp_tool(&conn, tool_name, arguments).await {
+        Ok(output) => {
+            let mut mcp = state
+                .mcp_host
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Json(json!({
+                "result": {
+                    "output": output,
+                    "servers": mcp.catalog_json(),
+                }
+            }))
+            .into_response()
+        }
+        Err(err) => error_response(StatusCode::BAD_GATEWAY, "mcp_call_failed", &err, false),
+    }
+}
+
+async fn sync_model_to_active_runtime(state: &Gateway, model_id: &str, session_id: Option<&str>) {
+    let payload = {
+        let cfg = state
+            .models_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cfg.runtime_configure_payload(model_id, session_id)
+    };
+    if let Some(dev_id) = resolve_target_device(state, "runtime.model.configure", &payload)
+        && state.device_channels.is_polling(&dev_id)
+    {
+        let _ = dispatch_to_bound_device(
+            state,
+            &dev_id,
+            "runtime.model.configure",
+            payload.clone(),
+            Duration::from_secs(2),
+        )
+        .await;
+    }
+    let project_opt = {
+        let projects = state
+            .projects
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        projects.first().cloned()
+    };
+    if let Some(project) = project_opt
+        && let Ok(client) = project.ipc.connect(state.limits.request_timeout).await
+    {
+        let _ = timeout(
+            state.limits.request_timeout,
+            client.request("runtime.model.configure", payload),
+        )
+        .await;
+    }
+}
+
+async fn handle_models_save_provider(state: &Gateway, params: &Value) -> Response {
+    let Some(id_raw) = params
+        .get("id")
+        .or_else(|| params.get("provider_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "缺少模型服务商标识 (id)",
+            false,
+        );
+    };
+    let base_url = params
+        .get("base_url")
+        .or_else(|| params.get("baseUrl"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let api = params
+        .get("api")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let api_key = params
+        .get("api_key")
+        .or_else(|| params.get("apiKey"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    let selected_model = {
+        let mut cfg = state
+            .models_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(prov) = cfg.providers.iter_mut().find(|p| p.id == id_raw) {
+            if let Some(u) = base_url {
+                prov.base_url = u;
+            }
+            if let Some(n) = name {
+                prov.name = n;
+            }
+            if let Some(a) = api {
+                prov.api = a;
+            }
+            if let Some(k) = api_key {
+                prov.api_key_secret = Some(k);
+                prov.configured = true;
+            }
+        } else {
+            let default_model_id = format!("{id_raw}-default");
+            cfg.providers.push(host_services::ProviderEntryConfig {
+                id: id_raw.to_owned(),
+                name: name.unwrap_or_else(|| id_raw.to_owned()),
+                api: api.unwrap_or_else(|| "chat_completions".to_owned()),
+                base_url: base_url.unwrap_or_else(|| "http://127.0.0.1:3425/v1".to_owned()),
+                configured: api_key.is_some(),
+                api_key_secret: api_key,
+                models: vec![host_services::ModelItemConfig {
+                    id: default_model_id.clone(),
+                    label: default_model_id,
+                    desc: "自定义接入模型".to_owned(),
+                    context: "128K".to_owned(),
+                    tools: true,
+                    vision: false,
+                    reasoning: false,
+                }],
+            });
+        }
+        cfg.save();
+        cfg.selected_model.clone()
+    };
+    sync_model_to_active_runtime(state, &selected_model, None).await;
+    let cfg = state
+        .models_config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Json(json!({ "result": cfg.public_json() })).into_response()
+}
+
+async fn handle_models_add_model(state: &Gateway, params: &Value) -> Response {
+    let Some(provider_id) = params
+        .get("provider_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "缺少 provider_id",
+            false,
+        );
+    };
+    let Some(model_id) = params
+        .get("model_id")
+        .or_else(|| params.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "缺少 model_id",
+            false,
+        );
+    };
+    let desc = params
+        .get("desc")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("自定义推理与工具编排模型")
+        .to_owned();
+    {
+        let mut cfg = state
+            .models_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(prov) = cfg.providers.iter_mut().find(|p| p.id == provider_id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_params",
+                "未找到对应模型服务商",
+                false,
+            );
+        };
+        if !prov.models.iter().any(|m| m.id == model_id) {
+            prov.models.push(host_services::ModelItemConfig {
+                id: model_id.to_owned(),
+                label: model_id.to_owned(),
+                desc,
+                context: "128K".to_owned(),
+                tools: true,
+                vision: false,
+                reasoning: false,
+            });
+        }
+        cfg.selected_model = model_id.to_owned();
+        cfg.save();
+    }
+    sync_model_to_active_runtime(state, model_id, None).await;
+    let cfg = state
+        .models_config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Json(json!({ "result": cfg.public_json() })).into_response()
+}
+
+async fn handle_models_select(state: &Gateway, params: &Value) -> Response {
+    let Some(model_id) = params
+        .get("model_id")
+        .or_else(|| params.get("model"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "缺少要切换的 model_id",
+            false,
+        );
+    };
+    let session_id = params
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    {
+        let mut cfg = state
+            .models_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cfg.selected_model = model_id.to_owned();
+        if let Some(sid) = &session_id {
+            cfg.session_models.insert(sid.clone(), model_id.to_owned());
+        }
+        cfg.save();
+    }
+    sync_model_to_active_runtime(state, model_id, session_id.as_deref()).await;
+    let cfg = state
+        .models_config
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Json(json!({ "result": cfg.public_json() })).into_response()
+}
+
+fn resolve_target_device(state: &Gateway, method: &str, params: &Value) -> Option<String> {
+    if let Some(sid) = params.get("session_id").and_then(Value::as_str)
+        && let Some(dev_id) = state
+            .device_channels
+            .session_devices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(sid)
+            .cloned()
+    {
+        return if dev_id.is_empty() || dev_id == "local" {
+            None
+        } else {
+            Some(dev_id)
+        };
+    }
+    if let Some(tid) = params.get("task_id").and_then(Value::as_str)
+        && let Some(dev_id) = state
+            .device_channels
+            .task_devices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tid)
+            .cloned()
+    {
+        return if dev_id.is_empty() || dev_id == "local" {
+            None
+        } else {
+            Some(dev_id)
+        };
+    }
+    let _ = method;
+    let auth = state
+        .server_auth
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let active = auth.active_device_id.trim();
+    if active.is_empty() || active == "local" {
+        return None;
+    }
+    if auth.devices.iter().any(|d| d.device_id == active) {
+        Some(active.to_owned())
+    } else {
+        None
+    }
+}
+
+async fn dispatch_to_bound_device(
+    state: &Gateway,
+    device_id: &str,
+    method: &str,
+    params: Value,
+    budget: Duration,
+) -> Response {
+    let (device_pub, server_kp) = {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = auth.devices.iter().find(|d| d.device_id == device_id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "unknown_device",
+                "当前选中的设备不存在或已解绑",
+                false,
+            );
+        };
+        if current_time_ms().saturating_sub(entry.last_heartbeat_ms) > 30_000
+            || !state.device_channels.is_polling(device_id)
+        {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "device_offline",
+                "当前选中的绑定设备离线，请确认设备端常驻进程正在运行",
+                false,
+            );
+        }
+        (entry.device_public_key.clone(), auth.server_keypair.clone())
+    };
+    let request_id = host_services::DeviceChannelHub::next_request_id();
+    let req_payload = json!({
+        "request_id": request_id,
+        "method": method,
+        "params": params,
+    });
+    let Ok(bytes) = serde_json::to_vec(&req_payload) else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "serialization_error",
+            "Failed to serialize device RPC request",
+            false,
+        );
+    };
+    let Ok(ciphertext) = device_pub.encrypt(&bytes) else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "encryption_error",
+            "Failed to encrypt RPC request with Device RSA public key",
+            false,
+        );
+    };
+    let Ok(signature) = server_kp.sign_sha256(format!("{device_id}:{ciphertext}").as_bytes())
+    else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "signature_error",
+            "Failed to sign RPC request with Server RSA private key",
+            false,
+        );
+    };
+    let frame = cayw_remote::RsaSealedFrame {
+        device_id: device_id.to_owned(),
+        ciphertext,
+        signature,
+    };
+    let reply = state
+        .device_channels
+        .dispatch(device_id, request_id, frame, budget, &state.cancel)
+        .await;
+    match reply {
+        Ok(payload) => {
+            if let Some(err) = payload.get("error") {
+                let code = err
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("device_rpc_error");
+                let message = err
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Device RPC failed");
+                let unknown = err
+                    .get("outcome_unknown")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                return error_response(StatusCode::BAD_GATEWAY, code, message, unknown);
+            }
+            let result = payload.get("result").cloned().unwrap_or(Value::Null);
+            if matches!(method, "session.create" | "session.fork")
+                && let Some(sid) = result.get("id").and_then(Value::as_str)
+            {
+                state
+                    .device_channels
+                    .session_devices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(sid.to_owned(), device_id.to_owned());
+            } else if method == "task.enqueue"
+                && let Some(tid) = result.get("id").and_then(Value::as_str)
+            {
+                state
+                    .device_channels
+                    .task_devices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(tid.to_owned(), device_id.to_owned());
+            }
+            Json(json!({ "result": result })).into_response()
+        }
+        Err(err) => upstream_error(state, err),
+    }
 }
 
 fn handle_devices_prepare_bind(state: &Gateway, _params: &Value) -> Response {
@@ -1496,7 +2331,6 @@ fn handle_devices_prepare_bind(state: &Gateway, _params: &Value) -> Response {
     auth.pending_binds.insert(
         bind_id.clone(),
         PendingBindSession {
-            bind_id: bind_id.clone(),
             created_at_ms: now,
             phase: PendingBindPhase::WaitingForHello,
         },
@@ -1574,12 +2408,20 @@ fn handle_devices_bind_status(state: &Gateway, params: &Value) -> Response {
 }
 
 fn handle_devices_bind_hello(state: &Gateway, params: &Value) -> Response {
-    let bind_id = params
+    let Some(resolved_bind_id) = params
         .get("bind_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+        .map(str::to_owned)
+    else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_or_expired_bind_id",
+            "握手必须携带由已授权网页会话预先创建的一次性配对邀请 bind_id",
+            false,
+        );
+    };
     let Some(pub_val) = params.get("device_public_key") else {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -1623,44 +2465,25 @@ fn handle_devices_bind_hello(state: &Gateway, params: &Value) -> Response {
         .server_auth
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let resolved_bind_id = match bind_id {
-        Some(explicit) => {
-            if !auth.pending_binds.contains_key(&explicit) {
-                auth.pending_binds.insert(
-                    explicit.clone(),
-                    PendingBindSession {
-                        bind_id: explicit.clone(),
-                        created_at_ms: current_time_ms(),
-                        phase: PendingBindPhase::WaitingForHello,
-                    },
-                );
-            }
-            explicit
-        }
-        None => {
-            // Find the most recent WaitingForHello session or allocate a fresh one.
-            if let Some(existing_id) = auth
-                .pending_binds
-                .values()
-                .filter(|s| matches!(s.phase, PendingBindPhase::WaitingForHello))
-                .max_by_key(|s| s.created_at_ms)
-                .map(|s| s.bind_id.clone())
-            {
-                existing_id
-            } else {
-                let fresh = format!("bind-{}", &fresh_bind_nonce()[..16]);
-                auth.pending_binds.insert(
-                    fresh.clone(),
-                    PendingBindSession {
-                        bind_id: fresh.clone(),
-                        created_at_ms: current_time_ms(),
-                        phase: PendingBindPhase::WaitingForHello,
-                    },
-                );
-                fresh
-            }
-        }
+    let now = current_time_ms();
+    let Some(existing_session) = auth.pending_binds.get(&resolved_bind_id) else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_or_expired_bind_id",
+            "未找到该配对邀请 bind_id 或已过期，请先在网页界面点击“添加设备”生成新绑定命令",
+            false,
+        );
     };
+    if now.saturating_sub(existing_session.created_at_ms) > 600_000
+        || !matches!(existing_session.phase, PendingBindPhase::WaitingForHello)
+    {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_or_expired_bind_id",
+            "该配对邀请 bind_id 已使用或已过期，请重新生成一次性绑定命令",
+            false,
+        );
+    }
     let challenge_nonce = fresh_bind_nonce();
     let Ok(encrypted_challenge) = device_public_key.encrypt(challenge_nonce.as_bytes()) else {
         return error_response(
@@ -1798,8 +2621,17 @@ fn handle_devices_bind_confirm(state: &Gateway, params: &Value) -> Response {
         .iter()
         .find(|d| d.device_public_key.fingerprint() == fp)
         .map(|d| d.device_id.clone());
-    let device_id =
-        existing_id.unwrap_or_else(|| format!("device-rsa-{:02}", auth.devices.len() + 1));
+    let device_id = existing_id.unwrap_or_else(|| {
+        let short_fp: String = fp.trim_start_matches("SHA256:").chars().take(12).collect();
+        let seq = auth.next_device_seq;
+        auth.next_device_seq = auth.next_device_seq.saturating_add(1);
+        let candidate = format!("device-rsa-{short_fp}");
+        if auth.devices.iter().any(|d| d.device_id == candidate) {
+            format!("device-rsa-{short_fp}-{seq}")
+        } else {
+            candidate
+        }
+    });
     let entry = BoundDeviceEntry {
         device_id: device_id.clone(),
         label,
@@ -1809,6 +2641,8 @@ fn handle_devices_bind_confirm(state: &Gateway, params: &Value) -> Response {
         handshake_bind_id: bind_id.to_owned(),
         bound_at_ms: now,
         last_heartbeat_ms: now,
+        last_heartbeat_signed_ts_ms: 0,
+        last_heartbeat_seq: 0,
     };
     if let Some(pos) = auth.devices.iter().position(|d| d.device_id == device_id) {
         auth.devices[pos] = entry.clone();
@@ -1834,80 +2668,233 @@ fn handle_devices_bind_confirm(state: &Gateway, params: &Value) -> Response {
     .into_response()
 }
 
-fn handle_devices_heartbeat(state: &Gateway, params: &Value) -> Response {
+#[allow(clippy::result_large_err)]
+fn verify_device_signed_liveness(
+    state: &Gateway,
+    prefix: &str,
+    params: &Value,
+) -> Result<(String, Value), Response> {
     let Some(device_id) = params.get("device_id").and_then(Value::as_str) else {
-        return error_response(
+        return Err(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_params",
-            "heartbeat requires device_id",
+            "requires device_id",
             false,
-        );
+        ));
     };
     let Some(timestamp_str) = params.get("timestamp").and_then(Value::as_str) else {
-        return error_response(
+        return Err(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_params",
-            "heartbeat requires timestamp",
+            "requires timestamp",
             false,
-        );
+        ));
     };
+    let Ok(ts_ms) = timestamp_str.trim().parse::<i64>() else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "timestamp must be integer milliseconds",
+            false,
+        ));
+    };
+    let seq_opt = params.get("seq").and_then(Value::as_u64);
     let Some(signature) = params.get("signature").and_then(Value::as_str) else {
-        return error_response(
+        return Err(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_params",
-            "heartbeat requires RSA signature",
+            "requires RSA signature",
             false,
-        );
+        ));
     };
+    let now = current_time_ms();
+    if now.abs_diff(ts_ms) > 30_000 {
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "stale_heartbeat",
+            "设备心跳时间戳已过期或超出允许的新鲜度窗口 (30s)",
+            false,
+        ));
+    }
     let mut auth = state
         .server_auth
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(entry) = auth.devices.iter_mut().find(|d| d.device_id == device_id) else {
-        return error_response(
+        return Err(error_response(
             StatusCode::UNAUTHORIZED,
             "unknown_device",
             "未知设备标识",
             false,
-        );
+        ));
     };
-    let payload = format!("heartbeat:{device_id}:{timestamp_str}");
+    let (payload, next_seq) = match seq_opt {
+        Some(seq) => {
+            if (ts_ms, seq) <= (entry.last_heartbeat_signed_ts_ms, entry.last_heartbeat_seq) {
+                return Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "replayed_heartbeat",
+                    "拒绝重放或旧序号的设备心跳报文",
+                    false,
+                ));
+            }
+            (format!("{prefix}:{device_id}:{timestamp_str}:{seq}"), seq)
+        }
+        None => {
+            if ts_ms <= entry.last_heartbeat_signed_ts_ms {
+                return Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "replayed_heartbeat",
+                    "拒绝重放或旧时间戳的设备心跳报文",
+                    false,
+                ));
+            }
+            (
+                format!("{prefix}:{device_id}:{timestamp_str}"),
+                entry.last_heartbeat_seq.saturating_add(1),
+            )
+        }
+    };
     if !entry
         .device_public_key
         .verify_sha256(payload.as_bytes(), signature)
     {
-        return error_response(
+        return Err(error_response(
             StatusCode::UNAUTHORIZED,
             "invalid_signature",
             "设备心跳 RSA 签名验证失败",
             false,
-        );
+        ));
     }
-    entry.last_heartbeat_ms = current_time_ms();
+    entry.last_heartbeat_ms = now;
+    entry.last_heartbeat_signed_ts_ms = ts_ms;
+    entry.last_heartbeat_seq = next_seq;
     let entry_clone = entry.clone();
     let updated = auth.entry_json(&entry_clone);
     auth.save_devices();
-    Json(json!({ "result": updated })).into_response()
+    Ok((device_id.to_owned(), updated))
 }
 
-fn handle_devices_select(state: &Gateway, params: &Value) -> Response {
-    let Some(device_id) = params
-        .get("device_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
+fn handle_devices_heartbeat(state: &Gateway, params: &Value) -> Response {
+    match verify_device_signed_liveness(state, "heartbeat", params) {
+        Ok((_, updated)) => Json(json!({ "result": updated })).into_response(),
+        Err(resp) => resp,
+    }
+}
+
+async fn handle_devices_poll(state: &Gateway, params: &Value) -> Response {
+    let (device_id, _) = match verify_device_signed_liveness(state, "poll", params) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let wait_ms = params.get("wait_ms").and_then(Value::as_u64).unwrap_or(0);
+    let frame = state
+        .device_channels
+        .poll_next(&device_id, wait_ms, &state.cancel)
+        .await;
+    Json(json!({
+        "result": {
+            "device_id": device_id,
+            "frame": frame,
+        }
+    }))
+    .into_response()
+}
+
+fn handle_devices_respond(state: &Gateway, params: &Value) -> Response {
+    let Some(frame_val) = params.get("frame") else {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_params",
-            "缺少要切换的 device_id",
+            "devices.respond requires frame",
             false,
         );
     };
+    let Ok(frame) = serde_json::from_value::<cayw_remote::RsaSealedFrame>(frame_val.clone()) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "invalid RsaSealedFrame",
+            false,
+        );
+    };
+    let plain = {
+        let mut auth = state
+            .server_auth
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = auth
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == frame.device_id)
+        else {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "unknown_device",
+                "未知设备标识",
+                false,
+            );
+        };
+        if !entry.device_public_key.verify_sha256(
+            format!("{}:{}", frame.device_id, frame.ciphertext).as_bytes(),
+            &frame.signature,
+        ) {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_signature",
+                "设备响应 RSA 签名验证未通过",
+                false,
+            );
+        }
+        entry.last_heartbeat_ms = current_time_ms();
+        let Ok(decrypted) = auth.server_keypair.decrypt(&frame.ciphertext) else {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "decryption_failed",
+                "服务端无法解密设备响应报文",
+                false,
+            );
+        };
+        decrypted
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&plain) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_payload",
+            "设备响应报文不是有效 JSON",
+            false,
+        );
+    };
+    let Some(request_id) = payload
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_payload",
+            "设备响应缺少 request_id",
+            false,
+        );
+    };
+    let delivered = state.device_channels.complete(&request_id, payload);
+    Json(json!({ "result": { "delivered": delivered } })).into_response()
+}
+
+fn handle_devices_select(state: &Gateway, params: &Value) -> Response {
+    let device_id = params
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
     let mut auth = state
         .server_auth
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if device_id.is_empty() || device_id == "local" {
+        auth.active_device_id.clear();
+        return Json(json!({ "result": auth.devices_list_json() })).into_response();
+    }
     let Some(found) = auth
         .devices
         .iter()
@@ -2183,9 +3170,9 @@ async fn favicon() -> impl IntoResponse {
     )
 }
 
-async fn bind_script(headers: HeaderMap, uri: Uri) -> impl IntoResponse {
+async fn bind_script(State(state): State<Arc<Gateway>>, headers: HeaderMap, uri: Uri) -> Response {
     let host = one_header(&headers, "host").unwrap_or("127.0.0.1:4321");
-    let bind_id_arg = uri
+    let Some(bind_id) = uri
         .query()
         .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("bind_id=")))
         .filter(|s| {
@@ -2193,8 +3180,34 @@ async fn bind_script(headers: HeaderMap, uri: Uri) -> impl IntoResponse {
                 && s.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         })
-        .map(|id| format!(" --bind-id {id}"))
-        .unwrap_or_default();
+    else {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_or_expired_bind_id",
+            "绑定脚本请求必须携带有效的 bind_id",
+            false,
+        );
+    };
+    {
+        let auth = state
+            .server_auth
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = current_time_ms();
+        let valid = auth.pending_binds.get(bind_id).is_some_and(|s| {
+            now.saturating_sub(s.created_at_ms) <= 600_000
+                && matches!(s.phase, PendingBindPhase::WaitingForHello)
+        });
+        if !valid {
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                "invalid_or_expired_bind_id",
+                "该绑定会话不存在、已过期或已使用",
+                false,
+            );
+        }
+    }
+    let bind_id_arg = format!(" --bind-id {bind_id}");
     let cayw_bin = std::env::var("CAYW_RUNTIME_BIN")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -2218,6 +3231,7 @@ fi
         [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
         script,
     )
+        .into_response()
 }
 
 async fn bind_hello_http(
@@ -2263,4 +3277,34 @@ async fn device_heartbeat_http(
         );
     };
     handle_devices_heartbeat(&state, &params)
+}
+
+async fn device_poll_http(
+    State(state): State<Arc<Gateway>>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Ok(Json(params)) = payload else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            "Expected JSON object",
+            false,
+        );
+    };
+    handle_devices_poll(&state, &params).await
+}
+
+async fn device_respond_http(
+    State(state): State<Arc<Gateway>>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let Ok(Json(params)) = payload else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            "Expected JSON object",
+            false,
+        );
+    };
+    handle_devices_respond(&state, &params)
 }

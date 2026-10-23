@@ -1024,10 +1024,72 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
         .unwrap()
         .to_owned();
 
-    // 2d. Signed heartbeat from the Device private key updates live connection status.
-    let hb_ts = "1700000000000";
+    // 2c-extra. Calling bind_hello without a pre-created bind_id or with an already-confirmed bind_id is rejected.
+    let rogue_kp = cayw_remote::RsaKeyPair::generate().unwrap();
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.bind_hello",
+                "params": {
+                    "label": "Rogue Device",
+                    "device_public_key": rogue_kp.public_key(),
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.bind_hello",
+                "params": {
+                    "bind_id": bind_id,
+                    "label": "Reused Invite",
+                    "device_public_key": rogue_kp.public_key(),
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+
+    // 2d. Signed heartbeat from the Device private key requires fresh timestamp + monotonic seq.
+    // Stale timestamp is rejected:
+    let stale_ts = "1700000000000";
+    let stale_sig = dev_kp
+        .sign_sha256(format!("heartbeat:{bound_device_id}:{stale_ts}:1").as_bytes())
+        .unwrap();
+    let stale_res = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.heartbeat",
+                "params": {
+                    "device_id": bound_device_id,
+                    "timestamp": stale_ts,
+                    "seq": 1,
+                    "signature": stale_sig,
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(stale_res["error"]["code"], "stale_heartbeat");
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let hb_ts = now_ms.to_string();
     let hb_sig = dev_kp
-        .sign_sha256(format!("heartbeat:{bound_device_id}:{hb_ts}").as_bytes())
+        .sign_sha256(format!("heartbeat:{bound_device_id}:{hb_ts}:1").as_bytes())
         .unwrap();
     let hb = envelope(
         http.post(format!("http://{addr}/api/rpc"))
@@ -1036,6 +1098,7 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
                 "params": {
                     "device_id": bound_device_id,
                     "timestamp": hb_ts,
+                    "seq": 1,
                     "signature": hb_sig,
                 }
             }))
@@ -1046,6 +1109,26 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
     )
     .await;
     assert_eq!(hb["result"]["connected"], true);
+
+    // Replaying the exact same valid heartbeat a second time is rejected:
+    let replayed = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.heartbeat",
+                "params": {
+                    "device_id": bound_device_id,
+                    "timestamp": hb_ts,
+                    "seq": 1,
+                    "signature": hb_sig,
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(replayed["error"]["code"], "replayed_heartbeat");
 
     let removed = envelope(
         http.post(format!("http://{addr}/api/rpc"))
@@ -1082,6 +1165,16 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
     )
     .await;
     assert_eq!(blocked["error"]["code"], "server_login_required");
+    let blocked_devices = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "devices.prepare_bind", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    assert_eq!(blocked_devices["error"]["code"], "server_login_required");
 
     // Login with default account (admin / admin)
     let login = envelope(
@@ -1146,6 +1239,528 @@ async fn tokenless_web_device_rsa_binding_and_server_account_login_flow() {
     assert_eq!(relogin["result"]["logged_in"], true);
 
     stop.cancel();
+    for task in [ipc_task, web_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+}
+
+async fn complete_2phase_bind(
+    http: &HttpClient,
+    addr: SocketAddr,
+    label: &str,
+) -> (String, cayw_remote::PersistentRsaDeviceBinding) {
+    let prep = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "devices.prepare_bind", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let bind_id = prep["result"]["bind_id"].as_str().unwrap().to_owned();
+    let dev_kp = cayw_remote::RsaKeyPair::generate().unwrap();
+    let hello = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.bind_hello",
+                "params": {
+                    "bind_id": bind_id,
+                    "label": label,
+                    "device_public_key": dev_kp.public_key(),
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let srv_pub: cayw_remote::RsaPublicKey =
+        serde_json::from_value(hello["result"]["server_public_key"].clone()).unwrap();
+    let enc_chal = hello["result"]["encrypted_challenge"].as_str().unwrap();
+    let nonce = String::from_utf8(dev_kp.decrypt(enc_chal).unwrap()).unwrap();
+    let proof = format!("confirm:{bind_id}:{nonce}");
+    let confirmed = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "devices.bind_confirm",
+                "params": {
+                    "bind_id": bind_id,
+                    "encrypted_response": srv_pub.encrypt(proof.as_bytes()).unwrap(),
+                    "device_signature": dev_kp.sign_sha256(proof.as_bytes()).unwrap(),
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let device_id = confirmed["result"]["created"]["device_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let binding = cayw_remote::PersistentRsaDeviceBinding {
+        device_id: device_id.clone(),
+        server_url: format!("http://{addr}"),
+        device_keypair: dev_kp,
+        server_public_key: srv_pub,
+        bound_at_ms: 1,
+    };
+    (device_id, binding)
+}
+
+#[tokio::test]
+async fn delete_and_readd_device_never_collides_and_state_dir_persists_across_restarts() {
+    let state_dir = std::env::temp_dir().join(format!(
+        "cayw-webui-persist-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&state_dir);
+
+    let stop1 = CancellationToken::new();
+    let runtime1 = Arc::new(RuntimeFixture::default());
+    let ipc_listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ipc_addr1 = ipc_listener1.local_addr().unwrap();
+    let ipc_task1 = tokio::spawn(cayw_ipc::serve(
+        ipc_listener1,
+        runtime1,
+        ServerConfig::loopback(),
+        stop1.clone(),
+    ));
+    let proj1 = ProjectEndpoint::new(
+        "default",
+        "默认项目",
+        IpcEndpoint::loopback(ipc_addr1).unwrap(),
+    )
+    .unwrap();
+    let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = listener1.local_addr().unwrap();
+    let web_task1 = tokio::spawn(cayw_webui::serve_projects_with_state_dir(
+        listener1,
+        vec![proj1],
+        GatewayLimits::default(),
+        Some(state_dir.clone()),
+        stop1.clone(),
+    ));
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // 1. Bind Device A and Device B
+    let (id_a, _) = complete_2phase_bind(&http, addr1, "Device A").await;
+    let (id_b, binding_b) = complete_2phase_bind(&http, addr1, "Device B").await;
+    assert_ne!(id_a, id_b);
+
+    // 2. Delete Device A, then bind Device C — Device B must NOT be overwritten!
+    envelope(
+        http.post(format!("http://{addr1}/api/rpc"))
+            .json(&json!({"method": "devices.remove", "params": {"device_id": id_a}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let (id_c, _) = complete_2phase_bind(&http, addr1, "Device C").await;
+    assert_ne!(id_b, id_c);
+
+    let list1 = envelope(
+        http.post(format!("http://{addr1}/api/rpc"))
+            .json(&json!({"method": "devices.list", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let devs1 = list1["result"]["devices"].as_array().unwrap();
+    assert_eq!(devs1.len(), 2);
+    let dev_b_entry = devs1
+        .iter()
+        .find(|d| d["device_id"] == id_b)
+        .expect("Device B must survive");
+    assert_eq!(dev_b_entry["label"], "Device B");
+    assert_eq!(
+        dev_b_entry["device_fingerprint"],
+        binding_b.device_keypair.public_key().fingerprint()
+    );
+    assert!(
+        devs1
+            .iter()
+            .any(|d| d["device_id"] == id_c && d["label"] == "Device C")
+    );
+
+    // 3. Save model config and a custom skill to disk
+    envelope(
+        http.post(format!("http://{addr1}/api/rpc"))
+            .json(&json!({
+                "method": "models.select",
+                "params": { "model_id": "deepseek-r1" }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let saved_skill = envelope(
+        http.post(format!("http://{addr1}/api/rpc"))
+            .json(&json!({
+                "method": "skills.save",
+                "params": {
+                    "name": "verify-persist-skill",
+                    "description": "验证重启持久化的自定义技能",
+                    "content": "请严格按照核对步骤执行。"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        saved_skill["result"]["saved"]["name"],
+        "verify-persist-skill"
+    );
+
+    // 4. Stop Gateway 1 and start Gateway 2 with the exact same state_dir
+    stop1.cancel();
+    for task in [ipc_task1, web_task1] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    let stop2 = CancellationToken::new();
+    let runtime2 = Arc::new(RuntimeFixture::default());
+    let ipc_listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ipc_addr2 = ipc_listener2.local_addr().unwrap();
+    let ipc_task2 = tokio::spawn(cayw_ipc::serve(
+        ipc_listener2,
+        runtime2,
+        ServerConfig::loopback(),
+        stop2.clone(),
+    ));
+    let proj2 = ProjectEndpoint::new(
+        "default",
+        "默认项目",
+        IpcEndpoint::loopback(ipc_addr2).unwrap(),
+    )
+    .unwrap();
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let web_task2 = tokio::spawn(cayw_webui::serve_projects_with_state_dir(
+        listener2,
+        vec![proj2],
+        GatewayLimits::default(),
+        Some(state_dir.clone()),
+        stop2.clone(),
+    ));
+
+    let list2 = envelope(
+        http.post(format!("http://{addr2}/api/rpc"))
+            .json(&json!({"method": "devices.list", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(list2["result"]["devices"].as_array().unwrap().len(), 2);
+
+    let models2 = envelope(
+        http.post(format!("http://{addr2}/api/rpc"))
+            .json(&json!({"method": "models.config", "params": {}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(models2["result"]["selected_model"], "deepseek-r1");
+
+    let skills2 = envelope(
+        http.post(format!("http://{addr2}/api/rpc"))
+            .json(&json!({"method": "skills.catalog", "params": {"name": "verify-persist-skill"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let found_skill = skills2["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "verify-persist-skill")
+        .expect("saved skill must be read back from disk after restart");
+    assert!(
+        found_skill["content"]
+            .as_str()
+            .unwrap()
+            .contains("请严格按照核对步骤执行。")
+    );
+
+    stop2.cancel();
+    for task in [ipc_task2, web_task2] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&state_dir);
+}
+
+#[tokio::test]
+async fn switching_bound_devices_routes_tasks_to_target_device_and_mcp_stdio_works() {
+    let stop = CancellationToken::new();
+    let local_runtime = Arc::new(RuntimeFixture::default());
+    let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ipc_addr = ipc_listener.local_addr().unwrap();
+    let ipc_task = tokio::spawn(cayw_ipc::serve(
+        ipc_listener,
+        local_runtime,
+        ServerConfig::loopback(),
+        stop.clone(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_limits(
+        listener,
+        IpcEndpoint::loopback(ipc_addr).unwrap(),
+        GatewayLimits::default(),
+        stop.clone(),
+    ));
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // Bind Device A and Device B
+    let (id_a, binding_a) = complete_2phase_bind(&http, addr, "Device A").await;
+    let (id_b, binding_b) = complete_2phase_bind(&http, addr, "Device B").await;
+
+    // Spawn simulated resident outbound poll loops for Device A and Device B,
+    // each returning its own distinct marker file content.
+    let spawn_device_worker = |binding: cayw_remote::PersistentRsaDeviceBinding,
+                               marker: &'static str,
+                               cancel: CancellationToken| {
+        let client = http.clone();
+        tokio::spawn(async move {
+            let mut seq = 10u64;
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                seq += 1;
+                let ts = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64)
+                    .to_string();
+                let sig = binding
+                    .device_keypair
+                    .sign_sha256(format!("poll:{}:{ts}:{seq}", binding.device_id).as_bytes())
+                    .unwrap();
+                let Ok(res) = client
+                    .post(format!("{}/api/device/poll", binding.server_url))
+                    .json(&json!({
+                        "device_id": binding.device_id,
+                        "timestamp": ts,
+                        "seq": seq,
+                        "signature": sig,
+                        "wait_ms": 500,
+                    }))
+                    .send()
+                    .await
+                else {
+                    break;
+                };
+                let Ok(body) = res.json::<Value>().await else {
+                    continue;
+                };
+                let Some(frame_val) = body
+                    .get("result")
+                    .and_then(|r| r.get("frame"))
+                    .filter(|v| !v.is_null())
+                else {
+                    continue;
+                };
+                let frame: cayw_remote::RsaSealedFrame =
+                    serde_json::from_value(frame_val.clone()).unwrap();
+                let decrypted = binding.open_from_server(&frame).unwrap();
+                let req: Value = serde_json::from_slice(&decrypted).unwrap();
+                let req_id = req["request_id"].as_str().unwrap();
+                let method = req["method"].as_str().unwrap();
+                let params = &req["params"];
+                let result = match method {
+                    "session.create" => json!({
+                        "id": format!("sess-on-{}", binding.device_id),
+                        "label": marker,
+                        "state": "idle",
+                        "cursor": 1,
+                        "messages": [],
+                    }),
+                    "task.enqueue" => json!({
+                        "id": format!("task-on-{}", binding.device_id),
+                        "session_id": params["session_id"],
+                        "state": "queued",
+                        "input_text": params["text"],
+                    }),
+                    "task.resume" => json!({
+                        "id": format!("sess-on-{}", binding.device_id),
+                        "state": "idle",
+                        "cursor": 2,
+                        "marker_content": marker,
+                        "messages": [{"role": "assistant", "content": marker}],
+                    }),
+                    _ => json!({"status": "ok", "device": binding.device_id, "marker": marker}),
+                };
+                let reply = json!({
+                    "request_id": req_id,
+                    "result": result,
+                });
+                let sealed = binding
+                    .seal_for_server(&serde_json::to_vec(&reply).unwrap())
+                    .unwrap();
+                let _ = client
+                    .post(format!("{}/api/device/respond", binding.server_url))
+                    .json(&json!({ "frame": sealed }))
+                    .send()
+                    .await;
+            }
+        })
+    };
+
+    let worker_a = spawn_device_worker(binding_a, "MARKER_FROM_DEVICE_A", stop.clone());
+    let worker_b = spawn_device_worker(binding_b, "MARKER_FROM_DEVICE_B", stop.clone());
+
+    // 1. Select Device A and verify session creation and task execution run on Device A!
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "devices.select", "params": {"device_id": id_a}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let sess_a = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "session.create", "params": {"label": "Test A"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(sess_a["result"]["label"], "MARKER_FROM_DEVICE_A");
+
+    let enq_a = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "task.enqueue",
+                "params": {
+                    "session_id": sess_a["result"]["id"],
+                    "text": "读取文件 device-marker.txt",
+                    "plan_mode": true,
+                    "skills": ["code-review"]
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let enq_text = enq_a["result"]["input_text"].as_str().unwrap();
+    assert!(enq_text.contains("[规划模式]"));
+    assert!(enq_text.contains("[已启用技能: code-review"));
+
+    let res_a = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "task.resume",
+                "params": { "task_id": enq_a["result"]["id"] }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(res_a["result"]["marker_content"], "MARKER_FROM_DEVICE_A");
+
+    // 2. Switch to Device B and verify session creation and task execution run on Device B!
+    envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "devices.select", "params": {"device_id": id_b}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let sess_b = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({"method": "session.create", "params": {"label": "Test B"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(sess_b["result"]["label"], "MARKER_FROM_DEVICE_B");
+
+    let enq_b = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "task.enqueue",
+                "params": {
+                    "session_id": sess_b["result"]["id"],
+                    "text": "读取文件 device-marker.txt"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let res_b = envelope(
+        http.post(format!("http://{addr}/api/rpc"))
+            .json(&json!({
+                "method": "task.resume",
+                "params": { "task_id": enq_b["result"]["id"] }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(res_b["result"]["marker_content"], "MARKER_FROM_DEVICE_B");
+
+    stop.cancel();
+    let _ = worker_a.await;
+    let _ = worker_b.await;
     for task in [ipc_task, web_task] {
         tokio::time::timeout(Duration::from_secs(5), task)
             .await

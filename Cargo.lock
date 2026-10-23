@@ -736,8 +736,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "cayw-ai",
+ "cayw-bridge",
+ "cayw-codemode",
  "cayw-ipc",
  "cayw-remote",
+ "cayw-sources",
  "reqwest",
  "serde",
  "serde_json",

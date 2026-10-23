@@ -105,13 +105,21 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Vec<String>) -> Result<(), String> {
-    if env::var("CAYW_STATE_DIR").is_err()
-        && let Ok(home) = env::var("HOME")
+    let state_dir = if let Ok(explicit) = env::var("CAYW_STATE_DIR")
+        && !explicit.trim().is_empty()
+    {
+        let p = std::path::PathBuf::from(explicit);
+        let _ = std::fs::create_dir_all(&p);
+        Some(p)
+    } else if let Ok(home) = env::var("HOME")
         && !home.trim().is_empty()
     {
         let default_state = std::path::Path::new(&home).join(".cayw").join("webui");
         let _ = std::fs::create_dir_all(&default_state);
-    }
+        Some(default_state)
+    } else {
+        None
+    };
     let config = Config::parse(
         args,
         env::vars()
@@ -167,10 +175,11 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         signal_cancel.cancel();
         result
     });
-    let result = cayw_webui::serve_projects_with_limits(
+    let result = cayw_webui::serve_projects_with_state_dir(
         listener,
         projects,
         GatewayLimits::default(),
+        state_dir,
         cancel,
     )
     .await

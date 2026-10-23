@@ -10,6 +10,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 pub const DEMO_SCRIPT: &str = "cayw.call('fs.write', {path='cayw-demo.txt', content='headless runtime demo'})\nlocal result = cayw.call('fs.read', {path='cayw-demo.txt'})\nreturn result";
+pub const PLAN_DEMO_SCRIPT: &str = "cayw.call('plan.update', {expected_version=0, steps={{id='step-1', text='分析任务需求与工作区上下文', status='completed'}, {id='step-2', text='调用受控 CodeMode 能力执行文件读写', status='in_progress'}, {id='step-3', text='核验输出并完成任务总结', status='pending'}}})\ncayw.call('fs.write', {path='cayw-demo.txt', content='headless runtime demo'})\nlocal result = cayw.call('fs.read', {path='cayw-demo.txt'})\nreturn result";
+pub const MARKER_READ_SCRIPT: &str =
+    "local result = cayw.call('fs.read', {path='device-marker.txt'})\nreturn result";
+pub const PLAN_MARKER_READ_SCRIPT: &str = "cayw.call('plan.update', {expected_version=0, steps={{id='step-1', text='分析任务需求与工作区上下文', status='completed'}, {id='step-2', text='调用受控 CodeMode 能力读取目标设备标识文件', status='in_progress'}, {id='step-3', text='核验输出并完成任务总结', status='pending'}}})\nlocal result = cayw.call('fs.read', {path='device-marker.txt'})\nreturn result";
 
 /// Synthetic model response using the same exec/wait contract as a real model.
 /// It reads every output page and waits for VM completion before reporting done.
@@ -115,9 +119,26 @@ impl Provider for OfflineProvider {
                 .failure(StopReason::Aborted, "offline fixture cancelled");
             return Box::pin(stream::iter(vec![AssistantEvent::Error { message }]));
         }
+        let last_user_text = request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content, .. } => Some(cayw_ai::content_text(content)),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let is_plan = last_user_text.contains("[规划模式]");
+        let is_marker = last_user_text.contains("device-marker.txt");
+        let selected_script = match (is_plan, is_marker) {
+            (true, true) => PLAN_MARKER_READ_SCRIPT,
+            (true, false) => PLAN_DEMO_SCRIPT,
+            (false, true) => MARKER_READ_SCRIPT,
+            (false, false) => DEMO_SCRIPT,
+        };
         let message = script_response(
             &request,
-            DEMO_SCRIPT,
+            selected_script,
             &format!("offline-{}", Uuid::new_v4()),
         );
         Box::pin(stream::iter(vec![AssistantEvent::Done { message }]))

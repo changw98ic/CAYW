@@ -358,7 +358,8 @@ impl Runtime {
         intent: cayw_requests::TaskIntent,
     ) -> Result<TaskRecord, RuntimeError> {
         crate::requests::validate_intent(&intent)?;
-        input.validate(&self.inner.model, self.inner.config.max_prompt_bytes)?;
+        let (_, active_model) = self.active_model_for_session(session);
+        input.validate(&active_model, self.inner.config.max_prompt_bytes)?;
         let _coordinate = self.inner.coordination.enter()?;
         self.check_ready(session)?;
         let task = self.inner.queue.enqueue_input(
@@ -885,11 +886,15 @@ async fn execute_with_cells(
         inner: CellTool::new(manager),
         context: context.clone(),
     });
+    let (_, active_model) = Runtime {
+        inner: inner.clone(),
+    }
+    .active_model_for_session(&context.lease.session_id);
     let agent = Agent::new(
         Arc::new(crate::model_requests::AccountedProvider::new(
             context.clone(),
         )),
-        inner.model.clone(),
+        active_model.clone(),
     );
     let mut messages = Runtime {
         inner: inner.clone(),
@@ -922,7 +927,7 @@ async fn execute_with_cells(
             context
                 .scope
                 .token_limit()
-                .min(inner.model.max_output_tokens.unwrap_or(u64::MAX)),
+                .min(active_model.max_output_tokens.unwrap_or(u64::MAX)),
         ),
         ..Default::default()
     })?;

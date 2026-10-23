@@ -25021,52 +25021,7 @@ function CAYWApp({ env } = {}) {
       pluginParamValues: {},
       pluginSavedNotice: "",
       // MCP & Skills state
-      mcpServers: [
-        {
-          id: "codegraph",
-          name: "CodeGraph \u4EE3\u7801\u8BED\u4E49\u56FE\u8C31",
-          transport: "\u672C\u673A\u6807\u51C6\u8F93\u5165\u8F93\u51FA",
-          endpoint: "codegraph-mcp --workspace .",
-          status: "active",
-          statusLabel: "\u5DF2\u8FDE\u63A5",
-          enabled: true,
-          builtin: true,
-          tools: [
-            { name: "codegraph.find_symbol", desc: "\u8DE8\u6587\u4EF6\u67E5\u627E\u7B26\u53F7\u5B9A\u4E49\u4E0E\u58F0\u660E\u4F4D\u7F6E" },
-            { name: "codegraph.find_references", desc: "\u67E5\u8BE2\u7B26\u53F7\u5728\u5DE5\u4F5C\u533A\u5185\u7684\u6240\u6709\u5F15\u7528\u4E0E\u8C03\u7528\u70B9" },
-            { name: "codegraph.dependencies", desc: "\u5206\u6790\u6A21\u5757\u4E0E\u6587\u4EF6\u7684\u4F9D\u8D56\u5173\u7CFB\u56FE" }
-          ]
-        },
-        {
-          id: "playwright",
-          name: "Playwright \u6D4F\u89C8\u5668\u81EA\u52A8\u5316",
-          transport: "\u672C\u673A\u6807\u51C6\u8F93\u5165\u8F93\u51FA",
-          endpoint: "playwright-mcp --headless",
-          status: "active",
-          statusLabel: "\u5DF2\u8FDE\u63A5",
-          enabled: true,
-          builtin: true,
-          tools: [
-            { name: "browser_navigate", desc: "\u6253\u5F00\u6307\u5B9A\u7F51\u9875\u5730\u5740\u5E76\u7B49\u5F85\u52A0\u8F7D" },
-            { name: "browser_snapshot", desc: "\u83B7\u53D6\u9875\u9762\u65E0\u969C\u788D\u7ED3\u6784\u5FEB\u7167" },
-            { name: "browser_take_screenshot", desc: "\u622A\u53D6\u5F53\u524D\u89C6\u53E3\u6216\u5B8C\u6574\u9875\u9762\u56FE\u50CF" }
-          ]
-        },
-        {
-          id: "context7",
-          name: "Context7 \u5E93\u4E0E\u6846\u67B6\u6587\u6863",
-          transport: "\u8FDC\u7A0B\u4E8B\u4EF6\u6D41",
-          endpoint: "https://mcp.context7.com/mcp",
-          status: "active",
-          statusLabel: "\u5DF2\u8FDE\u63A5",
-          enabled: true,
-          builtin: true,
-          tools: [
-            { name: "resolve-library-id", desc: "\u89E3\u6790\u7B2C\u4E09\u65B9\u5E93\u4E0E\u6846\u67B6\u7684\u6807\u51C6\u6807\u8BC6" },
-            { name: "query-docs", desc: "\u6309\u7248\u672C\u68C0\u7D22\u5B98\u65B9\u6587\u6863\u4E0E\u4EE3\u7801\u793A\u4F8B" }
-          ]
-        }
-      ],
+      mcpServers: [],
       expandedMcpCards: {},
       addingMcpOpen: false,
       newMcpName: "",
@@ -25595,6 +25550,8 @@ function CAYWApp({ env } = {}) {
         }
       } catch {
       }
+      void refreshModelsConfig();
+      void refreshMcpCatalog();
       await refreshSessions();
       if (login === s.loginGeneration && s.sessions.length) {
         await selectSession(s.sessions[0].id);
@@ -25833,9 +25790,31 @@ function CAYWApp({ env } = {}) {
   const refreshMcpCatalog = async () => {
     try {
       const res = await rpc("mcp.catalog", {});
-      if (Array.isArray(res) && res.length) {
-        const custom = s.mcpServers.filter((item) => !item.builtin);
-        s.mcpServers = [...res, ...custom];
+      if (Array.isArray(res)) {
+        s.mcpServers = res;
+        forceRender();
+      }
+    } catch {
+    }
+  };
+  const refreshModelsConfig = async () => {
+    try {
+      const res = await rpc("models.config", {});
+      if (object(res)) {
+        if (typeof res.selected_model === "string" && res.selected_model) {
+          s.selectedModel = res.selected_model;
+        }
+        if (Array.isArray(res.providers) && res.providers.length) {
+          s.modelProviders = res.providers.map((p) => ({
+            id: p.id,
+            name: p.name,
+            protocol: p.api || p.protocol || "\u517C\u5BB9\u63A5\u53E3",
+            baseUrl: p.baseUrl || p.base_url || "",
+            configured: Boolean(p.configured),
+            builtin: ["magpie", "openai", "anthropic"].includes(p.id),
+            models: Array.isArray(p.models) ? p.models : []
+          }));
+        }
         forceRender();
       }
     } catch {
@@ -25958,21 +25937,31 @@ function CAYWApp({ env } = {}) {
   };
   const handleSelectDevice = async (deviceId) => {
     try {
-      const res = await rpc("devices.select", { device_id: deviceId });
+      const targetId = deviceId === "__local_ipc__" ? "local" : deviceId;
+      const res = await rpc("devices.select", { device_id: targetId });
       if (object(res) && Array.isArray(res.devices)) {
         s.boundDevices = res.devices;
-        s.activeDeviceId = res.active_device_id || deviceId;
+        s.activeDeviceId = res.active_device_id ?? "";
         const current = res.devices.find((d) => d.device_id === s.activeDeviceId);
         if (current) s.deviceBinding = current;
       } else {
-        s.activeDeviceId = deviceId;
+        s.activeDeviceId = targetId === "local" ? "" : targetId;
         s.boundDevices = s.boundDevices.map((d) => ({
           ...d,
-          active: d.device_id === deviceId
+          active: d.device_id === s.activeDeviceId
         }));
       }
-      s.deviceBindingNotice = `\u5DF2\u5207\u6362\u81F3\u8BBE\u5907\u201C${s.boundDevices.find((d) => d.device_id === deviceId)?.label || deviceId}\u201D\u3002`;
+      const activeLabel = !s.activeDeviceId || s.activeDeviceId === "local" ? "\u672C\u673A\u76F4\u8FDE Runtime" : s.boundDevices.find((d) => d.device_id === s.activeDeviceId)?.label || s.activeDeviceId;
+      s.deviceBindingNotice = `\u5DF2\u5207\u6362\u4EFB\u52A1\u6267\u884C\u8BBE\u5907\u81F3\u201C${activeLabel}\u201D\u3002`;
+      s.selectionGeneration++;
+      clearTimer(s.timer);
+      s.selected = null;
+      s.sessions = [];
       forceRender();
+      await refreshSessions();
+      if (s.sessions.length) {
+        await selectSession(s.sessions[0].id);
+      }
     } catch (error) {
       s.deviceBindingNotice = errorText(error);
       forceRender();
@@ -26140,8 +26129,11 @@ function CAYWApp({ env } = {}) {
       void refreshServerAuthAndBinding();
     } else if (tab === "plugins" && !s.cachedCapabilities.length) {
       void refreshPlugins();
-    } else if (tab === "models" && s.projects.length === 1 && s.projects[0]?.address === "\u672C\u673A IPC") {
-      void refreshProjects();
+    } else if (tab === "models") {
+      void refreshModelsConfig();
+      if (s.projects.length === 1 && s.projects[0]?.address === "\u672C\u673A IPC") {
+        void refreshProjects();
+      }
     } else if (tab === "skills" && !s.skillsLoaded) {
       void refreshSkillsCatalog();
     } else if (tab === "mcp") {
@@ -26276,12 +26268,18 @@ function CAYWApp({ env } = {}) {
     report(null);
     s.promptText = "";
     if (promptInputRef.current) promptInputRef.current.value = "";
+    const attachedSkills = s.attachedItems.filter(
+      (it) => it.kind === "skill" && typeof it.name === "string" && it.name.trim()
+    ).map((it) => it.name.trim());
+    const promptParams = {
+      session_id: id,
+      text,
+      ...s.planModeActive ? { plan_mode: true } : {},
+      ...attachedSkills.length ? { skills: attachedSkills } : {}
+    };
     forceRender();
     try {
-      const nextSnap = await writeRpc(id, "session.prompt", {
-        session_id: id,
-        text
-      });
+      const nextSnap = await writeRpc(id, "session.prompt", promptParams);
       if (login !== s.loginGeneration) return;
       const v = s.views.get(id);
       if (v) {
@@ -27440,7 +27438,18 @@ function CAYWApp({ env } = {}) {
                 return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_userRow" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_userStack" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "gdEzaW_bubble" }, presentation.text))));
               }
               if (presentation.kind === "text") {
-                return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_root" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_body" }, /* @__PURE__ */ import_react.default.createElement(FormattedMarkdown, { text: presentation.text }))));
+                return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_root" }, role === "assistant" && (message.provider || message.model) ? /* @__PURE__ */ import_react.default.createElement(
+                  "div",
+                  {
+                    className: "Md3f7G_modelMeta",
+                    style: {
+                      fontSize: 11,
+                      color: "var(--dsw-alias-label-tertiary)",
+                      marginBottom: 4
+                    }
+                  },
+                  `\u6267\u884C\u6A21\u578B\uFF1A${message.provider || "runtime"} / ${message.model || s.selectedModel}`
+                ) : null, /* @__PURE__ */ import_react.default.createElement("div", { className: "Sxvs8a_body" }, /* @__PURE__ */ import_react.default.createElement(FormattedMarkdown, { text: presentation.text }))));
               }
               if (presentation.kind === "tool_call") {
                 return /* @__PURE__ */ import_react.default.createElement("div", { key, className: "Md3f7G_flowItem" }, presentation.text ? /* @__PURE__ */ import_react.default.createElement(
@@ -27834,7 +27843,7 @@ function CAYWApp({ env } = {}) {
               if (id === "__add_device__") {
                 openAddDeviceModal();
               } else if (id === "__local_ipc__") {
-                s.activeDeviceId = "";
+                void handleSelectDevice("local");
               } else {
                 void handleSelectDevice(id);
               }
@@ -28401,6 +28410,16 @@ function CAYWApp({ env } = {}) {
                       s.selectedModel = m.id;
                       s.modelMenuOpen = false;
                       forceRender();
+                      void (async () => {
+                        try {
+                          await rpc("models.select", {
+                            model_id: m.id,
+                            ...s.selected ? { session_id: s.selected } : {}
+                          });
+                          await refreshModelsConfig();
+                        } catch {
+                        }
+                      })();
                     }
                   },
                   /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_optionCopy" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_modelName" }, m.label || m.id), /* @__PURE__ */ import_react.default.createElement("span", { className: "_7KE1Ra_description" }, m.desc)),
@@ -29188,13 +29207,27 @@ function CAYWApp({ env } = {}) {
             type: "button",
             className: "zGbnIq_primaryButton",
             onClick: () => {
-              provider.baseUrl = s.editProviderBaseUrl.trim() || provider.baseUrl;
-              if (s.editProviderApiKey.trim()) {
+              const nextUrl = s.editProviderBaseUrl.trim() || provider.baseUrl;
+              const nextKey = s.editProviderApiKey.trim();
+              provider.baseUrl = nextUrl;
+              if (nextKey) {
                 provider.configured = true;
               }
               s.editingProviderId = null;
-              s.modelNotice = `\u5DF2\u4FDD\u5B58\u201C${provider.name}\u201D\u8FDE\u63A5\u914D\u7F6E\u3002`;
+              s.modelNotice = `\u5DF2\u4FDD\u5B58\u201C${provider.name}\u201D\u8FDE\u63A5\u914D\u7F6E\u5E76\u540C\u6B65\u81F3 Runtime\u3002`;
               forceRender();
+              void (async () => {
+                try {
+                  await rpc("models.save_provider", {
+                    id: provider.id,
+                    name: provider.name,
+                    base_url: nextUrl,
+                    ...nextKey ? { api_key: nextKey } : {}
+                  });
+                  await refreshModelsConfig();
+                } catch {
+                }
+              })();
             }
           },
           "\u4FDD\u5B58\u914D\u7F6E"
@@ -29256,15 +29289,27 @@ function CAYWApp({ env } = {}) {
             onClick: () => {
               const id = s.newModelId.trim();
               if (!id) return;
+              const desc = s.newModelDesc.trim() || "\u81EA\u5B9A\u4E49\u6A21\u578B";
               provider.models.push({
                 id,
                 label: id,
-                desc: s.newModelDesc.trim() || "\u81EA\u5B9A\u4E49\u6A21\u578B"
+                desc
               });
               s.selectedModel = id;
               s.addingModelProviderId = null;
-              s.modelNotice = `\u5DF2\u6DFB\u52A0\u5E76\u5207\u6362\u5230\u6A21\u578B ${id}\u3002`;
+              s.modelNotice = `\u5DF2\u6DFB\u52A0\u5E76\u5207\u6362\u5230\u6A21\u578B ${id}\uFF08\u5DF2\u540C\u6B65\u81F3 Runtime\uFF09\u3002`;
               forceRender();
+              void (async () => {
+                try {
+                  await rpc("models.add_model", {
+                    provider_id: provider.id,
+                    model_id: id,
+                    desc
+                  });
+                  await refreshModelsConfig();
+                } catch {
+                }
+              })();
             }
           },
           "\u786E\u8BA4\u6DFB\u52A0"
@@ -29310,8 +29355,18 @@ function CAYWApp({ env } = {}) {
                 } : void 0,
                 onClick: () => {
                   s.selectedModel = m.id;
-                  s.modelNotice = `\u5F53\u524D\u9ED8\u8BA4\u6A21\u578B\u5DF2\u5207\u6362\u4E3A ${m.id}\u3002`;
+                  s.modelNotice = `\u5F53\u524D\u9ED8\u8BA4\u6A21\u578B\u5DF2\u5207\u6362\u4E3A ${m.id}\uFF08\u5DF2\u4F5C\u7528\u4E8E Runtime\uFF09\u3002`;
                   forceRender();
+                  void (async () => {
+                    try {
+                      await rpc("models.select", {
+                        model_id: m.id,
+                        ...s.selected ? { session_id: s.selected } : {}
+                      });
+                      await refreshModelsConfig();
+                    } catch {
+                    }
+                  })();
                 }
               },
               isCurrent ? "\u5F53\u524D\u9ED8\u8BA4" : "\u8BBE\u4E3A\u9ED8\u8BA4"
@@ -29420,14 +29475,16 @@ function CAYWApp({ env } = {}) {
           disabled: !s.newProviderName.trim() || !s.newProviderBaseUrl.trim(),
           onClick: () => {
             const modelId = s.newProviderModelId.trim() || "default-model";
+            const provId = `custom-${Date.now()}`;
+            const provName = s.newProviderName.trim();
+            const provUrl = s.newProviderBaseUrl.trim();
+            const provKey = s.newProviderApiKey.trim();
             s.modelProviders.push({
-              id: `custom-${Date.now()}`,
-              name: s.newProviderName.trim(),
+              id: provId,
+              name: provName,
               protocol: "\u517C\u5BB9\u63A5\u53E3",
-              baseUrl: s.newProviderBaseUrl.trim(),
-              configured: Boolean(
-                s.newProviderApiKey.trim()
-              ),
+              baseUrl: provUrl,
+              configured: Boolean(provKey),
               builtin: false,
               models: [
                 {
@@ -29439,8 +29496,25 @@ function CAYWApp({ env } = {}) {
             });
             s.selectedModel = modelId;
             s.addingProviderOpen = false;
-            s.modelNotice = `\u5DF2\u6DFB\u52A0\u6A21\u578B\u670D\u52A1\u201C${s.newProviderName.trim()}\u201D\u3002`;
+            s.modelNotice = `\u5DF2\u6DFB\u52A0\u6A21\u578B\u670D\u52A1\u201C${provName}\u201D\u5E76\u540C\u6B65\u81F3 Runtime\u3002`;
             forceRender();
+            void (async () => {
+              try {
+                await rpc("models.save_provider", {
+                  id: provId,
+                  name: provName,
+                  base_url: provUrl,
+                  ...provKey ? { api_key: provKey } : {}
+                });
+                await rpc("models.add_model", {
+                  provider_id: provId,
+                  model_id: modelId,
+                  desc: "\u81EA\u5B9A\u4E49\u63A5\u5165\u6A21\u578B"
+                });
+                await refreshModelsConfig();
+              } catch {
+              }
+            })();
           }
         },
         "\u4FDD\u5B58\u5E76\u542F\u7528"
@@ -29511,13 +29585,52 @@ function CAYWApp({ env } = {}) {
               }
             )
           ),
-          isOpen ? /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_body" }, srv.tools.map((t) => /* @__PURE__ */ import_react.default.createElement("div", { key: t.name, className: "At1oFq_field" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "At1oFq_head" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_label" }, t.name), /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_badge" }, "\u6309\u9700\u6388\u6743\u8C03\u7528")), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint" }, t.desc))), /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_footer" }, !srv.builtin ? /* @__PURE__ */ import_react.default.createElement(
+          isOpen ? /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_body" }, srv.tools.map((t) => /* @__PURE__ */ import_react.default.createElement("div", { key: t.name, className: "At1oFq_field" }, /* @__PURE__ */ import_react.default.createElement("div", { className: "At1oFq_head" }, /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_label" }, t.name), srv.enabled ? /* @__PURE__ */ import_react.default.createElement(
+            "button",
+            {
+              type: "button",
+              className: "zGbnIq_addModelButton",
+              style: { height: 22, fontSize: 11 },
+              onClick: () => {
+                void (async () => {
+                  try {
+                    const args = t.name === "add" ? { a: 17, b: 25 } : {};
+                    const res = await rpc(
+                      "mcp.call",
+                      {
+                        id: srv.id,
+                        tool: t.name,
+                        arguments: args
+                      }
+                    );
+                    if (object(res) && Array.isArray(res.servers)) {
+                      s.mcpServers = res.servers;
+                    }
+                    s.mcpNotice = `\u5DE5\u5177 ${t.name} \u8C03\u7528\u6210\u529F\uFF0C\u8FD4\u56DE\u7ED3\u679C\uFF1A${JSON.stringify(res?.output ?? res)}`;
+                    forceRender();
+                  } catch (error) {
+                    s.mcpNotice = errorText(error);
+                    forceRender();
+                  }
+                })();
+              }
+            },
+            "\u8C03\u7528\u9A8C\u8BC1"
+          ) : /* @__PURE__ */ import_react.default.createElement("span", { className: "At1oFq_badge" }, "\u8FDE\u63A5\u540E\u53EF\u8C03\u7528")), /* @__PURE__ */ import_react.default.createElement("p", { className: "At1oFq_hint" }, t.desc))), /* @__PURE__ */ import_react.default.createElement("div", { className: "YyYd_a_footer" }, !srv.builtin ? /* @__PURE__ */ import_react.default.createElement(
             "button",
             {
               type: "button",
               className: "zGbnIq_dangerButton",
               style: { height: 30, fontSize: 12 },
               onClick: () => {
+                void (async () => {
+                  try {
+                    await rpc("mcp.disconnect", {
+                      id: srv.id
+                    });
+                  } catch {
+                  }
+                })();
                 s.mcpServers = s.mcpServers.filter(
                   (item) => item.id !== srv.id
                 );
@@ -29532,12 +29645,41 @@ function CAYWApp({ env } = {}) {
               type: "button",
               className: "YyYd_a_discard",
               onClick: () => {
-                srv.enabled = !srv.enabled;
-                s.mcpNotice = srv.enabled ? `\u5DF2\u542F\u7528\u201C${srv.name}\u201D\u3002` : `\u5DF2\u505C\u7528\u201C${srv.name}\u201D\u3002`;
-                forceRender();
+                void (async () => {
+                  try {
+                    if (srv.enabled) {
+                      const res = await rpc(
+                        "mcp.disconnect",
+                        { id: srv.id }
+                      );
+                      if (object(res) && Array.isArray(res.servers)) {
+                        s.mcpServers = res.servers;
+                      }
+                      s.mcpNotice = `\u5DF2\u505C\u6B62\u5E76\u65AD\u5F00\u201C${srv.name}\u201D\u8FDB\u7A0B\u8FDE\u63A5\u3002`;
+                    } else {
+                      const res = await rpc(
+                        "mcp.connect",
+                        {
+                          id: srv.id,
+                          name: srv.name,
+                          transport: srv.transport,
+                          endpoint: srv.endpoint
+                        }
+                      );
+                      if (object(res) && Array.isArray(res.servers)) {
+                        s.mcpServers = res.servers;
+                      }
+                      s.mcpNotice = `\u5DF2\u901A\u8FC7 Stdio \u63E1\u624B\u8FDE\u63A5\u201C${srv.name}\u201D\u5E76\u5B8C\u6210\u5DE5\u5177\u53D1\u73B0\u3002`;
+                    }
+                    forceRender();
+                  } catch (error) {
+                    s.mcpNotice = errorText(error);
+                    forceRender();
+                  }
+                })();
               }
             },
-            srv.enabled ? "\u6682\u505C\u670D\u52A1" : "\u542F\u7528\u670D\u52A1"
+            srv.enabled ? "\u505C\u6B62\u670D\u52A1" : "\u8FDE\u63A5\u670D\u52A1"
           ), /* @__PURE__ */ import_react.default.createElement(
             "button",
             {
@@ -29619,26 +29761,27 @@ function CAYWApp({ env } = {}) {
           className: "zGbnIq_primaryButton",
           disabled: !s.newMcpName.trim() || !s.newMcpEndpoint.trim(),
           onClick: () => {
-            const id = `mcp-${Date.now()}`;
-            s.mcpServers.push({
-              id,
-              name: s.newMcpName.trim(),
-              transport: s.newMcpTransport,
-              endpoint: s.newMcpEndpoint.trim(),
-              status: "active",
-              statusLabel: "\u5DF2\u8FDE\u63A5",
-              enabled: true,
-              builtin: false,
-              tools: [
-                {
-                  name: "default.call",
-                  desc: "\u6309\u9700\u53D1\u73B0\u5E76\u8C03\u7528\u8BE5\u670D\u52A1\u63D0\u4F9B\u7684\u5DE5\u5177"
+            const name = s.newMcpName.trim();
+            const transport = s.newMcpTransport;
+            const endpoint = s.newMcpEndpoint.trim();
+            void (async () => {
+              try {
+                const res = await rpc("mcp.connect", {
+                  name,
+                  transport,
+                  endpoint
+                });
+                if (object(res) && Array.isArray(res.servers)) {
+                  s.mcpServers = res.servers;
                 }
-              ]
-            });
-            s.addingMcpOpen = false;
-            s.mcpNotice = `\u5DF2\u6DFB\u52A0\u5916\u90E8\u5DE5\u5177\u670D\u52A1\u201C${s.newMcpName.trim()}\u201D\u3002`;
-            forceRender();
+                s.addingMcpOpen = false;
+                s.mcpNotice = `\u5DF2\u8FDE\u63A5\u5916\u90E8\u5DE5\u5177\u670D\u52A1\u201C${name}\u201D\u5E76\u53D1\u73B0\u771F\u5B9E\u5DE5\u5177\u5217\u8868\u3002`;
+                forceRender();
+              } catch (error) {
+                s.mcpNotice = errorText(error);
+                forceRender();
+              }
+            })();
           }
         },
         "\u4FDD\u5B58\u5E76\u8FDE\u63A5"
@@ -29689,7 +29832,19 @@ function CAYWApp({ env } = {}) {
             forceRender();
           }
         }
-      ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, /* @__PURE__ */ import_react.default.createElement(
+      ))), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_field" }, /* @__PURE__ */ import_react.default.createElement("label", { className: "zGbnIq_fieldLabel" }, "\u6280\u80FD\u6307\u4EE4\u6B63\u6587 (Markdown)"), /* @__PURE__ */ import_react.default.createElement(
+        "textarea",
+        {
+          className: "zGbnIq_input",
+          rows: 4,
+          placeholder: "\u8F93\u5165 SKILL.md \u8BE6\u7EC6\u64CD\u4F5C\u6B65\u9AA4\u4E0E\u7EA6\u675F\u2026",
+          value: s.newSkillContent,
+          onChange: (e) => {
+            s.newSkillContent = e.target.value;
+            forceRender();
+          }
+        }
+      )), /* @__PURE__ */ import_react.default.createElement("div", { className: "zGbnIq_editorActions" }, /* @__PURE__ */ import_react.default.createElement(
         "button",
         {
           type: "button",
@@ -29708,17 +29863,31 @@ function CAYWApp({ env } = {}) {
           disabled: !s.newSkillName.trim(),
           onClick: () => {
             const name = s.newSkillName.trim();
-            s.skillsCatalog.unshift({
-              name,
-              description: s.newSkillDesc.trim() || "\u81EA\u5B9A\u4E49\u5DE5\u4F5C\u6D41\u6280\u80FD",
-              source: "\u81EA\u5B9A\u4E49\u6280\u80FD",
-              path: `~/.codex/skills/${name}/SKILL.md`
-            });
-            s.addingSkillOpen = false;
-            s.newSkillName = "";
-            s.newSkillDesc = "";
-            s.skillNotice = `\u5DF2\u6CE8\u518C\u6280\u80FD /${name}\u3002`;
-            forceRender();
+            const desc = s.newSkillDesc.trim() || "\u81EA\u5B9A\u4E49\u5DE5\u4F5C\u6D41\u6280\u80FD";
+            const content = s.newSkillContent?.trim() || desc;
+            void (async () => {
+              try {
+                const res = await rpc("skills.save", {
+                  name,
+                  description: desc,
+                  content
+                });
+                if (object(res) && Array.isArray(res.catalog)) {
+                  s.skillsCatalog = res.catalog;
+                } else {
+                  await refreshSkillsCatalog();
+                }
+                s.addingSkillOpen = false;
+                s.newSkillName = "";
+                s.newSkillDesc = "";
+                s.newSkillContent = "";
+                s.skillNotice = `\u5DF2\u5C06\u6280\u80FD /${res?.saved?.name || name} \u5199\u5165\u78C1\u76D8\uFF08${res?.saved?.path || "SKILL.md"}\uFF09\u3002`;
+                forceRender();
+              } catch (error) {
+                s.skillNotice = errorText(error);
+                forceRender();
+              }
+            })();
           }
         },
         "\u4FDD\u5B58\u6280\u80FD"

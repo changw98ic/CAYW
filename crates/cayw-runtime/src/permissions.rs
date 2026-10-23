@@ -211,6 +211,9 @@ impl Gate {
             .permissions()
             .iter()
             .any(|grant| grant.capability == name && grant.scope == scope)
+            || lock(&inner.extra_permissions)
+                .iter()
+                .any(|grant| grant.capability == name && grant.scope == scope)
         {
             self.scope.authorize(Authorization {
                 proof: self.scope.proof("runtime-config".into(), None),

@@ -131,6 +131,30 @@ struct Task {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ModelGet {
+    #[serde(default)]
+    session_id: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelConfigure {
+    provider: String,
+    model: String,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    api: Option<String>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    offline_fallback: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EnqueueWithIntent {
     session_id: String,
     text: String,
@@ -221,6 +245,66 @@ impl RpcHandler for Runtime {
             "runtime.health" => {
                 let _: Empty = parse(params)?;
                 encode(self.health()?)
+            }
+            "runtime.model.get" => {
+                let p: ModelGet = parse(params)?;
+                Ok(self.model_config_view(p.session_id.as_deref()))
+            }
+            "runtime.model.configure" => {
+                let p: ModelConfigure = parse(params)?;
+                let provider_name = p.provider.trim();
+                let model_id = p.model.trim();
+                if provider_name.is_empty() || model_id.is_empty() {
+                    return Err(RpcError::new(
+                        "invalid_params",
+                        "provider and model must be non-empty",
+                    ));
+                }
+                let mut model = cayw_ai::Model::new(provider_name, model_id);
+                model.max_output_tokens = Some(p.max_output_tokens.unwrap_or(4096).max(1));
+                let has_live_credentials =
+                    p.base_url.as_deref().is_some_and(|u| !u.trim().is_empty())
+                        && p.api_key.as_deref().is_some_and(|k| !k.trim().is_empty())
+                        && !p.offline_fallback;
+                let provider_arc: std::sync::Arc<dyn cayw_ai::Provider> = if has_live_credentials {
+                    let base = p.base_url.as_deref().unwrap_or("").trim();
+                    let key = p.api_key.as_deref().unwrap_or("").trim().to_owned();
+                    match p.api.as_deref().unwrap_or("chat_completions") {
+                        "messages" | "anthropic" => std::sync::Arc::new(
+                            cayw_providers::AnthropicProvider::new(base, key)
+                                .map_err(|e| RpcError::new("invalid_params", e.to_string()))?,
+                        ),
+                        "responses" => std::sync::Arc::new(
+                            cayw_providers::ResponsesProvider::new(base, key)
+                                .map_err(|e| RpcError::new("invalid_params", e.to_string()))?,
+                        ),
+                        "stream_generate_content" | "generate_content" | "gemini" => {
+                            std::sync::Arc::new(
+                                cayw_providers::GeminiProvider::new(base, key)
+                                    .map_err(|e| RpcError::new("invalid_params", e.to_string()))?,
+                            )
+                        }
+                        _ => std::sync::Arc::new(
+                            cayw_ai::providers::OpenAiProvider::new(base, key)
+                                .map_err(|e| RpcError::new("invalid_params", e.to_string()))?,
+                        ),
+                    }
+                } else {
+                    std::sync::Arc::new(crate::fixture::OfflineProvider::default())
+                };
+                let meta = json!({
+                    "provider": provider_name,
+                    "model": model_id,
+                    "base_url": p.base_url.unwrap_or_default(),
+                    "api": p.api.unwrap_or_else(|| "chat_completions".to_owned()),
+                    "live_http": has_live_credentials,
+                });
+                Ok(self.configure_model(
+                    provider_arc,
+                    model,
+                    Some(meta),
+                    p.session_id.as_deref(),
+                )?)
             }
             "session.create" => {
                 let p: Create = parse(params)?;

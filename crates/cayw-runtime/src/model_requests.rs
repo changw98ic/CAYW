@@ -1036,7 +1036,11 @@ impl Provider for AccountedProvider {
             }
             let provider_cancel=cancel.child_token();
             let _cancel_on_drop=provider_cancel.clone().drop_guard();
-            let mut upstream=context.inner.provider.stream(request.clone(),provider_cancel.clone());
+            let (active_provider, _) = Runtime {
+                inner: context.inner.clone(),
+            }
+            .active_model_for_session(&context.lease.session_id);
+            let mut upstream=active_provider.stream(request.clone(),provider_cancel.clone());
             while let Some(event)=upstream.next().await {
                 partial=event.message().clone();
                 let invalid=match guard.observe(&event) {

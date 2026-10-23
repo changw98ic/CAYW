@@ -208,6 +208,7 @@ struct ActiveRun {
     cancel: CancellationToken,
     unknown: Arc<std::sync::atomic::AtomicBool>,
 }
+type ModelOverrideEntry = (Arc<dyn Provider>, Model, Option<serde_json::Value>);
 pub(crate) struct Inner {
     store: Arc<SessionStore>,
     cells: Arc<cayw_cells::SqliteJournal>,
@@ -222,6 +223,9 @@ pub(crate) struct Inner {
     host_root: cayw_host::Host,
     provider: Arc<dyn Provider>,
     model: Model,
+    model_override: Mutex<Option<ModelOverrideEntry>>,
+    session_models: Mutex<BTreeMap<String, ModelOverrideEntry>>,
+    extra_permissions: Mutex<Vec<ScopedPermission>>,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
     binding_cache: session::BindingCache,
@@ -322,6 +326,9 @@ impl Runtime {
                 host_root,
                 provider,
                 model,
+                model_override: Mutex::new(None),
+                session_models: Mutex::new(BTreeMap::new()),
+                extra_permissions: Mutex::new(Vec::new()),
                 config,
                 active: Mutex::new(BTreeMap::new()),
                 binding_cache: session::BindingCache::default(),
@@ -340,16 +347,97 @@ impl Runtime {
     pub fn workspace(&self) -> &Path {
         &self.inner.root
     }
+    pub fn grant_extra_permission(&self, perm: ScopedPermission) {
+        let mut extra = lock(&self.inner.extra_permissions);
+        if !extra
+            .iter()
+            .any(|p| p.capability == perm.capability && p.scope == perm.scope)
+        {
+            extra.push(perm);
+        }
+    }
+    pub fn active_model(&self) -> Model {
+        if let Some((_, m, _)) = lock(&self.inner.model_override).as_ref() {
+            return m.clone();
+        }
+        self.inner.model.clone()
+    }
+    pub fn active_model_for_session(&self, session_id: &str) -> (Arc<dyn Provider>, Model) {
+        if let Some((p, m, _)) = lock(&self.inner.session_models).get(session_id) {
+            return (p.clone(), m.clone());
+        }
+        if let Some((p, m, _)) = lock(&self.inner.model_override).as_ref() {
+            return (p.clone(), m.clone());
+        }
+        (self.inner.provider.clone(), self.inner.model.clone())
+    }
+    pub fn configure_model(
+        &self,
+        provider: Arc<dyn Provider>,
+        model: Model,
+        metadata: Option<serde_json::Value>,
+        session_id: Option<&str>,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        if model.provider.trim().is_empty() || model.id.trim().is_empty() {
+            return Err(RuntimeError::InvalidInput(
+                "model and provider must be explicit".into(),
+            ));
+        }
+        if model.max_output_tokens == Some(0) {
+            return Err(RuntimeError::InvalidInput(
+                "model output token limit must be positive".into(),
+            ));
+        }
+        if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
+            self.get(sid)?;
+            lock(&self.inner.session_models).insert(
+                sid.to_owned(),
+                (provider.clone(), model.clone(), metadata.clone()),
+            );
+        }
+        *lock(&self.inner.model_override) = Some((provider, model, metadata));
+        Ok(self.model_config_view(session_id))
+    }
+    pub fn model_config_view(&self, session_id: Option<&str>) -> serde_json::Value {
+        if let Some(sid) = session_id.filter(|s| !s.trim().is_empty())
+            && let Some((_, m, meta)) = lock(&self.inner.session_models).get(sid)
+        {
+            return serde_json::json!({
+                "session_id": sid,
+                "provider": m.provider,
+                "model": m.id,
+                "max_output_tokens": m.max_output_tokens,
+                "configuration": meta,
+            });
+        }
+        if let Some((_, m, meta)) = lock(&self.inner.model_override).as_ref() {
+            return serde_json::json!({
+                "session_id": session_id,
+                "provider": m.provider,
+                "model": m.id,
+                "max_output_tokens": m.max_output_tokens,
+                "configuration": meta,
+            });
+        }
+        serde_json::json!({
+            "session_id": session_id,
+            "provider": self.inner.model.provider,
+            "model": self.inner.model.id,
+            "max_output_tokens": self.inner.model.max_output_tokens,
+            "configuration": serde_json::Value::Null,
+        })
+    }
     pub fn health(&self) -> Result<Health, RuntimeError> {
         let (running, queued) = self.inner.queue.counts()?;
+        let active_model = self.active_model();
         Ok(Health {
             status: "ok",
             protocol_version: cayw_core::PROTOCOL_VERSION,
             running,
             queued,
             max_concurrent_runs: self.inner.config.max_concurrent_runs,
-            provider: self.inner.model.provider.clone(),
-            model: self.inner.model.id.clone(),
+            provider: active_model.provider,
+            model: active_model.id,
         })
     }
     pub fn create(&self, label: Option<String>) -> Result<SessionView, RuntimeError> {

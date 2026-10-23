@@ -614,52 +614,7 @@ export function CAYWApp({ env } = {}) {
       pluginParamValues: {},
       pluginSavedNotice: '',
       // MCP & Skills state
-      mcpServers: [
-        {
-          id: 'codegraph',
-          name: 'CodeGraph 代码语义图谱',
-          transport: '本机标准输入输出',
-          endpoint: 'codegraph-mcp --workspace .',
-          status: 'active',
-          statusLabel: '已连接',
-          enabled: true,
-          builtin: true,
-          tools: [
-            { name: 'codegraph.find_symbol', desc: '跨文件查找符号定义与声明位置' },
-            { name: 'codegraph.find_references', desc: '查询符号在工作区内的所有引用与调用点' },
-            { name: 'codegraph.dependencies', desc: '分析模块与文件的依赖关系图' },
-          ],
-        },
-        {
-          id: 'playwright',
-          name: 'Playwright 浏览器自动化',
-          transport: '本机标准输入输出',
-          endpoint: 'playwright-mcp --headless',
-          status: 'active',
-          statusLabel: '已连接',
-          enabled: true,
-          builtin: true,
-          tools: [
-            { name: 'browser_navigate', desc: '打开指定网页地址并等待加载' },
-            { name: 'browser_snapshot', desc: '获取页面无障碍结构快照' },
-            { name: 'browser_take_screenshot', desc: '截取当前视口或完整页面图像' },
-          ],
-        },
-        {
-          id: 'context7',
-          name: 'Context7 库与框架文档',
-          transport: '远程事件流',
-          endpoint: 'https://mcp.context7.com/mcp',
-          status: 'active',
-          statusLabel: '已连接',
-          enabled: true,
-          builtin: true,
-          tools: [
-            { name: 'resolve-library-id', desc: '解析第三方库与框架的标准标识' },
-            { name: 'query-docs', desc: '按版本检索官方文档与代码示例' },
-          ],
-        },
-      ],
+      mcpServers: [],
       expandedMcpCards: {},
       addingMcpOpen: false,
       newMcpName: '',
@@ -1251,6 +1206,8 @@ export function CAYWApp({ env } = {}) {
           s.projects = list;
         }
       } catch {}
+      void refreshModelsConfig();
+      void refreshMcpCatalog();
       await refreshSessions();
       if (login === s.loginGeneration && s.sessions.length) {
         await selectSession(s.sessions[0].id);
@@ -1509,14 +1466,36 @@ export function CAYWApp({ env } = {}) {
   const refreshMcpCatalog = async () => {
     try {
       const res = await rpc('mcp.catalog', {});
-      if (Array.isArray(res) && res.length) {
-        const custom = s.mcpServers.filter(item => !item.builtin);
-        s.mcpServers = [...res, ...custom];
+      if (Array.isArray(res)) {
+        s.mcpServers = res;
         forceRender();
       }
     } catch {
       // Retain default MCP catalog
     }
+  };
+
+  const refreshModelsConfig = async () => {
+    try {
+      const res = await rpc('models.config', {});
+      if (object(res)) {
+        if (typeof res.selected_model === 'string' && res.selected_model) {
+          s.selectedModel = res.selected_model;
+        }
+        if (Array.isArray(res.providers) && res.providers.length) {
+          s.modelProviders = res.providers.map(p => ({
+            id: p.id,
+            name: p.name,
+            protocol: p.api || p.protocol || '兼容接口',
+            baseUrl: p.baseUrl || p.base_url || '',
+            configured: Boolean(p.configured),
+            builtin: ['magpie', 'openai', 'anthropic'].includes(p.id),
+            models: Array.isArray(p.models) ? p.models : [],
+          }));
+        }
+        forceRender();
+      }
+    } catch {}
   };
 
   const refreshServerAuthAndBinding = async () => {
@@ -1642,21 +1621,35 @@ export function CAYWApp({ env } = {}) {
 
   const handleSelectDevice = async deviceId => {
     try {
-      const res = await rpc('devices.select', { device_id: deviceId });
+      const targetId = deviceId === '__local_ipc__' ? 'local' : deviceId;
+      const res = await rpc('devices.select', { device_id: targetId });
       if (object(res) && Array.isArray(res.devices)) {
         s.boundDevices = res.devices;
-        s.activeDeviceId = res.active_device_id || deviceId;
+        s.activeDeviceId = res.active_device_id ?? '';
         const current = res.devices.find(d => d.device_id === s.activeDeviceId);
         if (current) s.deviceBinding = current;
       } else {
-        s.activeDeviceId = deviceId;
+        s.activeDeviceId = targetId === 'local' ? '' : targetId;
         s.boundDevices = s.boundDevices.map(d => ({
           ...d,
-          active: d.device_id === deviceId,
+          active: d.device_id === s.activeDeviceId,
         }));
       }
-      s.deviceBindingNotice = `已切换至设备“${s.boundDevices.find(d => d.device_id === deviceId)?.label || deviceId}”。`;
+      const activeLabel =
+        !s.activeDeviceId || s.activeDeviceId === 'local'
+          ? '本机直连 Runtime'
+          : s.boundDevices.find(d => d.device_id === s.activeDeviceId)?.label ||
+            s.activeDeviceId;
+      s.deviceBindingNotice = `已切换任务执行设备至“${activeLabel}”。`;
+      s.selectionGeneration++;
+      clearTimer(s.timer);
+      s.selected = null;
+      s.sessions = [];
       forceRender();
+      await refreshSessions();
+      if (s.sessions.length) {
+        await selectSession(s.sessions[0].id);
+      }
     } catch (error) {
       s.deviceBindingNotice = errorText(error);
       forceRender();
@@ -1835,8 +1828,11 @@ export function CAYWApp({ env } = {}) {
       void refreshServerAuthAndBinding();
     } else if (tab === 'plugins' && !s.cachedCapabilities.length) {
       void refreshPlugins();
-    } else if (tab === 'models' && s.projects.length === 1 && s.projects[0]?.address === '本机 IPC') {
-      void refreshProjects();
+    } else if (tab === 'models') {
+      void refreshModelsConfig();
+      if (s.projects.length === 1 && s.projects[0]?.address === '本机 IPC') {
+        void refreshProjects();
+      }
     } else if (tab === 'skills' && !s.skillsLoaded) {
       void refreshSkillsCatalog();
     } else if (tab === 'mcp') {
@@ -1994,12 +1990,23 @@ export function CAYWApp({ env } = {}) {
     report(null);
     s.promptText = '';
     if (promptInputRef.current) promptInputRef.current.value = '';
+    const attachedSkills = s.attachedItems
+      .filter(
+        it =>
+          it.kind === 'skill' &&
+          typeof it.name === 'string' &&
+          it.name.trim(),
+      )
+      .map(it => it.name.trim());
+    const promptParams = {
+      session_id: id,
+      text,
+      ...(s.planModeActive ? { plan_mode: true } : {}),
+      ...(attachedSkills.length ? { skills: attachedSkills } : {}),
+    };
     forceRender();
     try {
-      const nextSnap = await writeRpc(id, 'session.prompt', {
-        session_id: id,
-        text,
-      });
+      const nextSnap = await writeRpc(id, 'session.prompt', promptParams);
       if (login !== s.loginGeneration) return;
       const v = s.views.get(id);
       if (v) {
@@ -3496,6 +3503,19 @@ export function CAYWApp({ env } = {}) {
                         return (
                           <div key={key} className="Md3f7G_flowItem">
                             <div className="Sxvs8a_root">
+                              {role === 'assistant' &&
+                              (message.provider || message.model) ? (
+                                <div
+                                  className="Md3f7G_modelMeta"
+                                  style={{
+                                    fontSize: 11,
+                                    color: 'var(--dsw-alias-label-tertiary)',
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  {`执行模型：${message.provider || 'runtime'} / ${message.model || s.selectedModel}`}
+                                </div>
+                              ) : null}
                               <div className="Sxvs8a_body">
                                 <FormattedMarkdown text={presentation.text} />
                               </div>
@@ -4025,7 +4045,7 @@ export function CAYWApp({ env } = {}) {
                           if (id === '__add_device__') {
                             openAddDeviceModal();
                           } else if (id === '__local_ipc__') {
-                            s.activeDeviceId = '';
+                            void handleSelectDevice('local');
                           } else {
                             void handleSelectDevice(id);
                           }
@@ -4680,6 +4700,17 @@ export function CAYWApp({ env } = {}) {
                                             s.selectedModel = m.id;
                                             s.modelMenuOpen = false;
                                             forceRender();
+                                            void (async () => {
+                                              try {
+                                                await rpc('models.select', {
+                                                  model_id: m.id,
+                                                  ...(s.selected
+                                                    ? { session_id: s.selected }
+                                                    : {}),
+                                                });
+                                                await refreshModelsConfig();
+                                              } catch {}
+                                            })();
                                           }}
                                         >
                                           <span className="_7KE1Ra_optionCopy">
@@ -5797,15 +5828,32 @@ export function CAYWApp({ env } = {}) {
                                     type="button"
                                     className="zGbnIq_primaryButton"
                                     onClick={() => {
-                                      provider.baseUrl =
+                                      const nextUrl =
                                         s.editProviderBaseUrl.trim() ||
                                         provider.baseUrl;
-                                      if (s.editProviderApiKey.trim()) {
+                                      const nextKey =
+                                        s.editProviderApiKey.trim();
+                                      provider.baseUrl =
+                                        nextUrl;
+                                      if (nextKey) {
                                         provider.configured = true;
                                       }
                                       s.editingProviderId = null;
-                                      s.modelNotice = `已保存“${provider.name}”连接配置。`;
+                                      s.modelNotice = `已保存“${provider.name}”连接配置并同步至 Runtime。`;
                                       forceRender();
+                                      void (async () => {
+                                        try {
+                                          await rpc('models.save_provider', {
+                                            id: provider.id,
+                                            name: provider.name,
+                                            base_url: nextUrl,
+                                            ...(nextKey
+                                              ? { api_key: nextKey }
+                                              : {}),
+                                          });
+                                          await refreshModelsConfig();
+                                        } catch {}
+                                      })();
                                     }}
                                   >
                                     保存配置
@@ -5893,17 +5941,27 @@ export function CAYWApp({ env } = {}) {
                                       onClick={() => {
                                         const id = s.newModelId.trim();
                                         if (!id) return;
+                                        const desc =
+                                          s.newModelDesc.trim() || '自定义模型';
                                         provider.models.push({
                                           id,
                                           label: id,
-                                          desc:
-                                            s.newModelDesc.trim() ||
-                                            '自定义模型',
+                                          desc,
                                         });
                                         s.selectedModel = id;
                                         s.addingModelProviderId = null;
-                                        s.modelNotice = `已添加并切换到模型 ${id}。`;
+                                        s.modelNotice = `已添加并切换到模型 ${id}（已同步至 Runtime）。`;
                                         forceRender();
+                                        void (async () => {
+                                          try {
+                                            await rpc('models.add_model', {
+                                              provider_id: provider.id,
+                                              model_id: id,
+                                              desc,
+                                            });
+                                            await refreshModelsConfig();
+                                          } catch {}
+                                        })();
                                       }}
                                     >
                                       确认添加
@@ -5957,8 +6015,19 @@ export function CAYWApp({ env } = {}) {
                                           }
                                           onClick={() => {
                                             s.selectedModel = m.id;
-                                            s.modelNotice = `当前默认模型已切换为 ${m.id}。`;
+                                            s.modelNotice = `当前默认模型已切换为 ${m.id}（已作用于 Runtime）。`;
                                             forceRender();
+                                            void (async () => {
+                                              try {
+                                                await rpc('models.select', {
+                                                  model_id: m.id,
+                                                  ...(s.selected
+                                                    ? { session_id: s.selected }
+                                                    : {}),
+                                                });
+                                                await refreshModelsConfig();
+                                              } catch {}
+                                            })();
                                           }}
                                         >
                                           {isCurrent ? '当前默认' : '设为默认'}
@@ -6106,14 +6175,16 @@ export function CAYWApp({ env } = {}) {
                                   const modelId =
                                     s.newProviderModelId.trim() ||
                                     'default-model';
+                                  const provId = `custom-${Date.now()}`;
+                                  const provName = s.newProviderName.trim();
+                                  const provUrl = s.newProviderBaseUrl.trim();
+                                  const provKey = s.newProviderApiKey.trim();
                                   s.modelProviders.push({
-                                    id: `custom-${Date.now()}`,
-                                    name: s.newProviderName.trim(),
+                                    id: provId,
+                                    name: provName,
                                     protocol: '兼容接口',
-                                    baseUrl: s.newProviderBaseUrl.trim(),
-                                    configured: Boolean(
-                                      s.newProviderApiKey.trim(),
-                                    ),
+                                    baseUrl: provUrl,
+                                    configured: Boolean(provKey),
                                     builtin: false,
                                     models: [
                                       {
@@ -6125,8 +6196,26 @@ export function CAYWApp({ env } = {}) {
                                   });
                                   s.selectedModel = modelId;
                                   s.addingProviderOpen = false;
-                                  s.modelNotice = `已添加模型服务“${s.newProviderName.trim()}”。`;
+                                  s.modelNotice = `已添加模型服务“${provName}”并同步至 Runtime。`;
                                   forceRender();
+                                  void (async () => {
+                                    try {
+                                      await rpc('models.save_provider', {
+                                        id: provId,
+                                        name: provName,
+                                        base_url: provUrl,
+                                        ...(provKey
+                                          ? { api_key: provKey }
+                                          : {}),
+                                      });
+                                      await rpc('models.add_model', {
+                                        provider_id: provId,
+                                        model_id: modelId,
+                                        desc: '自定义接入模型',
+                                      });
+                                      await refreshModelsConfig();
+                                    } catch {}
+                                  })();
                                 }}
                               >
                                 保存并启用
@@ -6243,9 +6332,48 @@ export function CAYWApp({ env } = {}) {
                                       <span className="At1oFq_label">
                                         {t.name}
                                       </span>
-                                      <span className="At1oFq_badge">
-                                        按需授权调用
-                                      </span>
+                                      {srv.enabled ? (
+                                        <button
+                                          type="button"
+                                          className="zGbnIq_addModelButton"
+                                          style={{ height: 22, fontSize: 11 }}
+                                          onClick={() => {
+                                            void (async () => {
+                                              try {
+                                                const args =
+                                                  t.name === 'add'
+                                                    ? { a: 17, b: 25 }
+                                                    : {};
+                                                const res = await rpc(
+                                                  'mcp.call',
+                                                  {
+                                                    id: srv.id,
+                                                    tool: t.name,
+                                                    arguments: args,
+                                                  },
+                                                );
+                                                if (
+                                                  object(res) &&
+                                                  Array.isArray(res.servers)
+                                                ) {
+                                                  s.mcpServers = res.servers;
+                                                }
+                                                s.mcpNotice = `工具 ${t.name} 调用成功，返回结果：${JSON.stringify(res?.output ?? res)}`;
+                                                forceRender();
+                                              } catch (error) {
+                                                s.mcpNotice = errorText(error);
+                                                forceRender();
+                                              }
+                                            })();
+                                          }}
+                                        >
+                                          调用验证
+                                        </button>
+                                      ) : (
+                                        <span className="At1oFq_badge">
+                                          连接后可调用
+                                        </span>
+                                      )}
                                     </div>
                                     <p className="At1oFq_hint">{t.desc}</p>
                                   </div>
@@ -6257,6 +6385,13 @@ export function CAYWApp({ env } = {}) {
                                       className="zGbnIq_dangerButton"
                                       style={{ height: 30, fontSize: 12 }}
                                       onClick={() => {
+                                        void (async () => {
+                                          try {
+                                            await rpc('mcp.disconnect', {
+                                              id: srv.id,
+                                            });
+                                          } catch {}
+                                        })();
                                         s.mcpServers = s.mcpServers.filter(
                                           item => item.id !== srv.id,
                                         );
@@ -6271,14 +6406,47 @@ export function CAYWApp({ env } = {}) {
                                     type="button"
                                     className="YyYd_a_discard"
                                     onClick={() => {
-                                      srv.enabled = !srv.enabled;
-                                      s.mcpNotice = srv.enabled
-                                        ? `已启用“${srv.name}”。`
-                                        : `已停用“${srv.name}”。`;
-                                      forceRender();
+                                      void (async () => {
+                                        try {
+                                          if (srv.enabled) {
+                                            const res = await rpc(
+                                              'mcp.disconnect',
+                                              { id: srv.id },
+                                            );
+                                            if (
+                                              object(res) &&
+                                              Array.isArray(res.servers)
+                                            ) {
+                                              s.mcpServers = res.servers;
+                                            }
+                                            s.mcpNotice = `已停止并断开“${srv.name}”进程连接。`;
+                                          } else {
+                                            const res = await rpc(
+                                              'mcp.connect',
+                                              {
+                                                id: srv.id,
+                                                name: srv.name,
+                                                transport: srv.transport,
+                                                endpoint: srv.endpoint,
+                                              },
+                                            );
+                                            if (
+                                              object(res) &&
+                                              Array.isArray(res.servers)
+                                            ) {
+                                              s.mcpServers = res.servers;
+                                            }
+                                            s.mcpNotice = `已通过 Stdio 握手连接“${srv.name}”并完成工具发现。`;
+                                          }
+                                          forceRender();
+                                        } catch (error) {
+                                          s.mcpNotice = errorText(error);
+                                          forceRender();
+                                        }
+                                      })();
                                     }}
                                   >
-                                    {srv.enabled ? '暂停服务' : '启用服务'}
+                                    {srv.enabled ? '停止服务' : '连接服务'}
                                   </button>
                                   <button
                                     type="button"
@@ -6394,26 +6562,30 @@ export function CAYWApp({ env } = {}) {
                                   !s.newMcpEndpoint.trim()
                                 }
                                 onClick={() => {
-                                  const id = `mcp-${Date.now()}`;
-                                  s.mcpServers.push({
-                                    id,
-                                    name: s.newMcpName.trim(),
-                                    transport: s.newMcpTransport,
-                                    endpoint: s.newMcpEndpoint.trim(),
-                                    status: 'active',
-                                    statusLabel: '已连接',
-                                    enabled: true,
-                                    builtin: false,
-                                    tools: [
-                                      {
-                                        name: 'default.call',
-                                        desc: '按需发现并调用该服务提供的工具',
-                                      },
-                                    ],
-                                  });
-                                  s.addingMcpOpen = false;
-                                  s.mcpNotice = `已添加外部工具服务“${s.newMcpName.trim()}”。`;
-                                  forceRender();
+                                  const name = s.newMcpName.trim();
+                                  const transport = s.newMcpTransport;
+                                  const endpoint = s.newMcpEndpoint.trim();
+                                  void (async () => {
+                                    try {
+                                      const res = await rpc('mcp.connect', {
+                                        name,
+                                        transport,
+                                        endpoint,
+                                      });
+                                      if (
+                                        object(res) &&
+                                        Array.isArray(res.servers)
+                                      ) {
+                                        s.mcpServers = res.servers;
+                                      }
+                                      s.addingMcpOpen = false;
+                                      s.mcpNotice = `已连接外部工具服务“${name}”并发现真实工具列表。`;
+                                      forceRender();
+                                    } catch (error) {
+                                      s.mcpNotice = errorText(error);
+                                      forceRender();
+                                    }
+                                  })();
                                 }}
                               >
                                 保存并连接
@@ -6492,6 +6664,21 @@ export function CAYWApp({ env } = {}) {
                               />
                             </div>
                           </div>
+                          <div className="zGbnIq_field">
+                            <label className="zGbnIq_fieldLabel">
+                              技能指令正文 (Markdown)
+                            </label>
+                            <textarea
+                              className="zGbnIq_input"
+                              rows={4}
+                              placeholder="输入 SKILL.md 详细操作步骤与约束…"
+                              value={s.newSkillContent}
+                              onChange={e => {
+                                s.newSkillContent = e.target.value;
+                                forceRender();
+                              }}
+                            />
+                          </div>
                           <div className="zGbnIq_editorActions">
                             <button
                               type="button"
@@ -6509,18 +6696,36 @@ export function CAYWApp({ env } = {}) {
                               disabled={!s.newSkillName.trim()}
                               onClick={() => {
                                 const name = s.newSkillName.trim();
-                                s.skillsCatalog.unshift({
-                                  name,
-                                  description:
-                                    s.newSkillDesc.trim() || '自定义工作流技能',
-                                  source: '自定义技能',
-                                  path: `~/.codex/skills/${name}/SKILL.md`,
-                                });
-                                s.addingSkillOpen = false;
-                                s.newSkillName = '';
-                                s.newSkillDesc = '';
-                                s.skillNotice = `已注册技能 /${name}。`;
-                                forceRender();
+                                const desc =
+                                  s.newSkillDesc.trim() || '自定义工作流技能';
+                                const content =
+                                  s.newSkillContent?.trim() || desc;
+                                void (async () => {
+                                  try {
+                                    const res = await rpc('skills.save', {
+                                      name,
+                                      description: desc,
+                                      content,
+                                    });
+                                    if (
+                                      object(res) &&
+                                      Array.isArray(res.catalog)
+                                    ) {
+                                      s.skillsCatalog = res.catalog;
+                                    } else {
+                                      await refreshSkillsCatalog();
+                                    }
+                                    s.addingSkillOpen = false;
+                                    s.newSkillName = '';
+                                    s.newSkillDesc = '';
+                                    s.newSkillContent = '';
+                                    s.skillNotice = `已将技能 /${res?.saved?.name || name} 写入磁盘（${res?.saved?.path || 'SKILL.md'}）。`;
+                                    forceRender();
+                                  } catch (error) {
+                                    s.skillNotice = errorText(error);
+                                    forceRender();
+                                  }
+                                })();
                               }}
                             >
                               保存技能
