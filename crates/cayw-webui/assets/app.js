@@ -23923,8 +23923,8 @@ var attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-var readMethods = /* @__PURE__ */ new Set(["runtime.health", "devices.list", "devices.bind_status", "device.binding.status", "server.auth.status", "projects.list", "projects.browse", "skills.catalog", "mcp.catalog", "session.list", "session.get", "session.events", "session.grants", "session.audit", "capabilities.list"]);
-var rejectedCodes = /* @__PURE__ */ new Set(["forbidden", "invalid_params", "invalid_request", "invalid_json", "method_not_allowed", "queue_full", "queue_timeout", "body_timeout", "invalid_body", "busy", "session_frozen", "needs_reconciliation", "stale_approval", "cancelled"]);
+var readMethods = /* @__PURE__ */ new Set(["runtime.health", "devices.list", "devices.bind_status", "device.binding.status", "server.auth.status", "projects.list", "projects.browse", "skills.catalog", "mcp.catalog", "session.list", "session.get", "session.events", "session.grants", "session.audit", "task.get", "capabilities.list"]);
+var rejectedCodes = /* @__PURE__ */ new Set(["forbidden", "invalid_params", "invalid_request", "invalid_json", "method_not_allowed", "queue_full", "queue_timeout", "body_timeout", "invalid_body", "busy", "session_frozen", "needs_reconciliation", "stale_approval", "stale_cancellation", "cancelled"]);
 var RpcError = class extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
     super(clip(message, 2e3));
@@ -23936,7 +23936,8 @@ var RpcError = class extends Error {
 };
 function beginWrite(view, key, method, params = {}) {
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
-  const lease = method === "session.prompt" ? null : view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const observedLease = view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const lease = method === "session.prompt" ? null : method === "session.cancel" ? observedLease?.worker_id === params.worker_id && observedLease?.attempt_id === params.attempt_id ? observedLease : null : observedLease;
   const target = method === "session.cancel" && sameLease(lease, view.activeAttempt?.lease) ? view.activeAttempt : null;
   const prompts = method === "session.cancel" && !lease ? view.writes.filter((write2) => write2.method === "session.prompt" && write2.phase === "pending") : [];
   const promptKey = prompts.length === 1 ? prompts[0].key : null;
@@ -24876,6 +24877,7 @@ function CAYWApp({ env } = {}) {
       views: /* @__PURE__ */ new Map(),
       promptPending: /* @__PURE__ */ new Set(),
       approvalPending: /* @__PURE__ */ new Set(),
+      taskAdmissions: /* @__PURE__ */ new Map(),
       cancelPending: false,
       createBusy: false,
       reconnectBusy: false,
@@ -25209,6 +25211,7 @@ function CAYWApp({ env } = {}) {
       views: s.views,
       promptPending: s.promptPending,
       approvalPending: s.approvalPending,
+      taskAdmissions: s.taskAdmissions,
       cachedCapabilities: s.cachedCapabilities
     });
   };
@@ -25219,6 +25222,7 @@ function CAYWApp({ env } = {}) {
     s.views = ps2?.views ?? /* @__PURE__ */ new Map();
     s.promptPending = ps2?.promptPending ?? /* @__PURE__ */ new Set();
     s.approvalPending = ps2?.approvalPending ?? /* @__PURE__ */ new Set();
+    s.taskAdmissions = ps2?.taskAdmissions ?? /* @__PURE__ */ new Map();
     s.cachedCapabilities = ps2?.cachedCapabilities ?? [];
   };
   const rememberView = (view2) => {
@@ -25245,7 +25249,7 @@ function CAYWApp({ env } = {}) {
     s.controllers.add(controller);
     const requestBody = s.activeProject ? { method, params, project: s.activeProject } : { method, params };
     let timeout;
-    if (method !== "session.prompt") {
+    if (!["session.prompt", "task.resume"].includes(method)) {
       timeout = setTimer(() => controller.abort(), 15e3);
     }
     try {
@@ -25566,12 +25570,14 @@ function CAYWApp({ env } = {}) {
         views: retained,
         promptPending: /* @__PURE__ */ new Set(),
         approvalPending: /* @__PURE__ */ new Set(),
+        taskAdmissions: /* @__PURE__ */ new Map(),
         cachedCapabilities: []
       });
     }
     s.views = s.projectStates.get(currentProjectId())?.views ?? /* @__PURE__ */ new Map();
     s.promptPending = /* @__PURE__ */ new Set();
     s.approvalPending = /* @__PURE__ */ new Set();
+    s.taskAdmissions = s.projectStates.get(currentProjectId())?.taskAdmissions ?? /* @__PURE__ */ new Map();
     s.forkOpen = false;
     if (forkDialogRef.current?.close) forkDialogRef.current.close();
     s.reconnectBusy = true;
@@ -25616,7 +25622,28 @@ function CAYWApp({ env } = {}) {
     if (view2) rememberView(beginWrite(view2, key, method, params));
     if (id === s.selected) forceRender();
     try {
-      const result = await rpc(method, params);
+      let result;
+      if (method === "session.prompt") {
+        const admission = rpc("task.enqueue", params).then((task) => {
+          if (task?.session_id !== id || typeof task.id !== "string" || !task.id) {
+            throw new RpcError(
+              "invalid_response",
+              "\u4EFB\u52A1\u5165\u961F\u672A\u8FD4\u56DE\u539F\u4EFB\u52A1\u7F16\u53F7\uFF0C\u8BF7\u7531\u5BBF\u4E3B\u6838\u5BF9\u3002",
+              true
+            );
+          }
+          if (login === s.loginGeneration && s.views.has(id)) {
+            rememberView({ ...s.views.get(id), originalTaskId: task.id });
+          }
+          return task.id;
+        });
+        s.taskAdmissions.set(id, admission);
+        if (id === s.selected) forceRender();
+        const taskId = await admission;
+        result = await rpc("task.resume", { task_id: taskId });
+      } else {
+        result = await rpc(method, params);
+      }
       if (login === s.loginGeneration && s.views.has(id)) {
         rememberView(finishWrite(s.views.get(id), key, null, result));
       }
@@ -26286,7 +26313,7 @@ function CAYWApp({ env } = {}) {
     const snapshot2 = view2?.snapshot;
     const pending2 = s.promptPending.has(s.selected);
     const busy2 = pending2 || sessionRunning(snapshot2);
-    const cancelDisabled2 = !snapshot2 || !busy2 && !view2.writes.length && !view2.activeAttempt && !array(snapshot2.pending_approvals).length || s.cancelPending;
+    const cancelDisabled2 = !snapshot2 || !s.taskAdmissions.has(s.selected) && !view2?.originalTaskId || !busy2 && !view2.writes.length && !view2.activeAttempt && !array(snapshot2.pending_approvals).length || s.cancelPending;
     if (cancelDisabled2 || !s.selected) return;
     const id = s.selected;
     const login = s.loginGeneration;
@@ -26294,7 +26321,31 @@ function CAYWApp({ env } = {}) {
     report(null);
     forceRender();
     try {
-      const result = await writeRpc(id, "session.cancel", { session_id: id });
+      const admission = s.taskAdmissions.get(id);
+      const taskId = admission ? await admission : s.views.get(id)?.originalTaskId;
+      if (typeof taskId !== "string" || !taskId) {
+        throw new RpcError(
+          "invalid_params",
+          "\u672A\u4FDD\u5B58\u539F\u4EFB\u52A1\u7F16\u53F7\uFF0C\u8BF7\u5728\u5BBF\u4E3B\u4E2D\u6307\u5B9A\u539F Task \u540E\u53D6\u6D88\u3002"
+        );
+      }
+      const task = await rpc("task.get", { task_id: taskId });
+      if (task?.id !== taskId || task.session_id !== id) {
+        throw new RpcError(
+          "invalid_response",
+          "\u8FD4\u56DE\u7684\u4EFB\u52A1\u4E0E\u539F\u53D6\u6D88\u76EE\u6807\u4E0D\u7B26\u3002",
+          true
+        );
+      }
+      if (login !== s.loginGeneration) return;
+      const target = {
+        session_id: id,
+        task_id: taskId,
+        worker_id: task.worker_id,
+        attempt_id: task.attempt_id,
+        fence: task.fence
+      };
+      const result = await writeRpc(id, "session.cancel", target);
       if (login !== s.loginGeneration) return;
       s.pollStatus = result?.cancelled ? "\u5DF2\u8BF7\u6C42\u53D6\u6D88\uFF1B\u7B49\u5F85 Runtime \u8BB0\u5F55\u5B9E\u9645\u7EC8\u6001\u3002" : "Runtime \u5F53\u524D\u6CA1\u6709\u53EF\u53D6\u6D88\u7684\u6267\u884C\uFF1B\u7EE7\u7EED\u8BFB\u53D6\u771F\u5B9E\u72B6\u6001\u3002";
       await freshSnapshot(id, login);
@@ -26451,7 +26502,7 @@ function CAYWApp({ env } = {}) {
   const promptDisabled = !snapshot || Boolean(blocked) || busy;
   const currentPromptText = promptInputRef.current?.value ?? s.promptText;
   const sendDisabled = promptDisabled || !currentPromptText.trim();
-  const cancelDisabled = !snapshot || !busy && !view?.writes.length && !view?.activeAttempt && !array(snapshot.pending_approvals).length || s.cancelPending;
+  const cancelDisabled = !snapshot || !s.taskAdmissions.has(s.selected) && !view?.originalTaskId || !busy && !view?.writes.length && !view?.activeAttempt && !array(snapshot.pending_approvals).length || s.cancelPending;
   const promptStatus = !snapshot ? "" : view?.writes.some((write) => write.phase === "uncertain") ? "\u8FDE\u63A5\u7ED3\u679C\u5F85\u786E\u8BA4" : unresolved(snapshot) || view?.faults.reconciliation ? "\u5F85\u5BBF\u4E3B\u6838\u5BF9\u526F\u4F5C\u7528" : frozen(snapshot, view) ? "\u4F1A\u8BDD\u5DF2\u51BB\u7ED3" : array(snapshot?.pending_approvals).length ? "\u7B49\u5F85\u4E0A\u65B9\u6388\u6743\u786E\u8BA4" : busy ? "\u6B63\u5728\u5904\u7406\u2026" : decisionBusy ? "\u6B63\u5728\u8BB0\u5F55\u5BA1\u6279\u2026" : "";
   const approvals = array(snapshot?.pending_approvals);
   const approvalButtonsDisabled = Boolean(

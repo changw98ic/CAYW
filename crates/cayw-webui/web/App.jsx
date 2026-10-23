@@ -469,6 +469,7 @@ export function CAYWApp({ env } = {}) {
       views: new Map(),
       promptPending: new Set(),
       approvalPending: new Set(),
+      taskAdmissions: new Map(),
       cancelPending: false,
       createBusy: false,
       reconnectBusy: false,
@@ -816,6 +817,7 @@ export function CAYWApp({ env } = {}) {
       views: s.views,
       promptPending: s.promptPending,
       approvalPending: s.approvalPending,
+      taskAdmissions: s.taskAdmissions,
       cachedCapabilities: s.cachedCapabilities,
     });
   };
@@ -827,6 +829,7 @@ export function CAYWApp({ env } = {}) {
     s.views = ps?.views ?? new Map();
     s.promptPending = ps?.promptPending ?? new Set();
     s.approvalPending = ps?.approvalPending ?? new Set();
+    s.taskAdmissions = ps?.taskAdmissions ?? new Map();
     s.cachedCapabilities = ps?.cachedCapabilities ?? [];
   };
 
@@ -866,7 +869,7 @@ export function CAYWApp({ env } = {}) {
       ? { method, params, project: s.activeProject }
       : { method, params };
     let timeout;
-    if (method !== 'session.prompt') {
+    if (!['session.prompt', 'task.resume'].includes(method)) {
       timeout = setTimer(() => controller.abort(), 15000);
     }
     try {
@@ -1220,12 +1223,15 @@ export function CAYWApp({ env } = {}) {
         views: retained,
         promptPending: new Set(),
         approvalPending: new Set(),
+        taskAdmissions: new Map(),
         cachedCapabilities: [],
       });
     }
     s.views = s.projectStates.get(currentProjectId())?.views ?? new Map();
     s.promptPending = new Set();
     s.approvalPending = new Set();
+    s.taskAdmissions =
+      s.projectStates.get(currentProjectId())?.taskAdmissions ?? new Map();
     s.forkOpen = false;
     if (forkDialogRef.current?.close) forkDialogRef.current.close();
     s.reconnectBusy = true;
@@ -1273,7 +1279,34 @@ export function CAYWApp({ env } = {}) {
     if (view) rememberView(beginWrite(view, key, method, params));
     if (id === s.selected) forceRender();
     try {
-      const result = await rpc(method, params);
+      let result;
+      if (method === 'session.prompt') {
+        // Admission returns our Task ID before execution starts. Never select a
+        // Session's current task when a delayed stop action eventually runs.
+        const admission = rpc('task.enqueue', params).then(task => {
+          if (
+            task?.session_id !== id ||
+            typeof task.id !== 'string' ||
+            !task.id
+          ) {
+            throw new RpcError(
+              'invalid_response',
+              '任务入队未返回原任务编号，请由宿主核对。',
+              true,
+            );
+          }
+          if (login === s.loginGeneration && s.views.has(id)) {
+            rememberView({ ...s.views.get(id), originalTaskId: task.id });
+          }
+          return task.id;
+        });
+        s.taskAdmissions.set(id, admission);
+        if (id === s.selected) forceRender();
+        const taskId = await admission;
+        result = await rpc('task.resume', { task_id: taskId });
+      } else {
+        result = await rpc(method, params);
+      }
       if (login === s.loginGeneration && s.views.has(id)) {
         rememberView(finishWrite(s.views.get(id), key, null, result));
       }
@@ -2003,6 +2036,7 @@ export function CAYWApp({ env } = {}) {
     const busy = pending || sessionRunning(snapshot);
     const cancelDisabled =
       !snapshot ||
+      (!s.taskAdmissions.has(s.selected) && !view?.originalTaskId) ||
       (!busy &&
         !view.writes.length &&
         !view.activeAttempt &&
@@ -2015,7 +2049,35 @@ export function CAYWApp({ env } = {}) {
     report(null);
     forceRender();
     try {
-      const result = await writeRpc(id, 'session.cancel', { session_id: id });
+      // Capture the original admission before any await. A replacement prompt
+      // in the same Session must never become this stop action's target.
+      const admission = s.taskAdmissions.get(id);
+      const taskId = admission
+        ? await admission
+        : s.views.get(id)?.originalTaskId;
+      if (typeof taskId !== 'string' || !taskId) {
+        throw new RpcError(
+          'invalid_params',
+          '未保存原任务编号，请在宿主中指定原 Task 后取消。',
+        );
+      }
+      const task = await rpc('task.get', { task_id: taskId });
+      if (task?.id !== taskId || task.session_id !== id) {
+        throw new RpcError(
+          'invalid_response',
+          '返回的任务与原取消目标不符。',
+          true,
+        );
+      }
+      if (login !== s.loginGeneration) return;
+      const target = {
+        session_id: id,
+        task_id: taskId,
+        worker_id: task.worker_id,
+        attempt_id: task.attempt_id,
+        fence: task.fence,
+      };
+      const result = await writeRpc(id, 'session.cancel', target);
       if (login !== s.loginGeneration) return;
       s.pollStatus = result?.cancelled
         ? '已请求取消；等待 Runtime 记录实际终态。'
@@ -2193,6 +2255,7 @@ export function CAYWApp({ env } = {}) {
   const sendDisabled = promptDisabled || !currentPromptText.trim();
   const cancelDisabled =
     !snapshot ||
+    (!s.taskAdmissions.has(s.selected) && !view?.originalTaskId) ||
     (!busy &&
       !view?.writes.length &&
       !view?.activeAttempt &&

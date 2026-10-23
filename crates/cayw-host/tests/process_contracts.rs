@@ -88,6 +88,7 @@ fn profile(program: PathBuf, mode: &str) -> Profile {
         timeout: Duration::from_secs(20),
         max_output_bytes: 4096,
         allow_filter: false,
+        io: cayw_device::ProcessIo::Pipes,
     }
 }
 fn host(root: &Path, config: HostConfig) -> (Arc<Host>, Arc<Audit>) {
@@ -139,6 +140,42 @@ fn repository(root: &Path) {
     fs::create_dir_all(root.join(".git/objects")).unwrap();
     fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
     fs::write(root.join(".git/HEAD"), "ref: refs/heads/fixture\n").unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn configured_pty_profile_runs_through_permission_audit_and_the_same_device() {
+    let root = Root::new();
+    let mut terminal = profile(fixture(), "terminal");
+    terminal.io = cayw_device::ProcessIo::Pty {
+        columns: 80,
+        rows: 24,
+    };
+    let (host, audit) = host(
+        &root.0,
+        HostConfig {
+            profiles: BTreeMap::from([("terminal".into(), terminal)]),
+            ..Default::default()
+        },
+    );
+    let result = call(&host, "check.run", json!({"profile":"terminal"}))
+        .await
+        .unwrap();
+    host.drain_processes().await.unwrap();
+    let output = result["stdout"].as_str().unwrap();
+    let observation: Value = serde_json::from_str(output.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        observation,
+        json!({"stdin":true,"stdout":true,"stderr":true,"controlling_terminal":true})
+    );
+    assert!(output.contains("terminal-stderr"));
+    assert_eq!(result["stderr"], "");
+    assert_eq!(result["output_complete"], true);
+    let records = audit.0.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["phase"], "running");
+    assert_eq!(records[1]["phase"], "succeeded");
+    assert_eq!(records[0]["id"], records[1]["id"]);
 }
 
 // A stale-name recursive removal loses a real third-party marker in the rename

@@ -116,6 +116,246 @@ async fn approval(rt: &Runtime, id: &str) -> cayw_core::ApprovalRequest {
     .await
     .unwrap()
 }
+fn peer(dir: &tempfile::TempDir, lifetime: Duration) -> Runtime {
+    Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(Script(TWICE)),
+        Model::new("fixture", "approvals"),
+        RuntimeConfig {
+            grant_lifetime: lifetime,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn independent_sdk_connection_decides_only_the_live_original_attempt() {
+    // Break caught: an independent SDK connection has no local active map, so
+    // it cannot approve the real owner's pending request despite matching facts.
+    let svc = service();
+    let lifetime = Duration::from_secs(10);
+    let (dir, rt, id) = setup(TWICE, svc.clone(), lifetime);
+    let controller = peer(&dir, lifetime);
+    let task = start(&rt, &id);
+    let first = approval(&controller, &id).await;
+    let original = controller.tasks(&id).unwrap()[0].clone();
+    assert_eq!(original.state, TaskState::Running);
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    controller
+        .approve(&id, &first.id, ApprovalChoice::AllowOnce, "sdk-peer")
+        .unwrap();
+    let second = approval(&controller, &id).await;
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.attempt_id, first.attempt_id);
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        controller
+            .approve(&id, &first.id, ApprovalChoice::AllowTask, "late-peer")
+            .is_err()
+    );
+    controller
+        .approve(&id, &second.id, ApprovalChoice::Deny, "sdk-peer")
+        .unwrap();
+    task.await.unwrap().unwrap();
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 1);
+    let terminal = controller.tasks(&id).unwrap()[0].clone();
+    assert_eq!(terminal.id, original.id);
+    assert_eq!(terminal.worker_id, original.worker_id);
+    assert_eq!(terminal.attempt_id, original.attempt_id);
+    assert_eq!(terminal.fence, original.fence);
+    assert!(
+        controller
+            .approve(&id, &second.id, ApprovalChoice::AllowOnce, "late-peer")
+            .is_err()
+    );
+    assert_eq!(controller.tasks(&id).unwrap()[0], terminal);
+    assert!(
+        controller
+            .grants(&id)
+            .unwrap()
+            .iter()
+            .all(|grant| grant.state != "active")
+    );
+}
+
+#[tokio::test]
+async fn sdk_peer_cancellation_closes_pending_approval_before_any_effect() {
+    let svc = service();
+    let lifetime = Duration::from_secs(10);
+    let (dir, rt, id) = setup(TWICE, svc.clone(), lifetime);
+    let controller = peer(&dir, lifetime);
+    let task = start(&rt, &id);
+    let pending = approval(&controller, &id).await;
+    let original = controller.task(&pending.input.task_id).unwrap();
+    assert!(controller.cancel(&original.cancel_target()).unwrap());
+    assert!(
+        controller
+            .approve(&id, &pending.id, ApprovalChoice::AllowOnce, "late-peer")
+            .is_err()
+    );
+    let _ = task.await.unwrap();
+    assert_eq!(
+        controller.tasks(&id).unwrap()[0].state,
+        TaskState::Cancelled
+    );
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    assert!(controller.grants(&id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sdk_peer_approval_storage_failure_closes_admission_until_recovery() {
+    // Break caught: a peer cannot cancel the owner's in-memory token. A failed
+    // durable decision must close the persistent fence and retain the slot.
+    let svc = service();
+    let lifetime = Duration::from_secs(10);
+    let (dir, rt, id) = setup(TWICE, svc.clone(), lifetime);
+    let controller = peer(&dir, lifetime);
+    let task = start(&rt, &id);
+    let pending = approval(&controller, &id).await;
+    let db = rusqlite::Connection::open(dir.path().join("session.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_peer_activation BEFORE UPDATE OF state ON runtime_grants WHEN NEW.state='active' BEGIN SELECT RAISE(ABORT, 'injected grant activation failure'); END;").unwrap();
+    assert!(matches!(
+        controller.approve(&id, &pending.id, ApprovalChoice::AllowOnce, "sdk-peer"),
+        Err(cayw_runtime::RuntimeError::RecoveryRequired {
+            outcome_unknown: true,
+            ..
+        })
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(controller.tasks(&id).unwrap()[0].state, TaskState::Draining);
+    assert_eq!(controller.health().unwrap().running, 1);
+    assert!(
+        controller
+            .approve(&id, &pending.id, ApprovalChoice::AllowOnce, "late-peer")
+            .is_err()
+    );
+    assert!(
+        controller
+            .prompt(&id, "no replay", CancellationToken::new())
+            .await
+            .is_err()
+    );
+    db.execute_batch("DROP TRIGGER fail_peer_activation;")
+        .unwrap();
+    let recovered = controller.recover(&id).unwrap();
+    assert_eq!(recovered.state, cayw_core::SessionState::Idle);
+    assert_eq!(
+        controller.tasks(&id).unwrap()[0].state,
+        TaskState::Interrupted
+    );
+    assert_eq!(controller.health().unwrap().running, 0);
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+}
+
+async fn peer_double_write_failure(activation: bool, revoke: bool) {
+    // Break caught: the peer cannot notify the owner's memory. Even when both
+    // database writes fail, cancellation/revocation must not free admission.
+    let svc = service();
+    let lifetime = Duration::from_secs(10);
+    let (dir, rt, id) = setup(TWICE, svc.clone(), lifetime);
+    let controller = peer(&dir, lifetime);
+    let task = start(&rt, &id);
+    let pending = approval(&controller, &id).await;
+    let original = controller.tasks(&id).unwrap()[0].clone();
+    let db = rusqlite::Connection::open(dir.path().join("session.db")).unwrap();
+    db.execute_batch(if activation {
+        "CREATE TRIGGER fail_peer_decision BEFORE UPDATE OF state ON runtime_grants WHEN NEW.state='active' BEGIN SELECT RAISE(ABORT, 'injected activation failure'); END;"
+    } else {
+        "CREATE TRIGGER fail_peer_decision BEFORE INSERT ON runtime_grants BEGIN SELECT RAISE(ABORT, 'injected grant insertion failure'); END;"
+    }).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_peer_block BEFORE UPDATE OF state ON runtime_tasks WHEN NEW.state='draining' BEGIN SELECT RAISE(ABORT, 'injected admission closure failure'); END;").unwrap();
+    assert!(matches!(
+        controller.approve(&id, &pending.id, ApprovalChoice::AllowOnce, "sdk-peer"),
+        Err(cayw_runtime::RuntimeError::RecoveryRequired {
+            outcome_unknown: true,
+            cleanup: Some(_),
+            ..
+        })
+    ));
+    let grants = controller.grants(&id).unwrap();
+    assert!(
+        controller
+            .approve(&id, &pending.id, ApprovalChoice::AllowTask, "retry-peer")
+            .is_err()
+    );
+    assert_eq!(controller.grants(&id).unwrap(), grants);
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    if revoke {
+        let grant = controller.grants(&id).unwrap().pop().unwrap();
+        controller.revoke(&id, &grant.id, "trusted-revoke").unwrap();
+    } else {
+        assert!(
+            controller
+                .cancel(&controller.task(&original.id).unwrap().cancel_target())
+                .unwrap()
+        );
+    }
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(cayw_runtime::RuntimeError::RecoveryRequired { .. })
+    ));
+    let blocked = controller.tasks(&id).unwrap()[0].clone();
+    assert_eq!(blocked.id, original.id);
+    assert_eq!(blocked.attempt_id, original.attempt_id);
+    assert_eq!(blocked.worker_id, original.worker_id);
+    assert_eq!(blocked.fence, original.fence);
+    assert_eq!(blocked.state, TaskState::Running);
+    assert_eq!(controller.health().unwrap().running, 1);
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    assert!(controller.get(&id).unwrap().attempt.is_some());
+    assert!(
+        controller
+            .approve(&id, &pending.id, ApprovalChoice::AllowTask, "late-peer")
+            .is_err()
+    );
+    assert!(
+        controller
+            .prompt(&id, "no replay", CancellationToken::new())
+            .await
+            .is_err()
+    );
+    db.execute_batch("DROP TRIGGER fail_peer_decision; DROP TRIGGER fail_peer_block;")
+        .unwrap();
+    assert_eq!(
+        controller.recover(&id).unwrap().state,
+        cayw_core::SessionState::Idle
+    );
+    assert_eq!(
+        controller.tasks(&id).unwrap()[0].state,
+        TaskState::Interrupted
+    );
+    assert_eq!(controller.health().unwrap().running, 0);
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn sdk_peer_grant_insertion_and_block_failures_retain_original_admission() {
+    peer_double_write_failure(false, false).await;
+}
+
+#[tokio::test]
+async fn sdk_peer_grant_activation_and_block_failures_retain_original_admission() {
+    peer_double_write_failure(true, false).await;
+}
+
+#[tokio::test]
+async fn sdk_peer_revocation_cannot_erase_failed_decision_before_recovery() {
+    peer_double_write_failure(true, true).await;
+}
+
 #[tokio::test]
 async fn once_prompts_again_and_task_grant_does_not_escape_its_attempt() {
     let svc = service();

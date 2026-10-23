@@ -270,7 +270,25 @@ async fn patch_rejects_overlapping_matches_and_changed_or_missing_targets() {
         "aaa"
     );
     assert!(call(&host, "fs.write", json!({"path":"missing","content":"bad","overwrite":true,"expected_sha256":read["sha256"]})).await.is_err());
+    let missing = call(
+        &host,
+        "fs.patch",
+        json!({"path":"missing","expected_sha256":read["sha256"],"old":"aaa","new":"bad"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!missing.outcome_unknown);
     assert!(!root.path().join("missing").exists());
+    let unmatched = call(
+        &host,
+        "fs.patch",
+        json!({"path":"note","expected_sha256":read["sha256"],"old":"absent","new":"bad"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!unmatched.outcome_unknown);
+    assert_eq!(std::fs::read(root.path().join("note")).unwrap(), b"aaa");
+    assert!(!host.outcome_unknown());
 }
 
 #[cfg(unix)]
@@ -1650,6 +1668,7 @@ fn process_profile(kind: ProfileKind, mode: &str) -> Profile {
         timeout: Duration::from_secs(10),
         max_output_bytes: 8192,
         allow_filter: false,
+        io: cayw_device::ProcessIo::Pipes,
     }
 }
 #[test]

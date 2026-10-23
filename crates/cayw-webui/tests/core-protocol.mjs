@@ -8,7 +8,7 @@ const snapshot = { id: lease.session_id, state: 'idle', cursor: 5, attempt: null
 function finishedCancel(protocol, eventLease = lease, envelopeLease = lease, receiptError = null) {
   let view = createView(lease.session_id);
   view = applySnapshot(view, { ...snapshot, cursor: 1, state: 'running', attempt: lease }, true);
-  view = beginWrite(view, 'cancel-1', 'session.cancel');
+  view = beginWrite(view, 'cancel-1', 'session.cancel', { worker_id: lease.worker_id, attempt_id: lease.attempt_id, fence: lease.fence });
   view = finishWrite(view, 'cancel-1', receiptError, receiptError ? null : { cancelled: true });
   view = consumeEvents(view, [{ protocol_version: protocol, session_id: lease.session_id, cursor: 5, attempt: envelopeLease, event: { type: 'attempt_finished', lease: eventLease } }]);
   return applySnapshot(view, snapshot, false, 5, view.proofEpoch);
@@ -20,6 +20,17 @@ test('the original Core v3 terminal settles a successful cancel receipt', () => 
 
 test('an obsolete Core terminal cannot settle the current cancel receipt', () => {
   assert.equal(finishedCancel(1).writes.length, 1);
+});
+
+test('a cancel target that differs from the observed attempt keeps its own receipt obligation', () => {
+  const other = { ...lease, worker_id: 'worker-2', fence: 2 };
+  let view = createView(lease.session_id);
+  view = applySnapshot(view, { ...snapshot, cursor: 1, state: 'running', attempt: lease }, true);
+  view = beginWrite(view, 'cancel-1', 'session.cancel', { worker_id: other.worker_id, attempt_id: other.attempt_id, fence: other.fence });
+  view = finishWrite(view, 'cancel-1', null, { cancelled: true });
+  view = consumeEvents(view, [{ protocol_version: 3, session_id: lease.session_id, cursor: 5, attempt: lease, event: { type: 'attempt_finished', lease } }]);
+  view = applySnapshot(view, snapshot, false, 5, view.proofEpoch);
+  assert.equal(view.writes.length, 1);
 });
 
 test('a terminal must retain the original worker and fence', () => {

@@ -81,8 +81,8 @@ const attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-const readMethods = new Set(['runtime.health', 'devices.list', 'devices.bind_status', 'device.binding.status', 'server.auth.status', 'projects.list', 'projects.browse', 'skills.catalog', 'mcp.catalog', 'session.list', 'session.get', 'session.events', 'session.grants', 'session.audit', 'capabilities.list']);
-const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'cancelled']);
+const readMethods = new Set(['runtime.health', 'devices.list', 'devices.bind_status', 'device.binding.status', 'server.auth.status', 'projects.list', 'projects.browse', 'skills.catalog', 'mcp.catalog', 'session.list', 'session.get', 'session.events', 'session.grants', 'session.audit', 'task.get', 'capabilities.list']);
+const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'stale_cancellation', 'cancelled']);
 
 export class RpcError extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -98,7 +98,12 @@ export function beginWrite(view, key, method, params = {}) {
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
   // A prompt has no accepted task identity until its own HTTP receipt returns.
   // The session's current/next attempt may belong to an entirely different client.
-  const lease = method === 'session.prompt' ? null : view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  const observedLease = view.snapshot?.attempt ?? view.activeAttempt?.lease ?? null;
+  // Queue and Core fences differ. A cancellation can use a Core terminal proof
+  // only when the original Task's Worker and Attempt match that Core lease.
+  const lease = method === 'session.prompt' ? null : method === 'session.cancel'
+    ? observedLease?.worker_id === params.worker_id && observedLease?.attempt_id === params.attempt_id ? observedLease : null
+    : observedLease;
   const target = method === 'session.cancel' && sameLease(lease, view.activeAttempt?.lease) ? view.activeAttempt : null;
   // Stop can be clicked before any attempt is visible. Remember the local
   // pending prompt, never the session's next attempt from an arbitrary client.

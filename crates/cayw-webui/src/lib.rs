@@ -61,6 +61,9 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "session.grants",
     "session.audit",
     "session.prompt",
+    "task.enqueue",
+    "task.resume",
+    "task.get",
     "session.cancel",
     "approval.decide",
     "approval.revoke",
@@ -731,7 +734,7 @@ async fn rpc(
             false,
         );
     }
-    let prompt = request.method == "session.prompt";
+    let prompt = matches!(request.method.as_str(), "session.prompt" | "task.resume");
     let _prompt_pending = if prompt {
         match state.pending_prompts.try_acquire() {
             Ok(permit) => Some(permit),
@@ -2058,6 +2061,8 @@ fn side_effecting(method: &str) -> bool {
         method,
         "session.create"
             | "session.prompt"
+            | "task.enqueue"
+            | "task.resume"
             | "session.cancel"
             | "approval.decide"
             | "approval.revoke"

@@ -7,6 +7,27 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+const CASE_NAMES: [&str; 18] = [
+    "cold_process_first_success",
+    "warm_process_first_success",
+    "file_pipeline",
+    "syntax_failure",
+    "syntax_repair_success",
+    "loop_budget",
+    "cancel_pending_host",
+    "host_permission_denied",
+    "sandbox_globals",
+    "unknown_capability",
+    "invalid_arguments",
+    "file_calculation",
+    "capability_signatures",
+    "output_budget",
+    "memory_budget",
+    "host_call_budget",
+    "active_timeout",
+    "timeout_pending_host",
+];
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Temporary(PathBuf);
 impl Temporary {
@@ -88,8 +109,19 @@ fn binary_records_real_host_results_failures_repairs_and_cancellation() {
     let meta = read_json(&out.join("meta.json"));
     let summary = read_json(&out.join("summary.json"));
     let samples = records(&out);
-    assert_eq!(samples.len(), 22);
-    assert_eq!(summary["sample_count"], 22);
+    assert_eq!(samples.len(), CASE_NAMES.len() * 2);
+    assert_eq!(summary["sample_count"], CASE_NAMES.len() * 2);
+    let mut expected_names = CASE_NAMES.to_vec();
+    expected_names.sort_unstable();
+    for iteration in 1..=2 {
+        let mut actual_names: Vec<_> = samples
+            .iter()
+            .filter(|sample| sample["iteration"] == iteration)
+            .map(|sample| sample["case"].as_str().unwrap())
+            .collect();
+        actual_names.sort_unstable();
+        assert_eq!(actual_names, expected_names);
+    }
     let all_passed = samples
         .iter()
         .all(|record| record["semantic_passed"] == true);
@@ -364,7 +396,7 @@ fn runtime_environment_cannot_forge_build_source_binding_and_default_workspace_w
     } else {
         assert_eq!(meta["binding"]["build"]["source_manifest_sha256"], bound);
     }
-    assert_eq!(records(&out).len(), 11);
+    assert_eq!(records(&out).len(), CASE_NAMES.len());
     assert!(
         out.join("workspace/iteration-0001/file_pipeline/pipeline.txt")
             .is_file()
