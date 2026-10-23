@@ -73,35 +73,71 @@ pub(crate) fn decide(
         ));
     }
     let _coordinate = inner.coordination.enter()?;
-    let (task, cancel, unknown) = {
-        let active = lock(&inner.active);
-        let run = active.get(session).ok_or(RuntimeError::StaleApproval)?;
-        (run.task.clone(), run.cancel.clone(), run.unknown.clone())
-    };
-    if cancel.is_cancelled()
-        || unknown.load(std::sync::atomic::Ordering::Acquire)
-        || inner.queue.get(&task.id)?.state != crate::TaskState::Running
-        || inner.queue.check(&task).is_err()
-    {
+    let local = lock(&inner.active)
+        .get(session)
+        .map(|run| (run.task.clone(), run.cancel.clone(), run.unknown.clone()));
+    if local.as_ref().is_some_and(|(_, cancel, unknown)| {
+        cancel.is_cancelled() || unknown.load(std::sync::atomic::Ordering::Acquire)
+    }) {
         return Err(RuntimeError::StaleApproval);
     }
     let view = crate::Runtime {
         inner: inner.clone(),
     }
     .get(session)?;
-    if view.frozen {
+    if view.frozen || view.state == cayw_core::SessionState::NeedsReconciliation {
         return Err(RuntimeError::StaleApproval);
     }
-    let snapshot = inner.store.snapshot(session)?;
-    let lease = snapshot.attempt.ok_or(RuntimeError::StaleApproval)?;
-    let approval = snapshot
+    let lease = view.attempt.ok_or(RuntimeError::StaleApproval)?;
+    let approval = view
         .pending_approvals
         .into_iter()
         .find(|approval| approval.id == id && approval.attempt_id == lease.attempt_id)
         .ok_or(RuntimeError::StaleApproval)?;
+    let record = inner.queue.get(&approval.input.task_id)?;
+    if record.state != crate::TaskState::Running
+        || record.cancel_requested
+        || record.session_id != session
+        || record.attempt_id.as_deref() != Some(lease.attempt_id.as_str())
+        || record.worker_id.as_deref() != Some(lease.worker_id.as_str())
+    {
+        return Err(RuntimeError::StaleApproval);
+    }
+    let task = crate::queue::TaskLease {
+        id: record.id,
+        worker: lease.worker_id.clone(),
+        fence: record.fence,
+    };
+    if local.as_ref().is_some_and(|(owned, _, _)| {
+        owned.id != task.id || owned.worker != task.worker || owned.fence != task.fence
+    }) || inner.queue.check(&task).is_err()
+    {
+        return Err(RuntimeError::StaleApproval);
+    }
+    // Queue/Core facts alone may outlive a crashed worker. Its original task
+    // lock must still be held; recovery uses lifecycle coordination as well.
+    match inner.coordination.task(&task.id) {
+        Err(RuntimeError::Busy) => {}
+        Ok(_) => return Err(RuntimeError::StaleApproval),
+        Err(error) => return Err(error),
+    }
+    inner.store.validate_lease(&lease)?;
+    if inner.journal.decision_pending(&task.id)? {
+        return Err(RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::Worker(
+                "approval decision did not commit; explicit recovery required".into(),
+            )),
+            cleanup: None,
+            outcome_unknown: true,
+        });
+    }
     let lifetime = u64::try_from(inner.config.grant_lifetime.as_millis()).unwrap_or(u64::MAX);
-    // A preparing row cannot authorize anything. If either database operation
-    // fails/crashes, the gate remains closed and the task can be cancelled.
+    // Persist intent before changing either approval projection. Failing before
+    // intent cannot grant permission. Once it exists, only recovery may repair
+    // an unfinished decision, even after public revocation.
+    let decision = inner
+        .journal
+        .begin_decision(&approval, choice.as_str(), actor)?;
     let outcome = (|| {
         let grant = inner.journal.insert_grant(
             &approval,
@@ -121,13 +157,31 @@ pub(crate) fn decide(
             actor,
         )?;
         inner.store.append_host_event(&lease,"approval_scope_decided",serde_json::json!({"task_id":task.id,"approval_id":id,"grant_id":grant.id,"choice":choice,"scope":approval.input.scope,"actor":actor}))?;
-        inner.journal.activate_grant(&grant.id, approved)?;
+        inner
+            .journal
+            .activate_grant(&grant.id, approved, decision)?;
         Ok(resolution)
     })();
-    if outcome.is_err() {
-        unknown.store(true, std::sync::atomic::Ordering::Release);
-        cancel.cancel();
-    }
+    let outcome = outcome.map_err(|cause| {
+        if let Some((_, cancel, unknown)) = &local {
+            unknown.store(true, std::sync::atomic::Ordering::Release);
+            cancel.cancel();
+        }
+        // An independent controller cannot signal another process's tokens.
+        // Persistently close admission and retain capacity for recovery instead.
+        let cleanup = inner
+            .queue
+            .block(
+                &task,
+                "approval persistence failed; explicit recovery required",
+            )
+            .err();
+        RuntimeError::RecoveryRequired {
+            cause: Box::new(cause),
+            cleanup: cleanup.map(Box::new),
+            outcome_unknown: true,
+        }
+    });
     inner.approvals.notify_waiters();
     inner.changed.notify_waiters();
     outcome
@@ -152,9 +206,9 @@ impl Gate {
         }
         let inner = &context.inner;
         let scope = canonical_scope(args);
-        if inner
-            .config
-            .permissions
+        if context
+            .scope
+            .permissions()
             .iter()
             .any(|grant| grant.capability == name && grant.scope == scope)
         {

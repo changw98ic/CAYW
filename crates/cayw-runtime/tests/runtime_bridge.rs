@@ -97,6 +97,9 @@ impl SourceHandle for Source {
             match &request.operation {
                 SourceOperation::InvokeTool { arguments, .. } => json!({"echo":arguments}),
                 SourceOperation::ReadSkill { .. } => json!(SKILL),
+                SourceOperation::ReadResource { uri } => {
+                    json!({"uri":uri,"mime_type":"text/markdown","text":"fixture resource body"})
+                }
                 SourceOperation::Search { arguments } => json!({"hits":[arguments["query"]]}),
             }
         };
@@ -122,6 +125,7 @@ fn manifest() -> Manifest {
             description: "fixture skill".into(),
             content_sha256: cayw_bridge::content_sha256(SKILL),
         }],
+        resources: Vec::new(),
         search: true,
     }
 }
@@ -153,6 +157,20 @@ fn registry_with(behavior: Behavior, limits: Limits) -> (Registry, Arc<SourceSta
 }
 fn registry(behavior: Behavior) -> (Registry, Arc<SourceState>) {
     registry_with(behavior, Limits::default())
+}
+
+struct ConfirmedSourceReceipt(CapabilityReconciliation);
+impl cayw_core::ReconciliationVerifier for ConfirmedSourceReceipt {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        match request {
+            cayw_core::ReconciliationRequest::Capability { reconciliation }
+                if reconciliation == &self.0 && reconciliation.actor == "fixture-host" =>
+            {
+                Ok(())
+            }
+            _ => Err("request differs from the inspected original fixture source receipt".into()),
+        }
+    }
 }
 
 struct Script {
@@ -489,17 +507,16 @@ async fn cancellation_preserves_unknown_dispatch_across_reopen_and_original_regi
         provider("return cayw.call('mcp.call',{server='local',tool='echo',arguments={value=1}})"),
     );
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "cancel fixture").unwrap();
     let worker_rt = rt.clone();
-    let worker_id = id.clone();
-    let worker = tokio::spawn(async move {
-        worker_rt
-            .prompt(&worker_id, "cancel fixture", CancellationToken::new())
-            .await
-    });
+    let task_id = admitted.id.clone();
+    let worker =
+        tokio::spawn(async move { worker_rt.resume(&task_id, CancellationToken::new()).await });
     tokio::time::timeout(Duration::from_secs(8), state.entered.notified())
         .await
         .unwrap();
-    rt.cancel(&id).unwrap();
+    rt.cancel(&rt.task(&admitted.id).unwrap().cancel_target())
+        .unwrap();
     let _ = worker.await.unwrap();
     assert_eq!(
         rt.get(&id).unwrap().state,
@@ -514,6 +531,28 @@ async fn cancellation_preserves_unknown_dispatch_across_reopen_and_original_regi
     assert!(rt.enqueue(&id, "retry").is_err());
     let call = rt.get(&id).unwrap().unresolved_capabilities[0].clone();
     let pins = call.external_provenance.clone();
+    // The original source future has joined. Its fixture performs no effect
+    // before release, and this run never received a release permit.
+    {
+        let requests = state.calls.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].key, records.last().unwrap().record.key);
+        assert!(matches!(&requests[0].operation,
+            SourceOperation::InvokeTool { name, arguments }
+                if name == "echo" && arguments == &json!({"value":1})));
+        assert_eq!(state.release.available_permits(), 0);
+    }
+    let receipt = CapabilityReconciliation {
+        key: call.key.clone(),
+        expected: (&call).into(),
+        actor: "fixture-host".into(),
+        evidence: "original source future joined; blocked fixture had no release or effect".into(),
+        outcome: CapabilityOutcome::NotExecuted {
+            reason: "fixture confirmation".into(),
+        },
+        external_provenance: pins.clone(),
+    };
+    settings.reconciliation_verifier = Some(Arc::new(ConfirmedSourceReceipt(receipt.clone())));
     drop(rt);
     let reopened = open(&temp, settings, provider("return 1"));
     assert_eq!(
@@ -525,6 +564,7 @@ async fn cancellation_preserves_unknown_dispatch_across_reopen_and_original_regi
     bad["sources"]["local"]["source"]["origin"] = json!("altered origin");
     let wrong = CapabilityReconciliation {
         key: call.key.clone(),
+        expected: (&call).into(),
         actor: "fixture-host".into(),
         evidence: "wrong provenance must fail".into(),
         outcome: CapabilityOutcome::NotExecuted {
@@ -533,20 +573,10 @@ async fn cancellation_preserves_unknown_dispatch_across_reopen_and_original_regi
         external_provenance: Some(bad),
     };
     assert!(reopened.reconcile_capability(&id, wrong).is_err());
-    reopened
-        .reconcile_capability(
-            &id,
-            CapabilityReconciliation {
-                key: call.key,
-                actor: "fixture-host".into(),
-                evidence: "fixture host inspected original handle and confirmed outcome".into(),
-                outcome: CapabilityOutcome::NotExecuted {
-                    reason: "fixture confirmation".into(),
-                },
-                external_provenance: pins,
-            },
-        )
-        .unwrap();
+    let mut forged = receipt.clone();
+    forged.expected.task_id = "replacement-task".into();
+    assert!(reopened.reconcile_capability(&id, forged).is_err());
+    reopened.reconcile_capability(&id, receipt).unwrap();
     assert_eq!(state.calls.lock().unwrap().len(), 1);
     assert!(registry.snapshot("local").unwrap().outcome_unknown);
     assert!(matches!(
@@ -819,6 +849,11 @@ impl Provider for InterleavedProvider {
             _ => None,
         };
         let mut message = AssistantMessage::new(&request.model);
+        // Fixed synthetic counters exercise accounting, not tokenization or billing.
+        message.usage.input = 4;
+        message.usage.output = 4;
+        message.usage.update_total();
+        message.usage_status = cayw_ai::UsageStatus::Reported;
         if let Some(args) = args {
             message.content.push(Content::ToolCall(ToolCall::new(
                 format!("interleaved-{step}"),
@@ -1194,6 +1229,11 @@ async fn fabricated_host_event_title_cannot_be_used_as_bridge_evidence() {
                     .unwrap();
             }
             let mut message = AssistantMessage::new(&request.model);
+            // The event corruption is deliberate; the model reply itself succeeds.
+            message.usage.input = 4;
+            message.usage.output = 4;
+            message.usage.update_total();
+            message.usage_status = cayw_ai::UsageStatus::Reported;
             message
                 .content
                 .push(Content::text("fixture forge inserted"));

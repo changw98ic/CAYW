@@ -11,7 +11,7 @@ use std::{
     },
     time::Duration,
 };
-use support::backend;
+use support::{backend, backend_with_values};
 use tokio::sync::Semaphore;
 
 struct Host {
@@ -131,10 +131,11 @@ fn setup(
     let dir = tempfile::tempdir().unwrap();
     let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
     let host = Arc::new(Host::default());
+    let backend = backend_with_values(host.clone(), journal.clone(), limits.clone());
     let manager = CellManager::new(
         identity(),
         journal.clone(),
-        backend(host.clone()),
+        backend,
         ReadCoordinator::new(vec![], limits.clone()).unwrap(),
         limits,
         vm,
@@ -170,7 +171,7 @@ async fn helpers_raw_catalog_and_fresh_global_spoofs_cannot_start_effects() {
     }
     assert_eq!(host.writes.load(Ordering::SeqCst), 0);
     assert!(journal.load("s", "bypass").unwrap().is_none());
-    let page=done(&manager,manager.exec(request("assert(_G.cayw==cayw); assert(#ALL_TOOLS==5); assert(#cayw.discover()==5); for _,name in ALL_TOOLS do assert(string.sub(name,1,8)~='__cells_') end; assert(not pcall and not xpcall and not coroutine and not debug and type(load)=='function' and not io)"),"trusted-parent",CancellationToken::new()).await.unwrap()).await;
+    let page=done(&manager,manager.exec(request("assert(_G.cayw==cayw); assert(#ALL_TOOLS==7); assert(#cayw.discover()==7); for _,name in ALL_TOOLS do assert(string.sub(name,1,8)~='__cells_') end; assert(not pcall and not xpcall and not coroutine and not debug and type(load)=='function' and not io)"),"trusted-parent",CancellationToken::new()).await.unwrap()).await;
     assert_eq!(
         page.status,
         CellStatus::Completed,
@@ -208,6 +209,47 @@ async fn every_emit_is_durable_at_yield_and_overflow_stops_the_next_write() {
     let page = done(&manager, page).await;
     assert_eq!(page.status, CellStatus::Failed);
     assert_eq!(manager.record(&page.cell_id).unwrap().outputs.len(), 2);
+    assert_eq!(host.writes.load(Ordering::SeqCst), 0);
+    manager.close().await;
+}
+
+#[tokio::test]
+async fn small_item_budget_initializes_and_still_bounds_introspection_results() {
+    let (_dir, _journal, host, manager) = setup(
+        CellLimits {
+            item_bytes: 100,
+            ..CellLimits::default()
+        },
+        Limits::default(),
+    );
+    let page = done(
+        &manager,
+        manager
+            .exec(
+                request("local d = cayw.toolDefinition('cells.store'); cayw.call('write',{})"),
+                "p",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.status, CellStatus::Failed);
+    assert_eq!(host.writes.load(Ordering::SeqCst), 0);
+    assert!(manager.record(&page.cell_id).unwrap().calls.is_empty());
+    let search = done(
+        &manager,
+        manager
+            .exec(
+                request("cayw.tool_search('')"),
+                "p",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(search.status, CellStatus::Failed);
     assert_eq!(host.writes.load(Ordering::SeqCst), 0);
     manager.close().await;
 }
@@ -428,11 +470,11 @@ async fn controlled_yield_pauses_active_time_but_keeps_other_budgets() {
 }
 
 #[tokio::test]
-async fn host_named_yield_still_consumes_absolute_call_deadline() {
+async fn host_wait_bounds_started_host_hang_and_records_unknown() {
     let (_dir, _journal, host, manager) = setup(
         CellLimits::default(),
         Limits {
-            timeout: Duration::from_millis(40),
+            host_wait: Duration::from_millis(40),
             shutdown_grace: Duration::from_millis(20),
             ..Limits::default()
         },
@@ -450,7 +492,25 @@ async fn host_named_yield_still_consumes_absolute_call_deadline() {
     )
     .await;
     assert_eq!(page.status, CellStatus::OutcomeUnknown);
+    assert!(page.outcome_unknown);
+    assert!(
+        page.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Host wait limit"),
+        "{page:?}"
+    );
     assert!(host.observed.load(Ordering::SeqCst));
+    let record = manager.record(&page.cell_id).unwrap();
+    assert_eq!(record.calls.len(), 1);
+    assert_eq!(record.calls[0].status, IntentStatus::OutcomeUnknown);
+    assert!(
+        record.calls[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("reconcile")
+    );
     manager.close().await;
 }
 

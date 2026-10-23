@@ -1,4 +1,5 @@
 use crate::common::{self, Format, Result};
+use base64::Engine;
 use cayw_ai::{
     AssistantEvent, AssistantMessage, CancellationToken, Content, Message, ModelRequest,
     StopReason, ToolCall, ToolDefinition, current_system,
@@ -14,6 +15,8 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
     common::validate_request(request, Format::Gemini)?;
     let system = current_system(&request.messages);
     let mut contents = Vec::new();
+    let mut pending = Vec::new();
+    let mut outputs = BTreeMap::new();
     for message in &request.messages {
         match message {
             Message::System(_) | Message::Custom { .. } => {}
@@ -24,11 +27,21 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 common::input_parts(content, request.model.supports_images, Format::Gemini)?,
             ),
             Message::Assistant(assistant) => {
-                let parts = assistant.content.iter().map(|part| match part {
-                    Content::Text { text } => Ok(json!({"text":text})),
-                    Content::ToolCall(call) => Ok(json!({"functionCall":{"id":call.id,"name":call.name,"args":call.arguments}})),
-                    _ => Err("Unsupported Gemini assistant history".to_owned()),
-                }).collect::<Result<Vec<_>>>()?;
+                let parts = history_parts(assistant)?;
+                pending = assistant
+                    .tool_calls()
+                    .into_iter()
+                    .zip(parts.iter().filter_map(|part| part.get("functionCall")))
+                    .map(|(call, function)| {
+                        (
+                            call.id,
+                            function
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        )
+                    })
+                    .collect();
                 common::append_turn(&mut contents, "model", "parts", parts);
             }
             Message::ToolResult(result) => {
@@ -46,21 +59,30 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 if result.structured_content.is_some() && !text.is_empty() {
                     response["text"] = text.into();
                 }
-                common::append_turn(
-                    &mut contents,
-                    "user",
-                    "parts",
-                    vec![
-                        json!({"functionResponse":{"id":result.tool_call_id,"name":result.tool_name,"response":response}}),
-                    ],
+                outputs.insert(
+                    result.tool_call_id.clone(),
+                    json!({"name":result.tool_name,"response":response}),
                 );
+                if outputs.len() == pending.len() {
+                    let parts = pending
+                        .drain(..)
+                        .map(|(id, wire_id)| {
+                            let mut response = outputs.remove(&id).expect("validated tool pairing");
+                            if let Some(wire_id) = wire_id {
+                                response["id"] = wire_id.into();
+                            }
+                            json!({"functionResponse":response})
+                        })
+                        .collect();
+                    common::append_turn(&mut contents, "user", "parts", parts);
+                }
             }
         }
     }
     if contents.first().is_none_or(|m| m["role"] != "user") {
         return Err("Gemini history must start with a user turn".into());
     }
-    let mut body = json!({"contents":contents,"generationConfig":{"candidateCount":1}});
+    let mut body = json!({"contents":contents,"generationConfig":{}});
     if !system.prompt.is_empty() {
         body["systemInstruction"] = json!({"parts":[{"text":system.prompt}]});
     }
@@ -80,6 +102,138 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
     Ok(body)
 }
 
+// Signed parts must retain their wire boundaries. The local call IDs pair tool
+// results without inventing provider IDs for calls that omitted them.
+fn history_parts(assistant: &AssistantMessage) -> Result<Vec<Value>> {
+    if assistant.provider_metadata.is_empty() {
+        return assistant
+            .content
+            .iter()
+            .map(|part| match part {
+                Content::Text { text } => Ok(json!({"text":text})),
+                Content::ToolCall(_) => {
+                    Err("Gemini tool history requires its original response parts".to_owned())
+                }
+                _ => Err("Unsupported Gemini assistant history".to_owned()),
+            })
+            .collect();
+    }
+    if assistant.provider_metadata.len() != 1 {
+        return Err("Unsupported Gemini history metadata".into());
+    }
+    let metadata = assistant
+        .provider_metadata
+        .get("gemini")
+        .ok_or("Unsupported Gemini history metadata")?;
+    let fields = common::object(metadata)?;
+    if fields.len() != 2 || !fields.contains_key("parts") || !fields.contains_key("call_ids") {
+        return Err("Invalid Gemini history metadata fields".into());
+    }
+    let parts = metadata["parts"]
+        .as_array()
+        .filter(|parts| !parts.is_empty())
+        .ok_or("Invalid Gemini history parts")?;
+    let call_ids = metadata["call_ids"]
+        .as_array()
+        .ok_or("Invalid Gemini history call IDs")?;
+    let mut normalized = Vec::new();
+    let mut text_index = None;
+    let mut call_index = 0;
+    let mut limits = common::ResponseLimits::default();
+    for part in parts {
+        limits.fragment()?;
+        validate_part(part)?;
+        if let Some(text) = part.get("text") {
+            let text = text.as_str().expect("validated text");
+            let index = *text_index.get_or_insert_with(|| {
+                normalized.push(Content::text(""));
+                normalized.len() - 1
+            });
+            if let Content::Text { text: previous } = &mut normalized[index] {
+                previous.push_str(text);
+            }
+        } else {
+            limits.tool_call()?;
+            text_index = None;
+            let function = &part["functionCall"];
+            let id = call_ids
+                .get(call_index)
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .ok_or("Missing or invalid Gemini history call ID")?;
+            if function
+                .get("id")
+                .is_some_and(|wire_id| wire_id.as_str() != Some(id))
+            {
+                return Err("Gemini history call ID does not match its original part".into());
+            }
+            normalized.push(Content::ToolCall(ToolCall::new(
+                id,
+                common::string(function, "name")?,
+                function.get("args").cloned().unwrap_or_else(|| json!({})),
+            )));
+            call_index += 1;
+        }
+    }
+    if call_index != call_ids.len() || normalized != assistant.content {
+        return Err("Gemini history metadata does not match assistant content".into());
+    }
+    Ok(parts.clone())
+}
+
+fn validate_part(part: &Value) -> Result<()> {
+    let fields = common::object(part)?;
+    if fields.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "text" | "functionCall" | "thought" | "thoughtSignature"
+        )
+    }) {
+        return Err("Unsupported Gemini response part".into());
+    }
+    if part
+        .get("thought")
+        .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return Err("Gemini thought content cannot be represented safely by this adapter".into());
+    }
+    if let Some(signature) = part.get("thoughtSignature") {
+        let signature = signature
+            .as_str()
+            .filter(|signature| !signature.is_empty())
+            .ok_or("Invalid Gemini thought signature")?;
+        // Signatures are opaque base64 bytes. Validate the representation only;
+        // authenticating the encrypted contents remains the provider's job.
+        base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .map_err(|_| "Invalid Gemini thought signature".to_owned())?;
+    }
+    match (part.get("text"), part.get("functionCall")) {
+        (Some(text), None) if text.is_string() => Ok(()),
+        (None, Some(function)) => {
+            let fields = common::object(function)?;
+            if fields
+                .keys()
+                .any(|key| !matches!(key.as_str(), "id" | "name" | "args"))
+            {
+                return Err(
+                    "Partial or nonstandard Gemini function arguments are unsupported".into(),
+                );
+            }
+            common::string(function, "name")?;
+            if function
+                .get("id")
+                .is_some_and(|id| id.as_str().is_none_or(|id| id.trim().is_empty()))
+                || function.get("args").is_some_and(|args| !args.is_object())
+            {
+                return Err("Invalid Gemini function call ID or arguments".into());
+            }
+            Ok(())
+        }
+        _ => Err("Gemini part must contain text or a complete functionCall".into()),
+    }
+}
+
 pub(crate) struct State {
     pub message: AssistantMessage,
     tools: BTreeMap<String, ToolDefinition>,
@@ -88,9 +242,7 @@ pub(crate) struct State {
     call_sequence: u64,
     text_index: Option<usize>,
     finish: Option<StopReason>,
-    prompt_tokens: u64,
-    candidate_tokens: u64,
-    total: Option<u64>,
+    usage: common::UsageReport,
     limits: common::ResponseLimits,
 }
 
@@ -112,9 +264,7 @@ impl State {
             call_sequence: 0,
             text_index: None,
             finish: None,
-            prompt_tokens: 0,
-            candidate_tokens: 0,
-            total: None,
+            usage: common::UsageReport::default(),
             limits: common::ResponseLimits::default(),
         }
     }
@@ -140,8 +290,9 @@ impl State {
             }
             common::stable(&mut self.message.response_id, &value, "responseId")?;
             common::stable(&mut self.message.response_model, &value, "modelVersion")?;
-            if let Some(usage) = value.get("usageMetadata") {
+            if let Some(usage) = value.get("usageMetadata").filter(|value| !value.is_null()) {
                 self.usage(usage)?;
+                yield AssistantEvent::UsageUpdate { partial: self.message.clone() };
             }
             let Some(candidates) = value.get("candidates") else {
                 if value.get("usageMetadata").is_some() {
@@ -175,17 +326,10 @@ impl State {
                 for part in parts {
                     common::checkpoint(cancel).await?;
                     self.limits.fragment()?;
-                    let fields = common::object(part)?;
-                    if part.get("thoughtSignature").is_some_and(|v| !v.is_null())
-                        || part.get("thought").is_some_and(|v| v.as_bool() != Some(false))
-                    {
-                        Err("Gemini thought and signature content cannot be represented safely by this adapter".to_owned())?;
-                    }
-                    if fields.keys().any(|key| !matches!(key.as_str(), "text" | "functionCall" | "thought")) {
-                        Err("Unsupported Gemini response part".to_owned())?;
-                    }
+                    validate_part(part)?;
                     match (part.get("text"), part.get("functionCall")) {
                         (Some(text), None) => {
+                            self.remember_part(part, None);
                             let text = text.as_str().ok_or("Invalid Gemini text part")?;
                             let index = if let Some(index) = self.text_index {
                                 index
@@ -224,6 +368,7 @@ impl State {
                             let call = ToolCall::new(id, name, arguments);
                             common::validate_call(&call, &self.tools)?;
                             common::check_cancel(cancel)?;
+                            self.remember_part(part, Some(&call.id));
                             let index = self.message.content.len();
                             let delta = call.arguments.to_string();
                             self.message.content.push(Content::ToolCall(ToolCall::new(&call.id, &call.name, Value::Null)));
@@ -270,6 +415,24 @@ impl State {
         Ok(())
     }
 
+    fn remember_part(&mut self, part: &Value, call_id: Option<&str>) {
+        let metadata = self
+            .message
+            .provider_metadata
+            .entry("gemini".to_owned())
+            .or_insert_with(|| json!({"parts":[],"call_ids":[]}));
+        metadata["parts"]
+            .as_array_mut()
+            .expect("constructed parts")
+            .push(part.clone());
+        if let Some(id) = call_id {
+            metadata["call_ids"]
+                .as_array_mut()
+                .expect("constructed call IDs")
+                .push(id.into());
+        }
+    }
+
     fn end_text(&mut self) -> Option<AssistantEvent> {
         self.text_index.take().map(|index| AssistantEvent::TextEnd {
             index,
@@ -288,33 +451,60 @@ impl State {
     }
 
     fn usage(&mut self, usage: &Value) -> Result<()> {
-        common::object(usage)?;
-        common::counter(usage, "promptTokenCount", &mut self.prompt_tokens)?;
-        common::counter(usage, "candidatesTokenCount", &mut self.candidate_tokens)?;
-        common::counter(
+        self.usage.update(
+            &mut self.message,
             usage,
-            "cachedContentTokenCount",
-            &mut self.message.usage.cache_read,
+            &[
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "cachedContentTokenCount",
+                "thoughtsTokenCount",
+                "toolUsePromptTokenCount",
+                "totalTokenCount",
+            ],
         )?;
-        common::counter(
-            usage,
-            "thoughtsTokenCount",
-            &mut self.message.usage.reasoning,
-        )?;
-        if self.message.usage.cache_read > self.prompt_tokens {
+        let prompt = self.usage.get("promptTokenCount");
+        let candidates = self.usage.get("candidatesTokenCount").unwrap_or_default();
+        self.message.usage.cache_read = self
+            .usage
+            .get("cachedContentTokenCount")
+            .unwrap_or_default();
+        self.message.usage.reasoning = self.usage.get("thoughtsTokenCount").unwrap_or_default();
+        if prompt.is_some_and(|prompt| self.message.usage.cache_read > prompt) {
             return Err("Gemini cached tokens exceed prompt tokens".into());
         }
-        self.message.usage.input = self.prompt_tokens - self.message.usage.cache_read;
-        self.message.usage.output = self
-            .candidate_tokens
-            .saturating_add(self.message.usage.reasoning);
-        if let Some(total) = usage.get("totalTokenCount") {
-            self.total = Some(total.as_u64().ok_or("Invalid Gemini total token count")?);
-        }
-        self.message.usage.update_total();
-        if let Some(total) = self.total {
+        let tool_prompt = self
+            .usage
+            .get("toolUsePromptTokenCount")
+            .unwrap_or_default();
+        self.message.usage.input = prompt
+            .unwrap_or_default()
+            .saturating_sub(self.message.usage.cache_read)
+            .checked_add(tool_prompt)
+            .ok_or("Gemini input usage overflows")?;
+        self.message.usage.output = candidates
+            .checked_add(self.message.usage.reasoning)
+            .ok_or("Gemini output usage overflows")?;
+        let calculated = prompt
+            .unwrap_or_default()
+            .checked_add(tool_prompt)
+            .and_then(|total| total.checked_add(self.message.usage.output))
+            .ok_or("Gemini usage total overflows")?;
+        if let Some(total) = self.usage.get("totalTokenCount") {
             self.message.usage.total_tokens = total;
+            if total < calculated
+                || (prompt.is_some()
+                    && self.usage.get("candidatesTokenCount").is_some()
+                    && total != calculated)
+            {
+                return Err("Gemini total usage contradicts its counters".into());
+            }
+        } else {
+            self.message.usage.total_tokens = calculated;
         }
+        self.message.usage_status = self
+            .usage
+            .status("promptTokenCount", "candidatesTokenCount");
         Ok(())
     }
 }

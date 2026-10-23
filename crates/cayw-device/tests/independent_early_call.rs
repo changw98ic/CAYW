@@ -52,6 +52,7 @@ async fn draining_a_real_precancelled_call_waits_for_its_registered_cleanup() {
         env: BTreeMap::new(),
         timeout: Duration::from_secs(10),
         max_output_bytes: 1024,
+        io: cayw_device::ProcessIo::Pipes,
     };
     let cancel = CancellationToken::new();
     cancel.cancel();

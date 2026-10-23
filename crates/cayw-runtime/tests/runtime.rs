@@ -1,8 +1,11 @@
 use cayw_ai::{
-    AssistantEvent, AssistantStream, CancellationToken, Message, Model, ModelRequest, Provider,
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Message, Model,
+    ModelRequest, Provider, StopReason,
 };
 use cayw_core::SessionState;
-use cayw_runtime::{ApprovalChoice, Runtime, RuntimeConfig, RuntimeError, ScopedPermission};
+use cayw_runtime::{
+    ApprovalChoice, Runtime, RuntimeConfig, RuntimeError, ScopedPermission, TaskState,
+};
 use futures::stream;
 use serde_json::json;
 use std::{
@@ -26,12 +29,11 @@ impl ScriptProvider {
 }
 impl Provider for ScriptProvider {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
-        let mut answer = cayw_runtime::fixture::script_response(
+        let answer = cayw_runtime::fixture::script_response(
             &request,
             &self.script,
             &format!("script-{}", request.messages.len()),
         );
-        answer.usage.total_tokens = 7;
         self.requests.lock().unwrap().push(request);
         Box::pin(stream::iter(vec![AssistantEvent::Done { message: answer }]))
     }
@@ -40,6 +42,14 @@ struct HangingProvider;
 impl Provider for HangingProvider {
     fn stream(&self, _: ModelRequest, _: CancellationToken) -> AssistantStream {
         Box::pin(stream::pending())
+    }
+}
+struct FailedProvider;
+impl Provider for FailedProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let message = AssistantMessage::new(&request.model)
+            .failure(StopReason::Error, "fixture model failed");
+        Box::pin(stream::iter(vec![AssistantEvent::Done { message }]))
     }
 }
 fn config() -> RuntimeConfig {
@@ -125,12 +135,7 @@ async fn prompt_executes_real_luau_host_write_read_and_reopens_history() {
     assert!(!rt.audit(&session.id, 0, 100).unwrap().is_empty());
     {
         let requests = provider.requests.lock().unwrap();
-        let instruction = requests[0]
-            .messages
-            .iter()
-            .find(|m| matches!(m, Message::System { .. }))
-            .unwrap()
-            .text();
+        let instruction = cayw_ai::current_system(&requests[0].messages).prompt;
         assert!(
             instruction.contains("action=exec")
                 && instruction.contains("action=wait")
@@ -320,7 +325,8 @@ async fn approval_cancellation_and_revocation_are_durable() {
             .await
     });
     let approval = pending(&rt, &id).await;
-    rt.cancel(&id).unwrap();
+    let target = rt.task(&approval.input.task_id).unwrap().cancel_target();
+    rt.cancel(&target).unwrap();
     task.await.unwrap().unwrap();
     assert!(!temp.path().join("workspace/cancelled.txt").exists());
     assert!(
@@ -356,5 +362,24 @@ async fn token_budget_blocks_tool_execution_before_side_effect() {
         matches!(answer.messages.last(), Some(Message::Assistant(last)) if last.stop_reason.is_failure())
     );
     assert!(!temp.path().join("workspace/limit.txt").exists());
+    assert_eq!(rt.health().unwrap().running, 0);
+}
+
+#[tokio::test]
+async fn failed_model_returns_its_history_but_the_task_is_not_completed() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("workspace")).unwrap();
+    let rt = runtime(&temp, Arc::new(FailedProvider), config());
+    let id = rt.create(None).unwrap().id;
+    let view = rt
+        .prompt(&id, "provider failure", CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        matches!(view.messages.last(), Some(Message::Assistant(last)) if last.stop_reason.is_failure())
+    );
+    let task = rt.tasks(&id).unwrap().remove(0);
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(task.error.as_deref(), Some("fixture model failed"));
     assert_eq!(rt.health().unwrap().running, 0);
 }

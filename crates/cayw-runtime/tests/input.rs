@@ -1,0 +1,268 @@
+//! Typed prompt input keeps text and images in one durable record. These tests
+//! exercise the real RPC adapter and Runtime queue; no model is called by
+//! `task.enqueue`.
+
+use cayw_ai::{
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
+    ModelRequest, Provider, StopReason,
+};
+use cayw_ipc::RpcHandler;
+use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, TaskInput};
+use futures::stream;
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+struct FixtureProvider {
+    seen: std::sync::Mutex<Vec<Message>>,
+}
+impl Provider for FixtureProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        self.seen
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(request.messages.clone());
+        let mut message = AssistantMessage::new(&request.model);
+        message.content.push(Content::text("fixture reply"));
+        message.stop_reason = StopReason::Stop;
+        Box::pin(stream::iter(vec![AssistantEvent::Done { message }]))
+    }
+}
+
+fn runtime(temp: &tempfile::TempDir, supports_images: bool) -> (Runtime, Arc<FixtureProvider>) {
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut model = Model::new("fixture", "typed-image-fixture");
+    model.supports_images = supports_images;
+    let provider = Arc::new(FixtureProvider {
+        seen: std::sync::Mutex::new(vec![]),
+    });
+    let runtime = Runtime::open(
+        temp.path().join("sessions.db"),
+        &workspace,
+        provider.clone(),
+        model,
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    (runtime, provider)
+}
+
+async fn rpc(runtime: &Runtime, method: &str, params: Value) -> Result<Value, cayw_ipc::RpcError> {
+    runtime.call(method, params, CancellationToken::new()).await
+}
+
+#[tokio::test]
+async fn task_enqueue_accepts_text_and_canonical_images_as_one_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, true);
+    let session = runtime.create(None).unwrap().id;
+
+    let record = rpc(
+        &runtime,
+        "task.enqueue",
+        json!({
+            "session_id":session,
+            "text":"describe this image",
+            "images":[{"mime_type":"image/png","data":"aGVsbG8="}]
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(record["input"]["text"], "describe this image");
+    assert_eq!(record["input"]["images"][0]["mime_type"], "image/png");
+    assert_eq!(record["input"]["images"][0]["data"], "aGVsbG8=");
+    assert!(record.get("text").is_none(), "{record}");
+    let stored = serde_json::to_value(
+        runtime
+            .task(record["id"].as_str().expect("record id"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(stored["input"], record["input"]);
+}
+
+#[tokio::test]
+async fn task_enqueue_without_images_uses_the_same_input_shape() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, false);
+    let session = runtime.create(None).unwrap().id;
+    let record = rpc(
+        &runtime,
+        "task.enqueue",
+        json!({"session_id":session,"text":"text only"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        record["input"],
+        json!({"text":"text only","images":[]}),
+        "{record}"
+    );
+    assert!(record.get("text").is_none(), "{record}");
+}
+
+#[tokio::test]
+async fn task_enqueue_rejects_invalid_images_before_insert() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, true);
+
+    let session = runtime.create(None).unwrap().id;
+    for images in [
+        json!([{"mime_type":"image/png","data":"aGVsbG8"}]),
+        json!([{"mime_type":"image/png","data":"aGVsbG8_"}]),
+        json!([{"mime_type":"image/png","data":"aGVs bG8="}]),
+        json!([{"mime_type":"text/plain","data":"aGVsbG8="}]),
+        json!([{"mime_type":"image/png","data":""}]),
+        json!([{"mime_type":"image/png","data":"aGVsbG8=","filename":"x.png"}]),
+    ] {
+        let error = rpc(
+            &runtime,
+            "task.enqueue",
+            json!({"session_id":session,"text":"describe","images":images}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_params", "{images}");
+        assert!(runtime.tasks(&session).unwrap().is_empty(), "{images}");
+    }
+
+    let session = runtime.create(None).unwrap().id;
+    let error = rpc(
+        &runtime,
+        "task.enqueue",
+        json!({
+            "session_id":session,"text":"text",
+            "images":[{"mime_type":"image/png","data":"aGVsbG8="}],
+            "extra":true
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_params");
+    assert!(runtime.tasks(&session).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn task_enqueue_rejects_images_for_a_text_only_model_before_insert() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, false);
+    let session = runtime.create(None).unwrap().id;
+    let error = rpc(
+        &runtime,
+        "task.enqueue",
+        json!({
+            "session_id":session,"text":"describe",
+            "images":[{"mime_type":"image/png","data":"aGVsbG8="}]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_params");
+    assert!(runtime.tasks(&session).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn session_prompt_delivers_the_image_content_to_the_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, provider) = runtime(&temp, true);
+    let session = runtime.create(None).unwrap().id;
+    rpc(
+        &runtime,
+        "session.prompt",
+        json!({
+            "session_id":session,
+            "text":"what is in this image",
+            "images":[{"mime_type":"image/png","data":"aGVsbG8="}]
+        }),
+    )
+    .await
+    .unwrap();
+
+    let seen = provider
+        .seen
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let user = seen
+        .iter()
+        .find(|message| matches!(message, Message::User { .. }))
+        .expect("provider saw a user message");
+    let Message::User { content, .. } = user else {
+        unreachable!()
+    };
+    assert!(content.iter().any(|part| matches!(
+        part,
+        Content::Image { data, mime_type }
+            if data == "aGVsbG8=" && mime_type == "image/png"
+    )));
+}
+
+#[test]
+fn task_input_validation_is_local_and_strict() {
+    let mut model = Model::new("fixture", "typed-image-fixture");
+    model.supports_images = true;
+    let text_only = TaskInput {
+        text: "hello".into(),
+        images: vec![],
+    };
+    assert!(text_only.validate(&model, 5).is_ok());
+    assert!(text_only.validate(&model, 4).is_err());
+    assert!(
+        TaskInput::default().validate(&model, 1024).is_err(),
+        "empty text with no images is not a prompt"
+    );
+
+    let image = ImageInput {
+        mime_type: "image/png".into(),
+        data: "aGVsbG8=".into(),
+    };
+    let with_image = TaskInput {
+        text: "hello".into(),
+        images: vec![image.clone()],
+    };
+    let exact = "hello".len() + image.mime_type.len() + image.data.len();
+    assert!(with_image.validate(&model, exact).is_ok());
+    assert!(with_image.validate(&model, exact - 1).is_err());
+
+    model.supports_images = false;
+    assert!(
+        with_image.validate(&model, usize::MAX).is_err(),
+        "a text-only model refuses images before enqueue"
+    );
+}
+
+#[test]
+fn task_input_message_keeps_text_and_images_in_order() {
+    let input = TaskInput {
+        text: "first".into(),
+        images: vec![
+            ImageInput {
+                mime_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+            },
+            ImageInput {
+                mime_type: "image/jpeg".into(),
+                data: "d29ybGQ=".into(),
+            },
+        ],
+    };
+    let Message::User { content, .. } = input.message() else {
+        panic!("task input becomes a user message");
+    };
+    assert_eq!(
+        content,
+        vec![
+            Content::Text {
+                text: "first".into()
+            },
+            Content::Image {
+                data: "aGVsbG8=".into(),
+                mime_type: "image/png".into()
+            },
+            Content::Image {
+                data: "d29ybGQ=".into(),
+                mime_type: "image/jpeg".into()
+            },
+        ]
+    );
+}

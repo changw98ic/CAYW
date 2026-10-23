@@ -13,7 +13,7 @@ use std::{
     },
     time::Duration,
 };
-use support::{TestCellExec, backend};
+use support::{TestCellExec, backend, backend_with_values, values_wrap};
 use tokio::sync::Semaphore;
 
 struct Host {
@@ -133,10 +133,11 @@ fn manager(
     reads: Arc<ReadCoordinator>,
     limits: CellLimits,
 ) -> Arc<CellManager> {
+    let backend = backend_with_values(host, journal.clone(), limits.clone());
     CellManager::new(
         id,
         journal,
-        backend(host),
+        backend,
         reads,
         limits,
         Limits {
@@ -154,10 +155,15 @@ fn shared_manager(
     reads: Arc<ReadCoordinator>,
     limits: CellLimits,
 ) -> Arc<CellManager> {
+    let backend = values_wrap(
+        support::shared_backend(host, fixture, reads.clone()),
+        journal.clone(),
+        limits.clone(),
+    );
     CellManager::new(
         id,
         journal,
-        support::shared_backend(host, fixture, reads.clone()),
+        backend,
         reads,
         limits,
         Limits {

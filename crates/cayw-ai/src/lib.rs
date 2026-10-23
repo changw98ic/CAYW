@@ -1,5 +1,8 @@
 //! Model-independent messages and streaming providers for the CAYW agent core.
 
+#[cfg(feature = "fault-injection")]
+pub mod faults;
+pub mod json;
 pub mod providers;
 mod transcript;
 mod types;

@@ -38,13 +38,36 @@ Each pipeline executes real Luau and Host write/read operations. A second prompt
 
 ## Direct Luau cases
 
-The eleven cases cover fresh-process first success; first and next execute in a running process; UTF-8 file write/read/list/stat; a syntax failure followed by its corrected script in the same workspace; instruction-budget exhaustion; cancellation while an injected Host operation is pending; permission denial; unavailable script globals; an unregistered capability; and strict argument rejection.
+The eighteen cases have fixed scripts, complete signatures for their finite set of tools, inputs, grants, limits and expected results in `cases.rs`. Every sample records those declarations and the signatures observed on the same Host supplied to CodeMode. The reader checks them against this executable's declarations.
 
-Each execute creates a fresh Luau VM. A warm process does not imply VM reuse. File operations use the real Host permission gate and durable audit. The ordinary Host has its configured file/data catalog; process profiles, Git and external services are not enabled by this fixture.
+| Name | Actual operation and expected result |
+| --- | --- |
+| `cold_process_first_success` | Start a fresh original child and retain its first emit and result. |
+| `warm_process_first_success` | Run a warmup and the selected script in the same process and CodeMode object. |
+| `file_pipeline` | Write, read, list and stat a real UTF-8 file; check its bytes and digest. |
+| `syntax_failure` | Retain the original syntax error and verify that no file operation started. |
+| `syntax_repair_success` | Run the fixed correction in the original workspace; retain its link to the first attempt. |
+| `loop_budget` | Stop a long loop at the instruction limit without Host effects. |
+| `cancel_pending_host` | Cancel after the original local Host future starts, await its settlement and retain unknown outcome. |
+| `host_permission_denied` | Refuse an ungranted write and verify an empty task workspace. |
+| `sandbox_globals` | Check the unavailable script globals and advertised catalog. |
+| `unknown_capability` | Refuse a tool absent from the catalog before Host dispatch. |
+| `invalid_arguments` | Refuse a numeric file path before Host dispatch. |
+| `file_calculation` | Write and read the numbers 1 through 10; independently check the even sum 30 and count 5. |
+| `capability_signatures` | Read four complete file-tool definitions inside the executing VM and compare them with the actual Host. |
+| `output_budget` | Retain a completed write and small emit, then reject an oversized emit before the next authorized write. |
+| `memory_budget` | Retain a completed write, then reject an 8 MiB allocation under the 1 MiB VM cap before the next authorized write. |
+| `host_call_budget` | Complete two real file calls, then refuse the third dispatch even though it is granted. |
+| `active_timeout` | Stop a long loop at the single execution deadline, with a known terminal result and no Host effects. |
+| `timeout_pending_host` | Let that deadline cancel the original pending Host future; await settlement and retain unknown outcome and its recovery record. |
+
+Each execute creates a fresh Luau VM. A warm process reuses its process and CodeMode object, while the selected execution gets a new VM; operating-system caches are not reset. File operations use the real Host permission gate and durable audit. The ordinary Host has its configured file/data catalog; process profiles, Git and external services are not enabled by this fixture. Task workspaces are read before and after execution. Actual result files are retained as bound attachments; Host lock and recovery records are recorded separately.
 
 The syntax correction is fixed offline input. Its `repair_attempt` observations and `repair_summary` retain both the original failure and correction, their errors, identities and measured durations. Totals include every recorded attempt. Missing durations remain null; unmeasured token usage and money remain `not_measured` with null values. This does not prove a model can repair a script.
 
-The cancellation case injects a local pending `search.query` fixture. It has no network operation or subprocess. Cancellation starts after the fixture has entered its future. The real Host's unknown classification and durable settlement are retained; the fixture does not claim the product has reconciled the effect.
+The cancellation and pending-Host timeout cases inject a local pending `search.query` fixture. It has no network operation or subprocess. Explicit cancellation starts after the fixture has entered its future; the timeout case issues no explicit cancellation and waits for the execution deadline. Both retain the real Host's unknown classification, durable settlement and original pending recovery record. The fixture does not claim the product has reconciled the effect.
+
+Output, VM allocator and Host-call caps have actual over-limit cases. Their later writes are granted in advance, so the absence of those writes checks that execution stopped. The memory case reaches the allocator after a real completed call; it does not merely trip a source-size check. Reported process peak RSS remains a separate observation, and no per-script allocation peak is claimed.
 
 ## Evidence format and validation
 

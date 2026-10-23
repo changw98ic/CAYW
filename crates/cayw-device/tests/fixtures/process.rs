@@ -5,6 +5,9 @@ use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+use std::os::unix::process::CommandExt;
+
 fn mark(directory: &Path, name: &str) {
     fs::write(directory.join(name), process::id().to_string()).unwrap();
 }
@@ -121,6 +124,42 @@ fn main() {
                 io::stderr().write_all(&[b'e'; 8192]).unwrap();
             }
         }
+        #[cfg(target_os = "macos")]
+        Some("terminal-inspect") => {
+            use std::io::BufRead;
+            let directory = Path::new(&args[2]);
+            mark(directory, "root.pid");
+            // SAFETY: these calls only observe this isolated fixture's stdio.
+            let terminal = unsafe {
+                (
+                    libc::isatty(0),
+                    libc::isatty(1),
+                    libc::isatty(2),
+                    libc::tcgetpgrp(0),
+                    libc::getpgrp(),
+                )
+            };
+            println!("terminal={terminal:?}");
+            io::stdout().flush().unwrap();
+            for line in io::stdin().lock().lines() {
+                let line = line.unwrap();
+                println!("received={line}");
+                eprintln!("terminal-stderr");
+                io::stdout().flush().unwrap();
+                if line == "quit" {
+                    break;
+                }
+            }
+        }
+        Some("gated-exit") => {
+            let directory = Path::new(&args[2]);
+            mark(directory, "root.pid");
+            while !directory.join("exit-now").exists() {
+                thread::sleep(Duration::from_millis(2));
+            }
+            io::stdout().write_all(b"done\n").unwrap();
+            io::stderr().write_all(b"err\n").unwrap();
+        }
         Some("exit") => process::exit(7),
         Some("both") => {
             let stderr = thread::spawn(|| {
@@ -176,6 +215,71 @@ fn main() {
                 },
             );
             sleep_forever();
+        }
+        #[cfg(target_os = "macos")]
+        Some("observed-escape") => {
+            let directory = Path::new(&args[2]);
+            mark(directory, "root.pid");
+            drop(descendant(directory, "gated-escape", false));
+            sleep_forever();
+        }
+        #[cfg(target_os = "macos")]
+        Some("gated-escape") => {
+            let directory = Path::new(&args[2]);
+            mark(directory, "waiting.pid");
+            while !directory.join("escape-now").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            // SAFETY: this fixture is not the group leader. It deliberately
+            // leaves the observed group to test the documented management limit.
+            assert_ne!(unsafe { libc::setsid() }, -1);
+            mark(directory, "escaped.pid");
+            while !directory.join("escape-release").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        // The managed group leader itself leaves its group. It spawns a helper
+        // born directly in its own process group (so the helper is never a
+        // member of the managed group), then joins that group. macOS allows a
+        // pipe-mode group leader to do this; a PTY session leader is refused.
+        #[cfg(target_os = "macos")]
+        Some("regroup") => {
+            let directory = Path::new(&args[2]);
+            mark(directory, "root.pid");
+            while !directory.join("regroup-now").exists() {
+                thread::sleep(Duration::from_millis(2));
+            }
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .arg("group-helper")
+                .arg(directory)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0);
+            let helper = command.spawn().unwrap();
+            while !directory.join("helper.pid").exists() {
+                thread::sleep(Duration::from_millis(2));
+            }
+            // SAFETY: this fixture is the managed group leader; changing its own
+            // process group is the behavior under test. The helper PID is a live
+            // group in the same session.
+            let rc = unsafe { libc::setpgid(0, helper.id() as libc::pid_t) };
+            fs::write(directory.join("regroup.rc"), rc.to_string()).unwrap();
+            if rc == 0 {
+                mark(directory, "regrouped.pid");
+            }
+            while !directory.join("exit-now").exists() {
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        #[cfg(target_os = "macos")]
+        Some("group-helper") => {
+            let directory = Path::new(&args[2]);
+            mark(directory, "helper.pid");
+            while !directory.join("helper-release").exists() {
+                thread::sleep(Duration::from_millis(2));
+            }
         }
         #[cfg(unix)]
         Some("escaped") => {

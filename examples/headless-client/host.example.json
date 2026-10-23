@@ -1,0 +1,33 @@
+{
+  "model": {
+    "service": "magpie",
+    "api": "chat_completions",
+    "id": "group/auto-deepseek-v4-1-flash",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "api_version": "v1",
+    "max_output_tokens": 4096,
+    "api_key_env": "MAGPIE_API_KEY"
+  },
+  "budgets": {
+    "max_turns": 8,
+    "max_total_tokens": 8192,
+    "max_run_time_ms": 45000,
+    "max_capability_calls": 16,
+    "max_capability_bytes": 262144,
+    "host_wait_ms": 40000,
+    "host_call_timeout_ms": 40000
+  },
+  "profiles": {
+    "hold": {
+      "kind": "test",
+      "program": "/bin/sleep",
+      "args": ["30"],
+      "env": {},
+      "timeout_ms": 35000,
+      "max_output_bytes": 4096,
+      "allow_filter": false,
+      "io": { "kind": "pipes" }
+    }
+  },
+  "permissions": []
+}

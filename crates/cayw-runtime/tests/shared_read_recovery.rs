@@ -21,6 +21,23 @@ impl Provider for Script {
         }]))
     }
 }
+struct ReadReceipt(std::path::PathBuf);
+impl cayw_core::ReconciliationVerifier for ReadReceipt {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        let cayw_core::ReconciliationRequest::Tool { reconciliation } = request else {
+            return Err("shared-read fixture has no capability repair receipt".into());
+        };
+        let receipt: cayw_core::Reconciliation =
+            serde_json::from_slice(&std::fs::read(&self.0).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        if reconciliation == &receipt && receipt.actor == "fixture-host" {
+            Ok(())
+        } else {
+            Err("shared-read reconciliation differs from its original fixture receipt".into())
+        }
+    }
+}
+
 fn config() -> RuntimeConfig {
     let mut config = RuntimeConfig::default();
     config.host.frozen_reads = true;
@@ -41,12 +58,15 @@ async fn failed_cells_terminal_recovers_exact_dependencies_and_known_core_bytes_
     let path = dir.path().join("session.db");
     let provider = Arc::new(Script(AtomicUsize::new(0)));
     let open = || {
+        let mut settings = config();
+        settings.reconciliation_verifier =
+            Some(Arc::new(ReadReceipt(dir.path().join("read-receipt.json"))));
         Runtime::open(
             &path,
             &root,
             provider.clone(),
             Model::new("fixture", "read-recovery"),
-            config(),
+            settings,
         )
         .unwrap()
     };
@@ -99,11 +119,30 @@ async fn failed_cells_terminal_recovers_exact_dependencies_and_known_core_bytes_
     assert!(recovered.unresolved_capabilities.is_empty());
     assert_eq!(recovered.unresolved_calls.len(), 1);
     let original_parent = recovered.unresolved_calls[0].call.id.clone();
-    rt.reconcile(&id, cayw_core::Reconciliation {
-        call_id: original_parent, actor: "fixture-host".into(),
+    let expected = rt
+        .store()
+        .tool_reconciliation_origin(&id, &original_parent)
+        .unwrap();
+    assert_eq!(expected.lease, call.lease);
+    assert_eq!(expected.task_id, call.task_id);
+    assert_eq!(
+        expected.execution.as_ref().unwrap().execution_id,
+        call.key.execution_id
+    );
+    let receipt = cayw_core::Reconciliation {
+        call_id: original_parent, expected, actor: "fixture-host".into(),
         evidence: "Original VM stopped; verified exact known Core read and repaired original Cells journal without replay".into(),
         outcome: cayw_core::ReconciledOutcome::Completed { result: cayw_agent::ToolResult::error("original read returned but its Cells terminal commit failed") },
-    }).unwrap();
+    };
+    std::fs::write(
+        dir.path().join("read-receipt.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    let mut forged = receipt.clone();
+    forged.expected.lease.worker_id = "replacement-worker".into();
+    assert!(rt.reconcile(&id, forged).is_err());
+    rt.reconcile(&id, receipt).unwrap();
     let recovered = rt.get(&id).unwrap();
     assert_eq!(recovered.state, SessionState::Idle);
     assert!(!recovered.frozen);
