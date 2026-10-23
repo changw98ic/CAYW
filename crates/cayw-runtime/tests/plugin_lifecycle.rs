@@ -713,7 +713,8 @@ async fn cancelled_and_crashed_external_calls_remain_tied_to_the_original_call()
     })
     .await
     .unwrap();
-    assert!(rt.cancel(&id).unwrap());
+    let target = rt.tasks(&id).unwrap()[0].cancel_target();
+    assert!(rt.cancel(&target).unwrap());
     let _ = running.await.unwrap();
     let call = settled_calls(&rt, &id)
         .into_iter()
