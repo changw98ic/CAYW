@@ -176,7 +176,7 @@ impl PluginRegistry {
         }
         let snapshot = entry.plugin.strongflow_state()?;
         snapshot.validate()?;
-        if snapshot.plugin_manifest != expected.manifest
+        if !checkpoint_matches(&snapshot.plugin_manifest, &expected.manifest)
             || self.check_available(&expected.manifest.name)? != *expected
         {
             return Err(PluginError::Unavailable(
@@ -325,6 +325,33 @@ impl Drop for PluginRegistry {
             entry.plugin.shutdown();
         }
     }
+}
+
+#[cfg(feature = "strongflow")]
+pub(crate) fn checkpoint_matches(stored: &PluginManifest, loaded: &PluginManifest) -> bool {
+    let library = strongflow::StrongFlow::new().manifest().clone();
+    if stored != &library {
+        return false;
+    }
+    if loaded.kind == PluginKind::Native {
+        return loaded == &library;
+    }
+    let mut external = library.clone();
+    external.kind = PluginKind::External;
+    let library_names: Vec<_> = external
+        .capabilities
+        .iter()
+        .map(|capability| capability.name.clone())
+        .collect();
+    let mut without_host = loaded.clone();
+    without_host
+        .capabilities
+        .retain(|capability| library_names.iter().any(|name| name == &capability.name));
+    let host_methods = loaded.capabilities.iter().all(|capability| {
+        library_names.iter().any(|name| name == &capability.name)
+            || capability.name.starts_with("strongflow.host.")
+    });
+    without_host == external && host_methods
 }
 
 pub(crate) fn validate_manifest(

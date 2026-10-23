@@ -163,10 +163,24 @@ pub struct StrongFlowState {
     pub workflows: BTreeMap<String, WorkflowSnapshot>,
 }
 
+fn same_obligations(current: &StrongFlowState, previous: &StrongFlowState) -> bool {
+    current.format_version == previous.format_version
+        && current.workflows == previous.workflows
+        && current.plugin_manifest.name == previous.plugin_manifest.name
+        && current.plugin_manifest.version == previous.plugin_manifest.version
+        && current.plugin_manifest.protocol_version == previous.plugin_manifest.protocol_version
+}
+
 impl StrongFlowState {
     pub fn validate(&self) -> Result<(), PluginError> {
+        let mut library = StrongFlow::new().manifest;
+        // A child process advertises External. The library checkpoint is the
+        // same manifest with kind Native. Either kind is this plugin version.
         if self.format_version != STRONGFLOW_STATE_VERSION
-            || self.plugin_manifest != StrongFlow::new().manifest
+            || (self.plugin_manifest != library && {
+                library.kind = PluginKind::External;
+                self.plugin_manifest != library
+            })
         {
             return Err(PluginError::InvalidArguments(
                 "unsupported StrongFlow state version or plugin manifest".into(),
@@ -441,6 +455,26 @@ impl StrongFlow {
         workflow.statuses.insert(step_id.into(), status);
         Ok(status)
     }
+
+    /// Process handshake only. These names are host mutations, not part of the
+    /// library checkpoint manifest returned by `StrongFlow::new`.
+    pub fn external_manifest() -> PluginManifest {
+        let mut manifest = Self::new().manifest;
+        manifest.kind = PluginKind::External;
+        let parameters = serde_json::json!({"type": "object"});
+        for name in [
+            "strongflow.host.create_plan",
+            "strongflow.host.start_step",
+            "strongflow.host.submit_evidence",
+        ] {
+            manifest.capabilities.push(ToolDefinition {
+                name: name.into(),
+                description: "Host-owned StrongFlow mutation. Not an agent capability.".into(),
+                parameters: parameters.clone(),
+            });
+        }
+        manifest
+    }
 }
 
 #[async_trait]
@@ -623,7 +657,7 @@ impl SessionBinding {
             ));
         }
         let current = registry.strongflow_state(target)?;
-        if current != *previous {
+        if !same_obligations(&current, previous) {
             return Err(PluginError::Unavailable(
                 "recovery must preserve every original plan, step status and evidence record"
                     .into(),
@@ -690,7 +724,12 @@ impl SessionBinding {
                         })
                         || self.workflow_state.as_ref().is_some_and(|state| {
                             state.validate().is_err()
-                                || Some(&state.plugin_manifest) != self.plugin_manifest.as_ref()
+                                || self.plugin_manifest.as_ref().is_none_or(|manifest| {
+                                    !crate::registry::checkpoint_matches(
+                                        &state.plugin_manifest,
+                                        manifest,
+                                    )
+                                })
                         })
                 }
                 _ => true,

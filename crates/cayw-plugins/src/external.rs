@@ -116,6 +116,10 @@ pub struct ExternalPlugin {
     sender: mpsc::Sender<Call>,
     stop: CancellationToken,
     process: Arc<Mutex<Option<ProcessGuard>>>,
+    /// Absolute path of a StrongFlowState file written by the child. The host
+    /// reads it only through the trusted checkpoint hook, never through `call`.
+    #[cfg(feature = "strongflow")]
+    strongflow_state_path: Option<PathBuf>,
 }
 
 impl ExternalPlugin {
@@ -197,6 +201,8 @@ impl ExternalPlugin {
         let (sender, receiver) = mpsc::channel(16);
         let stop = CancellationToken::new();
         let process = Arc::new(Mutex::new(Some(process)));
+        #[cfg(feature = "strongflow")]
+        let strongflow_state_path = config.argv.first().map(PathBuf::from);
         tokio::spawn(run_process(
             ProcessSession {
                 process: process.clone(),
@@ -215,6 +221,8 @@ impl ExternalPlugin {
             sender,
             stop,
             process,
+            #[cfg(feature = "strongflow")]
+            strongflow_state_path,
         })
     }
 }
@@ -283,6 +291,24 @@ impl Plugin for ExternalPlugin {
 
     fn shutdown(&self) {
         self.stop.cancel();
+    }
+
+    /// Read the child's durable checkpoint. This is not a wire call: the
+    /// registry invokes it only for the loaded instance, then checks that the
+    /// file's manifest matches the loaded description.
+    #[cfg(feature = "strongflow")]
+    fn strongflow_state(&self) -> Result<crate::strongflow::StrongFlowState, PluginError> {
+        let Some(path) = &self.strongflow_state_path else {
+            return Err(PluginError::Unavailable(
+                "external StrongFlow has no state file".into(),
+            ));
+        };
+        let bytes = std::fs::read(path).map_err(|error| {
+            PluginError::Unavailable(format!("cannot read StrongFlow state: {error}"))
+        })?;
+        serde_json::from_slice(&bytes).map_err(|error| {
+            PluginError::Unavailable(format!("StrongFlow state is not valid JSON: {error}"))
+        })
     }
 }
 

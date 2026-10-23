@@ -413,4 +413,183 @@ mod strongflow {
                 .is_err()
         );
     }
+
+    #[cfg(feature = "strongflow")]
+    fn external_manifest() -> PluginManifest {
+        StrongFlow::external_manifest()
+    }
+
+    #[cfg(feature = "strongflow")]
+    async fn load_process(
+        rt: &Runtime,
+        state: &std::path::Path,
+    ) -> cayw_plugins::PluginDescription {
+        rt.load_external(
+            ExternalConfig::new(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/debug/cayw-plugin-strongflow"),
+                vec![state.to_str().unwrap().into()],
+                external_manifest(),
+            ),
+            PluginContext::new(
+                [
+                    "strongflow.describe".into(),
+                    "strongflow.ready".into(),
+                    "strongflow.host.create_plan".into(),
+                    "strongflow.host.start_step".into(),
+                    "strongflow.host.submit_evidence".into(),
+                ],
+                [],
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "strongflow")]
+    async fn host_call(
+        rt: &Runtime,
+        loaded: &cayw_plugins::PluginDescription,
+        method: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        rt.call_plugin(loaded, method, arguments, CancellationToken::new())
+            .await
+    }
+
+    #[cfg(feature = "strongflow")]
+    #[tokio::test]
+    async fn external_process_keeps_ordinary_chat_and_original_obligations() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("strongflow-state.json");
+        let rt = runtime(&dir, "", None);
+        let ordinary = rt.create(Some("ordinary".into())).unwrap();
+        rt.prompt(
+            &ordinary.id,
+            "chat without strongflow",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!rt.get(&ordinary.id).unwrap().frozen);
+
+        let loaded = load_process(&rt, &state).await;
+        assert_eq!(loaded.manifest.kind, PluginKind::External);
+        let plan = json!({
+            "id": "plan",
+            "steps": [{
+                "id": "test",
+                "depends_on": [],
+                "acceptance_checks": ["actual-tests"]
+            }]
+        });
+        host_call(
+            &rt,
+            &loaded,
+            "strongflow.host.create_plan",
+            json!({"plan": plan}),
+        )
+        .await
+        .unwrap();
+        let bound = rt.create(Some("bound".into())).unwrap();
+        rt.bind_strongflow(&bound.id).unwrap();
+        let described = host_call(
+            &rt,
+            &loaded,
+            "strongflow.describe",
+            json!({"workflow_id":"plan"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(described["statuses"]["test"], "pending");
+        let ready = host_call(
+            &rt,
+            &loaded,
+            "strongflow.ready",
+            json!({"workflow_id":"plan"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ready, json!(["test"]));
+        let started = host_call(
+            &rt,
+            &loaded,
+            "strongflow.host.start_step",
+            json!({"workflow_id":"plan","step_id":"test"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(started["status"], "running");
+        assert!(
+            host_call(
+                &rt,
+                &loaded,
+                "strongflow.host.submit_evidence",
+                json!({"workflow_id":"plan","step_id":"ship","evidence": evidence()}),
+            )
+            .await
+            .is_err()
+        );
+
+        rt.unload_plugin("strongflow").unwrap();
+        let frozen = rt.get(&bound.id).unwrap();
+        assert!(frozen.frozen);
+        assert!(frozen.binding.unwrap().reason.unwrap().contains("unloaded"));
+        assert!(matches!(
+            rt.prompt(&bound.id, "must stay frozen", CancellationToken::new())
+                .await,
+            Err(RuntimeError::Frozen(_))
+        ));
+        rt.prompt(&ordinary.id, "chat after unload", CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!rt.get(&ordinary.id).unwrap().frozen);
+
+        let denied = rt.fork(&bound.id, "ordinary copy", false);
+        assert!(denied.is_err());
+        assert!(rt.get(&bound.id).unwrap().frozen);
+        let forked = rt.fork(&bound.id, "ordinary copy", true).unwrap();
+        assert!(!forked.frozen);
+        assert!(forked.binding.is_none());
+        let source = rt.events(&forked.id, 0, 100).unwrap().iter().any(|record| {
+            matches!(&record.event, CoreEvent::SessionForked { source_session_id, .. } if source_session_id == &bound.id)
+        });
+        assert!(source);
+        rt.prompt(&forked.id, "forked ordinary chat", CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(rt.get(&bound.id).unwrap().frozen);
+
+        let restored = load_process(&rt, &state).await;
+        assert!(rt.get(&bound.id).unwrap().frozen);
+        let resumed = rt.resume_strongflow(&bound.id, &restored).unwrap();
+        assert_eq!(
+            resumed.workflow_state().unwrap().workflows["plan"].statuses["test"],
+            StepStatus::Running
+        );
+        rt.prompt(&bound.id, "original continues", CancellationToken::new())
+            .await
+            .unwrap();
+        let first = host_call(
+            &rt,
+            &restored,
+            "strongflow.host.submit_evidence",
+            json!({"workflow_id":"plan","step_id":"test","evidence": evidence()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, json!("passed"));
+        assert!(
+            host_call(
+                &rt,
+                &restored,
+                "strongflow.host.submit_evidence",
+                json!({"workflow_id":"plan","step_id":"test","evidence": evidence()}),
+            )
+            .await
+            .is_err(),
+            "a repeated delivery cannot pass the gate again"
+        );
+    }
 }

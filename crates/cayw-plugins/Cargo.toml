@@ -37,6 +37,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 name = "cayw-plugin-fixture"
 path = "tests/fixtures/external.rs"
 
+[[bin]]
+name = "cayw-plugin-strongflow"
+path = "src/bin/cayw-plugin-strongflow.rs"
+required-features = ["strongflow"]
+
 [[example]]
 name = "offline_plugins"
 required-features = ["strongflow", "observer", "evaluation"]

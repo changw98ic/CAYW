@@ -17,6 +17,27 @@ impl Runtime {
     pub fn list_plugins(&self) -> Vec<PluginDescription> {
         self.inner.registry.list()
     }
+    /// Exact call against a loaded description. Host tests use this for process
+    /// operations that are not agent capabilities.
+    pub async fn call_plugin(
+        &self,
+        expected: &PluginDescription,
+        method: &str,
+        arguments: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, RuntimeError> {
+        self.inner
+            .registry
+            .call_exact(
+                expected,
+                method,
+                arguments,
+                cancel,
+                self.inner.config.host.call_timeout,
+            )
+            .await
+            .map_err(plugin_error)
+    }
     pub async fn load_external(
         &self,
         config: cayw_plugins::ExternalConfig,
