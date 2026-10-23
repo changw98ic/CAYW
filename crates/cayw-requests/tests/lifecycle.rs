@@ -938,6 +938,7 @@ fn host_config(
         timeout: Duration::from_secs(10),
         max_output_bytes: 8192,
         allow_filter: false,
+        io: cayw_host::ProcessIo::Pipes,
     };
     RequestHostConfig {
         root: fixture.root.clone(),

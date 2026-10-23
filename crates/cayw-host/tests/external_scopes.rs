@@ -721,6 +721,7 @@ async fn parent_drain_joins_the_process_started_by_an_external_scope() {
                     timeout: Duration::from_secs(20),
                     max_output_bytes: 4096,
                     allow_filter: false,
+                    io: cayw_device::ProcessIo::Pipes,
                 },
             )]),
             ..Default::default()
@@ -786,6 +787,7 @@ async fn external_scope_keeps_the_pinned_root_and_original_process_runner() {
                     timeout: Duration::from_secs(10),
                     max_output_bytes: 4096,
                     allow_filter: false,
+                    io: cayw_device::ProcessIo::Pipes,
                 },
             )]),
             ..Default::default()

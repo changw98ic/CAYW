@@ -7,10 +7,7 @@ use cayw_host::{Host, HostConfig};
 use serde_json::json;
 use std::{
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 use support::*;
@@ -33,7 +30,7 @@ async fn setup() -> (Workspace, LocalClient, Arc<Stats>, Registry, Arc<Policy>) 
         .unwrap();
     (workspace, client, stats, registry, policy)
 }
-async fn observed(counter: &AtomicUsize) {
+async fn observed(counter: &Counter) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while counter.load(Ordering::Acquire) == 0 {
             tokio::task::yield_now().await;
@@ -196,9 +193,9 @@ async fn one_real_connection_two_luau_consumers_and_application_skill_handle() {
         .await
         .unwrap();
     assert_eq!(another.return_value["value"]["server_pid"], pid);
-    assert_eq!(another.return_value["value"]["initializations"], 1);
+    assert_eq!(another.return_value["value"]["connections"], 1);
     assert_eq!(stats.spawned.load(Ordering::Relaxed), 1);
-    assert_eq!(stats.initializations.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.connections.load(Ordering::Relaxed), 1);
     assert_eq!(stats.skill_reads.load(Ordering::Relaxed), 1);
     assert_eq!(gate.calls.lock().unwrap().len(), 6);
     assert_eq!(audit.records.lock().unwrap().len(), 12);

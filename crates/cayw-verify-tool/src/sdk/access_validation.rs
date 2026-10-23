@@ -550,7 +550,8 @@ fn match_task(task: &TaskRecord, lease: &AttemptLease) -> bool {
         && task.attempt_id.as_ref() == Some(&lease.attempt_id)
         && task.worker_id.as_ref() == Some(&lease.worker_id)
         && task.fence == lease.fence
-        && task.text == PROMPT
+        && task.input.text == PROMPT
+        && task.input.images.is_empty()
         && !task.id.is_empty()
         && !task.cancel_requested
         && task.error.is_none()
@@ -612,6 +613,11 @@ fn approval(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Value]
         .all(|count| count == 2),
         "approval evidence lost a distinct write/read request, decision or capability terminal",
     )?;
+    ensure(
+        final_state.audit.len() == 6,
+        "approval audit lost a decision pair or its original task terminal",
+    )?;
+    let mut expected_audit = Vec::new();
     let mut previous_settle = 0;
     for index in 0..2 {
         let (planned_at, plan) = planned[index];
@@ -720,7 +726,7 @@ fn approval(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Value]
                 && capability_events(&paused.events, 1).len() == index
                 && capability_events(&paused.events, 2).len() == index
                 && paused.grants.len() == index
-                && paused.audit.is_empty()
+                && serde_json::to_value(&paused.audit)? == json!(expected_audit)
                 && if index == 0 {
                     paused.file.is_null() && paused.workspace.is_empty()
                 } else {
@@ -744,6 +750,20 @@ fn approval(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Value]
                 && grant.state == "revoked",
             "final grant contradicts the original exact one-use permission",
         )?;
+        // Build each record from the original approval and grant. Only its
+        // observed timestamp is carried into the unchanged pause/final prefix.
+        let cursor = (index * 2 + 1) as u64;
+        expected_audit.push(json!({
+            "cursor":cursor,"session_id":lease.session_id,"task_id":task.id,
+            "kind":"approval_decision_started","timestamp":final_state.audit[index * 2].timestamp,
+            "data":{"approval_id":original.id,"attempt_id":lease.attempt_id,
+                "choice":"allow_once","actor":"rpc-user"}
+        }));
+        expected_audit.push(json!({
+            "cursor":cursor + 1,"session_id":lease.session_id,"task_id":task.id,
+            "kind":"approval_decision_committed","timestamp":final_state.audit[index * 2 + 1].timestamp,
+            "data":{"decision_cursor":cursor,"grant_id":grant.id}
+        }));
         let admitted = events
             .iter()
             .filter_map(|record| match &record.event {
@@ -799,18 +819,19 @@ fn approval(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Value]
         matches!(&events.last().ok_or("approval history empty")?.event,CoreEvent::AttemptFinished {lease:ended} if ended == lease),
         "approval lacks its original attempt terminal",
     )?;
-    let kinds = final_state
-        .audit
-        .iter()
-        .map(|audit| audit.kind.as_str())
-        .collect::<Vec<_>>();
+    expected_audit.push(json!({
+        "cursor":5,"session_id":lease.session_id,"task_id":null,
+        "kind":"grants_expired","timestamp":final_state.audit[4].timestamp,
+        "data":{"reason":"task finished"}
+    }));
+    expected_audit.push(json!({
+        "cursor":6,"session_id":lease.session_id,"task_id":task.id,
+        "kind":"run_finished","timestamp":final_state.audit[5].timestamp,
+        "data":{"error":null,"worker_id":lease.worker_id}
+    }));
     ensure(
-        kinds == ["grants_expired", "run_finished"]
-            && final_state.audit[0].data == json!({"reason":"task finished"})
-            && final_state.audit[0].task_id.is_none()
-            && final_state.audit[1].task_id.as_ref() == Some(&task.id)
-            && final_state.audit[1].data == json!({"error":null,"worker_id":lease.worker_id}),
-        "approval audit does not record the original completed task and revoked grants",
+        serde_json::to_value(&final_state.audit)? == json!(expected_audit),
+        "approval audit does not record the exact original decisions, completed task and revoked grants",
     )?;
     // Reuse the existing full Agent/Cells/Provider pairing validator. Its task
     // input is the original final snapshot rather than a new claimed check.

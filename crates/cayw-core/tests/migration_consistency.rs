@@ -87,8 +87,29 @@ fn raw_rows(path: &Path, id: &str) -> (Value, Vec<Value>) {
     (projection, events)
 }
 
+struct MigrationVerifier;
+impl ReconciliationVerifier for MigrationVerifier {
+    fn verify(&self, request: &ReconciliationRequest) -> Result<(), String> {
+        match request {
+            ReconciliationRequest::Capability { reconciliation }
+                if reconciliation.actor == "host"
+                    && reconciliation.evidence == "checked original operation"
+                    && reconciliation.outcome
+                        == (CapabilityOutcome::Completed {
+                            result: json!({"saved":true}),
+                        }) =>
+            {
+                Ok(())
+            }
+            _ => Err("fixture receipt rejected".into()),
+        }
+    }
+}
+
 fn fixture(path: &Path) -> (SessionStore, AttemptLease, CapabilityCallKey) {
-    let store = SessionStore::open(path).unwrap();
+    let store = SessionStore::open(path)
+        .unwrap()
+        .with_reconciliation_verifier(std::sync::Arc::new(MigrationVerifier));
     let session = store.create_session("migration facts").unwrap();
     let lease = store.begin_attempt(&session.id, "original-worker").unwrap();
     store
@@ -435,6 +456,13 @@ fn v2_logged_known_unknown_recovered_and_reconciled_results_migrate_unchanged() 
                     .reconcile_capability(
                         &lease.session_id,
                         CapabilityReconciliation {
+                            expected: Box::new(ReconciliationOrigin {
+                                lease: lease.clone(),
+                                task_id: "task".into(),
+                                execution_id: "vm".into(),
+                                parent_call_id: "launch".into(),
+                                source_hash: "source".into(),
+                            }),
                             key,
                             actor: "host".into(),
                             evidence: "checked original operation".into(),
@@ -460,6 +488,130 @@ fn v2_logged_known_unknown_recovered_and_reconciled_results_migrate_unchanged() 
             assert_eq!(serde_json::to_value(record).unwrap(), expected);
         }
         assert_eq!(actual.len(), events.len());
+    }
+}
+
+#[test]
+fn weak_v3_reconciliation_events_without_expected_are_rejected_without_changing_storage() {
+    struct ExactToolReceipt(ReconciliationRequest);
+    impl ReconciliationVerifier for ExactToolReceipt {
+        fn verify(&self, request: &ReconciliationRequest) -> Result<(), String> {
+            if request == &self.0 {
+                Ok(())
+            } else {
+                Err("request has no exact fixture receipt".into())
+            }
+        }
+    }
+    for kind in ["reconciled", "capability_reconciled"] {
+        let db = Database::new();
+        let baseline = db.path("complete-v3");
+        let (store, lease, key) = fixture(&baseline);
+        store
+            .append_agent_event(
+                &lease,
+                &AgentEvent::ToolExecutionEnd {
+                    call: ToolCall::new(
+                        "launch",
+                        "execute_code",
+                        json!({"action":"exec", "script":"return 1"}),
+                    ),
+                    result: cayw_agent::ToolResult {
+                        outcome_unknown: true,
+                        ..cayw_agent::ToolResult::error("original tool reply was lost")
+                    },
+                    duration_ms: None,
+                },
+            )
+            .unwrap();
+        store.recover(&lease.session_id).unwrap();
+        store
+            .reconcile_capability(
+                &lease.session_id,
+                CapabilityReconciliation {
+                    key,
+                    expected: Box::new(ReconciliationOrigin {
+                        lease: lease.clone(),
+                        task_id: "task".into(),
+                        execution_id: "vm".into(),
+                        parent_call_id: "launch".into(),
+                        source_hash: "source".into(),
+                    }),
+                    actor: "host".into(),
+                    evidence: "checked original operation".into(),
+                    outcome: CapabilityOutcome::Completed {
+                        result: json!({"saved":true}),
+                    },
+                    external_provenance: Some(json!({"operation_id":"original"})),
+                },
+            )
+            .unwrap();
+        let reconciliation = Reconciliation {
+            call_id: "launch".into(),
+            expected: store
+                .tool_reconciliation_origin(&lease.session_id, "launch")
+                .unwrap(),
+            actor: "host".into(),
+            evidence: "checked original tool".into(),
+            outcome: ReconciledOutcome::Completed {
+                result: cayw_agent::ToolResult::text("fixture operation completed"),
+            },
+        };
+        store
+            .clone()
+            .with_reconciliation_verifier(std::sync::Arc::new(ExactToolReceipt(
+                ReconciliationRequest::Tool {
+                    reconciliation: reconciliation.clone(),
+                },
+            )))
+            .reconcile(&lease.session_id, reconciliation)
+            .unwrap();
+        let (mut projection, mut events) = raw_rows(&baseline, &lease.session_id);
+        projection["execution_waits"] = json!([]);
+        let mut removed = 0;
+        for event in &mut events {
+            event["protocol_version"] = json!(PROTOCOL_VERSION);
+            if event["event"]["type"] == kind {
+                assert!(
+                    event["event"]["reconciliation"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("expected")
+                        .is_some()
+                );
+                removed += 1;
+            }
+        }
+        assert_eq!(removed, 1);
+        let path = db.path(kind);
+        legacy(&path, SCHEMA_VERSION, &projection, &events);
+        let raw_before = {
+            let db = Connection::open(&path).unwrap();
+            let projection: String = db
+                .query_row("SELECT projection FROM core_sessions", [], |row| row.get(0))
+                .unwrap();
+            let records: Vec<String> = db
+                .prepare("SELECT record FROM core_events ORDER BY cursor")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (projection, records)
+        };
+        assert_rejected_unchanged(&path, SCHEMA_VERSION);
+        let db = Connection::open(&path).unwrap();
+        let projection: String = db
+            .query_row("SELECT projection FROM core_sessions", [], |row| row.get(0))
+            .unwrap();
+        let records: Vec<String> = db
+            .prepare("SELECT record FROM core_events ORDER BY cursor")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!((projection, records), raw_before);
     }
 }
 

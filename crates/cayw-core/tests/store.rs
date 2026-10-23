@@ -12,6 +12,21 @@ use std::{
 };
 use uuid::Uuid;
 
+struct FixtureVerifier;
+impl cayw_core::ReconciliationVerifier for FixtureVerifier {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        match request {
+            cayw_core::ReconciliationRequest::Tool { reconciliation }
+                if reconciliation.actor == "host"
+                    && reconciliation.evidence == "inspected resulting file" =>
+            {
+                Ok(())
+            }
+            _ => Err("not a receipt accepted by this test host".into()),
+        }
+    }
+}
+
 struct Database(PathBuf);
 impl Database {
     fn new() -> Self {
@@ -23,7 +38,9 @@ impl Database {
         self.0.join("session.sqlite")
     }
     fn open(&self) -> SessionStore {
-        SessionStore::open(self.path()).unwrap()
+        SessionStore::open(self.path())
+            .unwrap()
+            .with_reconciliation_verifier(Arc::new(FixtureVerifier))
     }
 }
 impl Drop for Database {
@@ -618,6 +635,9 @@ fn interrupted_batch_preserves_durable_results_and_reconciles_only_missing_termi
                 &AgentEvent::ToolExecutionStart { call: call.clone() },
             )
             .unwrap();
+        store
+            .bind_tool_origin(&lease, &call.id, "original-task")
+            .unwrap();
         store.mark_tool_started(&lease, &call.id).unwrap();
     }
     end_call(&store, &lease, &a, "reported before batch commit");
@@ -647,19 +667,63 @@ fn interrupted_batch_preserves_durable_results_and_reconciles_only_missing_termi
         store.snapshot(&id).unwrap().state,
         SessionState::NeedsReconciliation
     );
-    store
-        .reconcile(
-            &id,
-            Reconciliation {
-                call_id: b.id,
-                actor: "host".into(),
-                evidence: "inspected resulting file".into(),
-                outcome: ReconciledOutcome::Completed {
-                    result: ToolResult::text("verified saved"),
-                },
-            },
-        )
+    let input = Reconciliation {
+        expected: store.tool_reconciliation_origin(&id, &b.id).unwrap(),
+        call_id: b.id.clone(),
+        actor: "host".into(),
+        evidence: "inspected resulting file".into(),
+        outcome: ReconciledOutcome::Completed {
+            result: ToolResult::text("verified saved"),
+        },
+    };
+    let events_before = store.events(&id, 0, 1000).unwrap();
+    for field in [
+        "session",
+        "attempt",
+        "worker",
+        "fence",
+        "task",
+        "call",
+        "execution",
+    ] {
+        let mut changed = input.clone();
+        match field {
+            "session" => changed.expected.lease.session_id = "other-session".into(),
+            "attempt" => changed.expected.lease.attempt_id = "other-attempt".into(),
+            "worker" => changed.expected.lease.worker_id = "other-worker".into(),
+            "fence" => changed.expected.lease.fence += 1,
+            "task" => changed.expected.task_id = "other-task".into(),
+            "call" => changed.expected.call.arguments = json!({"path":"other.txt"}),
+            _ => {
+                changed.expected.execution = Some(ExecutionInput {
+                    execution_id: "fake".into(),
+                    parent_call_id: b.id.clone(),
+                    task_id: "original-task".into(),
+                    source_hash: "fake-source".into(),
+                })
+            }
+        }
+        assert!(store.reconcile(&id, changed).is_err(), "{field}");
+        assert_eq!(store.snapshot(&id).unwrap(), recovered);
+        assert_eq!(store.events(&id, 0, 1000).unwrap(), events_before);
+    }
+    let db = rusqlite::Connection::open(database.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_reconciliation BEFORE INSERT ON core_events WHEN json_extract(NEW.record,'$.event.type')='reconciled' BEGIN SELECT RAISE(ABORT,'synthetic decision write failure'); END;").unwrap();
+    assert!(matches!(
+        store.reconcile(&id, input.clone()),
+        Err(CoreError::Database(_))
+    ));
+    assert_eq!(store.snapshot(&id).unwrap(), recovered);
+    assert_eq!(store.events(&id, 0, 1000).unwrap(), events_before);
+    db.execute_batch("DROP TRIGGER reject_reconciliation")
         .unwrap();
+    let settled = store.reconcile(&id, input.clone()).unwrap();
+    assert_eq!(store.reconcile(&id, input.clone()).unwrap(), settled);
+    let mut contradiction = input;
+    contradiction.outcome = ReconciledOutcome::NotExecuted {
+        reason: "changed claim".into(),
+    };
+    assert!(store.reconcile(&id, contradiction).is_err());
     let current = store.snapshot(&id).unwrap();
     assert_eq!(current.state, SessionState::Idle);
     assert!(current.unresolved_calls.is_empty());
@@ -671,7 +735,11 @@ fn interrupted_batch_preserves_durable_results_and_reconciles_only_missing_termi
             .collect::<Vec<_>>(),
         ["completed", "started", "planned"]
     );
-    assert!(results.iter().all(|result| !result.outcome_unknown));
+    assert_eq!(current.messages, recovered.messages);
+    assert!(
+        results[1].outcome_unknown,
+        "the original unknown reply is historical evidence"
+    );
     assert_eq!(store.events(&id, 0, old_log.len()).unwrap(), old_log);
     assert_eq!(
         store
@@ -740,6 +808,12 @@ fn unknown_outcome_cannot_be_cleared_by_finishing_or_reopening() {
             .reconcile(
                 &id,
                 Reconciliation {
+                    expected: Box::new(cayw_core::ToolReconciliationOrigin {
+                        lease: lease.clone(),
+                        task_id: "unbound-task".into(),
+                        call: call("unknown-call"),
+                        execution: None,
+                    }),
                     call_id: "unknown-call".into(),
                     actor: "host".into(),
                     evidence: "".into(),
@@ -750,6 +824,71 @@ fn unknown_outcome_cannot_be_cleared_by_finishing_or_reopening() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn reconciliation_payloads_require_the_complete_original_identity() {
+    let tool = serde_json::from_value::<Reconciliation>(json!({
+        "call_id":"unknown", "actor":"host", "evidence":"receipt",
+        "outcome":{"type":"not_executed","reason":"observed stopped"}
+    }));
+    assert!(
+        tool.is_err(),
+        "call_id alone must not select a tool reconciliation"
+    );
+    let capability = serde_json::from_value::<cayw_core::CapabilityReconciliation>(json!({
+        "key":{"execution_id":"vm","sequence":0}, "actor":"host", "evidence":"receipt",
+        "outcome":{"type":"completed","result":1}, "external_provenance":null
+    }));
+    assert!(
+        capability.is_err(),
+        "a key alone must not select a capability reconciliation"
+    );
+}
+
+#[test]
+fn reconciliation_requires_an_explicit_host_verifier() {
+    let database = Database::new();
+    let store = SessionStore::open(database.path()).unwrap();
+    let id = store.create_session("host authority").unwrap().id;
+    let lease = store.begin_attempt(&id, "worker").unwrap();
+    start(&store, &lease);
+    let tool = call("unknown");
+    message(
+        &store,
+        &lease,
+        Message::Assistant(assistant(vec![tool.clone()])),
+    );
+    store
+        .append_agent_event(
+            &lease,
+            &AgentEvent::ToolExecutionStart { call: tool.clone() },
+        )
+        .unwrap();
+    store
+        .bind_tool_origin(&lease, &tool.id, "original-task")
+        .unwrap();
+    store.mark_tool_started(&lease, &tool.id).unwrap();
+    let before = store.recover(&id).unwrap();
+    let events = store.events(&id, 0, 100).unwrap();
+    let result = store.reconcile(
+        &id,
+        Reconciliation {
+            expected: store.tool_reconciliation_origin(&id, &tool.id).unwrap(),
+            call_id: tool.id,
+            actor: "self-declared-host".into(),
+            evidence: "A nonempty sentence is not authorization or a verified receipt".into(),
+            outcome: ReconciledOutcome::Completed {
+                result: ToolResult::text("claimed success"),
+            },
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a default store must not accept caller-supplied actor and evidence"
+    );
+    assert_eq!(store.snapshot(&id).unwrap(), before);
+    assert_eq!(store.events(&id, 0, 100).unwrap(), events);
 }
 
 #[test]

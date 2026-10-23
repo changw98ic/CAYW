@@ -5,14 +5,21 @@ use super::*;
 struct WaitArguments {
     action: String,
     cell_id: String,
+    #[serde(deserialize_with = "wait_integer")]
     cursor: u64,
+    #[serde(deserialize_with = "wait_integer")]
     yield_time_ms: u64,
-    max_output_tokens: usize,
+    #[serde(deserialize_with = "wait_integer")]
+    max_output_tokens: u64,
     #[serde(default = "continue_default")]
     continue_execution: bool,
 }
 fn continue_default() -> bool {
     true
+}
+fn wait_integer<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    cayw_ai::unsigned_tool_integer(&value).map_err(serde::de::Error::custom)
 }
 
 impl StoredSession {

@@ -52,6 +52,7 @@ async fn last_owner_drop_must_not_deadlock_supervisor_notification_against_drain
             env: BTreeMap::new(),
             timeout: Duration::from_secs(10),
             max_output_bytes: 1024,
+            io: cayw_device::ProcessIo::Pipes,
         },
         CancellationToken::new(),
         resource,

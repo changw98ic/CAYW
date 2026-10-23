@@ -153,6 +153,16 @@ def main():
             records.extend(page)
             after = page[-1]["cursor"]
 
+    def cancel_original_task(sid, task_id):
+        tasks = rpc.call("session.tasks", {"session_id": sid})
+        task, = [task for task in tasks if task["id"] == task_id]
+        assert task["session_id"] == sid
+        target = {"session_id": sid, "task_id": task_id,
+                  "worker_id": task["worker_id"], "attempt_id": task["attempt_id"],
+                  "fence": task["fence"]}
+        result = rpc.call("session.cancel", target)
+        rpc_evidence.append({"method": "session.cancel", "params": target, "result": result})
+
     def select_session(sid):
         # Fresh Apps follow the host's session order, which is not creation order.
         wait_text("Sessions refreshed.")
@@ -221,6 +231,9 @@ def main():
         # A fresh process attaches after the actual stream was produced, the review bug.
         run_id = rpc.start("session.prompt", {"session_id": sid, "text": "attach to existing run"})
         wait_for(lambda: get(sid)["pending_approvals"], "external run reached host approval")
+        original_task, = [task for task in rpc.call("session.tasks", {"session_id": sid})
+                          if task["state"] == "running"]
+        original_task_id = original_task["id"]
         key("C-q")
         wait_for(lambda: "CAYW  •  connected" not in pane(), "first process quit")
         wait_text("TUI_EXIT=0")
@@ -237,7 +250,7 @@ def main():
         wait_for(lambda: "CAYW  •  connected" not in pane(), "TUI quit")
         # Only explicit RPC cancellation clears the externally owned work for cleanup.
         assert get(sid)["pending_approvals"], "quitting an attachment must preserve the other connection's run"
-        rpc.call("session.cancel", {"session_id": sid})
+        cancel_original_task(sid, original_task_id)
         rpc.finish(run_id)
         wait_shell()
         rpc_evidence.append({"check": "terminal mode restoration", **restored_terminal(out)})
@@ -259,6 +272,9 @@ def main():
         run_id = rpc.start("session.prompt", {"session_id": sid, "text": "gated unfinished stream"})
         wait_for(lambda: any(record["event"].get("event", {}).get("message", {}).get("content", []) == [{"type":"text","text":"streamed fixture 你好"}] for record in all_events(sid)), "unfinished stream delta recorded")
         initial = get(sid)
+        original_task, = [task for task in rpc.call("session.tasks", {"session_id": sid})
+                          if task["state"] == "running"]
+        original_task_id = original_task["id"]
         assert initial["state"] == "running" and not initial["pending_approvals"]
         assert not any(message.get("role") == "assistant" for message in initial["messages"])
         launch_env.write_text(json.dumps({"CAYW_IPC_ADDR": address, "CAYW_IPC_TOKEN": token}))
@@ -276,7 +292,7 @@ def main():
         key("C-q")
         wait_for(lambda: "CAYW  •  connected" not in pane(), "unfinished attachment quit")
         assert get(sid)["state"] == "running", "quitting must not cancel the external stream"
-        rpc.call("session.cancel", {"session_id":sid})
+        cancel_original_task(sid, original_task_id)
         rpc.finish(run_id)
         wait_shell()
         rpc_evidence.append({"check": "terminal mode restoration", **restored_terminal(out)})

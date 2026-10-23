@@ -126,6 +126,65 @@ pub(crate) fn sha256(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
+/// URI syntax only. The value is an opaque source key; it is never resolved,
+/// decoded or opened as a filesystem path, and fragments/queries are not data.
+pub(crate) fn resource_uri(value: &str) -> bool {
+    if value.is_empty() || value.len() > 2048 || !value.is_ascii() {
+        return false;
+    }
+    if value
+        .bytes()
+        .any(|c| c.is_ascii_control() || c.is_ascii_whitespace())
+    {
+        return false;
+    }
+    let Some((scheme, rest)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.as_bytes()[0].is_ascii_alphabetic()
+        && scheme
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+        && rest.bytes().any(|c| c.is_ascii_alphanumeric())
+}
+
+/// `type/subtype` tokens only, without parameters. MIME is explicit metadata,
+/// not a hint that may be rewritten by the bridge.
+pub(crate) fn mime_type(value: &str) -> bool {
+    if value.is_empty() || value.len() > 256 || !value.is_ascii() {
+        return false;
+    }
+    let Some((kind, subtype)) = value.split_once('/') else {
+        return false;
+    };
+    let token = |byte: u8| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    };
+    !kind.is_empty()
+        && !subtype.is_empty()
+        && !subtype.contains('/')
+        && kind.bytes().all(token)
+        && subtype.bytes().all(token)
+}
+
 /// All object schemas are closed. Local refs are accepted by the same validator
 /// used by the Core; external schema resolution is rejected without IO.
 pub(crate) fn strict_schema(schema: &Value) -> Result<(), CapabilityError> {

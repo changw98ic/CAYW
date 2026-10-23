@@ -121,20 +121,20 @@ async fn another_connection_cancels_running_work_and_never_duplicates_a_session(
     let rt = open(&dir, p.clone());
     let peer = open(&dir, p.clone());
     let session = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&session, "only once").unwrap();
     let run_rt = rt.clone();
-    let run_id = session.clone();
-    let run = tokio::spawn(async move {
-        run_rt
-            .prompt(&run_id, "only once", CancellationToken::new())
-            .await
-    });
+    let run_id = admitted.id.clone();
+    let run = tokio::spawn(async move { run_rt.resume(&run_id, CancellationToken::new()).await });
     entered(&p).await;
     assert!(matches!(
         peer.enqueue(&session, "duplicate"),
         Err(RuntimeError::Busy)
     ));
     assert_eq!(peer.health().unwrap().running, 1);
-    assert!(peer.cancel(&session).unwrap());
+    assert!(
+        peer.cancel(&peer.task(&admitted.id).unwrap().cancel_target())
+            .unwrap()
+    );
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()
@@ -153,16 +153,13 @@ async fn explicit_recovery_requires_stopped_worker_before_releasing_its_slot() {
     let rt = open(&dir, p.clone());
     let peer = open(&dir, p.clone());
     let id = rt.create(None).unwrap().id;
+    let admitted = rt.enqueue(&id, "old executor").unwrap();
     let run_rt = rt.clone();
-    let run_id = id.clone();
-    let run = tokio::spawn(async move {
-        run_rt
-            .prompt(&run_id, "old executor", CancellationToken::new())
-            .await
-    });
+    let run_id = admitted.id.clone();
+    let run = tokio::spawn(async move { run_rt.resume(&run_id, CancellationToken::new()).await });
     entered(&p).await;
     let old = rt.get(&id).unwrap().attempt.unwrap();
-    let task = rt.tasks(&id).unwrap()[0].clone();
+    let task = rt.task(&admitted.id).unwrap();
     assert!(
         peer.resume(&task.id, CancellationToken::new())
             .await
@@ -172,7 +169,7 @@ async fn explicit_recovery_requires_stopped_worker_before_releasing_its_slot() {
     assert_eq!(peer.get(&id).unwrap().attempt, Some(old.clone()));
     assert_eq!(peer.task(&task.id).unwrap().state, TaskState::Running);
     assert_eq!(peer.health().unwrap().running, 1);
-    assert!(peer.cancel(&id).unwrap());
+    assert!(peer.cancel(&task.cancel_target()).unwrap());
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()
@@ -214,7 +211,7 @@ async fn queued_cancellation_and_queue_timeout_release_capacity_without_model_ca
     ));
     assert!(p.calls.lock().unwrap().is_empty());
     assert_eq!(rt.health().unwrap().queued, 1);
-    assert!(rt.cancel(&first).unwrap());
+    assert!(rt.cancel(&blocked.cancel_target()).unwrap());
     assert_eq!(rt.task(&blocked.id).unwrap().state, TaskState::Cancelled);
     assert_eq!(rt.health().unwrap().queued, 0);
 }

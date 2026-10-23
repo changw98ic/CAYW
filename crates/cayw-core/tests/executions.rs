@@ -10,6 +10,22 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+struct FixtureVerifier;
+impl cayw_core::ReconciliationVerifier for FixtureVerifier {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        match request {
+            cayw_core::ReconciliationRequest::Capability { reconciliation }
+                if reconciliation.actor == "inspecting-host"
+                    && reconciliation.evidence == "checked the durable operation receipt"
+                    && reconciliation.outcome == completed() =>
+            {
+                Ok(())
+            }
+            _ => Err("receipt not accepted by the fixture host".into()),
+        }
+    }
+}
+
 struct Fixture {
     directory: PathBuf,
     store: SessionStore,
@@ -22,7 +38,9 @@ impl Fixture {
     fn new(arguments: Value) -> Self {
         let directory = std::env::temp_dir().join(format!("cayw-core-vm-{}", Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
-        let store = SessionStore::open(directory.join("session.sqlite")).unwrap();
+        let store = SessionStore::open(directory.join("session.sqlite"))
+            .unwrap()
+            .with_reconciliation_verifier(std::sync::Arc::new(FixtureVerifier));
         let id = store.create_session("VM records").unwrap().id;
         let lease = store.begin_attempt(&id, "original-worker").unwrap();
         store
@@ -231,16 +249,392 @@ fn completed() -> CapabilityOutcome {
     }
 }
 fn reconciliation(
+    fixture: &Fixture,
     key: CapabilityCallKey,
     external_provenance: Option<Value>,
 ) -> CapabilityReconciliation {
     CapabilityReconciliation {
+        expected: Box::new(cayw_core::ReconciliationOrigin {
+            lease: fixture.lease.clone(),
+            task_id: "host-task".into(),
+            execution_id: key.execution_id.clone(),
+            parent_call_id: fixture.parent.id.clone(),
+            source_hash: "sha256:original-source".into(),
+        }),
         key,
         actor: "inspecting-host".into(),
         evidence: "checked the durable operation receipt".into(),
         outcome: completed(),
         external_provenance,
     }
+}
+
+struct AllowParentReconciliation(std::sync::atomic::AtomicUsize);
+impl cayw_core::ReconciliationVerifier for AllowParentReconciliation {
+    fn verify(&self, _: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        // Deliberately authorize every test request. Independent Core facts must
+        // still reject a host decision that denies an already executed child.
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn reconciliation_fixture() -> Fixture {
+    let fixture = Fixture::new(json!({"action":"exec","script":"original local file fixture"}));
+    fixture
+        .store
+        .bind_tool_origin(&fixture.lease, &fixture.parent.id, "host-task")
+        .unwrap();
+    fixture.begin("vm");
+    fixture
+}
+
+fn original_child(fixture: &Fixture, key: &CapabilityCallKey) -> cayw_core::CapabilityCallRecord {
+    let projection: Value = serde_json::from_str(&fixture.projection()).unwrap();
+    projection["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| {
+            serde_json::from_value::<cayw_core::CapabilityCallRecord>(call.clone()).unwrap()
+        })
+        .find(|call| call.key == *key)
+        .unwrap()
+}
+
+fn actual_file_child(fixture: &Fixture, completed: bool) -> cayw_core::CapabilityCallRecord {
+    use std::io::Write;
+    let effect = fixture.directory.join("original-effect");
+    let key = key(0);
+    fixture
+        .store
+        .plan_capability(
+            &fixture.lease,
+            CapabilityInput {
+                key: key.clone(),
+                name: "fs.write".into(),
+                arguments: json!({"path":effect,"content":"one actual local effect"}),
+            },
+        )
+        .unwrap();
+    let started = fixture
+        .store
+        .start_capability(
+            &fixture.lease,
+            &key,
+            serde_json::to_value(CapabilityAuthorization {
+                actor: "local-file-fixture-host".into(),
+                target: key.clone(),
+                task_id: "host-task".into(),
+                capability: "fs.write".into(),
+                scope: effect.to_string_lossy().into(),
+                decision: ApprovalDecision::Approve,
+                approval_id: None,
+                external_provenance: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let CoreEvent::CapabilityStarted { call } = &started.event else {
+        panic!("the actual file attempt needs an original Core start");
+    };
+    assert_eq!(call.lease, fixture.lease);
+    assert_eq!(call.task_id, "host-task");
+    assert_eq!(call.parent_call_id, fixture.parent.id);
+    let outcome = if completed {
+        let payload = b"one actual local effect";
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&effect)
+            .unwrap();
+        file.write_all(payload).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(std::fs::read(&effect).unwrap(), payload);
+        CapabilityOutcome::Completed {
+            result: json!({"path":effect,"written_bytes":payload.len()}),
+        }
+    } else {
+        std::fs::create_dir(&effect).unwrap();
+        let error = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&effect)
+            .expect_err("the real create_new file attempt must collide with the directory");
+        assert!(error.raw_os_error().is_some());
+        assert!(effect.is_dir());
+        CapabilityOutcome::Failed {
+            error: format!("actual local create_new failed: {error}"),
+        }
+    };
+    std::fs::File::open(&fixture.directory)
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    let settled = fixture
+        .store
+        .settle_capability(&fixture.lease, &key, outcome.clone())
+        .unwrap();
+    let CoreEvent::CapabilitySettled { call } = settled.event else {
+        panic!("the real file outcome needs a durable Core terminal");
+    };
+    assert_eq!(call.outcome, Some(outcome));
+    assert_eq!(original_child(fixture, &key), call);
+    call
+}
+
+fn lose_tool_observation(fixture: &Fixture, call: &ToolCall) {
+    fixture
+        .store
+        .append_agent_event(
+            &fixture.lease,
+            &AgentEvent::ToolExecutionEnd {
+                call: call.clone(),
+                result: ToolResult {
+                    outcome_unknown: true,
+                    ..ToolResult::error("the original tool observation was lost")
+                },
+                duration_ms: None,
+            },
+        )
+        .unwrap();
+    let recovered = fixture.store.recover(&fixture.lease.session_id).unwrap();
+    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.unresolved_calls.len(), 1);
+    assert_eq!(recovered.unresolved_calls[0].call, *call);
+    assert!(recovered.unresolved_capabilities.is_empty());
+    assert!(recovered.messages.iter().any(|message| {
+        matches!(message, Message::ToolResult(result)
+            if result.tool_call_id == call.id && result.outcome_unknown)
+    }));
+}
+
+fn nonexecution_decision(fixture: &Fixture, call: &ToolCall) -> cayw_core::Reconciliation {
+    cayw_core::Reconciliation {
+        call_id: call.id.clone(),
+        expected: fixture
+            .store
+            .tool_reconciliation_origin(&fixture.lease.session_id, &call.id)
+            .unwrap(),
+        actor: "authorized-fixture-host".into(),
+        evidence: "explicit broad test authority; independent original Core facts remain mandatory"
+            .into(),
+        outcome: cayw_core::ReconciledOutcome::NotExecuted {
+            reason: "the host proposes that this particular tool invocation was not executed"
+                .into(),
+        },
+    }
+}
+
+fn assert_executed_child_rejects_parent_nonexecution(completed: bool) {
+    use std::sync::atomic::Ordering;
+    let fixture = reconciliation_fixture();
+    let child = actual_file_child(&fixture, completed);
+    lose_tool_observation(&fixture, &fixture.parent);
+    let id = &fixture.lease.session_id;
+    let decision = nonexecution_decision(&fixture, &fixture.parent);
+    assert_eq!(decision.expected.execution, Some(fixture.input("vm")));
+    let before = fixture.store.snapshot(id).unwrap();
+    let events = fixture.store.events(id, 0, 1000).unwrap();
+    let projection = fixture.projection();
+    let verifier = std::sync::Arc::new(AllowParentReconciliation(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let store = fixture
+        .store
+        .clone()
+        .with_reconciliation_verifier(verifier.clone());
+    let result = store.reconcile(id, decision);
+    let after = store.snapshot(id).unwrap();
+    let child_after = original_child(&fixture, &child.key);
+    assert!(
+        verifier.0.load(Ordering::SeqCst) > 0,
+        "the broad verifier must actually authorize before the local contradiction check"
+    );
+    assert!(
+        result.is_err(),
+        "Core accepted parent launch NotExecuted after an actually executed child: \
+         child_outcome={:?}, accepted={}, state_after={:?}, core_unchanged={}, \
+         events_unchanged={}, child_unchanged={}, messages_unchanged={}",
+        child.outcome,
+        result.is_ok(),
+        after.state,
+        after == before,
+        store.events(id, 0, 1000).unwrap() == events,
+        child_after == child,
+        after.messages == before.messages,
+    );
+    assert_eq!(after, before);
+    assert_eq!(store.events(id, 0, 1000).unwrap(), events);
+    assert_eq!(fixture.projection(), projection);
+    assert_eq!(child_after, child);
+    assert_eq!(after.messages, before.messages);
+    let effect = fixture.directory.join("original-effect");
+    if completed {
+        assert_eq!(std::fs::read(effect).unwrap(), b"one actual local effect");
+    } else {
+        assert!(effect.is_dir());
+        assert_eq!(std::fs::read_dir(effect).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn known_completed_child_rejects_parent_launch_nonexecution_before_commit() {
+    assert_executed_child_rejects_parent_nonexecution(true);
+}
+
+#[test]
+fn known_failed_child_rejects_parent_launch_nonexecution_before_commit() {
+    assert_executed_child_rejects_parent_nonexecution(false);
+}
+
+#[test]
+fn all_children_not_executed_allow_parent_nonexecution_without_changing_original_history() {
+    use std::sync::atomic::Ordering;
+    let fixture = reconciliation_fixture();
+    let mut children = Vec::new();
+    for sequence in 0..2 {
+        let key = fixture.plan(sequence);
+        fixture
+            .store
+            .settle_capability(&fixture.lease, &key, not_executed())
+            .unwrap();
+        children.push(original_child(&fixture, &key));
+    }
+    lose_tool_observation(&fixture, &fixture.parent);
+    let id = &fixture.lease.session_id;
+    let before = fixture.store.snapshot(id).unwrap();
+    let events = fixture.store.events(id, 0, 1000).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, CoreEvent::CapabilityStarted { .. }))
+    );
+    let decision = nonexecution_decision(&fixture, &fixture.parent);
+    let verifier = std::sync::Arc::new(AllowParentReconciliation(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let store = fixture
+        .store
+        .clone()
+        .with_reconciliation_verifier(verifier.clone());
+    let reconciled = store.reconcile(id, decision.clone()).unwrap();
+    assert!(verifier.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(reconciled.state, SessionState::Idle);
+    assert!(reconciled.unresolved_calls.is_empty());
+    assert_eq!(reconciled.messages, before.messages);
+    assert_eq!(reconciled.executions, before.executions);
+    let after_events = store.events(id, 0, 1000).unwrap();
+    assert!(after_events.starts_with(&events));
+    assert_eq!(after_events.len(), events.len() + 1);
+    assert!(matches!(
+        &after_events.last().unwrap().event,
+        CoreEvent::Reconciled { reconciliation } if reconciliation == &decision
+    ));
+    for child in children {
+        assert_eq!(original_child(&fixture, &child.key), child);
+    }
+    assert_eq!(store.reconcile(id, decision).unwrap(), reconciled);
+    assert_eq!(store.events(id, 0, 1000).unwrap(), after_events);
+    assert!(!fixture.directory.join("note.txt").exists());
+}
+
+#[test]
+fn known_completed_child_allows_not_executed_wait_without_denying_its_original_launch() {
+    use std::sync::atomic::Ordering;
+    let fixture = reconciliation_fixture();
+    let child = actual_file_child(&fixture, true);
+    fixture.parent_end();
+    let parent_result = fixture
+        .store
+        .snapshot(&fixture.lease.session_id)
+        .unwrap()
+        .messages
+        .into_iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    fixture
+        .store
+        .append_agent_event(
+            &fixture.lease,
+            &AgentEvent::TurnEnd {
+                message: fixture.assistant.clone(),
+                tool_results: vec![parent_result],
+            },
+        )
+        .unwrap();
+    fixture
+        .store
+        .append_agent_event(&fixture.lease, &AgentEvent::TurnStart)
+        .unwrap();
+    let wait = ToolCall::new(
+        "observation-wait",
+        "execute_code",
+        json!({"action":"wait","cell_id":"vm","cursor":0,"yield_time_ms":0,
+            "max_output_tokens":1024,"continue_execution":false}),
+    );
+    append_message(
+        &fixture.store,
+        &fixture.lease,
+        Message::Assistant(model_message(vec![wait.clone()])),
+    );
+    fixture
+        .store
+        .append_agent_event(
+            &fixture.lease,
+            &AgentEvent::ToolExecutionStart { call: wait.clone() },
+        )
+        .unwrap();
+    fixture
+        .store
+        .bind_tool_origin(&fixture.lease, &wait.id, "host-task")
+        .unwrap();
+    fixture
+        .store
+        .mark_tool_started(&fixture.lease, &wait.id)
+        .unwrap();
+    fixture
+        .store
+        .register_execution_wait(&fixture.lease, &wait.id, "vm", "host-task", &wait.arguments)
+        .unwrap();
+    lose_tool_observation(&fixture, &wait);
+    let decision = nonexecution_decision(&fixture, &wait);
+    let execution = decision.expected.execution.as_ref().unwrap();
+    assert_eq!(execution, &fixture.input("vm"));
+    assert_ne!(execution.parent_call_id, wait.id);
+    let id = &fixture.lease.session_id;
+    let before = fixture.store.snapshot(id).unwrap();
+    let events = fixture.store.events(id, 0, 1000).unwrap();
+    let verifier = std::sync::Arc::new(AllowParentReconciliation(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    let store = fixture
+        .store
+        .clone()
+        .with_reconciliation_verifier(verifier.clone());
+    let reconciled = store.reconcile(id, decision.clone()).unwrap();
+    assert!(verifier.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(reconciled.state, SessionState::Idle);
+    assert!(reconciled.unresolved_calls.is_empty());
+    assert_eq!(reconciled.messages, before.messages);
+    assert_eq!(reconciled.executions, before.executions);
+    assert_eq!(original_child(&fixture, &child.key), child);
+    let after_events = store.events(id, 0, 1000).unwrap();
+    assert!(after_events.starts_with(&events));
+    assert_eq!(after_events.len(), events.len() + 1);
+    assert!(matches!(
+        &after_events.last().unwrap().event,
+        CoreEvent::Reconciled { reconciliation } if reconciliation == &decision
+    ));
+    assert_eq!(store.reconcile(id, decision).unwrap(), reconciled);
+    assert_eq!(store.events(id, 0, 1000).unwrap(), after_events);
+    assert_eq!(
+        std::fs::read(fixture.directory.join("original-effect")).unwrap(),
+        b"one actual local effect"
+    );
 }
 
 #[test]
@@ -299,7 +693,7 @@ fn a_started_child_is_the_only_unknown_when_the_parent_response_is_lost() {
     assert_eq!(recovered.executions[0].state, ExecutionState::Interrupted);
     let recovered = fixture
         .store
-        .reconcile_capability(&recovered.id, reconciliation(key, None))
+        .reconcile_capability(&recovered.id, reconciliation(&fixture, key, None))
         .unwrap();
     assert_eq!(recovered.state, SessionState::Idle);
     fixture
@@ -1270,7 +1664,7 @@ fn recovery_preserves_known_children_and_only_reconciles_started_effects() {
     ));
     let reconciled = fixture
         .store
-        .reconcile_capability(&before.id, reconciliation(started.clone(), None))
+        .reconcile_capability(&before.id, reconciliation(&fixture, started.clone(), None))
         .unwrap();
     assert_eq!(reconciled.state, SessionState::Idle);
     assert!(reconciled.unresolved_capabilities.is_empty());
@@ -1279,14 +1673,16 @@ fn recovery_preserves_known_children_and_only_reconciles_started_effects() {
     assert!(
         fixture
             .store
-            .reconcile_capability(&before.id, reconciliation(known, None))
+            .reconcile_capability(&before.id, reconciliation(&fixture, known, None))
             .is_err()
     );
-    assert!(
+    assert_eq!(
         fixture
             .store
-            .reconcile_capability(&before.id, reconciliation(started, None))
-            .is_err()
+            .reconcile_capability(&before.id, reconciliation(&fixture, started, None))
+            .unwrap(),
+        reconciled,
+        "an exact retry must retain the first decision and cursor"
     );
     fixture
         .store
@@ -1321,7 +1717,7 @@ fn reconciliation_checks_the_provenance_bound_before_external_execution() {
                 .store
                 .reconcile_capability(
                     &fixture.lease.session_id,
-                    reconciliation(key.clone(), external)
+                    reconciliation(&fixture, key.clone(), external)
                 )
                 .is_err()
         );
@@ -1331,11 +1727,87 @@ fn reconciliation_checks_the_provenance_bound_before_external_execution() {
         .store
         .reconcile_capability(
             &fixture.lease.session_id,
-            reconciliation(key, Some(provenance)),
+            reconciliation(&fixture, key, Some(provenance)),
         )
         .unwrap();
     assert_eq!(recovered.state, SessionState::Idle);
     assert!(recovered.unresolved_capabilities.is_empty());
+}
+
+#[test]
+fn reconciliation_checks_every_original_identity_field_and_requires_host_authority() {
+    let fixture = Fixture::new(json!({"script":"return 1"}));
+    fixture.begin("vm");
+    fixture.parent_end();
+    let key = fixture.plan(0);
+    fixture
+        .store
+        .start_capability(&fixture.lease, &key, authorization(key.clone(), None, None))
+        .unwrap();
+    let unknown = fixture.store.recover(&fixture.lease.session_id).unwrap();
+    let input = reconciliation(&fixture, key, None);
+    let events = fixture.store.events(&unknown.id, 0, 1000).unwrap();
+    let untrusted = SessionStore::open(fixture.directory.join("session.sqlite")).unwrap();
+    assert!(matches!(
+        untrusted.reconcile_capability(&unknown.id, input.clone()),
+        Err(CoreError::ApprovalDenied)
+    ));
+    for field in [
+        "session",
+        "attempt",
+        "worker",
+        "fence",
+        "task",
+        "execution",
+        "parent",
+        "source",
+    ] {
+        let mut changed = input.clone();
+        match field {
+            "session" => changed.expected.lease.session_id = "different-session".into(),
+            "attempt" => changed.expected.lease.attempt_id = "different-attempt".into(),
+            "worker" => changed.expected.lease.worker_id = "different-worker".into(),
+            "fence" => changed.expected.lease.fence += 1,
+            "task" => changed.expected.task_id = "different-task".into(),
+            "execution" => changed.expected.execution_id = "different-execution".into(),
+            "parent" => changed.expected.parent_call_id = "different-parent".into(),
+            _ => changed.expected.source_hash = "different-source".into(),
+        }
+        assert!(
+            fixture
+                .store
+                .reconcile_capability(&unknown.id, changed)
+                .is_err(),
+            "{field}"
+        );
+        assert_eq!(fixture.store.snapshot(&unknown.id).unwrap(), unknown);
+        assert_eq!(fixture.store.events(&unknown.id, 0, 1000).unwrap(), events);
+    }
+    for field in ["actor", "evidence"] {
+        let mut changed = input.clone();
+        if field == "actor" {
+            changed.actor = "self-declared-host".into();
+        } else {
+            changed.evidence = "nonempty unsupported receipt".into();
+        }
+        assert!(matches!(
+            fixture.store.reconcile_capability(&unknown.id, changed),
+            Err(CoreError::ApprovalDenied)
+        ));
+        assert_eq!(fixture.store.snapshot(&unknown.id).unwrap(), unknown);
+    }
+    let settled = fixture
+        .store
+        .reconcile_capability(&unknown.id, input.clone())
+        .unwrap();
+    assert_eq!(untrusted.snapshot(&unknown.id).unwrap(), settled);
+    assert!(
+        matches!(
+            untrusted.reconcile_capability(&unknown.id, input),
+            Err(CoreError::ApprovalDenied)
+        ),
+        "exact retries still require host authority"
+    );
 }
 
 #[test]
@@ -1443,11 +1915,11 @@ fn recovery_and_reconciliation_roll_back_all_child_facts_on_insert_failure() {
     fixture.assert_rollback(|| {
         fixture
             .store
-            .reconcile_capability(&before.id, reconciliation(started.clone(), None))
+            .reconcile_capability(&before.id, reconciliation(&fixture, started.clone(), None))
     });
     fixture
         .store
-        .reconcile_capability(&before.id, reconciliation(started, None))
+        .reconcile_capability(&before.id, reconciliation(&fixture, started, None))
         .unwrap();
 }
 

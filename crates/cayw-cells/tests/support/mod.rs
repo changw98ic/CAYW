@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_cells::{
-    CellBackend, CellError, CellExecution, CellManager, CellPage, CellTerminal, ExecRequest,
+    CellBackend, CellError, CellExecution, CellLimits, CellManager, CellPage, CellTerminal,
+    CellValueAuthorizer, CellValueExecutor, CellValueOperation, ExecRequest, SqliteJournal,
+    authorized_cell_backend,
 };
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use serde_json::Value;
@@ -38,6 +40,42 @@ impl CellBackend for Backend {
     fn finished(&self, _: &CellExecution, _: &CellTerminal) -> Result<(), CellError> {
         Ok(())
     }
+}
+/// Explicit test-only value policy. Production must supply its real host
+/// authorization; the library does not default-allow store/load.
+#[allow(dead_code)]
+struct AllowFixtureValues;
+#[async_trait]
+impl CellValueAuthorizer for AllowFixtureValues {
+    async fn authorize(
+        &self,
+        _: &CellExecution,
+        _: CellValueOperation,
+        _: &Value,
+        _: CancellationToken,
+    ) -> Result<(), CapabilityError> {
+        Ok(())
+    }
+}
+#[allow(dead_code)]
+pub fn values_wrap(
+    inner: Arc<dyn CellBackend>,
+    journal: Arc<SqliteJournal>,
+    limits: CellLimits,
+) -> Arc<dyn CellBackend> {
+    authorized_cell_backend(
+        inner,
+        CellValueExecutor::new(journal, limits),
+        Arc::new(AllowFixtureValues),
+    )
+}
+#[allow(dead_code)]
+pub fn backend_with_values(
+    host: Arc<dyn CapabilityHost>,
+    journal: Arc<SqliteJournal>,
+    limits: CellLimits,
+) -> Arc<dyn CellBackend> {
+    values_wrap(backend(host), journal, limits)
 }
 /// Explicit test fixture for independently admitted reads. The adapter below is
 /// a real CellBackend; Bridge never has a registered-read bypass.

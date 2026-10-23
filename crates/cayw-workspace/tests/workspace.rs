@@ -644,6 +644,128 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
     );
 }
 
+#[tokio::test]
+async fn patch_preconditions_reject_missing_files_and_absent_old_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = workspace(&temp);
+    let missing = call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[{"op":"patch","path":"missing.json","expected_sha256":hash(b"null"),"old":"null","new":"true","language":"json"}]}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!missing.outcome_unknown);
+    assert!(
+        missing
+            .message
+            .contains("compare-and-swap absence conflict"),
+        "{missing}"
+    );
+    assert!(!temp.path().join("missing.json").exists());
+    assert_eq!(
+        fs::read_dir(temp.path().join(".cayw-workspace"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    fs::write(temp.path().join("existing.json"), b"{\"old\":true}").unwrap();
+    let before = fs::read(temp.path().join("existing.json")).unwrap();
+    let unmatched = call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[{"op":"patch","path":"existing.json","expected_sha256":hash(&before),"old":"missing","new":"false","language":"json"}]}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!unmatched.outcome_unknown);
+    assert!(
+        unmatched.message.contains("patch text not found"),
+        "{unmatched}"
+    );
+    assert_eq!(fs::read(temp.path().join("existing.json")).unwrap(), before);
+    assert_eq!(
+        fs::read_dir(temp.path().join(".cayw-workspace"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn mkdir_requires_an_existing_parent_and_an_absent_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = workspace(&temp);
+    let missing_parent = call(
+        &workspace,
+        "fs.mkdir",
+        json!({"path":"missing/child","expected_absent":true}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!missing_parent.outcome_unknown);
+    assert!(!temp.path().join("missing").exists());
+
+    call(
+        &workspace,
+        "fs.mkdir",
+        json!({"path":"existing","expected_absent":true}),
+    )
+    .await
+    .unwrap();
+    let existing = call(
+        &workspace,
+        "fs.mkdir",
+        json!({"path":"existing","expected_absent":true}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!existing.outcome_unknown);
+    assert!(temp.path().join("existing").is_dir());
+    assert_eq!(
+        fs::read_dir(temp.path().join("existing")).unwrap().count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn batch_status_without_an_id_lists_every_published_journal() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = workspace(&temp);
+    let first = call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[write("one.json","1")]}),
+    )
+    .await
+    .unwrap();
+    let second = call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[write("two.json","2")]}),
+    )
+    .await
+    .unwrap();
+    let listed = call(&workspace, "fs.batch_status", json!({}))
+        .await
+        .unwrap();
+    let batches = listed["batches"].as_array().unwrap();
+    assert_eq!(batches.len(), 2);
+    let ids: Vec<&str> = batches
+        .iter()
+        .map(|batch| batch["batch_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&first["batch_id"].as_str().unwrap()));
+    assert!(ids.contains(&second["batch_id"].as_str().unwrap()));
+    assert!(batches.iter().all(|batch| batch["status"] == "prepared"));
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch["outcome_unknown"] == false)
+    );
+}
+
 #[test]
 fn catalog_schemas_are_valid_and_strict() {
     for definition in cayw_workspace::definitions() {

@@ -1,4 +1,7 @@
-use crate::{ApprovalChoice, Runtime, RuntimeError};
+use crate::{
+    ApprovalChoice, Runtime, RuntimeError,
+    input::{ImageInput, TaskInput},
+};
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_core::{CapabilityReconciliation, Reconciliation};
@@ -22,15 +25,25 @@ impl From<RuntimeError> for RpcError {
             RuntimeError::QueueFull => "queue_full",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::Budget(_) => "budget_exceeded",
-            RuntimeError::NeedsReconciliation => "needs_reconciliation",
+            RuntimeError::NeedsReconciliation => "needs_reconciliation_outcome_unknown",
             RuntimeError::Frozen(_) => "session_frozen",
             RuntimeError::StaleApproval => "stale_approval",
+            RuntimeError::StaleCancellation => "stale_cancellation",
             RuntimeError::RecoveryRequired {
                 outcome_unknown: true,
                 ..
             } => "runtime_outcome_unknown",
             RuntimeError::RecoveryRequired { .. } => "recovery_required",
             RuntimeError::Core(_) => "session_error",
+            RuntimeError::Request(error) => match error {
+                cayw_requests::RequestError::InvalidInput(_) => "invalid_params",
+                cayw_requests::RequestError::Stale => "request_stale",
+                cayw_requests::RequestError::NotFound => "request_not_found",
+                cayw_requests::RequestError::Denied(_) => "request_denied",
+                cayw_requests::RequestError::Budget => "request_budget_exceeded",
+                cayw_requests::RequestError::PolicyMismatch => "request_policy_changed",
+                _ => "request_authority_unavailable_outcome_unknown",
+            },
             _ => "runtime_error",
         };
         Self::new(code, error.to_string())
@@ -54,6 +67,8 @@ struct Session {
 struct Prompt {
     session_id: String,
     text: String,
+    #[serde(default)]
+    images: Vec<ImageInput>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,6 +99,13 @@ struct Revoke {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AnswerQuestion {
+    session_id: String,
+    request_id: String,
+    answer: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Reconcile {
     session_id: String,
     reconciliation: Reconciliation,
@@ -106,6 +128,80 @@ struct Fork {
 #[serde(deny_unknown_fields)]
 struct Task {
     task_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnqueueWithIntent {
+    session_id: String,
+    text: String,
+    #[serde(default)]
+    images: Vec<ImageInput>,
+    intent: crate::TaskIntent,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestStatus {
+    task_id: String,
+    request_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestEvents {
+    task_id: String,
+    #[serde(default)]
+    after: u64,
+    #[serde(default = "request_page_limit")]
+    limit: usize,
+}
+fn request_page_limit() -> usize {
+    64
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RequestDecision {
+    Allow { lifetime_ms: u64 },
+    Deny,
+    Unavailable,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideRequest {
+    task_id: String,
+    request_id: String,
+    decision: RequestDecision,
+    reason: String,
+}
+impl DecideRequest {
+    fn validate(&self, limits: &cayw_requests::RequestConfig) -> Result<(), RpcError> {
+        if self.reason.trim().is_empty()
+            || self.reason.len() > 2048
+            || self
+                .reason
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            return Err(RpcError::new(
+                "invalid_params",
+                "decision reason must contain 1..2048 ordinary bytes",
+            ));
+        }
+        if let RequestDecision::Allow { lifetime_ms } = self.decision
+            && (lifetime_ms == 0 || lifetime_ms > limits.max_grant_lifetime_ms)
+        {
+            return Err(RpcError::new(
+                "invalid_params",
+                "grant lifetime exceeds host maximum",
+            ));
+        }
+        Ok(())
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeRequest {
+    task_id: String,
+    request_id: String,
+    reason: String,
 }
 
 /// The IPC transport owns framing, authentication, request ids and disconnect
@@ -161,22 +257,28 @@ impl RpcHandler for Runtime {
             }
             "session.prompt" => {
                 let p: Prompt = parse(params)?;
-                encode(self.prompt(&p.session_id, &p.text, cancel).await?)
+                let input = TaskInput {
+                    text: p.text,
+                    images: p.images,
+                };
+                encode(self.prompt_input(&p.session_id, input, cancel).await?)
             }
             "session.cancel" => {
-                let p: Session = parse(params)?;
-                Ok(json!({"cancelled":self.cancel(&p.session_id)?}))
+                let p: crate::CancelTarget = parse(params)?;
+                Ok(json!({"cancelled":self.cancel(&p)?}))
             }
             "session.recover" => {
                 let p: Session = parse(params)?;
                 encode(self.recover(&p.session_id)?)
             }
             "session.reconcile" => {
-                let p: Reconcile = parse(params)?;
+                let mut p: Reconcile = parse(params)?;
+                p.reconciliation.actor = "rpc-user".into();
                 encode(self.reconcile(&p.session_id, p.reconciliation)?)
             }
             "capability.reconcile" => {
-                let p: ReconcileCapability = parse(params)?;
+                let mut p: ReconcileCapability = parse(params)?;
+                p.reconciliation.actor = "rpc-user".into();
                 encode(self.reconcile_capability(&p.session_id, p.reconciliation)?)
             }
             "session.fork" => {
@@ -199,6 +301,22 @@ impl RpcHandler for Runtime {
                 let _: Empty = parse(params)?;
                 encode(self.capabilities()?)
             }
+            "session.questions" => {
+                let p: Session = parse(params)?;
+                encode(self.questions(&p.session_id)?)
+            }
+            "session.pending_questions" => {
+                let p: Session = parse(params)?;
+                encode(self.pending_questions(&p.session_id)?)
+            }
+            "session.plan" => {
+                let p: Session = parse(params)?;
+                encode(self.plan(&p.session_id)?)
+            }
+            "question.answer" => {
+                let p: AnswerQuestion = parse(params)?;
+                encode(self.answer_question(&p.session_id, &p.request_id, &p.answer, "rpc-user")?)
+            }
             "session.tasks" => {
                 let p: Session = parse(params)?;
                 encode(self.tasks(&p.session_id)?)
@@ -209,16 +327,95 @@ impl RpcHandler for Runtime {
             }
             "task.enqueue" => {
                 let p: Prompt = parse(params)?;
-                encode(self.enqueue(&p.session_id, &p.text)?)
+                let input = TaskInput {
+                    text: p.text,
+                    images: p.images,
+                };
+                encode(self.enqueue_input(&p.session_id, input)?)
+            }
+            "task.enqueue_with_intent" => {
+                let p: EnqueueWithIntent = parse(params)?;
+                encode(self.enqueue_input_with_intent(
+                    &p.session_id,
+                    TaskInput {
+                        text: p.text,
+                        images: p.images,
+                    },
+                    p.intent,
+                )?)
             }
             "task.resume" => {
                 let p: Task = parse(params)?;
                 encode(self.resume(&p.task_id, cancel).await?)
+            }
+            "request.operations" => {
+                let _: Empty = parse(params)?;
+                encode(self.request_operations()?)
+            }
+            "request.status" => {
+                let p: RequestStatus = parse(params)?;
+                encode(self.request_status(&p.task_id, &p.request_id)?)
+            }
+            "request.events" => {
+                let p: RequestEvents = parse(params)?;
+                encode(self.request_events(&p.task_id, p.after, p.limit)?)
+            }
+            "request.task_state" => {
+                let p: Task = parse(params)?;
+                encode(self.request_task_state(&p.task_id)?)
+            }
+            "request.decide" => {
+                let p: DecideRequest = parse(params)?;
+                // Validate before claiming evaluation: rejected JSON must not
+                // leave a request waiting for an inaccessible private ticket.
+                p.validate(&self.inner.config.request_limits)?;
+                let ticket = self.request_evaluate(&p.task_id, &p.request_id, "rpc-user")?;
+                // These remain separate durable transitions. Cancellation,
+                // expiry or a failed write can reject the original decision;
+                // never issue a replacement ticket or retry it automatically.
+                let record = match p.decision {
+                    RequestDecision::Allow { lifetime_ms } => self.request_approve(
+                        &p.task_id,
+                        &ticket,
+                        Duration::from_millis(lifetime_ms),
+                        &p.reason,
+                    )?,
+                    RequestDecision::Deny => self.request_deny(&p.task_id, &ticket, &p.reason)?,
+                    RequestDecision::Unavailable => {
+                        self.request_evaluator_unavailable(&p.task_id, &ticket, &p.reason)?
+                    }
+                };
+                encode(record)
+            }
+            "request.revoke" => {
+                let p: RevokeRequest = parse(params)?;
+                encode(self.request_revoke(&p.task_id, &p.request_id, "rpc-user", &p.reason)?)
+            }
+            "request.close_task" => {
+                let p: Task = parse(params)?;
+                self.close_request_task(&p.task_id)?;
+                Ok(json!({"closed":true}))
             }
             _ => Err(RpcError::new(
                 "method_not_found",
                 format!("unknown runtime method {method}"),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_session_error_keeps_unknown_outcome_on_rpc_transport() {
+        let error = RpcError::from(RuntimeError::NeedsReconciliation);
+        assert_eq!(error.code, "needs_reconciliation_outcome_unknown");
+        let error = cayw_ipc::ClientError::from(error);
+        assert!(error.outcome_unknown);
+        let known = cayw_ipc::ClientError::from(RpcError::from(RuntimeError::Busy));
+        assert_eq!(known.code, "busy");
+        assert!(!known.outcome_unknown);
     }
 }

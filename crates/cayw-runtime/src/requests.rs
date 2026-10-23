@@ -11,7 +11,10 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
 /// Selected existing operations need a task request in addition to ordinary
-/// Host permission. Changes to injected services require a new policy identity.
+/// Host permission. The bound identity combines this policy ID with the
+/// already-open Host and the configured dynamic-service boundaries, so a change
+/// to child permissions or budgets, cell value limits, the parent permission
+/// set or a relevant Runtime budget invalidates old catalogs and receipts.
 #[derive(Clone, Debug)]
 pub struct RequestPolicy {
     pub permission_policy_id: String,
@@ -83,17 +86,109 @@ pub(crate) fn definitions(inner: &Inner) -> Vec<ToolDefinition> {
         vec![]
     }
 }
+/// Every real capability this Runtime can dispatch, with request-control tools
+/// and plugins deliberately excluded. The same definitions must feed both the
+/// advertised catalog and the task request binding, or a policy could name an
+/// operation that execution cannot resolve (or bind a weaker schema).
+pub(crate) fn operation_definitions(inner: &Inner, host: &cayw_host::Host) -> Vec<ToolDefinition> {
+    let mut definitions = host.capabilities();
+    definitions.extend(crate::values::definitions());
+    definitions.extend(crate::collaboration::definitions());
+    definitions.extend(crate::children::definitions(inner));
+    definitions
+}
+fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {
+    let mut permissions = permissions.iter().collect::<Vec<_>>();
+    permissions.sort_by(|left, right| {
+        left.capability
+            .cmp(&right.capability)
+            .then_with(|| left.scope.cmp(&right.scope))
+    });
+    permissions
+        .into_iter()
+        .map(|permission| {
+            json!({
+                "capability": &permission.capability,
+                "scope": &permission.scope,
+            })
+        })
+        .collect()
+}
+/// Bind the dynamic service authority as well as the already-open Host. The
+/// Host identity covers its workspace, process profiles and upstream policy;
+/// this digest covers the Runtime-owned boundaries that are not part of that
+/// Host configuration. A changed child permission/budget, value limit or
+/// relevant Runtime budget therefore produces a different catalog and defeats
+/// every old receipt instead of silently reusing it.
+fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, RuntimeError> {
+    // Preserve the RequestStore identifier contract before hashing. Hashing
+    // must not make an empty or oversized host-provided policy ID acceptable.
+    HostActor::new(base_policy)?;
+    let local_agents = inner.config.local_agents.as_ref().map(|config| {
+        json!({
+            "max_children": config.max_children,
+            "max_depth": config.max_depth,
+            "shared_total_tokens": config.shared_total_tokens,
+            "max_calls": config.max_calls,
+            "max_output_bytes": config.max_output_bytes,
+            "max_time_ns": config.max_time.as_nanos().to_string(),
+            "permissions": permission_list(&config.permissions),
+        })
+    });
+    let cells = &inner.config.cells;
+    let runtime = &inner.config;
+    let identity = json!({
+        "base_policy": base_policy,
+        "local_agents": local_agents,
+        "cells": {
+            "max_cells": cells.max_cells,
+            "max_running": cells.max_running,
+            "script_bytes": cells.script_bytes,
+            "output_bytes": cells.output_bytes,
+            "output_items": cells.output_items,
+            "item_bytes": cells.item_bytes,
+            "media_bytes": cells.media_bytes,
+            "max_output_tokens": cells.max_output_tokens,
+            "max_yield_time_ns": cells.max_yield_time.as_nanos().to_string(),
+            "store_bytes": cells.store_bytes,
+            "store_keys": cells.store_keys,
+            "json_depth": cells.json_depth,
+            "cache_entries": cells.cache_entries,
+        },
+        "permissions": permission_list(&runtime.permissions),
+        "runtime": {
+            "max_concurrent_runs": runtime.max_concurrent_runs,
+            "max_queued_runs": runtime.max_queued_runs,
+            "max_prompt_bytes": runtime.max_prompt_bytes,
+            "max_total_tokens": runtime.max_total_tokens,
+            "max_turns": runtime.max_turns,
+            "max_run_time_ns": runtime.max_run_time.as_nanos().to_string(),
+            "max_queue_time_ns": runtime.max_queue_time.as_nanos().to_string(),
+            "max_capability_calls": runtime.max_capability_calls,
+            "max_capability_bytes": runtime.max_capability_bytes,
+            "grant_lifetime_ns": runtime.grant_lifetime.as_nanos().to_string(),
+        },
+    });
+    let encoded = serde_json::to_string(&identity)?;
+    Ok(format!(
+        "runtime-services-{}",
+        cayw_bridge::content_sha256(&encoded)
+    ))
+}
 fn catalog(inner: &Inner, host: &cayw_host::Host) -> Result<OperationCatalog, RuntimeError> {
     let policy = inner.config.request_policy.as_ref().ok_or_else(|| {
         RuntimeError::InvalidInput("task requests are not configured by the host".into())
     })?;
+    let base_policy =
+        crate::bridge::permission_policy_id(&inner.config, &policy.permission_policy_id)?;
+    let identity = HostIdentity::from_host(
+        host,
+        &crate::bridge::effective_host_config(&inner.config),
+        &service_policy_id(inner, &base_policy)?,
+    )?;
     Ok(OperationCatalog::bind(
-        HostIdentity::from_host(
-            host,
-            &crate::bridge::effective_host_config(&inner.config),
-            &crate::bridge::permission_policy_id(&inner.config, &policy.permission_policy_id)?,
-        )?,
-        &host.capabilities(),
+        identity,
+        &operation_definitions(inner, host),
         policy.operations.clone(),
     )?)
 }
@@ -318,34 +413,44 @@ pub(crate) fn finish(
         _ => {}
     }
     close_identity(inner, &identity)?;
+    #[cfg(feature = "fault-injection")]
+    cayw_ai::faults::hit(
+        "requests.task_end.before",
+        serde_json::json!({"session_id":task.session_id,"task_id":task.id,"identity":identity,"outcome":outcome}),
+    );
     inner.requests.end_task(
         &identity,
         outcome,
         &HostActor::new("runtime-task-end")?,
         "Original task work stopped and its process cleanup was confirmed",
     )?;
+    #[cfg(feature = "fault-injection")]
+    cayw_ai::faults::hit(
+        "requests.task_end.committed",
+        serde_json::json!({"session_id":task.session_id,"task_id":task.id,"identity":identity,"outcome":outcome}),
+    );
     Ok(())
 }
-pub(crate) fn check_cancel(inner: &Inner, session: &str) -> Result<(), RuntimeError> {
-    for task in inner.queue.list(session)? {
-        if matches!(
-            task.state,
-            TaskState::Queued | TaskState::Running | TaskState::Draining
-        ) && let Some(identity) = identity(inner, &task)?
-            && matches!(
-                inner.requests.task_state(&identity)?,
-                cayw_requests::TaskState::Ended { .. }
-            )
-        {
-            // Requests is a separate durable authority. It may have committed
-            // while Queue's terminal commit failed. Do not acknowledge another
-            // terminal choice over that partial settlement; keep recovery owed.
-            return Err(RuntimeError::RecoveryRequired {
-                cause: Box::new(RuntimeError::Worker("request authority ended before queue settlement; explicit recovery is required".into())),
-                cleanup: None,
-                outcome_unknown: false,
-            });
-        }
+pub(crate) fn check_task_cancel(inner: &Inner, task: &TaskRecord) -> Result<(), RuntimeError> {
+    if matches!(
+        task.state,
+        TaskState::Queued | TaskState::Running | TaskState::Draining
+    ) && let Some(identity) = identity(inner, task)?
+        && matches!(
+            inner.requests.task_state(&identity)?,
+            cayw_requests::TaskState::Ended { .. }
+        )
+    {
+        // Requests may have committed before Queue's separate commit failed.
+        // Retain admission and reject a conflicting terminal decision.
+        return Err(RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::Worker(
+                "request authority ended before queue settlement; explicit recovery is required"
+                    .into(),
+            )),
+            cleanup: None,
+            outcome_unknown: false,
+        });
     }
     Ok(())
 }
@@ -525,26 +630,24 @@ impl Runtime {
         actor: &str,
         reason: &str,
     ) -> Result<RequestRecord, RuntimeError> {
-        let record = {
-            let _coordinate = self.inner.coordination.enter()?;
-            let identity = self.active_request(task_id)?;
+        let _coordinate = self.inner.coordination.enter()?;
+        let identity = self.active_request(task_id)?;
+        let record =
             self.inner
                 .requests
-                .revoke(&identity, request_id, &HostActor::new(actor)?, reason)?
-        };
-        self.cancel(&record.identity.session_id)?;
+                .revoke(&identity, request_id, &HostActor::new(actor)?, reason)?;
+        let task = self.inner.queue.get(task_id)?;
+        self.cancel_coordinated(&task.cancel_target())?;
         Ok(record)
     }
     /// Closing is durable before cancellation. Finishing is owned by the worker
     /// after its original cells and process supervisors have stopped.
     pub fn close_request_task(&self, task_id: &str) -> Result<(), RuntimeError> {
-        let session = {
-            let _coordinate = self.inner.coordination.enter()?;
-            let identity = self.active_request(task_id)?;
-            closing(&self.inner, task_id)?;
-            identity.session_id
-        };
-        self.cancel(&session)?;
+        let _coordinate = self.inner.coordination.enter()?;
+        self.active_request(task_id)?;
+        closing(&self.inner, task_id)?;
+        let task = self.inner.queue.get(task_id)?;
+        self.cancel_coordinated(&task.cancel_target())?;
         Ok(())
     }
 }

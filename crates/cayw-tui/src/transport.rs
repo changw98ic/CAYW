@@ -4,7 +4,7 @@ use cayw_ipc::{Client, ClientConfig, ClientError};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until, timeout},
 };
@@ -32,6 +32,10 @@ pub struct Watch {
 pub enum Update {
     Connected,
     Disconnected(String),
+    TaskAdmitted {
+        session_id: String,
+        task_id: String,
+    },
     Response {
         request: Request,
         result: Result<Value, String>,
@@ -54,6 +58,13 @@ struct Failure {
     disconnected: bool,
 }
 type Reply = Result<Value, Failure>;
+
+struct TaskAdmission {
+    epoch: u64,
+    session_id: String,
+    task_id: String,
+    proceed: oneshot::Sender<bool>,
+}
 
 enum Finished {
     Connect {
@@ -145,6 +156,7 @@ async fn run(
     updates: mpsc::UnboundedSender<Update>,
 ) {
     let mut jobs = JoinSet::new();
+    let (admissions, mut admitted) = mpsc::unbounded_channel::<TaskAdmission>();
     let mut client: Option<Client> = None;
     let mut connecting = false;
     let mut next_connect = Instant::now();
@@ -156,6 +168,16 @@ async fn run(
 
     loop {
         tokio::select! {
+            Some(admission) = admitted.recv() => {
+                let current = admission.epoch == epoch;
+                if current {
+                    let _ = updates.send(Update::TaskAdmitted {
+                        session_id: admission.session_id,
+                        task_id: admission.task_id,
+                    });
+                }
+                let _ = admission.proceed.send(current);
+            },
             control = controls.recv() => match control {
                 Some(Control::Shutdown) | None => break,
                 Some(Control::Watch(next)) => { watch = next; awaiting_consumption = false; }
@@ -177,8 +199,13 @@ async fn run(
                         let _ = updates.send(Update::Response { request, result: Err("Too many pending requests; request was not sent.".into()) });
                         continue;
                     }
+                    let admissions = admissions.clone();
                     jobs.spawn(async move {
-                        let result = request_value(&connection, request.method, request.params.clone()).await;
+                        let result = if request.method == "session.prompt" {
+                            prompt_task(&connection, request.params.clone(), epoch, &admissions).await
+                        } else {
+                            request_value(&connection, request.method, request.params.clone()).await
+                        };
                         Finished::Call { epoch, request, result }
                     });
                 }
@@ -280,9 +307,87 @@ fn close_connection(client: Option<Client>, jobs: &mut JoinSet<Finished>) {
     }
 }
 
+async fn prompt_task(
+    client: &Client,
+    params: Value,
+    epoch: u64,
+    admissions: &mpsc::UnboundedSender<TaskAdmission>,
+) -> Reply {
+    let session_id = params["session_id"].as_str().unwrap_or("").to_owned();
+    let task = client
+        .request("task.enqueue", params)
+        .await
+        .map_err(failure)?;
+    let task_id = task["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| Failure {
+            message: "Task admission did not return an identity; inspect the original request"
+                .into(),
+            disconnected: false,
+        })?
+        .to_owned();
+    if task["session_id"].as_str() != Some(session_id.as_str()) {
+        return Err(Failure {
+            message: "Task admission belongs to another Session".into(),
+            disconnected: false,
+        });
+    }
+    let (proceed, permitted) = oneshot::channel();
+    let admission = TaskAdmission {
+        epoch,
+        session_id,
+        task_id: task_id.clone(),
+        proceed,
+    };
+    if admissions.send(admission).is_err() || permitted.await != Ok(true) {
+        return Err(Failure {
+            message: "Task was admitted on a closed connection; inspect its original identity before resuming".into(),
+            disconnected: true,
+        });
+    }
+    client
+        .request("task.resume", json!({"task_id":task_id}))
+        .await
+        .map_err(failure)
+}
+
+async fn cancel_original_task(client: &Client, params: &Value) -> Reply {
+    let task_id = params["task_id"].as_str().ok_or_else(|| Failure {
+        message: "Cancellation requires the original Task ID".into(),
+        disconnected: false,
+    })?;
+    let task = client
+        .request("task.get", json!({"task_id":task_id}))
+        .await
+        .map_err(failure)?;
+    if task["id"].as_str() != Some(task_id) || task["session_id"] != params["session_id"] {
+        return Err(Failure {
+            message: "Task response differs from the original cancellation target".into(),
+            disconnected: false,
+        });
+    }
+    let target = json!({"session_id":task["session_id"],"task_id":task["id"],
+        "worker_id":task["worker_id"],"attempt_id":task["attempt_id"],"fence":task["fence"]});
+    client
+        .request("session.cancel", target)
+        .await
+        .map_err(failure)
+}
+
 async fn request_value(client: &Client, method: &str, params: Value) -> Reply {
     if method == "session.prompt" {
         return client.request(method, params).await.map_err(failure);
+    }
+    if method == "session.cancel" {
+        return match timeout(REQUEST_TIMEOUT, cancel_original_task(client, &params)).await {
+            Ok(result) => result,
+            Err(_) => Err(Failure {
+                message: "Original Task cancellation observation timed out; inspect that Task"
+                    .into(),
+                disconnected: true,
+            }),
+        };
     }
     match timeout(REQUEST_TIMEOUT, client.request(method, params)).await {
         Ok(result) => result.map_err(failure),

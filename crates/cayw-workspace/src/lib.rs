@@ -139,6 +139,8 @@ pub enum FaultPoint {
     AfterInstall(usize),
     BeforeCommitRecord,
     AfterRecoveryInstall(usize),
+    BeforeRemove(usize),
+    AfterRemove(usize),
 }
 #[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy)]
@@ -326,6 +328,8 @@ impl Workspace {
                 "after_install" => FaultPoint::AfterInstall(index),
                 "commit_record" => FaultPoint::BeforeCommitRecord,
                 "recovery" => FaultPoint::AfterRecoveryInstall(index),
+                "before_remove" => FaultPoint::BeforeRemove(index),
+                "after_remove" => FaultPoint::AfterRemove(index),
                 _ => return Err(failure("invalid internal fault point")),
             };
             let mut fault = self.fault.lock().unwrap_or_else(|error| error.into_inner());

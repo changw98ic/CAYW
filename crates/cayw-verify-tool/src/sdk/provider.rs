@@ -157,7 +157,6 @@ impl Provider for FixedProvider {
             if message.stop_reason == StopReason::Stop {
                 message.content.push(Content::text(FINAL));
             }
-            message.usage.total_tokens = 1;
             AssistantEvent::Done { message }
         }))
     }

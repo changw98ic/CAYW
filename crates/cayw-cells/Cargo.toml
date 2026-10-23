@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+fault-injection = ["cayw-ai/fault-injection"]
+
 [dependencies]
 cayw-ai.workspace = true
 cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
