@@ -92,6 +92,7 @@ completed: 5 messages, running=false
 
 - [架构设计](docs/architecture.md)：组件职责、执行流程与恢复规则。
 - [开发路线图](docs/development-map.md)：交付计划、当前进度与验收记录。
+- [可视化编辑](docs/visual-editor.md)：HTML/CSS、Vite React 与 Vue 3 页面的直接编辑和源码保存。
 - [贡献指南](CONTRIBUTING.md)：开发环境、构建、测试与提交要求。
 - [AI 编程助手说明](AGENTS.md)：在本仓库工作时需要遵守的规则。
 
