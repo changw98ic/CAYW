@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Trace Debug</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Trace Debug</h1>
+      <p>调用轨迹调试台</p>
+    </div>
+    <p id="connection-status" class="connection" role="status" aria-live="polite">未连接</p>
+  </header>
+
+  <section id="login-panel" class="card login-panel" aria-labelledby="login-title">
+    <h2 id="login-title">连接本机调试服务</h2>
+    <p class="muted">输入网页访问令牌。令牌只保存在本页内存中，不会写入地址栏。</p>
+    <form id="login-form" novalidate>
+      <label for="web-token">网页访问令牌</label>
+      <div class="login-row">
+        <input id="web-token" name="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+        <button id="login-button" type="submit">连接</button>
+      </div>
+    </form>
+    <p id="login-error" class="alert" role="alert" hidden></p>
+  </section>
+
+  <main id="workspace" hidden>
+    <p id="global-error" class="alert" role="alert" hidden></p>
+
+    <section class="card controls" aria-labelledby="controls-title">
+      <h2 id="controls-title" class="visually-hidden">调用项目与结果选择</h2>
+      <div class="field">
+        <label for="project-select">调用项目</label>
+        <select id="project-select"></select>
+      </div>
+      <div class="field">
+        <label for="evaluation-select">结果轮次</label>
+        <select id="evaluation-select"></select>
+      </div>
+      <div class="field meta-field">
+        <span class="field-label">运行方式</span>
+        <span id="evaluation-mode" class="badge badge-none">—</span>
+      </div>
+      <div class="field meta-field">
+        <span class="field-label">本轮状态</span>
+        <span id="evaluation-status" class="badge badge-none">—</span>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="summary-title">
+      <div class="card-head">
+        <h2 id="summary-title">项目概况</h2>
+        <span id="document-sequence" class="small muted"></span>
+      </div>
+      <dl id="project-summary" class="facts facts-compact"></dl>
+      <div id="session-captures" class="session-captures"></div>
+    </section>
+
+    <section class="card error-card" aria-labelledby="error-facts-title">
+      <div class="card-head">
+        <h2 id="error-facts-title">错误事实摘要</h2>
+        <span class="small muted">只显示本轮已记录的事实</span>
+      </div>
+      <div id="error-facts-list" class="fact-list"></div>
+    </section>
+
+    <section class="card timeline-card" aria-labelledby="timeline-title">
+      <div class="card-head">
+        <h2 id="timeline-title">执行时间线</h2>
+        <span id="timeline-meta" class="small muted"></span>
+      </div>
+      <p class="hint">按本轮步骤顺序排列。点击任一项可选中对应节点；用 Tab 聚焦，按 Enter 或空格打开。已捕获＝原始 Runtime 记录，本地计算＝本地重放，复用＝沿用上轮结果。</p>
+      <ol id="timeline-list" class="timeline" aria-label="本轮执行步骤"></ol>
+    </section>
+
+    <section class="card graph-card" aria-labelledby="module-graph-title">
+      <div class="card-head">
+        <h2 id="module-graph-title">模块架构图</h2>
+        <p id="module-graph-note" class="small muted">点击模块下钻到节点图。</p>
+      </div>
+      <div id="module-graph" class="graph-scroll" role="group" aria-label="模块架构图"></div>
+      <ul class="legend" aria-label="状态图例">
+        <li><span class="swatch status-completed"></span>完成</li>
+        <li><span class="swatch status-running"></span>运行中</li>
+        <li><span class="swatch status-waiting"></span>等待响应</li>
+        <li><span class="swatch status-failed"></span>失败</li>
+        <li><span class="swatch status-blocked"></span>阻断</li>
+        <li><span class="swatch status-outcome_unknown"></span>结果未知</li>
+        <li><span class="swatch status-none"></span>未执行</li>
+        <li><span class="swatch swatch-reused"></span>复用上轮结果</li>
+        <li><span class="edge-swatch is-active"></span>本轮实际走过</li>
+        <li><span class="edge-swatch is-planned"></span>计划边（未走）</li>
+      </ul>
+    </section>
+
+    <section class="card graph-card" aria-labelledby="node-graph-title">
+      <div class="card-head">
+        <h2 id="node-graph-title">节点图</h2>
+        <div class="graph-tools">
+          <span id="graph-filter-label" class="small muted"></span>
+          <button id="graph-show-all" type="button" class="secondary" hidden>显示全部模块</button>
+        </div>
+      </div>
+      <div id="node-graph" class="graph-scroll" role="group" aria-label="节点图"></div>
+      <p class="hint">用 Tab 聚焦节点，按 Enter 或空格查看详情；方向键可移动到相邻节点。</p>
+    </section>
+
+    <div class="columns">
+      <section class="card detail-card" aria-labelledby="node-detail-title">
+        <div class="card-head">
+          <h2 id="node-detail-title">节点详情</h2>
+          <span id="node-detail-subtitle" class="small muted"></span>
+        </div>
+        <p id="node-empty" class="muted">在图中选择一个节点。</p>
+        <div id="node-body" hidden>
+          <div id="node-heading" class="node-heading"></div>
+          <div id="node-error" class="alert" role="alert" hidden></div>
+          <div id="node-gaps" class="fact-list node-gaps" hidden></div>
+          <h3>本轮事实</h3>
+          <dl id="node-facts" class="facts"></dl>
+          <h3>编辑节点</h3>
+          <p class="hint">保存后服务端会立即求值，并自动显示新的结果轮次。参数必须是合法 JSON；旧草稿不会覆盖新版本。</p>
+          <div class="editor">
+            <label for="node-source">节点源码（Luau 函数体）</label>
+            <textarea id="node-source" rows="12" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="source-hint"></textarea>
+            <p id="source-hint" class="hint">参数 input、state、params、context 可用；返回 output、state 和可选的 branch。</p>
+            <label for="node-params">参数 JSON</label>
+            <textarea id="node-params" rows="6" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+            <label for="node-pointer">输入 JSON 指针</label>
+            <input id="node-pointer" type="text" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="留空表示使用完整输入，例如 /amount">
+            <div class="actions">
+              <button id="save-node" type="button">保存并重算</button>
+              <button id="discard-draft" type="button" class="secondary" hidden>放弃草稿</button>
+              <span id="save-status" class="small" role="status" aria-live="polite"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card history-card" aria-labelledby="history-title">
+        <div class="card-head">
+          <h2 id="history-title">版本历史与撤销</h2>
+          <span id="revision-count" class="small muted"></span>
+        </div>
+        <ol id="revision-list" class="revision-list"></ol>
+        <div class="undo-box">
+          <label for="undo-version">撤销到版本</label>
+          <select id="undo-version"></select>
+          <button id="undo-node" type="button" class="secondary">撤销到选中版本</button>
+          <p id="undo-status" class="small" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+    </div>
+
+    <section class="card" aria-labelledby="comparison-title">
+      <div class="card-head">
+        <h2 id="comparison-title">前后对比</h2>
+        <div class="compare-picker">
+          <label for="compare-select">对比基准</label>
+          <select id="compare-select"></select>
+        </div>
+      </div>
+      <div id="comparison-body"></div>
+    </section>
+
+    <section class="card" aria-labelledby="gaps-title">
+      <div class="card-head">
+        <h2 id="gaps-title">缺口与证据</h2>
+        <span class="small muted">原始记录与本地重放分开标注</span>
+      </div>
+      <div id="gaps-list" class="fact-list"></div>
+    </section>
+  </main>
+
+  <noscript>
+    <p class="alert">此页面需要 JavaScript 才能读取本机调试数据。</p>
+  </noscript>
+</body>
+</html>

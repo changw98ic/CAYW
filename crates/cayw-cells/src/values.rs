@@ -269,6 +269,14 @@ impl CellBackend for AuthorizedCellBackend {
     ) -> Result<(), CellError> {
         self.inner.finished(execution, terminal)
     }
+
+    fn output(
+        &self,
+        execution: &CellExecution,
+        entry: &crate::OutputEntry,
+    ) -> Result<(), CellError> {
+        self.inner.output(execution, entry)
+    }
 }
 
 /// Convenience constructor for the explicit decorator.

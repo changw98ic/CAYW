@@ -582,6 +582,128 @@ fn anthropic_tool(input_tail: &str) -> String {
     ])
 }
 
+// A complete Messages tool_use reply may carry arguments that cannot become a
+// callable tool input. The provider must still finish the reply, retain the
+// original text, and mark the call so the model receives a paired error result.
+fn anthropic_bad_tool(id: &str, partial_json: &str) -> String {
+    sse(vec![
+        json!({"type":"message_start","message":{"id":"msg_bad_tool","type":"message","role":"assistant","model":"claude-returned","content":[],"usage":{"input_tokens":11,"output_tokens":0,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id,"name":"weather","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":partial_json}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}),
+        json!({"type":"message_stop"}),
+    ])
+}
+
+fn serialized_contains_raw(serialized: &str, raw: &str) -> bool {
+    serialized.contains(raw) || serialized.contains(&serde_json::to_string(raw).unwrap())
+}
+
+fn assert_corrected_call(
+    events: &[AssistantEvent],
+    id: &str,
+    raw: &str,
+    parsed: Option<&Value>,
+    usage: (u64, u64, u64, u64, u64),
+) {
+    let message = terminal(events);
+    assert_eq!(message.stop_reason, StopReason::ToolUse, "{events:?}");
+    assert!(
+        matches!(events.last(), Some(AssistantEvent::Done { .. })),
+        "a complete message_stop must still produce Done: {events:?}"
+    );
+    assert_eq!(message.usage_status, UsageStatus::Reported, "{message:?}");
+    assert_eq!(
+        (
+            message.usage.input,
+            message.usage.output,
+            message.usage.cache_read,
+            message.usage.cache_write,
+            message.usage.total_tokens,
+        ),
+        usage,
+        "{message:?}"
+    );
+    let calls = message.tool_calls();
+    assert_eq!(calls.len(), 1, "{message:?}");
+    let call = &calls[0];
+    assert_eq!(call.id, id);
+    assert_eq!(call.name, "weather");
+    assert!(
+        call.arguments_error
+            .as_deref()
+            .is_some_and(|error| !error.trim().is_empty()),
+        "invalid tool arguments must be marked instead of executed: {call:?}"
+    );
+    if let Some(parsed) = parsed {
+        assert_eq!(&call.arguments, parsed, "parsed input must be preserved");
+    }
+    let metadata = serde_json::to_string(&message.provider_metadata).unwrap();
+    assert!(
+        serialized_contains_raw(&call.arguments.to_string(), raw)
+            || serialized_contains_raw(&metadata, raw),
+        "original tool input was not retained: call={call:?} metadata={metadata}"
+    );
+}
+
+async fn round_trip_corrected_call(partial_json: &str, parsed: Option<Value>) {
+    let (base, rx, server) = http_server(
+        "200 OK",
+        "text/event-stream",
+        anthropic_bad_tool("call_bad", partial_json),
+    )
+    .await;
+    let mut req = tools_request("anthropic");
+    let events = collect(adapter("anthropic", &base).as_ref(), req.clone()).await;
+    rx.await.unwrap();
+    server.await.unwrap();
+    assert_corrected_call(
+        &events,
+        "call_bad",
+        partial_json,
+        parsed.as_ref(),
+        (11, 5, 3, 2, 21),
+    );
+    let message = terminal(&events).clone();
+    assert_eq!(message.response_id.as_deref(), Some("msg_bad_tool"));
+    // The marked call, raw input and complete usage must survive history
+    // serialization before the next request.
+    let restored: AssistantMessage =
+        serde_json::from_slice(&serde_json::to_vec(&message).unwrap()).unwrap();
+    let mut error_result = tool_result("call_bad", "weather");
+    if let Message::ToolResult(result) = &mut error_result {
+        result.is_error = true;
+    }
+    req.messages.push(Message::Assistant(restored));
+    req.messages.push(error_result);
+    let (base, rx, server) = http_server("200 OK", "text/event-stream", anthropic_text()).await;
+    let events = collect(adapter("anthropic", &base).as_ref(), req).await;
+    assert_eq!(
+        terminal(&events).stop_reason,
+        StopReason::Stop,
+        "a paired is_error result must be accepted for the corrected call: {events:?}"
+    );
+    let body = rx.await.unwrap().body;
+    server.await.unwrap();
+    let call = &body["messages"][1]["content"][0];
+    assert_eq!(call["type"], "tool_use");
+    assert_eq!(call["id"], "call_bad");
+    assert_eq!(call["name"], "weather");
+    assert!(
+        parsed
+            .as_ref()
+            .is_some_and(|parsed| &call["input"] == parsed)
+            || call["input"] == Value::String(partial_json.to_owned())
+            || serialized_contains_raw(&call["input"].to_string(), partial_json),
+        "replayed tool_use input lost the original: {call}"
+    );
+    let result = &body["messages"][2]["content"][0];
+    assert_eq!(result["type"], "tool_result");
+    assert_eq!(result["tool_use_id"], "call_bad");
+    assert_eq!(result["is_error"], true);
+}
+
 #[tokio::test]
 async fn anthropic_tool_round_trip_preserves_schema_ids_names_and_structured_results() {
     let (base, rx, server) =
@@ -725,8 +847,6 @@ async fn both_protocols_report_bad_json_http_errors_and_unsupported_content_once
             ("200 OK", "text/event-stream", String::new()),
         ];
         if kind == "anthropic" {
-            cases.push(("200 OK", "text/event-stream", anthropic_tool("7}")));
-            cases.push(("200 OK", "text/event-stream", anthropic_tool("\"Paris\"")));
             cases.push((
                 "200 OK",
                 "text/event-stream",
@@ -755,6 +875,24 @@ async fn both_protocols_report_bad_json_http_errors_and_unsupported_content_once
             rx.await.unwrap();
             server.await.unwrap();
         }
+    }
+    // Complete Messages tool_use replies whose arguments cannot form a valid
+    // tool call are corrected, not treated as protocol failures. Gemini keeps
+    // its original strict contract above.
+    for (tail, raw, parsed) in [
+        ("7}", "{\"city\":7}", Some(json!({"city":7}))),
+        ("\"Paris\"", "{\"city\":\"Paris\"", None),
+    ] {
+        let (base, rx, server) =
+            http_server("200 OK", "text/event-stream", anthropic_tool(tail)).await;
+        let events = collect(
+            adapter("anthropic", &base).as_ref(),
+            tools_request("anthropic"),
+        )
+        .await;
+        assert_corrected_call(&events, "call_a", raw, parsed.as_ref(), (9, 5, 0, 0, 14));
+        rx.await.unwrap();
+        server.await.unwrap();
     }
 }
 
@@ -953,19 +1091,310 @@ async fn both_protocols_are_lazy_and_cancel_or_drop_the_network_body() {
 
 #[tokio::test]
 async fn ambiguous_duplicate_tool_json_is_rejected_before_tool_completion() {
+    // Messages: a complete tool_use with duplicate object keys keeps the raw
+    // input and the call is marked so the model can be corrected.
     let anthropic = anthropic_tool("\"Paris\",\"city\":\"Tokyo\"}");
+    let (base, rx, server) = http_server("200 OK", "text/event-stream", anthropic).await;
+    let events = collect(
+        adapter("anthropic", &base).as_ref(),
+        tools_request("anthropic"),
+    )
+    .await;
+    assert_corrected_call(
+        &events,
+        "call_a",
+        "{\"city\":\"Paris\",\"city\":\"Tokyo\"}",
+        None,
+        (9, 5, 0, 0, 14),
+    );
+    rx.await.unwrap();
+    server.await.unwrap();
+
+    // Gemini keeps the original contract: ambiguous JSON never completes a call.
     let gemini = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"weather\",\"args\":{\"city\":\"Paris\",\"city\":\"Tokyo\"}}}]},\"finishReason\":\"STOP\"}]}\n\n".to_owned();
-    for (kind, body) in [("anthropic", anthropic), ("gemini", gemini)] {
-        let (base, rx, server) = http_server("200 OK", "text/event-stream", body).await;
-        let events = collect(adapter(kind, &base).as_ref(), tools_request(kind)).await;
+    let (base, rx, server) = http_server("200 OK", "text/event-stream", gemini).await;
+    let events = collect(adapter("gemini", &base).as_ref(), tools_request("gemini")).await;
+    assert_error(&events);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AssistantEvent::ToolCallEnd { .. }))
+    );
+    rx.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn anthropic_non_object_tool_json_round_trips_with_a_paired_error_result() {
+    // The outer argument value is a JSON string whose inner text contains an
+    // object followed by extra content. It stays a string; nothing is repaired.
+    let partial_json = r#""{\"city\":\"Paris\"} trailing""#;
+    round_trip_corrected_call(partial_json, Some(json!("{\"city\":\"Paris\"} trailing"))).await;
+}
+
+#[tokio::test]
+async fn anthropic_schema_invalid_tool_json_round_trips_with_a_paired_error_result() {
+    // Valid JSON object, but `city` violates the declared string schema.
+    round_trip_corrected_call("{\"city\":7}", Some(json!({"city":7}))).await;
+}
+
+#[tokio::test]
+async fn anthropic_raw_syntax_tool_json_round_trips_with_a_paired_error_result() {
+    for raw in ["{\"city\":\"Paris\"", "{\"city\":\"Paris\"} trailing"] {
+        round_trip_corrected_call(raw, None).await;
+    }
+}
+
+#[tokio::test]
+async fn anthropic_initial_invalid_arguments_are_correctable_only_without_deltas() {
+    for initial in [Value::Null, json!(""), json!(7), json!([1, 2])] {
+        for mixed in [false, true] {
+            let mut wire = vec![
+                json!({"type":"message_start","message":{"id":"msg_initial","type":"message","role":"assistant","model":"claude-returned","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_initial","name":"weather","input":initial}}),
+            ];
+            if mixed {
+                wire.push(json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Paris\"}"}}));
+            }
+            wire.extend([
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
+                json!({"type":"message_stop"}),
+            ]);
+            let (base, rx, server) = http_server("200 OK", "text/event-stream", sse(wire)).await;
+            let events = collect(
+                adapter("anthropic", &base).as_ref(),
+                tools_request("anthropic"),
+            )
+            .await;
+            let message = terminal(&events);
+            assert_eq!(
+                message.provider_metadata["anthropic"]["content"][0]["input"],
+                initial
+            );
+            if mixed {
+                assert_error(&events);
+                assert_eq!(
+                    message.error_message.as_deref(),
+                    Some("Cannot combine complete tool input with JSON deltas")
+                );
+                assert!(!events.iter().any(|event| matches!(
+                    event,
+                    AssistantEvent::ToolCallEnd { .. } | AssistantEvent::Done { .. }
+                )));
+            } else {
+                assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
+                assert_eq!(message.stop_reason, StopReason::ToolUse);
+                let calls = message.tool_calls();
+                assert_eq!(calls[0].arguments, initial);
+                assert!(calls[0].arguments_error.is_some());
+            }
+            rx.await.unwrap();
+            server.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn anthropic_tool_json_resource_limits_never_become_correctable_arguments() {
+    for (raw, expected) in [
+        (
+            format!("{}0{}", "[".repeat(129), "]".repeat(129)),
+            "depth limit",
+        ),
+        (format!("[{}0]", "0,".repeat(65_535)), "node limit"),
+        ("1".repeat(4097), "scalar token limit"),
+    ] {
+        let (base, server) =
+            bulk_server("text/event-stream", anthropic_bad_tool("call_limit", &raw)).await;
+        let events = collect(
+            adapter("anthropic", &base).as_ref(),
+            tools_request("anthropic"),
+        )
+        .await;
         assert_error(&events);
         assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::ToolCallEnd { .. }))
+            terminal(&events)
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains(expected)
         );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AssistantEvent::Done { .. } | AssistantEvent::ToolCallEnd { .. }
+        )));
+        assert!(
+            terminal(&events)
+                .tool_calls()
+                .iter()
+                .all(|call| call.arguments_error.is_none())
+        );
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn anthropic_argument_error_descriptions_do_not_change_history_validity() {
+    for raw in ["{\"city\":\"Paris\"", "{\"city\":7}"] {
+        let (base, rx, server) = http_server(
+            "200 OK",
+            "text/event-stream",
+            anthropic_bad_tool("call_bad", raw),
+        )
+        .await;
+        let req = tools_request("anthropic");
+        let events = collect(adapter("anthropic", &base).as_ref(), req.clone()).await;
         rx.await.unwrap();
         server.await.unwrap();
+        let message = terminal(&events);
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        let arguments = message.tool_calls()[0].arguments.clone();
+
+        for metadata in [true, false] {
+            for description in ["", "city must be a string", "参数无效：请重新生成"] {
+                let mut restored: AssistantMessage =
+                    serde_json::from_slice(&serde_json::to_vec(message).unwrap()).unwrap();
+                if !metadata {
+                    restored.provider_metadata.clear();
+                }
+                let Content::ToolCall(call) = &mut restored.content[0] else {
+                    panic!("missing invalid call")
+                };
+                call.arguments_error = Some(description.to_owned());
+                let original_metadata = restored.provider_metadata.clone();
+                let mut next = req.clone();
+                next.messages.push(Message::Assistant(restored.clone()));
+                let mut result = tool_result("call_bad", "weather");
+                if let Message::ToolResult(result) = &mut result {
+                    result.is_error = true;
+                }
+                next.messages.push(result);
+                let (base, rx, server) =
+                    http_server("200 OK", "text/event-stream", anthropic_text()).await;
+                let events = collect(adapter("anthropic", &base).as_ref(), next).await;
+                assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
+                let body = rx.await.unwrap().body;
+                server.await.unwrap();
+                let sent = &body["messages"][1]["content"][0];
+                assert_eq!(sent["id"], "call_bad");
+                assert_eq!(sent["name"], "weather");
+                let expected = if arguments.is_object() {
+                    arguments.clone()
+                } else {
+                    json!({"invalid_tool_arguments":arguments})
+                };
+                assert_eq!(sent["input"], expected);
+                let paired = &body["messages"][2]["content"][0];
+                assert_eq!(paired["tool_use_id"], "call_bad");
+                assert_eq!(paired["is_error"], true);
+                assert_eq!(restored.tool_calls()[0].arguments, arguments);
+                assert_eq!(restored.provider_metadata, original_metadata);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn anthropic_tool_argument_errors_require_paired_error_results_before_network() {
+    let (base, rx, server) = http_server(
+        "200 OK",
+        "text/event-stream",
+        anthropic_bad_tool("call_bad", "{\"city\":\"Paris\""),
+    )
+    .await;
+    let req = tools_request("anthropic");
+    let events = collect(adapter("anthropic", &base).as_ref(), req.clone()).await;
+    rx.await.unwrap();
+    server.await.unwrap();
+    assert_corrected_call(
+        &events,
+        "call_bad",
+        "{\"city\":\"Paris\"",
+        None,
+        (11, 5, 3, 2, 21),
+    );
+    let message = terminal(&events).clone();
+
+    let paired = |message: AssistantMessage, mark: fn(&mut ToolResultMessage)| {
+        let mut req = req.clone();
+        req.messages.push(Message::Assistant(message));
+        let mut outcome = tool_result("call_bad", "weather");
+        if let Message::ToolResult(result) = &mut outcome {
+            mark(result);
+        }
+        req.messages.push(outcome);
+        req
+    };
+
+    let mut variants = Vec::new();
+    // No result for the corrected call.
+    let mut missing = req.clone();
+    missing.messages.push(Message::Assistant(message.clone()));
+    variants.push(missing);
+    // A result that is not marked as an error.
+    variants.push(paired(message.clone(), |_| {}));
+    // Unknown effects still stop the next request.
+    variants.push(paired(message.clone(), |result| {
+        result.is_error = true;
+        result.outcome_unknown = true;
+    }));
+    for metadata in [true, false] {
+        // Invalid arguments still need an error marker.
+        let mut missing_marker = message.clone();
+        if !metadata {
+            missing_marker.provider_metadata.clear();
+        }
+        let Content::ToolCall(call) = &mut missing_marker.content[0] else {
+            panic!("missing invalid call")
+        };
+        call.arguments_error = None;
+        variants.push(paired(missing_marker, |result| result.is_error = true));
+
+        // Valid arguments must not carry an invalid-arguments marker.
+        let mut wrong_marker = message.clone();
+        if metadata {
+            wrong_marker.provider_metadata.get_mut("anthropic").unwrap()["content"][0]["input"] =
+                json!({"city":"Paris"});
+        } else {
+            wrong_marker.provider_metadata.clear();
+        }
+        let Content::ToolCall(call) = &mut wrong_marker.content[0] else {
+            panic!("missing call")
+        };
+        call.arguments = json!({"city":"Paris"});
+        variants.push(paired(wrong_marker, |result| result.is_error = true));
+    }
+    // Wire identity, order and input must still agree with the saved call.
+    for (field, value) in [
+        ("input", json!({"city":"Tokyo"})),
+        ("id", json!("different-call")),
+        ("name", json!("different-tool")),
+    ] {
+        let mut contradictory = message.clone();
+        contradictory
+            .provider_metadata
+            .get_mut("anthropic")
+            .unwrap()["content"][0][field] = value;
+        variants.push(paired(contradictory, |result| result.is_error = true));
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider = adapter(
+        "anthropic",
+        &format!("http://{}", listener.local_addr().unwrap()),
+    );
+    for req in variants {
+        let events = timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                biased;
+                events = collect(provider.as_ref(), req) => events,
+                connection = listener.accept() => panic!("invalid error history opened a socket: {connection:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_error(&events);
     }
 }
 

@@ -96,7 +96,7 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
     {
         return Err("Tool outcome is unknown; reconcile effects before another request".into());
     }
-    let mut pending = BTreeMap::<String, String>::new();
+    let mut pending = BTreeMap::<String, PendingCall>::new();
     let mut seen = BTreeSet::new();
     let mut definitions = BTreeMap::<String, ToolDefinition>::new();
     let mut has_conversation = false;
@@ -156,11 +156,22 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
                     match part {
                         Content::Text { .. } => {}
                         Content::ToolCall(call) => {
-                            validate_call(call, &definitions)?;
+                            let invalid_arguments = if format == Format::Anthropic {
+                                validate_history_call(call, &definitions)?
+                            } else {
+                                validate_call(call, &definitions)?;
+                                false
+                            };
                             if !seen.insert(call.id.clone()) {
                                 return Err("Duplicate tool call ID in history".into());
                             }
-                            pending.insert(call.id.clone(), call.name.clone());
+                            pending.insert(
+                                call.id.clone(),
+                                PendingCall {
+                                    name: call.name.clone(),
+                                    invalid_arguments,
+                                },
+                            );
                         }
                         Content::Thinking { .. } => {
                             return Err("Thinking and signature history is unsupported".into());
@@ -179,13 +190,20 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
                 has_conversation = true;
             }
             Message::ToolResult(result) => {
-                let name = pending
+                let call = pending
                     .remove(&result.tool_call_id)
                     .ok_or("Unmatched or duplicate tool result")?;
-                if name != result.tool_name {
+                if call.name != result.tool_name {
                     return Err("Tool result name does not match its call".into());
                 }
                 tool_output(result)?;
+                // Invalid arguments require a paired failure result. Unknown
+                // outcomes were rejected before walking the history.
+                if call.invalid_arguments && !result.is_error {
+                    return Err(
+                        "Invalid tool arguments require a matching error tool result".into(),
+                    );
+                }
                 has_conversation = true;
                 awaiting_model = true;
             }
@@ -201,7 +219,12 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
     Ok(())
 }
 
-fn require_results(pending: &BTreeMap<String, String>) -> Result<()> {
+struct PendingCall {
+    name: String,
+    invalid_arguments: bool,
+}
+
+fn require_results(pending: &BTreeMap<String, PendingCall>) -> Result<()> {
     if pending.is_empty() {
         Ok(())
     } else {
@@ -246,6 +269,43 @@ pub(crate) fn validate_call(
         .map_err(|_| "Invalid tool schema".to_owned())?
         .validate(&call.arguments)
         .map_err(|_| "Tool arguments do not satisfy the declared schema".to_owned())
+}
+
+// Classify the stored arguments as-is. Invalid JSON stays a verbatim string;
+// it is never decoded a second time or replaced with an empty object.
+pub(crate) fn arguments_error(arguments: &Value, schema: &Value) -> Result<Option<String>> {
+    if !arguments.is_object() {
+        return Ok(Some(
+            "Tool arguments must be a valid JSON object".to_owned(),
+        ));
+    }
+    let validator = ArgumentValidator::new(schema).map_err(|_| "Invalid tool schema".to_owned())?;
+    match validator.validate(arguments) {
+        Ok(()) => Ok(None),
+        Err(_) => Ok(Some(
+            "Tool arguments do not satisfy the declared schema".to_owned(),
+        )),
+    }
+}
+
+// Anthropic can carry a complete, trustworthy call identity even when its
+// arguments are malformed. Such a call is replayable only when the stored
+// marker agrees with the arguments and a known-failure result was recorded.
+pub(crate) fn validate_history_call(
+    call: &ToolCall,
+    definitions: &BTreeMap<String, ToolDefinition>,
+) -> Result<bool> {
+    if call.id.trim().is_empty() || call.name.trim().is_empty() {
+        return Err("Invalid tool call ID or name".into());
+    }
+    let tool = definitions
+        .get(&call.name)
+        .ok_or("Response or history calls an undeclared tool")?;
+    let invalid = arguments_error(&call.arguments, &tool.parameters)?.is_some();
+    if call.arguments_error.is_some() != invalid {
+        return Err("Tool call argument error marker does not match its arguments".into());
+    }
+    Ok(invalid)
 }
 
 pub(crate) fn active_tools(request: &ModelRequest) -> BTreeMap<String, ToolDefinition> {

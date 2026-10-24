@@ -614,6 +614,33 @@ impl CellBackend for Backend {
             Box::new(crate::shared_read::Completion::ordinary(scope.clone())),
         ))
     }
+    fn output(
+        &self,
+        execution: &CellExecution,
+        entry: &cayw_cells::OutputEntry,
+    ) -> Result<(), CellError> {
+        // A structured trace is ordinary bounded output, never host authority.
+        // Publish after the Cells commit so observers can follow the live path.
+        let cayw_cells::CellOutput::Json { value } = &entry.output else {
+            return Ok(());
+        };
+        if value.get("schema").and_then(Value::as_str) != Some("cayw.trace.v1") {
+            return Ok(());
+        }
+        self.verify(execution)?;
+        self.context
+            .host_event(
+                "trace_node",
+                json!({
+                    "execution_id":execution.cell_id,
+                    "parent_call_id":execution.parent_call_id,
+                    "source_hash":execution.source_hash,
+                    "task_id":self.context.task.id,
+                    "entry":entry,
+                }),
+            )
+            .map_err(|error| CellError::Journal(error.to_string()))
+    }
     fn finished(
         &self,
         execution: &CellExecution,

@@ -1,6 +1,6 @@
 # CAYW 开发路线图
 
-本路线图在原 21 个交付型 Issues（原 18 项、后续平台支持 #19、上下文压缩 [#22](https://github.com/changw98ic/CAYW/issues/22) 和公开 API 补齐 [#23](https://github.com/changw98ic/CAYW/issues/23)）之外，加入 2026-10-23 的当前页面可视化编辑 [#30](https://github.com/changw98ic/CAYW/issues/30)。#30 独立跟踪，不恢复已退出原主线的 #14 完整历史范围。2026-10-19 起统一用词：测试工具称 VerifyTool（代码包 `cayw-verify-tool`），StrongFlow/JEv/Fusion/Observer 及第三方扩展统一称 plugin，分 Native plugin 与 External plugin（代码包 `cayw-plugins`）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收并关闭；实现、独立客户端和验收说明已由 PR #20 合并到 `main`。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2、#4、#13 正文中原有的三平台要求已于 2026-10-19 收窄为 macOS，Linux/Windows 部分指向 #19。2026-10-18 起先独立实现 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前 workspace 成员以根 `Cargo.toml` 为准。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。
+本路线图在原 21 个交付型 Issues（原 18 项、后续平台支持 #19、上下文压缩 [#22](https://github.com/changw98ic/CAYW/issues/22) 和公开 API 补齐 [#23](https://github.com/changw98ic/CAYW/issues/23)）之外，加入 2026-10-23 的当前页面可视化编辑 [#30](https://github.com/changw98ic/CAYW/issues/30) 与 Trace Debug [#31](https://github.com/changw98ic/CAYW/issues/31)。#30 独立跟踪，不恢复已退出原主线的 #14 完整历史范围；#31 为独立可选调试插件。
 
 [返回项目说明](../README.md) · [架构文档](architecture.md) · [查看全部 Issues](https://github.com/changw98ic/CAYW/issues)
 
@@ -54,7 +54,11 @@
 
 ### 当前页面的可视化编辑
 
-[#30](https://github.com/changw98ic/CAYW/issues/30) 依赖 #1 的公开接口与 #6 的执行底座，作为独立可选应用交付。核心路径是当前项目页面进入编辑、拖拽与右键修改、插入组件、保存回源码及重启后继续编辑。HTML/CSS 已完成 macOS ARM64 本地验收；Vite React JSX/TSX 与 Vue 3 已适配，并通过合成项目的多文件保存、停服重启和外部修改冲突流程。当前范围见[可视化编辑说明](visual-editor.md)，最新结果见[精简重测记录](validation/issue-30-editor-simplification-macos.md)；适配阶段见[框架验收记录](validation/issue-30-framework-editor-macos.md)，较早的 HTML 结果见[历史记录](validation/issue-30-visual-editor-macos.md)。当次 Magpie 100M token 验收已获授权，但环境缺少凭据，真实生成请求为 0，生成项目后的完整验收仍待完成。代码位于独立分支 `issue/30-visual-editor`，GitHub Issue 状态未同步；不把本地合成结果写成整项结项。该任务不要求先恢复 #12/#14 的历史范围。
+#30 依赖 #1 的公开接口与 #6 的执行底座，作为独立可选应用交付。核心路径是当前项目页面进入编辑、拖拽与右键修改、插入组件、保存回源码及重启后继续编辑。HTML/CSS 已完成 macOS ARM64 本地验收；Vite React JSX/TSX 与 Vue 3 已适配，并通过合成项目的多文件保存、停服重启和外部修改冲突流程。当前范围见[可视化编辑说明](visual-editor.md)，最新结果见[精简重测记录](validation/issue-30-editor-simplification-macos.md)；适配阶段见[框架验收记录](validation/issue-30-framework-editor-macos.md)，较早的 HTML 结果见[历史记录](validation/issue-30-visual-editor-macos.md)。当次 Magpie 100M token 验收已获授权，但环境缺少凭据，真实生成请求为 0，生成项目后的完整验收仍待完成。该任务不要求先恢复 #12/#14 的历史范围。
+
+### 新增：Trace Debug
+
+[#31](https://github.com/changw98ic/CAYW/issues/31) 是独立、可选的实时调试插件。它消费 #1 的认证 IPC 事件，复用 #6 的执行记录和已有 CodeMode。节点保存后在插件内自动重新计算，保留原始运行、内容版本与对比结果。它不依赖 #30 的页面编辑器，也不要求可选远程 Server。当前实现、启动入口和边界见 [Trace Debug](../crates/cayw-trace-debug/README.md)；本地验收状态见下表。
 
 ### E：Device 资源与内容部署深化
 
@@ -93,6 +97,7 @@
 | [[Core] 交付上下文压缩：Core 基础压缩与 plugin 增强回退](https://github.com/changw98ic/CAYW/issues/22) | C | [#6](https://github.com/changw98ic/CAYW/issues/6) | [#7](https://github.com/changw98ic/CAYW/issues/7)、[#10](https://github.com/changw98ic/CAYW/issues/10)；JEv 增强压缩验收另需 [#17](https://github.com/changw98ic/CAYW/issues/17) | 计划 |
 | [[API] 补齐公开 API：Session 分叉、模型配置、工具授权、上下文与预算](https://github.com/changw98ic/CAYW/issues/23) | C | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#6](https://github.com/changw98ic/CAYW/issues/6) | [#10](https://github.com/changw98ic/CAYW/issues/10)、[#11](https://github.com/changw98ic/CAYW/issues/11)、[#12](https://github.com/changw98ic/CAYW/issues/12) | 计划 |
 | [[页面编辑] 当前 UI 的可视化转换、拖拽、组件插入、右键修改与源码回写](https://github.com/changw98ic/CAYW/issues/30) | 独立应用 | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#6](https://github.com/changw98ic/CAYW/issues/6) | 不恢复 #12/#14 的完整历史范围 | [HTML/CSS 已本地验收；React JSX/TSX、Vue 3 已适配并通过合成项目完整编辑流程](validation/issue-30-framework-editor-macos.md)；已授权 Magpie 100M，缺少凭据，真实请求 0，生成验收待完成；独立分支 `issue/30-visual-editor`，GitHub 状态未同步 |
+| [[Plugin] 实时 Trace 架构图与节点调试](https://github.com/changw98ic/CAYW/issues/31) | 新增 plugin | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#6](https://github.com/changw98ic/CAYW/issues/6) | #30 仅是可选定位入口，不作为依赖 | [已完成 macOS ARM64 首版本地验收](validation/issue-31-trace-debug-macos.md)：实际追踪与审批等待、节点保存自动重新计算、分支/输出变化、对比撤销及停用后普通 IPC 任务；已补充 [Magpie 真实模型验证](validation/issue-31-magpie-macos.md)，原始失败与预算保留均记录；保留独立工作树，未提交或修改远端 Issue |
 | [[平台] 补齐 Linux 与 Windows 支持及原生验收](https://github.com/changw98ic/CAYW/issues/19) | 后续平台 | [#1](https://github.com/changw98ic/CAYW/issues/1) | 关联 #2/#4/#7/#18；不阻塞其 macOS 交付 | 计划；不属当前首发，尚未启动 |
 
 ## 依赖图
@@ -123,8 +128,11 @@ flowchart TD
   I22["#22 上下文压缩"]
   I23["#23 公开 API 补齐"]
   I30["#30 当前页面可视化编辑 / 源码回写"]
+  I31["#31 Trace Debug / 节点自动重新计算"]
   I1 --> I30
   I6 --> I30
+  I1 --> I31
+  I6 --> I31
   I1 --> I19
   I1 --> I2
   I1 --> I3

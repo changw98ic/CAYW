@@ -69,9 +69,12 @@ fn history_content(assistant: &AssistantMessage) -> Result<Vec<Value>> {
             .iter()
             .map(|part| match part {
                 Content::Text { text } => Ok(json!({"type":"text","text":text})),
-                Content::ToolCall(call) => Ok(
-                    json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.arguments}),
-                ),
+                Content::ToolCall(call) => Ok(json!({
+                    "type":"tool_use",
+                    "id":call.id,
+                    "name":call.name,
+                    "input":send_arguments(call.arguments.clone()),
+                })),
                 _ => Err("Unsupported Anthropic assistant history".to_owned()),
             })
             .collect();
@@ -110,10 +113,41 @@ fn history_content(assistant: &AssistantMessage) -> Result<Vec<Value>> {
             _ => unreachable!("validated block type"),
         }
     }
-    if normalized != assistant.content {
+    // Argument validity is checked at the request boundary. Metadata must match
+    // the actual wire content, which has no local error-description field.
+    if normalized.len() != assistant.content.len()
+        || !normalized
+            .iter()
+            .zip(&assistant.content)
+            .all(|(wire, saved)| match (wire, saved) {
+                (Content::ToolCall(wire), Content::ToolCall(saved)) => {
+                    wire.id == saved.id
+                        && wire.name == saved.name
+                        && wire.arguments == saved.arguments
+                }
+                _ => wire == saved,
+            })
+    {
         return Err("Anthropic history metadata does not match assistant content".into());
     }
-    Ok(content.clone())
+    // Messages requires an object input. Project only the copy that is sent;
+    // the persisted wire block keeps the original malformed value unchanged.
+    let mut sent = content.clone();
+    for block in &mut sent {
+        if block["type"] == "tool_use" {
+            let arguments = block["input"].take();
+            block["input"] = send_arguments(arguments);
+        }
+    }
+    Ok(sent)
+}
+
+fn send_arguments(arguments: Value) -> Value {
+    if arguments.is_object() {
+        arguments
+    } else {
+        json!({"invalid_tool_arguments": arguments})
+    }
 }
 
 fn validate_block(block: &Value, complete: bool) -> Result<()> {
@@ -129,7 +163,10 @@ fn validate_block(block: &Value, complete: bool) -> Result<()> {
                     return Err("Invalid Anthropic tool identity".into());
                 }
             }
-            common::object(block.get("input").ok_or("Missing Anthropic tool input")?)?;
+            // Arguments are model output, not protocol identity. Keep any value
+            // here so malformed input can be reported back instead of ending the
+            // stream; the stop event classifies it.
+            block.get("input").ok_or("Missing Anthropic tool input")?;
             if let Some(caller) = block.get("caller") {
                 let fields = common::object(caller)?;
                 if fields.len() != 1 || caller["type"] != "direct" {
@@ -312,8 +349,7 @@ impl State {
                         }
                         let initial = block
                             .get("input")
-                            .filter(|v| v.is_object())
-                            .ok_or("Tool input must be an object")?
+                            .ok_or("Missing Anthropic tool input")?
                             .clone();
                         self.message.content.push(Content::ToolCall(ToolCall::new(
                             id,
@@ -373,7 +409,9 @@ impl State {
                         },
                         "input_json_delta",
                     ) => {
-                        if initial.as_object().is_some_and(|o| !o.is_empty()) {
+                        if !initial.is_object()
+                            || initial.as_object().is_some_and(|o| !o.is_empty())
+                        {
                             return Err(
                                 "Cannot combine complete tool input with JSON deltas".into()
                             );
@@ -427,13 +465,32 @@ impl State {
                         let arguments = if json.is_empty() {
                             initial
                         } else {
-                            crate::json::parse_response(&json, cancel).await?
+                            match crate::json::parse_response(&json, cancel).await {
+                                Ok(value) => value,
+                                // Keep syntax errors verbatim; cancellation and
+                                // parser resource limits still stop the response.
+                                Err(
+                                    crate::json::ParseError::InvalidSyntax
+                                    | crate::json::ParseError::TrailingData,
+                                ) => Value::String(json),
+                                Err(error) => return Err(error.into()),
+                            }
+                        };
+                        let schema = {
+                            let Content::ToolCall(call) = &self.message.content[index] else {
+                                unreachable!()
+                            };
+                            self.tools
+                                .get(&call.name)
+                                .ok_or("Response calls an undeclared tool")?
+                                .parameters
+                                .clone()
                         };
                         let Content::ToolCall(call) = &mut self.message.content[index] else {
                             unreachable!()
                         };
                         call.arguments = arguments;
-                        common::validate_call(call, &self.tools)?;
+                        call.arguments_error = common::arguments_error(&call.arguments, &schema)?;
                         let arguments = call.arguments.clone();
                         stored_content(&mut self.message)[wire_index as usize]["input"] = arguments;
                         events.push(AssistantEvent::ToolCallEnd {
@@ -552,4 +609,44 @@ fn index(value: &Value) -> Result<u64> {
         .get("index")
         .and_then(Value::as_u64)
         .ok_or_else(|| "Invalid content block index".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cayw_ai::{Model, StreamOptions, SystemMessage};
+
+    #[tokio::test]
+    async fn cancellation_during_tool_json_parsing_is_not_an_argument_error() {
+        let request = ModelRequest {
+            model: Model::new("anthropic", "synthetic-model"),
+            messages: vec![Message::System(SystemMessage {
+                tools_added: vec![ToolDefinition {
+                    name: "fixture".into(),
+                    description: "Synthetic tool".into(),
+                    parameters: json!({"type":"object"}),
+                }],
+                ..Default::default()
+            })],
+            options: StreamOptions::default(),
+        };
+        let cancel = CancellationToken::new();
+        let mut state = State::new(&request);
+        for event in [
+            json!({"type":"message_start","message":{"id":"cancel-fixture","model":"synthetic-model","type":"message","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"cancel-call","name":"fixture","input":{}}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":format!("[{}0]", "0,".repeat(1024))}}),
+        ] {
+            state.accept(event, None, &cancel).await.unwrap();
+        }
+        let stop = state.accept(
+            json!({"type":"content_block_stop","index":0}),
+            None,
+            &cancel,
+        );
+        tokio::pin!(stop);
+        assert!(futures::poll!(&mut stop).is_pending());
+        cancel.cancel();
+        assert_eq!(stop.await.unwrap_err(), "Request cancelled");
+    }
 }
