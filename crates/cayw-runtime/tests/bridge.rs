@@ -121,6 +121,9 @@ impl SourceHandle for Source {
                 json!({"uri":uri,"mime_type":"text/markdown","text":"fixture resource body"})
             }
             (SourceOperation::Search { arguments }, _) => json!({"matches":[arguments["query"]]}),
+            (SourceOperation::GetPrompt { name, arguments }, _) => {
+                json!({"name": name, "description": "fixture prompt", "arguments": arguments, "messages": []})
+            }
         };
         Ok(SourceReply {
             key: request.key,
@@ -152,6 +155,7 @@ fn manifest() -> Manifest {
             content_sha256: content_sha256("fixture skill body"),
         }],
         resources: Vec::new(),
+        prompts: Vec::new(),
         search: true,
     }
 }
