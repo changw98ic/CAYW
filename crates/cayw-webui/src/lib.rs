@@ -1,6 +1,10 @@
 //! Optional loopback browser gateway. The runtime owns every session, event,
 //! tool invocation and approval decision. This gateway never retries an RPC.
 
+mod ownership;
+
+pub use ownership::OwnershipStore;
+
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -147,6 +151,8 @@ struct Gateway {
     in_flight: Semaphore,
     prompts: Semaphore,
     cancel: CancellationToken,
+    /// Durable Session/Task → device maps; survives gateway restart (F13).
+    ownership: Option<Arc<crate::OwnershipStore>>,
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
@@ -210,6 +216,65 @@ pub async fn serve_with_limits(
         prompts: Semaphore::new(limits.max_prompt_in_flight),
         limits,
         cancel: cancel.clone(),
+        ownership: None,
+    });
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/app.js", get(script))
+        .route("/styles.css", get(styles))
+        .route("/api/rpc", post(rpc))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(cancel.cancelled_owned())
+        .await
+}
+
+/// Same as [`serve_with_limits`], with a durable ownership store that restores
+/// Session/Task → device affinity after the gateway process restarts (F13).
+pub async fn serve_with_ownership(
+    listener: TcpListener,
+    ipc_client: IpcEndpoint,
+    web_token: impl Into<String>,
+    limits: GatewayLimits,
+    ownership: Arc<OwnershipStore>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    let address = listener.local_addr()?;
+    if !address.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "WebUI must bind to a loopback address",
+        ));
+    }
+    let web_token = web_token.into();
+    if !valid_token(&web_token) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Web token must contain 32..4096 ASCII bytes without whitespace",
+        ));
+    }
+    if web_token == ipc_client.token {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Web and IPC access tokens must differ",
+        ));
+    }
+    limits.validate()?;
+    let state = Arc::new(Gateway {
+        ipc: ipc_client,
+        web_token,
+        authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
+        pending: Semaphore::new(limits.max_pending_requests),
+        pending_prompts: Semaphore::new(limits.max_pending_requests.saturating_sub(1).max(1)),
+        in_flight: Semaphore::new(limits.max_in_flight),
+        prompts: Semaphore::new(limits.max_prompt_in_flight),
+        limits,
+        cancel: cancel.clone(),
+        ownership: Some(ownership),
     });
     let app = Router::new()
         .route("/", get(index))

@@ -1,5 +1,6 @@
 //! Headless runtime with one durable session history and explicit host authority.
 mod audit;
+mod background;
 mod bridge;
 mod cancellation;
 mod cells;
@@ -35,6 +36,7 @@ mod shared_read;
 mod values;
 
 pub use audit::{AuditRecord, GrantRecord};
+pub use background::{BackgroundConfig, BackgroundLogPage, BackgroundStatus, BackgroundTaskView};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
 pub use cayw_requests::TaskIntent;
@@ -128,6 +130,8 @@ pub struct RuntimeConfig {
     pub resources: ResourcePolicy,
     /// Optional Device-authoritative text outside the model's workspace.
     pub content: Option<ContentConfig>,
+    /// Optional persistent background commands (F13).
+    pub background: Option<BackgroundConfig>,
     pub max_prompt_bytes: usize,
     pub max_history_bytes: usize,
     pub max_event_bytes: usize,
@@ -165,6 +169,7 @@ impl Default for RuntimeConfig {
             fairness_after_dispatches: 8,
             resources: ResourcePolicy::default(),
             content: None,
+            background: None,
             max_prompt_bytes: 256 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
             max_event_bytes: 2 * 1024 * 1024,
@@ -195,6 +200,7 @@ impl RuntimeConfig {
         if let Some(content) = &self.content {
             content.validate()?;
         }
+        background::validate(self.background.as_ref())?;
         if self.max_concurrent_runs == 0
             || self.max_concurrent_runs > 1024
             || self.max_queued_runs < self.max_concurrent_runs
@@ -247,6 +253,7 @@ pub(crate) struct Inner {
     process_journal: processes::ProcessJournal,
     processes: Mutex<BTreeMap<String, Arc<cayw_host::Host>>>,
     content: Option<Arc<cayw_content::ContentStore>>,
+    background: Option<Arc<background::BackgroundRegistry>>,
     root: PathBuf,
     host_root: cayw_host::Host,
     provider: Arc<dyn Provider>,
@@ -334,6 +341,13 @@ impl Runtime {
             &config.resources,
         )?;
         let content = content::open(store_path.as_ref(), &root, config.content.as_ref())?;
+        let background = match &config.background {
+            Some(cfg) => Some(Arc::new(background::BackgroundRegistry::open(
+                store_path.as_ref(),
+                cfg,
+            )?)),
+            None => None,
+        };
         // RequestStore owns its authority fence and database as one unit. It
         // must not mistake the pre-existing Core database for a new authority.
         let requests = Arc::new(request_recovery::open_requests(
@@ -370,6 +384,7 @@ impl Runtime {
                 process_journal,
                 processes: Mutex::new(BTreeMap::new()),
                 content,
+                background,
                 root,
                 host_root,
                 provider,
