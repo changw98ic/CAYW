@@ -462,10 +462,10 @@ async fn concurrent_calls_and_json_depth_are_bounded_before_execution() {
 #[tokio::test]
 async fn cancelled_before_admission_and_timeouts_do_not_replay() {
     let registry = registry(Limits {
-        // Absolute deadline must outlive journal prep + admission on loaded CI;
-        // biased select returns known if the deadline expires before dispatched.
-        // Handler still blocks on release so the budget always elapses after entry.
-        operation_timeout: Duration::from_millis(500),
+        // Barrier below waits for admission; once entered the handler blocks on
+        // release so tens of ms is enough for the unknown-outcome deadline.
+        // Do not widen this as a flake shield — the entered select is the fix.
+        operation_timeout: Duration::from_millis(50),
         ..Limits::default()
     });
     let state = Arc::new(State::default());
