@@ -641,6 +641,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-run-inspector"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-runtime"
 version = "0.1.0"
 dependencies = [
