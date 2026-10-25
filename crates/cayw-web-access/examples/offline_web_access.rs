@@ -9,12 +9,21 @@ async fn main() {
     let transport = FixtureTransport::new().insert_html("https://example.com/f10", html);
     let search = FixtureSearch::new().insert(
         "f10",
-        vec![hit(1, "https://example.com/f10", "CAYW F10", "citation demo")],
+        vec![hit(
+            1,
+            "https://example.com/f10",
+            "CAYW F10",
+            "citation demo",
+        )],
     );
     let access = WebAccess::with_fixtures(transport, search);
 
     let found = access.search("f10", Some(1)).await.expect("search");
-    println!("search provider={} hits={}", found.provider, found.hits.len());
+    println!(
+        "search provider={} hits={}",
+        found.provider,
+        found.hits.len()
+    );
     let extracted = access
         .extract_url(&found.hits[0].url)
         .await

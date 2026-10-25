@@ -98,9 +98,11 @@ impl HttpTransport for FixtureTransport {
     ) -> BoxFuture<'a, Result<RawResponse, WebAccessError>> {
         Box::pin(async move {
             if self.offline {
-                return Err(WebAccessError::offline("fixture transport is in offline mode")
-                    .with_url(url)
-                    .with_provider("fixture"));
+                return Err(
+                    WebAccessError::offline("fixture transport is in offline mode")
+                        .with_url(url)
+                        .with_provider("fixture"),
+                );
             }
             let Some(page) = self.pages.get(url) else {
                 return Err(WebAccessError::new(
@@ -157,8 +159,10 @@ impl SearchProvider for FixtureSearch {
     ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>> {
         Box::pin(async move {
             if self.offline {
-                return Err(WebAccessError::offline("fixture search provider is offline")
-                    .with_provider("fixture"));
+                return Err(
+                    WebAccessError::offline("fixture search provider is offline")
+                        .with_provider("fixture"),
+                );
             }
             let mut hits = self
                 .hits

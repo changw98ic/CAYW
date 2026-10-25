@@ -21,7 +21,10 @@ fn token_text(bytes: &[u8]) -> String {
 }
 
 /// Extract visible text + best-effort `<title>` from HTML bytes/string.
-pub fn extract_html(input: &str, max_chars: usize) -> Result<(Option<String>, String, bool), WebAccessError> {
+pub fn extract_html(
+    input: &str,
+    max_chars: usize,
+) -> Result<(Option<String>, String, bool), WebAccessError> {
     let mut title: Option<String> = None;
     let mut in_title = false;
     let mut skip_depth: usize = 0;
@@ -238,7 +241,10 @@ pub fn extract_auto(
     }
     Err(WebAccessError::new(
         FailureClass::ExtractFailed,
-        format!("unsupported MIME for extraction: {}", mime.unwrap_or("<none>")),
+        format!(
+            "unsupported MIME for extraction: {}",
+            mime.unwrap_or("<none>")
+        ),
     ))
 }
 

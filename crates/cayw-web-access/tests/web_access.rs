@@ -30,11 +30,18 @@ fn fixture_stack() -> WebAccess {
 #[tokio::test]
 async fn public_url_extract_yields_citation_for_later_tools() {
     let access = fixture_stack();
-    let extracted = access.fetch_and_extract("https://example.com/").await.unwrap();
+    let extracted = access
+        .fetch_and_extract("https://example.com/")
+        .await
+        .unwrap();
     assert_eq!(extracted.title.as_deref(), Some("Example Domain"));
     assert!(extracted.text.contains("documentation examples"));
     assert!(!extracted.text.contains("ignored"));
-    let cref = extracted.citation.content_ref.as_deref().expect("content_ref");
+    let cref = extracted
+        .citation
+        .content_ref
+        .as_deref()
+        .expect("content_ref");
     let body = access.store().get_text(cref).unwrap();
     assert!(body.contains("Example Domain"));
     // Citation JSON is what subsequent tools would receive as a handle-like pointer.
@@ -70,7 +77,10 @@ async fn offline_failure_is_diagnosable() {
     assert_eq!(d.url.as_deref(), Some("https://example.com/"));
     assert!(d.message.contains("offline"));
 
-    let err = access.search("anything", None).await.expect_err("offline search");
+    let err = access
+        .search("anything", None)
+        .await
+        .expect_err("offline search");
     assert_eq!(err.diagnostic().class, FailureClass::Offline);
 }
 
@@ -93,20 +103,34 @@ async fn refuses_search_query_capability_name() {
 async fn call_dispatch_web_capabilities() {
     let access = fixture_stack();
     let search = access
-        .call(capabilities::WEB_SEARCH, json!({"query": "example", "limit": 2}))
+        .call(
+            capabilities::WEB_SEARCH,
+            json!({"query": "example", "limit": 2}),
+        )
         .await
         .unwrap();
     assert_eq!(search["hits"][0]["url"], "https://example.com/");
     let fetched = access
-        .call(capabilities::WEB_FETCH, json!({"url": "https://example.com/"}))
+        .call(
+            capabilities::WEB_FETCH,
+            json!({"url": "https://example.com/"}),
+        )
         .await
         .unwrap();
     assert_eq!(fetched["status"], 200);
     let extracted = access
-        .call(capabilities::WEB_EXTRACT, json!({"url": "https://example.com/"}))
+        .call(
+            capabilities::WEB_EXTRACT,
+            json!({"url": "https://example.com/"}),
+        )
         .await
         .unwrap();
-    assert!(extracted["text"].as_str().unwrap().contains("Example Domain"));
+    assert!(
+        extracted["text"]
+            .as_str()
+            .unwrap()
+            .contains("Example Domain")
+    );
 }
 
 #[test]

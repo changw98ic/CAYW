@@ -85,7 +85,11 @@ impl WebAccess {
         Ok(())
     }
 
-    pub async fn search(&self, query: &str, limit: Option<u32>) -> Result<SearchResult, WebAccessError> {
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<SearchResult, WebAccessError> {
         let q = query.trim();
         if q.is_empty() || q.len() > 8192 {
             return Err(WebAccessError::new(
@@ -228,7 +232,10 @@ impl WebAccess {
                     .ok_or_else(|| {
                         WebAccessError::new(FailureClass::InvalidUrl, "web.search requires query")
                     })?;
-                let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let limit = arguments
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
                 let result = self.search(query, limit).await?;
                 Ok(serde_json::to_value(result).expect("serialize SearchResult"))
             }

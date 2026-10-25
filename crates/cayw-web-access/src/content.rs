@@ -80,24 +80,24 @@ impl ContentStore {
 
     pub fn get_meta(&self, id: &str) -> Result<ContentRef, WebAccessError> {
         let guard = self.inner.lock().expect("content store lock");
-        guard
-            .bodies
-            .get(id)
-            .map(|b| b.meta.clone())
-            .ok_or_else(|| WebAccessError::new(FailureClass::NotFound, format!("unknown content ref {id}")))
+        guard.bodies.get(id).map(|b| b.meta.clone()).ok_or_else(|| {
+            WebAccessError::new(FailureClass::NotFound, format!("unknown content ref {id}"))
+        })
     }
 
     pub fn get_text(&self, id: &str) -> Result<String, WebAccessError> {
         let guard = self.inner.lock().expect("content store lock");
-        let body = guard
-            .bodies
-            .get(id)
-            .ok_or_else(|| WebAccessError::new(FailureClass::NotFound, format!("unknown content ref {id}")))?;
+        let body = guard.bodies.get(id).ok_or_else(|| {
+            WebAccessError::new(FailureClass::NotFound, format!("unknown content ref {id}"))
+        })?;
         if let Some(text) = &body.text {
             return Ok(text.clone());
         }
         String::from_utf8(body.bytes.clone()).map_err(|_| {
-            WebAccessError::new(FailureClass::ExtractFailed, "content body is not UTF-8 text")
+            WebAccessError::new(
+                FailureClass::ExtractFailed,
+                "content body is not UTF-8 text",
+            )
         })
     }
 
@@ -135,6 +135,9 @@ mod tests {
         );
         assert_eq!(meta.byte_len, 5);
         assert_eq!(store.get_text(&meta.id).unwrap(), "hello");
-        assert_eq!(store.get_meta(&meta.id).unwrap().title.as_deref(), Some("Hello"));
+        assert_eq!(
+            store.get_meta(&meta.id).unwrap().title.as_deref(),
+            Some("Hello")
+        );
     }
 }
