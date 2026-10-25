@@ -217,7 +217,7 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 Bridge 保存来源 ID、版本、origin、实例/代际、manifest 摘要和原调用关联。来源卸载/替换后，旧快照或迟到结果不能装作当前来源；已开始但未获可靠回执的调用保持 unknown。模型不能通过一个看似相同的工具名改绑连接或伪造来源。
 
-CodeGraph、跨文件 AST/语义索引和外部 search 在宿主侧按需接入，不塞进 Core。已有 Workspace 文本检索和单文件语法能力可直接提供受控局部读，但不替代这些外部服务。F04 首刀由 [`cayw-codeintel`](../crates/cayw-codeintel/README.md) 提供共享的文件/符号版本与最小 definitions/diagnostics 桥接（仍不内置实况 LSP）。普通 Chat 不应因缺少某项检索扩展而失去基本运行能力。参见 [Bridge](../crates/cayw-bridge/src/registry.rs)、[Runtime 桥接验收](validation/runtime-bridge.md)、[F04 来源](sources/f04-symbol-version-bridge.md)和 [#9](https://github.com/changw98ic/CAYW/issues/9)。
+CodeGraph、跨文件 AST/语义索引和外部 search 在宿主侧按需接入，不塞进 Core。已有 Workspace 文本检索和单文件语法能力可直接提供受控局部读，但不替代这些外部服务。F04 首刀由 [`cayw-codeintel`](../crates/cayw-codeintel/README.md) 提供共享的文件/符号版本与最小 definitions/diagnostics 桥接（仍不内置实况 LSP）。F16 / SLICE E 由 Trace Debug 的 [`symbol_graph`](../crates/cayw-trace-debug/src/symbol_graph.rs) 将声明节点挂到同一桥接的文件/符号/内容版本，错误摘要回链证据；不做任意程序自动构图。普通 Chat 不应因缺少某项检索扩展而失去基本运行能力。参见 [Bridge](../crates/cayw-bridge/src/registry.rs)、[Runtime 桥接验收](validation/runtime-bridge.md)、[F04 来源](sources/f04-symbol-version-bridge.md)和 [#9](https://github.com/changw98ic/CAYW/issues/9)。
 
 ## 持久化、事件游标、幂等与恢复
 

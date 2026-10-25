@@ -2,8 +2,10 @@
 pub mod capture;
 pub mod engine;
 pub mod server;
+pub mod symbol_graph;
 pub mod types;
 
+pub use symbol_graph::{SymbolGraphLinker, parse_implementation};
 pub use types::*;
 
 use cayw_ai::CancellationToken;

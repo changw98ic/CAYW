@@ -709,6 +709,7 @@ dependencies = [
  "cayw-agent",
  "cayw-ai",
  "cayw-cells",
+ "cayw-codeintel",
  "cayw-codemode",
  "cayw-core",
  "cayw-ipc",

@@ -1008,6 +1008,7 @@ fn ensure_project<'a>(
             active_node: None,
             trace_error: None,
             runtime_status: Status::Running,
+            symbol_hangs: Default::default(),
         });
     merge_field(&mut project.session_id, session_id, "session")?;
     merge_field(&mut project.attempt_id, attempt_id, "attempt")?;

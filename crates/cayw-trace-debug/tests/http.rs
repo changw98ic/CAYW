@@ -342,6 +342,7 @@ async fn store_errors_map_to_conflict_and_unprocessable_entity() {
             active_node: None,
             trace_error: None,
             runtime_status: Status::Completed,
+            symbol_hangs: Default::default(),
         },
     );
     std::fs::write(

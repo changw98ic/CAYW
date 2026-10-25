@@ -4,6 +4,11 @@ Trace Debug 是独立、可选的本机调试插件。它通过认证 IPC 读取
 
 普通 Runtime 不依赖此包。关闭插件不会取消原任务。插件不直接打开 Core 或 Cells 数据库，也不持有业务任务写入接口。
 
+## F16 符号挂载（SLICE E）
+
+节点可通过 `implementation` 挂到宿主 [`cayw-codeintel`](../cayw-codeintel/README.md) 已发布的工程文件/符号/内容版本（例如 `examples/demo.rs::condition`）。失败步骤的错误摘要携带同一挂载与 `evidence_cursor`，并可写入带回链的 diagnostics。非路径实现（如 `luau`）不挂载；未在桥接中发布的路径不会虚构关联。详见 `docs/sources/f16-symbol-graph-link.md`。
+
+
 ## 启动
 
 在仓库根目录构建一次：
