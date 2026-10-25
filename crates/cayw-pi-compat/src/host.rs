@@ -129,12 +129,20 @@ impl PiCompatHost {
         {
             Ok(value) => Ok(value),
             Err(err) => {
-                if err.outcome_unknown() {
-                    return Err(PiCompatError::OutcomeUnknown(err.to_string()));
+                // Cancelled/Timeout are known terminals (remote convention); do not
+                // elevate them to OutcomeUnknown. Unloaded/Protocol/Io stay unknown.
+                match &err {
+                    PluginError::Cancelled => Err(PiCompatError::Cancelled),
+                    PluginError::Timeout => Err(PiCompatError::Timeout),
+                    other if other.outcome_unknown() => {
+                        Err(PiCompatError::OutcomeUnknown(other.to_string()))
+                    }
+                    other => {
+                        let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+                        matrix.record_incompatible(package.clone(), surface, other.to_string());
+                        Err(map_plugin_err(err))
+                    }
                 }
-                let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
-                matrix.record_incompatible(package.clone(), surface, err.to_string());
-                Err(map_plugin_err(err))
             }
         }
     }
@@ -210,9 +218,10 @@ fn map_plugin_err(err: PluginError) -> PiCompatError {
         | PluginError::Io(msg)
         | PluginError::Unavailable(msg)
         | PluginError::Failed(msg) => PiCompatError::Failed(msg),
-        PluginError::Cancelled | PluginError::Timeout | PluginError::Unloaded => {
-            PiCompatError::OutcomeUnknown(err.to_string())
-        }
+        PluginError::Cancelled => PiCompatError::Cancelled,
+        PluginError::Timeout => PiCompatError::Timeout,
+        // Unloaded mid-call: side effects may already have started.
+        PluginError::Unloaded => PiCompatError::OutcomeUnknown(err.to_string()),
         PluginError::OutcomeUnknown(msg) => PiCompatError::OutcomeUnknown(msg),
     }
 }

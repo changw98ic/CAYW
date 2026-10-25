@@ -79,3 +79,21 @@ fn family_mappings_cover_all_surfaces() {
         assert!(!m.cayw_seam.is_empty());
     }
 }
+
+#[tokio::test]
+async fn cancelled_call_is_known_not_outcome_unknown() {
+    let host = PiCompatHost::new(true);
+    let package = PiFixturePlugin::package_id();
+    host.install_fixture().expect("install fixture");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let err = host
+        .call_tool(&package, json!({"text": "x"}), cancel)
+        .await
+        .expect_err("pre-cancelled call must fail");
+    assert!(
+        matches!(err, PiCompatError::Cancelled),
+        "Cancelled must stay a known terminal, got {err:?}"
+    );
+    assert!(!err.outcome_unknown());
+}

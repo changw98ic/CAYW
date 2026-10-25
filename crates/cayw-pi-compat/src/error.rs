@@ -15,6 +15,10 @@ pub enum PiCompatError {
     Unavailable(String),
     #[error("plugin call failed: {0}")]
     Failed(String),
+    #[error("plugin call cancelled with a known outcome")]
+    Cancelled,
+    #[error("plugin call timed out with a known outcome")]
+    Timeout,
     #[error("plugin outcome unknown: {0}")]
     OutcomeUnknown(String),
 }
