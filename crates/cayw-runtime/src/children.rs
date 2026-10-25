@@ -1079,11 +1079,11 @@ async fn finish_detached(
     let parent_deadline = tokio::time::Instant::from_std(context.scope.deadline());
     let own_deadline = tokio::time::Instant::now() + max_time;
     let deadline = parent_deadline.min(own_deadline);
-    let fleet_cancel = context
-        .inner
-        .fleet
-        .cancel_token(&task_id)
-        .unwrap_or_default();
+    // Register always inserts the token before this finisher is spawned; a
+    // missing handle is a programming error, not a never-cancelled default.
+    let fleet_cancel = context.inner.fleet.cancel_token(&task_id).expect(
+        "detached fleet member must expose its cancel token after register",
+    );
     loop {
         if receiver.borrow().is_some() {
             break;
@@ -1112,9 +1112,20 @@ async fn finish_detached(
         receiver,
     )
     .await;
-    // Best-effort runner join. Detached ownership stays in the fleet registry.
-    let _ = tokio::time::timeout(max_time, &mut join).await;
-    if outcome.confirmed() && !outcome.unknown() {
+    // Soft join for the detached runner: keep ownership in the fleet registry,
+    // but surface join failure/timeout as Unknown instead of discarding silently.
+    let join_ok = match tokio::time::timeout(max_time, &mut join).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_join_err)) => {
+            context.unknown.store(true, Ordering::Release);
+            false
+        }
+        Err(_elapsed) => {
+            context.unknown.store(true, Ordering::Release);
+            false
+        }
+    };
+    if join_ok && outcome.confirmed() && !outcome.unknown() {
         let event = finish_event(&context, &outcome);
         let _ =
             context
@@ -1128,12 +1139,21 @@ async fn finish_detached(
             true,
         );
     } else {
+        let error = if !join_ok {
+            Some(
+                outcome
+                    .error
+                    .unwrap_or_else(|| "detached child runner join timed out or failed".into()),
+            )
+        } else {
+            outcome
+                .error
+                .or_else(|| Some("detached child requires reconciliation".into()))
+        };
         context.inner.fleet.mark_terminal(
             &task_id,
             FleetMemberState::Unknown,
-            outcome
-                .error
-                .or_else(|| Some("detached child requires reconciliation".into())),
+            error,
             false,
         );
     }
