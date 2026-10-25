@@ -257,7 +257,7 @@ Device 持有会话、工作区与内容的权威事实。可信宿主可在安�
 
 可信 Native plugin 用 Cargo feature 静态链接，升级需重新编译；不承诺热替换 Rust ABI。External plugin 用独立进程、版本化 IPC，宿主限定启动配置、能力、权限、预算和生命周期。plugin manifest、版本/代际与调用关联必须可核对。独立进程并不防止恶意本地代码访问其进程已经拥有的资源，不能把进程隔离当成安全沙箱。
 
-plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡献不取得 Core 私有状态或新的执行权。TUI/WebUI 选择如何展示，用户动作仍经公开接口及原审批/权限路径；模型或 plugin 提供的“批准”只作为数据处理。不先加入新的 UI 框架，也不要求所有 plugin 实现某种界面。
+plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡献不取得 Core 私有状态或新的执行权。F07 首刀的共享面板扩展面见 [`cayw-panel`](../crates/cayw-panel/README.md)：官方与第三方经同一 `PanelRegistry` / `WorkspaceHooks` 注册侧栏与底部工作区贡献；注册本身不授权。TUI/WebUI 选择如何展示，用户动作仍经公开接口及原审批/权限路径；模型或 plugin 提供的“批准”只作为数据处理。不先加入新的 UI 框架，也不要求所有 plugin 实现某种界面。
 
 普通 Chat 不依赖 StrongFlow/JEv/Fusion/Observer。StrongFlow Session 持久绑定流程版本、来源与义务：plugin 卸载或缺失时，原 Session 提示不可用并保持冻结，不在原地去掉义务或伪造完成。允许的转换是用户显式确认后，核对原执行已停止且没有未结未知效果，Fork 为新的普通 Session，保存来源会话/游标；原 Session 与证据保持原状，新会话重新获得自己的权限。
 
