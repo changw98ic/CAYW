@@ -371,8 +371,16 @@ impl RemoteDevice {
             token.cancel();
         }
         // Allow cooperative handlers to observe their cancelled tokens before
-        // aborting any that do not yield. This is bounded by one scheduling turn.
-        tokio::task::yield_now().await;
+        // aborting any that do not yield. One scheduling turn is not enough on a
+        // loaded runner (macOS CI under `cargo test --workspace`); keep a short
+        // bounded grace so waiters can finish cancelled().await without stalling
+        // cleanup on blocked work.
+        let _ = timeout(Duration::from_millis(50), async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         tasks.shutdown().await;
         result
     }
