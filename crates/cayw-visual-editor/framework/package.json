@@ -1,0 +1,18 @@
+{
+  "name": "cayw-visual-editor-framework",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Framework source mapping and Vite preview companion for the CAYW visual editor",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "dependencies": {
+    "@babel/parser": "7.28.4",
+    "@vue/compiler-dom": "3.5.22",
+    "@vue/compiler-sfc": "3.5.22",
+    "magic-string": "0.30.19",
+    "vite": "7.3.5"
+  }
+}

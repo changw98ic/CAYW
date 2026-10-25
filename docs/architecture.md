@@ -45,10 +45,13 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-bridge` | 宿主已有 MCP/Skills/搜索能力的目录、来源快照和调用桥接 | 不在 Core 再创建连接或 loader |
 | `cayw-plugins` / `cayw-content` / `cayw-remote` | plugin、Device 内容存放/备份、远程绑定路由 | 各自边界与局部实现分开验收；不成为普通 Chat 的强依赖 |
 | `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | 客户端、浏览器轻网关与验证消费者 | 依赖公开接口；Runtime 不反向依赖这些消费者 |
+| `cayw-visual-editor` | HTML/CSS、Vite React 与 Vue 3 页面的可选编辑应用；源码映射、预览和直接操作 | Rust 持有草稿与源码权威，保存通过 Host 公开接口执行文件权限、调用记录和摘要核对；可选 Node 进程解析 JSX/TSX/SFC 并启动 Vite，Core 不依赖编辑器 |
 
 依赖从接入方指向公开接口，再由 Runtime 组合运行底座。Host 实现 CodeMode 的能力接口，Runtime 注入实际实现；接口调用不要求 CodeMode 反向依赖具体 UI 或某个 MCP 客户端。可选 Native plugin 由 Cargo feature 决定编译组合，External plugin 由宿主通过 IPC 注入。模型响应中的工具或 plugin 名称不能新增依赖或授予权限。
 
 本地 Agent 循环依赖 Provider，并不依赖 TUI、Server 或 VerifyTool。VerifyTool 可以依赖真实 Runtime 做验证，这不形成 Runtime 对 VerifyTool 的反向依赖。运行数据会往返流动，但不改变这些软件依赖方向。
+
+可视化编辑器按 `--framework` 显式选择 HTML、React 或 Vue。HTML 使用 Rust 解析与静态预览；React/Vue 的 Node 进程保留项目 Vite 配置和插件，分别提供磁盘原页面与内存草稿预览。Node 只返回有界的源码补丁，Rust 校验文件、UTF-8 字节位置和旧文本后提交草稿。普通编辑不调用模型，也不向模型增加通用 Node 工具。项目 Vite 配置以本机用户身份执行，进程隔离不是沙箱。多文件保存逐个核对文件摘要，不承诺跨文件事务；中途仅保存部分文件时，保留持久未知状态并停止后续写入。
 
 ## 部署形态
 
@@ -281,6 +284,16 @@ TUI 是可选终端消费者，WebUI 是可选浏览器消费者；WebUI 的本�
 本地浏览器轻网关明确监听、来源与鉴权；回环不替代身份校验。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
 
 VerifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [VerifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
+
+## 当前页面的可视化编辑
+
+[Issue #30](https://github.com/changw98ic/CAYW/issues/30) 由独立可选应用 `cayw-visual-editor` 承接。首版面向 HTML/CSS 与原生 JavaScript 页面，使用源码位置映射和页面操作覆盖层。它不把页面先转成预注册组件模板，也不在 Core 中增加页面解析器。
+
+项目预览和编辑器分别使用本机地址。项目脚本不能取得编辑器访问令牌。预览消息必须校验来源、发送窗口和消息结构，不能借消息获得任意文件或进程能力。
+
+源码读取和保存通过 `cayw-host` 的公开 Rust 接口执行。编辑器为当前项目提供精确权限和持久调用记录。保存带原文件摘要，过期映射不能覆盖外部改动；未确认保存结果时保留未知状态，不能通过重启自动恢复写入。页面资源读取保持固定目录句柄，不能因路径替换而换根。
+
+确定性样式、文本与结构操作不需要模型。首版以单个 HTML 文件为保存单位；无法映射的动态区域保持渲染并标明操作范围。预览刷新不承诺保留脚本内存中的临时状态。使用范围与真实验收入口见[可视化编辑说明](visual-editor.md)。
 
 ## 测试验收与阶段映射
 
