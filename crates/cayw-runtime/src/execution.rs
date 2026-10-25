@@ -965,6 +965,10 @@ async fn execute_with_cells(
         )),
         inner.model.clone(),
     );
+    // FleetView intervention: steer/stop need the live Agent control.
+    inner
+        .fleet
+        .attach_control(&context.lease.session_id, agent.control());
     let mut messages = Runtime {
         inner: inner.clone(),
     }
@@ -1062,7 +1066,7 @@ async fn execute_with_cells(
         context.check(&context.cancel)?;
         completion.check()
     };
-    supervise_run(
+    let result = supervise_run(
         run,
         &context.cancel,
         tokio::time::Instant::from_std(context.scope.deadline()),
@@ -1072,7 +1076,9 @@ async fn execute_with_cells(
             agent.control().abort();
         },
     )
-    .await
+    .await;
+    inner.fleet.clear_control(&context.lease.session_id);
+    result
 }
 
 async fn supervise_run<F, C, CF, A>(

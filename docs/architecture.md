@@ -37,7 +37,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-ai` / `cayw-providers` | 消息、模型请求/流事件、参数声明与协议适配 | 不负责设备权限、Session 权威状态或 UI |
 | `cayw-agent` | AgentLoop：历史、模型流、工具批次、steering/follow-up、取消 | 消费 Provider 与宿主注册工具；自身历史在内存中，不冒充持久化 Runtime |
 | `cayw-core` | Session、Attempt lease、事件日志、执行/调用/审批事实与核对 | 对执行写入检查完整 lease；不加载 UI、Server 或外部代码索引 |
-| `cayw-runtime` / `cayw-ipc` | 公开 Rust 入口、调度与生命周期协调；本地传输 | 复用同一 Runtime 分派，不另建 IPC 专用执行器 |
+| `cayw-runtime` / `cayw-ipc` | 公开 Rust 入口、调度与生命周期协调、本地子代理 FleetView（F12 首刀）；本地传输 | 复用同一 Runtime 分派，不另建 IPC 专用执行器；后台 detach 不绕过预算/深度 |
 | `cayw-codemode` / `cayw-cells` | Luau 编排、分段 cell、输出、会话值、执行记录与共享读协调 | 通过宿主能力接口调用 Rust，不自带环境文件/进程/网络权限 |
 | `cayw-host` / `cayw-workspace` / `cayw-data` | 授权、审计和预算后分派文件、检索、数据、Git 与配置好的进程能力 | Workspace/Data 执行器本身不是模型权限边界，不能另作旁路暴露 |
 | `cayw-device` | 进程树归属、交互进程、停止确认、资源记账和准入底座 | 本地执行不依赖远程 Server；进程组不是安全沙箱 |

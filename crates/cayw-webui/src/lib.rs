@@ -23,6 +23,9 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
+    "runtime.fleet",
+    "runtime.fleet.stop",
+    "runtime.fleet.steer",
     "session.create",
     "session.list",
     "session.get",
@@ -476,6 +479,8 @@ fn side_effecting(method: &str) -> bool {
             | "session.cancel"
             | "approval.decide"
             | "session.fork"
+            | "runtime.fleet.stop"
+            | "runtime.fleet.steer"
     )
 }
 

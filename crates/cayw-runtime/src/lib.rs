@@ -10,6 +10,7 @@ mod content;
 mod coordination;
 mod execution;
 pub mod fixture;
+mod fleet;
 mod input;
 mod launch;
 mod model_requests;
@@ -43,6 +44,7 @@ pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
 };
 pub use content::{ContentConfig, ContentScope, ContentView};
+pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::HeadlessConfig;
 pub use model_requests::{
@@ -253,6 +255,7 @@ pub(crate) struct Inner {
     model: Model,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
+    fleet: fleet::FleetRegistry,
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
@@ -376,6 +379,7 @@ impl Runtime {
                 model,
                 config,
                 active: Mutex::new(BTreeMap::new()),
+                fleet: fleet::FleetRegistry::default(),
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),

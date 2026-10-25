@@ -1,21 +1,25 @@
-//! Issue 5 local sub-agents.
+//! Local sub-agents (Issue 5) plus F12 FleetView / delegation first cut.
 //!
 //! One `agent.run` capability call starts exactly one real child Runtime session
-//! and task in the same database and waits for that task's durable terminal. The
-//! parent's capability admission, authorization, Core start/settlement and audit
-//! remain the outer boundary; children never bypass `max_concurrent_runs`.
+//! and task in the same database. Foreground mode waits for that task's durable
+//! terminal (Issue 5). Background mode returns a handle immediately and keeps the
+//! child running as a detached fleet member: parent cancel / drain must not stop
+//! it. `agent.fleet` / `agent.stop` / `agent.steer` expose FleetView and
+//! intervention; budgets, depth and `max_concurrent_runs` still apply.
 //!
 //! The child gets its own Session, Task, attempt, approvals and Request identity.
 //! Its permissions come only from the trusted host's `LocalAgents.permissions`;
 //! model arguments cannot name, inherit or upgrade a permission. Token, capability
 //! call and byte budgets are shared across the whole tree, so a child can never
 //! reset its parent's spend. A child never nests beyond `max_depth`, and every
-//! wait is bounded by the parent's remaining run deadline.
+//! wait is bounded by the parent's remaining run deadline (background still shares
+//! the tree absolute deadline and its own `max_time`).
 
 use crate::{
     Inner, Runtime, RuntimeError, ScopedPermission, SessionView, TaskState,
     cells::CallScope,
     execution::RunContext,
+    fleet::{AgentRunMode, FleetEntry, FleetMemberState},
     queue::{TaskLease, TaskTerminal},
 };
 use async_trait::async_trait;
@@ -36,6 +40,9 @@ use std::{
 use tokio::sync::watch;
 
 pub(crate) const CAPABILITY: &str = "agent.run";
+pub(crate) const CAPABILITY_FLEET: &str = "agent.fleet";
+pub(crate) const CAPABILITY_STOP: &str = "agent.stop";
+pub(crate) const CAPABILITY_STEER: &str = "agent.steer";
 const DEFAULT_LABEL: &str = "Sub-agent";
 const RESULT_LABEL_BYTES: usize = 256;
 const RESULT_ERROR_BYTES: usize = 256;
@@ -106,14 +113,64 @@ pub(crate) fn validate(config: Option<&LocalAgents>) -> Result<(), RuntimeError>
 fn definition() -> ToolDefinition {
     ToolDefinition {
         name: CAPABILITY.into(),
-        description: "Start one real local sub-agent session in this runtime and wait for its durable terminal. The child has its own session, task and host-configured permissions. It cannot inherit or upgrade parent permissions, and nesting beyond the host limit is refused.".into(),
+        description: "Start one real local sub-agent session in this runtime. Foreground (default) waits for its durable terminal. Background returns a fleet handle immediately; the child keeps running and parent cancel does not stop it. The child has its own session, task and host-configured permissions. It cannot inherit or upgrade parent permissions, and nesting beyond the host limit is refused.".into(),
         parameters: json!({
             "type": "object",
             "additionalProperties": false,
             "required": ["prompt"],
             "properties": {
                 "prompt": {"type": "string", "minLength": 1, "maxLength": 256 * 1024},
-                "label": {"type": "string", "minLength": 1, "maxLength": 1024}
+                "label": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "mode": {"type": "string", "enum": ["foreground", "background"]}
+            }
+        }),
+    }
+}
+
+fn fleet_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CAPABILITY_FLEET.into(),
+        description: "List local sub-agents in the FleetView. Optional parent_session_id scopes the page; after/limit paginate by child_task_id.".into(),
+        parameters: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "parent_session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "after": {"type": "string", "minLength": 1, "maxLength": 128},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000}
+            }
+        }),
+    }
+}
+
+fn stop_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CAPABILITY_STOP.into(),
+        description:
+            "Request stop for one fleet member by child_task_id. Idempotent when already terminal."
+                .into(),
+        parameters: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["child_task_id"],
+            "properties": {
+                "child_task_id": {"type": "string", "minLength": 1, "maxLength": 128}
+            }
+        }),
+    }
+}
+
+fn steer_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CAPABILITY_STEER.into(),
+        description: "Append one steering user message to a running fleet member. Requires the child Agent control to be attached.".into(),
+        parameters: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["child_task_id", "text"],
+            "properties": {
+                "child_task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "text": {"type": "string", "minLength": 1, "maxLength": 256 * 1024}
             }
         }),
     }
@@ -122,14 +179,22 @@ fn definition() -> ToolDefinition {
 /// Catalog entry for the trusted host. Discovery is not permission.
 pub(crate) fn definitions(inner: &Inner) -> Vec<ToolDefinition> {
     if inner.config.local_agents.is_some() {
-        vec![definition()]
+        vec![
+            definition(),
+            fleet_definition(),
+            stop_definition(),
+            steer_definition(),
+        ]
     } else {
         vec![]
     }
 }
 
 pub(crate) fn is_capability(name: &str) -> bool {
-    name == CAPABILITY
+    matches!(
+        name,
+        CAPABILITY | CAPABILITY_FLEET | CAPABILITY_STOP | CAPABILITY_STEER
+    )
 }
 
 /// Shared and per-run local-agent state attached to every RunContext.
@@ -336,6 +401,11 @@ impl RunScope {
         self.live_children.fetch_sub(1, Ordering::AcqRel);
     }
 
+    /// Shared live-child counter for FleetRegistry detached ownership.
+    fn live_children_handle(&self) -> Arc<AtomicUsize> {
+        self.live_children.clone()
+    }
+
     /// Snapshot of the children still owned by this run. Used only after the
     /// run's capability futures have been dropped, so no new child can be
     /// inserted. Each child is then removed and re-inserted one at a time, so
@@ -374,6 +444,8 @@ struct ChildHandle {
     label: String,
     session_id: String,
     depth: usize,
+    /// Background / detached children are skipped by parent drain and cancel.
+    detached: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -447,6 +519,28 @@ impl ChildOutcome {
 struct RunArgs {
     prompt: String,
     label: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetArgs {
+    parent_session_id: Option<String>,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopArgs {
+    child_task_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SteerArgs {
+    child_task_id: String,
+    text: String,
 }
 
 struct ChildService {
@@ -460,9 +554,18 @@ impl ChildService {
         prompt: String,
         label: String,
         cancel: CancellationToken,
+        mode: AgentRunMode,
     ) -> Result<Value, CapabilityError> {
         let context = self.context.clone();
-        context.check(&cancel).map_err(known)?;
+        // Background children must not observe the parent capability cancel token:
+        // returning the handle would otherwise cancel them via drop_guard.
+        let parent_cancel = cancel.clone();
+        let child_lifetime = if mode.detached() {
+            CancellationToken::new()
+        } else {
+            cancel.child_token()
+        };
+        context.check(&parent_cancel).map_err(known)?;
         if context.scope.remaining_time().is_zero() {
             return Err(known("parent run time budget is exhausted"));
         }
@@ -509,6 +612,8 @@ impl ChildService {
             "depth": child_scope.depth(),
             "label": &label,
             "prompt_bytes": prompt.len(),
+            "mode": mode,
+            "detached": mode.detached(),
         });
         if let Err(error) = context.inner.store.append_host_event(
             &context.lease,
@@ -532,7 +637,7 @@ impl ChildService {
         }
         context.inner.changed.notify_waiters();
 
-        let child_cancel = cancel.child_token();
+        let child_cancel = child_lifetime;
         let (sender, receiver) = watch::channel(None);
         let runtime = Runtime {
             inner: context.inner.clone(),
@@ -558,6 +663,67 @@ impl ChildService {
             );
             let _ = sender.send(Some(outcome));
         });
+        // Transfer the live-slot permit into fleet ownership before any await.
+        let live = context.scope.live_children_handle();
+        let mut permit = permit;
+        permit.active = false;
+        context
+            .inner
+            .fleet
+            .register(
+                task_id.clone(),
+                FleetEntry {
+                    parent_session_id: context.lease.session_id.clone(),
+                    parent_task_id: context.task.id.clone(),
+                    child_session_id: session.id.clone(),
+                    label: label.clone(),
+                    depth,
+                    mode,
+                    detached: mode.detached(),
+                    cancel: child_cancel.clone(),
+                    state: FleetMemberState::Running,
+                    error: None,
+                    live: live.clone(),
+                    // Only detached members own the live-slot release via fleet.
+                    // Foreground still releases through insert_child / release_child.
+                    slot_held: mode.detached(),
+                    control: Mutex::new(None),
+                },
+            )
+            .map_err(known)?;
+        if mode.detached() {
+            // Detached background: do not park the handle in the parent drain map.
+            // A finisher owns join + durable evidence + live-slot release.
+            let finish_context = context.clone();
+            let finish_task = task_id.clone();
+            let finish_session = session_id.clone();
+            let finish_label = label.clone();
+            let finish_depth = depth;
+            let finish_max_time = self.config.max_time;
+            let mut finish_receiver = receiver;
+            tokio::spawn(async move {
+                finish_detached(
+                    finish_context,
+                    finish_task,
+                    finish_session,
+                    finish_label,
+                    finish_depth,
+                    finish_max_time,
+                    join,
+                    &mut finish_receiver,
+                )
+                .await;
+            });
+            return Ok(json!({
+                "session_id": session.id,
+                "task_id": task_id,
+                "label": bounded(&label, RESULT_LABEL_BYTES),
+                "depth": depth,
+                "mode": mode,
+                "detached": true,
+                "state": "running",
+            }));
+        }
         context.scope.insert_child(
             task_id.clone(),
             ChildHandle {
@@ -568,6 +734,7 @@ impl ChildService {
                 label: label.clone(),
                 session_id: session.id.clone(),
                 depth,
+                detached: false,
             },
             permit,
         );
@@ -592,7 +759,7 @@ impl ChildService {
                     child_cancel.cancel();
                     break Stop::Cleanup;
                 }
-                _ = cancel.cancelled() => {
+                _ = parent_cancel.cancelled() => {
                     child_cancel.cancel();
                     break Stop::Cleanup;
                 }
@@ -708,6 +875,12 @@ impl ChildService {
         joined.confirmed = true;
         drop(joined);
         context.scope.release_child();
+        context.inner.fleet.mark_terminal(
+            &outcome.task_id,
+            FleetMemberState::from_task(outcome.state),
+            outcome.error.clone(),
+            false,
+        );
         context.inner.changed.notify_waiters();
         if timed_out && outcome.state != TaskState::Completed {
             return Err(known("local agent exceeded its time limit"));
@@ -744,7 +917,8 @@ impl ExternalHost for ChildService {
             return Err(known("agent.run label must contain 1..1024 bytes"));
         }
         let label = args.label.unwrap_or_else(|| DEFAULT_LABEL.into());
-        self.run(args.prompt, label, cancel).await
+        let mode = AgentRunMode::parse(args.mode.as_deref()).map_err(known)?;
+        self.run(args.prompt, label, cancel, mode).await
     }
 }
 
@@ -755,6 +929,7 @@ impl ExternalHost for ChildService {
 pub(crate) async fn call(
     host: Host,
     scope: &Arc<CallScope>,
+    name: &str,
     arguments: Value,
     cancel: CancellationToken,
 ) -> Result<Value, CapabilityError> {
@@ -765,6 +940,38 @@ pub(crate) async fn call(
         .local_agents
         .clone()
         .ok_or_else(|| known("local agents are not enabled by the trusted host"))?;
+    match name {
+        CAPABILITY_FLEET => {
+            let args: FleetArgs = serde_json::from_value(arguments)
+                .map_err(|error| known(format!("agent.fleet arguments are invalid: {error}")))?;
+            let view = context
+                .inner
+                .fleet
+                .snapshot(
+                    args.parent_session_id.as_deref(),
+                    args.after.as_deref(),
+                    args.limit.unwrap_or(100),
+                )
+                .map_err(known)?;
+            return serde_json::to_value(view).map_err(|error| known(error.to_string()));
+        }
+        CAPABILITY_STOP => {
+            let args: StopArgs = serde_json::from_value(arguments)
+                .map_err(|error| known(format!("agent.stop arguments are invalid: {error}")))?;
+            return context.inner.fleet.stop(&args.child_task_id).map_err(known);
+        }
+        CAPABILITY_STEER => {
+            let args: SteerArgs = serde_json::from_value(arguments)
+                .map_err(|error| known(format!("agent.steer arguments are invalid: {error}")))?;
+            return context
+                .inner
+                .fleet
+                .steer(&args.child_task_id, &args.text)
+                .map_err(known);
+        }
+        CAPABILITY => {}
+        other => return Err(known(format!("local agent service received {other}"))),
+    }
     // Reject nesting before any permission wait. A child at max_depth must not
     // be able to sit in an approval queue for a call that can never run.
     if context.scope.depth() >= config.max_depth {
@@ -853,6 +1060,84 @@ fn observe_task(runtime: &Runtime, task_id: &str, fallback: &ChildOutcome) -> Ch
         error: task.error.or_else(|| fallback.error.clone()),
         output: String::new(),
     }
+}
+
+/// Owns a detached background child through its durable terminal. Parent cancel
+/// and drain never enter this path; only the child's own token, time budget, or
+/// an explicit fleet stop can stop it.
+#[allow(clippy::too_many_arguments)]
+async fn finish_detached(
+    context: Arc<RunContext>,
+    task_id: String,
+    session_id: String,
+    label: String,
+    depth: usize,
+    max_time: Duration,
+    mut join: tokio::task::JoinHandle<()>,
+    receiver: &mut watch::Receiver<Option<ChildOutcome>>,
+) {
+    let parent_deadline = tokio::time::Instant::from_std(context.scope.deadline());
+    let own_deadline = tokio::time::Instant::now() + max_time;
+    let deadline = parent_deadline.min(own_deadline);
+    let fleet_cancel = context
+        .inner
+        .fleet
+        .cancel_token(&task_id)
+        .unwrap_or_default();
+    loop {
+        if receiver.borrow().is_some() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            _ = fleet_cancel.cancelled() => break,
+            _ = tokio::time::sleep_until(deadline) => {
+                fleet_cancel.cancel();
+                break;
+            }
+            changed = receiver.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let outcome = wait_cleanup(
+        &context,
+        &task_id,
+        &session_id,
+        &label,
+        depth,
+        max_time,
+        receiver,
+    )
+    .await;
+    // Best-effort runner join. Detached ownership stays in the fleet registry.
+    let _ = tokio::time::timeout(max_time, &mut join).await;
+    if outcome.confirmed() && !outcome.unknown() {
+        let event = finish_event(&context, &outcome);
+        let _ =
+            context
+                .inner
+                .store
+                .append_host_event(&context.lease, "agent_child_finished", event);
+        context.inner.fleet.mark_terminal(
+            &task_id,
+            FleetMemberState::from_task(outcome.state),
+            outcome.error.clone(),
+            true,
+        );
+    } else {
+        context.inner.fleet.mark_terminal(
+            &task_id,
+            FleetMemberState::Unknown,
+            outcome
+                .error
+                .or_else(|| Some("detached child requires reconciliation".into())),
+            false,
+        );
+    }
+    context.inner.changed.notify_waiters();
 }
 
 /// Waits for cancellation cleanup without detaching the child. If the bounded
@@ -1001,6 +1286,11 @@ pub(crate) async fn drain(context: &RunContext) -> Result<(), RuntimeError> {
             drop(joined);
             continue;
         }
+        if joined.handle.as_ref().is_some_and(|handle| handle.detached) {
+            // Detached background members are owned by FleetRegistry, not drain.
+            drop(joined);
+            continue;
+        }
         let (outcome, attempt) = {
             let handle = joined.handle.as_mut().expect("handle checked above");
             handle.cancel.cancel();
@@ -1073,6 +1363,12 @@ pub(crate) async fn drain(context: &RunContext) -> Result<(), RuntimeError> {
                 joined.confirmed = true;
                 drop(joined);
                 context.scope.release_child();
+                context.inner.fleet.mark_terminal(
+                    &task_id,
+                    FleetMemberState::from_task(outcome.state),
+                    outcome.error.clone(),
+                    false,
+                );
                 context.inner.changed.notify_waiters();
             }
             Err(error) => {
@@ -1141,6 +1437,7 @@ mod tests {
                 label: "Child".into(),
                 session_id: "child-session".into(),
                 depth: 1,
+                detached: false,
             },
             permit,
         );

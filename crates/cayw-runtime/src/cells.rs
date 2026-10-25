@@ -550,7 +550,7 @@ impl CellBackend for Backend {
                     && self.context.inner.config.local_agents.is_some() =>
             {
                 match crate::bridge::scoped_host(&self.base, &scope) {
-                    Ok(host) => crate::children::call(host, &scope, arguments, cancel).await,
+                    Ok(host) => crate::children::call(host, &scope, name, arguments, cancel).await,
                     Err(error) => Err(error),
                 }
             }
