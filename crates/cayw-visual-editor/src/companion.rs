@@ -187,7 +187,10 @@ impl Companion {
                 &mut info,
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             );
-            result == 0 && info.si_pid == self.pid as libc::pid_t
+            // On Linux `si_pid` is a method; `si_signo != 0` is the portable
+            // waitid(WNOHANG|WNOWAIT) signal that this P_PID child has exited,
+            // matching cayw-device's observe_identity pattern.
+            result == 0 && info.si_signo != 0
         }
     }
 

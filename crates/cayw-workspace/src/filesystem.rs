@@ -82,11 +82,24 @@ pub(crate) fn open_root(path: &Path) -> Result<Dir, CapabilityError> {
     Ok(dir)
 }
 pub(crate) fn sync(dir: &Dir) -> Result<(), CapabilityError> {
-    dir.try_clone()
-        .map_err(io_error)?
-        .into_std_file()
-        .sync_all()
-        .map_err(io_error)
+    // `cap_std::Dir` is O_PATH on Linux and rejects fsync with EBADF. Opening
+    // "." yields a normal readable directory descriptor that can be synced.
+    #[cfg(target_os = "linux")]
+    {
+        dir.open(".")
+            .map_err(io_error)?
+            .into_std()
+            .sync_all()
+            .map_err(io_error)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        dir.try_clone()
+            .map_err(io_error)?
+            .into_std_file()
+            .sync_all()
+            .map_err(io_error)
+    }
 }
 pub(crate) fn open_store(root: &Dir, context: &Context) -> Result<Dir, CapabilityError> {
     context.check()?;

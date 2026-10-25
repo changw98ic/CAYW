@@ -196,11 +196,15 @@ fn save(host: &Host, state: &State) -> Result<(), CapabilityError> {
     result
 }
 fn sync(root: &Dir) -> Result<(), CapabilityError> {
-    root.try_clone()
-        .map_err(io_error)?
-        .into_std_file()
-        .sync_all()
-        .map_err(io_error)
+    filesystem::sync_directory(root).map_err(|error| {
+        // Fence setup treats a failed directory sync as a known failure before
+        // any mutation is published; remap the post-commit wording.
+        if error.outcome_unknown {
+            failure(error.message)
+        } else {
+            error
+        }
+    })
 }
 fn initial(host: &Host) -> Result<State, CapabilityError> {
     let workspace = host.workspace_identity()?;

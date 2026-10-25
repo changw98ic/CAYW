@@ -228,6 +228,44 @@ fn temporary(dir: &Dir) -> Result<(Temporary<'_>, File), CapabilityError> {
     Err(failure("unable to create a unique temporary file"))
 }
 
+
+/// Durably records directory entry updates after a rename or hard-link commit.
+///
+/// `cap_std::Dir` is opened with `O_PATH` on Linux. Those descriptors reject
+/// `fsync` with `EBADF`, so reopening `"."` yields a normal directory file
+/// descriptor that can be synchronized. Other Unix platforms keep the previous
+/// `Dir::into_std_file` path.
+pub(crate) fn sync_directory(dir: &Dir) -> Result<(), CapabilityError> {
+    #[cfg(target_os = "linux")]
+    {
+        dir.open(".")
+            .map_err(|error| {
+                CapabilityError::unknown(format!(
+                    "file committed but directory synchronization failed: {error}"
+                ))
+            })?
+            .into_std()
+            .sync_all()
+            .map_err(|error| {
+                CapabilityError::unknown(format!(
+                    "file committed but directory synchronization failed: {error}"
+                ))
+            })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        dir.try_clone()
+            .map_err(|error| CapabilityError::unknown(error.to_string()))?
+            .into_std_file()
+            .sync_all()
+            .map_err(|error| {
+                CapabilityError::unknown(format!(
+                    "file committed but directory synchronization failed: {error}"
+                ))
+            })
+    }
+}
+
 /// Once rename/link may have committed, every uncertain durability result is
 /// unknown. No await point occurs between checking cancellation and committing.
 fn commit(
@@ -266,15 +304,7 @@ fn commit(
         })?;
         temporary.present = false;
     }
-    dir.try_clone()
-        .map_err(|error| CapabilityError::unknown(error.to_string()))?
-        .into_std_file()
-        .sync_all()
-        .map_err(|error| {
-            CapabilityError::unknown(format!(
-                "file committed but directory synchronization failed: {error}"
-            ))
-        })?;
+    sync_directory(dir)?;
     Ok(json!({"bytes":bytes.len(), "sha256":hash(bytes)}))
 }
 
