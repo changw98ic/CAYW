@@ -556,7 +556,7 @@ impl SourceHandle for StdioHandle {
         let value = if matches!(request.operation, SourceOperation::GetPrompt { .. }) {
             if !result
                 .get("description")
-                .map_or(true, |value| value.is_string())
+                .is_none_or(|value| value.is_string())
                 || !result["messages"].is_array()
             {
                 return Err(failure("stdio prompt result requires description/messages"));
