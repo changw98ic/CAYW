@@ -74,4 +74,12 @@ pub trait CellBackend: Send + Sync {
     ) -> Result<BackendResponse, CapabilityError>;
     fn finished(&self, execution: &CellExecution, terminal: &CellTerminal)
     -> Result<(), CellError>;
+    /// Observes an already committed output. It cannot grant execution authority.
+    fn output(
+        &self,
+        _execution: &CellExecution,
+        _entry: &crate::OutputEntry,
+    ) -> Result<(), CellError> {
+        Ok(())
+    }
 }

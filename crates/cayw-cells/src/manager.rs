@@ -688,19 +688,26 @@ impl Run {
     }
     pub(crate) fn emit(&self, output: CellOutput) -> Result<(), CellError> {
         let bytes = output.validate(&self.limits)?;
+        let mut entry = None;
         self.update(|record| {
             if record.outputs.len() >= self.limits.output_items
                 || record.output_bytes.saturating_add(bytes) > self.limits.output_bytes
             {
                 return Err(CellError::Capacity);
             }
-            record.outputs.push(OutputEntry {
+            let committed = OutputEntry {
                 cursor: record.outputs.len() as u64 + 1,
                 output,
-            });
+            };
+            entry = Some(committed.clone());
+            record.outputs.push(committed);
             record.output_bytes += bytes;
             Ok(())
-        })
+        })?;
+        self.backend.output(
+            &self.execution,
+            &entry.expect("successful output commit retained its entry"),
+        )
     }
     fn resume(&self) -> Result<(), CellError> {
         {

@@ -310,6 +310,30 @@ impl CodeMode {
         })
     }
 
+    /// Checks a standalone source body without executing it or calling the Host.
+    /// Embedders use this before placing that body inside a generated function,
+    /// so unmatched delimiters cannot escape the generated function boundary.
+    pub fn validate_source(&self, source: &str) -> Result<(), CodeModeError> {
+        if source.len() > self.limits.memory_bytes / 4 {
+            return Err(CodeModeError::empty(
+                ErrorKind::MemoryLimit,
+                "Script source exceeds one quarter of the VM memory budget",
+                self.limits.output_bytes,
+            ));
+        }
+        let lua = mlua::Lua::new();
+        lua.load(source)
+            .into_function()
+            .map(|_| ())
+            .map_err(|error| {
+                CodeModeError::empty(
+                    ErrorKind::Script,
+                    error.to_string(),
+                    self.limits.output_bytes,
+                )
+            })
+    }
+
     /// Returns the complete report on success, or the same audit in `error.report`.
     /// Cancellation/timeout cancels the started host's child token and polls that
     /// same future for at most `Limits::shutdown_grace`. Its actual terminal

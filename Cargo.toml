@@ -23,6 +23,7 @@ members = [
     "crates/cayw-cells",
     "crates/cayw-requests",
     "crates/cayw-visual-editor",
+    "crates/cayw-trace-debug",
 ]
 
 [workspace.package]

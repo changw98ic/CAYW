@@ -7,7 +7,31 @@
 use crate::CancellationToken;
 use serde_json::{Map, Value};
 
-type Result<T> = std::result::Result<T, String>;
+/// Response syntax errors can be reported to the model; cancellation and
+/// resource limits must still stop response processing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ParseError {
+    #[error("Invalid, incomplete or duplicate-key JSON")]
+    InvalidSyntax,
+    #[error("Trailing data in provider JSON")]
+    TrailingData,
+    #[error("Provider JSON exceeds the node limit")]
+    NodeLimit,
+    #[error("Provider JSON exceeds the depth limit")]
+    DepthLimit,
+    #[error("Provider JSON exceeds the scalar token limit")]
+    ScalarTokenLimit,
+    #[error("Request cancelled")]
+    Cancelled,
+}
+
+impl From<ParseError> for String {
+    fn from(error: ParseError) -> Self {
+        error.to_string()
+    }
+}
+
+type Result<T> = std::result::Result<T, ParseError>;
 const MAX_JSON_NODES: usize = 65_536;
 const MAX_JSON_DEPTH: usize = 128;
 const SCAN_BATCH: usize = 4096;
@@ -99,7 +123,7 @@ pub async fn parse_response(input: &str, cancel: &CancellationToken) -> Result<V
             }
             None if root.is_some() => {
                 if byte.is_some() {
-                    return Err("Trailing data in provider JSON".into());
+                    return Err(ParseError::TrailingData);
                 }
                 checkpoint(cancel).await?;
                 return Ok(root.expect("complete root"));
@@ -108,12 +132,12 @@ pub async fn parse_response(input: &str, cancel: &CancellationToken) -> Result<V
         }
         parser.nodes += 1;
         if parser.nodes > MAX_JSON_NODES {
-            return Err("Provider JSON exceeds the node limit".into());
+            return Err(ParseError::NodeLimit);
         }
         match byte {
             Some(b'{') | Some(b'[') => {
                 if stack.len() >= MAX_JSON_DEPTH {
-                    return Err("Provider JSON exceeds the depth limit".into());
+                    return Err(ParseError::DepthLimit);
                 }
                 parser.cursor += 1;
                 stack.push(if byte == Some(b'{') {
@@ -151,7 +175,7 @@ pub async fn parse_response(input: &str, cancel: &CancellationToken) -> Result<V
                 // JSON numbers have no useful representation here beyond one
                 // bounded token. Avoid a second synchronous multi-MiB scan.
                 if parser.cursor - start > SCAN_BATCH {
-                    return Err("Provider JSON exceeds the scalar token limit".into());
+                    return Err(ParseError::ScalarTokenLimit);
                 }
                 let value = serde_json::from_str::<Value>(&input[start..parser.cursor])
                     .map_err(|_| invalid_message())?;
@@ -167,7 +191,7 @@ pub async fn parse_response(input: &str, cancel: &CancellationToken) -> Result<V
 
 pub(crate) fn check_cancel(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
-        Err("Request cancelled".into())
+        Err(ParseError::Cancelled)
     } else {
         Ok(())
     }
@@ -179,8 +203,8 @@ pub(crate) async fn checkpoint(cancel: &CancellationToken) -> Result<()> {
     check_cancel(cancel)
 }
 
-fn invalid_message() -> String {
-    "Invalid, incomplete or duplicate-key JSON".into()
+fn invalid_message() -> ParseError {
+    ParseError::InvalidSyntax
 }
 
 fn invalid<T>() -> Result<T> {
@@ -428,6 +452,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn syntax_and_trailing_data_have_distinct_error_kinds() {
+        for (input, expected) in [
+            ("{\"city\":", ParseError::InvalidSyntax),
+            ("{\"city\":1,\"city\":2}", ParseError::InvalidSyntax),
+            ("{} trailing", ParseError::TrailingData),
+        ] {
+            assert_eq!(
+                parse_response(input, &CancellationToken::new())
+                    .await
+                    .unwrap_err(),
+                expected,
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn json_array_and_string_scanning_yield_before_the_whole_frame_is_parsed() {
         for input in [
             format!("[{} BROKEN]", "null,".repeat(3000)),
@@ -439,21 +479,29 @@ mod tests {
             let mut context = Context::from_waker(&waker);
             assert!(matches!(parser.as_mut().poll(&mut context), Poll::Pending));
             cancel.cancel();
-            assert_eq!(parser.await.unwrap_err(), "Request cancelled");
+            assert_eq!(parser.await.unwrap_err(), ParseError::Cancelled);
         }
     }
 
     #[tokio::test]
     async fn json_nodes_depth_and_scalar_tokens_are_bounded_before_tree_expansion() {
-        for input in [
-            format!("[{}null]", "null,".repeat(65_536)),
-            format!("{}null{}", "[".repeat(129), "]".repeat(129)),
-            "1".repeat(SCAN_BATCH + 1),
+        for (input, expected) in [
+            (
+                format!("[{}null]", "null,".repeat(65_536)),
+                ParseError::NodeLimit,
+            ),
+            (
+                format!("{}null{}", "[".repeat(129), "]".repeat(129)),
+                ParseError::DepthLimit,
+            ),
+            ("1".repeat(SCAN_BATCH + 1), ParseError::ScalarTokenLimit),
         ] {
-            let error = parse_response(&input, &CancellationToken::new())
-                .await
-                .unwrap_err();
-            assert!(error.contains("limit"), "{error}");
+            assert_eq!(
+                parse_response(&input, &CancellationToken::new())
+                    .await
+                    .unwrap_err(),
+                expected,
+            );
         }
     }
 }

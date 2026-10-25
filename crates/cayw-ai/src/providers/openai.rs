@@ -135,7 +135,7 @@ impl Provider for OpenAiProvider {
                         let mut offset = 0;
                         while offset < bytes.len() {
                             if let Err(error) = checkpoint(&cancel).await {
-                                failure = Some(error); break 'body;
+                                failure = Some(error.into()); break 'body;
                             }
                             // Count only bytes consumed before [DONE]. Never
                             // inspect a later frame just because it shares the
@@ -159,7 +159,7 @@ impl Provider for OpenAiProvider {
                                     break 'body;
                                 }
                                 if let Err(error) = checkpoint(&cancel).await {
-                                    failure = Some(error); break 'body;
+                                    failure = Some(error.into()); break 'body;
                                 }
                                 let mut updates = state.accept(&frame, &cancel);
                                 while let Some(update) = updates.next().await {
@@ -194,7 +194,7 @@ impl Provider for OpenAiProvider {
                                 break;
                             }
                             if let Err(error) = checkpoint(&cancel).await {
-                                failure = Some(error); break;
+                                failure = Some(error.into()); break;
                             }
                             let mut updates = state.accept(&frame, &cancel);
                             while let Some(update) = updates.next().await {

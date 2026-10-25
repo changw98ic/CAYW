@@ -1,0 +1,471 @@
+//! Optional trace consumer. Replay has no Runtime or live Host execution handle.
+pub mod capture;
+pub mod engine;
+pub mod server;
+pub mod types;
+
+pub use types::*;
+
+use cayw_ai::CancellationToken;
+use cayw_core::EventRecord;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+const MAX_STORE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_HISTORY: usize = 256;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("本地追踪文件：{0}")]
+    Io(#[from] std::io::Error),
+    #[error("追踪数据格式：{0}")]
+    Json(#[from] serde_json::Error),
+}
+
+pub struct TraceStore {
+    path: PathBuf,
+    document: Mutex<Document>,
+    edits: tokio::sync::Mutex<()>,
+    _lock: File,
+}
+
+impl TraceStore {
+    pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
+        let path = path.as_ref().to_path_buf();
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let lock_path = path.with_extension("lock");
+        reject_symlink(&lock_path)?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(lock_path)?;
+        lock.try_lock()
+            .map_err(|_| Error::Conflict("追踪文件正由另一个插件进程使用".into()))?;
+        reject_symlink(&path)?;
+        let document: Document = match File::open(&path) {
+            Ok(file) => {
+                if file.metadata()?.len() > MAX_STORE_BYTES as u64 {
+                    return Err(Error::Invalid("追踪文件超过 32 MiB 上限".into()));
+                }
+                let mut bytes = Vec::new();
+                file.take(MAX_STORE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                serde_json::from_slice(&bytes)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Document::default(),
+            Err(error) => return Err(error.into()),
+        };
+        if document.schema != TRACE_SCHEMA {
+            return Err(Error::Invalid("追踪文件版本不受支持".into()));
+        }
+        let store = Arc::new(Self {
+            path,
+            document: Mutex::new(document),
+            edits: tokio::sync::Mutex::new(()),
+            _lock: lock,
+        });
+        // A lost plugin process cannot resume a partially evaluated Lua stack.
+        let mut recovered = store.snapshot();
+        let mut changed = false;
+        for project in recovered.projects.values_mut() {
+            if project.version() > 1
+                && project
+                    .latest()
+                    .is_none_or(|e| e.version != project.version())
+            {
+                project.evaluations.push(Evaluation {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    version: project.version(),
+                    mode: "replay".into(),
+                    status: Status::Blocked,
+                    steps: vec![],
+                    output: None,
+                    gaps: vec![Gap {
+                        node_id: None,
+                        message: "插件在本轮求值完成前停止；已保存内容，尚无该版本的计算结果"
+                            .into(),
+                    }],
+                    elapsed_ms: 0.0,
+                    saved_at_ms: now_ms(),
+                });
+                changed = true;
+            }
+        }
+        if changed {
+            store.commit(recovered)?;
+        }
+        Ok(store)
+    }
+
+    pub fn snapshot(&self) -> Document {
+        self.document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn persist(&self, document: &Document) -> Result<(), Error> {
+        let bytes = serde_json::to_vec(document)?;
+        if bytes.len() > MAX_STORE_BYTES {
+            return Err(Error::Invalid(
+                "追踪文件达到 32 MiB 上限；请为新的采集选择另一文件".into(),
+            ));
+        }
+        let temp = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> Result<(), Error> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temp, &self.path)?;
+            File::open(
+                self.path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )?
+            .sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
+    }
+
+    fn commit(&self, mut document: Document) -> Result<(), Error> {
+        let mut current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if document.sequence != current.sequence {
+            return Err(Error::Conflict("追踪状态已变化".into()));
+        }
+        document.sequence = document
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::Invalid("追踪序号耗尽".into()))?;
+        self.persist(&document)?;
+        *current = document;
+        Ok(())
+    }
+
+    pub fn ingest(&self, events: &[EventRecord]) -> Result<(), Error> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = current.clone();
+        let mut changed = false;
+        for event in events {
+            let after = next
+                .sessions
+                .entry(event.session_id.clone())
+                .or_default()
+                .after;
+            if event.protocol_version != 3 {
+                return Err(Error::Invalid("Runtime 事件版本不受支持".into()));
+            }
+            if event.cursor <= after {
+                if !next.events.iter().any(|record| record == event) {
+                    return Err(Error::Invalid("同一会话游标的原始事件不一致".into()));
+                }
+                continue;
+            }
+            if event.cursor != after + 1 {
+                return Err(Error::Invalid(format!(
+                    "会话 {} 的追踪记录缺失：期待 {}，收到 {}",
+                    event.session_id,
+                    after + 1,
+                    event.cursor
+                )));
+            }
+            if next.events.len() >= 100_000 {
+                return Err(Error::Invalid(
+                    "本文件达到十万条事件上限，请新建追踪文件".into(),
+                ));
+            }
+            capture::apply(&mut next, event)?;
+            next.events.push(event.clone());
+            let session = next.sessions.entry(event.session_id.clone()).or_default();
+            session.after = event.cursor;
+            session.error = None;
+            changed = true;
+        }
+        if changed {
+            if next.projects.len() > 256 {
+                return Err(Error::Invalid(
+                    "本文件达到 256 次执行上限，请新建追踪文件".into(),
+                ));
+            }
+            next.sequence += 1;
+            self.persist(&next)?;
+            *current = next;
+        }
+        Ok(())
+    }
+
+    pub fn connection_error(&self, session_id: &str, message: Option<String>) -> Result<(), Error> {
+        let mut current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current
+            .sessions
+            .get(session_id)
+            .is_some_and(|s| s.error == message)
+        {
+            return Ok(());
+        }
+        let mut next = current.clone();
+        next.sessions.entry(session_id.into()).or_default().error = message;
+        next.sequence += 1;
+        self.persist(&next)?;
+        *current = next;
+        Ok(())
+    }
+
+    pub async fn edit(
+        &self,
+        project_id: &str,
+        edit: Edit,
+        cancel: CancellationToken,
+    ) -> Result<Document, Error> {
+        let _editing = self.edits.lock().await;
+        let mut document = self.snapshot();
+        let project = document
+            .projects
+            .get_mut(project_id)
+            .ok_or_else(|| Error::Invalid("找不到这次运行".into()))?;
+        check_revision(project, edit.expected_version)?;
+        let mut plan = project
+            .revisions
+            .last()
+            .ok_or_else(|| Error::Invalid("未捕获可编辑节点计划".into()))?
+            .plan
+            .clone();
+        let node = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == edit.node_id)
+            .ok_or_else(|| Error::Invalid("找不到该节点".into()))?;
+        node.source = edit.source;
+        node.params = edit.params;
+        node.input_pointer = edit.input_pointer;
+        engine::validate_plan(&plan)?;
+        self.revise(
+            document,
+            project_id,
+            plan,
+            Some(edit.node_id),
+            "edit",
+            cancel,
+        )
+        .await
+    }
+
+    pub async fn undo(
+        &self,
+        project_id: &str,
+        undo: Undo,
+        cancel: CancellationToken,
+    ) -> Result<Document, Error> {
+        let _editing = self.edits.lock().await;
+        let document = self.snapshot();
+        let project = document
+            .projects
+            .get(project_id)
+            .ok_or_else(|| Error::Invalid("找不到这次运行".into()))?;
+        check_revision(project, undo.expected_version)?;
+        let plan = project
+            .revisions
+            .iter()
+            .find(|r| r.version == undo.target_version)
+            .ok_or_else(|| Error::Invalid("找不到目标内容版本".into()))?
+            .plan
+            .clone();
+        self.revise(document, project_id, plan, None, "undo", cancel)
+            .await
+    }
+
+    async fn revise(
+        &self,
+        mut document: Document,
+        project_id: &str,
+        plan: GraphPlan,
+        changed_node: Option<String>,
+        reason: &str,
+        cancel: CancellationToken,
+    ) -> Result<Document, Error> {
+        let started = std::time::Instant::now();
+        let project = document
+            .projects
+            .get_mut(project_id)
+            .expect("validated project");
+        let parent = project.version();
+        let version = parent + 1;
+        // Replay always starts at this revision's entry and recomputes every node,
+        // so a changed upstream source is not a reason to reject the edit. The
+        // base is only evidence that the edited node was on the captured path.
+        // A missing node there is a gap; it is not permission to borrow an older
+        // branch's input.
+        let base = if changed_node.is_some() {
+            project
+                .evaluations
+                .iter()
+                .rev()
+                .find(|result| !result.steps.is_empty())
+                .cloned()
+        } else {
+            project.latest().cloned()
+        };
+        let calls = project.calls.clone();
+        let runtime_status = project.runtime_status.clone();
+        let project_trace_error = project.trace_error.clone();
+        project.revisions.push(Revision {
+            version,
+            parent: Some(parent),
+            changed_node: changed_node.clone(),
+            plan: plan.clone(),
+            created_at_ms: now_ms(),
+            reason: reason.into(),
+        });
+        self.commit(document)?;
+        let result =
+            if runtime_status == Status::OutcomeUnknown || runtime_status == Status::Running {
+                Evaluation {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    version,
+                    mode: "replay".into(),
+                    status: Status::Blocked,
+                    steps: vec![],
+                    output: None,
+                    gaps: vec![Gap {
+                        node_id: changed_node.clone(),
+                        message: if runtime_status == Status::Running {
+                            "原始执行仍在运行；输入和前置状态尚未完整捕获".into()
+                        } else {
+                            "原始执行存在未知效果，不能自动重放".into()
+                        },
+                    }],
+                    elapsed_ms: 0.0,
+                    saved_at_ms: now_ms(),
+                }
+            } else if let Some(error) = &project_trace_error {
+                Evaluation {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    version,
+                    mode: "replay".into(),
+                    status: Status::Blocked,
+                    steps: vec![],
+                    output: None,
+                    gaps: vec![Gap {
+                        node_id: changed_node.clone(),
+                        message: format!("原始节点追踪不完整：{error}；不能复用其输入或状态"),
+                    }],
+                    elapsed_ms: 0.0,
+                    saved_at_ms: now_ms(),
+                }
+            } else {
+                match engine::evaluate(
+                    &plan,
+                    base.as_ref(),
+                    changed_node.as_deref(),
+                    &calls,
+                    version,
+                    cancel,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => Evaluation {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        version,
+                        mode: "replay".into(),
+                        status: Status::Blocked,
+                        steps: vec![],
+                        output: None,
+                        gaps: vec![Gap {
+                            node_id: changed_node,
+                            message: error.to_string(),
+                        }],
+                        elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                        saved_at_ms: now_ms(),
+                    },
+                }
+            };
+        // Ingest may have advanced while the VM ran; append onto its current state.
+        let mut current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = current.clone();
+        let project = next
+            .projects
+            .get_mut(project_id)
+            .ok_or_else(|| Error::Invalid("运行记录丢失".into()))?;
+        if project.version() != version {
+            return Err(Error::Conflict("内容版本已变化，旧结果未应用".into()));
+        }
+        project.evaluations.push(result);
+        if next.metrics.save_to_result_ms.len() < 1024 {
+            next.metrics
+                .save_to_result_ms
+                .push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        next.sequence += 1;
+        self.persist(&next)?;
+        *current = next;
+        Ok(current.clone())
+    }
+}
+
+fn check_revision(project: &Project, expected: u64) -> Result<(), Error> {
+    if expected != project.version() {
+        return Err(Error::Conflict(format!(
+            "当前内容版本为 {}，请重新载入后保存",
+            project.version()
+        )));
+    }
+    if project.revisions.len() >= MAX_HISTORY || project.evaluations.len() >= MAX_HISTORY {
+        return Err(Error::Invalid(
+            "本次运行达到 256 个版本上限，请使用新的追踪文件".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> Result<(), Error> {
+    match path.symlink_metadata() {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            Err(Error::Invalid("追踪文件和锁必须是普通文件".into()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
