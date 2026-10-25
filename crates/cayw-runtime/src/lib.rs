@@ -6,6 +6,7 @@ mod cells;
 mod children;
 mod collaboration;
 mod completion;
+mod content;
 mod coordination;
 mod execution;
 pub mod fixture;
@@ -15,6 +16,8 @@ mod model_requests;
 mod permissions;
 #[cfg(feature = "plugins")]
 mod plugins;
+#[cfg(all(test, target_os = "macos"))]
+mod policy_tests;
 mod processes;
 mod provider;
 mod queue;
@@ -24,7 +27,9 @@ mod recovery;
 mod remote;
 mod request_recovery;
 mod requests;
+mod resources;
 mod rpc;
+mod scheduler;
 mod session;
 mod shared_read;
 mod values;
@@ -37,6 +42,7 @@ pub use children::LocalAgents;
 pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
 };
+pub use content::{ContentConfig, ContentScope, ContentView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::HeadlessConfig;
 pub use model_requests::{
@@ -46,8 +52,12 @@ pub use model_requests::{
 pub use permissions::{ApprovalChoice, ScopedPermission};
 pub use processes::{ProcessCleanupInspection, ProcessCleanupProcess};
 pub use provider::{ConfiguredProvider, ProviderApi, ProviderConfig, ProviderService};
-pub use queue::{TaskRecord, TaskState};
+pub use queue::{TaskPriority, TaskRecord, TaskState};
 pub use requests::RequestPolicy;
+pub use resources::{
+    ResourceCapability, ResourcePolicy, ResourceUsage, ResourceView, TaskResources,
+};
+pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
 
 use cayw_ai::{CancellationToken, Model, Provider, ToolDefinition};
@@ -87,6 +97,8 @@ pub enum RuntimeError {
     Journal(#[from] rusqlite::Error),
     #[error("task request authority error: {0}")]
     Request(#[from] cayw_requests::RequestError),
+    #[error("local content error: {0}")]
+    Content(#[from] cayw_content::Error),
     #[error("invalid serialized data: {0}")]
     Json(#[from] serde_json::Error),
     #[error("agent error: {0}")]
@@ -107,8 +119,15 @@ pub enum RuntimeError {
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub max_concurrent_runs: usize,
-    /// Includes running tasks. One live task per logical session, across connections.
+    /// Includes running, approval-waiting and draining tasks. One live task per session.
     pub max_queued_runs: usize,
+    /// Promote a ready task after this many other dispatches. New arrivals cannot
+    /// increase its bound of fairness_after_dispatches + max_queued_runs - 1.
+    pub fairness_after_dispatches: usize,
+    /// Persistent execution admission declarations; these do not limit actual RSS.
+    pub resources: ResourcePolicy,
+    /// Optional Device-authoritative text outside the model's workspace.
+    pub content: Option<ContentConfig>,
     pub max_prompt_bytes: usize,
     pub max_history_bytes: usize,
     pub max_event_bytes: usize,
@@ -143,6 +162,9 @@ impl Default for RuntimeConfig {
         Self {
             max_concurrent_runs: 4,
             max_queued_runs: 64,
+            fairness_after_dispatches: 8,
+            resources: ResourcePolicy::default(),
+            content: None,
             max_prompt_bytes: 256 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
             max_event_bytes: 2 * 1024 * 1024,
@@ -169,10 +191,16 @@ impl RuntimeConfig {
     fn validate(&self) -> Result<(), RuntimeError> {
         bridge::validate_config(self)?;
         children::validate(self.local_agents.as_ref())?;
+        self.resources.validate()?;
+        if let Some(content) = &self.content {
+            content.validate()?;
+        }
         if self.max_concurrent_runs == 0
             || self.max_concurrent_runs > 1024
             || self.max_queued_runs < self.max_concurrent_runs
             || self.max_queued_runs > 100_000
+            || self.fairness_after_dispatches == 0
+            || self.fairness_after_dispatches > 100_000
             || self.max_prompt_bytes == 0
             || self.max_history_bytes == 0
             || self.max_event_bytes == 0
@@ -218,6 +246,7 @@ pub(crate) struct Inner {
     coordination: coordination::Coordination,
     process_journal: processes::ProcessJournal,
     processes: Mutex<BTreeMap<String, Arc<cayw_host::Host>>>,
+    content: Option<Arc<cayw_content::ContentStore>>,
     root: PathBuf,
     host_root: cayw_host::Host,
     provider: Arc<dyn Provider>,
@@ -276,6 +305,7 @@ impl Runtime {
             None => store,
         });
         let coordination = coordination::Coordination::new(store_path.as_ref())?;
+        let _opening_policy = coordination.opening_policy(store_path.as_ref())?;
         let cells = Arc::new(
             cayw_cells::SqliteJournal::open(
                 store_path
@@ -296,17 +326,38 @@ impl Runtime {
         .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
         let journal = audit::AuditDb::open(store_path.as_ref())?;
         let process_journal = processes::ProcessJournal::open(store_path.as_ref())?;
-        let queue = queue::Queue::open(
+        let queue = queue::Queue::open_with_resources(
             store_path.as_ref(),
             config.max_concurrent_runs,
             config.max_queued_runs,
+            config.fairness_after_dispatches,
+            &config.resources,
         )?;
+        let content = content::open(store_path.as_ref(), &root, config.content.as_ref())?;
         // RequestStore owns its authority fence and database as one unit. It
         // must not mistake the pre-existing Core database for a new authority.
-        let requests = Arc::new(cayw_requests::RequestStore::open(
-            request_recovery::request_path(store_path.as_ref())?,
+        let requests = Arc::new(request_recovery::open_requests(
+            store_path.as_ref(),
             config.request_limits.clone(),
         )?);
+        // An amendment in a later domain temporarily releases this opener's
+        // shared policy lock. Check all domains after the last such transition;
+        // no check may amend policy or reopen the held content root.
+        drop(_opening_policy);
+        queue.check_policy(
+            config.max_concurrent_runs,
+            config.max_queued_runs,
+            config.fairness_after_dispatches,
+            &config.resources,
+        )?;
+        content::check_binding(
+            store_path.as_ref(),
+            config.content.as_ref(),
+            content.as_deref(),
+        )?;
+        if cayw_requests::RequestStore::persisted_config(requests.path())? != requests.config() {
+            return Err(cayw_requests::RequestError::PolicyMismatch.into());
+        }
         let rt = Self {
             inner: Arc::new(Inner {
                 store,
@@ -318,6 +369,7 @@ impl Runtime {
                 coordination,
                 process_journal,
                 processes: Mutex::new(BTreeMap::new()),
+                content,
                 root,
                 host_root,
                 provider,
@@ -454,7 +506,10 @@ impl Runtime {
         if self.tasks(id)?.iter().any(|t| {
             matches!(
                 t.state,
-                TaskState::Queued | TaskState::Running | TaskState::Draining
+                TaskState::Queued
+                    | TaskState::Running
+                    | TaskState::WaitingApproval
+                    | TaskState::Draining
             )
         }) {
             return Err(RuntimeError::Busy);
@@ -489,7 +544,10 @@ impl Runtime {
         for task in self.inner.queue.list(id)? {
             if matches!(
                 task.state,
-                TaskState::Queued | TaskState::Running | TaskState::Draining
+                TaskState::Queued
+                    | TaskState::Running
+                    | TaskState::WaitingApproval
+                    | TaskState::Draining
             ) {
                 self.cancel_coordinated(&task.cancel_target())?;
             }

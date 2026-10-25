@@ -19,7 +19,7 @@ pub use terminal::{TerminalConfig, TerminalLimits};
 use async_trait::async_trait;
 use cap_std::fs::Dir;
 use cayw_ai::{ArgumentValidator, CancellationToken, ToolDefinition};
-use cayw_codemode::{CapabilityError, CapabilityHost};
+use cayw_codemode::{CapabilityError, CapabilityHost, CapabilityStop};
 pub use cayw_device::{DeviceError, ProcessIdentity, ProcessIo, ProcessObserver};
 use serde_json::Value;
 use std::{
@@ -115,19 +115,21 @@ pub struct HostConfig {
     /// Combined serialized argument and result bytes across this host instance.
     pub max_total_bytes: usize,
     pub max_calls: usize,
-    /// Per-file bound. Git reads additionally share this total byte allowance
-    /// across metadata, objects and the worktree snapshot. Larger repositories
-    /// are refused before launch; no ambient-path fallback is used.
+    /// Per-file bound for ordinary file reads and for each copied Git metadata
+    /// file. Git reads no longer copy object data or the worktree, so repository
+    /// size and ignored build data do not gate a read. Directory listings remain
+    /// bounded by `max_list_entries`.
     pub max_file_bytes: usize,
-    /// Directory listing bound and total Git snapshot entry allowance.
+    /// Directory listing bound and copied Git metadata entry allowance.
     pub max_list_entries: usize,
     /// Includes permission waiting and execution. Durable audit writes are awaited
     /// even after cancellation so a caller cannot mistake an uncommitted result.
     pub call_timeout: Duration,
     /// Absolute application-selected git executable; absent means no git catalog.
-    /// Read commands use a bounded passive snapshot, excluding repository config,
-    /// hooks and object alternates. Worktree symlinks/special files are refused.
-    /// Concurrent in-place source edits do not have transaction snapshot semantics.
+    /// Read commands use a sanitized private metadata directory and the held root
+    /// in place. Worktree symlinks are not followed; a changed object-store
+    /// identity discards the result. Concurrent in-place source edits do not have
+    /// transaction snapshot semantics.
     pub git_program: Option<PathBuf>,
     /// Opt-in for real-repository Git writes. Absent means no write capability.
     /// The identity is host-owned; capabilities are individually policy-gated.
@@ -580,7 +582,10 @@ impl Host {
         }
         check(cancel, deadline)?;
         if lock(&self.budget).exhausted {
-            return Err(failure("host total byte budget exhausted"));
+            return Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "host total byte budget exhausted",
+            ));
         }
         Ok(())
     }
@@ -598,7 +603,10 @@ impl Host {
             || bytes > available.saturating_sub(4)
             || available < 4
         {
-            return Err(failure("host call or total byte budget exhausted"));
+            return Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "host call or total byte budget exhausted",
+            ));
         }
         budget.calls += 1;
         budget.bytes += bytes;
@@ -668,8 +676,8 @@ impl Host {
                     .ok_or_else(|| failure("data capabilities are disabled"))?;
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(failure("data capability cancelled")),
-                    _ = tokio::time::sleep_until(deadline.into()) => Err(failure("data capability deadline reached")),
+                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "data capability cancelled")),
+                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "data capability deadline reached")),
                     result = cayw_data::execute(name, args, cancel.clone(), limits) => result,
                 }
             }
@@ -725,8 +733,8 @@ impl Host {
                     // admission, without extending the original call deadline.
                     tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => return Err(failure("cancelled while opening workspace")),
-                        _ = tokio::time::sleep_until(deadline.into()) => return Err(failure("workspace opening deadline reached")),
+                        _ = cancel.cancelled() => return Err(CapabilityError::stopped(CapabilityStop::Cancelled, "cancelled while opening workspace")),
+                        _ = tokio::time::sleep_until(deadline.into()) => return Err(CapabilityError::stopped(CapabilityStop::Timeout, "workspace opening deadline reached")),
                         _ = tokio::time::sleep(Duration::from_millis(5)) => {},
                     }
                 }
@@ -805,8 +813,8 @@ impl Host {
         // Ordinary calls retain ordered permission/audit admission. Frozen reads
         // never need this lane to settle or acknowledge their original ticket.
         let lane = tokio::select! { biased;
-            _ = cancel.cancelled() => return Err(self.diagnostic(failure("capability cancelled while queued"))),
-            _ = tokio::time::sleep_until(deadline.into()) => return Err(self.diagnostic(failure("capability queue deadline reached"))),
+            _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
+            _ = tokio::time::sleep_until(deadline.into()) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
             guard = self.execution.lock() => guard,
         };
         let mut call = self
@@ -910,8 +918,8 @@ impl Host {
             .map_err(|error| response.error(error))?;
         tokio::select! {
             biased;
-            _ = child.cancelled() => return Err(response.error(failure("capability cancelled before permission"))),
-            _ = tokio::time::sleep_until(deadline.into()) => return Err(response.error(failure("capability permission deadline reached"))),
+            _ = child.cancelled() => return Err(response.error(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled before permission"))),
+            _ = tokio::time::sleep_until(deadline.into()) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability permission deadline reached"))),
             result = self.gate.authorize(name, &arguments.0, child.clone()) => {
                 if let Err(error) = result {
                     if error.outcome_unknown { self.safety.unknown.store(true, Ordering::Release); }
@@ -1054,6 +1062,7 @@ impl ResponseBudget {
         // encodable diagnostics below are charged at their full serialized size.
         if available < 2 {
             budget.exhausted = true;
+            error.stop.get_or_insert(CapabilityStop::Budget);
             error.message.clear();
             self.release(&mut budget, keep);
             return error;
@@ -1066,6 +1075,7 @@ impl ResponseBudget {
             .len();
         if size > available {
             budget.exhausted = true;
+            error.stop.get_or_insert(CapabilityStop::Budget);
             error.message = fit_message(error.message, limit);
         }
         let size = serde_json::to_vec(&error.message)
@@ -1215,10 +1225,16 @@ pub(crate) fn io_error(error: io::Error) -> CapabilityError {
 }
 pub(crate) fn check(cancel: &CancellationToken, deadline: Instant) -> Result<(), CapabilityError> {
     if cancel.is_cancelled() {
-        return Err(failure("capability cancelled"));
+        return Err(CapabilityError::stopped(
+            CapabilityStop::Cancelled,
+            "capability cancelled",
+        ));
     }
     if Instant::now() >= deadline {
-        return Err(failure("capability deadline reached"));
+        return Err(CapabilityError::stopped(
+            CapabilityStop::Timeout,
+            "capability deadline reached",
+        ));
     }
     Ok(())
 }
@@ -1236,7 +1252,10 @@ fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
         }
         *used = used.saturating_add(1);
         if *used > limit {
-            return Err(failure("JSON byte budget exceeded"));
+            return Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "JSON byte budget exceeded",
+            ));
         }
         match value {
             Value::Array(values) => {
@@ -1253,7 +1272,10 @@ fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
             Value::String(text) => {
                 *used = used.saturating_add(text.len());
                 if *used > limit {
-                    return Err(failure("JSON byte budget exceeded"));
+                    return Err(CapabilityError::stopped(
+                        CapabilityStop::Budget,
+                        "JSON byte budget exceeded",
+                    ));
                 }
             }
             _ => {}
@@ -1278,6 +1300,7 @@ fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
         }
     }
     let mut counter = Counter { used: 0, limit };
-    serde_json::to_writer(&mut counter, value).map_err(|error| failure(error.to_string()))?;
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| CapabilityError::stopped(CapabilityStop::Budget, error.to_string()))?;
     Ok(counter.used)
 }

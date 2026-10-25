@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
-use cayw_codemode::{CapabilityError, CapabilityHost};
+use cayw_codemode::{CapabilityError, CapabilityHost, CapabilityStop};
 use cayw_host::{AuditSink, ExternalHost, Host, HostConfig, PermissionGate, Profile, ProfileKind};
 use serde_json::{Value, json};
 use std::{
@@ -53,6 +53,7 @@ impl PermissionGate for Gate {
             Some(error) => Err(CapabilityError {
                 message: error.message.clone(),
                 outcome_unknown: error.outcome_unknown,
+                stop: error.stop,
             }),
             None => Ok(()),
         }
@@ -528,6 +529,137 @@ async fn scopes_share_execution_order_and_permanent_unknown_stop() {
     assert_eq!(second_gate.calls.load(Ordering::SeqCst), 0);
     assert!(second_audit.records.lock().unwrap().is_empty());
     assert!(!root.path().join("never").exists());
+}
+
+struct PausedGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait]
+impl PermissionGate for PausedGate {
+    async fn authorize(
+        &self,
+        _: &str,
+        _: &Value,
+        _: CancellationToken,
+    ) -> Result<(), CapabilityError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn host_wait_stops_keep_their_type_before_execution() {
+    for queued in [false, true] {
+        for cancelled in [false, true] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let root = Root::new();
+                let gate = Arc::new(PausedGate {
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                });
+                let audit = Arc::new(Audit::default());
+                let host = Host::new(
+                    root.path(),
+                    gate.clone(),
+                    audit.clone(),
+                    HostConfig {
+                        call_timeout: if cancelled {
+                            Duration::from_secs(5)
+                        } else {
+                            Duration::from_millis(100)
+                        },
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let blocker_cancel = CancellationToken::new();
+                let mut blocker =
+                    Box::pin(host.call("fs.stat", json!({"path":"."}), blocker_cancel.clone()));
+                tokio::select! {
+                    result = &mut blocker => panic!("permission wait returned early: {result:?}"),
+                    () = gate.entered.notified() => {},
+                }
+                let cancel = CancellationToken::new();
+                let error = if queued {
+                    let mut waiting =
+                        Box::pin(host.call("fs.stat", json!({"path":"."}), cancel.clone()));
+                    assert!(futures::poll!(&mut waiting).is_pending());
+                    if cancelled {
+                        cancel.cancel();
+                    }
+                    let error = waiting.await.unwrap_err();
+                    blocker_cancel.cancel();
+                    assert!(blocker.await.is_err());
+                    error
+                } else {
+                    if cancelled {
+                        blocker_cancel.cancel();
+                    }
+                    blocker.await.unwrap_err()
+                };
+                assert_eq!(
+                    error.stop,
+                    Some(if cancelled {
+                        CapabilityStop::Cancelled
+                    } else {
+                        CapabilityStop::Timeout
+                    }),
+                    "queued={queued}, cancelled={cancelled}: {error:?}"
+                );
+                assert!(!error.outcome_unknown);
+                assert!(!host.outcome_unknown());
+                assert!(audit.records.lock().unwrap().is_empty());
+            })
+            .await
+            .expect("Host permission and queue waits must finish");
+        }
+    }
+}
+
+#[tokio::test]
+async fn host_byte_budget_stops_leave_ordinary_errors_recoverable() {
+    let root = Root::new();
+    let audit = Arc::new(Audit::default());
+    let host = host(
+        root.path(),
+        HostConfig {
+            max_argument_bytes: 128,
+            max_result_bytes: 128,
+            ..Default::default()
+        },
+        Arc::new(Gate::default()),
+        audit.clone(),
+    );
+    let invalid = call(&host, "data.parse", json!({"format":"json","text":"{"}))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.stop, None);
+    assert!(!invalid.outcome_unknown);
+    assert_eq!(
+        call(&host, "data.parse", json!({"format":"json","text":"7"}))
+            .await
+            .unwrap(),
+        json!({"value":7})
+    );
+    let oversized = call(
+        &host,
+        "data.parse",
+        json!({"format":"json","text":"x".repeat(200)}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(oversized.stop, Some(CapabilityStop::Budget));
+    assert!(!oversized.outcome_unknown);
+    let large = json!({"padding":"x".repeat(200)}).to_string();
+    std::fs::write(root.path().join("large.json"), large).unwrap();
+    let result = call(&host, "fs.read", json!({"path":"large.json"}))
+        .await
+        .unwrap_err();
+    assert_eq!(result.stop, Some(CapabilityStop::Budget));
+    assert!(!result.outcome_unknown);
+    assert!(!host.outcome_unknown());
 }
 
 struct ErrorExternal;
@@ -1087,7 +1219,7 @@ async fn git_historical_and_deleted_parent_paths_work_without_following_links() 
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn git_snapshot_refuses_worktree_and_object_links_and_shared_budget_overflow() {
+async fn git_snapshot_accepts_links_without_following_and_still_bounds_metadata_budgets() {
     for case in [
         "worktree-link",
         "object-link",
@@ -1121,8 +1253,27 @@ async fn git_snapshot_refuses_worktree_and_object_links_and_shared_budget_overfl
             Arc::new(Gate::default()),
             Arc::new(Audit::default()),
         );
-        let error = call(&host, "git.status", json!({})).await.unwrap_err();
-        assert!(!error.outcome_unknown, "{case}: {error}");
+        match case {
+            // A safe worktree link and a stray object entry are not opened or
+            // followed. Object data and the worktree are read in place, so a
+            // link is ordinary content for Git's own status output.
+            "worktree-link" | "object-link" => {
+                let result = call(&host, "git.status", json!({}))
+                    .await
+                    .unwrap_or_else(|error| panic!("{case}: {}", error.message));
+                assert_eq!(result["success"], true, "{case}: {result}");
+                assert!(
+                    !result["stdout"].as_str().unwrap().contains("outside"),
+                    "{case}: a read must not follow the link: {result}"
+                );
+            }
+            // Metadata copies keep their own money bounds even though object and
+            // worktree data are no longer copied or size-gated.
+            _ => {
+                let error = call(&host, "git.status", json!({})).await.unwrap_err();
+                assert!(!error.outcome_unknown, "{case}: {error}");
+            }
+        }
         assert_eq!(host.active_processes(), 0);
         assert_eq!(
             std::fs::read_to_string(outside.path().join("secret")).unwrap(),

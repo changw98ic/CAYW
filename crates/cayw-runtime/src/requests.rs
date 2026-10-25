@@ -95,6 +95,7 @@ pub(crate) fn operation_definitions(inner: &Inner, host: &cayw_host::Host) -> Ve
     definitions.extend(crate::values::definitions());
     definitions.extend(crate::collaboration::definitions());
     definitions.extend(crate::children::definitions(inner));
+    definitions.extend(crate::content::definitions(inner.config.content.as_ref()));
     definitions
 }
 fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {
@@ -156,6 +157,8 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
             "cache_entries": cells.cache_entries,
         },
         "permissions": permission_list(&runtime.permissions),
+        "content": crate::content::policy_identity(inner)?,
+        "resources": runtime.resources,
         "runtime": {
             "max_concurrent_runs": runtime.max_concurrent_runs,
             "max_queued_runs": runtime.max_queued_runs,
@@ -513,7 +516,17 @@ impl Runtime {
     }
     fn active_request(&self, task_id: &str) -> Result<TaskIdentity, RuntimeError> {
         let task = self.task(task_id)?;
-        if task.state != TaskState::Running || task.cancel_requested {
+        // A live original Attempt owns its request authority while it is
+        // running, parked as WaitingApproval for an ordinary host permission,
+        // or queued again for re-admission of that same worker and attempt.
+        // A queued entry without an attempt is dormant accepted work and owns
+        // no active request authority.
+        let active = match task.state {
+            TaskState::Running | TaskState::WaitingApproval => true,
+            TaskState::Queued => task.attempt_id.is_some(),
+            _ => false,
+        };
+        if !active || task.cancel_requested {
             return Err(RuntimeError::StaleApproval);
         }
         let view = self.get(&task.session_id)?;
@@ -531,6 +544,39 @@ impl Runtime {
     }
     pub fn request_operations(&self) -> Result<Vec<OperationScope>, RuntimeError> {
         Ok(catalog(&self.inner, &self.inner.host_root)?.operations())
+    }
+    /// Current durable operational limits. Finished tasks no longer consume the
+    /// active task count or state reservation; these limits bound unfinished
+    /// work, not lifetime audit history.
+    pub fn request_limits(&self) -> cayw_requests::RequestConfig {
+        self.inner.requests.config()
+    }
+    /// Trusted host-only adjustment of the operational request limits. The new
+    /// value is persisted with an immutable history row before this handle uses
+    /// it. Another independent Runtime must close before the adjustment; clones
+    /// of this Runtime share the updated limits. Active tasks may continue, but
+    /// lowering below their current usage is rejected. This does not grant any
+    /// capability or change a request decision.
+    pub fn request_limits_adjust(
+        &self,
+        next: cayw_requests::RequestConfig,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        next.validate()?;
+        let actor = HostActor::new(actor)?;
+        let _coordinate = self.inner.coordination.enter()?;
+        self.inner.coordination.amend_policy(|| {
+            self.inner.requests.adjust_config(next, &actor, reason)?;
+            Ok(Some(()))
+        })?;
+        Ok(())
+    }
+    /// Host-only immutable operational-limit adjustment history.
+    pub fn request_config_history(
+        &self,
+    ) -> Result<Vec<cayw_requests::ConfigAdjustment>, RuntimeError> {
+        Ok(self.inner.requests.config_history()?)
     }
     pub fn request_status(
         &self,

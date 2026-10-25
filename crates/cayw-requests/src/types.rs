@@ -226,6 +226,8 @@ pub enum ValidityReason {
 #[serde(rename_all = "snake_case")]
 pub enum RequestState {
     Invalid,
+    /// Structurally valid and below the repeat threshold. This is a hint for
+    /// the host/model; a trusted host may evaluate it immediately.
     Requested,
     AwaitingEvaluation,
     Evaluating,
@@ -341,8 +343,13 @@ impl EvaluationTicket {
     }
 }
 
-/// Threshold is an eligibility experiment, never an authorization guarantee.
-/// Configuration is persisted and must match on every connection/reopen.
+/// The repeat threshold only selects the informational state before evaluation
+/// (`requested` versus `awaiting_evaluation`). It never withholds evaluation
+/// from a structurally valid request and never grants by itself.
+/// [`crate::RequestStore::adjust_config`] durably replaces operational limits
+/// for a live store; a trusted host may also open with
+/// [`crate::RequestStore::open_with_trusted_adjustment`] to adopt and persist
+/// limits changed since the previous process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RequestConfig {
@@ -350,12 +357,19 @@ pub struct RequestConfig {
     pub request_lifetime_ms: u64,
     pub evaluation_timeout_ms: u64,
     pub max_grant_lifetime_ms: u64,
+    /// Maximum number of unfinished (Active/Closing) tasks. Finished tasks keep
+    /// their tombstones but stop counting against this operational limit.
     pub max_tasks: u32,
     /// Across all attempts; old rows and terminal task tombstones are retained.
     pub max_requests_per_task: u32,
     pub max_attempts_per_task: u32,
+    /// Lifetime event-row budget. Event rows are immutable audit facts and are
+    /// never released.
     pub max_events: u64,
-    /// Conservative reservations cover projections and all future lifecycle events.
+    /// Operational state reservations of unfinished tasks and a repair awaiting
+    /// activation. Task reservations return at `end_task`; a repair reservation
+    /// returns in its activation commit. Retained audit records are not charged
+    /// again.
     pub max_state_bytes: u64,
     pub max_result_bytes: usize,
     pub sqlite_busy_timeout_ms: u64,
@@ -409,6 +423,18 @@ impl RequestConfig {
         }
         Ok(())
     }
+}
+
+/// Immutable audit fact for one trusted operational-limit adjustment. History
+/// rows are never updated or deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigAdjustment {
+    pub at_ms: u64,
+    pub actor: String,
+    pub reason: String,
+    pub previous: RequestConfig,
+    pub next: RequestConfig,
 }
 
 pub trait Clock: Send + Sync {

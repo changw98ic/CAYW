@@ -16,40 +16,35 @@ use std::{
 pub(crate) const STORE: &str = ".cayw-workspace";
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+/// Names this workspace or a cooperating Host owns. Only actual internal
+/// objects are reserved; other `.cayw-*` names are ordinary user paths.
 pub(crate) fn reserved(name: &str) -> bool {
-    name.eq_ignore_ascii_case(".git") || name.to_ascii_lowercase().starts_with(".cayw-")
+    let lower = name.to_ascii_lowercase();
+    lower == ".git"
+        || lower == STORE
+        || lower == ".cayw-worktrees"
+        || lower == ".cayw-host-lock"
+        || lower == ".cayw-host-read-fence"
+        || lower == ".cayw-host-read-state"
+        || lower == ".cayw-host-read-fault"
+        || lower == ".cayw-host-read-faults"
+        || lower.starts_with(".cayw-host-tmp-")
+        || lower.starts_with(".cayw-host-read-state-")
 }
 pub(crate) fn components(path: &str, root: bool) -> Result<Vec<&str>, CapabilityError> {
     if root && path == "." {
         return Ok(vec![]);
     }
-    if path.is_empty()
-        || path.len() > 4096
-        || !path.is_ascii()
-        || path.contains(['\\', ':'])
-        || path.chars().any(char::is_control)
-    {
-        return Err(failure("expected a portable relative path"));
+    // macOS names may be UTF-8 and may contain characters that Windows forbids
+    // (colon, backslash, trailing space/dot, reserved device stems). The fixed
+    // directory handle, not a name whitelist, keeps access inside the root.
+    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+        return Err(failure("expected a relative workspace path"));
     }
     let mut result = vec![];
     for part in path.split('/') {
-        if part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.len() > 255
-            || reserved(part)
-            || part.contains(['<', '>', '"', '|', '?', '*'])
-            || part.ends_with([' ', '.'])
-        {
+        if part.is_empty() || part == "." || part == ".." || part.len() > 255 || reserved(part) {
             return Err(failure("forbidden or reserved path component"));
-        }
-        let base = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
-        if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || (base.len() == 4
-                && (base.starts_with("COM") || base.starts_with("LPT"))
-                && matches!(base.as_bytes()[3], b'1'..=b'9'))
-        {
-            return Err(failure("reserved portable device name"));
         }
         result.push(part);
     }

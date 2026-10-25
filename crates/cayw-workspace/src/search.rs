@@ -516,7 +516,7 @@ pub(crate) fn execute(
             if args.pattern.is_empty()
                 || args.pattern.len() > MAX_GLOB_BYTES
                 || args.pattern.starts_with('/')
-                || args.pattern.contains(['\0', ':'])
+                || args.pattern.contains('\0')
                 || args.pattern.split('/').any(|p| p == ".." || p == ".")
             {
                 return Err(failure("expected a bounded relative glob pattern"));

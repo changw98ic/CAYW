@@ -141,7 +141,10 @@ async fn independent_sdk_connection_decides_only_the_live_original_attempt() {
     let task = start(&rt, &id);
     let first = approval(&controller, &id).await;
     let original = controller.tasks(&id).unwrap()[0].clone();
-    assert_eq!(original.state, TaskState::Running);
+    assert!(matches!(
+        original.state,
+        TaskState::Running | TaskState::WaitingApproval
+    ));
     assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
     controller
         .approve(&id, &first.id, ApprovalChoice::AllowOnce, "sdk-peer")
@@ -231,8 +234,24 @@ async fn sdk_peer_approval_storage_failure_closes_admission_until_recovery() {
             .is_err()
     );
     assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(controller.tasks(&id).unwrap()[0].state, TaskState::Draining);
-    assert_eq!(controller.health().unwrap().running, 1);
+    let blocked = controller.tasks(&id).unwrap()[0].clone();
+    assert_eq!(blocked.state, TaskState::Draining);
+    assert_eq!(
+        controller.health().unwrap().running,
+        usize::from(blocked.holds_slot)
+    );
+    assert!(
+        controller
+            .scheduler(100)
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|task| task.id == blocked.id)
+    );
+    assert!(matches!(
+        controller.enqueue(&id, "duplicate"),
+        Err(cayw_runtime::RuntimeError::Busy)
+    ));
     assert!(
         controller
             .approve(&id, &pending.id, ApprovalChoice::AllowOnce, "late-peer")
@@ -312,8 +331,22 @@ async fn peer_double_write_failure(activation: bool, revoke: bool) {
     assert_eq!(blocked.attempt_id, original.attempt_id);
     assert_eq!(blocked.worker_id, original.worker_id);
     assert_eq!(blocked.fence, original.fence);
-    assert_eq!(blocked.state, TaskState::Running);
-    assert_eq!(controller.health().unwrap().running, 1);
+    assert!(matches!(
+        blocked.state,
+        TaskState::Running | TaskState::WaitingApproval
+    ));
+    assert_eq!(
+        controller.health().unwrap().running,
+        usize::from(blocked.holds_slot)
+    );
+    assert!(
+        controller
+            .scheduler(100)
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|task| task.id == blocked.id)
+    );
     assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
     assert!(controller.get(&id).unwrap().attempt.is_some());
     assert!(

@@ -779,14 +779,10 @@ pub(crate) async fn call(
 }
 
 fn capacity_precheck(inner: &Inner) -> Result<(), RuntimeError> {
-    let (running, queued) = inner.queue.counts()?;
-    if running.saturating_add(queued) >= inner.config.max_queued_runs {
-        return Err(RuntimeError::QueueFull);
-    }
-    if running >= inner.config.max_concurrent_runs {
-        return Err(RuntimeError::QueueFull);
-    }
-    Ok(())
+    inner.queue.check_child_capacity(
+        inner.config.max_queued_runs,
+        inner.config.max_concurrent_runs,
+    )
 }
 
 fn abort_started_child(inner: &Inner, lease: &TaskLease, reason: &str) {

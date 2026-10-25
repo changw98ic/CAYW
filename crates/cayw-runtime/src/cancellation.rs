@@ -38,7 +38,10 @@ impl Runtime {
         }
         if !matches!(
             task.state,
-            TaskState::Queued | TaskState::Running | TaskState::Draining
+            TaskState::Queued
+                | TaskState::Running
+                | TaskState::WaitingApproval
+                | TaskState::Draining
         ) {
             return Ok(false);
         }

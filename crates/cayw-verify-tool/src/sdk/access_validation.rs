@@ -716,9 +716,13 @@ fn approval(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Value]
                 && paused.session.attempt.as_ref() == Some(lease)
                 && paused.session.state == cayw_core::SessionState::AwaitingApproval
                 && paused.session.pending_approvals == vec![original.clone()]
-                && paused.health["running"] == 1
+                // A parked approval releases its execution slot under the
+                // scheduler contract. The original Task keeps its exact
+                // attempt/worker/fence identity in WaitingApproval.
+                && paused.health["running"] == 0
                 && paused.tasks.len() == 1
-                && paused.tasks[0].state == TaskState::Running
+                && paused.tasks[0].state == TaskState::WaitingApproval
+                && !paused.tasks[0].holds_slot
                 && match_task(&paused.tasks[0], lease)
                 && paused.tasks[0].id == task.id
                 && paused.provider_calls == 1
@@ -732,7 +736,7 @@ fn approval(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Value]
                 } else {
                     file_bytes(&paused.file)? == CONTENT.as_bytes()
                 },
-            "approval pause lost its complete unchanged original pending task or has an effect before permission",
+            "approval pause lost its complete unchanged parked original task or has an effect before permission",
         )?;
         let grant = final_state
             .grants

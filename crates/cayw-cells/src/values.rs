@@ -4,7 +4,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
-use cayw_codemode::CapabilityError;
+use cayw_codemode::{CapabilityError, CapabilityStop};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -117,7 +117,7 @@ impl CellValueExecutor {
         self.limits.validate().map_err(capability_error)?;
         let session = &execution.identity.session_id;
         if self.journal.is_frozen(session).map_err(capability_error)? {
-            return Err(CapabilityError::new(CellError::Frozen.to_string()));
+            return Err(capability_error(CellError::Frozen));
         }
         let (depth, bytes) = match operation {
             // The store helper passes one object around the value. Count that
@@ -160,13 +160,7 @@ impl CellValueExecutor {
         self.journal
             .store(session, key, expected_version, value, &self.limits)
             .map(|snapshot| json!({"version":snapshot.version}))
-            .map_err(|error| {
-                if matches!(&error, CellError::Journal(_)) {
-                    CapabilityError::unknown(error.to_string())
-                } else {
-                    CapabilityError::new(error.to_string())
-                }
-            })
+            .map_err(capability_error)
     }
 
     fn load(&self, session: &str, arguments: Value) -> Result<Value, CapabilityError> {
@@ -175,10 +169,7 @@ impl CellValueExecutor {
             .ok_or_else(|| CapabilityError::new("cells.load arguments require an object"))?;
         reject_extra_fields(object, &["key"])?;
         let key = stored_key(object)?;
-        let snapshot = self
-            .journal
-            .load(session, key)
-            .map_err(|error| CapabilityError::new(error.to_string()))?;
+        let snapshot = self.journal.load(session, key).map_err(capability_error)?;
         let Some(snapshot) = snapshot else {
             return Ok(Value::Null);
         };
@@ -252,7 +243,8 @@ impl CellBackend for AuthorizedCellBackend {
                 .await;
         };
         if cancel.is_cancelled() {
-            return Ok(BackendResponse::new(Err(CapabilityError::new(
+            return Ok(BackendResponse::new(Err(CapabilityError::stopped(
+                CapabilityStop::Cancelled,
                 "cell value operation cancelled before authorization",
             ))));
         }
@@ -260,7 +252,8 @@ impl CellBackend for AuthorizedCellBackend {
             .authorize(execution, operation, &arguments, cancel.clone())
             .await?;
         if cancel.is_cancelled() {
-            return Ok(BackendResponse::new(Err(CapabilityError::new(
+            return Ok(BackendResponse::new(Err(CapabilityError::stopped(
+                CapabilityStop::Cancelled,
                 "cell value operation cancelled before execution",
             ))));
         }
@@ -330,5 +323,5 @@ fn validate_snapshot(
 }
 
 fn capability_error(error: CellError) -> CapabilityError {
-    CapabilityError::new(error.to_string())
+    error.capability_error()
 }

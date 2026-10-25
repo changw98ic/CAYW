@@ -294,9 +294,6 @@ impl<R: AsyncRead + Unpin> Frames<R> {
     }
 
     pub async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
-        if self.deadline.is_none() {
-            self.deadline = self.frame_timeout.map(|duration| Instant::now() + duration);
-        }
         loop {
             let bytes = match self.deadline {
                 Some(deadline) => timeout_at(deadline, self.reader.fill_buf())
@@ -314,6 +311,11 @@ impl<R: AsyncRead + Unpin> Frames<R> {
                     io::ErrorKind::UnexpectedEof,
                     "truncated IPC frame",
                 ));
+            }
+            // Waiting for another request must not cancel a handler already in flight.
+            // Once a frame starts, retain its deadline across cancelled reads and chunks.
+            if self.deadline.is_none() {
+                self.deadline = self.frame_timeout.map(|duration| Instant::now() + duration);
             }
             let newline = bytes.iter().position(|&byte| byte == b'\n');
             let count = newline.unwrap_or(bytes.len());
@@ -384,4 +386,58 @@ pub(crate) fn encode(value: &impl Serialize, max: usize) -> io::Result<Vec<u8>> 
     })?;
     writer.bytes.push(b'\n');
     Ok(writer.bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Frames;
+    use futures::poll;
+    use std::{io, task::Poll, time::Duration};
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn frame_deadline_starts_with_first_byte_and_resets_after_newline() {
+        let (reader, mut writer) = tokio::io::duplex(128);
+        let interval = Duration::from_secs(60);
+        let mut frames = Frames::new(reader, 128, Some(interval));
+        for expected in [b"first\n".as_slice(), b"second\n".as_slice()] {
+            let next = frames.next();
+            tokio::pin!(next);
+            assert!(poll!(&mut next).is_pending());
+            tokio::time::advance(interval * 2).await;
+            assert!(
+                poll!(&mut next).is_pending(),
+                "an idle reader must not time out an active request"
+            );
+            writer.write_all(expected).await.unwrap();
+            assert_eq!(
+                next.await.unwrap().unwrap(),
+                &expected[..expected.len() - 1]
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partial_frame_deadline_survives_cancelled_reads_and_more_bytes() {
+        let (reader, mut writer) = tokio::io::duplex(128);
+        let interval = Duration::from_secs(60);
+        let mut frames = Frames::new(reader, 128, Some(interval));
+        writer.write_all(b"{").await.unwrap();
+        {
+            let next = frames.next();
+            tokio::pin!(next);
+            assert!(poll!(&mut next).is_pending());
+            tokio::time::advance(interval / 2).await;
+            assert!(poll!(&mut next).is_pending());
+        }
+        writer.write_all(b" ").await.unwrap();
+        let next = frames.next();
+        tokio::pin!(next);
+        assert!(poll!(&mut next).is_pending());
+        tokio::time::advance(interval).await;
+        match poll!(&mut next) {
+            Poll::Ready(Err(error)) => assert_eq!(error.kind(), io::ErrorKind::TimedOut),
+            other => panic!("partial frame did not retain its deadline: {other:?}"),
+        }
+    }
 }

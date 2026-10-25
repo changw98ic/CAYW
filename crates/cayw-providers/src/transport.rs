@@ -44,8 +44,9 @@ impl HttpConfig {
         let mut key = HeaderValue::from_str(&key)
             .map_err(|_| ProviderConfigError("API key is not a valid HTTP header value".into()))?;
         key.set_sensitive(true);
+        // Keep redirects and automatic retries disabled. Environment proxy
+        // discovery and TLS certificate verification stay at the reqwest default.
         let client = Client::builder()
-            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .build()

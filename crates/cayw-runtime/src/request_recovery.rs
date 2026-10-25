@@ -23,6 +23,31 @@ pub(crate) fn request_path(store_path: &Path) -> Result<PathBuf, RuntimeError> {
     Ok(path.into())
 }
 
+/// Apply the explicit startup limits under the opening Runtime's policy lock,
+/// then reopen strictly after its lifetime shared lock has been restored.
+pub(crate) fn open_requests(
+    store_path: &Path,
+    limits: RequestConfig,
+) -> Result<RequestStore, RuntimeError> {
+    let path = request_path(store_path)?;
+    if path
+        .try_exists()
+        .map_err(|error| RuntimeError::Workspace(error.to_string()))?
+        && RequestStore::persisted_config(&path)? != limits
+    {
+        crate::coordination::amend_policy(store_path, || {
+            RequestStore::open_with_trusted_adjustment(
+                &path,
+                limits.clone(),
+                &cayw_requests::HostActor::new("runtime-startup")?,
+                "Runtime startup applies the configured operational request limits",
+            )?;
+            Ok(Some(()))
+        })?;
+    }
+    Ok(RequestStore::open(path, limits)?)
+}
+
 struct AuthorityOwners {
     _owners: Vec<Owners>,
     verified: Vec<TaskIdentity>,
@@ -76,6 +101,43 @@ fn original_leases(
 }
 
 impl Runtime {
+    /// Read the durable operational request limits without opening admission.
+    /// Used by a trusted host that restarts a Runtime after limits changed.
+    pub fn persisted_request_limits(
+        store_path: impl AsRef<Path>,
+    ) -> Result<RequestConfig, RuntimeError> {
+        Ok(RequestStore::persisted_config(request_path(
+            store_path.as_ref(),
+        )?)?)
+    }
+
+    /// Trusted host-only persistent adjustment after all Runtime connections
+    /// have closed. The authority must still be openable; a stopped authority is
+    /// never reset by an adjustment. The new value and immutable history row
+    /// commit together.
+    pub fn adjust_request_limits(
+        store_path: impl AsRef<Path>,
+        next: RequestConfig,
+        actor: &cayw_requests::HostActor,
+        reason: &str,
+    ) -> Result<RequestConfig, RuntimeError> {
+        next.validate()?;
+        let store_path = store_path
+            .as_ref()
+            .canonicalize()
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        let changed = crate::coordination::amend_stopped_policy(&store_path, || {
+            let path = request_path(&store_path)?;
+            let stored = RequestStore::persisted_config(&path)?;
+            let store = RequestStore::open(&path, stored)?;
+            store.adjust_config(next, actor, reason)?;
+            Ok(Some(store.config()))
+        })?;
+        changed.ok_or_else(|| {
+            RuntimeError::Worker("request policy adjustment produced no result".into())
+        })
+    }
+
     /// Read the original permission authority even when `Runtime::open` refuses
     /// admission. This does not create storage, advance time or enable anything.
     pub fn inspect_request_authority(
@@ -114,10 +176,12 @@ impl Runtime {
             .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
         let coordination = crate::coordination::Coordination::new(&store_path)?;
         let _coordinate = coordination.enter()?;
-        let queue = crate::queue::Queue::open(
+        let queue = crate::queue::Queue::open_with_resources(
             &store_path,
             config.max_concurrent_runs,
             config.max_queued_runs,
+            config.fairness_after_dispatches,
+            &config.resources,
         )?;
         let task = queue.get(&target.task_id)?;
         if task.cancel_target() != *target {
@@ -283,10 +347,12 @@ impl Runtime {
         let coordination = crate::coordination::Coordination::new(&store_path)?;
         let _coordinate = coordination.enter()?;
         let store = SessionStore::open(&store_path)?;
-        let queue = crate::queue::Queue::open(
+        let queue = crate::queue::Queue::open_with_resources(
             &store_path,
             config.max_concurrent_runs,
             config.max_queued_runs,
+            config.fairness_after_dispatches,
+            &config.resources,
         )?;
         let processes = crate::processes::ProcessJournal::open(&store_path)?;
         let cells = Arc::new(

@@ -340,9 +340,8 @@ async fn cross_runtime_answer_uses_only_core_lease_queue_and_coordination() {
 
 #[tokio::test]
 async fn plan_update_uses_per_task_version_cas_and_validates_steps() {
-    // `pcall` is deliberately absent from the VM, so the stale second call ends
-    // the cell with a known capability failure. The first version must remain
-    // the only durable plan and the task must not become outcome-unknown.
+    // The uncaught stale second call ends the cell with a known failure. The
+    // first version stays the only durable plan without unknown side effects.
     const SCRIPT: &str = r#"
 local first = cayw.call('plan.update',{expected_version=0,steps={{id='inspect',text='Inspect workspace',status='in_progress'},{id='edit',text='Apply edit',status='pending'}}})
 return cayw.call('plan.update',{expected_version=0,steps={{id='conflict',text='Must not commit',status='pending'}}})
@@ -381,6 +380,39 @@ return cayw.call('plan.update',{expected_version=0,steps={{id='conflict',text='M
     let second = start(&rt, &id);
     second.await.unwrap().unwrap();
     assert_eq!(rt.plan(&id).unwrap().unwrap().version, 1);
+}
+
+#[tokio::test]
+async fn plan_update_allows_parallel_in_progress_steps_with_the_same_version_cas() {
+    let script: &'static str = r#"return cayw.call('plan.update',{expected_version=0,steps={{id='left',text='Run left work',status='in_progress'},{id='right',text='Run right work',status='in_progress'},{id='merge',text='Merge results',status='pending'}}})"#;
+    let scope = json!({
+        "expected_version": 0,
+        "steps": [
+            {"id":"left", "text":"Run left work", "status":"in_progress"},
+            {"id":"right", "text":"Run right work", "status":"in_progress"},
+            {"id":"merge", "text":"Merge results", "status":"pending"},
+        ]
+    });
+    let (_dir, rt) = setup(script, vec![ScopedPermission::exact("plan.update", scope)]);
+    let id = rt.create(None).unwrap().id;
+    let view = start(&rt, &id).await.unwrap().unwrap();
+    assert_ne!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
+    let plan = rt.plan(&id).unwrap().expect("one accepted plan");
+    assert_eq!(plan.version, 1);
+    assert_eq!(plan.previous_version, 0);
+    assert_eq!(
+        plan.steps
+            .iter()
+            .map(|step| (step.id.as_str(), step.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("left", PlanStepStatus::InProgress),
+            ("right", PlanStepStatus::InProgress),
+            ("merge", PlanStepStatus::Pending)
+        ]
+    );
+    assert_eq!(host_events(&rt, &id, "collaboration_plan_updated").len(), 1);
 }
 
 #[tokio::test]

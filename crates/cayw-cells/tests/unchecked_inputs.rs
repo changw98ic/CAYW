@@ -129,10 +129,20 @@ fn store_rejects_unchecked_values_without_process_abort() {
                 assert_eq!(stored.value, nested(10, false));
                 assert_eq!(journal.load("s", "value").unwrap(), Some(stored));
             } else {
-                assert!(
-                    matches!(result, Err(CellError::Invalid(_))),
-                    "{case}: {result:?}"
-                );
+                if matches!(
+                    case.as_str(),
+                    "deep-array" | "deep-object" | "deep-byte-limit" | "deep-unvisited-sibling"
+                ) {
+                    assert!(
+                        matches!(result, Err(CellError::Capacity)),
+                        "{case}: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(CellError::Invalid(_))),
+                        "{case}: {result:?}"
+                    );
+                }
                 assert_eq!(journal.load("s", "value").unwrap(), Some(baseline));
                 assert!(!journal.is_frozen("s").unwrap());
             }
@@ -306,7 +316,7 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
                     assert_eq!(retried.reconciliation.len(), 1);
                 } else {
                     assert!(
-                        matches!(result, Err(CellError::Invalid(_))),
+                        matches!(result, Err(CellError::Capacity)),
                         "{case}: {result:?}"
                     );
                     assert_eq!(

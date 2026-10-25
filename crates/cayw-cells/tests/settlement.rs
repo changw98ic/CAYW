@@ -150,6 +150,72 @@ async fn terminal(cells: &CellManager, mut page: CellPage) -> CellPage {
     .unwrap()
 }
 
+#[tokio::test]
+async fn host_settlement_preserves_the_original_known_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let backend = Backend::new(false);
+    let cells = manager(
+        identity("stop"),
+        journal.clone(),
+        backend,
+        ReadCoordinator::new(vec![], CellLimits::default()).unwrap(),
+    );
+    let page = terminal(
+        &cells,
+        cells
+            .exec(
+                request("pcall(function() text(string.rep('x',300000)) end)"),
+                "parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.status, CellStatus::Failed);
+    assert_eq!(page.stop, Some(cayw_codemode::CapabilityStop::Budget));
+    let record = cells.record(&page.cell_id).unwrap();
+    cells.close().await;
+    drop(cells);
+    let scope = journal
+        .stopped_scope(
+            ExecutorStopped {
+                identity: record.identity.clone(),
+                evidence: "original VM joined".into(),
+            },
+            CellLimits::default(),
+        )
+        .unwrap();
+    let mut settlement = HostSettlement {
+        execution: record.execution(),
+        calls: vec![],
+        execution_terminal: Some(HostExecutionSettlement {
+            expected_backend_error: None,
+            terminal: CellTerminal {
+                status: record.status,
+                error: record.error.clone(),
+                stop: None,
+                outcome_unknown: false,
+            },
+            evidence: "original known terminal".into(),
+        }),
+        evidence: "original stop remains authoritative".into(),
+    };
+    assert!(matches!(
+        scope.settle(settlement.clone()),
+        Err(CellError::Conflict)
+    ));
+    settlement
+        .execution_terminal
+        .as_mut()
+        .unwrap()
+        .terminal
+        .stop = record.stop;
+    assert_eq!(scope.settle(settlement).unwrap().stop, record.stop);
+    scope.finish().unwrap();
+}
+
 // Break caught: the capability is known in Core, but a lost lifecycle reply
 // permanently freezes Cells even after the old VM and manager have stopped.
 #[tokio::test]
@@ -215,6 +281,7 @@ async fn host_settlement_after_close_allows_a_new_task_without_replaying() {
         terminal: CellTerminal {
             status: CellStatus::Reconciled,
             error: None,
+            stop: None,
             outcome_unknown: false,
         },
         evidence: "Core durable execution settlement after explicit host observation".into(),
@@ -407,6 +474,7 @@ fn stopped_crash_windows_accept_host_facts_and_preserve_known_terminals() {
         outputs: vec![],
         output_bytes: 0,
         error: None,
+        stop: None,
         backend_error: None,
         reconciliation: vec![],
         host_settlements: vec![],
@@ -475,6 +543,7 @@ fn stopped_crash_windows_accept_host_facts_and_preserve_known_terminals() {
             terminal: CellTerminal {
                 status: CellStatus::Reconciled,
                 error: None,
+                stop: None,
                 outcome_unknown: false,
             },
             evidence: "Core stopped execution and parent pairing are durable".into(),
@@ -898,6 +967,7 @@ async fn session_stays_frozen_until_every_task_record_has_host_settlement() {
                     terminal: CellTerminal {
                         status: CellStatus::Cancelled,
                         error: None,
+                        stop: None,
                         outcome_unknown: false,
                     },
                     evidence: "Core execution durably cancelled with no dispatched capabilities"
@@ -1101,6 +1171,7 @@ fn existing_omitted_success_can_add_evidence_without_replacing_known_success() {
         outputs: vec![],
         output_bytes: 0,
         error: None,
+        stop: None,
         backend_error: Some("old lifecycle reply lost".into()),
         reconciliation: vec![],
         host_settlements: vec![],
@@ -1140,6 +1211,7 @@ fn existing_omitted_success_can_add_evidence_without_replacing_known_success() {
             terminal: CellTerminal {
                 status: CellStatus::Reconciled,
                 error: None,
+                stop: None,
                 outcome_unknown: false,
             },
             evidence: "Core known success and execution durably verified".into(),

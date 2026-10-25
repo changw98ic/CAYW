@@ -481,6 +481,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext 3.4.6",
  "cap-std 3.4.6",
+ "cayw-ai",
  "chacha20poly1305",
  "fs2",
  "rand_core 0.6.4",
@@ -651,6 +652,7 @@ dependencies = [
  "cayw-bridge",
  "cayw-cells",
  "cayw-codemode",
+ "cayw-content",
  "cayw-core",
  "cayw-host",
  "cayw-ipc",

@@ -14,8 +14,8 @@ use cayw_core::{
     SessionState,
 };
 use cayw_runtime::{
-    ApprovalChoice, BridgeDispatchEvent, RequestPolicy, Runtime, RuntimeConfig, ScopedPermission,
-    TaskState,
+    ApprovalChoice, BridgeDispatchEvent, RequestPolicy, Runtime, RuntimeConfig, RuntimeError,
+    ScopedPermission, TaskState,
 };
 use serde_json::{Value, json};
 use std::{
@@ -430,13 +430,28 @@ async fn all_scopes_share_host_call_budget() {
         ),
     );
     let id = rt.create(None).unwrap().id;
-    assert_eq!(
-        rt.prompt(&id, "bounded fixture", CancellationToken::new())
-            .await
-            .unwrap()
-            .state,
-        SessionState::Idle
-    );
+    assert!(matches!(
+        rt.prompt(&id, "bounded fixture", CancellationToken::new()).await,
+        Err(RuntimeError::Worker(ref reason)) if reason == "host call or total byte budget exhausted"
+    ));
+    let view = rt.get(&id).unwrap();
+    assert_eq!(view.state, SessionState::Idle);
+    assert!(view.unresolved_calls.is_empty());
+    assert!(view.unresolved_capabilities.is_empty());
+    let tasks = rt.tasks(&id).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, TaskState::Failed);
+    assert!(!tasks[0].cancel_requested);
+    let terminals = rt
+        .audit(&id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.task_id.as_deref() == Some(tasks[0].id.as_str()) && event.kind.starts_with("run_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, "run_failed");
     assert!(state.calls.lock().unwrap().is_empty());
     let calls = settled(&rt, &id);
     assert_eq!(calls.len(), 2);

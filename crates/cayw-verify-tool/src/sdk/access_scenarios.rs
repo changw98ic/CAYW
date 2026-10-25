@@ -262,6 +262,20 @@ pub(super) async fn execute(
     Ok(())
 }
 
+async fn wait_parked(runtime: &Runtime, task_id: &str) -> Result<()> {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let task = runtime.task(task_id)?;
+            if task.state == TaskState::WaitingApproval && !task.holds_slot {
+                return Ok::<(), cayw_runtime::RuntimeError>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
 async fn next_approval(
     client: &Client,
     id: &str,
@@ -326,6 +340,10 @@ async fn approval(
             async {
                 for (index, capability) in ["fs.write", "fs.read"].into_iter().enumerate() {
                     let original = next_approval(&control, &id, &mut cursor, report).await?;
+                    // The new scheduler parks the task only after the approval
+                    // request is durable. Wait for that stable state so the
+                    // pause evidence never captures the pre-park transition.
+                    wait_parked(runtime, &original.input.task_id).await?;
                     let before = snapshot(runtime, provider, &context.root, &id)?;
                     report.observe("access_approval_waiting", json!({"approval":original,"snapshot":before}))?;
                     let expected_arguments = if index == 0 { write_arguments(false) } else { json!({"path":"result.txt"}) };

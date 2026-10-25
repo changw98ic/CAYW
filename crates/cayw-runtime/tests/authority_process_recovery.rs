@@ -3,7 +3,8 @@
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_requests::{AuthorityRepairRequest, HostActor, OperationScope, RequestError};
 use cayw_runtime::{
-    CancelTarget, RequestPolicy, Runtime, RuntimeConfig, RuntimeError, ScopedPermission,
+    CancelTarget, RequestPolicy, ResourcePolicy, Runtime, RuntimeConfig, RuntimeError,
+    ScopedPermission, TaskInput, TaskPriority, TaskRecord, TaskResources,
 };
 use serde_json::json;
 use std::{
@@ -31,6 +32,9 @@ fn config(root: &Path) -> RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
         max_run_time: Duration::from_secs(180),
+        resources: ResourcePolicy {
+            max_declared_memory_bytes: 100,
+        },
         request_policy: Some(RequestPolicy {
             permission_policy_id: "combined-recovery".into(),
             operations: vec![OperationScope::exact(
@@ -71,6 +75,77 @@ fn open(root: &Path) -> Result<Runtime, RuntimeError> {
         Model::new("fixture", "combined-recovery"),
         config(root),
     )
+}
+fn enqueue_resources(runtime: &Runtime, session: &str, text: &str) -> TaskRecord {
+    runtime
+        .enqueue_with_resources(
+            session,
+            TaskInput {
+                text: text.into(),
+                images: vec![],
+            },
+            cayw_requests::TaskIntent::General,
+            TaskPriority::Normal,
+            TaskResources {
+                declared_memory_bytes: 80,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+fn assert_resources(runtime: &Runtime, original: &TaskRecord, reserved: bool) {
+    let view = runtime.resources().unwrap();
+    assert_eq!(view.policy.max_declared_memory_bytes, 100);
+    assert_eq!(view.usage.max_declared_memory_bytes, 100);
+    assert_eq!(
+        view.usage.reserved_declared_memory_bytes,
+        if reserved { 80 } else { 0 }
+    );
+    assert_eq!(view.usage.holding_tasks, usize::from(reserved));
+    let task = runtime.task(&original.id).unwrap();
+    assert_eq!(task.id, original.id);
+    assert_eq!(task.session_id, original.session_id);
+    assert_eq!(task.resources.declared_memory_bytes, 80);
+    assert_eq!(task.holds_slot, reserved);
+    if original.worker_id.is_some() {
+        assert_eq!(task.worker_id, original.worker_id);
+        assert_eq!(task.attempt_id, original.attempt_id);
+    }
+    eprintln!(
+        "AUTHORITY_RESOURCE_STATE {}",
+        json!({"task":task,"usage":view.usage})
+    );
+}
+fn assert_persisted_resources(root: &Path, original: &TaskRecord) {
+    let database = rusqlite::Connection::open(root.join("session.sqlite")).unwrap();
+    let row: (String, String, Option<String>, Option<String>, i64, i64, bool) = database.query_row(
+        "SELECT id,session,worker,attempt,fence,declared_memory_bytes,holds_slot FROM runtime_tasks WHERE id=?1",
+        [&original.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+    ).unwrap();
+    assert_eq!(
+        row,
+        (
+            original.id.clone(),
+            original.session_id.clone(),
+            original.worker_id.clone(),
+            original.attempt_id.clone(),
+            i64::try_from(original.fence).unwrap(),
+            80,
+            true
+        )
+    );
+    let total: i64 = database
+        .query_row(
+            "SELECT max_declared_memory_bytes FROM runtime_queue_config WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, 100);
+    eprintln!(
+        "AUTHORITY_RESOURCE_PERSISTED {}",
+        json!({"target":original.cancel_target(),"policy":total,"reserved":row.5,"holds_slot":row.6})
+    );
 }
 fn retry_authority<T>(
     label: &str,
@@ -156,9 +231,11 @@ fn authority_process_child() {
         .block_on(async {
             let runtime = open(&root).unwrap();
             let session = runtime.create(None).unwrap().id;
-            let task = runtime
-                .enqueue(&session, "original process with Requests authority")
-                .unwrap();
+            let task = enqueue_resources(
+                &runtime,
+                &session,
+                "original process with Requests authority",
+            );
             std::fs::write(
                 root.join("identity.json"),
                 serde_json::to_vec(&task).unwrap(),
@@ -222,9 +299,7 @@ async fn a_live_original_host_keeps_ownership_after_its_cleanup_record_fails() {
         BEGIN SELECT RAISE(ABORT,'live owner cleanup recording failure'); END;",
         )
         .unwrap();
-    let admitted = runtime
-        .enqueue(&session, "keep the original process owner")
-        .unwrap();
+    let admitted = enqueue_resources(&runtime, &session, "keep the original process owner");
     let worker = {
         let runtime = runtime.clone();
         let task = admitted.id.clone();
@@ -236,7 +311,9 @@ async fn a_live_original_host_keeps_ownership_after_its_cleanup_record_fails() {
         cayw_host::ProcessIdentity::observe(leader).unwrap(),
         cayw_host::ProcessIdentity::observe(leaf).unwrap(),
     ];
-    let target = runtime.task(&admitted.id).unwrap().cancel_target();
+    let original_task = runtime.task(&admitted.id).unwrap();
+    let target = original_task.cancel_target();
+    assert_resources(&peer, &original_task, true);
     assert!(cancel_when_available(&peer, &target));
     let error = tokio::time::timeout(Duration::from_secs(30), worker)
         .await
@@ -260,6 +337,11 @@ async fn a_live_original_host_keeps_ownership_after_its_cleanup_record_fails() {
     assert!(supervisor.is_running().unwrap());
     let task = peer.task(&admitted.id).unwrap();
     assert_eq!(task.state, cayw_runtime::TaskState::Draining);
+    assert_eq!(task.cancel_target(), target);
+    assert_resources(&peer, &original_task, true);
+    let reopened = open(root).unwrap();
+    assert_resources(&reopened, &original_task, true);
+    assert_eq!(reopened.task(&task.id).unwrap(), task);
     let before = peer.get(&session).unwrap();
     let events = peer.events(&session, 0, 1000).unwrap();
     let audit = serde_json::to_value(peer.audit(&session, 0, 1000).unwrap()).unwrap();
@@ -313,8 +395,10 @@ async fn a_live_original_host_keeps_ownership_after_its_cleanup_record_fails() {
     .await
     .unwrap();
     assert_eq!(peer.health().unwrap().running, 1);
+    assert_resources(&peer, &original_task, true);
     peer.recover(&session).unwrap();
     assert_eq!(peer.health().unwrap().running, 0);
+    assert_resources(&peer, &original_task, false);
     assert!(supervisor.is_running().unwrap());
     let cleanup: Vec<_> = peer
         .audit(&session, 0, 1000)
@@ -378,6 +462,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
     let peer = open_when_available(root);
     let task = peer.task(&admitted.id).unwrap();
     let target: CancelTarget = task.cancel_target();
+    assert_resources(&peer, &task, true);
     let snapshot = peer.get(&admitted.session_id).unwrap();
     let events = peer.events(&admitted.session_id, 0, 1000).unwrap();
     let actor = HostActor::new("combined-recovery-host").unwrap();
@@ -399,6 +484,8 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
     let exit = original.child.wait().unwrap();
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(exit.signal(), Some(9));
+    assert_resources(&peer, &task, true);
+    assert_persisted_resources(root, &task);
     assert!(
         identities.iter().all(|identity| !stopped(identity)),
         "the original tree must survive its host before the authority fault"
@@ -414,6 +501,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
         open(root),
         Err(RuntimeError::Request(RequestError::AuthorityStopped))
     ));
+    assert_persisted_resources(root, &task);
     let error = Runtime::repair_request_authority(
         root.join("session.sqlite"),
         config(root),
@@ -427,6 +515,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
             ..
         }
     ));
+    assert_persisted_resources(root, &task);
     let original_core = cayw_core::SessionStore::open(root.join("session.sqlite"))
         .unwrap()
         .snapshot(&admitted.session_id)
@@ -491,6 +580,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
         )
         .is_err()
     );
+    assert_persisted_resources(root, &task);
     Runtime::confirm_lost_processes_stopped(
         root.join("session.sqlite"),
         config(root),
@@ -523,6 +613,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
     )
     .unwrap();
     // Cleanup confirmation cannot activate Requests or settle the original Task.
+    assert_persisted_resources(root, &task);
     assert!(matches!(
         open(root),
         Err(RuntimeError::Request(RequestError::AuthorityStopped))
@@ -552,8 +643,13 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
     );
     assert_eq!(reopened.task(&task.id).unwrap(), task);
     assert_eq!(reopened.health().unwrap().running, 1);
+    assert_resources(&reopened, &task, true);
     reopened.recover(&admitted.session_id).unwrap();
     assert_eq!(reopened.health().unwrap().running, 0);
+    assert_resources(&reopened, &task, false);
+    let recovered_task = reopened.task(&task.id).unwrap();
+    assert_eq!(recovered_task.fence, task.fence + 1);
+    assert_eq!(recovered_task.state, cayw_runtime::TaskState::Interrupted);
     assert!(
         reopened
             .enqueue(&admitted.session_id, "do not replay unknown effects")

@@ -9,7 +9,7 @@ description = "Headless runtime integrating durable sessions, bounded Luau tools
 
 [features]
 default = []
-fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection"]
+fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection", "cayw-content/fault-injection"]
 plugins = ["dep:cayw-plugins"]
 strongflow = ["plugins", "cayw-plugins/strongflow"]
 remote = ["dep:cayw-remote"]
@@ -23,6 +23,7 @@ cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
 cayw-core = { path = "../cayw-core", version = "0.1.0" }
 cayw-cells = { path = "../cayw-cells", version = "0.1.0" }
 cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
+cayw-content = { path = "../cayw-content", version = "0.1.0", default-features = false }
 cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }

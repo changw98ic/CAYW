@@ -11,7 +11,21 @@ fn wait(path: &Path) {
     }
 }
 
+fn forward_git() {
+    let output = std::process::Command::new("/usr/bin/git")
+        .args(std::env::args_os().skip(1))
+        .output()
+        .unwrap();
+    use std::io::Write;
+    std::io::stdout().write_all(&output.stdout).unwrap();
+    std::io::stderr().write_all(&output.stderr).unwrap();
+    std::process::exit(output.status.code().unwrap_or(1));
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("config") {
+        forward_git();
+    }
     if Path::new("probe-control.json").is_file() {
         let control: serde_json::Value =
             serde_json::from_slice(&fs::read("probe-control.json").unwrap()).unwrap();
@@ -24,6 +38,9 @@ fn main() {
         )
         .unwrap();
         wait(Path::new(control["release"].as_str().unwrap()));
+        if control["run_git"] == true {
+            forward_git();
+        }
         return;
     }
     match std::env::args().nth(1).as_deref() {

@@ -1,7 +1,12 @@
 //! Durable model accounting. No tokenizer or price is assumed. A request holds
-//! the budget lineage's entire remainder until a successful, fully reported
-//! terminal is committed. This deliberately permits only one unsettled request
-//! in a session tree; neither a new task, child, fork nor reopen resets it.
+//! the budget lineage's entire remainder from reservation until either a
+//! successful, fully reported terminal commits or a cancellation is durably
+//! recorded before the dispatch marker. Only such a provably undispatched
+//! request releases its own hold; dispatched, failed, truncated and
+//! crash-uncertain requests keep theirs. This permits only one unsettled
+//! request in a session tree; neither a new task, child, fork nor reopen resets
+//! consumption or unknown holds. The effective cap is the trusted host's
+//! current configuration; historical records keep their original limits.
 use crate::{Inner, Runtime, RuntimeError, execution::RunContext};
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, ModelRequest, Provider,
@@ -38,6 +43,11 @@ pub enum ModelRequestTerminal {
     Completed,
     Failed,
     Cancelled,
+    /// Cancellation was durably observed before the dispatch marker was
+    /// committed. No Provider call can have happened, so this request's own
+    /// token hold is released with a known zero consumption. It is never valid
+    /// for a request that recorded `Started`.
+    CancelledBeforeDispatch,
     Dropped,
     MissingTerminal,
     RecordingFailed,
@@ -306,43 +316,59 @@ fn apply(
                     last_received,
                     ..
                 } => {
-                    if let Some(observation) = last_received
-                        && record
-                            .observations
-                            .last()
-                            .is_none_or(|last| last.observation != observation)
-                    {
-                        if record.observations.len() >= MAX_OBSERVATIONS {
-                            return Err(corrupt());
-                        }
-                        record.observations.push(ModelRequestObservation {
-                            cursor: event.cursor,
-                            sequence: record.observations.len() as u64 + 1,
-                            observation,
-                        });
-                    }
-                    if terminal == ModelRequestTerminal::Rejected {
-                        return Err(corrupt());
-                    }
-                    if let Some(tokens) = settled_tokens {
-                        if record.started_cursor.is_none() {
-                            return Err(corrupt());
-                        }
-                        let last = record.observations.last().ok_or_else(corrupt)?;
-                        if terminal != ModelRequestTerminal::Completed
-                            || last.observation.event != "done"
-                            || last.observation.usage_status != UsageStatus::Reported
-                            || !matches!(
-                                last.observation.stop_reason,
-                                StopReason::Stop | StopReason::Length | StopReason::ToolUse
-                            )
-                            || checked_tokens(&last.observation.usage) != Some(tokens)
-                            || tokens > record.reservation_tokens
+                    if terminal == ModelRequestTerminal::CancelledBeforeDispatch {
+                        // The reserve committed but dispatch admission never did,
+                        // so no Provider call can have happened. Release exactly
+                        // this hold with known zero consumption. A Started
+                        // marker, usage evidence or any other amount is
+                        // inconsistent and must not be interpreted as a release.
+                        if record.started_cursor.is_some()
+                            || settled_tokens != Some(0)
+                            || last_received.is_some()
                         {
                             return Err(corrupt());
                         }
                         record.outstanding_reservation_tokens = 0;
-                        record.settled_tokens = Some(tokens);
+                        record.settled_tokens = Some(0);
+                    } else {
+                        if let Some(observation) = last_received
+                            && record
+                                .observations
+                                .last()
+                                .is_none_or(|last| last.observation != observation)
+                        {
+                            if record.observations.len() >= MAX_OBSERVATIONS {
+                                return Err(corrupt());
+                            }
+                            record.observations.push(ModelRequestObservation {
+                                cursor: event.cursor,
+                                sequence: record.observations.len() as u64 + 1,
+                                observation,
+                            });
+                        }
+                        if terminal == ModelRequestTerminal::Rejected {
+                            return Err(corrupt());
+                        }
+                        if let Some(tokens) = settled_tokens {
+                            if record.started_cursor.is_none() {
+                                return Err(corrupt());
+                            }
+                            let last = record.observations.last().ok_or_else(corrupt)?;
+                            if terminal != ModelRequestTerminal::Completed
+                                || last.observation.event != "done"
+                                || last.observation.usage_status != UsageStatus::Reported
+                                || !matches!(
+                                    last.observation.stop_reason,
+                                    StopReason::Stop | StopReason::Length | StopReason::ToolUse
+                                )
+                                || checked_tokens(&last.observation.usage) != Some(tokens)
+                                || tokens > record.reservation_tokens
+                            {
+                                return Err(corrupt());
+                            }
+                            record.outstanding_reservation_tokens = 0;
+                            record.settled_tokens = Some(tokens);
+                        }
                     }
                     record.terminal = Some(terminal);
                     record.terminal_cursor = Some(event.cursor);
@@ -450,11 +476,15 @@ fn project(
         .filter(|record| record.reservation_cursor.is_some() && record.terminal.is_none())
         .count();
     let mut requests = Vec::new();
-    let mut token_limit = configured_limit;
+    // The effective cap is the current trusted host configuration for this
+    // session tree. Historical records keep their own `token_limit` as audit
+    // facts, but they cannot permanently pin an earlier, smaller allocation:
+    // consumption and unknown holds are carried forward separately.
+    let token_limit = configured_limit;
     let mut settled_tokens = 0_u64;
     let mut reserved_tokens = 0_u64;
     let mut overflowed = false;
-    for record in records.into_values() {
+    for mut record in records.into_values() {
         let canonical = lineage(&record.identity.lease.session_id, &links)?;
         if canonical != record.identity.budget_session_id {
             return Err(corrupt());
@@ -462,8 +492,18 @@ fn project(
         if canonical != root {
             continue;
         }
-        if record.reservation_cursor.is_some() {
-            token_limit = token_limit.min(record.token_limit);
+        // Journals written before the explicit release terminal recorded a
+        // provably pre-dispatch cancellation as `Cancelled` without a `Started`
+        // event or any observation. Interpret those with the canonical release
+        // so an old session tree is not permanently stuck. The original Core
+        // events are not modified.
+        if record.terminal == Some(ModelRequestTerminal::Cancelled)
+            && record.started_cursor.is_none()
+            && record.settled_tokens.is_none()
+            && record.observations.is_empty()
+        {
+            record.outstanding_reservation_tokens = 0;
+            record.settled_tokens = Some(0);
         }
         let settled = record.settled_tokens.unwrap_or(0);
         overflowed |= settled_tokens.checked_add(settled).is_none()
@@ -697,6 +737,7 @@ struct RequestGuard {
     tokens: u64,
     event_limit: usize,
     observations: usize,
+    started: bool,
     finished: bool,
     recording_failed: bool,
     last_received: Option<ModelUsageObservation>,
@@ -829,6 +870,7 @@ impl RequestGuard {
             tokens: ledger.remaining_tokens,
             event_limit,
             observations: 0,
+            started: false,
             finished: false,
             recording_failed: false,
             last_received: None,
@@ -873,7 +915,17 @@ impl RequestGuard {
                     settled_tokens,
                     ..
                 } => {
-                    if cancelled || self.context.cancel.is_cancelled() {
+                    // A pre-dispatch release is itself the durable record of the
+                    // cancellation. It is only legal before the dispatch marker
+                    // and must not be downgraded back into an unsettled hold.
+                    let releasing =
+                        *terminal == ModelRequestTerminal::CancelledBeforeDispatch && !self.started;
+                    if *terminal == ModelRequestTerminal::CancelledBeforeDispatch && !releasing {
+                        // Never let a post-dispatch call claim a pre-dispatch
+                        // release; retain it conservatively instead.
+                        *terminal = ModelRequestTerminal::Cancelled;
+                        *settled_tokens = None;
+                    } else if (cancelled || self.context.cancel.is_cancelled()) && !releasing {
                         *terminal = ModelRequestTerminal::Cancelled;
                         *settled_tokens = None;
                     }
@@ -916,8 +968,19 @@ impl RequestGuard {
             request_id: self.id.clone(),
             reservation_cursor: self.reservation,
             previous_cursor: self.cursor,
-        })
-        .map(|_| ())
+        })?;
+        self.started = true;
+        Ok(())
+    }
+    /// Releases the reservation of a request whose durable cancellation was
+    /// observed before the dispatch marker. Only valid before `start()`.
+    fn release_cancelled_before_dispatch(&mut self) -> Result<(), RuntimeError> {
+        if self.started {
+            return Err(RuntimeError::Worker(
+                "post-dispatch cancellation cannot release model reservation".into(),
+            ));
+        }
+        self.finish(ModelRequestTerminal::CancelledBeforeDispatch, Some(0))
     }
     fn observe(
         &mut self,
@@ -984,14 +1047,30 @@ impl RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         if !self.finished {
+            // A guard dropped after cancellation but before the dispatch marker
+            // provably never reached a Provider. A failed durable read stays
+            // held: its state is unresolved.
+            let durably_cancelled = self.context.cancel.is_cancelled()
+                || matches!(
+                    self.context
+                        .inner
+                        .queue
+                        .model_cancelled(&self.context.task, &self.context.lease),
+                    Ok(true)
+                );
+            let released_before_dispatch =
+                !self.started && !self.recording_failed && durably_cancelled;
             let terminal = if self.recording_failed {
                 ModelRequestTerminal::RecordingFailed
-            } else if self.context.cancel.is_cancelled() {
+            } else if released_before_dispatch {
+                ModelRequestTerminal::CancelledBeforeDispatch
+            } else if durably_cancelled {
                 ModelRequestTerminal::Cancelled
             } else {
                 ModelRequestTerminal::Dropped
             };
-            if self.finish(terminal, None).is_err() {
+            let settled = released_before_dispatch.then_some(0);
+            if self.finish(terminal, settled).is_err() {
                 self.context.model_recording_failed();
             }
         }
@@ -1010,6 +1089,16 @@ impl Provider for AccountedProvider {
         let context = self.context.clone();
         let stream:BoxStream<'static,AssistantEvent>=async_stream::stream! {
             let mut partial = AssistantMessage::new(&request.model);
+            let mut activity = match crate::scheduler::Activity::model(&context, &cancel).await {
+                Ok(activity) => activity,
+                Err(error) => {
+                    if !matches!(error, RuntimeError::Cancelled | RuntimeError::Budget(_)) {
+                        context.persistence_failed(error);
+                    }
+                    yield error_message(&partial, "model request has no scheduler admission");
+                    return;
+                }
+            };
             let mut guard=match RequestGuard::reserve(context.clone(),&mut request,id,turn) {
                 Ok(guard)=>guard,
                 Err(error)=>{
@@ -1018,10 +1107,26 @@ impl Provider for AccountedProvider {
                     return;
                 }
             };
+            // `start()` checks the durable queue fence and the owner token at
+            // commit time. A per-request cancellation observed before the
+            // marker is equally provably undispatched.
+            if cancel.is_cancelled() {
+                if guard.release_cancelled_before_dispatch().is_err() {
+                    context.model_recording_failed();
+                    yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled before dispatch admission; its unused reservation could not be released")};
+                } else {
+                    yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled before dispatch admission; unused reservation released")};
+                }
+                return;
+            }
             if let Err(error) = guard.start() {
                 if matches!(error,RuntimeError::Cancelled) {
-                    if guard.finish(ModelRequestTerminal::Cancelled,None).is_err() {context.model_recording_failed();}
-                    yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled before dispatch admission; reservation retained")};
+                    if guard.release_cancelled_before_dispatch().is_err() {
+                        context.model_recording_failed();
+                        yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled before dispatch admission; its unused reservation could not be released")};
+                    } else {
+                        yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled before dispatch admission; unused reservation released")};
+                    }
                 } else {
                     context.model_recording_failed();
                     let _ = guard.finish(ModelRequestTerminal::RecordingFailed,None);
@@ -1029,11 +1134,11 @@ impl Provider for AccountedProvider {
                 }
                 return;
             }
-            if cancel.is_cancelled() || context.cancel.is_cancelled() {
-                if guard.finish(ModelRequestTerminal::Cancelled,None).is_err() {context.model_recording_failed();}
-                yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled before provider invocation; reservation retained")};
-                return;
-            }
+            // Everything before `start()` is provably undispatched and releases
+            // its own hold there. Once the durable `Started` marker exists, the
+            // request is treated as possibly dispatched: a later cancellation
+            // aborts the adapter through `provider_cancel`, but it must keep the
+            // hold because a crash at this boundary is indistinguishable.
             let provider_cancel=cancel.child_token();
             let _cancel_on_drop=provider_cancel.clone().drop_guard();
             let mut upstream=context.inner.provider.stream(request.clone(),provider_cancel.clone());
@@ -1072,6 +1177,11 @@ impl Provider for AccountedProvider {
                         return;
                     }
                     drop(upstream);
+                    if let Err(error) = activity.finish() {
+                        context.persistence_failed(error);
+                        yield error_message(&partial,"model completion could not update scheduler activity");
+                        return;
+                    }
                     if context.cancel.is_cancelled() || cancel.is_cancelled() {
                         yield AssistantEvent::Error {message:partial.failure(StopReason::Aborted,"model request cancelled; late response cannot release its reservation")};
                     } else {
@@ -1501,14 +1611,16 @@ mod tests {
         assert_eq!(ledger.requests[0].terminal, None);
         assert!(ledger.budget_unknown);
         assert_eq!(ledger.reserved_tokens, 1000);
+        // The effective cap is the trusted configured value (C18). Reopen with
+        // the same allocation to compare the durable ledger itself.
         let store = SessionStore::open(temp.path().join("session.db")).unwrap();
         assert_eq!(
-            read(&store, &context.lease.session_id, 2000).unwrap(),
+            read(&store, &context.lease.session_id, 1000).unwrap(),
             ledger
         );
     }
     #[test]
-    fn committed_peer_cancel_before_started_rejects_the_original_dispatch() {
+    fn committed_peer_cancel_before_started_releases_only_its_unused_hold() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
         let peer = Runtime::open(
@@ -1540,15 +1652,273 @@ mod tests {
             matches!(guard.start(), Err(RuntimeError::Cancelled)),
             "persistent cancel must prevent Started even while the owner token is false"
         );
+        assert!(!guard.started);
+        guard.release_cancelled_before_dispatch().unwrap();
+        assert!(guard.finished);
         drop(guard);
         let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
+        let record = &ledger.requests[0];
+        assert_eq!(record.started_cursor, None);
+        assert_eq!(
+            record.terminal,
+            Some(ModelRequestTerminal::CancelledBeforeDispatch)
+        );
+        assert_eq!(
+            record.settled_tokens,
+            Some(0),
+            "a request that never crossed the dispatch marker consumed no tokens"
+        );
+        assert_eq!(record.outstanding_reservation_tokens, 0);
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(ledger.settled_tokens, 0);
+        assert_eq!(
+            ledger.remaining_tokens, 1000,
+            "the same lineage can admit its next model request"
+        );
+        assert!(!ledger.budget_unknown);
+        assert!(!context.unknown.load(Ordering::Acquire));
+        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
+        assert_eq!(
+            read(&store, &context.lease.session_id, 1000).unwrap(),
+            ledger,
+            "the release must survive reopening the durable ledger"
+        );
+    }
+
+    #[test]
+    fn reservation_without_a_terminal_or_dispatch_marker_is_still_held() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, request) = context(temp.path());
+        // Simulate a crash after the durable reservation and before any
+        // terminal. Without a `Started` marker the request is not dispatched,
+        // but the crash itself is unresolved uncertainty: keep the hold.
+        let identity = ModelRequestIdentity {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            lease: context.lease.clone(),
+            task_id: context.task.id.clone(),
+            budget_session_id: context.lease.session_id.clone(),
+            turn: 1,
+            provider: request.model.provider.clone(),
+            model: request.model.id.clone(),
+        };
+        append(
+            &context.inner,
+            &context.lease,
+            &Entry::Reserved {
+                identity,
+                policy: ModelReservationPolicy::EntireSessionRemainder,
+                tokens: 1000,
+                token_limit: 1000,
+                output_max_tokens: 16,
+            },
+        )
+        .unwrap();
+        let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
         assert_eq!(ledger.requests[0].started_cursor, None);
+        assert_eq!(ledger.requests[0].terminal, None);
+        assert_eq!(ledger.reserved_tokens, 1000);
+        assert!(ledger.budget_unknown);
+        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
+        assert_eq!(
+            read(&store, &context.lease.session_id, 1000).unwrap(),
+            ledger
+        );
+    }
+
+    #[test]
+    fn legacy_pre_dispatch_cancellation_projects_as_a_released_hold() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_runtime, context, request) = context(temp.path());
+        let id = uuid::Uuid::new_v4().to_string();
+        let identity = ModelRequestIdentity {
+            request_id: id.clone(),
+            lease: context.lease.clone(),
+            task_id: context.task.id.clone(),
+            budget_session_id: context.lease.session_id.clone(),
+            turn: 1,
+            provider: request.model.provider.clone(),
+            model: request.model.id.clone(),
+        };
+        let reservation = append(
+            &context.inner,
+            &context.lease,
+            &Entry::Reserved {
+                identity,
+                policy: ModelReservationPolicy::EntireSessionRemainder,
+                tokens: 1000,
+                token_limit: 1000,
+                output_max_tokens: 16,
+            },
+        )
+        .unwrap();
+        // This is the exact shape the old implementation persisted for a
+        // cancellation that never crossed the dispatch marker.
+        append(
+            &context.inner,
+            &context.lease,
+            &Entry::Finished {
+                request_id: id,
+                reservation_cursor: reservation,
+                previous_cursor: reservation,
+                terminal: ModelRequestTerminal::Cancelled,
+                settled_tokens: None,
+                last_received: None,
+            },
+        )
+        .unwrap();
+        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
+        let ledger = read(&store, &context.lease.session_id, 1000).unwrap();
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(ledger.remaining_tokens, 1000);
+        assert!(!ledger.budget_unknown);
+        assert_eq!(
+            ledger.requests[0].terminal,
+            Some(ModelRequestTerminal::Cancelled),
+            "the original recorded terminal is preserved"
+        );
+        assert_eq!(ledger.requests[0].started_cursor, None);
+        assert_eq!(ledger.requests[0].settled_tokens, Some(0));
+        assert_eq!(ledger.requests[0].outstanding_reservation_tokens, 0);
+    }
+
+    #[test]
+    fn release_is_refused_after_the_dispatch_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, mut request) = context(temp.path());
+        let mut guard = RequestGuard::reserve(
+            context.clone(),
+            &mut request,
+            uuid::Uuid::new_v4().to_string(),
+            1,
+        )
+        .unwrap();
+        guard.start().unwrap();
+        assert!(matches!(
+            guard.release_cancelled_before_dispatch(),
+            Err(RuntimeError::Worker(_))
+        ));
+        assert!(guard.started && !guard.finished);
+        guard.finish(ModelRequestTerminal::Cancelled, None).unwrap();
+        let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
         assert_eq!(ledger.reserved_tokens, 1000);
         assert_eq!(
             ledger.requests[0].terminal,
             Some(ModelRequestTerminal::Cancelled)
         );
-        assert!(!context.unknown.load(Ordering::Acquire));
+        assert!(ledger.budget_unknown);
+    }
+
+    #[test]
+    fn recorded_dispatch_marker_rejects_a_pre_dispatch_release_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_runtime, context, request) = context(temp.path());
+        let id = uuid::Uuid::new_v4().to_string();
+        let identity = ModelRequestIdentity {
+            request_id: id.clone(),
+            lease: context.lease.clone(),
+            task_id: context.task.id.clone(),
+            budget_session_id: context.lease.session_id.clone(),
+            turn: 1,
+            provider: request.model.provider.clone(),
+            model: request.model.id.clone(),
+        };
+        let reservation = append(
+            &context.inner,
+            &context.lease,
+            &Entry::Reserved {
+                identity,
+                policy: ModelReservationPolicy::EntireSessionRemainder,
+                tokens: 1000,
+                token_limit: 1000,
+                output_max_tokens: 16,
+            },
+        )
+        .unwrap();
+        let started = append(
+            &context.inner,
+            &context.lease,
+            &Entry::Started {
+                request_id: id.clone(),
+                reservation_cursor: reservation,
+                previous_cursor: reservation,
+            },
+        )
+        .unwrap();
+        append(
+            &context.inner,
+            &context.lease,
+            &Entry::Finished {
+                request_id: id,
+                reservation_cursor: reservation,
+                previous_cursor: started,
+                terminal: ModelRequestTerminal::CancelledBeforeDispatch,
+                settled_tokens: Some(0),
+                last_received: None,
+            },
+        )
+        .unwrap();
+        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
+        assert!(
+            read(&store, &context.lease.session_id, 1000).is_err(),
+            "a request with a durable Started marker must never release as pre-dispatch"
+        );
+    }
+
+    #[test]
+    fn trusted_configuration_increase_raises_the_same_session_limit_after_settlement() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, mut request) = context(temp.path());
+        let session = context.lease.session_id.clone();
+        let mut guard = RequestGuard::reserve(
+            context.clone(),
+            &mut request,
+            uuid::Uuid::new_v4().to_string(),
+            1,
+        )
+        .unwrap();
+        guard.start().unwrap();
+        let mut message = AssistantMessage::new(&request.model);
+        message.usage = Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = UsageStatus::Reported;
+        message.stop_reason = StopReason::Stop;
+        guard.observe(&AssistantEvent::Done { message }).unwrap();
+        guard
+            .finish(ModelRequestTerminal::Completed, Some(8))
+            .unwrap();
+        drop(guard);
+        let lower = runtime.model_requests(&session).unwrap();
+        assert_eq!(lower.token_limit, 1000);
+        assert_eq!(lower.settled_tokens, 8);
+        assert_eq!(lower.remaining_tokens, 992);
+        assert_eq!(lower.requests[0].token_limit, 1000);
+        drop(runtime);
+        // A trusted host explicitly allocates a larger budget before reopening
+        // the original session tree. Consumption and the original record facts
+        // stay intact; only the effective cap is raised.
+        let raised = Runtime::open(
+            temp.path().join("session.db"),
+            temp.path().join("workspace"),
+            Arc::new(UnreachableProvider),
+            request.model.clone(),
+            RuntimeConfig {
+                max_total_tokens: 2000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ledger = raised.model_requests(&session).unwrap();
+        assert_eq!(ledger.token_limit, 2000);
+        assert_eq!(ledger.settled_tokens, 8);
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(ledger.remaining_tokens, 1992);
+        assert!(!ledger.budget_unknown);
+        assert_eq!(ledger.requests, lower.requests);
+        assert_eq!(ledger.requests[0].token_limit, 1000);
     }
 
     #[test]
@@ -1711,6 +2081,28 @@ mod tests {
                 .unwrap()
                 .reserved_tokens,
             1000
+        );
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_stream_does_not_dispatch_or_leave_a_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, request) = context(temp.path());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let provider = AccountedProvider::new(context.clone());
+        let events = provider.stream(request, cancel).collect::<Vec<_>>().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], AssistantEvent::Error { .. }));
+        let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
+        assert!(ledger.requests.is_empty());
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(ledger.remaining_tokens, 1000);
+        assert!(!ledger.budget_unknown);
+        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
+        assert_eq!(
+            read(&store, &context.lease.session_id, 1000).unwrap(),
+            ledger
         );
     }
 

@@ -1087,6 +1087,7 @@ async fn restart_classifies_unstarted_interrupted_and_pending_across_tasks_witho
             outputs: Vec::new(),
             output_bytes: 0,
             error: None,
+            stop: None,
             backend_error: None,
             reconciliation: Vec::new(),
             host_settlements: Vec::new(),

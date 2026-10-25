@@ -243,7 +243,9 @@ fn apply_input(
         if record.backend_error.is_none()
             && record.status.is_terminal()
             && record.status != CellStatus::OutcomeUnknown
-            && (record.status != execution.terminal.status || record.error != terminal_error)
+            && (record.status != execution.terminal.status
+                || record.error != terminal_error
+                || record.stop != execution.terminal.stop)
             && !already_applied
         {
             return Err(CellError::Conflict);
@@ -251,6 +253,7 @@ fn apply_input(
         record.backend_error = None;
         record.status = execution.terminal.status;
         record.error = terminal_error;
+        record.stop = execution.terminal.stop;
     } else if !record.unresolved()
         && record.backend_error.is_none()
         && matches!(

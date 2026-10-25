@@ -883,6 +883,7 @@ fn terminal_for(record: &CellRecord, core: Option<&ExecutionRecord>) -> CellTerm
             status: record.status,
             error: record.error.clone(),
             outcome_unknown: false,
+            stop: record.stop,
         };
     }
     let (status, error) = if record.status == CellStatus::OutcomeUnknown {
@@ -905,6 +906,7 @@ fn terminal_for(record: &CellRecord, core: Option<&ExecutionRecord>) -> CellTerm
         status,
         error,
         outcome_unknown: false,
+        stop: None,
     }
 }
 fn cell_message(message: &str) -> String {

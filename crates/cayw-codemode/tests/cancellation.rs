@@ -119,7 +119,7 @@ async fn cancellation_or_host_wait_settles_the_same_host_before_return_and_start
                 ).unwrap();
                 let cancel = CancellationToken::new();
                 let mut execution = Box::pin(mode.execute(
-                    "cayw.emit('accepted'); cayw.call('work', {}); cayw.call('work', {})",
+                    "cayw.emit('accepted'); pcall(function() xpcall(function() cayw.call('work', {}) end, function() return 'handled' end) end); cayw.call('work', {})",
                     cancel.clone(),
                 ));
                 tokio::select! {

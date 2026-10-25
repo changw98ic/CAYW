@@ -223,12 +223,73 @@ async fn reported_success_settles_tokens_and_reopen_preserves_identity_and_unkno
     );
     drop(runtime);
     let reopened = open(temp.path(), provider.clone(), 2000);
+    let raised = reopened.model_requests(&session.id).unwrap();
     assert_eq!(
-        reopened.model_requests(&session.id).unwrap(),
-        ledger,
-        "raising configuration must not reset a persisted budget"
+        raised.token_limit, 2000,
+        "a trusted configured allocation raises the same session tree"
     );
+    assert_eq!(
+        raised.settled_tokens, ledger.settled_tokens,
+        "raising configuration must not reset consumed tokens"
+    );
+    assert_eq!(raised.reserved_tokens, 0);
+    assert_eq!(raised.remaining_tokens, 1964);
+    assert!(!raised.budget_unknown);
+    assert_eq!(
+        raised.requests, ledger.requests,
+        "historical records keep their original token limits and usage"
+    );
+    assert_unknown_money(&raised);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn trusted_configuration_increase_continues_the_same_session_after_settlement() {
+    let (temp, runtime, provider, listener) = setup(1000).await;
+    let session = runtime.create(None).unwrap();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            respond(
+                request(&listener).await,
+                "200 OK",
+                &body(Some(full_usage(11, 7)), true),
+            )
+            .await;
+        }
+    });
+    prompt(&runtime, &session.id, "first settled request").await;
+    let before = runtime.model_requests(&session.id).unwrap();
+    assert_eq!(before.token_limit, 1000);
+    assert_eq!(before.settled_tokens, 18);
+    assert_eq!(before.remaining_tokens, 982);
+    assert_eq!(before.reserved_tokens, 0);
+    drop(runtime);
+    // The trusted host explicitly increases the same session tree's allocation
+    // after every old request settled. This is not a per-task reset.
+    let reopened = open(temp.path(), provider.clone(), 2000);
+    let raised = reopened.model_requests(&session.id).unwrap();
+    assert_eq!(raised.token_limit, 2000);
+    assert_eq!(raised.remaining_tokens, 1982);
+    assert_eq!(raised.requests, before.requests);
+    prompt(
+        &reopened,
+        &session.id,
+        "continue under the trusted allocation",
+    )
+    .await;
+    server.await.unwrap();
+    let after = reopened.model_requests(&session.id).unwrap();
+    assert_eq!(after.settled_tokens, 36);
+    assert_eq!(after.reserved_tokens, 0);
+    assert_eq!(after.remaining_tokens, 1964);
+    assert!(!after.budget_unknown);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        after.requests[0].token_limit, 1000,
+        "the first record keeps the limit it was admitted under"
+    );
+    assert_eq!(after.requests[1].token_limit, 2000);
+    assert_unknown_money(&after);
 }
 
 #[tokio::test]
@@ -304,8 +365,17 @@ async fn usage_only_reported_then_cancel_keeps_known_values_and_the_full_reserva
     );
     assert_unknown_money(&ledger);
     drop(runtime);
-    let reopened = open(temp.path(), provider.clone(), 1000);
-    assert_eq!(reopened.model_requests(&session.id).unwrap(), ledger);
+    let unchanged = open(temp.path(), provider.clone(), 1000);
+    assert_eq!(unchanged.model_requests(&session.id).unwrap(), ledger);
+    drop(unchanged);
+    let reopened = open(temp.path(), provider.clone(), 2000);
+    let raised = reopened.model_requests(&session.id).unwrap();
+    assert_eq!(raised.token_limit, 2000);
+    assert_eq!(raised.reserved_tokens, ledger.reserved_tokens);
+    assert_eq!(raised.settled_tokens, ledger.settled_tokens);
+    assert_eq!(raised.requests, ledger.requests);
+    assert!(raised.budget_unknown);
+    assert_eq!(raised.remaining_tokens, 1000);
     prompt(
         &reopened,
         &session.id,

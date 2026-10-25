@@ -1,6 +1,6 @@
 use crate::{bridge::Bridge, *};
 use cayw_ai::CancellationToken;
-use cayw_codemode::{CapabilityHost, CodeMode, ExecutionReport, Limits};
+use cayw_codemode::{CapabilityHost, CapabilityStop, CodeMode, ExecutionReport, Limits};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -205,6 +205,7 @@ impl CellManager {
                 outputs: Vec::new(),
                 output_bytes: 0,
                 error: None,
+                stop: None,
                 backend_error: None,
                 reconciliation: Vec::new(),
                 host_settlements: Vec::new(),
@@ -276,7 +277,14 @@ impl CellManager {
                 {
                     Ok(report) => task_run.complete_report(report, None),
                     Err(error) => {
+                        let stop = error.kind.stop();
                         let message = error.to_string();
+                        if let Err(fault) = task_run.update(|record| {
+                            record.stop = stop;
+                            Ok(())
+                        }) {
+                            task_run.hook_failed(&fault);
+                        }
                         task_run.complete_report(*error.report, Some(message));
                     }
                 }
@@ -424,6 +432,7 @@ impl CellManager {
                     terminal: CellTerminal {
                         status: record.status,
                         error: record.error.clone(),
+                        stop: record.stop,
                         outcome_unknown: record.status == CellStatus::OutcomeUnknown
                             || record.unresolved()
                             || record.backend_error.is_some(),
@@ -643,8 +652,11 @@ impl Run {
         self.execution.identity.clone()
     }
     pub(crate) fn check(&self) -> Result<(), CellError> {
-        if self.cancel.is_cancelled() || self.exited.load(Ordering::Acquire) {
+        if self.cancel.is_cancelled() {
             return Err(CellError::Closed);
+        }
+        if self.exited.load(Ordering::Acquire) {
+            return Err(CellError::Exited);
         }
         let identity = self.identity();
         if self.journal.is_frozen(&identity.session_id)?
@@ -770,7 +782,15 @@ impl Run {
                 value: report.return_value,
             })
         {
-            error = Some(fault.to_string());
+            let message = fault.to_string();
+            let stop = fault.capability_error().stop;
+            if let Err(fault) = self.update(|record| {
+                record.stop = stop;
+                Ok(())
+            }) {
+                self.hook_failed(&fault);
+            }
+            error = Some(message);
         }
         self.finish(error, true);
     }
@@ -799,6 +819,11 @@ impl Run {
                 }
             }
             let unknown = failed || record.unresolved();
+            if exited {
+                record.stop.get_or_insert(CapabilityStop::Exited);
+            } else if cancelled || !completed {
+                record.stop.get_or_insert(CapabilityStop::Cancelled);
+            }
             if unknown {
                 self.reads.freeze(&record.identity.session_id);
             }
@@ -831,6 +856,7 @@ impl Run {
                     status: record.status,
                     error: record.error.clone(),
                     outcome_unknown: record.status == CellStatus::OutcomeUnknown,
+                    stop: record.stop,
                 }
             };
             #[cfg(feature = "fault-injection")]
@@ -855,6 +881,7 @@ impl Run {
             has_more: cursor < record.outputs.len() as u64,
             required_budget: None,
             outcome_unknown: record.status == CellStatus::OutcomeUnknown,
+            stop: record.stop,
             error: record.error.as_ref().map(|error| {
                 let mut end = error.len().min(64);
                 while !error.is_char_boundary(end) {

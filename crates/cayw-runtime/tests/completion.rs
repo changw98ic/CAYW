@@ -61,6 +61,17 @@ async fn rejects_early_final(script: &'static str, reason: &str) {
     assert!(result.unwrap_err().to_string().contains(reason));
     let tasks = runtime.tasks(&id).unwrap();
     assert_eq!(tasks[0].state, TaskState::Failed);
+    assert!(!tasks[0].cancel_requested);
+    let terminals = runtime
+        .audit(&id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.task_id.as_deref() == Some(tasks[0].id.as_str()) && event.kind.starts_with("run_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, "run_failed");
     let view = runtime.get(&id).unwrap();
     assert!(view.unresolved_calls.is_empty());
     assert!(view.unresolved_capabilities.is_empty());

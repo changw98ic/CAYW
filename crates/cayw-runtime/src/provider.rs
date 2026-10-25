@@ -4,7 +4,7 @@ use cayw_ai::{Model, Provider, providers::OpenAiProvider};
 use cayw_providers::{AnthropicProvider, GeminiMode, GeminiProvider, ResponsesProvider};
 use reqwest::{Url, header::HeaderValue};
 use serde::{Deserialize, Serialize};
-use std::{net::IpAddr, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,30 +51,29 @@ fn invalid(reason: &str) -> RuntimeError {
 
 impl ProviderConfig {
     /// Reject unsupported and contradictory settings before loading a key or making requests.
+    ///
+    /// `service` selects the wire protocol adapter. `base_url` is an explicit
+    /// host choice: any deployment prefix, hostname and port are accepted so a
+    /// host can select a gateway or a local fixture. Adapting the path does not
+    /// mark that deployment as verified; see the provider README.
     pub fn validate(&self) -> Result<(), RuntimeError> {
-        let (expected_version, path, official_host) = match (self.service, self.api) {
+        let expected_version = match (self.service, self.api) {
             (ProviderService::Openai, ProviderApi::ChatCompletions | ProviderApi::Responses) => {
-                ("v1", "/v1", Some("api.openai.com"))
+                "v1"
             }
             (ProviderService::Magpie, ProviderApi::ChatCompletions | ProviderApi::Responses) => {
-                ("v1", "/v1", None)
+                "v1"
             }
-            (ProviderService::Magpie, ProviderApi::Messages) => ("2023-06-01", "/v1", None),
+            (ProviderService::Magpie, ProviderApi::Messages) => "2023-06-01",
             (
                 ProviderService::Magpie,
                 ProviderApi::StreamGenerateContent | ProviderApi::GenerateContent,
-            ) => ("v1beta", "/v1beta", None),
-            (ProviderService::Anthropic, ProviderApi::Messages) => {
-                ("2023-06-01", "/v1", Some("api.anthropic.com"))
-            }
+            ) => "v1beta",
+            (ProviderService::Anthropic, ProviderApi::Messages) => "2023-06-01",
             (
                 ProviderService::Gemini,
                 ProviderApi::StreamGenerateContent | ProviderApi::GenerateContent,
-            ) => (
-                "v1beta",
-                "/v1beta",
-                Some("generativelanguage.googleapis.com"),
-            ),
+            ) => "v1beta",
             _ => return Err(invalid("service and API do not match")),
         };
         if self.api_version != expected_version {
@@ -136,31 +135,19 @@ impl ProviderConfig {
             || base.password().is_some()
             || base.query().is_some()
             || base.fragment().is_some()
-            || base.path().trim_end_matches('/') != path
         {
             return Err(invalid(
-                "base_url must name the selected API root without credentials, query or fragment",
+                "base_url must be an absolute HTTP(S) URL without credentials, query or fragment",
             ));
         }
-        // Only numeric loopback addresses are local fixtures. Do not resolve DNS
-        // to decide whether a non-official endpoint counts as an official service.
-        let loopback = base.host_str().is_some_and(|host| {
-            host.trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-        });
-        if !loopback
-            && (base.scheme() != "https"
-                || official_host.is_some_and(|host| {
-                    base.host_str() != Some(host) || base.port_or_known_default() != Some(443)
-                }))
-        {
-            return Err(invalid(
-                "base_url does not match the selected service; HTTP is allowed only on numeric loopback",
-            ));
-        }
+        // The host explicitly selected this deployment. The adapter appends its
+        // protocol suffix to the existing base path. Acceptance is not verification.
         Ok(())
+    }
+
+    /// The explicit model name selected by the host. Reading it never loads a credential.
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     /// Read only the selected credential. This constructs a lazy adapter, without a model request.
@@ -187,8 +174,9 @@ impl ProviderConfig {
             .map_err(|_| invalid("credential is not a valid HTTP header value"))?;
         let provider: Arc<dyn Provider> = match self.api {
             ProviderApi::ChatCompletions => {
+                // Keep redirects and automatic retries off. Environment proxy
+                // discovery and TLS certificate verification stay at the reqwest default.
                 let client = reqwest::Client::builder()
-                    .no_proxy()
                     .redirect(reqwest::redirect::Policy::none())
                     .retry(reqwest::retry::never())
                     .build()

@@ -12,6 +12,10 @@ pub enum Error {
     InvalidHash,
     #[error("store path must be absolute, without parent components or symlinks")]
     UnsafePath,
+    #[error("content directory must not be writable by group or other users")]
+    UnsafePermissions,
+    #[error("content root identity differs from the original directory: device or inode changed")]
+    RootIdentityMismatch,
     #[error("content exceeds the configured length limit")]
     ContentTooLarge,
     #[error("store quota exceeded")]
@@ -27,6 +31,8 @@ pub enum Error {
     },
     #[error("record not found")]
     NotFound,
+    #[error("content store is busy; retry after the current transaction finishes")]
+    Busy,
     #[error("content, metadata or store integrity check failed")]
     Integrity,
     #[error("unsupported protocol or store version")]
@@ -102,6 +108,10 @@ impl ContentHash {
         Ok(Self(value))
     }
     pub(crate) fn parse_filename(value: &str) -> Result<Self> {
+        Self::from_hex(value)
+    }
+    /// Parses the canonical 64-character lowercase SHA-256 representation.
+    pub fn from_hex(value: &str) -> Result<Self> {
         if value.len() != 64 {
             return Err(Error::InvalidHash);
         }
@@ -197,6 +207,14 @@ impl Record {
     }
 }
 
+/// Identity and current OS mode of the content directory held open by a store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RootMetadata {
+    pub device: u64,
+    pub inode: u64,
+    pub mode: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
@@ -218,7 +236,7 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    pub(crate) fn validate(self) -> Result<()> {
+    pub fn validate(self) -> Result<()> {
         if self.max_content_bytes == 0
             || self.max_content_bytes > 1024 * 1024 * 1024
             || self.max_total_bytes < self.max_content_bytes

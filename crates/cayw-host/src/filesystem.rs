@@ -16,39 +16,64 @@ use std::{
 const INTERNAL: &str = ".cayw-host-";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
-/// A portable relative path with no normalizing segments or special OS names.
-/// Validation is lexical; directory handles enforce the actual access boundary.
+/// Actual objects owned by this Host or by Git. Other `.cayw-*` names are
+/// ordinary user files and must remain readable, listable and writable.
+const INTERNAL_NAMES: &[&str] = &[
+    ".git",
+    ".cayw-host-lock",
+    ".cayw-workspace",
+    ".cayw-worktrees",
+    ".cayw-host-read-fence",
+    ".cayw-host-read-state",
+    ".cayw-host-read-fault",
+    ".cayw-host-read-faults",
+];
+const INTERNAL_PREFIXES: &[&str] = &[".cayw-host-tmp-", ".cayw-host-read-state-"];
+pub(crate) fn internal(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    INTERNAL_NAMES.contains(&lower.as_str())
+        || INTERNAL_PREFIXES
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+pub(crate) fn git_internal_excludes() -> String {
+    let mut patterns = String::new();
+    for (name, prefix) in INTERNAL_NAMES
+        .iter()
+        .map(|name| (*name, false))
+        .chain(INTERNAL_PREFIXES.iter().map(|name| (*name, true)))
+    {
+        for character in name.chars() {
+            if character.is_ascii_alphabetic() {
+                patterns.push('[');
+                patterns.push(character);
+                patterns.push(character.to_ascii_uppercase());
+                patterns.push(']');
+            } else {
+                patterns.push(character);
+            }
+        }
+        if prefix {
+            patterns.push('*');
+        }
+        patterns.push('\n');
+    }
+    patterns
+}
+/// A relative path with no normalizing segments or actual internal objects.
+/// Validation is lexical; directory handles enforce the access boundary.
+/// macOS accepts UTF-8 names and characters Windows forbids; those are kept.
 pub(crate) fn components(path: &str, allow_root: bool) -> Result<Vec<&str>, CapabilityError> {
     if allow_root && path == "." {
         return Ok(vec![]);
     }
-    if path.is_empty()
-        || path.len() > 4096
-        || path.contains(['\\', ':'])
-        || path.chars().any(char::is_control)
-    {
-        return Err(failure("expected a portable relative workspace path"));
+    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+        return Err(failure("expected a relative workspace path"));
     }
     let mut components = vec![];
     for part in path.split('/') {
-        if part.is_empty()
-            || part == "."
-            || part == ".."
-            || part.len() > 255
-            || part.to_ascii_lowercase().starts_with(".cayw-")
-            || part.eq_ignore_ascii_case(".git")
-            || part.contains(['<', '>', '"', '|', '?', '*'])
-            || part.ends_with([' ', '.'])
-        {
+        if part.is_empty() || part == "." || part == ".." || part.len() > 255 || internal(part) {
             return Err(failure("path contains a forbidden or reserved component"));
-        }
-        let base = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
-        if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || (base.len() == 4
-                && (base.starts_with("COM") || base.starts_with("LPT"))
-                && matches!(base.as_bytes()[3], b'1'..=b'9'))
-        {
-            return Err(failure("path contains a reserved device name"));
         }
         components.push(part);
     }
@@ -292,7 +317,7 @@ pub(crate) async fn execute(
                     .file_name()
                     .into_string()
                     .map_err(|_| failure("entry name is not UTF-8"))?;
-                if name.to_ascii_lowercase().starts_with(".cayw-") {
+                if internal(&name) {
                     continue;
                 }
                 if entries.len() >= host.config.max_list_entries {

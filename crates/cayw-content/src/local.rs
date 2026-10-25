@@ -72,11 +72,75 @@ impl ContentStore {
     pub fn open(path: impl AsRef<Path>, device_id: Id, limits: Limits) -> Result<Self> {
         limits.validate()?;
         let root = open_root(path.as_ref())?;
+        Self {
+            root,
+            device_id,
+            limits,
+        }
+        .initialize()
+    }
+
+    /// Checks the held root's mode and optional original device/inode before
+    /// creating any store entries. A bound root must already exist.
+    #[cfg(unix)]
+    pub fn open_private(
+        path: impl AsRef<Path>,
+        device_id: Id,
+        limits: Limits,
+        expected_root: Option<(u64, u64)>,
+    ) -> Result<Self> {
+        limits.validate()?;
+        let root = open_root_inner(path.as_ref(), expected_root.is_none())?;
         let store = Self {
             root,
             device_id,
             limits,
         };
+        let actual = store.root_metadata()?;
+        if actual.mode & 0o022 != 0 {
+            return Err(Error::UnsafePermissions);
+        }
+        if expected_root.is_some_and(|expected| expected != (actual.device, actual.inode)) {
+            return Err(Error::RootIdentityMismatch);
+        }
+        store.initialize()
+    }
+
+    /// Opens one already-bound private store and adopts a trusted quota policy.
+    /// The device and original root identity are still checked; records, keys
+    /// and objects are preserved. The new limits are accepted only when every
+    /// retained record and object still fits them.
+    #[cfg(unix)]
+    pub fn open_private_amending_limits(
+        path: impl AsRef<Path>,
+        device_id: Id,
+        limits: Limits,
+        expected_root: (u64, u64),
+    ) -> Result<Self> {
+        limits.validate()?;
+        let root = open_root_inner(path.as_ref(), false)?;
+        let store = Self {
+            root,
+            device_id,
+            limits,
+        };
+        let actual = store.root_metadata()?;
+        if actual.mode & 0o022 != 0 {
+            return Err(Error::UnsafePermissions);
+        }
+        if expected_root != (actual.device, actual.inode) {
+            return Err(Error::RootIdentityMismatch);
+        }
+        store.initialize_with(true)
+    }
+
+    fn initialize(self) -> Result<Self> {
+        self.initialize_with(false)
+    }
+
+    fn initialize_with(self, amend_limits: bool) -> Result<Self> {
+        let store = self;
+        let limits = store.limits;
         let mut lock = store.lock()?;
         match store.root.symlink_metadata("objects") {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
@@ -94,7 +158,12 @@ impl ContentStore {
         }
         match read_file(&store.root, "state.json", STATE_LIMIT) {
             Ok(bytes) => {
-                store.parse_state(&bytes)?;
+                let mut state = store.parse_state_with(&bytes, amend_limits)?;
+                if amend_limits && state.limits != limits {
+                    store.check_object_total()?;
+                    state.limits = limits;
+                    store.save_state(&state)?;
+                }
             }
             Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 let objects = store.root.open_dir_nofollow("objects")?;
@@ -124,7 +193,17 @@ impl ContentStore {
     }
 
     pub fn read(&self, name: &Id) -> Result<Option<(Record, Vec<u8>)>> {
-        self.transaction(|state, dirs| {
+        self.read_inner(name, false)
+    }
+
+    /// Returns `Busy` instead of waiting for the current transaction's lock.
+    /// Once acquired, the same bounded synchronous read and validation run to completion.
+    pub fn try_read(&self, name: &Id) -> Result<Option<(Record, Vec<u8>)>> {
+        self.read_inner(name, true)
+    }
+
+    fn read_inner(&self, name: &Id, nonblocking: bool) -> Result<Option<(Record, Vec<u8>)>> {
+        self.transaction_inner(nonblocking, |state, dirs| {
             let Some(record) = state.records.get(name) else {
                 return Ok(None);
             };
@@ -136,11 +215,45 @@ impl ContentStore {
     /// Compares the full observed revision and increments the local version once.
     /// No implicit conversion or last-writer-wins update is performed.
     pub fn put(&self, name: &Id, expected: ExpectedRevision, bytes: &[u8]) -> Result<Record> {
+        self.put_inner(name, expected, bytes, false)
+    }
+
+    /// Returns `Busy` before changing content when another transaction holds the lock.
+    /// The host may wait with its own cancellation token and retry the same request.
+    pub fn try_put(&self, name: &Id, expected: ExpectedRevision, bytes: &[u8]) -> Result<Record> {
+        self.put_inner(name, expected, bytes, true)
+    }
+
+    fn put_inner(
+        &self,
+        name: &Id,
+        expected: ExpectedRevision,
+        bytes: &[u8],
+        nonblocking: bool,
+    ) -> Result<Record> {
         self.check_length(bytes)?;
-        self.transaction(|state, dirs| {
+        self.transaction_inner(nonblocking, |state, dirs| {
             state.check_expected(name, expected)?;
             self.put_locked(state, dirs, name, bytes, None)
         })
+    }
+
+    /// Reads the held directory's identity and current mode without resolving its path.
+    #[cfg(unix)]
+    pub fn root_metadata(&self) -> Result<crate::RootMetadata> {
+        use cap_std::fs::{MetadataExt, PermissionsExt};
+        let metadata = self.root.dir_metadata()?;
+        Ok(crate::RootMetadata {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.permissions().mode(),
+        })
+    }
+
+    /// Checks the persisted device and quotas through the held root without
+    /// changing policy or resolving the configured directory again.
+    pub fn validate_configuration(&self) -> Result<()> {
+        self.transaction_inner(false, |_, _| Ok(()))
     }
 
     pub fn device_id(&self) -> &Id {
@@ -156,11 +269,19 @@ impl ContentStore {
         }
         Ok(())
     }
+    #[cfg(feature = "encryption")]
     pub(crate) fn transaction<T>(
         &self,
         f: impl FnOnce(&mut State, &LockedDirs<'_>) -> Result<T>,
     ) -> Result<T> {
-        let lock = self.lock()?;
+        self.transaction_inner(false, f)
+    }
+    fn transaction_inner<T>(
+        &self,
+        nonblocking: bool,
+        f: impl FnOnce(&mut State, &LockedDirs<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let lock = self.lock_inner(nonblocking)?;
         let objects = self.root.open_dir_nofollow("objects")?;
         let dirs = LockedDirs {
             root: &self.root,
@@ -171,6 +292,9 @@ impl ContentStore {
         f(&mut state, &dirs)
     }
     fn lock(&self) -> Result<File> {
+        self.lock_inner(false)
+    }
+    fn lock_inner(&self, nonblocking: bool) -> Result<File> {
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).follow(FollowSymlinks::No);
         private_file_mode(&mut opts);
@@ -200,22 +324,50 @@ impl ContentStore {
         if !lock.metadata()?.is_file() {
             return Err(Error::UnsafePath);
         }
-        fs2::FileExt::lock_exclusive(&lock)?;
+        if nonblocking {
+            match fs2::FileExt::try_lock_exclusive(&lock) {
+                Ok(()) => {}
+                Err(error)
+                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    return Err(Error::Busy);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            fs2::FileExt::lock_exclusive(&lock)?;
+        }
         Ok(lock)
     }
     fn parse_state(&self, bytes: &[u8]) -> Result<State> {
+        self.parse_state_with(bytes, false)
+    }
+    /// `amend_limits` accepts a persisted policy that differs from the opener's
+    /// while still validating every retained record against the new limits.
+    fn parse_state_with(&self, bytes: &[u8], amend_limits: bool) -> Result<State> {
         let state: State = serde_json::from_slice(bytes)?;
         if state.protocol != 1 {
             return Err(Error::UnsupportedVersion);
         }
-        if state.device_id != self.device_id || state.limits != self.limits {
+        if state.device_id != self.device_id {
             return Err(Error::StoreConfigurationMismatch);
         }
+        let changed = state.limits != self.limits;
+        if changed && !amend_limits {
+            return Err(Error::StoreConfigurationMismatch);
+        }
+        let over_limit = |changed: bool| {
+            if changed {
+                Error::QuotaExceeded
+            } else {
+                Error::Integrity
+            }
+        };
         if state.records.len() > self.limits.max_records as usize
             || state.keys.len() + state.exported.len() + state.imported.len()
                 > self.limits.max_security_entries as usize
         {
-            return Err(Error::Integrity);
+            return Err(over_limit(changed));
         }
         for nonce_id in state.exported.keys() {
             ContentHash::parse_filename(nonce_id)?;
@@ -226,22 +378,52 @@ impl ContentStore {
                 || record.device_id != state.device_id
                 || record.content_len > self.limits.max_content_bytes
             {
-                return Err(Error::Integrity);
+                return Err(over_limit(changed));
             }
         }
         Ok(state)
     }
+    /// Charges all retained objects, including orphans from interrupted writes,
+    /// before a lowered total-object quota becomes authoritative.
+    fn check_object_total(&self) -> Result<()> {
+        let objects = self.root.open_dir_nofollow("objects")?;
+        let mut total = 0u64;
+        for entry in objects.entries()? {
+            let entry = entry?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| Error::Integrity)?;
+            ContentHash::parse_filename(&name)?;
+            let meta = objects.symlink_metadata(&name)?;
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                return Err(Error::UnsafePath);
+            }
+            total = total.checked_add(meta.len()).ok_or(Error::QuotaExceeded)?;
+        }
+        if total > self.limits.max_total_bytes {
+            return Err(Error::QuotaExceeded);
+        }
+        Ok(())
+    }
     pub(crate) fn save_state(&self, state: &State) -> Result<()> {
+        self.save_state_inner(state, None)
+    }
+    fn save_state_inner(&self, state: &State, changed: Option<&Record>) -> Result<()> {
         let bytes = serde_json::to_vec(state)?;
         if bytes.len() as u64 > STATE_LIMIT {
             return Err(Error::QuotaExceeded);
         }
         write_stage(&self.root, ".state-stage", &bytes)?;
+        content_checkpoint("content_state_staged", changed);
         self.root.rename(".state-stage", &self.root, "state.json")?;
+        content_checkpoint("content_state_renamed", changed);
         sync_dir(&self.root).map_err(|e| match e {
             Error::Io(io) => Error::CommitOutcomeUnknown(io),
             other => other,
-        })
+        })?;
+        content_checkpoint("content_state_synced", changed);
+        Ok(())
     }
     pub(crate) fn read_content(&self, dirs: &LockedDirs<'_>, record: &Record) -> Result<Vec<u8>> {
         let bytes = read_file(
@@ -288,7 +470,7 @@ impl ContentStore {
         record.revision = record.calculate_revision()?;
         self.ensure_object(dirs, &record.content_hash, bytes)?;
         state.records.insert(name.clone(), record.clone());
-        self.save_state(state)?;
+        self.save_state_inner(state, Some(&record))?;
         Ok(record)
     }
     fn ensure_object(&self, dirs: &LockedDirs<'_>, hash: &ContentHash, bytes: &[u8]) -> Result<()> {
@@ -342,6 +524,23 @@ impl ContentStore {
         sync_dir(dirs.root)?;
         Ok(())
     }
+}
+
+fn content_checkpoint(point: &'static str, record: Option<&Record>) {
+    #[cfg(feature = "fault-injection")]
+    if let Some(record) = record {
+        cayw_ai::faults::hit(
+            point,
+            serde_json::json!({
+                "name": record.name,
+                "version": record.version,
+                "revision": record.revision.to_string(),
+                "content_hash": record.content_hash.to_string(),
+            }),
+        );
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    let _ = (point, record);
 }
 
 pub(crate) fn read_file(dir: &Dir, name: &str, limit: u64) -> Result<Vec<u8>> {
@@ -409,6 +608,9 @@ fn sync_dir(dir: &Dir) -> Result<()> {
     sync_file(&dir.try_clone()?.into_std_file())
 }
 fn open_root(path: &Path) -> Result<Dir> {
+    open_root_inner(path, true)
+}
+fn open_root_inner(path: &Path, create_missing: bool) -> Result<Dir> {
     if !path.is_absolute() {
         return Err(Error::UnsafePath);
     }
@@ -426,7 +628,7 @@ fn open_root(path: &Path) -> Result<Dir> {
     for name in names {
         let next = match dir.open_dir_nofollow(name) {
             Ok(next) => next,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if create_missing && e.kind() == std::io::ErrorKind::NotFound => {
                 #[cfg(all(test, unix))]
                 tests::before_path_retry(&dir, name);
                 match create_private_dir(&dir, name) {
@@ -457,7 +659,7 @@ mod tests {
 
     type PathRetry = Box<dyn FnOnce(&Dir, &std::ffi::OsStr)>;
     thread_local! {
-        static FAILED_SYNC: RefCell<Option<(u64, u64)>> = const { RefCell::new(None) };
+        static FAILED_SYNC: RefCell<Option<(u64, u64, usize)>> = const { RefCell::new(None) };
         static PATH_RETRY: RefCell<Option<PathRetry>> = const { RefCell::new(None) };
     }
 
@@ -489,9 +691,15 @@ mod tests {
     pub(super) fn before_sync(file: &File) -> std::io::Result<()> {
         let meta = file.metadata()?;
         FAILED_SYNC.with_borrow_mut(|target| {
-            if *target == Some((meta.dev(), meta.ino())) {
-                *target = None;
-                return Err(std::io::Error::from_raw_os_error(5)); // EIO on Unix.
+            if let Some((device, inode, remaining)) = target.as_mut()
+                && *device == meta.dev()
+                && *inode == meta.ino()
+            {
+                if *remaining == 0 {
+                    *target = None;
+                    return Err(std::io::Error::from_raw_os_error(5)); // EIO on Unix.
+                }
+                *remaining -= 1;
             }
             Ok(())
         })
@@ -500,10 +708,13 @@ mod tests {
     struct FailedSync;
     impl FailedSync {
         fn at(path: &Path) -> Self {
+            Self::after(path, 0)
+        }
+        fn after(path: &Path, successful_matches: usize) -> Self {
             let meta = std::fs::metadata(path).unwrap();
             FAILED_SYNC.with_borrow_mut(|target| {
                 assert!(target.is_none());
-                *target = Some((meta.dev(), meta.ino()));
+                *target = Some((meta.dev(), meta.ino(), successful_matches));
             });
             Self
         }
@@ -640,6 +851,42 @@ mod tests {
         assert_eq!(
             db.read(&name).unwrap().unwrap(),
             (second, b"next durable version".to_vec())
+        );
+    }
+
+    #[test]
+    fn post_rename_sync_failure_is_unknown_and_exact_record_survives_reopen() {
+        let root = TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let db = ContentStore::open(root.path(), id("device"), Limits::default()).unwrap();
+        let first = db
+            .put(&id("note"), ExpectedRevision::Absent, b"first")
+            .unwrap();
+        let old_authority = std::fs::read(root.path().join("state.json")).unwrap();
+        // Object installation syncs the root once. Fail the later sync after
+        // state.json has been replaced, with all other real filesystem IO intact.
+        let failure = FailedSync::after(root.path(), 1);
+        assert!(matches!(
+            db.try_put(&id("note"), first.expected(), b"second"),
+            Err(Error::CommitOutcomeUnknown(error)) if error.raw_os_error() == Some(5)
+        ));
+        drop(failure);
+        assert_ne!(
+            std::fs::read(root.path().join("state.json")).unwrap(),
+            old_authority
+        );
+        let (second, bytes) = db.try_read(&id("note")).unwrap().unwrap();
+        assert_eq!(second.version, 2);
+        assert_eq!(second.parent_revision, Some(first.revision));
+        assert_eq!(bytes, b"second");
+        assert!(matches!(
+            db.try_put(&id("note"), first.expected(), b"second"),
+            Err(Error::Conflict { actual, .. }) if actual == second.expected()
+        ));
+        drop(db);
+        let db = ContentStore::open(root.path(), id("device"), Limits::default()).unwrap();
+        assert_eq!(
+            db.try_read(&id("note")).unwrap().unwrap(),
+            (second, b"second".to_vec())
         );
     }
 

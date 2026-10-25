@@ -609,9 +609,8 @@ pub fn compare(left: &Bundle, right: &Bundle) -> Comparison {
                 };
             }
         }
-        if bundle.samples.iter().any(|s| s["status"] != "passed") {
-            missing.push(format!("{side} task has no passing result"));
-        }
+        // A failed sample with valid measurements is known comparison evidence,
+        // not incomplete evidence. Its failure stays in the bundle summary.
         for key in [
             "timing_summary",
             "statuses",

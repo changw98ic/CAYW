@@ -1,13 +1,16 @@
 use crate::{
-    CallStatus, CapabilityCall, CapabilityError, CapabilityHost, CodeMode, CodeModeError,
-    ErrorKind, ExecutionReport, Limits, VmOperation, VmServices, json,
+    CallStatus, CapabilityCall, CapabilityError, CapabilityHost, CapabilityStop, CodeMode,
+    CodeModeError, ErrorKind, ExecutionReport, Limits, VmOperation, VmServices, json,
 };
 use cayw_ai::CancellationToken;
 use mlua::{Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Value as LuaValue, VmState};
 use serde::Serialize;
 use serde_json::{Value, json as json_value};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
@@ -82,7 +85,7 @@ struct Run {
     limits: Limits,
     clock: Mutex<Clock>,
     cancel: CancellationToken,
-    pending: tokio::sync::Mutex<Option<PendingCall>>,
+    pending: Mutex<Option<PendingCall>>,
 }
 struct Pause(Arc<Run>);
 impl Drop for Pause {
@@ -94,6 +97,17 @@ impl Drop for Pause {
     }
 }
 impl Run {
+    fn poll_pending(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Value, CapabilityError>> {
+        // A suspended mlua callback can outlive its parent async thread. Keep
+        // ownership here, but never keep the guard across an asynchronous wait.
+        let mut pending = self.pending.lock().expect("pending call poisoned");
+        let pending = pending.as_mut().expect("registered pending call");
+        pending.started = true;
+        pending.future.as_mut().poll(cx)
+    }
     fn check(&self) -> Result<(), Fault> {
         if let Some(fault) = &self.state.lock().expect("execution state poisoned").fault {
             return Err(fault.clone());
@@ -123,6 +137,16 @@ impl Run {
             .fault
             .get_or_insert(fault)
             .clone()
+    }
+    /// Returns the latched stop reason when it must not be handled as an
+    /// ordinary recoverable script error.
+    fn latched_fatal(&self) -> Option<Fault> {
+        self.state
+            .lock()
+            .expect("execution state poisoned")
+            .fault
+            .clone()
+            .filter(|fault| fault.is_fatal())
     }
     fn remaining(&self) -> usize {
         self.limits.output_bytes.saturating_sub(
@@ -194,8 +218,222 @@ impl Run {
         }
     }
 }
+impl Fault {
+    /// Cancellation, exhausted budgets and unconfirmed effects stop the whole
+    /// execution even when a script wraps the call in `pcall` or a coroutine.
+    fn is_fatal(&self) -> bool {
+        self.kind.stop().is_some() || self.kind == ErrorKind::OutcomeUnknown
+    }
+}
 fn lua_result<T>(run: &Run, result: Result<T, Fault>) -> mlua::Result<T> {
-    result.map_err(|fault| mlua::Error::external(run.fail(fault)))
+    result.map_err(|fault| {
+        if fault.is_fatal() {
+            // Latch first: a later `run.check` re-raises even if the script
+            // caught this error object.
+            mlua::Error::external(run.fail(fault))
+        } else {
+            // Known business failures are ordinary script errors. They stay
+            // catchable and do not permanently fault the execution.
+            mlua::Error::external(fault)
+        }
+    })
+}
+
+/// Tracks that the script is synchronously inside `coroutine.resume`. Native
+/// `resume` cannot drive an async Host call: a pending Rust future would yield
+/// the user thread and leave the invocation without an owner while the script
+/// keeps running. Host entry points therefore reject this context before any
+/// dispatch.
+struct CoroutineDepth(Arc<AtomicUsize>);
+impl CoroutineDepth {
+    fn enter(depth: Arc<AtomicUsize>) -> Self {
+        depth.fetch_add(1, Ordering::SeqCst);
+        Self(depth)
+    }
+}
+impl Drop for CoroutineDepth {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Builds the coroutine library from the native implementation. Pure
+/// computation, yields and generators stay available; every native entry that
+/// resumes a thread goes through one guarded function, and a latched fatal
+/// fault cannot be returned as an ordinary `false, error` pair.
+fn restricted_coroutine(
+    lua: &Lua,
+    run: &Arc<Run>,
+) -> Result<(mlua::Table, Arc<AtomicUsize>), Fault> {
+    let library: mlua::Table = lua.globals().get("coroutine").map_err(Fault::from_lua)?;
+    let table = lua.create_table().map_err(Fault::from_lua)?;
+    for name in [
+        "create",
+        "status",
+        "running",
+        "isyieldable",
+        "yield",
+        "close",
+    ] {
+        let function: mlua::Function = library.get(name).map_err(Fault::from_lua)?;
+        table.raw_set(name, function).map_err(Fault::from_lua)?;
+    }
+    let depth = Arc::new(AtomicUsize::new(0));
+    let resume_run = run.clone();
+    let resume_depth = depth.clone();
+    let resume = lua
+        .create_function(
+            move |lua, (thread, arguments): (mlua::Thread, MultiValue)| {
+                let _depth = CoroutineDepth::enter(resume_depth.clone());
+                // Inspect the original VM error before native coroutine.resume can
+                // turn allocator failure into an ordinary false/message pair.
+                let outcome = thread.resume::<MultiValue>(arguments);
+                if let Some(fault) = resume_run.latched_fatal() {
+                    return Err(mlua::Error::external(fault));
+                }
+                let mut result = MultiValue::new();
+                match outcome {
+                    Ok(values) => {
+                        result.push_back(LuaValue::Boolean(true));
+                        result.extend(values);
+                    }
+                    Err(error) => {
+                        let fault = Fault::from_lua(error.clone());
+                        if fault.is_fatal() {
+                            return Err(mlua::Error::external(resume_run.fail(fault)));
+                        }
+                        result.push_back(LuaValue::Boolean(false));
+                        result.push_back(LuaValue::String(lua.create_string(error.to_string())?));
+                    }
+                }
+                Ok(result)
+            },
+        )
+        .map_err(Fault::from_lua)?;
+    table
+        .raw_set("resume", resume.clone())
+        .map_err(Fault::from_lua)?;
+    let create: mlua::Function = table.get("create").map_err(Fault::from_lua)?;
+    let unpack: mlua::Function = lua
+        .globals()
+        .get::<mlua::Table>("table")
+        .map_err(Fault::from_lua)?
+        .get("unpack")
+        .map_err(Fault::from_lua)?;
+    // `wrap` must reuse the guarded `resume`, so it is built here rather than
+    // taken from the native library.
+    let wrap: mlua::Function = lua
+        .load(
+            r#"
+            local create, resume, unpack = ...
+            return function(f)
+                local co = create(f)
+                return function(...)
+                    local result = {resume(co, ...)}
+                    if not result[1] then error(result[2], 0) end
+                    return unpack(result, 2, #result)
+                end
+            end
+            "#,
+        )
+        .set_name("trusted-coroutine-wrap")
+        .call((create, resume, unpack))
+        .map_err(Fault::from_lua)?;
+    table.raw_set("wrap", wrap).map_err(Fault::from_lua)?;
+    // The script may call these functions but cannot replace the guard.
+    table.set_readonly(true);
+    Ok((table, depth))
+}
+
+/// Keeps `pcall`/`xpcall` for ordinary known failures while preventing any
+/// protected call from turning a latched cancellation, budget exhaustion or
+/// unknown effect into a normal return value.
+///
+/// Native `pcall` is a C boundary, so a Host call that suspends cannot yield
+/// through it. This implementation runs the protected function in an mlua
+/// async thread, which lets ordinary Host calls suspend and resume normally.
+fn guarded_protected_call(lua: &Lua, run: &Arc<Run>, name: &str) -> Result<mlua::Function, Fault> {
+    let xpcall = name == "xpcall";
+    let label = if xpcall { "xpcall" } else { "pcall" };
+    let run = run.clone();
+    lua.create_async_function(move |lua, arguments: MultiValue| {
+        let run = run.clone();
+        async move {
+            if let Some(fault) = run.latched_fatal() {
+                return Err(mlua::Error::external(fault));
+            }
+            let mut values = arguments.into_iter();
+            let function = match values.next() {
+                Some(LuaValue::Function(function)) => function,
+                _ => {
+                    return Err(mlua::Error::external(Fault::new(
+                        ErrorKind::Arguments,
+                        format!("{label} requires a function as its first argument"),
+                    )));
+                }
+            };
+            let handler = if xpcall {
+                match values.next() {
+                    Some(LuaValue::Function(handler)) => Some(handler),
+                    _ => {
+                        return Err(mlua::Error::external(Fault::new(
+                            ErrorKind::Arguments,
+                            "xpcall requires a message handler",
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+            let protected_arguments: MultiValue = values.collect();
+            let outcome = function.call_async::<MultiValue>(protected_arguments).await;
+            let mut result = MultiValue::new();
+            match outcome {
+                Ok(values) => {
+                    result.push_back(LuaValue::Boolean(true));
+                    result.extend(values);
+                }
+                Err(error) => {
+                    let fault = Fault::from_lua(error.clone());
+                    if fault.is_fatal() {
+                        return Err(mlua::Error::external(run.fail(fault)));
+                    }
+                    if let Some(fault) = run.latched_fatal() {
+                        return Err(mlua::Error::external(fault));
+                    }
+                    let message = LuaValue::String(lua.create_string(error.to_string())?);
+                    let message = match handler {
+                        Some(handler) => match handler.call_async::<LuaValue>(message).await {
+                            Ok(value) => value,
+                            Err(handler_error) => {
+                                let fault = Fault::from_lua(handler_error.clone());
+                                if fault.is_fatal() {
+                                    return Err(mlua::Error::external(run.fail(fault)));
+                                }
+                                LuaValue::String(lua.create_string(handler_error.to_string())?)
+                            }
+                        },
+                        None => message,
+                    };
+                    run.check().map_err(mlua::Error::external)?;
+                    result.push_back(LuaValue::Boolean(false));
+                    result.push_back(message);
+                }
+            }
+            if let Some(fault) = run.latched_fatal() {
+                return Err(mlua::Error::external(fault));
+            }
+            Ok(result)
+        }
+    })
+    .map_err(Fault::from_lua)
+}
+
+fn coroutine_rejection() -> Fault {
+    Fault::new(
+        ErrorKind::Capability,
+        "Host capabilities cannot be called inside a script coroutine; call them from the main script",
+    )
 }
 
 pub(crate) async fn execute(
@@ -217,7 +455,7 @@ pub(crate) async fn execute(
             paused: None,
         }),
         cancel: child,
-        pending: tokio::sync::Mutex::new(None),
+        pending: Mutex::new(None),
     });
     let result = execute_vm(mode, script, run.clone(), services).await;
     // The coroutine may have ended on its interrupt while a Host or cell service
@@ -226,7 +464,7 @@ pub(crate) async fn execute(
     if let Err(fault) = &result {
         run.fail(fault.clone());
     }
-    let pending = run.pending.lock().await.take();
+    let pending = run.pending.lock().expect("pending call poisoned").take();
     if let Some(mut pending) = pending {
         match pending.target {
             PendingTarget::Host(index) => {
@@ -279,6 +517,24 @@ async fn settle_pending(
     }
 }
 
+async fn settle_registered(run: &Run) -> Option<Result<Value, CapabilityError>> {
+    let deadline = {
+        let mut registered = run.pending.lock().expect("pending call poisoned");
+        let pending = registered
+            .as_mut()
+            .expect("started call remains registered");
+        pending.cancel.cancel();
+        *pending
+            .shutdown_deadline
+            .get_or_insert_with(|| tokio::time::Instant::now() + run.limits.shutdown_grace)
+    };
+    tokio::select! {
+        biased;
+        result = std::future::poll_fn(|cx| run.poll_pending(cx)) => Some(result),
+        _ = tokio::time::sleep_until(deadline) => None,
+    }
+}
+
 fn record_host(
     run: &Run,
     index: usize,
@@ -305,6 +561,7 @@ fn record_host(
         Some(Err(CapabilityError {
             message,
             outcome_unknown,
+            stop,
         })) => {
             {
                 let mut state = run.state.lock().expect("execution state poisoned");
@@ -326,11 +583,7 @@ fn record_host(
             }
             run.check()?;
             Err(Fault::new(
-                if outcome_unknown {
-                    ErrorKind::OutcomeUnknown
-                } else {
-                    ErrorKind::Capability
-                },
+                capability_error_kind(outcome_unknown, stop),
                 message,
             ))
         }
@@ -416,8 +669,7 @@ async fn call_host(
     }
     let cancel = run.cancel.child_token();
     let host_cancel = cancel.clone();
-    let mut pending = run.pending.lock().await;
-    *pending = Some(PendingCall {
+    *run.pending.lock().expect("pending call poisoned") = Some(PendingCall {
         target: PendingTarget::Host(index),
         started: false,
         cancel,
@@ -427,27 +679,26 @@ async fn call_host(
     run.clock.lock().expect("VM clock poisoned").paused = Some(Instant::now());
     let pause = Pause(run.clone());
     let deadline = tokio::time::Instant::now() + run.limits.host_wait;
-    let result = {
-        let PendingCall {
-            started, future, ..
-        } = pending.as_mut().expect("registered pending Host");
-        tokio::select! {
-            biased;
-            _ = run.cancel.cancelled() => Err(run.fail(Fault::new(ErrorKind::Cancelled, "CodeMode execution cancelled"))),
-            _ = tokio::time::sleep_until(deadline) => Err(run.fail(Fault::new(ErrorKind::Timeout, "CodeMode Host wait limit reached"))),
-            result = std::future::poll_fn(|cx| {
-                // Cancellation is checked before every original Host poll.
-                // Argument preparation was checked before pausing the VM clock.
-                if let Err(fault) = run.check() {
-                    return std::task::Poll::Ready(Err(fault));
-                }
-                *started = true;
-                future.as_mut().poll(cx).map(Ok)
-            }) => result,
-        }
+    let result = tokio::select! {
+        biased;
+        _ = run.cancel.cancelled() => Err(run.fail(Fault::new(ErrorKind::Cancelled, "CodeMode execution cancelled"))),
+        _ = tokio::time::sleep_until(deadline) => Err(run.fail(Fault::new(ErrorKind::Timeout, "CodeMode Host wait limit reached"))),
+        result = std::future::poll_fn(|cx| {
+            if let Err(fault) = run.check() {
+                return std::task::Poll::Ready(Err(fault));
+            }
+            run.poll_pending(cx).map(Ok)
+        }) => result,
     };
-    if !pending.as_ref().expect("registered pending Host").started {
-        pending.take();
+    let started = run
+        .pending
+        .lock()
+        .expect("pending call poisoned")
+        .as_ref()
+        .expect("registered pending Host")
+        .started;
+    if !started {
+        run.pending.lock().expect("pending call poisoned").take();
         run.state
             .lock()
             .expect("execution state poisoned")
@@ -458,19 +709,14 @@ async fn call_host(
     }
     let result = match result {
         Ok(result) => Some(result),
-        Err(_) => {
-            // The selected branch already latched its original stop reason.
-            settle_pending(
-                run,
-                pending.as_mut().expect("started Host remains registered"),
-            )
-            .await
-        }
+        Err(_) => settle_registered(run).await,
     };
-    // Keep the Host in Run across every await, including the cleanup grace, so
-    // a Luau interrupt cannot drop it or restart the grace period.
-    let invocation = pending.take().expect("Host settlement finished");
-    drop(pending);
+    let invocation = run
+        .pending
+        .lock()
+        .expect("pending call poisoned")
+        .take()
+        .expect("Host settlement finished");
     drop(invocation);
     drop(pause);
     let value = record_host(run, index, result)?;
@@ -478,13 +724,22 @@ async fn call_host(
     Ok(value)
 }
 
+fn capability_error_kind(unknown: bool, stop: Option<CapabilityStop>) -> ErrorKind {
+    if unknown {
+        return ErrorKind::OutcomeUnknown;
+    }
+    match stop {
+        Some(CapabilityStop::Cancelled) => ErrorKind::Cancelled,
+        Some(CapabilityStop::Timeout) => ErrorKind::Timeout,
+        Some(CapabilityStop::Budget) => ErrorKind::Budget,
+        Some(CapabilityStop::Exited) => ErrorKind::Exited,
+        None => ErrorKind::Capability,
+    }
+}
+
 fn service_fault(error: CapabilityError) -> Fault {
     Fault::new(
-        if error.outcome_unknown {
-            ErrorKind::OutcomeUnknown
-        } else {
-            ErrorKind::Capability
-        },
+        capability_error_kind(error.outcome_unknown, error.stop),
         error.message,
     )
 }
@@ -495,7 +750,6 @@ async fn call_service(
     operation: VmOperation,
     arguments: Value,
 ) -> Result<Value, Fault> {
-    let mut pending = run.pending.lock().await;
     // Store/Load wait on host-owned state and Yield waits for an explicit
     // resume, so neither consumes the VM calculation clock. Store/Load are
     // bounded by host_wait; Yield has no deadline of its own. Local helpers
@@ -520,7 +774,7 @@ async fn call_service(
     };
     let cancel = run.cancel.child_token();
     let service_cancel = cancel.clone();
-    *pending = Some(PendingCall {
+    *run.pending.lock().expect("pending call poisoned") = Some(PendingCall {
         target: PendingTarget::Service,
         started: false,
         cancel,
@@ -529,58 +783,53 @@ async fn call_service(
             async move { services.invoke(operation, arguments, service_cancel).await },
         ),
     });
-    // `pending` owns the future across every await, including shutdown grace,
-    // so a Luau interrupt cannot drop it or restart the grace period.
-    let driven: Result<Result<Value, CapabilityError>, Fault> = {
-        let PendingCall {
-            started, future, ..
-        } = pending.as_mut().expect("registered pending service");
-        tokio::select! {
-            biased;
-            _ = run.cancel.cancelled() => Err(run.fail(Fault::new(
-                ErrorKind::Cancelled,
-                "CodeMode execution cancelled",
-            ))),
-            _ = async {
-                match deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline).await,
-                    None => std::future::pending::<()>().await,
-                }
-            } => Err(run.fail(Fault::new(
-                ErrorKind::Timeout,
-                if host_wait {
-                    "CodeMode Host wait limit reached"
-                } else {
-                    "CodeMode time limit reached"
-                },
-            ))),
-            result = std::future::poll_fn(|cx| {
-                // Cancellation is checked before every original service poll.
-                // The clock is paused for Store/Load and Yield, so run.check
-                // only counts local helpers against the VM deadline.
-                if let Err(fault) = run.check() {
-                    return std::task::Poll::Ready(Err(fault));
-                }
-                *started = true;
-                future.as_mut().poll(cx).map(Ok)
-            }) => result,
-        }
+    let driven = tokio::select! {
+        biased;
+        _ = run.cancel.cancelled() => Err(run.fail(Fault::new(
+            ErrorKind::Cancelled,
+            "CodeMode execution cancelled",
+        ))),
+        _ = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => Err(run.fail(Fault::new(
+            ErrorKind::Timeout,
+            if host_wait {
+                "CodeMode Host wait limit reached"
+            } else {
+                "CodeMode time limit reached"
+            },
+        ))),
+        result = std::future::poll_fn(|cx| {
+            if let Err(fault) = run.check() {
+                return std::task::Poll::Ready(Err(fault));
+            }
+            run.poll_pending(cx).map(Ok)
+        }) => result,
     };
-    if !pending
+    let started = run
+        .pending
+        .lock()
+        .expect("pending call poisoned")
         .as_ref()
         .expect("registered pending service")
-        .started
-    {
-        // Cancellation or the VM deadline ended the callback before its first
-        // service poll. Nothing started, so nothing is dispatched or replayed.
-        pending.take();
+        .started;
+    if !started {
+        // No original service poll happened, so cleanup must not dispatch it.
+        run.pending.lock().expect("pending call poisoned").take();
         drop(pause);
         return Err(driven.expect_err("a service result requires a first poll"));
     }
     match driven {
         Ok(Ok(value)) => {
-            let invocation = pending.take().expect("settled service remains registered");
-            drop(pending);
+            let invocation = run
+                .pending
+                .lock()
+                .expect("pending call poisoned")
+                .take()
+                .expect("settled service remains registered");
             drop(invocation);
             drop(pause);
             let value = json::from_host(value, run.remaining())?;
@@ -589,8 +838,12 @@ async fn call_service(
             Ok(value)
         }
         Ok(Err(error)) => {
-            let invocation = pending.take().expect("settled service remains registered");
-            drop(pending);
+            let invocation = run
+                .pending
+                .lock()
+                .expect("pending call poisoned")
+                .take()
+                .expect("settled service remains registered");
             drop(invocation);
             drop(pause);
             if error.outcome_unknown {
@@ -608,16 +861,14 @@ async fn call_service(
             // Poll this exact started future for the shutdown grace; a Pending
             // poll lets the timer end grace. Never dispatch or replay a new
             // service call during this interval.
-            let settled = settle_pending(
-                run,
-                pending
-                    .as_mut()
-                    .expect("started service remains registered"),
-            )
-            .await;
+            let settled = settle_registered(run).await;
             record_service(run, settled);
-            let invocation = pending.take().expect("service settlement finished");
-            drop(pending);
+            let invocation = run
+                .pending
+                .lock()
+                .expect("pending call poisoned")
+                .take()
+                .expect("service settlement finished");
             drop(invocation);
             drop(pause);
             Err(stop)
@@ -631,14 +882,19 @@ fn install_services(
     mode: &CodeMode,
     run: &Arc<Run>,
     services: Arc<dyn VmServices>,
+    coroutine_depth: Arc<AtomicUsize>,
 ) -> Result<(), Fault> {
     let service_run = run.clone();
     let dispatcher = lua
         .create_async_function(move |lua, (name, arguments): (String, LuaValue)| {
             let run = service_run.clone();
             let services = services.clone();
+            let inside_coroutine = coroutine_depth.load(Ordering::SeqCst) > 0;
             async move {
                 let action = async {
+                    if inside_coroutine {
+                        return Err(coroutine_rejection());
+                    }
                     run.check()?;
                     let operation = match name.as_str() {
                         "store" => VmOperation::Store,
@@ -722,7 +978,7 @@ async fn execute_vm(
         ));
     }
     let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE,
         LuaOptions::new(),
     )
     .map_err(Fault::from_lua)?;
@@ -731,8 +987,15 @@ async fn execute_vm(
     let interrupt = run.clone();
     lua.set_interrupt(move |_| lua_result(&interrupt, interrupt.interrupt()));
 
-    // Protected calls could catch a budget interrupt forever; coroutine wrappers could
-    // suppress an unknown host effect. Only the outer Rust execution owns recovery.
+    // Pure-computation coroutines are language features. The library exposed
+    // below keeps them, but the resumer records synchronous execution so Host
+    // calls cannot start a future that native `resume` cannot drive.
+    let (coroutine, coroutine_depth) = restricted_coroutine(&lua, &run)?;
+    let pcall = guarded_protected_call(&lua, &run, "pcall")?;
+    let xpcall = guarded_protected_call(&lua, &run, "xpcall")?;
+
+    // Environment access, arbitrary loading and debug facilities stay out.
+    // Protected calls and coroutines are installed above with their guards.
     for name in [
         "os",
         "io",
@@ -748,9 +1011,6 @@ async fn execute_vm(
         "setfenv",
         "print",
         "warn",
-        "coroutine",
-        "pcall",
-        "xpcall",
         "collectgarbage",
         "newproxy",
         "gcinfo",
@@ -760,6 +1020,15 @@ async fn execute_vm(
             .raw_set(name, LuaValue::Nil)
             .map_err(Fault::from_lua)?;
     }
+    lua.globals()
+        .raw_set("coroutine", coroutine)
+        .map_err(Fault::from_lua)?;
+    lua.globals()
+        .raw_set("pcall", pcall)
+        .map_err(Fault::from_lua)?;
+    lua.globals()
+        .raw_set("xpcall", xpcall)
+        .map_err(Fault::from_lua)?;
     let api = lua.create_table().map_err(Fault::from_lua)?;
     api.raw_set("null", lua.null()).map_err(Fault::from_lua)?;
     api.raw_set(
@@ -851,14 +1120,22 @@ async fn execute_vm(
     let host = mode.host.clone();
     let catalog = mode.catalog.clone();
     let call_run = run.clone();
+    let call_depth = coroutine_depth.clone();
     api.raw_set(
         "call",
         lua.create_async_function(move |lua, values: MultiValue| {
             let run = call_run.clone();
             let host = host.clone();
             let catalog = catalog.clone();
+            // Read the resumer state synchronously: mlua polls this future once
+            // before returning control to `coroutine.resume`, so the rejection
+            // must already be part of that first poll.
+            let inside_coroutine = call_depth.load(Ordering::SeqCst) > 0;
             async move {
                 let execute = async {
+                    if inside_coroutine {
+                        return Err(coroutine_rejection());
+                    }
                     run.check()?;
                     let mut values = values.into_iter();
                     let name = match values.next() {
@@ -915,13 +1192,15 @@ async fn execute_vm(
 
     let environment = lua.create_table().map_err(Fault::from_lua)?;
     if let Some(services) = services {
-        install_services(&lua, &environment, mode, &run, services)?;
+        install_services(
+            &lua,
+            &environment,
+            mode,
+            &run,
+            services,
+            coroutine_depth.clone(),
+        )?;
     }
-    // Async functions load coroutine internally. No handle to that library, the
-    // bootstrap dispatcher or the original global table reaches the user chunk.
-    lua.globals()
-        .raw_set("coroutine", LuaValue::Nil)
-        .map_err(Fault::from_lua)?;
     api.set_readonly(true);
     environment.raw_set("cayw", api).map_err(Fault::from_lua)?;
     lua.array_metatable().set_readonly(true);
@@ -935,7 +1214,9 @@ async fn execute_vm(
         .raw_set("_G", environment.clone())
         .map_err(Fault::from_lua)?;
     lua.sandbox(true).map_err(Fault::from_lua)?;
-    environment.set_readonly(true);
+    // The environment belongs to this one execution and is writable: scripts may
+    // use globals and global functions. Host tables copied here (`cayw`,
+    // `ALL_TOOLS`, builtin libraries) were made read-only before the copy.
     run.check()?;
     let values = lua
         .load(script)

@@ -1,4 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
+use cayw_codemode::{CapabilityError, CapabilityStop};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, time::Duration};
@@ -52,6 +53,8 @@ pub struct CellTerminal {
     pub status: CellStatus,
     pub error: Option<String>,
     pub outcome_unknown: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<CapabilityStop>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +165,8 @@ pub enum CellError {
     NotFound,
     #[error("cell manager is closed")]
     Closed,
+    #[error("cell exited")]
+    Exited,
     #[error("cell capacity exhausted")]
     Capacity,
     #[error("cell state requires evidence before more execution")]
@@ -170,6 +175,18 @@ pub enum CellError {
     Conflict,
     #[error("journal: {0}")]
     Journal(String),
+}
+impl CellError {
+    pub(crate) fn capability_error(self) -> CapabilityError {
+        let message = self.to_string();
+        match self {
+            Self::Closed => CapabilityError::stopped(CapabilityStop::Cancelled, message),
+            Self::Exited => CapabilityError::stopped(CapabilityStop::Exited, message),
+            Self::Capacity => CapabilityError::stopped(CapabilityStop::Budget, message),
+            Self::Frozen | Self::Journal(_) => CapabilityError::unknown(message),
+            Self::Invalid(_) | Self::NotFound | Self::Conflict => CapabilityError::new(message),
+        }
+    }
 }
 impl From<rusqlite::Error> for CellError {
     fn from(value: rusqlite::Error) -> Self {
@@ -298,18 +315,20 @@ impl CellOutput {
     }
 }
 fn media(data: &str, limit: usize) -> Result<(), CellError> {
-    if data.len() > limit.saturating_add(2) / 3 * 4 || data.is_empty() {
-        return Err(CellError::Invalid(
-            "media byte limit exceeded or empty media".into(),
-        ));
+    if data.is_empty() {
+        return Err(CellError::Invalid("empty media".into()));
+    }
+    if data.len() > limit.saturating_add(2) / 3 * 4 {
+        return Err(CellError::Capacity);
     }
     let bytes = STANDARD
         .decode(data)
         .map_err(|_| CellError::Invalid("media requires canonical padded base64".into()))?;
-    if bytes.len() > limit || STANDARD.encode(&bytes) != data {
-        return Err(CellError::Invalid(
-            "invalid or oversized base64 media".into(),
-        ));
+    if STANDARD.encode(&bytes) != data {
+        return Err(CellError::Invalid("invalid base64 media".into()));
+    }
+    if bytes.len() > limit {
+        return Err(CellError::Capacity);
     }
     Ok(())
 }
@@ -357,6 +376,9 @@ pub struct CellRecord {
     pub outputs: Vec<OutputEntry>,
     pub output_bytes: usize,
     pub error: Option<String>,
+    /// Explicit VM stop; missing historical values do not infer a stop from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<CapabilityStop>,
     /// A failed trusted lifecycle hook freezes the session until the host repairs
     /// its records. Capability evidence alone cannot clear this failure.
     pub backend_error: Option<String>,
@@ -401,6 +423,8 @@ pub struct CellPage {
     pub required_budget: Option<usize>,
     pub outcome_unknown: bool,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<CapabilityStop>,
 }
 
 #[derive(Clone, Debug)]
@@ -538,9 +562,7 @@ pub(crate) fn validate_json(value: &Value, depth: usize, bytes: usize) -> Result
         )
         .is_err()
     {
-        return Err(CellError::Invalid(
-            "JSON depth or byte limit exceeded".into(),
-        ));
+        return Err(CellError::Capacity);
     }
     Ok(())
 }

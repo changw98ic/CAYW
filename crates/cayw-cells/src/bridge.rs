@@ -59,7 +59,7 @@ impl Bridge {
             _ => self
                 .local(operation, args, cancel)
                 .await
-                .map_err(|error| CapabilityError::new(error.to_string())),
+                .map_err(CellError::capability_error),
         }
     }
     async fn local(
@@ -89,10 +89,9 @@ impl Bridge {
                     .ok_or_else(|| CellError::Invalid("exit code requires an i32".into()))?;
                 self.run.emit(CellOutput::Exit { code })?;
                 self.run.exited.store(true, Ordering::Release);
-                // CodeMode treats a host Err as an uncatchable execution fault.
-                // Its pcall/xpcall/coroutine libraries are absent. The manager
-                // recognizes its own flag, never the error text, as normal exit.
-                Err(CellError::Closed)
+                // The typed exit passes through protected calls. The manager
+                // recognizes its own flag, never error text, as normal exit.
+                Err(CellError::Exited)
             }
             VmOperation::Yield => {
                 self.run.update(|record| {
@@ -180,7 +179,7 @@ impl Bridge {
         args: Value,
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
-        let failure = |e: CellError| CapabilityError::new(e.to_string());
+        let failure = CellError::capability_error;
         self.run.check().map_err(failure)?;
         let (argument_depth, argument_bytes) = self.argument_limits(name);
         validate_json(&args, argument_depth, argument_bytes).map_err(failure)?;
@@ -356,7 +355,7 @@ impl VmServices for Bridge {
         self.run
             .check()
             .and_then(|()| self.run.emit(CellOutput::Json { value }))
-            .map_err(|e| CapabilityError::new(e.to_string()))
+            .map_err(CellError::capability_error)
     }
     async fn invoke(
         &self,

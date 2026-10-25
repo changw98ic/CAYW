@@ -1,5 +1,8 @@
 use crate::{Failure, Result, options::Connection};
-use cayw_ai::CancellationToken;
+use cayw_ai::{
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Model, ModelRequest,
+    Provider, StopReason,
+};
 use cayw_core::EventRecord;
 use cayw_ipc::{Client, ClientConfig};
 use cayw_runtime::{
@@ -7,7 +10,28 @@ use cayw_runtime::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+const UNCONFIGURED_PROVIDER: &str = "unconfigured";
+const UNCONFIGURED_MODEL: &str = "unconfigured";
+
+/// The Runtime contract always needs a provider. Query and control commands
+/// never stream it. Streaming fails explicitly instead of inventing model output.
+struct UnconfiguredProvider;
+
+impl Provider for UnconfiguredProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let start = AssistantMessage::new(&request.model);
+        let error = start.clone().failure(
+            StopReason::Error,
+            "model configuration is required for model execution",
+        );
+        Box::pin(futures::stream::iter([
+            AssistantEvent::Start { message: start },
+            AssistantEvent::Error { message: error },
+        ]))
+    }
+}
 
 pub enum Api {
     Sdk(Runtime),
@@ -19,37 +43,67 @@ pub struct Connections {
     pub metadata: Value,
 }
 impl Connections {
-    pub async fn open(connection: &Connection) -> Result<Self> {
+    /// `needs_model` is true only for commands that can execute a model turn.
+    /// Query and control commands open the same persisted Runtime without
+    /// requiring a model object or reading the selected credential.
+    pub async fn open(connection: &Connection, needs_model: bool) -> Result<Self> {
         match connection {
             Connection::Sdk {
                 db,
                 workspace,
                 config,
             } => {
-                let path = config.as_ref().ok_or_else(|| {
-                    Failure::invalid("model configuration is required in --config")
-                })?;
-                let headless = HeadlessConfig::load(path)?;
-                let selected = headless.model().cloned().ok_or_else(|| {
-                    Failure::invalid("model configuration is required in --config")
-                })?;
-                let config = headless.into_runtime_config()?;
-                let configured = selected.build()?;
-                let model_configuration = serde_json::to_value(&selected)?;
-                let model = configured.model;
-                let provider = configured.provider;
+                let headless = match config {
+                    Some(path) => HeadlessConfig::load(path)?,
+                    None => HeadlessConfig::default(),
+                };
+                let selected = headless.model().cloned();
+                let runtime = headless.into_runtime_config()?;
+                let (provider, model, model_configuration, requested_model, model_execution) =
+                    if needs_model {
+                        let selected = selected.ok_or_else(|| {
+                            Failure::invalid("model configuration is required for prompt")
+                        })?;
+                        let configured = selected.build()?;
+                        (
+                            configured.provider,
+                            configured.model,
+                            serde_json::to_value(&selected)?,
+                            Some(selected.id().to_owned()),
+                            "configured",
+                        )
+                    } else {
+                        let configuration = selected
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()?
+                            .unwrap_or(Value::Null);
+                        (
+                            Arc::new(UnconfiguredProvider) as Arc<dyn Provider>,
+                            Model::new(UNCONFIGURED_PROVIDER, UNCONFIGURED_MODEL),
+                            configuration,
+                            selected.as_ref().map(|config| config.id().to_owned()),
+                            "not_requested",
+                        )
+                    };
                 let execute = Runtime::open(
                     db,
                     workspace,
                     provider.clone(),
                     model.clone(),
-                    config.clone(),
+                    runtime.clone(),
                 )?;
-                let observe = Runtime::open(db, workspace, provider, model.clone(), config)?;
+                let observe = Runtime::open(db, workspace, provider, model, runtime)?;
                 Ok(Self {
                     execute: Api::Sdk(execute),
                     observe: Api::Sdk(observe),
-                    metadata: json!({"type":"runtime","mode":"sdk","model_configuration":model_configuration,"requested_model":model.id}),
+                    metadata: json!({
+                        "type":"runtime",
+                        "mode":"sdk",
+                        "model_configuration":model_configuration,
+                        "requested_model":requested_model,
+                        "model_execution":model_execution
+                    }),
                 })
             }
             Connection::Ipc { address, token_env } => {
@@ -144,12 +198,25 @@ impl Api {
                 )
                 .await?),
             Self::Ipc(c) => {
-                rpc(
-                    c,
-                    "session.events",
-                    json!({"session_id":id,"after":after,"limit":limit,"wait_ms":wait_ms}),
-                )
-                .await
+                let mut limit = limit;
+                loop {
+                    match c
+                        .request(
+                            "session.events",
+                            json!({"session_id":id,"after":after,"limit":limit,"wait_ms":wait_ms}),
+                        )
+                        .await
+                    {
+                        Ok(page) => return Ok(serde_json::from_value(page)?),
+                        // Only this read may repeat, at the same unconsumed cursor.
+                        Err(error)
+                            if error.code == "response_too_large_outcome_unknown" && limit > 1 =>
+                        {
+                            limit /= 2;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
         }
     }

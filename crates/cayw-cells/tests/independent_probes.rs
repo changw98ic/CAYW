@@ -233,25 +233,30 @@ fn setup() -> (
 }
 
 #[tokio::test]
-async fn requirement_free_globals_cannot_be_overwritten() {
+async fn requirement_free_globals_are_writable_and_isolated_between_cells() {
     let (_dir, _journal, host, cells) = setup();
     let page = done(
         &cells,
-        "new_global = 42; new_global = 43; text(tostring(new_global)); cayw.call('write', {})",
+        "new_global = 42; _G.new_global = 43; function global_value() return new_global end; text(tostring(global_value())); cayw.call('write', {})",
     )
     .await;
-    eprintln!(
-        "global probe status={:?}, writes={}, outputs={:?}",
-        page.status,
-        host.writes.load(Ordering::SeqCst),
-        cells.record(&page.cell_id).unwrap().outputs
-    );
+    assert_eq!(page.status, CellStatus::Completed);
+    assert_eq!(host.writes.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        &cells.record(&page.cell_id).unwrap().outputs[0].output,
+        CellOutput::Text { text } if text == "43"
+    ));
+    let next = done(
+        &cells,
+        "assert(new_global == nil and _G.new_global == nil and global_value == nil); text('isolated')",
+    )
+    .await;
+    assert_eq!(next.status, CellStatus::Completed);
+    assert!(matches!(
+        &cells.record(&next.cell_id).unwrap().outputs[0].output,
+        CellOutput::Text { text } if text == "isolated"
+    ));
     cells.close().await;
-    assert_eq!(
-        page.status,
-        CellStatus::Failed,
-        "unrestricted fresh globals executed and were overwritten"
-    );
 }
 
 #[tokio::test]

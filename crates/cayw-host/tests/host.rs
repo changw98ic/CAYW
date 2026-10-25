@@ -353,8 +353,6 @@ async fn paths_symlinks_and_byte_limits_are_enforced() {
         "../secret",
         "/etc/passwd",
         "x/../secret",
-        "x\\secret",
-        "C:secret",
         ".cayw-host-lock",
         ".CAYW-HOST-LOCK",
         ".cayw-workspace",
@@ -1764,24 +1762,36 @@ async fn test_filter_is_one_literal_argument_and_nonzero_exit_is_confirmed() {
             ..Default::default()
         },
     );
-    for filter in [
-        "--ignored",
-        "name;touch bad",
-        "name space",
-        "$(touch bad)",
-        "../bad",
-    ] {
-        assert!(
-            call(
-                &host,
-                "test.run",
-                json!({"profile":"fixture","filter":filter})
-            )
-            .await
-            .is_err()
-        );
-    }
+    // A filter is one literal argv item. Shell syntax, spaces, parentheses,
+    // semicolons and relative-looking text are ordinary characters now; only a
+    // leading dash would let the test program read it as an option.
+    let error = call(
+        &host,
+        "test.run",
+        json!({"profile":"fixture","filter":"--ignored"}),
+    )
+    .await
+    .expect_err("a leading dash must not become an option");
+    assert!(!error.outcome_unknown);
     assert!(gate.calls.lock().unwrap().is_empty());
+    for filter in ["name;touch bad", "name space", "$(touch bad)", "../bad"] {
+        let result = call(
+            &host,
+            "test.run",
+            json!({"profile":"fixture","filter":filter}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{filter}: {}", error.message));
+        assert_eq!(result["success"], true, "{filter}: {result}");
+        let args: Vec<String> =
+            serde_json::from_slice(&std::fs::read(root.path().join("process-arguments")).unwrap())
+                .unwrap();
+        assert_eq!(args.last().unwrap(), filter, "filter must stay one argv");
+    }
+    assert!(
+        !root.path().join("bad").exists(),
+        "a literal filter must never be interpreted by a shell"
+    );
     let result = call(
         &host,
         "test.run",

@@ -64,6 +64,13 @@ struct Session {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ContentInspect {
+    session_id: String,
+    task_id: Option<String>,
+    name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Prompt {
     session_id: String,
     text: String,
@@ -146,6 +153,35 @@ struct RequestStatus {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Scheduled {
+    session_id: String,
+    text: String,
+    #[serde(default)]
+    images: Vec<ImageInput>,
+    intent: crate::TaskIntent,
+    priority: crate::TaskPriority,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceTask {
+    session_id: String,
+    text: String,
+    #[serde(default)]
+    images: Vec<ImageInput>,
+    intent: crate::TaskIntent,
+    priority: crate::TaskPriority,
+    resources: crate::TaskResources,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Scheduler {
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default = "page_limit")]
+    limit: usize,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RequestEvents {
     task_id: String,
     #[serde(default)]
@@ -221,6 +257,43 @@ impl RpcHandler for Runtime {
             "runtime.health" => {
                 let _: Empty = parse(params)?;
                 encode(self.health()?)
+            }
+            "runtime.resources" => {
+                let _: Empty = parse(params)?;
+                encode(self.resources()?)
+            }
+            "task.enqueue_with_resources" => {
+                let p: ResourceTask = parse(params)?;
+                encode(self.enqueue_with_resources(
+                    &p.session_id,
+                    TaskInput {
+                        text: p.text,
+                        images: p.images,
+                    },
+                    p.intent,
+                    p.priority,
+                    p.resources,
+                )?)
+            }
+            "runtime.scheduler" => {
+                let p: Scheduler = parse(params)?;
+                encode(self.scheduler_page(p.after.as_deref(), p.limit)?)
+            }
+            "task.enqueue_scheduled" => {
+                let p: Scheduled = parse(params)?;
+                encode(self.enqueue_scheduled(
+                    &p.session_id,
+                    TaskInput {
+                        text: p.text,
+                        images: p.images,
+                    },
+                    p.intent,
+                    p.priority,
+                )?)
+            }
+            "content.inspect" => {
+                let p: ContentInspect = parse(params)?;
+                encode(self.content_inspect(&p.session_id, p.task_id.as_deref(), &p.name)?)
             }
             "session.create" => {
                 let p: Create = parse(params)?;
@@ -368,7 +441,7 @@ impl RpcHandler for Runtime {
                 let p: DecideRequest = parse(params)?;
                 // Validate before claiming evaluation: rejected JSON must not
                 // leave a request waiting for an inaccessible private ticket.
-                p.validate(&self.inner.config.request_limits)?;
+                p.validate(&self.request_limits())?;
                 let ticket = self.request_evaluate(&p.task_id, &p.request_id, "rpc-user")?;
                 // These remain separate durable transitions. Cancellation,
                 // expiry or a failed write can reject the original decision;

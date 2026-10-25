@@ -14,7 +14,7 @@ use std::{
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use uuid::Uuid;
@@ -24,6 +24,8 @@ const ATTEMPT_EVENT_RESERVE: u64 = 1;
 const REQUEST_EVENT_RESERVE: u64 = 6; // submitted, evaluation, decision, terminal (+ margin)
 const TASK_RESERVE: u64 = (TASK_BYTES as u64) * 3;
 const REQUEST_RESERVE: u64 = (RECORD_BYTES as u64) * 8;
+// Defensive bound for explicit authority inspection, not an admission quota.
+const INSPECTION_TASKS: usize = 1_000_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS request_meta (
@@ -53,6 +55,14 @@ CREATE TRIGGER IF NOT EXISTS request_tasks_no_delete BEFORE DELETE ON request_ta
  BEGIN SELECT RAISE(ABORT,'task tombstones are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS capability_requests_no_delete BEFORE DELETE ON capability_requests
  BEGIN SELECT RAISE(ABORT,'request tombstones are immutable'); END;
+CREATE TABLE IF NOT EXISTS request_config_history (
+ id TEXT PRIMARY KEY, at_ms INTEGER NOT NULL CHECK(at_ms>=0),
+ actor TEXT NOT NULL, reason TEXT NOT NULL, previous BLOB NOT NULL, next BLOB NOT NULL
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS request_config_history_no_update BEFORE UPDATE ON request_config_history
+ BEGIN SELECT RAISE(ABORT,'request configuration history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS request_config_history_no_delete BEFORE DELETE ON request_config_history
+ BEGIN SELECT RAISE(ABORT,'request configuration history is immutable'); END;
 ";
 
 // Repair preparation and activation have independent durable records. A new
@@ -119,7 +129,10 @@ pub struct RequestStore {
     connection: Mutex<Connection>,
     authority: AuthorityFence,
     authority_id: String,
-    config: RequestConfig,
+    /// Operational limits of this handle. A trusted adjustment replaces it and
+    /// is durably persisted before this value changes. Other handles that were
+    /// opened with an older configuration fail closed with PolicyMismatch.
+    config: RwLock<RequestConfig>,
     clock: Arc<dyn Clock>,
 }
 impl RequestStore {
@@ -233,8 +246,11 @@ impl RequestStore {
             let prepared_result = (|| -> Result<RepairData> {
                 fence.write(&current.authority_id, now, Phase::Pending)?;
                 tx.execute_batch(REPAIR_SCHEMA)?;
-                let inspection_bytes =
-                    bounded_json(&request.inspection, repair_record_limit(&config)?)?.len() as u64;
+                let inspection_bytes = bounded_json(
+                    &request.inspection,
+                    repair_record_limit(current.tasks.len())?,
+                )?
+                .len() as u64;
                 let repair_bytes = inspection_bytes
                     .checked_mul(2)
                     .and_then(|n| n.checked_add(16 * 1024))
@@ -279,7 +295,10 @@ impl RequestStore {
                     prepared_digest: facts_digest(&tx)?,
                     at_ms: now,
                 };
-                let bytes = bounded_json(&repair, repair_record_limit(&config)?)?;
+                let bytes = bounded_json(
+                    &repair,
+                    repair_record_limit(request.inspection.tasks.len())?,
+                )?;
                 tx.execute(
                     "INSERT INTO request_authority_repairs VALUES(?1,?2,?3,?4)",
                     params![request.repair_id, current.authority_id, next_id, bytes],
@@ -431,6 +450,17 @@ impl RequestStore {
                     params![configuration, authority_id],
                 )?;
             }
+            // Task-count and state reservations are operational projections of
+            // unfinished tasks, not a lifetime admission count. Recomputing
+            // them on open migrates databases created by the earlier
+            // lifetime-counter semantics without deleting any task, request,
+            // event, or decision tombstone. Reservation growth is deterministic
+            // from the retained projection, so repeated opens agree.
+            let (active, reserved_bytes) = live_usage(&tx)?;
+            tx.execute(
+                "UPDATE request_meta SET task_count=?1,reserved_bytes=?2 WHERE singleton=1",
+                params![active, sql_integer(reserved_bytes)?],
+            )?;
             tx.commit()?;
             Ok(connection)
         })();
@@ -465,24 +495,186 @@ impl RequestStore {
             connection: Mutex::new(connection),
             authority,
             authority_id,
-            config,
+            config: RwLock::new(config),
             clock,
         })
     }
+    /// Read the durable operational configuration without opening the admission
+    /// path or changing any fact. A trusted host can use this to open with the
+    /// persisted limits after a previous process changed them.
+    pub fn persisted_config(path: impl AsRef<Path>) -> Result<RequestConfig> {
+        let path = path.as_ref();
+        if !path.is_absolute() || path.file_name().is_none() || path == Path::new(":memory:") {
+            return Err(RequestError::InvalidInput(
+                "RequestStore requires an absolute SQLite file path".into(),
+            ));
+        }
+        let path = path
+            .parent()
+            .ok_or_else(|| RequestError::InvalidInput("database parent is missing".into()))?
+            .canonicalize()?
+            .join(path.file_name().expect("database filename checked"));
+        let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_millis(
+            RequestConfig::default().sqlite_busy_timeout_ms,
+        ))?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT configuration FROM request_meta WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(RequestError::NotFound)?;
+        let config: RequestConfig = serde_json::from_slice(&bytes)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Open with the persisted operational configuration, then durably apply
+    /// the caller's requested configuration if it differs. This is the
+    /// supported restart path after a trusted adjustment: the caller does not
+    /// have to know the previously persisted limits. The adjustment keeps an
+    /// immutable previous/next history row and fails closed if the caller also
+    /// tries to lower limits below current active usage.
+    pub fn open_with_trusted_adjustment(
+        path: impl AsRef<Path>,
+        config: RequestConfig,
+        actor: &HostActor,
+        reason: &str,
+    ) -> Result<Self> {
+        config.validate()?;
+        // A new database has no persisted configuration to adopt; open creates
+        // it with this configuration exactly like `open`.
+        if !path.as_ref().try_exists()? {
+            return Self::open(path, config);
+        }
+        let stored = Self::persisted_config(&path)?;
+        let store = Self::open(&path, stored)?;
+        if store.config() != config {
+            store.adjust_config(config, actor, reason)?;
+        }
+        Ok(store)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
-    pub fn config(&self) -> &RequestConfig {
-        &self.config
+    /// Current operational configuration. A trusted [`Self::adjust_config`]
+    /// replaces this value only after the new limits are durably persisted.
+    pub fn config(&self) -> RequestConfig {
+        self.config
+            .read()
+            .map(|config| config.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    /// Trusted operational-limit adjustment. The new configuration is validated
+    /// and persisted together with an immutable previous/next history record.
+    /// Limits cannot be lowered below current active usage. Every other handle
+    /// that was opened with the previous configuration fails closed with
+    /// `PolicyMismatch` on its next operation instead of silently admitting
+    /// work under stale limits.
+    pub fn adjust_config(
+        &self,
+        next: RequestConfig,
+        actor: &HostActor,
+        reason: &str,
+    ) -> Result<()> {
+        next.validate()?;
+        text(reason)?;
+        let mut guard = self.config.write().map_err(|_| RequestError::Poisoned)?;
+        let current = guard.clone();
+        // The write guard serializes adjustment against handles of this store;
+        // the operation itself still checks the durable configuration so an
+        // independent process's adjustment is never overwritten silently.
+        self.transaction_with(&current, |tx, now, _| {
+            let (active, reserved_events, reserved_bytes): (i64, i64, i64) = tx.query_row(
+                "SELECT task_count,reserved_events,reserved_bytes FROM request_meta WHERE singleton=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            if u64::from(next.max_tasks) < read_unsigned(&active)?
+                || next.max_events < read_unsigned(&reserved_events)?
+                || next.max_state_bytes < read_unsigned(&reserved_bytes)?
+            {
+                return Err(RequestError::InvalidInput(
+                    "configuration limits cannot be lowered below current active usage".into(),
+                ));
+            }
+            let previous = bounded_json(&current, 8192)?;
+            let next_bytes = bounded_json(&next, 8192)?;
+            tx.execute(
+                "UPDATE request_meta SET configuration=?1 WHERE singleton=1",
+                [&next_bytes],
+            )?;
+            tx.execute(
+                "INSERT INTO request_config_history VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    sql_integer(now)?,
+                    actor.as_str(),
+                    reason,
+                    previous,
+                    next_bytes
+                ],
+            )?;
+            Ok(())
+        })?;
+        *guard = next;
+        Ok(())
+    }
+
+    /// Host-only immutable history of operational-limit adjustments, oldest
+    /// first. The original audit rows are retained exactly as written.
+    pub fn config_history(&self) -> Result<Vec<ConfigAdjustment>> {
+        self.transaction(|tx, _, _| {
+            let mut statement = tx.prepare(
+                "SELECT at_ms,actor,reason,previous,next FROM request_config_history ORDER BY at_ms,id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })?;
+            let mut history = Vec::new();
+            for row in rows {
+                let (at_ms, actor, reason, previous, next) = row?;
+                history.push(ConfigAdjustment {
+                    at_ms: read_unsigned(&at_ms)?,
+                    actor,
+                    reason,
+                    previous: serde_json::from_slice(&previous)?,
+                    next: serde_json::from_slice(&next)?,
+                });
+            }
+            Ok(history)
+        })
     }
 
     fn transaction<T>(
         &self,
-        operation: impl FnOnce(&Transaction<'_>, u64) -> Result<T>,
+        operation: impl FnOnce(&Transaction<'_>, u64, &RequestConfig) -> Result<T>,
+    ) -> Result<T> {
+        // Keep the same lock order as adjustment: configuration, authority,
+        // then connection. An adjustment cannot replace this configuration
+        // between the snapshot and its durable transaction check.
+        let config = self.config.read().map_err(|_| RequestError::Poisoned)?;
+        self.transaction_with(&config, operation)
+    }
+    fn transaction_with<T>(
+        &self,
+        config: &RequestConfig,
+        operation: impl FnOnce(&Transaction<'_>, u64, &RequestConfig) -> Result<T>,
     ) -> Result<T> {
         let mut fence = self
             .authority
-            .lock(Duration::from_millis(self.config.sqlite_busy_timeout_ms))?;
+            .lock(Duration::from_millis(config.sqlite_busy_timeout_ms))?;
         let mut connection = self.connection.lock().map_err(|_| {
             self.authority.stop();
             RequestError::Poisoned
@@ -550,16 +742,23 @@ impl RequestStore {
             }
             observed = observed.max(current);
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (last, id, stopped): (i64, String, i64) = tx.query_row(
-                "SELECT last_now_ms,authority_id,authority_stopped FROM request_meta WHERE singleton=1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
+            let (last, id, stopped, stored_configuration): (i64, String, i64, Vec<u8>) = tx
+                .query_row(
+                    "SELECT last_now_ms,authority_id,authority_stopped,configuration FROM request_meta WHERE singleton=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
             if id != self.authority_id
                 || stopped != 0
                 || read_unsigned(&last)? != record.last_now_ms
             {
                 return Err(RequestError::AuthorityStopped);
+            }
+            // Operational limits are part of the durable policy. A handle that
+            // was opened with a configuration another trusted adjustment has
+            // replaced must fail closed instead of admitting with stale limits.
+            if stored_configuration != bounded_json(config, 8192)? {
+                return Err(RequestError::PolicyMismatch);
             }
             tx.execute(
                 "UPDATE request_meta SET last_now_ms=?1 WHERE singleton=1",
@@ -568,7 +767,7 @@ impl RequestStore {
             // Keep the IMMEDIATE lock through the clock commit. Only projection
             // and events are rolled back on a rejected business operation.
             tx.execute_batch("SAVEPOINT request_operation")?;
-            let result = operation(&tx, observed);
+            let result = operation(&tx, observed, config);
             if result.is_err()
                 && !matches!(
                     result,
@@ -619,7 +818,7 @@ impl RequestStore {
     ) -> Result<()> {
         identity.validate()?;
         intent.validate()?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, config| {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM request_tasks WHERE id=?1)",
                 [&identity.task_id],
@@ -633,10 +832,10 @@ impl RequestStore {
                 [],
                 |r| r.get(0),
             )?;
-            if count >= self.config.max_tasks {
+            if count >= config.max_tasks {
                 return Err(RequestError::Budget);
             }
-            reserve(tx, &self.config, TASK_EVENT_RESERVE, TASK_RESERVE)?;
+            reserve(tx, config, TASK_EVENT_RESERVE, TASK_RESERVE)?;
             let task = TaskData {
                 identity: identity.clone(),
                 intent,
@@ -679,11 +878,11 @@ impl RequestStore {
         current.validate()?;
         identifier(next_attempt_id)?;
         text(reason)?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, config| {
             let mut task = active_task(tx, current)?;
             if task.attempts.iter().any(|a| a == next_attempt_id) { return Err(RequestError::Stale); }
-            if task.attempts.len() >= self.config.max_attempts_per_task as usize { return Err(RequestError::Budget); }
-            reserve(tx, &self.config, ATTEMPT_EVENT_RESERVE, TASK_BYTES as u64 + 16 * 1024)?;
+            if task.attempts.len() >= config.max_attempts_per_task as usize { return Err(RequestError::Budget); }
+            reserve(tx, config, ATTEMPT_EVENT_RESERVE, TASK_BYTES as u64 + 16 * 1024)?;
             terminalize_all(tx, &task, now, RequestState::Superseded, DecisionKind::Superseded, actor, reason)?;
             task.identity.attempt_id = next_attempt_id.into();
             task.attempts.push(next_attempt_id.into());
@@ -705,7 +904,7 @@ impl RequestStore {
     ) -> Result<TaskState> {
         identity.validate()?;
         text(reason)?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let mut task = identity_task(tx, identity)?;
             match task.state {
                 TaskState::Closing { .. } => return Ok(task.state),
@@ -750,11 +949,12 @@ impl RequestStore {
     ) -> Result<TaskState> {
         identity.validate()?;
         text(reason)?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let mut task = identity_task(tx, identity)?;
             if matches!(task.state, TaskState::Ended { .. }) {
                 return Err(RequestError::Stale);
             }
+            let release = task_reservation(&task);
             terminalize_all(
                 tx,
                 &task,
@@ -780,13 +980,17 @@ impl RequestStore {
                 actor.as_str(),
                 &task.state,
             )?;
+            // A finished task stops running work. Its task count and
+            // conservative active-state reservation return to the operational
+            // pool; its immutable projection and events remain tombstones.
+            release_task_quota(tx, release)?;
             Ok(task.state)
         })
     }
     /// Check the authoritative active task and the exact captured host policy.
     pub fn check_task(&self, identity: &TaskIdentity, catalog: &OperationCatalog) -> Result<()> {
         identity.validate()?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let task = active_task(tx, identity)?;
             check_catalog(&task, catalog)?;
             expire_task(tx, &task, now)?;
@@ -795,7 +999,7 @@ impl RequestStore {
     }
     pub fn task_state(&self, identity: &TaskIdentity) -> Result<TaskState> {
         identity.validate()?;
-        self.transaction(|tx, _| Ok(identity_task(tx, identity)?.state))
+        self.transaction(|tx, _, _| Ok(identity_task(tx, identity)?.state))
     }
 
     /// Record structural validity and purpose/gap claims, never trust claims as a
@@ -816,11 +1020,11 @@ impl RequestStore {
         }
         argument_bounds(&input.arguments)?;
         input.arguments = canonical(&input.arguments);
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, config| {
             let mut task = active_task(tx, identity)?;
             check_catalog(&task, catalog)?;
             expire_task(tx, &task, now)?;
-            if task.request_count >= self.config.max_requests_per_task {
+            if task.request_count >= config.max_requests_per_task {
                 return Err(RequestError::Budget);
             }
             let mut reasons = Vec::new();
@@ -874,9 +1078,12 @@ impl RequestStore {
                         .get("profile")
                         .and_then(Value::as_str)
                         .is_some();
+            // Below-threshold state is only a visibility hint for the host and
+            // model. Any structurally valid request is already evaluable by a
+            // trusted host; this branch never blocks evaluation or grants.
             let state = if !valid {
                 RequestState::Invalid
-            } else if explicit_profile || valid_count >= self.config.repeated_valid_threshold {
+            } else if explicit_profile || valid_count >= config.repeated_valid_threshold {
                 RequestState::AwaitingEvaluation
             } else {
                 RequestState::Requested
@@ -890,7 +1097,7 @@ impl RequestStore {
                 valid_request_count: valid_count,
                 catalog_fingerprint: task.catalog.fingerprint(),
                 created_at_ms: now,
-                request_expires_at_ms: checked_deadline(now, self.config.request_lifetime_ms)?,
+                request_expires_at_ms: checked_deadline(now, config.request_lifetime_ms)?,
                 evaluator: None,
                 evaluation_deadline_ms: None,
                 grant_expires_at_ms: None,
@@ -901,7 +1108,7 @@ impl RequestStore {
                 evaluation_nonce: None,
             };
             let data = bounded_json(&stored, RECORD_BYTES)?;
-            reserve(tx, &self.config, REQUEST_EVENT_RESERVE, REQUEST_RESERVE)?;
+            reserve(tx, config, REQUEST_EVENT_RESERVE, REQUEST_RESERVE)?;
             // A new valid request replaces older requests for exactly this scope;
             // any outstanding evaluator ticket immediately becomes stale.
             if valid {
@@ -945,13 +1152,16 @@ impl RequestStore {
     pub fn status(&self, identity: &TaskIdentity, request_id: &str) -> Result<RequestRecord> {
         identity.validate()?;
         identifier(request_id)?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let task = identity_task(tx, identity)?;
             expire_task(tx, &task, now)?;
             Ok(owned_request(tx, identity, request_id)?.record)
         })
     }
-    /// Start a bounded evaluation, claimed by a trusted host actor. Does not grant.
+    /// Start a bounded evaluation, claimed by a trusted host actor. Does not
+    /// grant. A structurally valid request is evaluable immediately; the repeat
+    /// threshold only changes the informational state (`requested` versus
+    /// `awaiting_evaluation`) and never withholds a ticket from the host.
     pub fn evaluate(
         &self,
         identity: &TaskIdentity,
@@ -960,15 +1170,20 @@ impl RequestStore {
     ) -> Result<EvaluationTicket> {
         identity.validate()?;
         identifier(request_id)?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, config| {
             let task = active_task(tx, identity)?;
             expire_task(tx, &task, now)?;
             let mut request = owned_request(tx, identity, request_id)?;
-            if request.record.state != RequestState::AwaitingEvaluation { return Err(RequestError::Stale); }
+            if !matches!(
+                request.record.state,
+                RequestState::Requested | RequestState::AwaitingEvaluation
+            ) {
+                return Err(RequestError::Stale);
+            }
             let nonce = Uuid::new_v4().to_string();
             request.evaluation_nonce = Some(nonce.clone());
             request.record.evaluator = Some(actor.as_str().into());
-            request.record.evaluation_deadline_ms = Some(checked_deadline(now, self.config.evaluation_timeout_ms)?.min(request.record.request_expires_at_ms));
+            request.record.evaluation_deadline_ms = Some(checked_deadline(now, config.evaluation_timeout_ms)?.min(request.record.request_expires_at_ms));
             request.record.state = RequestState::Evaluating;
             save_request(tx, &request)?;
             event(tx, now, identity, Some(request_id), "evaluation_started", actor.as_str(), &json!({"request_id":request_id,"deadline_ms":request.record.evaluation_deadline_ms}))?;
@@ -983,11 +1198,6 @@ impl RequestStore {
         reason: &str,
     ) -> Result<RequestRecord> {
         text(reason)?;
-        if lifetime_ms == 0 || lifetime_ms > self.config.max_grant_lifetime_ms {
-            return Err(RequestError::InvalidInput(
-                "grant lifetime exceeds host maximum".into(),
-            ));
-        }
         self.finish_evaluation(
             ticket,
             Some(catalog),
@@ -1032,7 +1242,12 @@ impl RequestStore {
         lifetime: Option<u64>,
         reason: &str,
     ) -> Result<RequestRecord> {
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, config| {
+            if lifetime.is_some_and(|ms| ms == 0 || ms > config.max_grant_lifetime_ms) {
+                return Err(RequestError::InvalidInput(
+                    "grant lifetime exceeds host maximum".into(),
+                ));
+            }
             let task = active_task(tx, &ticket.identity)?;
             if let Some(catalog) = catalog { check_catalog(&task, catalog)?; }
             expire_task(tx, &task, now)?;
@@ -1058,7 +1273,7 @@ impl RequestStore {
         identity.validate()?;
         identifier(request_id)?;
         text(reason)?;
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let task = active_task(tx, identity)?;
             expire_task(tx, &task, now)?;
             let mut request = owned_request(tx, identity, request_id)?;
@@ -1081,7 +1296,7 @@ impl RequestStore {
     /// same check in their own transaction, so a scheduler is never required.
     pub fn expire(&self, identity: &TaskIdentity) -> Result<usize> {
         identity.validate()?;
-        self.transaction(|tx, now| expire_task(tx, &identity_task(tx, identity)?, now))
+        self.transaction(|tx, now, _| expire_task(tx, &identity_task(tx, identity)?, now))
     }
     /// Select a real, exact granted request for this call. Unprotected capability
     /// names have no receipt and must use the ordinary upstream permission path.
@@ -1102,7 +1317,7 @@ impl RequestStore {
             ));
         }
         let arguments = canonical(arguments);
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let task = active_task(tx, identity)?;
             check_catalog(&task, catalog)?;
             expire_task(tx, &task, now)?;
@@ -1155,7 +1370,7 @@ impl RequestStore {
         receipt: &AuthorizationReceipt,
         catalog: &OperationCatalog,
     ) -> Result<()> {
-        self.transaction(|tx, now| {
+        self.transaction(|tx, now, _| {
             let task = active_task(tx, &receipt.identity)?;
             check_catalog(&task, catalog)?;
             if receipt.catalog_fingerprint != catalog.fingerprint() {
@@ -1195,7 +1410,7 @@ impl RequestStore {
                 "event page limit must be 1..64".into(),
             ));
         }
-        self.transaction(|tx, _| {
+        self.transaction(|tx, _, config| {
             identity_task(tx, identity)?;
             let mut statement = tx.prepare("SELECT sequence,at_ms,task_id,request_id,kind,actor,payload FROM request_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
             let mut rows = statement.query(params![identity.task_id, sql_integer(after)?, i64::try_from(limit).map_err(|_| RequestError::Budget)?])?;
@@ -1205,7 +1420,7 @@ impl RequestStore {
                 let payload: Vec<u8> = row.get(6)?;
                 let event = RequestEvent { sequence: read_unsigned(&row.get::<_, i64>(0)?)?, at_ms: read_unsigned(&row.get::<_, i64>(1)?)?, task_id: row.get(2)?, request_id: row.get(3)?, kind: row.get(4)?, actor: row.get(5)?, payload: serde_json::from_slice(&payload)? };
                 let size = bounded_json(&event, TASK_BYTES + RECORD_BYTES)?.len().checked_add(usize::from(!events.is_empty())).ok_or(RequestError::Budget)?;
-                if size > self.config.max_result_bytes.saturating_sub(bytes) {
+                if size > config.max_result_bytes.saturating_sub(bytes) {
                     if events.is_empty() { return Err(RequestError::Budget); }
                     break;
                 }
@@ -1316,7 +1531,11 @@ fn inspect_locked(
     let mut rows = statement.query([])?;
     let mut tasks = Vec::new();
     while let Some(row) = rows.next()? {
-        if tasks.len() >= config.max_tasks as usize {
+        // Completed tasks are permanent tombstones, so the operational
+        // `max_tasks` admission limit must not bound inspection. This wider
+        // defensive parse bound only stops a corrupt table from exhausting
+        // memory during explicit recovery.
+        if tasks.len() >= INSPECTION_TASKS {
             return Err(RequestError::Budget);
         }
         let id: String = row.get(0)?;
@@ -1391,8 +1610,8 @@ fn marker_time(marker: &[u8]) -> u64 {
         .ok()
         .map_or(0, |record| record.last_now_ms)
 }
-fn repair_record_limit(config: &RequestConfig) -> Result<usize> {
-    (config.max_tasks as usize)
+fn repair_record_limit(tasks: usize) -> Result<usize> {
+    tasks
         .checked_mul(4096)
         .and_then(|n| n.checked_add(16 * 1024))
         .ok_or(RequestError::Budget)
@@ -1466,9 +1685,14 @@ fn activate_repair(
             "INSERT INTO request_authority_activations VALUES(?1)",
             [&repair.receipt.repair_id],
         )?;
+        // Preparation held a temporary reservation through the activation
+        // commit. Rebuild the unfinished-task projection in this same commit
+        // so completed repairs never become a lifetime admission charge. The
+        // immutable repair and activation records remain retained.
+        let (active, reserved_bytes) = live_usage(&tx)?;
         tx.execute(
-            "UPDATE request_meta SET authority_stopped=0 WHERE singleton=1 AND authority_id=?1",
-            [&repair.receipt.authority_id],
+            "UPDATE request_meta SET authority_stopped=0,task_count=?2,reserved_bytes=?3 WHERE singleton=1 AND authority_id=?1",
+            params![repair.receipt.authority_id, active, sql_integer(reserved_bytes)?],
         )?;
         tx.commit()?;
         #[cfg(test)]
@@ -1492,6 +1716,10 @@ fn activate_repair(
 #[cfg(test)]
 #[path = "authority_recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+#[path = "configuration_tests.rs"]
+mod configuration_tests;
 
 fn persistence_failure(error: &RequestError) -> bool {
     matches!(
@@ -1529,6 +1757,55 @@ fn reserve(tx: &Transaction<'_>, config: &RequestConfig, events: u64, bytes: u64
     tx.execute(
         "UPDATE request_meta SET reserved_events=?1,reserved_bytes=?2 WHERE singleton=1",
         params![sql_integer(next_events)?, sql_integer(next_bytes)?],
+    )?;
+    Ok(())
+}
+/// Conservative state reservation held by one unfinished task. It covers the
+/// original projection, every terminal rewrite, each attempt replacement, and
+/// all request lifecycles recorded in that task. `end_task` returns exactly
+/// this amount, so completed ordinary work does not consume an operational
+/// allowance forever. Terminal tombstones and event rows remain retained.
+fn task_reservation(task: &TaskData) -> u64 {
+    let attempts = task.attempts.len().saturating_sub(1) as u64;
+    let requests = task.request_count as u64;
+    TASK_RESERVE
+        .saturating_add(attempts.saturating_mul(TASK_BYTES as u64 + 16 * 1024))
+        .saturating_add(requests.saturating_mul(REQUEST_RESERVE))
+}
+/// Rebuild the operational counters from the durable task projection. Called
+/// on open so databases from the earlier lifetime-counter semantics migrate
+/// without deleting any audit fact. Terminal tasks hold no reservation.
+fn live_usage(tx: &Transaction<'_>) -> Result<(u32, u64)> {
+    let mut statement = tx.prepare("SELECT data FROM request_tasks ORDER BY id")?;
+    let mut rows = statement.query([])?;
+    let mut active = 0_u32;
+    let mut reserved = 0_u64;
+    while let Some(row) = rows.next()? {
+        let data: Vec<u8> = row.get(0)?;
+        let task: TaskData = serde_json::from_slice(&data)?;
+        if matches!(task.state, TaskState::Active | TaskState::Closing { .. }) {
+            active = active.checked_add(1).ok_or(RequestError::Budget)?;
+            reserved = reserved
+                .checked_add(task_reservation(&task))
+                .ok_or(RequestError::Budget)?;
+        }
+    }
+    Ok((active, reserved))
+}
+/// Return one finished task's count and state reservation to the operational
+/// pool. Saturating arithmetic cannot silently wrap on a migrated projection
+/// whose older reservation was already released or never charged.
+fn release_task_quota(tx: &Transaction<'_>, release: u64) -> Result<()> {
+    let (count, reserved): (i64, i64) = tx.query_row(
+        "SELECT task_count,reserved_bytes FROM request_meta WHERE singleton=1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let count = read_unsigned(&count)?.saturating_sub(1);
+    let reserved = read_unsigned(&reserved)?.saturating_sub(release);
+    tx.execute(
+        "UPDATE request_meta SET task_count=?1,reserved_bytes=?2 WHERE singleton=1",
+        params![sql_integer(count)?, sql_integer(reserved)?],
     )?;
     Ok(())
 }

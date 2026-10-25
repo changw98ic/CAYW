@@ -1,6 +1,6 @@
 //! Host-owned Git capabilities.
 //!
-//! Read commands observe a bounded private snapshot built by `process`. Write
+//! Read commands use a bounded private metadata view built by `process`. Write
 //! commands operate on the real repository held by this host's root after a
 //! stricter structural check: a direct `.git` directory (never a symlink or a
 //! `gitdir:` file), no alternates or common directory, no dangerous local config,
@@ -84,7 +84,7 @@ fn branch_value() -> Value {
     json!({"type":"string", "minLength":1, "maxLength":255})
 }
 fn worktree_name_value() -> Value {
-    json!({"type":"string", "pattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"})
+    string(255)
 }
 
 pub(crate) fn validate_config(config: &HostConfig) -> Result<(), CapabilityError> {
@@ -145,7 +145,7 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<ToolDefinition> {
         ),
         definition(
             "git.blame",
-            "Read line attribution from the private snapshot for one workspace file, optionally from a full commit object ID.",
+            "Read line attribution through the private metadata view for one workspace file, optionally from a full commit object ID.",
             json!({"path":path_value(), "commit":object_id()}),
             &["path"],
         ),
@@ -236,14 +236,15 @@ fn valid_object_id(value: &str) -> bool {
     (value.len() == 40 || value.len() == 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Accept exactly the names Git itself accepts as a local branch short name,
+/// plus the containment and option-injection rules this Host needs. Characters
+/// outside ASCII are valid; Git's own ref-format exclusions are not.
 fn valid_branch_name(name: &str) -> bool {
     if name.is_empty()
-        || name.len() > 255
-        || name == "@"
-        || name.eq_ignore_ascii_case("HEAD")
+        || name.chars().count() > 255
+        || name == "HEAD"
         || name.starts_with('-')
         || name.starts_with('/')
-        || name.starts_with("refs/")
         || name.ends_with('/')
         || name.ends_with('.')
         || name.contains("..")
@@ -252,27 +253,34 @@ fn valid_branch_name(name: &str) -> bool {
     {
         return false;
     }
+    if name.chars().any(|character| {
+        character.is_ascii_control()
+            || matches!(character, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+    }) {
+        return false;
+    }
     for component in name.split('/') {
-        if component.is_empty() || component.starts_with('.') || component.ends_with(".lock") {
+        if component.is_empty()
+            || component.starts_with('.')
+            || component.ends_with(".lock")
+            || component.len() > 255
+        {
             return false;
         }
     }
-    name.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/' | b'@' | b'+')
-    })
+    true
 }
 
+/// A worktree name is one directory component under the fixed in-root
+/// `.cayw-worktrees` directory. This is a directory name, not a Git ref. The
+/// fixed prefix and `--` keep leading punctuation from becoming an option.
 fn valid_worktree_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with('.')
-        && !name.starts_with('-')
-        && !name.contains("..")
-        && !name.ends_with('.')
-        && !name.ends_with(".lock")
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && name.len() <= 255
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.chars().any(char::is_control)
 }
 
 fn stage_paths<'a>(
@@ -678,7 +686,7 @@ async fn write_lock(
 fn write_base_args() -> Vec<String> {
     let mut args = crate::process::git_base_args();
     // Pin the repository to the held working directory. Host callers cannot
-    // supply a git-dir or work-tree, and local core.worktree is rejected.
+    // supply a git-dir or work-tree; these flags override local core.worktree.
     args.push("--git-dir=.git".into());
     args.push("--work-tree=.".into());
     for (key, value) in [
@@ -944,13 +952,17 @@ async fn inspect_local_config(
         if entry.is_empty() {
             continue;
         }
-        let key = entry
-            .split(|byte| *byte == b'\n')
-            .next()
-            .ok_or_else(|| failure("invalid repository config entry"))?;
+        let (key, value) = match entry.iter().position(|byte| *byte == b'\n') {
+            Some(position) => (&entry[..position], Some(&entry[position + 1..])),
+            None => (entry, None),
+        };
         let key =
             std::str::from_utf8(key).map_err(|_| failure("repository config key is not UTF-8"))?;
-        if dangerous_config_key(&key.to_ascii_lowercase()) {
+        let value = value
+            .map(|value| std::str::from_utf8(value))
+            .transpose()
+            .map_err(|_| failure("repository config value is not UTF-8"))?;
+        if dangerous_config_value(&key.to_ascii_lowercase(), value) {
             return Err(failure(format!(
                 "repository config key is refused for host Git writes: {key}"
             )));
@@ -959,31 +971,61 @@ async fn inspect_local_config(
     repo.verify(host)
 }
 
-fn dangerous_config_key(key: &str) -> bool {
-    key.starts_with("include.")
-        || key.starts_with("includeif.")
-        || key.starts_with("filter.")
-        || key.starts_with("credential.")
-        || key.starts_with("gpg.")
-        || key.starts_with("pager.")
-        || key.starts_with("sequence.")
-        || key.starts_with("protocol.")
-        || key == "core.hookspath"
-        || key == "core.fsmonitor"
-        || key == "core.sshcommand"
-        || key == "core.askpass"
-        || key == "core.pager"
-        || key == "core.editor"
-        || key == "core.worktree"
-        || key == "core.alternaterefscommand"
-        || key == "core.gitproxy"
-        || key == "core.attributesfile"
-        || key == "core.excludesfile"
-        || key == "extensions.worktreeconfig"
-        || key == "extensions.partialclone"
-        || key == "commit.template"
-        || key == "diff.external"
-        || (key.starts_with("diff.") && (key.ends_with(".command") || key.ends_with(".textconv")))
+fn boolean_disabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "false" | "no" | "off" | "0"
+        )
+    })
+}
+
+/// Values have the semantics of their own key. For a command or include path,
+/// `false` is a program or filename, not a boolean disable switch. Command-line
+/// overrides neutralize fixed hooks, monitors, pagers and signing settings.
+fn dangerous_config_value(key: &str, value: Option<&str>) -> bool {
+    if key.starts_with("include.") || key.starts_with("includeif.") {
+        return !matches!(value, Some("" | "/dev/null"));
+    }
+    if key.starts_with("filter.") {
+        return (key.ends_with(".clean") || key.ends_with(".smudge") || key.ends_with(".process"))
+            && value != Some("");
+    }
+    if key == "credential.helper" || (key.starts_with("credential.") && key.ends_with(".helper")) {
+        return value != Some("");
+    }
+    if key.starts_with("gpg.") || key.starts_with("sequence.") || key == "core.editor" {
+        return value != Some("");
+    }
+    if key.starts_with("pager.") {
+        return !boolean_disabled(value) && value != Some("cat");
+    }
+    if key == "protocol.allow" || (key.starts_with("protocol.") && key.ends_with(".allow")) {
+        return !value.is_some_and(|value| value.eq_ignore_ascii_case("never"));
+    }
+    match key {
+        // Every write pins these exact values after repository config. No local
+        // value can select a helper, alternate root or ambient attributes file.
+        "core.hookspath"
+        | "core.fsmonitor"
+        | "core.sshcommand"
+        | "core.askpass"
+        | "core.pager"
+        | "core.worktree"
+        | "core.alternaterefscommand"
+        | "core.attributesfile"
+        | "core.excludesfile"
+        | "diff.external" => false,
+        "core.gitproxy" => value != Some("none") && value != Some(""),
+        "extensions.worktreeconfig" => !boolean_disabled(value),
+        "extensions.partialclone" => value != Some(""),
+        "commit.template" => !matches!(value, Some("" | "/dev/null")),
+        _ => {
+            key.starts_with("diff.")
+                && (key.ends_with(".command") || key.ends_with(".textconv"))
+                && value != Some("")
+        }
+    }
 }
 
 fn validate_stage_paths(host: &Host, paths: &[&str]) -> Result<(), CapabilityError> {

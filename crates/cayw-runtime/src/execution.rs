@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cayw_agent::{Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolContext, ToolResult};
 use cayw_ai::{CancellationToken, Message, ToolDefinition};
 use cayw_cells::{CellManager, CellTool};
-use cayw_codemode::CapabilityError;
+use cayw_codemode::{CapabilityError, CapabilityStop};
 use cayw_core::{ApprovalDecision, AttemptLease};
 use futures::FutureExt;
 use serde_json::Value;
@@ -26,13 +26,14 @@ pub(crate) struct RunContext {
     pub task: TaskLease,
     pub cancel: CancellationToken,
     pub scope: Arc<crate::children::RunScope>,
+    pub(crate) activity: crate::scheduler::Activity,
     turns: AtomicUsize,
     pub unknown: Arc<AtomicBool>,
-    /// A model turn failed without cancellation or uncertainty explaining it.
-    /// The run still returns the session view, but the durable task must not
-    /// claim Completed.
+    /// A model turn or trusted capability stopped the execution with a known
+    /// failure. The durable task must not claim Completed.
     pub failed: Arc<AtomicBool>,
     pub failed_reason: Arc<Mutex<Option<String>>>,
+    cells_stopping: AtomicBool,
     persistence_error: Mutex<Option<String>>,
     pub(crate) model_recording_error: Mutex<Option<String>>,
 }
@@ -46,10 +47,12 @@ impl RunContext {
             lease,
             task,
             cancel: CancellationToken::new(),
+            activity: Default::default(),
             turns: AtomicUsize::new(0),
             unknown: Arc::new(AtomicBool::new(false)),
             failed: Arc::new(AtomicBool::new(false)),
             failed_reason: Arc::new(Mutex::new(None)),
+            cells_stopping: AtomicBool::new(false),
             persistence_error: Mutex::new(None),
             model_recording_error: Mutex::new(None),
         }
@@ -76,6 +79,13 @@ impl RunContext {
         }
         if self.unknown.load(Ordering::Acquire) {
             return Err(RuntimeError::NeedsReconciliation);
+        }
+        if self.failed.load(Ordering::Acquire) {
+            return Err(RuntimeError::Worker(
+                lock(&self.failed_reason)
+                    .clone()
+                    .unwrap_or_else(|| "execution stopped with a known failure".into()),
+            ));
         }
         if lock(&self.model_recording_error).is_some() {
             return Err(RuntimeError::Worker(
@@ -118,6 +128,20 @@ impl RunContext {
         lock(&self.failed_reason).get_or_insert_with(|| reason.into());
         self.failed.store(true, Ordering::Release);
     }
+    pub(crate) fn capability_stopped(&self, error: &CapabilityError) {
+        if let Some(stop) = error.stop {
+            // Runtime may stop cells for a deadline or after the run has its
+            // outcome. Their cancellation must not replace that original cause.
+            if stop == CapabilityStop::Cancelled && self.cells_stopping.load(Ordering::Acquire) {
+                return;
+            }
+            lock(&self.failed_reason).get_or_insert_with(|| error.message.clone());
+            self.failed.store(true, Ordering::Release);
+            if stop == CapabilityStop::Cancelled {
+                self.cancel.cancel();
+            }
+        }
+    }
     pub(crate) fn host_event(&self, kind: &str, data: Value) -> Result<(), CapabilityError> {
         self.inner
             .store
@@ -127,8 +151,17 @@ impl RunContext {
         Ok(())
     }
 }
-fn capability_error(error: RuntimeError) -> CapabilityError {
-    CapabilityError::new(error.to_string())
+pub(crate) fn capability_error(error: RuntimeError) -> CapabilityError {
+    match error {
+        RuntimeError::Cancelled => {
+            CapabilityError::stopped(CapabilityStop::Cancelled, error.to_string())
+        }
+        RuntimeError::Budget(_) => {
+            CapabilityError::stopped(CapabilityStop::Budget, error.to_string())
+        }
+        RuntimeError::NeedsReconciliation => CapabilityError::unknown(error.to_string()),
+        _ => CapabilityError::new(error.to_string()),
+    }
 }
 #[async_trait]
 impl cayw_host::PermissionGate for Gate {
@@ -178,6 +211,12 @@ impl AgentTool for DurableTool {
         self.inner.shutdown_grace()
     }
     async fn execute(&self, input: ToolContext) -> Result<ToolResult, String> {
+        let mut activity = crate::scheduler::Activity::model(&self.context, &input.cancel)
+            .await
+            .map_err(|error| error.to_string())?;
+        if input.arguments.get("action").and_then(Value::as_str) == Some("wait") {
+            activity.finish().map_err(|error| error.to_string())?;
+        }
         self.context
             .check(&input.cancel)
             .map_err(|e| e.to_string())?;
@@ -357,14 +396,46 @@ impl Runtime {
         input: crate::TaskInput,
         intent: cayw_requests::TaskIntent,
     ) -> Result<TaskRecord, RuntimeError> {
+        self.enqueue_scheduled(session, input, intent, crate::TaskPriority::Normal)
+    }
+    /// Trusted host priority is fixed when the task is accepted. It is never
+    /// inferred from model output, tool arguments or the prompt text.
+    pub fn enqueue_scheduled(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        intent: cayw_requests::TaskIntent,
+        priority: crate::TaskPriority,
+    ) -> Result<TaskRecord, RuntimeError> {
+        self.enqueue_with_resources(
+            session,
+            input,
+            intent,
+            priority,
+            crate::TaskResources::default(),
+        )
+    }
+    /// Host-declared execution resources are fixed before acceptance. A model
+    /// cannot change this task's declaration or require unsupported guarantees.
+    pub fn enqueue_with_resources(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        intent: cayw_requests::TaskIntent,
+        priority: crate::TaskPriority,
+        resources: crate::TaskResources,
+    ) -> Result<TaskRecord, RuntimeError> {
+        resources.validate(&self.inner.config.resources)?;
         crate::requests::validate_intent(&intent)?;
         input.validate(&self.inner.model, self.inner.config.max_prompt_bytes)?;
         let _coordinate = self.inner.coordination.enter()?;
         self.check_ready(session)?;
-        let task = self.inner.queue.enqueue_input(
+        let task = self.inner.queue.enqueue_with_resources(
             session,
             &input,
             &intent,
+            priority,
+            &resources,
             self.inner.config.max_queued_runs,
         )?;
         self.inner.changed.notify_waiters();
@@ -705,10 +776,12 @@ async fn run_worker(
         task: worker.clone(),
         cancel: cancel.clone(),
         scope: scope.unwrap_or_else(|| Arc::new(crate::children::RunScope::root(&inner))),
+        activity: Default::default(),
         turns: AtomicUsize::new(0),
         unknown: flags.unknown,
         failed: flags.failed,
         failed_reason: flags.reason,
+        cells_stopping: AtomicBool::new(false),
         persistence_error: Mutex::new(None),
         model_recording_error: Mutex::new(None),
     });
@@ -863,6 +936,7 @@ async fn execute_agent(
     let closing = crate::requests::closing(inner, &context.task.id).inspect_err(|error| {
         context.persistence_failed(error);
     });
+    context.cells_stopping.store(true, Ordering::Release);
     let closed = manager.close().await;
     if closed.outcome_unknown {
         context.unknown.store(true, Ordering::Release);
@@ -993,7 +1067,10 @@ async fn execute_with_cells(
         &context.cancel,
         tokio::time::Instant::from_std(context.scope.deadline()),
         || async { context.check(&context.cancel) },
-        || agent.control().abort(),
+        || {
+            context.cells_stopping.store(true, Ordering::Release);
+            agent.control().abort();
+        },
     )
     .await
 }

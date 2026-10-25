@@ -1,4 +1,8 @@
-use crate::{RuntimeError, execution::RunContext, lock};
+use crate::{
+    RuntimeError,
+    execution::{RunContext, capability_error},
+    lock,
+};
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_cells::{CellBackend, CellError, CellExecution, CellIdentity, CellStatus, CellTerminal};
@@ -75,7 +79,7 @@ impl CallScope {
         &self,
         cancel: &CancellationToken,
     ) -> Result<(), CapabilityError> {
-        self.context.check(cancel).map_err(known)?;
+        self.context.check(cancel).map_err(capability_error)?;
         self.request.check(&self.context)?;
         if let Some(authorization) = &lock(&self.state).authorization
             && let Some(grant) = &authorization.grant
@@ -102,7 +106,9 @@ impl CallScope {
         lock(&self.state).started
     }
     pub(crate) fn start(&self) -> Result<(), CapabilityError> {
-        self.context.check(&self.context.cancel).map_err(known)?;
+        self.context
+            .check(&self.context.cancel)
+            .map_err(capability_error)?;
         let mut state = lock(&self.state);
         if state.started || state.settled {
             return Err(CapabilityError::new(
@@ -195,6 +201,9 @@ impl CallScope {
             self.fault_origin.clone(),
         );
         self.context.inner.changed.notify_waiters();
+        if let Err(error) = result {
+            self.context.capability_stopped(error);
+        }
         if result.as_ref().is_err_and(|error| error.outcome_unknown) && state.started {
             self.context.unknown.store(true, Ordering::Release);
             self.context.cancel.cancel();
@@ -429,6 +438,12 @@ impl CellBackend for Backend {
             .map_err(|error| {
                 CellError::Journal(self.context.persistence_failed(error).to_string())
             })?;
+        self.context
+            .activity
+            .cell_created(&self.context, &execution.cell_id)
+            .map_err(|error| {
+                CellError::Journal(self.context.persistence_failed(error).to_string())
+            })?;
         self.context.inner.changed.notify_waiters();
         Ok(())
     }
@@ -441,6 +456,11 @@ impl CellBackend for Backend {
         cancel: CancellationToken,
     ) -> Result<cayw_cells::BackendResponse, CapabilityError> {
         self.verify(execution).map_err(known)?;
+        self.context
+            .activity
+            .resume_cell(&self.context, &execution.cell_id, &cancel)
+            .await
+            .map_err(capability_error)?;
         let cells_sequence = sequence;
         // Cells uses one-based journal intent positions; Core uses zero-based
         // capability keys. The checked mapping is fixed for the entire lifetime.
@@ -505,7 +525,7 @@ impl CellBackend for Backend {
             self.context.admit_call(&arguments)
         })();
         let result = match admission {
-            Err(error) => Err(known(error)),
+            Err(error) => Err(capability_error(error)),
             Ok(()) if crate::requests::is_tool(name) && self.requests.is_some() => {
                 crate::requests::invoke_tool(
                     self.requests.as_ref().expect("request task checked"),
@@ -521,6 +541,9 @@ impl CellBackend for Backend {
             }
             Ok(()) if crate::collaboration::is_tool(name) => {
                 crate::collaboration::invoke(&scope, &self.base, arguments, cancel).await
+            }
+            Ok(()) if crate::content::is_tool(name) => {
+                crate::content::invoke(&scope, &self.base, arguments, cancel).await
             }
             Ok(())
                 if crate::children::is_capability(name)
@@ -650,6 +673,24 @@ impl CellBackend for Backend {
                 "terminal": terminal,
             }),
         );
+        self.context
+            .activity
+            .cell_finished(&self.context, &execution.cell_id)
+            .map_err(|error| {
+                CellError::Journal(self.context.persistence_failed(error).to_string())
+            })?;
+        if let Some(stop) = terminal
+            .stop
+            .filter(|stop| *stop != cayw_codemode::CapabilityStop::Exited)
+        {
+            self.context.capability_stopped(&CapabilityError::stopped(
+                stop,
+                terminal
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "cell execution stopped".into()),
+            ));
+        }
         self.context.inner.changed.notify_waiters();
         Ok(())
     }

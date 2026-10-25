@@ -4,8 +4,8 @@ use cayw_core::{CoreEvent, SessionState};
 use cayw_host::{Profile, ProfileKind};
 use cayw_requests::HostActor;
 use cayw_runtime::{
-    CancelTarget, ProcessCleanupInspection, Runtime, RuntimeConfig, RuntimeError, ScopedPermission,
-    TaskState,
+    CancelTarget, ProcessCleanupInspection, ResourcePolicy, Runtime, RuntimeConfig, RuntimeError,
+    ScopedPermission, TaskInput, TaskPriority, TaskRecord, TaskResources, TaskState,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
@@ -48,6 +48,63 @@ fn settings(root: &Path) -> RuntimeConfig {
         json!({"profile":"tree"}),
     )];
     config
+}
+fn resource_settings(mut config: RuntimeConfig) -> RuntimeConfig {
+    config.resources = ResourcePolicy {
+        max_declared_memory_bytes: 100,
+    };
+    config
+}
+fn enqueue_resources(runtime: &Runtime, session: &str, text: &str) -> TaskRecord {
+    runtime
+        .enqueue_with_resources(
+            session,
+            TaskInput {
+                text: text.into(),
+                images: vec![],
+            },
+            cayw_requests::TaskIntent::General,
+            TaskPriority::Normal,
+            TaskResources {
+                declared_memory_bytes: 80,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+fn assert_resources(runtime: &Runtime, original: &TaskRecord, reserved: bool) {
+    let view = runtime.resources().unwrap();
+    assert_eq!(view.policy.max_declared_memory_bytes, 100);
+    assert_eq!(view.usage.max_declared_memory_bytes, 100);
+    assert_eq!(
+        view.usage.reserved_declared_memory_bytes,
+        if reserved { 80 } else { 0 }
+    );
+    assert_eq!(view.usage.holding_tasks, usize::from(reserved));
+    let task = runtime.task(&original.id).unwrap();
+    assert_eq!(task.resources.declared_memory_bytes, 80);
+    assert_eq!(task.id, original.id);
+    assert_eq!(task.session_id, original.session_id);
+    assert_eq!(task.worker_id, original.worker_id);
+    assert_eq!(task.attempt_id, original.attempt_id);
+    assert_eq!(task.holds_slot, reserved);
+    if reserved {
+        assert_eq!(task.fence, original.fence);
+    }
+    eprintln!(
+        "PROCESS_RESOURCE_STATE {}",
+        json!({"task":task,"usage":view.usage})
+    );
+}
+fn open_resource(root: &Path) -> Runtime {
+    Runtime::open(
+        root.join("session.db"),
+        root.join("workspace"),
+        Arc::new(ProfileProvider),
+        Model::new("fixture", "resource-process-owner"),
+        resource_settings(settings(root)),
+    )
+    .unwrap()
 }
 fn open(root: &Path) -> Runtime {
     Runtime::open(
@@ -617,8 +674,8 @@ async fn started_registration_failure_still_cleans_the_spawned_process_and_keeps
 async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the_slot() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
-    let rt = open(dir.path());
-    let peer = open(dir.path());
+    let rt = open_resource(dir.path());
+    let peer = open_resource(dir.path());
     let id = rt.create(None).unwrap().id;
     let other = rt.create(None).unwrap().id;
     let db = rusqlite::Connection::open(dir.path().join("session.db")).unwrap();
@@ -630,7 +687,7 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
         BEGIN SELECT RAISE(ABORT, 'injected process identity cleanup recording failure'); END;",
     )
     .unwrap();
-    let admitted = rt.enqueue(&id, "record a started process tree").unwrap();
+    let admitted = enqueue_resources(&rt, &id, "record a started process tree");
     let worker = {
         let rt = rt.clone();
         let task_id = admitted.id.clone();
@@ -644,7 +701,13 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
         live(&leader) && live(&leaf),
         "the fixture tree must really be running before its record is denied"
     );
+    let original_processes = wait_recorded_and_observed(
+        dir.path(),
+        &[leader.trim().parse().unwrap(), leaf.trim().parse().unwrap()],
+    )
+    .await;
     let task = rt.task(&admitted.id).unwrap();
+    assert_resources(&peer, &task, true);
     assert!(peer.cancel(&task.cancel_target()).unwrap());
     let error = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
@@ -681,6 +744,17 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
         "a denied cleanup record must not be written as stopped"
     );
     // The slot is retained and no capacity is released or reused.
+    assert!(original_processes.iter().all(|identity| matches!(
+        verify_incarnation(identity, "resource-cleanup-denied"),
+        Incarnation::NotAlive(_)
+    )));
+    assert_resources(&peer, &task, true);
+    let reopened = open_resource(dir.path());
+    assert_resources(&reopened, &task, true);
+    assert_eq!(
+        reopened.task(&task.id).unwrap(),
+        peer.task(&task.id).unwrap()
+    );
     assert_eq!(rt.task(&task.id).unwrap().state, TaskState::Draining);
     assert_eq!(peer.health().unwrap().running, 1);
     assert!(matches!(
@@ -707,6 +781,7 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
     // the conservative contract, and it must never silently auto-replay.
     db.execute_batch("DROP TRIGGER fail_process_identity_stop")
         .unwrap();
+    assert_resources(&reopened, &task, true);
     assert!(rt.drain_task_processes(&task.id).await.is_err());
     assert_eq!(rt.task(&task.id).unwrap().state, TaskState::Draining);
     assert_eq!(rt.health().unwrap().running, 1);
@@ -728,6 +803,7 @@ async fn failed_identity_record_still_cleans_the_real_process_tree_and_keeps_the
     let tasks = rt.tasks(&id).unwrap();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, task.id);
+    assert_resources(&reopened, &task, true);
 }
 
 #[tokio::test]
@@ -780,24 +856,24 @@ async fn cancelled_profile_joins_process_tree_before_freeing_the_task_slot() {
 async fn dropping_prompt_keeps_the_owned_worker_until_process_cleanup_finishes() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
-    let rt = open(dir.path());
-    let peer = open(dir.path());
+    let rt = open_resource(dir.path());
+    let peer = open_resource(dir.path());
     let id = rt.create(None).unwrap().id;
+    let admitted = enqueue_resources(&rt, &id, "drop the caller, not process ownership");
     let worker = {
         let rt = rt.clone();
-        let id = id.clone();
-        tokio::spawn(async move {
-            rt.prompt(
-                &id,
-                "drop the caller, not process ownership",
-                CancellationToken::new(),
-            )
-            .await
-        })
+        let task_id = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task_id, CancellationToken::new()).await })
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
+    let original = wait_recorded_and_observed(
+        dir.path(),
+        &[leader.trim().parse().unwrap(), leaf.trim().parse().unwrap()],
+    )
+    .await;
     let task = rt.tasks(&id).unwrap().remove(0);
+    assert_resources(&peer, &task, true);
     assert_eq!(peer.health().unwrap().running, 1);
     worker.abort();
     assert!(worker.await.unwrap_err().is_cancelled());
@@ -806,6 +882,11 @@ async fn dropping_prompt_keeps_the_owned_worker_until_process_cleanup_finishes()
         .unwrap();
     wait_stopped(&leader).await;
     wait_stopped(&leaf).await;
+    assert!(original.iter().all(|identity| matches!(
+        verify_incarnation(identity, "resource-caller-drop"),
+        Incarnation::NotAlive(_)
+    )));
+    assert_resources(&peer, &task, false);
     assert_eq!(peer.health().unwrap().running, 0);
     let audit = peer.audit(&id, 0, 1000).unwrap();
     let stopped = audit
@@ -924,8 +1005,8 @@ async fn provider_panic_preserves_unknown_effects_and_drains_the_original_proces
 async fn failed_cleanup_record_keeps_capacity_until_the_original_owner_retries() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
-    let rt = open(dir.path());
-    let peer = open(dir.path());
+    let rt = open_resource(dir.path());
+    let peer = open_resource(dir.path());
     let id = rt.create(None).unwrap().id;
     let other = rt.create(None).unwrap().id;
     let db = rusqlite::Connection::open(dir.path().join("session.db")).unwrap();
@@ -935,9 +1016,7 @@ async fn failed_cleanup_record_keeps_capacity_until_the_original_owner_retries()
         BEGIN SELECT RAISE(ABORT, 'injected process cleanup recording failure'); END;",
     )
     .unwrap();
-    let admitted = rt
-        .enqueue(&id, "retain the original process owner")
-        .unwrap();
+    let admitted = enqueue_resources(&rt, &id, "retain the original process owner");
     let worker = {
         let rt = rt.clone();
         let task_id = admitted.id.clone();
@@ -945,7 +1024,13 @@ async fn failed_cleanup_record_keeps_capacity_until_the_original_owner_retries()
     };
     let leader = marker(&dir.path().join("leader.pid")).await;
     let leaf = marker(&dir.path().join("leaf.pid")).await;
+    let original_processes = wait_recorded_and_observed(
+        dir.path(),
+        &[leader.trim().parse().unwrap(), leaf.trim().parse().unwrap()],
+    )
+    .await;
     let task = rt.task(&admitted.id).unwrap();
+    assert_resources(&peer, &task, true);
     peer.cancel(&task.cancel_target()).unwrap();
     let error = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
@@ -966,6 +1051,17 @@ async fn failed_cleanup_record_keeps_capacity_until_the_original_owner_retries()
     ));
     wait_stopped(&leader).await;
     wait_stopped(&leaf).await;
+    assert!(original_processes.iter().all(|identity| matches!(
+        verify_incarnation(identity, "resource-scope-record-denied"),
+        Incarnation::NotAlive(_)
+    )));
+    assert_resources(&peer, &task, true);
+    let reopened = open_resource(dir.path());
+    assert_resources(&reopened, &task, true);
+    assert_eq!(
+        reopened.task(&task.id).unwrap(),
+        peer.task(&task.id).unwrap()
+    );
     assert_eq!(rt.task(&task.id).unwrap().state, TaskState::Draining);
     assert_eq!(peer.health().unwrap().running, 1);
     assert!(matches!(
@@ -1010,9 +1106,11 @@ async fn failed_cleanup_record_keeps_capacity_until_the_original_owner_retries()
         1,
         "drain alone must not release admission"
     );
+    assert_resources(&reopened, &task, true);
     let recovered = peer.recover(&id).unwrap();
     assert!(recovered.attempt.is_none());
     assert_eq!(peer.health().unwrap().running, 0);
+    assert_resources(&reopened, &task, false);
     let audit = peer.audit(&id, 0, 1000).unwrap();
     let stopped: Vec<_> = audit
         .iter()
@@ -1720,11 +1818,11 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
                 dir.path().join("workspace"),
                 Arc::new(ChainProvider),
                 Model::new("fixture", "process-owner"),
-                chain_matrix_config(dir.path(), io, trigger),
+                resource_settings(chain_matrix_config(dir.path(), io, trigger)),
             )
             .unwrap();
             let id = rt.create(None).unwrap().id;
-            let admitted = rt.enqueue(&id, "run a process chain").unwrap();
+            let admitted = enqueue_resources(&rt, &id, "run a process chain");
             let worker = {
                 let rt = rt.clone();
                 let task_id = admitted.id.clone();
@@ -1745,6 +1843,7 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
             let observed = wait_recorded_and_observed(dir.path(), &pids).await;
             let recorded_after = chain_started.elapsed();
             let task = rt.task(&admitted.id).unwrap();
+            assert_resources(&rt, &task, true);
             match trigger {
                 ChainTrigger::Normal => {
                     std::fs::write(dir.path().join("release"), "release").unwrap();
@@ -1813,6 +1912,19 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
                 0,
                 "{label}: the slot must be released only after confirmed cleanup"
             );
+            assert_resources(&rt, &task, false);
+            let terminal_record = rt.task(&task.id).unwrap();
+            assert_eq!(terminal_record.cancel_target(), task.cancel_target());
+            let terminal_event = audit
+                .iter()
+                .find(|event| {
+                    matches!(
+                        event.kind.as_str(),
+                        "run_finished" | "run_cancelled" | "run_failed" | "run_outcome_unknown"
+                    )
+                })
+                .unwrap();
+            assert!(stopped.cursor < terminal_event.cursor);
             // The terminal distinguishes the cells: only the fully normal chain
             // finishes idle; every cell that stops a running tree leaves the
             // original effects to be reconciled.
@@ -1882,6 +1994,9 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
                     },
                     "max_output_bytes": 4096,
                     "permission": "test.run {\"profile\":\"chain\"}",
+                    "resource_policy_bytes":100,"declared_memory_bytes":80,
+                    "reserved_terminal":rt.resources().unwrap().usage,
+                    "original_target":task.cancel_target(),
                 })
             );
         }
@@ -1968,6 +2083,187 @@ async fn a_failed_observation_record_marks_the_original_run_unknown() {
             "session_state": format!("{:?}", view.state),
             "outcome": format!("{outcome:?}"),
         })
+    );
+}
+
+#[tokio::test]
+async fn failed_resource_terminal_keeps_eighty_after_real_chain_cleanup_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let config = resource_settings(chain_settings(
+        dir.path(),
+        cayw_host::ProcessIo::Pipes,
+        Duration::from_secs(60),
+        4096,
+        false,
+    ));
+    let rt = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(ChainProvider),
+        Model::new("fixture", "resource-terminal"),
+        config.clone(),
+    )
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    let admitted = enqueue_resources(&rt, &id, "normal chain with a denied queue terminal");
+    let worker = {
+        let rt = rt.clone();
+        let task = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task, CancellationToken::new()).await })
+    };
+    let pids = chain_generations(dir.path()).await;
+    let observed = wait_recorded_and_observed(dir.path(), &pids).await;
+    let task = rt.task(&admitted.id).unwrap();
+    assert_resources(&rt, &task, true);
+    let db = rusqlite::Connection::open(dir.path().join("session.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER deny_resource_terminal BEFORE INSERT ON runtime_audit
+        WHEN NEW.kind='run_finished' BEGIN SELECT RAISE(ABORT,'resource terminal denied'); END;",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("release"), "normal chain release").unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(40), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, RuntimeError::RecoveryRequired { .. }));
+    assert!(
+        error.to_string().contains("resource terminal denied"),
+        "{error:?}"
+    );
+    for identity in &observed {
+        assert!(matches!(
+            verify_incarnation(identity, "resource-terminal-denied"),
+            Incarnation::NotAlive(_)
+        ));
+    }
+    let rows = identities(dir.path());
+    assert_recorded_chain(
+        &rows,
+        &task.id,
+        &pids,
+        &observed,
+        i64::from(std::process::id()),
+        "resource-terminal-denied",
+    );
+    assert!(rows.iter().all(|row| row.state == "stopped"));
+    assert_resources(&rt, &task, true);
+    let blocked = rt.task(&task.id).unwrap();
+    assert_eq!(blocked.state, TaskState::Draining);
+    let reopened = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(ChainProvider),
+        Model::new("fixture", "resource-terminal"),
+        config,
+    )
+    .unwrap();
+    assert_eq!(reopened.task(&task.id).unwrap(), blocked);
+    assert_resources(&reopened, &task, true);
+    let audit = reopened.audit(&id, 0, 1000).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|event| event.kind == "processes_stopped")
+            .count(),
+        1
+    );
+    assert!(!audit.iter().any(|event| event.kind == "run_finished"));
+    let successful_result = durable_success(&reopened, &id, "test.run");
+    db.execute_batch("DROP TRIGGER deny_resource_terminal")
+        .unwrap();
+    assert_resources(&reopened, &task, true);
+    reopened.recover(&id).unwrap();
+    assert_resources(&reopened, &task, false);
+    let recovered = reopened.task(&task.id).unwrap();
+    assert_eq!(recovered.state, TaskState::Interrupted);
+    assert_eq!(recovered.fence, task.fence + 1);
+    assert_eq!(
+        durable_success(&reopened, &id, "test.run"),
+        successful_result
+    );
+    assert_eq!(reopened.tasks(&id).unwrap().len(), 1);
+    eprintln!(
+        "RESOURCE_TERMINAL_FAILURE {}",
+        json!({"original":task,"blocked":blocked,
+        "after":recovered,"result":successful_result,"error":error.to_string(),
+        "reserved_before":80,"reserved_after_failed_terminal":80,"reserved_after_recovery":0})
+    );
+}
+
+#[tokio::test]
+async fn runtime_deadline_stops_the_real_chain_before_resource_release() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let mut config = resource_settings(chain_settings(
+        dir.path(),
+        cayw_host::ProcessIo::Pipes,
+        Duration::from_secs(60),
+        4096,
+        false,
+    ));
+    config.max_run_time = Duration::from_secs(10);
+    let rt = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(ChainProvider),
+        Model::new("fixture", "resource-deadline"),
+        config,
+    )
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    let admitted = enqueue_resources(&rt, &id, "wait for the real task deadline");
+    let worker = {
+        let rt = rt.clone();
+        let task = admitted.id.clone();
+        tokio::spawn(async move { rt.resume(&task, CancellationToken::new()).await })
+    };
+    let pids = chain_generations(dir.path()).await;
+    let observed = wait_recorded_and_observed(dir.path(), &pids).await;
+    let task = rt.task(&admitted.id).unwrap();
+    assert_eq!(task.state, TaskState::Running);
+    assert_resources(&rt, &task, true);
+    let outcome = tokio::time::timeout(Duration::from_secs(40), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(RuntimeError::Budget("time"))),
+        "{outcome:?}"
+    );
+    let rows = identities(dir.path());
+    assert_recorded_chain(
+        &rows,
+        &task.id,
+        &pids,
+        &observed,
+        i64::from(std::process::id()),
+        "runtime-resource-deadline",
+    );
+    assert!(rows.iter().all(|row| row.state == "stopped"));
+    assert_resources(&rt, &task, false);
+    assert_eq!(rt.task(&task.id).unwrap().state, TaskState::OutcomeUnknown);
+    assert_eq!(
+        rt.get(&id).unwrap().state,
+        SessionState::NeedsReconciliation
+    );
+    assert!(rt.enqueue(&id, "do not replay deadline effects").is_err());
+    let audit = rt.audit(&id, 0, 1000).unwrap();
+    let stopped = audit
+        .iter()
+        .find(|event| event.kind == "processes_stopped")
+        .unwrap();
+    let terminal = audit
+        .iter()
+        .find(|event| event.kind == "run_outcome_unknown")
+        .unwrap();
+    assert!(stopped.cursor < terminal.cursor);
+    eprintln!(
+        "RESOURCE_RUN_DEADLINE {}",
+        json!({"original":task,"outcome":format!("{outcome:?}"),
+        "after":rt.task(&task.id).unwrap(),"runtime_seconds":10,"profile_seconds":60,"reserved_after":0})
     );
 }
 

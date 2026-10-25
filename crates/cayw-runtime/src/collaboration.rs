@@ -61,7 +61,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: PLAN.into(),
-            description: "Replace the current task plan with compare-and-swap on expected_version. Version starts at 0 for each task; a successful update returns the previous version, the new version and source=model. At most one step may be in_progress and ids must be unique.".into(),
+            description: "Replace the current task plan with compare-and-swap on expected_version. Version starts at 0 for each task; a successful update returns the previous version, the new version and source=model. Multiple distinct steps may be in_progress; ids must be unique.".into(),
             parameters: json!({
                 "type":"object","additionalProperties":false,"required":["expected_version","steps"],
                 "properties":{
@@ -602,19 +602,12 @@ fn check_steps(steps: &[PlanStep]) -> Result<(), String> {
         ));
     }
     let mut ids = BTreeSet::new();
-    let mut in_progress = 0usize;
     for step in steps {
         check_identifier(&step.id, "plan step id", MAX_STEP_ID_BYTES)?;
         if !ids.insert(step.id.as_str()) {
             return Err(format!("plan step id {} is duplicated", step.id));
         }
         check_text(&step.text, "plan step text", MAX_STEP_TEXT_BYTES, true)?;
-        if step.status == PlanStepStatus::InProgress {
-            in_progress += 1;
-        }
-    }
-    if in_progress > 1 {
-        return Err("plan may contain at most one in_progress step".into());
     }
     Ok(())
 }

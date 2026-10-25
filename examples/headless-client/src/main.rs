@@ -125,7 +125,8 @@ async fn main() {
     }
 }
 async fn run(options: &Options) -> Result<()> {
-    let connections = Connections::open(&options.connection).await?;
+    let needs_model = options.command == "prompt";
+    let connections = Connections::open(&options.connection, needs_model).await?;
     let outcome = async {
         emit(&connections.metadata)?;
         let id = options.session.as_deref().unwrap_or_default();

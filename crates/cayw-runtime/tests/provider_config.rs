@@ -180,7 +180,6 @@ fn invalid_provider_configuration_fails_during_load_without_echoing_values() {
         ("service", json!("unknown-secret-service")),
         ("api", json!("chat_completions")),
         ("api_version", json!("2099-secret-version")),
-        ("base_url", json!("https://gateway.invalid/v1")),
         (
             "base_url",
             json!("https://user:secret-password@api.anthropic.com/v1"),
@@ -193,9 +192,7 @@ fn invalid_provider_configuration_fails_during_load_without_echoing_values() {
             "base_url",
             json!("https://api.anthropic.com/v1#secret-fragment"),
         ),
-        ("base_url", json!("https://api.anthropic.com/v2")),
-        ("base_url", json!("https://api.anthropic.com:8443/v1")),
-        ("base_url", json!("http://api.anthropic.com/v1")),
+        ("base_url", json!("not a url")),
         ("base_url", json!("file:///v1")),
         ("id", json!("secret model\n")),
         ("max_output_tokens", json!(0)),
@@ -234,5 +231,66 @@ fn invalid_provider_configuration_fails_during_load_without_echoing_values() {
         let mut config = valid.clone();
         config.as_object_mut().unwrap().remove(field);
         assert!(load(json!({"model": config})).is_err(), "missing {field}");
+    }
+}
+
+// Break caught: a host-selected deployment prefix, hostname, port or local
+// hostname is rejected even though the adapters retain the supplied base path.
+#[tokio::test]
+async fn host_selected_deployments_accept_prefix_host_and_port() {
+    for (service, api, version, base) in [
+        (
+            "openai",
+            "chat_completions",
+            "v1",
+            "https://gateway.example/gateway/v1",
+        ),
+        (
+            "openai",
+            "responses",
+            "v1",
+            "https://gateway.example:8443/deploy/team/v1",
+        ),
+        (
+            "anthropic",
+            "messages",
+            "2023-06-01",
+            "http://localhost:3425/proxy/anthropic",
+        ),
+        (
+            "magpie",
+            "messages",
+            "2023-06-01",
+            "https://gateway.example/deploy/magpie",
+        ),
+        (
+            "gemini",
+            "stream_generate_content",
+            "v1beta",
+            "http://[::1]:8080/deploy/v1beta",
+        ),
+        (
+            "gemini",
+            "generate_content",
+            "v1beta",
+            "https://generativelanguage.googleapis.com",
+        ),
+    ] {
+        let config = load(json!({"model": provider(service, api, version, base)}))
+            .unwrap_or_else(|error| panic!("{service}/{api} {base}: {error}"));
+        let mut reads = Vec::new();
+        let configured = config
+            .model()
+            .unwrap()
+            .build_with_environment(|name| {
+                reads.push(name.to_owned());
+                Some("synthetic-selection-key".into())
+            })
+            .unwrap();
+        assert_eq!(reads, ["CAYW_CONFIG_TEST_KEY"]);
+        assert_eq!(configured.model.provider, service);
+        assert_eq!(configured.model.id, "fixture-model");
+        assert_eq!(configured.model.max_output_tokens, Some(64));
+        assert!(config.into_runtime_config().is_ok());
     }
 }

@@ -5,7 +5,8 @@ use cayw_ai::{
     Content, Message, Model, ModelRequest, Provider, StopReason, ToolCall, ToolDefinition,
 };
 use cayw_codemode::{
-    CallStatus, CapabilityError, CapabilityHost, CodeMode, CodeModeTool, ErrorKind, Limits,
+    CallStatus, CapabilityError, CapabilityHost, CapabilityStop, CodeMode, CodeModeTool, ErrorKind,
+    Limits,
 };
 use futures::{StreamExt, stream};
 use serde_json::{Value, json};
@@ -45,6 +46,9 @@ impl CapabilityHost for Host {
                 json!({"type":"object","properties":{"left":{"type":"integer"},"right":{"type":"integer"}},"required":["left","right"],"additionalProperties":false}),
             ),
             definition("fail", empty.clone()),
+            definition("stop_budget", empty.clone()),
+            definition("stop_cancelled", empty.clone()),
+            definition("stop_timeout", empty.clone()),
             definition("unknown", empty.clone()),
             definition("hang", empty.clone()),
             definition("large", empty.clone()),
@@ -72,6 +76,18 @@ impl CapabilityHost for Host {
                 arguments["left"].as_i64().unwrap() + arguments["right"].as_i64().unwrap()
             )),
             "fail" => Err(CapabilityError::new("permission denied")),
+            "stop_budget" => Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "host quota reached",
+            )),
+            "stop_cancelled" => Err(CapabilityError::stopped(
+                CapabilityStop::Cancelled,
+                "host stopped",
+            )),
+            "stop_timeout" => Err(CapabilityError::stopped(
+                CapabilityStop::Timeout,
+                "host deadline",
+            )),
             "unknown" => Err(CapabilityError::unknown("response lost after dispatch")),
             "fail_large" => Err(CapabilityError::new("失".repeat(4000))),
             "unknown_large" => Err(CapabilityError::unknown("未".repeat(4000))),
@@ -245,7 +261,9 @@ async fn sandbox_exposes_no_ambient_io_or_protected_call_escape() {
         return {os == nil, io == nil, require == nil, package == nil,
             load == nil, loadstring == nil, loadfile == nil, dofile == nil,
             process == nil, debug == nil, getfenv == nil, setfenv == nil,
-            coroutine == nil, pcall == nil, xpcall == nil, print == nil}
+            coroutine == nil, pcall == nil, xpcall == nil, print == nil,
+            type(coroutine) == 'table', type(pcall) == 'function',
+            type(xpcall) == 'function'}
     "#,
             CancellationToken::new(),
         )
@@ -254,8 +272,8 @@ async fn sandbox_exposes_no_ambient_io_or_protected_call_escape() {
     assert_eq!(
         report.return_value,
         json!([
-            true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-            true, true
+            true, true, true, true, true, true, true, true, true, true, true, true, false, false,
+            false, true, true, true, true
         ])
     );
     let error = code
@@ -271,11 +289,14 @@ async fn sandbox_exposes_no_ambient_io_or_protected_call_escape() {
 #[tokio::test]
 async fn every_execution_has_an_isolated_environment() {
     let (_, code) = mode(Limits::default());
-    let error = code
-        .execute("secret = 'old run'; return true", CancellationToken::new())
+    let report = code
+        .execute(
+            "secret = 'old run'; return secret",
+            CancellationToken::new(),
+        )
         .await
-        .unwrap_err();
-    assert_eq!(error.kind, ErrorKind::Script);
+        .unwrap();
+    assert_eq!(report.return_value, json!("old run"));
     let report = code
         .execute("return secret == nil", CancellationToken::new())
         .await
@@ -574,7 +595,7 @@ async fn script_error_text_is_bounded_without_erasing_completed_capabilities() {
 }
 
 #[tokio::test]
-async fn async_host_bridge_cannot_restore_ambient_coroutines_after_suspension() {
+async fn async_host_bridge_keeps_restricted_globals_after_suspension() {
     struct YieldingHost;
     #[async_trait]
     impl CapabilityHost for YieldingHost {
@@ -592,8 +613,11 @@ async fn async_host_bridge_cannot_restore_ambient_coroutines_after_suspension() 
         }
     }
     let code = CodeMode::new(Arc::new(YieldingHost), Limits::default()).unwrap();
-    let report = code.execute("for i=1,3 do cayw.call('yield', {}) end; return {coroutine == nil, pcall == nil, xpcall == nil}", CancellationToken::new()).await.unwrap();
-    assert_eq!(report.return_value, json!([true, true, true]));
+    let report = code.execute("for i=1,3 do cayw.call('yield', {}) end; return {type(coroutine), type(pcall), type(xpcall), debug == nil, os == nil}", CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        report.return_value,
+        json!(["table", "function", "function", true, true])
+    );
     assert!(
         report
             .calls
@@ -661,6 +685,319 @@ async fn dropping_the_execution_future_cancels_started_capability_tokens() {
     }
     drop(execution);
     assert!(host.tokens.lock().unwrap()[0].is_cancelled());
+}
+
+#[tokio::test]
+async fn known_host_failure_is_catchable_and_another_authorized_call_can_continue() {
+    let (host, code) = mode(Limits::default());
+    let report = code
+        .execute(
+            r#"
+        local ok, message = pcall(function() return cayw.call('fail', {}) end)
+        local next_value = cayw.call('echo', {value = 'recovered'})
+        local ok2, handled = xpcall(function() return cayw.call('fail', {}) end,
+            function(error_value) return 'handled: ' .. tostring(error_value) end)
+        return {ok = ok, message = tostring(message), next = next_value, ok2 = ok2, handled = handled}
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.return_value["ok"], false);
+    assert!(
+        report.return_value["message"]
+            .as_str()
+            .unwrap()
+            .contains("permission denied")
+    );
+    assert_eq!(report.return_value["next"], "recovered");
+    assert_eq!(report.return_value["ok2"], false);
+    assert!(
+        report.return_value["handled"]
+            .as_str()
+            .unwrap()
+            .starts_with("handled: ")
+    );
+    assert_eq!(
+        report
+            .calls
+            .iter()
+            .map(|call| (call.name.as_str(), call.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("fail", CallStatus::Failed),
+            ("echo", CallStatus::Succeeded),
+            ("fail", CallStatus::Failed)
+        ]
+    );
+    assert!(!report.outcome_unknown);
+    assert_eq!(host.received.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn nested_pcall_and_coroutines_cannot_swallow_unknown_or_dispatch_more_calls() {
+    let (host, code) = mode(Limits::default());
+    let error = code
+        .execute(
+            r#"
+        local caught = pcall(function() return cayw.call('unknown', {}) end)
+        local co = coroutine.create(function()
+            pcall(function() return cayw.call('echo', {value = 'inside coroutine'}) end)
+        end)
+        coroutine.resume(co)
+        pcall(function() return cayw.call('echo', {value = 'after unknown'}) end)
+        return {caught = caught, finished = true}
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::OutcomeUnknown);
+    assert!(error.report.outcome_unknown);
+    assert_eq!(error.report.calls.len(), 1);
+    assert_eq!(error.report.calls[0].name, "unknown");
+    assert_eq!(error.report.calls[0].status, CallStatus::OutcomeUnknown);
+    assert_eq!(host.received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pcall_cannot_swallow_cancellation_before_the_next_dispatch() {
+    let (host, code) = mode(Limits {
+        timeout: Duration::from_secs(1),
+        shutdown_grace: Duration::from_millis(100),
+        ..Limits::default()
+    });
+    let cancel = CancellationToken::new();
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            code.execute(
+                r#"
+            local first = pcall(function()
+                return pcall(function() return cayw.call('hang', {}) end)
+            end)
+            local second = pcall(function() return cayw.call('echo', {value = 'after cancel'}) end)
+            return {first = first, second = second}
+        "#,
+                cancel.clone()
+            ),
+            async {
+                host.started.notified().await;
+                cancel.cancel();
+            }
+        )
+    })
+    .await
+    .expect("protected Host cancellation must finish its original cleanup");
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Cancelled);
+    assert!(error.report.outcome_unknown);
+    assert_eq!(error.report.calls.len(), 1);
+    assert_eq!(error.report.calls[0].name, "hang");
+    assert_eq!(error.report.calls[0].status, CallStatus::OutcomeUnknown);
+    assert_eq!(host.received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pcall_cannot_swallow_the_host_call_budget() {
+    let (host, code) = mode(Limits {
+        host_calls: 1,
+        ..Limits::default()
+    });
+    let error = code
+        .execute(
+            r#"
+        local first = pcall(function() return cayw.call('echo', {value = 1}) end)
+        local second = pcall(function() return cayw.call('echo', {value = 2}) end)
+        local third = pcall(function() return cayw.call('echo', {value = 3}) end)
+        return {first = first, second = second, third = third}
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::HostCallLimit);
+    assert_eq!(error.report.calls.len(), 1);
+    assert_eq!(host.received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn trusted_host_stops_cannot_be_swallowed_by_nested_protected_calls() {
+    for (name, kind) in [
+        ("stop_budget", ErrorKind::Budget),
+        ("stop_cancelled", ErrorKind::Cancelled),
+        ("stop_timeout", ErrorKind::Timeout),
+    ] {
+        let (host, code) = mode(Limits::default());
+        let error = code
+            .execute(
+                &format!(
+                    r#"
+            pcall(function()
+                xpcall(function() cayw.call('{name}', {{}}) end,
+                    function() return 'handled' end)
+                cayw.call('echo', {{value='must not run'}})
+            end)
+            return 'must not complete'
+        "#
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.report.calls.len(), 1);
+        assert_eq!(error.report.calls[0].status, CallStatus::Failed);
+        assert!(!error.report.outcome_unknown);
+        assert_eq!(host.received.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn memory_exhaustion_inside_handlers_cannot_be_swallowed() {
+    for script in [
+        "xpcall(function() error('known failure') end, function() return string.rep('x',8*1024*1024) end); cayw.call('echo',{value='after memory stop'})",
+        "pcall(function() xpcall(function() error('known failure') end, function() return string.rep('x',8*1024*1024) end) end); cayw.call('echo',{value='after memory stop'})",
+    ] {
+        let (host, code) = mode(Limits {
+            memory_bytes: 2 * 1024 * 1024,
+            ..Limits::default()
+        });
+        let error = code
+            .execute(script, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::MemoryLimit, "{script}: {error}");
+        assert!(!error.report.outcome_unknown);
+        assert!(error.report.calls.is_empty());
+        assert!(host.received.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn memory_exhaustion_inside_coroutines_cannot_be_swallowed() {
+    for script in [
+        "local co=coroutine.create(function() return string.rep('x',8*1024*1024) end); coroutine.resume(co); cayw.call('echo',{value='after memory stop'})",
+        "pcall(coroutine.wrap(function() return string.rep('x',8*1024*1024) end)); cayw.call('echo',{value='after memory stop'})",
+    ] {
+        let (host, code) = mode(Limits {
+            memory_bytes: 2 * 1024 * 1024,
+            ..Limits::default()
+        });
+        let error = code
+            .execute(script, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::MemoryLimit, "{script}: {error}");
+        assert!(!error.report.outcome_unknown);
+        assert!(error.report.calls.is_empty());
+        assert!(host.received.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn pure_computation_coroutines_run_without_reaching_the_host() {
+    let (host, code) = mode(Limits::default());
+    let report = code
+        .execute(
+            r#"
+        local co = coroutine.create(function(a)
+            local acc = a
+            for i = 1, 3 do acc = acc + coroutine.yield(acc) end
+            return acc
+        end)
+        local ok1, v1 = coroutine.resume(co, 1)
+        local ok2, v2 = coroutine.resume(co, 2)
+        local ok3, v3 = coroutine.resume(co, 3)
+        local ok4, v4 = coroutine.resume(co, 4)
+        if not (ok1 and ok2 and ok3 and ok4) then error('coroutine resume failed') end
+        local generator = coroutine.wrap(function()
+            for i = 1, 3 do coroutine.yield(i * 10) end
+        end)
+        local a, b, c = generator(), generator(), generator()
+        local caught, message = pcall(coroutine.wrap(function() error('wrapped failure', 0) end))
+        return {v1 = v1, v2 = v2, v3 = v3, v4 = v4,
+            a = a, b = b, c = c, caught = caught, message = tostring(message)}
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut value = report.return_value;
+    let message = value.as_object_mut().unwrap().remove("message").unwrap();
+    assert!(message.as_str().unwrap().contains("wrapped failure"));
+    assert_eq!(
+        value,
+        json!({"v1":1,"v2":3,"v3":6,"v4":10,"a":10,"b":20,"c":30,"caught":false})
+    );
+    assert!(report.calls.is_empty());
+    assert!(host.received.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_calls_inside_script_coroutines_are_rejected_before_dispatch() {
+    let (host, code) = mode(Limits::default());
+    let report = code
+        .execute(
+            r#"
+        local co = coroutine.create(function()
+            local ok, message = pcall(function() return cayw.call('echo', {value = 'inside'}) end)
+            return ok, tostring(message)
+        end)
+        local resumed, inside_ok, message = coroutine.resume(co)
+        local outside = cayw.call('echo', {value = 'outside'})
+        return {resumed = resumed, inside_ok = inside_ok, message = message, outside = outside}
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.return_value["resumed"], true);
+    assert_eq!(report.return_value["inside_ok"], false);
+    assert!(
+        report.return_value["message"]
+            .as_str()
+            .unwrap()
+            .contains("coroutine")
+    );
+    assert_eq!(report.return_value["outside"], "outside");
+    assert_eq!(
+        report
+            .calls
+            .iter()
+            .map(|call| (call.name.as_str(), call.status))
+            .collect::<Vec<_>>(),
+        vec![("echo", CallStatus::Succeeded)]
+    );
+    assert_eq!(host.received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn each_execution_can_write_its_own_globals_without_leaking_them() {
+    let (_, code) = mode(Limits::default());
+    let report = code
+        .execute(
+            r#"
+        answer = 42
+        _G.answer = _G.answer + 1
+        function greeting() return 'hello' end
+        return {answer = answer, global = _G.answer, greeting = greeting()}
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        report.return_value,
+        json!({"answer":43,"global":43,"greeting":"hello"})
+    );
+    let report = code
+        .execute(
+            "return {answer = answer, greeting = greeting}",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.return_value, json!({}));
 }
 
 #[test]
@@ -750,6 +1087,26 @@ async fn agent_runs_one_code_tool_with_multiple_host_calls_and_a_structured_repo
     assert_eq!(host.received.lock().unwrap().len(), 3);
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
     assert!(!agent.snapshot().needs_reconciliation);
+}
+
+#[tokio::test]
+async fn agent_stops_after_known_host_stops_without_another_model_turn() {
+    for name in ["stop_budget", "stop_timeout", "stop_cancelled"] {
+        let (agent, host, provider) = agent_fixture(
+            &format!("pcall(function() cayw.call('{name}', {{}}) end)"),
+            Limits::default(),
+        );
+        let result = agent
+            .prompt(Message::user("exercise trusted stop"))
+            .await
+            .unwrap();
+        let tool = code_result(&result.messages);
+        assert!(tool.is_error);
+        assert!(!tool.outcome_unknown);
+        assert_eq!(provider.requests.lock().unwrap().len(), 1, "{name}");
+        assert_eq!(host.received.lock().unwrap().len(), 1);
+        assert!(!agent.snapshot().needs_reconciliation);
+    }
 }
 
 #[tokio::test]

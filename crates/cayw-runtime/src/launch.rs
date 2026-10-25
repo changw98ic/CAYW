@@ -22,6 +22,9 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub struct HeadlessConfig {
     model: Option<ProviderConfig>,
     budgets: Budgets,
+    scheduler: Scheduler,
+    resources: crate::ResourcePolicy,
+    content: Option<crate::ContentConfig>,
     profiles: BTreeMap<String, ProcessProfile>,
     permissions: Vec<Permission>,
     requests: Option<Requests>,
@@ -46,6 +49,15 @@ struct Budgets {
     max_capability_bytes: Option<usize>,
     host_wait_ms: Option<u64>,
     host_call_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Scheduler {
+    max_concurrent_runs: Option<usize>,
+    max_accepted_tasks: Option<usize>,
+    fairness_after_dispatches: Option<usize>,
+    max_queue_time_ms: Option<u64>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -148,7 +160,23 @@ impl HeadlessConfig {
         if let Some(model) = &self.model {
             model.validate()?;
         }
-        let mut config = RuntimeConfig::default();
+        let mut config = RuntimeConfig {
+            resources: self.resources,
+            content: self.content,
+            ..RuntimeConfig::default()
+        };
+        if let Some(value) = self.scheduler.max_concurrent_runs {
+            config.max_concurrent_runs = value;
+        }
+        if let Some(value) = self.scheduler.max_accepted_tasks {
+            config.max_queued_runs = value;
+        }
+        if let Some(value) = self.scheduler.fairness_after_dispatches {
+            config.fairness_after_dispatches = value;
+        }
+        if let Some(value) = self.scheduler.max_queue_time_ms {
+            config.max_queue_time = Duration::from_millis(value);
+        }
         let budgets = self.budgets;
         if let Some(value) = budgets.max_total_tokens {
             config.max_total_tokens = value;
@@ -209,7 +237,8 @@ impl HeadlessConfig {
         // same profile/path validation used when opening the actual workspace.
         let host = crate::cells::catalog_host(Path::new("/"), config.host.clone())
             .map_err(|_| invalid("has an invalid process profile or Host budget"))?;
-        let definitions = cayw_codemode::CapabilityHost::capabilities(&host);
+        let mut definitions = cayw_codemode::CapabilityHost::capabilities(&host);
+        definitions.extend(crate::content::definitions(config.content.as_ref()));
         for permission in self.permissions {
             if !permission.arguments.is_object() {
                 return Err(invalid("permission arguments must be an object"));

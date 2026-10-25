@@ -949,7 +949,27 @@ async fn project_request_and_execution_share_the_existing_host_call_budget() {
     let (session, task, worker) = start(&rt);
     let record = approve(&rt, &project, &task).await;
     resume.add_permits(1);
-    let _ = finished(worker).await.unwrap();
+    assert!(matches!(
+        finished(worker).await,
+        Err(RuntimeError::Worker(ref reason)) if reason == "host call or total byte budget exhausted"
+    ));
+    let view = rt.get(&session).unwrap();
+    assert_eq!(view.state, SessionState::Idle);
+    assert!(view.unresolved_calls.is_empty());
+    assert!(view.unresolved_capabilities.is_empty());
+    let terminal_task = rt.task(&task.id).unwrap();
+    assert_eq!(terminal_task.state, TaskState::Failed);
+    assert!(!terminal_task.cancel_requested);
+    let terminals = rt
+        .audit(&session, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.task_id.as_deref() == Some(task.id.as_str()) && event.kind.starts_with("run_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, "run_failed");
     assert_eq!(project.effects(), "project test effect\n");
     assert_eq!(calls(&rt, &session, true).len(), 1);
     let settled = calls(&rt, &session, false);

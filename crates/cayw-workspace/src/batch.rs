@@ -226,13 +226,17 @@ fn expected(actual: &Option<Blob>, expected: &Expected) -> Result<(), Capability
         _ => Err(failure("batch compare-and-swap absence conflict")),
     }
 }
-fn check_paths(paths: impl IntoIterator<Item = String>) -> Result<(), CapabilityError> {
+fn check_paths(
+    paths: impl IntoIterator<Item = String>,
+    context: &Context,
+) -> Result<(), CapabilityError> {
+    context.check()?;
     let mut names = BTreeSet::new();
     for path in paths {
+        context.check()?;
         fs::components(&path, false)?;
-        let key = path.to_lowercase();
-        if !names.insert(key) {
-            return Err(failure("batch contains duplicate or case-alias paths"));
+        if !names.insert(path) {
+            return Err(failure("batch contains duplicate paths"));
         }
     }
     for path in &names {
@@ -251,6 +255,102 @@ fn check_paths(paths: impl IntoIterator<Item = String>) -> Result<(), Capability
         }
     }
     Ok(())
+}
+
+/// Probe only before a mutation, never while loading or reporting a journal.
+/// Each private directory inherits the actual target parent's name rules, so
+/// create_new detects aliases without assuming a case or Unicode mapping.
+fn check_target_aliases(anchors: &[Anchor], context: &Context) -> Result<(), CapabilityError> {
+    use cap_std::fs::MetadataExt;
+    let mut groups = std::collections::BTreeMap::<_, Vec<&Anchor>>::new();
+    for target in anchors {
+        context.check()?;
+        let metadata = target.dir.dir_metadata().map_err(io_error)?;
+        groups
+            .entry((metadata.dev(), metadata.ino()))
+            .or_default()
+            .push(target);
+    }
+    for group in groups.values().filter(|group| group.len() > 1) {
+        let mut probe = AliasProbe::new(&group[0].dir, context)?;
+        let result = (|| {
+            for target in group {
+                context.check()?;
+                match probe.dir.open_with(&target.name, &crate::private_options()) {
+                    Ok(file) => {
+                        probe.names.push(target.name.clone());
+                        drop(file);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Err(failure("batch contains alias paths on this volume"));
+                    }
+                    Err(error) => return Err(io_error(error)),
+                }
+            }
+            Ok(())
+        })();
+        probe.close()?;
+        result?;
+    }
+    Ok(())
+}
+
+struct AliasProbe<'a> {
+    parent: Dir,
+    dir: Dir,
+    name: String,
+    names: Vec<String>,
+    context: &'a Context,
+    closed: bool,
+}
+impl<'a> AliasProbe<'a> {
+    fn new(parent: &Dir, context: &'a Context) -> Result<Self, CapabilityError> {
+        context.check()?;
+        let parent = parent.try_clone().map_err(io_error)?;
+        let name = format!(".cayw-host-tmp-batch-alias-{}", fs::unique());
+        let mut builder = cap_std::fs::DirBuilder::new();
+        {
+            use cap_std::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        parent.create_dir_with(&name, &builder).map_err(io_error)?;
+        let dir = parent.open_dir_nofollow(&name).map_err(io_error)?;
+        Ok(Self {
+            parent,
+            dir,
+            name,
+            names: vec![],
+            context,
+            closed: false,
+        })
+    }
+    fn close(&mut self) -> Result<(), CapabilityError> {
+        self.closed = true;
+        for name in &self.names {
+            self.context.check()?;
+            self.dir.remove_file(name).map_err(io_error)?;
+        }
+        self.context.check()?;
+        use cap_std::fs::MetadataExt;
+        let original = self.dir.dir_metadata().map_err(io_error)?;
+        let current = self
+            .parent
+            .open_dir_nofollow(&self.name)
+            .map_err(io_error)?;
+        let current = current.dir_metadata().map_err(io_error)?;
+        if original.dev() != current.dev() || original.ino() != current.ino() {
+            return Err(failure("batch alias probe moved during cleanup"));
+        }
+        self.parent.remove_dir(&self.name).map_err(io_error)?;
+        fs::sync(&self.parent)
+    }
+}
+impl Drop for AliasProbe<'_> {
+    fn drop(&mut self) {
+        if !self.closed {
+            let _ = self.close();
+        }
+    }
 }
 
 impl Workspace {
@@ -301,7 +401,10 @@ impl Workspace {
         {
             return Err(failure("invalid journal version, ID or operation count"));
         }
-        check_paths(manifest.operations.iter().map(|op| op.path.clone()))?;
+        check_paths(
+            manifest.operations.iter().map(|op| op.path.clone()),
+            context,
+        )?;
         let mut bytes = 0usize;
         for op in &manifest.operations {
             if !matches!(op.operation.as_str(), "write" | "patch" | "remove")
@@ -423,7 +526,12 @@ impl Workspace {
                 | Input::Remove { path, .. } => path.clone(),
             })
             .collect();
-        check_paths(paths)?;
+        check_paths(paths.iter().cloned(), context)?;
+        let targets = paths
+            .iter()
+            .map(|path| anchor(&self.root, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        check_target_aliases(&targets, context)?;
         // Count unpublished directories as well, so repeated interrupted prepares
         // cannot grow disk storage without bound.
         let mut count = 0usize;
@@ -438,14 +546,13 @@ impl Workspace {
         let mut operations = vec![];
         let mut contents = vec![];
         let mut total = 0usize;
-        for input in args.operations {
+        for (input, target) in args.operations.into_iter().zip(targets) {
             context.check()?;
             let path = match &input {
                 Input::Write { path, .. }
                 | Input::Patch { path, .. }
                 | Input::Remove { path, .. } => path.clone(),
             };
-            let target = anchor(&self.root, &path)?;
             let (old, before) = capture(&target, self.limits.max_file_bytes, context)?;
             let (operation, candidate, language) = match input {
                 Input::Write {
@@ -799,6 +906,7 @@ impl Workspace {
             self.require_old(operation, &target, context)?;
             anchors.push(target);
         }
+        check_target_aliases(&anchors, context)?;
         context.check()?;
         journal.state.phase = Phase::Intent;
         if let Err(error) = state_write(&journal.dir, &journal.state, context) {
@@ -899,6 +1007,7 @@ impl Workspace {
             anchors.push(target);
             actual.push(current);
         }
+        check_target_aliases(&anchors, context).map_err(unknown)?;
         let commit = matches!(args.action, Recovery::Commit);
         journal.state.phase = if commit {
             Phase::RecoveringCommit

@@ -2,6 +2,7 @@ use crate::*;
 use async_trait::async_trait;
 use cayw_agent::{AgentTool, ExecutionMode, ToolContext, ToolResult};
 use cayw_ai::ToolDefinition;
+use cayw_codemode::CapabilityStop;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ impl AgentTool for CellTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "execute_code".into(),
-            description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. print, pcall, xpcall, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.".into(),
+            description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.".into(),
             parameters: json!({"type":"object","oneOf":[
                 {"type":"object","properties":{"action":{"const":"exec"},"script":{"type":"string","maxLength":self.manager.limits().script_bytes},"yield_time_ms":{"type":"integer","minimum":0,"maximum":self.manager.limits().max_yield_time.as_millis() as u64},"max_output_tokens":{"type":"integer","minimum":1024,"maximum":self.manager.limits().max_output_tokens}},"required":["action","script","yield_time_ms","max_output_tokens"],"additionalProperties":false},
                 {"type":"object","properties":{"action":{"const":"wait"},"cell_id":{"type":"string","minLength":1,"maxLength":128},"cursor":{"type":"integer","minimum":0},"yield_time_ms":{"type":"integer","minimum":0,"maximum":self.manager.limits().max_yield_time.as_millis() as u64},"max_output_tokens":{"type":"integer","minimum":1024,"maximum":self.manager.limits().max_output_tokens},"continue_execution":{"type":"boolean"}},"required":["action","cell_id","cursor","yield_time_ms","max_output_tokens"],"additionalProperties":false}
@@ -125,7 +126,9 @@ impl AgentTool for CellTool {
         match page {
             Ok(page) => {
                 let outcome_unknown = page.outcome_unknown;
-                let terminate = outcome_unknown || page.status == CellStatus::Cancelled;
+                let terminate = outcome_unknown
+                    || page.status == CellStatus::Cancelled
+                    || page.stop.is_some_and(|stop| stop != CapabilityStop::Exited);
                 let is_error = outcome_unknown
                     || matches!(
                         page.status,

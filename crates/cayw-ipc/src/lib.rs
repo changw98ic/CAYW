@@ -71,7 +71,8 @@ pub struct ServerConfig {
     pub max_id_bytes: usize,
     pub response_queue_capacity: usize,
     pub handshake_timeout: Duration,
-    /// A complete frame must arrive within this interval, including idle time between frames.
+    /// A frame must finish within this interval after its first byte is read.
+    /// Waiting for the next frame does not interrupt an in-flight handler.
     pub frame_timeout: Duration,
     pub write_timeout: Duration,
     pub cancellation_grace: Duration,

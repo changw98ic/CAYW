@@ -425,7 +425,7 @@ async fn scanner_never_follows_links_opens_fifos_or_reads_protected_entries() {
             .unwrap()
             .success()
     );
-    for dir in [".git", ".cayw-private"] {
+    for dir in [".git", ".cayw-host-tmp-private"] {
         fs::create_dir(temp.path().join(dir)).unwrap();
         fs::write(temp.path().join(dir).join("secret"), "needle").unwrap();
     }
@@ -449,7 +449,7 @@ async fn scanner_never_follows_links_opens_fifos_or_reads_protected_entries() {
     .unwrap();
     assert_eq!(grep["matches"].as_array().unwrap().len(), 1);
     assert_eq!(grep["matches"][0]["path"], "ok");
-    for path in ["link", ".git", ".cayw-private"] {
+    for path in ["link", ".git", ".cayw-host-tmp-private"] {
         assert!(
             call(&workspace, "fs.glob", json!({"path":path,"pattern":"**/*"}))
                 .await
