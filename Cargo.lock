@@ -781,6 +781,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-web-access"
+version = "0.1.0"
+dependencies = [
+ "html5gum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "cayw-webui"
 version = "0.1.0"
 dependencies = [

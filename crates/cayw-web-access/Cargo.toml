@@ -1,0 +1,25 @@
+[package]
+name = "cayw-web-access"
+description = "Web search / URL fetch / HTML+PDF extraction with source citations (F10 first cut)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+html5gum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+url = "2"
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[[example]]
+name = "offline_web_access"
