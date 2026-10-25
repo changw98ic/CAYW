@@ -375,7 +375,7 @@ impl RemoteDevice {
         // loaded runner (macOS CI under `cargo test --workspace`); keep a short
         // bounded grace so waiters can finish cancelled().await without stalling
         // cleanup on blocked work.
-        let _ = timeout(Duration::from_millis(50), async {
+        let _ = timeout(Duration::from_millis(100), async {
             loop {
                 tokio::task::yield_now().await;
             }
