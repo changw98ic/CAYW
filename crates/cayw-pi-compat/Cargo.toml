@@ -1,0 +1,24 @@
+[package]
+name = "cayw-pi-compat"
+description = "Optional Pi→CAYW external host mapping and version/compat matrix (F15 first cut)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cayw-ai.workspace = true
+cayw-plugins.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+serde_json.workspace = true
+
+[[example]]
+name = "offline_pi_compat"

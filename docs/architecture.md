@@ -46,6 +46,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-plugins` / `cayw-content` / `cayw-remote` | plugin、Device 内容存放/备份、远程绑定路由 | 各自边界与局部实现分开验收；不成为普通 Chat 的强依赖 |
 | `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | 客户端、浏览器轻网关与验证消费者 | 依赖公开接口；Runtime 不反向依赖这些消费者 |
 | `cayw-visual-editor` | HTML/CSS、Vite React 与 Vue 3 页面的可选编辑应用；源码映射、预览和直接操作 | Rust 持有草稿与源码权威，保存通过 Host 公开接口执行文件权限、调用记录和摘要核对；可选 Node 进程解析 JSX/TSX/SFC 并启动 Vite，Core 不依赖编辑器 |
+| `cayw-pi-compat` | 可选 Pi→CAYW 外部兼容宿主映射与版本/兼容矩阵（工具/命令/会话/事件/交互/生命周期） | 默认不启用；不加载未修改 npm ExtensionAPI；拒绝记 incompatible/unavailable，禁止静默成功；见 [F15 来源](sources/f15-pi-compat-host.md) |
 
 依赖从接入方指向公开接口，再由 Runtime 组合运行底座。Host 实现 CodeMode 的能力接口，Runtime 注入实际实现；接口调用不要求 CodeMode 反向依赖具体 UI 或某个 MCP 客户端。可选 Native plugin 由 Cargo feature 决定编译组合，External plugin 由宿主通过 IPC 注入。模型响应中的工具或 plugin 名称不能新增依赖或授予权限。
 
