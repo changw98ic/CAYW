@@ -39,7 +39,17 @@ fn node(id: &str, source: &str) -> Node {
     }
 }
 
-async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointer: &str) {
+/// Observed Runtime / undo (full-entry `replay`) still rebuild shared Luau table
+/// identity in one VM. Node-save local `recompute` starts at the edit with JSON
+/// snapshots, so upstream mutations that only existed via shared identity are
+/// not rebuilt — that is the F17 fast path tradeoff.
+async fn check_saved_and_undone_results(
+    a: &str,
+    b: &str,
+    context: Value,
+    pointer: &str,
+    local_edit_outputs: [i64; 2],
+) {
     let mut b = node("b", b);
     b.input_pointer = pointer.into();
     let plan = GraphPlan {
@@ -121,11 +131,15 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
     let captured = store.snapshot();
     let observed = captured.projects["execution"].evaluations[0].clone();
     assert_eq!(observed.status, Status::Completed);
+    assert_eq!(observed.mode, "observed");
     assert_eq!(observed.output, Some(json!(9)));
     assert_eq!(captured.projects["execution"].trace_error, None);
 
     let commented = format!("{}\n-- same behavior\n", b.source);
-    for (version, params, expected) in [(1, json!({"factor":1}), 9), (2, json!({"factor":2}), 18)] {
+    for (version, params, expected) in [
+        (1, json!({"factor":1}), local_edit_outputs[0]),
+        (2, json!({"factor":2}), local_edit_outputs[1]),
+    ] {
         let document = store
             .edit(
                 "execution",
@@ -143,9 +157,16 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
         let project = &document.projects["execution"];
         let result = project.latest().unwrap();
         assert_eq!(result.status, Status::Completed, "{result:?}");
+        assert_eq!(result.mode, "recompute", "{result:?}");
+        assert!(result.id.starts_with("recompute:"), "{result:?}");
+        assert!(
+            result.steps[0].reused && !result.steps[1].reused,
+            "upstream reused; edited node recomputed: {result:?}"
+        );
         assert_eq!(result.output, Some(json!(expected)), "{result:?}");
         assert!(result.gaps.is_empty(), "{result:?}");
         assert_eq!(project.evaluations[0], observed);
+        assert_eq!(result.version, version + 1);
     }
     let document = store
         .undo(
@@ -161,7 +182,17 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
     let project = &document.projects["execution"];
     let result = project.latest().unwrap();
     assert_eq!(result.status, Status::Completed, "{result:?}");
-    assert_eq!(result.output, Some(json!(9)), "{result:?}");
+    assert_eq!(result.mode, "replay", "{result:?}");
+    assert!(result.id.starts_with("replay:"), "{result:?}");
+    assert!(
+        result.steps.iter().all(|step| !step.reused),
+        "undo full-entry replay recomputes every step: {result:?}"
+    );
+    assert_eq!(
+        result.output,
+        Some(json!(9)),
+        "undo rebuilds shared identity from the entry: {result:?}"
+    );
     assert!(result.gaps.is_empty(), "{result:?}");
     assert_eq!(project.evaluations[0], observed);
     assert_eq!(document.events, captured.events);
@@ -169,22 +200,28 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
 
 #[tokio::test]
 async fn edits_and_undo_keep_upstream_context_changes() {
+    // Local recompute starts with plan.context (n=1); only undo rebuilds A's
+    // in-VM mutation of context.n=9.
     check_saved_and_undone_results(
         "context.n=9; return {output=input,state=state}",
         "return {output=context.n * params.factor,state=state}",
         json!({"n":1}),
         "",
+        [1, 2],
     )
     .await;
 }
 
 #[tokio::test]
 async fn edits_and_undo_keep_shared_input_and_state() {
+    // Local recompute uses JSON snapshots, so input/state are no longer the same
+    // table; undo still runs from the entry in one VM and keeps sharing.
     check_saved_and_undone_results(
         "return {output=state,state=state}",
         "state.n=9; return {output=(input.n or 1) * params.factor,state=state}",
         json!({}),
         "",
+        [1, 2],
     )
     .await;
 }
@@ -196,6 +233,7 @@ async fn input_mapping_keeps_nested_state_and_context_references() {
         "state.item.n=9; return {output=input.n * params.factor,state=state}",
         json!({"n":1}),
         "/payload",
+        [1, 2],
     )
     .await;
 }

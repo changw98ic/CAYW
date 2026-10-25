@@ -86,7 +86,7 @@ pub struct Gap {
 pub struct Evaluation {
     pub id: String,
     pub version: u64,
-    /// observed = actual Runtime; replay = local Luau with captured responses only.
+    /// observed = actual Runtime; replay = full-entry local Luau; recompute = from edited node.
     pub mode: String,
     pub status: Status,
     pub steps: Vec<Step>,

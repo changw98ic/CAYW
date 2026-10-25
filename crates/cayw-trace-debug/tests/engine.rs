@@ -322,7 +322,7 @@ async fn real_script_follows_the_returned_branch() {
 }
 
 #[tokio::test]
-async fn replay_recomputes_the_whole_graph_and_remaps_raw_input_at_the_edited_node() {
+async fn local_recompute_remaps_raw_input_at_the_edited_node() {
     let base_plan = plan(
         "a",
         vec![
@@ -389,11 +389,15 @@ async fn replay_recomputes_the_whole_graph_and_remaps_raw_input_at_the_edited_no
     .await
     .unwrap();
     assert_eq!(evaluated.status, Status::Completed, "{evaluated:#?}");
-    assert_eq!(evaluated.mode, "replay");
+    assert_eq!(evaluated.mode, "recompute");
     assert_eq!(evaluated.steps.len(), 3);
     assert!(
-        evaluated.steps.iter().all(|step| !step.reused),
-        "every node is recomputed from the entry"
+        evaluated.steps[0].reused,
+        "upstream of the edit is reused from the captured base"
+    );
+    assert!(
+        !evaluated.steps[1].reused && !evaluated.steps[2].reused,
+        "the edited node and affected downstream are recomputed"
     );
     assert_eq!(
         evaluated.steps[1].input,
@@ -403,7 +407,7 @@ async fn replay_recomputes_the_whole_graph_and_remaps_raw_input_at_the_edited_no
     assert_eq!(
         evaluated.steps[1].state_before,
         json!({"count": 1}),
-        "the preceding node's new state is used"
+        "the captured pre-state at the edit point is used"
     );
     assert_eq!(evaluated.steps[1].output, Some(json!({"value": 20})));
     assert_eq!(
@@ -428,6 +432,9 @@ async fn replay_recomputes_the_whole_graph_and_remaps_raw_input_at_the_edited_no
     .await
     .unwrap();
     assert_eq!(evaluated.status, Status::Completed, "{evaluated:#?}");
+    assert_eq!(evaluated.mode, "recompute");
+    assert!(evaluated.steps[0].reused);
+    assert!(!evaluated.steps[1].reused);
     assert_eq!(
         evaluated.steps[1].output,
         Some(json!({"value": {"n": 2, "tag": "a"}})),
@@ -1074,4 +1081,98 @@ fn invalid_plans_never_render_a_script() {
         script_for_plan(&plan),
         Err(cayw_trace_debug::Error::Invalid(_))
     ));
+}
+
+#[tokio::test]
+async fn local_recompute_reuses_upstream_and_marks_mode() {
+    let base_plan = plan(
+        "a",
+        vec![
+            node(
+                "a",
+                "return {output = {n = input.n, tag = \"a\"}, state = {count = 1}}",
+                "",
+            ),
+            node(
+                "b",
+                "return {output = {value = input}, state = {count = state.count + 1}}",
+                "/n",
+            ),
+            node(
+                "c",
+                "return {output = {final = input}, state = state}",
+                "/value",
+            ),
+        ],
+        vec![edge("a", "b", None), edge("b", "c", None)],
+        json!({"n": 2}),
+    );
+    let base = observed(vec![
+        step(
+            "a",
+            json!({"n": 2}),
+            json!({}),
+            json!({"n": 2, "tag": "a"}),
+            json!({"count": 1}),
+            None,
+            1,
+        ),
+        step(
+            "b",
+            json!({"n": 2, "tag": "a"}),
+            json!({"count": 1}),
+            json!({"value": 2}),
+            json!({"count": 2}),
+            None,
+            2,
+        ),
+        step(
+            "c",
+            json!({"value": 2}),
+            json!({"count": 2}),
+            json!({"final": 2}),
+            json!({"count": 2}),
+            None,
+            3,
+        ),
+    ]);
+
+    let mut edited = base_plan.clone();
+    edited.nodes[1].source =
+        "return {output = {value = input * 10}, state = {count = state.count + 1}}".into();
+    let recomputed = evaluate(
+        &edited,
+        Some(&base),
+        Some("b"),
+        &[],
+        1,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recomputed.mode, "recompute");
+    assert!(recomputed.id.starts_with("recompute:"));
+    assert!(recomputed.steps[0].reused);
+    assert_eq!(
+        recomputed.steps[0].output,
+        Some(json!({"n": 2, "tag": "a"}))
+    );
+    assert!(!recomputed.steps[1].reused);
+    assert_eq!(recomputed.output, Some(json!({"final": 20})));
+
+    // Undo / full-entry path stays replay and does not reuse.
+    let replayed = evaluate(
+        &base_plan,
+        Some(&base),
+        None,
+        &[],
+        2,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed.mode, "replay");
+    assert!(replayed.id.starts_with("replay:"));
+    assert!(replayed.steps.iter().all(|step| !step.reused));
+    assert_eq!(replayed.output, Some(json!({"final": 2})));
 }
