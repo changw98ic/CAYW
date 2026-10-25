@@ -6,6 +6,8 @@
 
 2026-10-24 的 [macOS 无界面主线最终组合验收](validation/macos-headless-mainline-final.md) 汇总 #2、#3、#4、#5、#6、#7、#8、#9、#10、#11、#18 共 11 项：同一测试源码上的 22 步离线回归、14 步正式 VerifyTool 检查，以及各项原证据的重新核对。该记录保留构建来源完整性 pending、#18 原 19 步及其他历史场景未在本次树重跑等限制；各项旧验收只证明各自源码，不据此更新远端 Issue 状态。
 
+2026-10-25 起 [#33](https://github.com/changw98ic/CAYW/issues/33) **F20 组合验收（SLICE Q）**骨架见 [f20-combo-acceptance-slice-q-20261025.md](validation/f20-combo-acceptance-slice-q-20261025.md)：底座烟测覆盖同 Session SQLite 重开、跨 Session 隔离与同场 `agent.run`（ContentStore 重开限 macOS）；结果释放/后台归属/MCP 同场封口仍等 A/P/F14，不把 F20 标完成。
+
 ## 从哪里开始
 
 **先把 Rust Agent 内核做出来，再在其上夯实 Stage A 执行底座。** `cayw-ai` / `cayw-agent` 的早期离线、本地 HTTP 和有限 Magpie + DS Flash 记录已保存。随后 Runtime 已接入持久化、Luau、工具权限、队列和恢复；共享读取与 Device 交互进程已分别验证。这些早期记录不包含随后 #2、#3、#4 的验收。2026-10-21 的 [交付检查](validation/issue-234-macos-delivery.md)分别列出验证基线、Luau 测量、进程清理与有限真实模型补充；长会话绑定读取及工具数字参数修复随本次交付进入 Runtime。这些有限场景不代替 [#6](https://github.com/changw98ic/CAYW/issues/6) 的完整验收；#6 随后已完成独立授权的 macOS ARM64 本地验收，详见[真实闭环记录](validation/issue-6-headless-chat-macos.md)。
