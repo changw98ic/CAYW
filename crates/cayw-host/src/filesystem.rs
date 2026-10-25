@@ -228,7 +228,6 @@ fn temporary(dir: &Dir) -> Result<(Temporary<'_>, File), CapabilityError> {
     Err(failure("unable to create a unique temporary file"))
 }
 
-
 /// Durably records directory entry updates after a rename or hard-link commit.
 ///
 /// `cap_std::Dir` is opened with `O_PATH` on Linux. Those descriptors reject
