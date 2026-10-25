@@ -267,6 +267,10 @@ Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。�
 
 参见[plugin 边界](../crates/cayw-plugins/README.md)、[#12](https://github.com/changw98ic/CAYW/issues/12)与[#16](https://github.com/changw98ic/CAYW/issues/16)。
 
+## 工作台批注反馈（F08 首刀）
+
+F08 首刀的批注反馈见 [`cayw-plannotator`](../crates/cayw-plannotator/README.md)：计划 / Markdown / diff / 本地页就地批注生成绑定 Session、目标与文件版本的结构化反馈，并注入后续 Agent attempt；版本不匹配时拒绝静默套用。浏览器 Plannotator UI、Pi 扩展与 TUI/WebUI 渲染接线不在本切片。
+
 ## Trace Debug：实时节点图与本地重新求值
 
 `cayw-trace-debug` 是可独立启停的本机插件应用。它经认证 IPC 按 Session 游标消费事件，维护自己的追踪文件和网页，不直接读写 Core 或 Cells 数据库。Runtime 和普通无界面任务不依赖该包；没有安装插件时仍可正常执行。该接入不依赖 #30 的页面编辑器，也不要求启用其他 plugin feature。
