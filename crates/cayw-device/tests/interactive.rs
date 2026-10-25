@@ -97,14 +97,20 @@ async fn receive(process: &mut InteractiveProcess, count: usize) -> Vec<u8> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut bytes = Vec::new();
         while bytes.len() < count {
-            bytes.extend(
-                process
-                    .stdout
-                    .recv()
-                    .await
-                    .unwrap()
-                    .expect("early stdout EOF"),
-            );
+            match process.stdout.recv().await.unwrap() {
+                Some(chunk) => bytes.extend(chunk),
+                None => {
+                    let exit = tokio::time::timeout(Duration::from_secs(2), process.control.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
+                    panic!(
+                        "early stdout EOF after {} of {} bytes; termination={exit:?}",
+                        bytes.len(),
+                        count
+                    );
+                }
+            }
         }
         assert_eq!(bytes.len(), count);
         bytes
@@ -293,6 +299,10 @@ async fn full_stdout_keeps_stderr_lifetime_budget_and_control_responsive() {
 
 #[tokio::test]
 async fn raw_lifetime_budget_includes_ready_delimiters_and_stderr_across_exchanges() {
+    // ready(6) + ab/echo+stderr(5) + cd/echo+stderr(5) = 16 raw bytes across pipes.
+    // Budget 16 must survive both exchanges; 15 must trip OutputLimit on the second.
+    // Never require a full second echo under budget 15: stderr can consume the last
+    // bytes mid-chunk and stage stdout EOF before "cd\n" is fully pushed.
     for (budget, reason) in [
         (16, TerminationReason::Exited),
         (15, TerminationReason::OutputLimit),
@@ -310,12 +320,13 @@ async fn raw_lifetime_budget_includes_ready_delimiters_and_stderr_across_exchang
             CancellationToken::new(),
         )
         .await;
+        marker(&directory, "root.pid").await;
         assert_eq!(receive(&mut process, 6).await, b"ready\n");
         process.stdin.write_all(b"ab\n").await.unwrap();
         assert_eq!(receive(&mut process, 3).await, b"ab\n");
         process.stdin.write_all(b"cd\n").await.unwrap();
-        assert_eq!(receive(&mut process, 3).await, b"cd\n");
         if budget == 16 {
+            assert_eq!(receive(&mut process, 3).await, b"cd\n");
             process.stdin.write_all(b"quit\n").await.unwrap();
         }
         let result = tokio::time::timeout(Duration::from_secs(10), process.control.wait())
@@ -395,7 +406,18 @@ async fn leader_exit_cleans_descendants_with_and_without_inherited_pipes() {
         reaped(marker(&directory, "root.pid").await);
         for name in ["middle.pid", "leaf.pid"] {
             let pid = marker(&directory, name).await;
-            assert_eq!(unsafe { libc::getpgid(pid) }, -1);
+            // Group teardown can lag the leader wait under load; poll until gone.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    // SAFETY: pid came from our fixture marker after leader cleanup.
+                    if unsafe { libc::getpgid(pid) } == -1 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{name} pid {pid} still has a process group"));
         }
         assert_eq!(scheduler.usage().active_tasks, 0);
     }
