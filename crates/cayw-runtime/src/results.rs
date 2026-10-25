@@ -183,7 +183,12 @@ fn getrandom_fill(bytes: &mut [u8]) -> Result<(), CapabilityError> {
         .map_err(|_| known("result handle entropy unavailable"))
 }
 
-fn body_key(device: &str, session: &str, task: Option<&str>, handle: &Id) -> Result<Id, RuntimeError> {
+fn body_key(
+    device: &str,
+    session: &str,
+    task: Option<&str>,
+    handle: &Id,
+) -> Result<Id, RuntimeError> {
     let bytes = serde_json::to_vec(&(
         "cayw-runtime-result-body-v1",
         device,
@@ -194,7 +199,12 @@ fn body_key(device: &str, session: &str, task: Option<&str>, handle: &Id) -> Res
     Ok(Id::new(ContentHash::of(&bytes).to_string())?)
 }
 
-fn meta_key(device: &str, session: &str, task: Option<&str>, handle: &Id) -> Result<Id, RuntimeError> {
+fn meta_key(
+    device: &str,
+    session: &str,
+    task: Option<&str>,
+    handle: &Id,
+) -> Result<Id, RuntimeError> {
     let bytes = serde_json::to_vec(&(
         "cayw-runtime-result-meta-v1",
         device,
@@ -311,16 +321,14 @@ fn view_from_meta(meta: &Meta) -> ResultHandleView {
     }
 }
 
-fn read_meta(
-    store: &ContentStore,
-    key: &Id,
-) -> Result<Option<(Record, Meta)>, CapabilityError> {
+fn read_meta(store: &ContentStore, key: &Id) -> Result<Option<(Record, Meta)>, CapabilityError> {
     match store.try_read(key) {
         Err(cayw_content::Error::Busy) => Err(known("result metadata store is busy")),
         Err(error) => Err(content_error(error)),
         Ok(None) => Ok(None),
         Ok(Some((record, bytes))) => {
-            let meta: Meta = serde_json::from_slice(&bytes).map_err(|_| known("result metadata is corrupt"))?;
+            let meta: Meta =
+                serde_json::from_slice(&bytes).map_err(|_| known("result metadata is corrupt"))?;
             Ok(Some((record, meta)))
         }
     }
@@ -435,9 +443,7 @@ impl cayw_host::ExternalHost for Service<'_> {
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
         if capability != self.scope.name {
-            return Err(known(
-                "result service differs from the original capability",
-            ));
+            return Err(known("result service differs from the original capability"));
         }
         let inner = &self.scope.context.inner;
         let store = inner
@@ -711,7 +717,6 @@ impl crate::Runtime {
     }
 }
 
-
 #[cfg(test)]
 mod unit {
     use super::{page_bytes, search_bytes, utf8_floor};
@@ -728,8 +733,9 @@ mod unit {
     #[cfg(target_os = "macos")]
     fn open_store() -> (TempDir, ContentStore) {
         let root = TempDir::new().unwrap();
-        let store = ContentStore::open(root.path(), Id::new("device-a").unwrap(), Limits::default())
-            .unwrap();
+        let store =
+            ContentStore::open(root.path(), Id::new("device-a").unwrap(), Limits::default())
+                .unwrap();
         (root, store)
     }
 
@@ -787,7 +793,11 @@ mod unit {
         .unwrap();
         assert_eq!(rest["has_more"], false);
         assert_eq!(
-            format!("{}{}", page["text"].as_str().unwrap(), rest["text"].as_str().unwrap()),
+            format!(
+                "{}{}",
+                page["text"].as_str().unwrap(),
+                rest["text"].as_str().unwrap()
+            ),
             body
         );
 
@@ -810,13 +820,8 @@ mod unit {
         assert_eq!(batch["items"][0]["ok"], true);
         assert_eq!(batch["items"][1]["ok"], false);
 
-        let released = release_result(
-            &store,
-            "sess-a",
-            "task-a",
-            json!({"handle": "demo1"}),
-        )
-        .unwrap();
+        let released =
+            release_result(&store, "sess-a", "task-a", json!({"handle": "demo1"})).unwrap();
         assert_eq!(released["released"], true);
         let err = get_result(
             &store,

@@ -7,7 +7,6 @@ mod children;
 mod collaboration;
 mod completion;
 mod content;
-mod results;
 mod coordination;
 mod execution;
 pub mod fixture;
@@ -29,6 +28,7 @@ mod remote;
 mod request_recovery;
 mod requests;
 mod resources;
+mod results;
 mod rpc;
 mod scheduler;
 mod session;
@@ -44,7 +44,6 @@ pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
 };
 pub use content::{ContentConfig, ContentScope, ContentView};
-pub use results::{ResultHandleView, ResultPage, ResultScope, ResultSnippet};
 pub use input::{ImageInput, TaskInput};
 pub use launch::HeadlessConfig;
 pub use model_requests::{
@@ -59,6 +58,7 @@ pub use requests::RequestPolicy;
 pub use resources::{
     ResourceCapability, ResourcePolicy, ResourceUsage, ResourceView, TaskResources,
 };
+pub use results::{ResultHandleView, ResultPage, ResultScope, ResultSnippet};
 pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
 

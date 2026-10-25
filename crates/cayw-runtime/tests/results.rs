@@ -213,6 +213,9 @@ async fn task_scoped_handle_is_isolated_from_session_and_other_sessions() {
     let b = rt.create(None).unwrap().id;
     assert!(
         rt.result_inspect(&b, Some(&task.id), "t1").is_err()
-            || rt.result_inspect(&b, Some(&task.id), "t1").unwrap().is_none()
+            || rt
+                .result_inspect(&b, Some(&task.id), "t1")
+                .unwrap()
+                .is_none()
     );
 }
