@@ -8,6 +8,7 @@
 //! - **recompute** (node save): reuse completed upstream steps from the captured
 //!   base, then run from the edited node with that step's input and
 //!   `state_before`, updating only affected downstream nodes.
+//!
 //! Host calls are answered only from the original captured records, matched to
 //! the node the runner has just started, by exact name, arguments and call order.
 
