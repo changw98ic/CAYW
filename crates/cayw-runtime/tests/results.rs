@@ -48,7 +48,7 @@ fn open(root: &Path, script: &str, config: RuntimeConfig) -> Runtime {
 }
 
 fn completed(rt: &Runtime, session: &str, name: &str) -> Value {
-    rt.events(session, 0, 2000)
+    rt.events(session, 0, 1000)
         .unwrap()
         .into_iter()
         .rev()
@@ -65,7 +65,7 @@ fn completed(rt: &Runtime, session: &str, name: &str) -> Value {
 
 fn failed_contains(rt: &Runtime, session: &str, name: &str, needle: &str) {
     let found = rt
-        .events(session, 0, 2000)
+        .events(session, 0, 1000)
         .unwrap()
         .into_iter()
         .rev()
@@ -160,7 +160,7 @@ return {{handle=stored.handle, matches=#found.matches, released=released.release
     assert_eq!(view.bytes, body.len() as u64);
 
     let search = rt
-        .events(&session, 0, 2000)
+        .events(&session, 0, 1000)
         .unwrap()
         .into_iter()
         .find_map(|record| {
