@@ -1,0 +1,20 @@
+[package]
+name = "cayw-vision"
+description = "Vision router: local pixel tools, OCR/Q&A backends, and answer cache (F11 first cut)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[example]]
+name = "offline_vision"

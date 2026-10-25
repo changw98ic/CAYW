@@ -758,6 +758,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-vision"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-visual-editor"
 version = "0.1.0"
 dependencies = [
