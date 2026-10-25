@@ -732,7 +732,10 @@ mod unit {
 
     #[cfg(target_os = "macos")]
     fn open_store() -> (TempDir, ContentStore) {
-        let root = TempDir::new().unwrap();
+        // ContentStore::open walks with open_dir_nofollow; macOS temp paths often
+        // go through /tmp or /var/folders symlinks, which yield ENOTDIR (Not a
+        // directory). Create under a canonicalized temp root like cayw-content tests.
+        let root = TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let store =
             ContentStore::open(root.path(), Id::new("device-a").unwrap(), Limits::default())
                 .unwrap();
