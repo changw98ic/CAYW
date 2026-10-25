@@ -422,6 +422,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-artifacts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-bridge"
 version = "0.1.0"
 dependencies = [

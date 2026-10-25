@@ -46,6 +46,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-plugins` / `cayw-content` / `cayw-remote` | plugin、Device 内容存放/备份、远程绑定路由 | 各自边界与局部实现分开验收；不成为普通 Chat 的强依赖 |
 | `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | 客户端、浏览器轻网关与验证消费者 | 依赖公开接口；Runtime 不反向依赖这些消费者 |
 | `cayw-visual-editor` | HTML/CSS、Vite React 与 Vue 3 页面的可选编辑应用；源码映射、预览和直接操作 | Rust 持有草稿与源码权威，保存通过 Host 公开接口执行文件权限、调用记录和摘要核对；可选 Node 进程解析 JSX/TSX/SFC 并启动 Vite，Core 不依赖编辑器 |
+| `cayw-artifacts` | F09/F19 首刀：HTML 卡片/图表/预览产物与宿主动作协议 | 按 Session 存放与恢复；动作只产生结构化意图（后续任务/工具/状态），不授予新 Host 能力；不替代 visual-editor / Trace |
 
 依赖从接入方指向公开接口，再由 Runtime 组合运行底座。Host 实现 CodeMode 的能力接口，Runtime 注入实际实现；接口调用不要求 CodeMode 反向依赖具体 UI 或某个 MCP 客户端。可选 Native plugin 由 Cargo feature 决定编译组合，External plugin 由宿主通过 IPC 注入。模型响应中的工具或 plugin 名称不能新增依赖或授予权限。
 
@@ -268,6 +269,9 @@ Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。�
 参见[plugin 边界](../crates/cayw-plugins/README.md)、[#12](https://github.com/changw98ic/CAYW/issues/12)与[#16](https://github.com/changw98ic/CAYW/issues/16)。
 
 ## Trace Debug：实时节点图与本地重新求值
+
+F09/F19 首刀的 HTML 产物与宿主动作协议见 [`cayw-artifacts`](../crates/cayw-artifacts/README.md)：通用 HTML 卡片/图表/独立预览按 Session 存放与恢复；卡片按钮等动作经统一协议触发后续任务或工具意图，跨 Session 拒绝，状态可快照恢复。不接线 WebUI 渲染，不替代专用调试/编辑页，不把 F09/F19 全范围标完成。
+
 
 `cayw-trace-debug` 是可独立启停的本机插件应用。它经认证 IPC 按 Session 游标消费事件，维护自己的追踪文件和网页，不直接读写 Core 或 Cells 数据库。Runtime 和普通无界面任务不依赖该包；没有安装插件时仍可正常执行。该接入不依赖 #30 的页面编辑器，也不要求启用其他 plugin feature。
 
