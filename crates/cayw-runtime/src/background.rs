@@ -49,6 +49,22 @@ pub struct BackgroundConfig {
     pub max_retained_finished: usize,
 }
 
+/// Raw `runtime_background_tasks` row, in SELECT column order.
+type TaskRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<i64>,
+    i64,
+    String,
+    Option<String>,
+    i64,
+    Option<i64>,
+);
+
 impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
@@ -271,18 +287,20 @@ impl BackgroundRegistry {
     }
 
     fn row_to_view(
-        id: String,
-        name: String,
-        profile: String,
-        session_id: String,
-        parent_task_id: Option<String>,
-        status: String,
-        exit_code: Option<i64>,
-        log_bytes: i64,
-        log_path: String,
-        error: Option<String>,
-        created_ms: i64,
-        finished_ms: Option<i64>,
+        (
+            id,
+            name,
+            profile,
+            session_id,
+            parent_task_id,
+            status,
+            exit_code,
+            log_bytes,
+            log_path,
+            error,
+            created_ms,
+            finished_ms,
+        ): TaskRow,
     ) -> Result<BackgroundTaskView, RuntimeError> {
         Ok(BackgroundTaskView {
             id,
@@ -325,9 +343,7 @@ impl BackgroundRegistry {
                 },
             )
             .optional()?
-            .map(|(a, b, c, d, e, f, g, h, i, j, k, l)| {
-                Self::row_to_view(a, b, c, d, e, f, g, h, i, j, k, l)
-            })
+            .map(Self::row_to_view)
             .transpose()
     }
 
@@ -356,11 +372,7 @@ impl BackgroundRegistry {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(a, b, c, d, e, f, g, h, i, j, k, l)| {
-                Self::row_to_view(a, b, c, d, e, f, g, h, i, j, k, l)
-            })
-            .collect()
+        rows.into_iter().map(Self::row_to_view).collect()
     }
 
     fn insert_running(
@@ -753,7 +765,7 @@ async fn run_task(
     }
     let id = new_id()?;
     let log_path = registry.root.join(format!("{id}.log"));
-    File::create(&log_path).map_err(|e| known(e))?;
+    File::create(&log_path).map_err(known)?;
     registry
         .insert_running(
             &id,
