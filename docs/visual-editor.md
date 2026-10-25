@@ -71,3 +71,5 @@ React 样式写成框架要求的对象。当前不接受含 `!important` 的 Re
 React/Vue 验收使用本项目从零编写的 Vite 测试项目。React 同时覆盖 JSX 与 TSX；Vue 覆盖单文件组件模板及原脚本、局部样式保留。两个项目均实际完成多文件修改、保存前磁盘不变、保存后构建、停服重启、再次编辑、外部修改冲突，以及原计数器和表单提交。它们是合成输入，不能当作外部项目或真实模型生成结果。最新命令、源码与构建摘要、截图、保存差异和调用记录见[精简重测记录](validation/issue-30-editor-simplification-macos.md)，适配阶段的结果见[框架验收记录](validation/issue-30-framework-editor-macos.md)。
 
 真实模型生成是独立验收。用户已授权本次 Magpie 调用最多 100,000,000 token，包含失败与未知预留。当前环境没有 `MAGPIE_API_KEY`，真实生成请求为 0 次。公开接口探测、脚手架构建和离线账本导出已运行，但模型生成项目后的编辑、保存与重启仍未验证。
+
+外部工程与 Linux 可复跑入口见 [F18 外部工程验收补强（SLICE L）](validation/f18-external-project-validation.md)：非 darwin 上用 fixtures/外部 Vite 工程做结构与构建验收；macOS Magpie 凭据经 `scripts/load-gateway-magpie-env.sh` 从 `/workspace/.env` 的 `GATEWAY_*` 映射，证据不打印密钥。
