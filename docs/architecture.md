@@ -45,6 +45,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-bridge` | 宿主已有 MCP/Skills/搜索能力的目录、来源快照和调用桥接 | 不在 Core 再创建连接或 loader |
 | `cayw-plugins` / `cayw-content` / `cayw-remote` | plugin、Device 内容存放/备份、远程绑定路由 | 各自边界与局部实现分开验收；不成为普通 Chat 的强依赖 |
 | `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | 客户端、浏览器轻网关与验证消费者 | 依赖公开接口；Runtime 不反向依赖这些消费者 |
+| `cayw-codeintel` | 宿主侧文件/符号版本桥接、同索引 definitions 与带回链的 diagnostics；供 Agent、编辑器、Trace 共用 | 不解析源码、不重复 `code.outline`、不把 CodeGraph/LSP 进程塞进 Core；跨文件影响与依赖图另计 |
 | `cayw-visual-editor` | HTML/CSS、Vite React 与 Vue 3 页面的可选编辑应用；源码映射、预览和直接操作 | Rust 持有草稿与源码权威，保存通过 Host 公开接口执行文件权限、调用记录和摘要核对；可选 Node 进程解析 JSX/TSX/SFC 并启动 Vite，Core 不依赖编辑器 |
 
 依赖从接入方指向公开接口，再由 Runtime 组合运行底座。Host 实现 CodeMode 的能力接口，Runtime 注入实际实现；接口调用不要求 CodeMode 反向依赖具体 UI 或某个 MCP 客户端。可选 Native plugin 由 Cargo feature 决定编译组合，External plugin 由宿主通过 IPC 注入。模型响应中的工具或 plugin 名称不能新增依赖或授予权限。
@@ -216,7 +217,7 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 Bridge 保存来源 ID、版本、origin、实例/代际、manifest 摘要和原调用关联。来源卸载/替换后，旧快照或迟到结果不能装作当前来源；已开始但未获可靠回执的调用保持 unknown。模型不能通过一个看似相同的工具名改绑连接或伪造来源。
 
-CodeGraph、跨文件 AST/语义索引和外部 search 在宿主侧按需接入，不塞进 Core。已有 Workspace 文本检索和单文件语法能力可直接提供受控局部读，但不替代这些外部服务。普通 Chat 不应因缺少某项检索扩展而失去基本运行能力。参见 [Bridge](../crates/cayw-bridge/src/registry.rs)、[Runtime 桥接验收](validation/runtime-bridge.md)和 [#9](https://github.com/changw98ic/CAYW/issues/9)。
+CodeGraph、跨文件 AST/语义索引和外部 search 在宿主侧按需接入，不塞进 Core。已有 Workspace 文本检索和单文件语法能力可直接提供受控局部读，但不替代这些外部服务。F04 首刀由 [`cayw-codeintel`](../crates/cayw-codeintel/README.md) 提供共享的文件/符号版本与最小 definitions/diagnostics 桥接（仍不内置实况 LSP）。普通 Chat 不应因缺少某项检索扩展而失去基本运行能力。参见 [Bridge](../crates/cayw-bridge/src/registry.rs)、[Runtime 桥接验收](validation/runtime-bridge.md)、[F04 来源](sources/f04-symbol-version-bridge.md)和 [#9](https://github.com/changw98ic/CAYW/issues/9)。
 
 ## 持久化、事件游标、幂等与恢复
 
