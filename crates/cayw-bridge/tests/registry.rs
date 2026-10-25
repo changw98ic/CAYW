@@ -51,6 +51,7 @@ fn manifest() -> Manifest {
             content_sha256: content_sha256("fixed content"),
         }],
         resources: Vec::new(),
+        prompts: Vec::new(),
         search: true,
     }
 }
@@ -106,6 +107,7 @@ impl SourceHandle for Handle {
                 })
             }
             SourceOperation::Search { arguments } => json!({"matches":[arguments["query"]]}),
+            SourceOperation::GetPrompt { .. } => Value::Null,
             SourceOperation::ReadResource { .. } => {
                 return Err(CapabilityError::new("unexpected resource read"));
             }

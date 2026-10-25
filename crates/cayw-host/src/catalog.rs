@@ -124,6 +124,10 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             }), &["server","tool","arguments"]),
             definition("mcp.resources.list", "List resource metadata pinned by the host's existing MCP sources.", json!({"server":string(256)}), &[]),
             definition("mcp.resources.read", "Read one manifest-pinned resource through the host's existing MCP source.", json!({"server":string(256),"uri":string(2048)}), &["server","uri"]),
+            definition("mcp.prompts.list", "List prompt templates pinned by the host's existing MCP sources.", json!({"server":string(256)}), &[]),
+            definition("mcp.prompts.get", "Fetch one prompt template through the host's existing MCP source.", json!({
+                "server":string(256),"name":string(256),"arguments":{"type":"object"}
+            }), &["server","name"]),
             definition("skills.list", "List skills from the application's existing skill source.", json!({}), &[]),
             definition("skills.read", "Read one named skill from the application's existing skill source.", json!({"name":string(256)}), &["name"]),
         ].into_iter().map(|definition| (definition, Executor::External)));

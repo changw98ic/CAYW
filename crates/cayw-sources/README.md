@@ -199,3 +199,51 @@ The example writes its JSON records with `create_new` and `sync_all`, reports
 `real_model: false`, and fails unless the stdio child was reaped, the Skill
 source was closed, and the loopback IPC server stopped. The IPC token is not
 written to any artifact.
+
+## Managed lifecycle (F14)
+
+`ManagedStdio` wraps the same stdio transport with host-selected residency:
+
+| Mode | Probe | First use | Idle recycle |
+| --- | --- | --- | --- |
+| `Lazy` (default) | connect → catalog → stop | reconnect | stop after `idle_timeout` when `in_flight == 0` |
+| `LazyKeepAlive` | connect → catalog → stop | reconnect | never while registered |
+| `Eager` | keep first connection | already live | never |
+
+```rust
+use cayw_ai::CancellationToken;
+use cayw_sources::{LifecycleMode, ManagedStdio, ServerSpec, StdioConfig};
+use std::time::Duration;
+
+let prepared = ManagedStdio::prepare(
+    ServerSpec {
+        id: "local".into(),
+        version: "2".into(),
+        origin: "host:example".into(),
+        config: StdioConfig::new("/absolute/program", "/absolute/directory"),
+        lifecycle: LifecycleMode::Lazy,
+        idle_timeout: Duration::from_secs(60),
+    },
+    CancellationToken::new(),
+).await?;
+
+let control = prepared.control(); // observations only
+let (manifest, handle) = prepared.into_parts();
+// register handle into cayw-bridge::Registry; mcp.discover stays metadata-only
+```
+
+Catalog entries remain registered while the child is stopped. `mcp.call`,
+`mcp.resources.read` and `mcp.prompts.get` start a fresh process. A recycled
+connection that returns a different tool/resource/prompt set or server identity
+fails closed and requires an explicit host reconnect.
+
+## External config import
+
+`import_mcp_servers_json` accepts Claude Desktop / Cursor / VS Code / Codex style
+documents with an `mcpServers` object. Only absolute local stdio `command` paths
+are accepted; `npx`/`uvx`/relative names and URL/SSE/HTTP entries are skipped with
+reasons. Optional `lifecycle` and `idleTimeout` (minutes) map onto `ServerSpec`.
+
+Prompt templates are discovered through `prompts/list` and fetched with
+`mcp.prompts.get`. Listing is metadata-only and never grants execution.
+Server-driven elicitation / forms are outside this local adapter.
