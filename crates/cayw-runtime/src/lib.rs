@@ -7,6 +7,7 @@ mod children;
 mod collaboration;
 mod completion;
 mod content;
+mod results;
 mod coordination;
 mod execution;
 pub mod fixture;
@@ -43,6 +44,7 @@ pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
 };
 pub use content::{ContentConfig, ContentScope, ContentView};
+pub use results::{ResultHandleView, ResultPage, ResultScope, ResultSnippet};
 pub use input::{ImageInput, TaskInput};
 pub use launch::HeadlessConfig;
 pub use model_requests::{
