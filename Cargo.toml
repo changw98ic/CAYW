@@ -13,6 +13,7 @@ members = [
     "crates/cayw-plugins",
     "crates/cayw-remote",
     "crates/cayw-content",
+    "crates/cayw-context",
     "crates/cayw-tui",
     "crates/cayw-webui",
     "crates/cayw-data",
@@ -35,6 +36,7 @@ repository = "https://github.com/changw98ic/CAYW"
 
 [workspace.dependencies]
 cayw-ai = { path = "crates/cayw-ai", version = "0.1.0" }
+cayw-context = { path = "crates/cayw-context", version = "0.1.0" }
 async-trait = "0.1"
 async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio"] }
