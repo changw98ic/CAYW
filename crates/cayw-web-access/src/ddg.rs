@@ -100,7 +100,9 @@ pub fn parse_duckduckgo_html(html: &str) -> Vec<SearchHit> {
             .or_else(|| {
                 // class may appear before href on the same tag starting earlier
                 let tag = &window[tag_start..];
-                let end = tag.find('>').unwrap_or(tag.len().min(400));
+                let end = tag
+                    .find('>')
+                    .unwrap_or_else(|| tag.floor_char_boundary(tag.len().min(400)));
                 extract_attr(&tag[..end], "href")
             });
         let Some(href) = href else {
@@ -174,6 +176,11 @@ fn anchor_inner_text(from_class: &str) -> Option<String> {
     Some(out)
 }
 
+/// Cap `s` to at most `max_bytes` without splitting a UTF-8 scalar.
+fn prefix_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    &s[..s.floor_char_boundary(max_bytes.min(s.len()))]
+}
+
 fn nearby_snippet(full: &str, result_idx: usize) -> Option<String> {
     let window_end = (result_idx + 1200).min(full.len());
     let window = &full[result_idx..window_end];
@@ -182,8 +189,13 @@ fn nearby_snippet(full: &str, result_idx: usize) -> Option<String> {
             let slice = &window[m..];
             if let Some(gt) = slice.find('>') {
                 let after = &slice[gt + 1..];
-                let end = after.find("</").unwrap_or_else(|| after.len().min(280));
-                let text = strip_tags(&after[..end]);
+                // Byte-cap fallback used to use `after.len().min(280)` which can land
+                // mid multi-byte Chinese / emoji scalar and panic on `&after[..end]`.
+                let raw = match after.find("</") {
+                    Some(i) => &after[..i],
+                    None => prefix_at_char_boundary(after, 280),
+                };
+                let text = strip_tags(raw);
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     return Some(decode_basic_entities(trimmed));
@@ -280,5 +292,38 @@ mod tests {
         let u = DuckDuckGoHtmlSearch::search_url("foo bar").unwrap();
         assert!(u.starts_with(ENDPOINT));
         assert!(u.contains("foo") && u.contains("bar"));
+    }
+
+    /// Truncated DDG HTML with a long Chinese (+ emoji) snippet and no closing
+    /// `</…>` used to panic: `after.len().min(280)` is not always a char boundary.
+    #[test]
+    fn chinese_snippet_byte_cap_does_not_panic() {
+        let zh = "中文搜索结果摘要这是一段很长的中文摘要内容用于测试字节截断".repeat(10);
+        assert!(zh.len() > 280);
+        assert!(!zh.is_char_boundary(280));
+        // No `</` after the snippet opener — same shape as a mid-page body cut.
+        let html = format!(
+            r#"<div class="result"><a class="result__a" href="https://example.cn/page">中文标题🚀✨</a><a class="result__snippet">{zh}"#
+        );
+        let hits = parse_duckduckgo_html(&html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://example.cn/page");
+        assert_eq!(hits[0].title.as_deref(), Some("中文标题🚀✨"));
+        let snippet = hits[0].snippet.as_deref().expect("snippet");
+        assert!(snippet.starts_with("中文"));
+        assert!(snippet.len() <= 280);
+        assert!(snippet.is_char_boundary(snippet.len()));
+        // Mixed emoji title path also stayed intact.
+        assert!(hits[0].title.as_deref().unwrap().contains('🚀'));
+    }
+
+    #[test]
+    fn prefix_at_char_boundary_floors_mid_scalar() {
+        let s = "中文🚀摘要";
+        // '中' is bytes 0..3; index 2 is inside it.
+        assert!(!s.is_char_boundary(2));
+        assert_eq!(prefix_at_char_boundary(s, 2), "");
+        assert_eq!(prefix_at_char_boundary(s, 3), "中");
+        assert_eq!(prefix_at_char_boundary(s, 100), s);
     }
 }
