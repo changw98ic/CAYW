@@ -5,12 +5,12 @@ use cayw_ai::CancellationToken;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, HostConfig, PermissionGate};
 use cayw_web_access::WebAccessOptions;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
 };
 
@@ -91,8 +91,23 @@ fn open(config: HostConfig) -> (Workspace, Host) {
 }
 
 #[tokio::test]
-async fn default_catalog_registers_web_tools() {
+async fn default_host_omits_web_catalog() {
     let (_ws, host) = open(HostConfig::default());
+    assert!(
+        !host
+            .capabilities()
+            .iter()
+            .any(|d| d.name.starts_with("web.")),
+        "ordinary HostConfig::default() must not advertise web.*"
+    );
+}
+
+#[tokio::test]
+async fn enabled_web_access_registers_web_tools() {
+    let (_ws, host) = open(HostConfig {
+        web_access: Some(WebAccessOptions::default()),
+        ..HostConfig::default()
+    });
     let names: Vec<_> = host.capabilities().into_iter().map(|d| d.name).collect();
     for need in ["web.search", "web.fetch", "web.extract"] {
         assert!(
@@ -129,10 +144,8 @@ async fn disabled_web_access_omits_catalog() {
         ..Default::default()
     };
     let (_ws, host) = open(config);
-    assert!(
-        !host
-            .capabilities()
-            .iter()
-            .any(|d| d.name.starts_with("web."))
-    );
+    assert!(!host
+        .capabilities()
+        .iter()
+        .any(|d| d.name.starts_with("web.")));
 }

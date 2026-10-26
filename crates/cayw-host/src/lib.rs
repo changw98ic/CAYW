@@ -145,9 +145,10 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
-    /// Web search / fetch / extract (`web.*`). None omits them from the catalog.
-    /// Default enables DuckDuckGo HTML search (no API key) + live HTTP fetch.
-    /// Content refs live in the process-local store held by the constructed service.
+    /// Web search / fetch / extract (`web.*`).
+    /// `None` (the default) omits them from the ordinary Host catalog.
+    /// When set, DuckDuckGo HTML search (no API key) + live HTTP fetch are available;
+    /// content refs live in the process-local store held by the constructed service.
     pub web_access: Option<cayw_web_access::WebAccessOptions>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
@@ -170,7 +171,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
-            web_access: Some(cayw_web_access::WebAccessOptions::default()),
+            web_access: None,
             external: None,
         }
     }
