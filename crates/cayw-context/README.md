@@ -12,7 +12,9 @@ CAYW 上下文 / token / 费用 / 缓存观测视图（F05 首刀，SLICE F）�
 - 组成：按 Provider 已报 token 分量（input / output / cache_read / cache_write / reasoning）
 - 协议版本：`CONTEXT_PROTOCOL_VERSION = 1`
 
-本切片**不**交付：消息类别组成（user / inject / skill …）、Insights 热力图、TUI/WebUI 渲染接线、Runtime `model_requests` 直接导出（后续可经同一视图层接入）。
+本 crate 仍是纯折叠层。Runtime 侧通过 `session_ledger_snapshot_from_model_requests` / `Runtime::session_context_overview` / IPC `session.context_overview` 接入同一账本（见 `cayw-runtime`）。
+
+本切片**不**交付：消息类别组成（user / inject / skill …）、Insights 热力图、TUI/WebUI 渲染接线。
 
 ## 快速使用
 

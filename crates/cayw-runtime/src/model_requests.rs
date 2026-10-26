@@ -540,7 +540,7 @@ fn project(
     })
 }
 
-fn visit(
+pub(crate) fn visit(
     store: &SessionStore,
     snapshot: &cayw_core::SessionSnapshot,
     mut accept: impl FnMut(&EventRecord) -> Result<(), RuntimeError>,

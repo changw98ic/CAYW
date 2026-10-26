@@ -7,6 +7,7 @@ mod children;
 mod collaboration;
 mod completion;
 mod content;
+mod context_overview;
 mod coordination;
 mod execution;
 pub mod fixture;
@@ -37,12 +38,14 @@ mod values;
 pub use audit::{AuditRecord, GrantRecord};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
+pub use cayw_context::{CostStatus, SessionLedgerSnapshot, SessionOverview};
 pub use cayw_requests::TaskIntent;
 pub use children::LocalAgents;
 pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
 };
 pub use content::{ContentConfig, ContentScope, ContentView};
+pub use context_overview::session_ledger_snapshot_from_model_requests;
 pub use input::{ImageInput, TaskInput};
 pub use launch::HeadlessConfig;
 pub use model_requests::{

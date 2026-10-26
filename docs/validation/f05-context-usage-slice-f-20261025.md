@@ -20,6 +20,14 @@ cargo run -p cayw-context --example offline_overview --locked
 - 示例打印 Fleet 成员与跨会话 KPI；`cost=Unknown`。
 - 无网络、无 Provider、无真实模型请求。
 
+## Runtime 接线补充
+
+```sh
+cargo test -p cayw-runtime --test context_overview --locked
+```
+
+证明：`OfflineProvider` 真实落账 → `model_requests` → adapter → `session_context_overview`，以及 IPC `session.context_overview`。未知费用保持空。
+
 ## 不做声明
 
 本记录不证明 F05 全范围完成，也不证明 TUI/WebUI 已接线。

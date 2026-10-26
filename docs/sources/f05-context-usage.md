@@ -24,13 +24,14 @@
 - token 分量组成、缓存命中率（分母为 0 时省略）、请求演进步骤
 - 单元测试与 `offline_overview` 示例
 - 本源记录与 crate README
+- Runtime 适配：`model_requests` → `SessionLedgerSnapshot`；`session_context_overview` + IPC `session.context_overview`
 
 ## 明确未交付（后续切片）
 
 - 消息类别组成（user / inject / skill / assistant / tool）
 - Insights 热力图 / 7 日费用柱图 / 日历筛选
 - TUI / WebUI 渲染接线
-- Runtime 公开 API 直接返回本视图（可后续薄封装）
+- TUI/WebUI 渲染接线（Runtime/IPC 已接 overview）
 
 ## 验收口径（本切片）
 

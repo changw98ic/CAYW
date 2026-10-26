@@ -324,6 +324,10 @@ impl RpcHandler for Runtime {
                 let p: Events = parse(params)?;
                 encode(self.audit(&p.session_id, p.after, p.limit)?)
             }
+            "session.context_overview" => {
+                let p: Session = parse(params)?;
+                encode(self.session_context_overview(&p.session_id)?)
+            }
             "session.grants" => {
                 let p: Session = parse(params)?;
                 encode(self.grants(&p.session_id)?)

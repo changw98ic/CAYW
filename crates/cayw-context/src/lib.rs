@@ -14,7 +14,8 @@
 //! - parent / child fleet overview sharing one budget lineage
 //!
 //! Message-category composition (user / inject / skill / …), Insights heatmaps,
-//! TUI/WebUI rendering, and Runtime wiring are out of scope for this slice.
+//! and TUI/WebUI rendering are out of scope for this slice. Runtime adapts the
+//! durable `model_requests` ledger into these snapshots (see cayw-runtime).
 //!
 //! Design reference (not a code transplant):
 //! [bowenliang123/dsh-context](https://github.com/bowenliang123/dsh-context).
