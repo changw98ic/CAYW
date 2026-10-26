@@ -571,6 +571,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-panel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "cayw-plugins"
 version = "0.1.0"
 dependencies = [
@@ -787,6 +797,7 @@ dependencies = [
  "async-trait",
  "axum",
  "cayw-ipc",
+ "cayw-panel",
  "reqwest",
  "serde",
  "serde_json",

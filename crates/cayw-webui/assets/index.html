@@ -39,6 +39,12 @@
       </form>
       <p id="list-status" class="small muted" role="status"></p>
       <nav id="session-list" class="session-list" aria-label="选择会话"></nav>
+      <section id="panel-sidebar" class="panel-zone" aria-labelledby="panel-sidebar-heading">
+        <div class="section-heading"><h2 id="panel-sidebar-heading">面板</h2><button id="refresh-panels" class="quiet" type="button">刷新</button></div>
+        <p id="panel-sidebar-status" class="small muted" role="status">连接后显示已注册侧栏面板。</p>
+        <nav id="panel-sidebar-guide" class="panel-guide" aria-label="侧栏面板目录"></nav>
+        <div id="panel-sidebar-open" class="panel-open-list" aria-live="polite"></div>
+      </section>
       <details class="capabilities"><summary>宿主能力</summary><button id="refresh-capabilities" class="quiet" type="button">读取能力</button><pre id="capability-content" class="small muted">读取后显示当前宿主公开的能力。</pre></details>
       <p class="sidebar-note small muted">对话保存在本机。断线后继续接收结果，消息不会自动重发。</p>
       </div>
@@ -60,6 +66,12 @@
         <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选择会话后即可输入。Enter 换行，Ctrl / ⌘ + Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止运行</button><button id="send-button" type="submit" disabled>发送</button></div></div>
       </form>
     </main>
+
+    <aside id="panel-bottom" class="panel-bottom" aria-labelledby="panel-bottom-heading" hidden>
+      <div class="section-heading"><h2 id="panel-bottom-heading">底部工作区</h2><span id="panel-bottom-status" class="small muted" role="status"></span></div>
+      <nav id="panel-bottom-guide" class="panel-guide" aria-label="底部面板目录"></nav>
+      <div id="panel-bottom-open" class="panel-open-list" aria-live="polite"></div>
+    </aside>
   </div>
 
   <dialog id="fork-dialog" aria-labelledby="fork-heading">

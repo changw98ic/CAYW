@@ -782,3 +782,191 @@ async fn slow_request_bodies_cannot_hold_all_admission_slots() {
     .await;
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn registered_panels_are_reachable_from_webui_product_entry() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let html = fixture
+        .http
+        .get(format!("http://{}/", fixture.addr))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("id=\"panel-sidebar\""),
+        "product HTML must expose the sidebar panel surface"
+    );
+    assert!(
+        html.contains("id=\"panel-bottom\""),
+        "product HTML must expose the bottom panel surface"
+    );
+    let script = fixture
+        .http
+        .get(format!("http://{}/app.js", fixture.addr))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        script.contains("/api/panels"),
+        "shipped UI must call the panel workbench API"
+    );
+    assert!(!html.contains(WEB_TOKEN) && !script.contains(WEB_TOKEN));
+
+    let catalog = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({"method":"panels.catalog","params":{}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let result = catalog.get("result").unwrap();
+    let sidebar: Vec<&str> = result["sidebar"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|panel| panel["id"].as_str().unwrap())
+        .collect();
+    let bottom: Vec<&str> = result["bottom"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|panel| panel["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        sidebar.contains(&"files"),
+        "official files panel must appear in sidebar guide"
+    );
+    assert!(
+        sidebar.contains(&"vendor:demo"),
+        "third-party sample panel must appear in sidebar guide"
+    );
+    assert!(
+        bottom.contains(&"terminal-bottom"),
+        "terminal panel must appear in bottom guide"
+    );
+
+    let opened = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.open",
+                "params":{
+                    "session_id":"webui-local",
+                    "panel_id":"files",
+                    "zone":"sidebar",
+                    "path":"README.md",
+                    "activate":true
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(opened["result"]["panel_id"], "files");
+    assert_eq!(opened["result"]["path"], "README.md");
+    let instance_id = opened["result"]["instance_id"].as_str().unwrap().to_owned();
+
+    let revealed = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.interact",
+                "params":{
+                    "session_id":"webui-local",
+                    "instance_id":instance_id,
+                    "kind":"editor",
+                    "path":"src/lib.rs"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(revealed["result"]["path"], "src/lib.rs");
+
+    let terminal = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.open",
+                "params":{
+                    "session_id":"webui-local",
+                    "panel_id":"terminal-bottom",
+                    "activate":true
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let terminal_id = terminal["result"]["instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let focused = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.interact",
+                "params":{
+                    "session_id":"webui-local",
+                    "instance_id":terminal_id,
+                    "kind":"terminal"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(focused["result"]["panel_id"], "terminal-bottom");
+    assert_eq!(focused["result"]["active"], true);
+
+    let listed = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({"method":"panels.list_open","params":{"session_id":"webui-local"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let open_ids: Vec<&str> = listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|panel| panel["panel_id"].as_str().unwrap())
+        .collect();
+    assert!(open_ids.contains(&"files"));
+    assert!(open_ids.contains(&"terminal-bottom"));
+    fixture.close().await;
+}

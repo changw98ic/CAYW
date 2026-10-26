@@ -1,6 +1,8 @@
 //! Optional loopback browser gateway. The runtime owns every session, event,
 //! tool invocation and approval decision. This gateway never retries an RPC.
 
+mod workbench;
+
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -11,11 +13,13 @@ use axum::{
     routing::{get, post},
 };
 use cayw_ipc::{Client, ClientConfig, ClientError};
+use cayw_panel::{OpenPanelRequest, PanelZone};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fmt, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
 use tokio_util::sync::CancellationToken;
+use workbench::{Workbench, panel_error_response};
 
 /// Requests are bounded before JSON parsing or IPC dispatch.
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
@@ -147,6 +151,7 @@ struct Gateway {
     in_flight: Semaphore,
     prompts: Semaphore,
     cancel: CancellationToken,
+    workbench: Arc<Workbench>,
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
@@ -199,6 +204,12 @@ pub async fn serve_with_limits(
         ));
     }
     limits.validate()?;
+    let workbench = Arc::new(Workbench::with_builtin_panels().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to seed WebUI panel workbench: {error}"),
+        )
+    })?);
     let state = Arc::new(Gateway {
         ipc: ipc_client,
         web_token,
@@ -210,12 +221,14 @@ pub async fn serve_with_limits(
         prompts: Semaphore::new(limits.max_prompt_in_flight),
         limits,
         cancel: cancel.clone(),
+        workbench,
     });
     let app = Router::new()
         .route("/", get(index))
         .route("/app.js", get(script))
         .route("/styles.css", get(styles))
         .route("/api/rpc", post(rpc))
+        .route("/api/panels", post(panels))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
@@ -297,7 +310,7 @@ async fn guarded_request(state: &Gateway, request: Request, next: Next) -> Respo
             false,
         );
     }
-    if request.uri().path() != "/api/rpc" {
+    if request.uri().path() != "/api/rpc" && request.uri().path() != "/api/panels" {
         return next.run(request).await;
     }
     if !authorized(request.headers(), &state.web_token) {
@@ -532,6 +545,163 @@ fn error_response(
         Json(json!({"error":{"code":code,"message":message,"outcome_unknown":outcome_unknown}})),
     )
         .into_response()
+}
+
+const PANEL_METHODS: &[&str] = &[
+    "panels.catalog",
+    "panels.open",
+    "panels.activate",
+    "panels.close",
+    "panels.list_open",
+    "panels.interact",
+];
+
+async fn panels(
+    State(state): State<Arc<Gateway>>,
+    payload: Result<Json<BrowserRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => {
+            let status = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return error_response(
+                status,
+                "invalid_json",
+                "Expected a bounded JSON object with method and params",
+                false,
+            );
+        }
+    };
+    if !PANEL_METHODS.contains(&request.method.as_str()) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "method_not_allowed",
+            "This method is not part of the panel workbench contract",
+            false,
+        );
+    }
+    if !request.params.is_object() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "params must be a JSON object",
+            false,
+        );
+    }
+    match dispatch_panels(&state, &request.method, request.params) {
+        Ok(result) => Json(json!({"result": result})).into_response(),
+        Err((status, body)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(body),
+        )
+            .into_response(),
+    }
+}
+
+fn dispatch_panels(state: &Gateway, method: &str, params: Value) -> Result<Value, (u16, Value)> {
+    let workbench = &state.workbench;
+    match method {
+        "panels.catalog" => {
+            Ok(serde_json::to_value(workbench.catalog()).expect("catalog serializes"))
+        }
+        "panels.open" => {
+            let session_id = required_string(&params, "session_id")?;
+            let panel_id = required_string(&params, "panel_id")?;
+            let zone = optional_zone(&params)?;
+            let path = optional_string(&params, "path")?;
+            let activate = params
+                .get("activate")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let opened = workbench
+                .open(
+                    &session_id,
+                    OpenPanelRequest {
+                        panel_id,
+                        zone,
+                        path,
+                        activate,
+                    },
+                )
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.activate" => {
+            let session_id = required_string(&params, "session_id")?;
+            let instance_id = required_string(&params, "instance_id")?;
+            let opened = workbench
+                .activate(&session_id, &instance_id)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.close" => {
+            let session_id = required_string(&params, "session_id")?;
+            let instance_id = required_string(&params, "instance_id")?;
+            let opened = workbench
+                .close(&session_id, &instance_id)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.list_open" => {
+            let session_id = required_string(&params, "session_id")?;
+            let zone = optional_zone(&params)?;
+            let opened = workbench
+                .list_open(&session_id, zone)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.interact" => {
+            let session_id = required_string(&params, "session_id")?;
+            let instance_id = required_string(&params, "instance_id")?;
+            let kind = required_string(&params, "kind")?;
+            let path = optional_string(&params, "path")?;
+            let opened = workbench
+                .interact(&session_id, &instance_id, &kind, path)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        _ => Err((
+            403,
+            json!({"error":{"code":"method_not_allowed","message":"This method is not part of the panel workbench contract","outcome_unknown":false}}),
+        )),
+    }
+}
+
+fn required_string(params: &Value, key: &str) -> Result<String, (u16, Value)> {
+    match params.get(key).and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => Ok(value.to_owned()),
+        _ => Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":format!("params.{key} must be a non-empty string"),"outcome_unknown":false}}),
+        )),
+    }
+}
+
+fn optional_string(params: &Value, key: &str) -> Result<Option<String>, (u16, Value)> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(_) => Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":format!("params.{key} must be a string when set"),"outcome_unknown":false}}),
+        )),
+    }
+}
+
+fn optional_zone(params: &Value) -> Result<Option<PanelZone>, (u16, Value)> {
+    match params.get("zone") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value == "sidebar" => Ok(Some(PanelZone::Sidebar)),
+        Some(Value::String(value)) if value == "bottom" => Ok(Some(PanelZone::Bottom)),
+        Some(_) => Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":"params.zone must be sidebar or bottom","outcome_unknown":false}}),
+        )),
+    }
 }
 
 async fn not_found() -> Response {

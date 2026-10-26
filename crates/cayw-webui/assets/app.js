@@ -333,6 +333,8 @@ function boot() {
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork', 'refresh-capabilities', 'capability-content',
+    'panel-sidebar', 'panel-sidebar-status', 'panel-sidebar-guide', 'panel-sidebar-open', 'refresh-panels',
+    'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
   ].map(id => [id, $(id)]));
   let token = '';
   let loginGeneration = 0;
@@ -397,6 +399,172 @@ function boot() {
     }
   }
 
+
+  let panelCatalog = null;
+  let openedPanels = [];
+  const panelSessionId = () => selected || 'webui-local';
+
+  async function panelsApi(method, params = {}) {
+    const controller = new AbortController();
+    controllers.add(controller);
+    const requestToken = token;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch('/api/panels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
+        body: JSON.stringify({ method, params }),
+        signal: controller.signal,
+        cache: 'no-store',
+        credentials: 'omit',
+      });
+      let payload;
+      try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '面板接口返回了无效 JSON。', false, response.status); }
+      if (!response.ok || payload?.error) {
+        const detail = payload?.error;
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '网页访问令牌无效或已失效，请重新连接。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
+      }
+      if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '面板响应缺少 result。', false, response.status);
+      return payload.result;
+    } catch (error) {
+      if (error.name === 'AbortError') throw new RpcError('transport_unknown', '面板请求连接已中断或超时。', false);
+      if (error instanceof TypeError) throw new RpcError('transport_unknown', '无法连接本机面板接口。', false);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      controllers.delete(controller);
+    }
+  }
+
+  function renderPanelGuide(target, entries, zone) {
+    target.replaceChildren();
+    for (const panel of array(entries)) {
+      const button = el('button', 'secondary', panel.title || panel.id);
+      button.type = 'button';
+      button.dataset.panelId = panel.id;
+      button.title = panel.description || panel.id;
+      button.addEventListener('click', () => openRegisteredPanel(panel.id, zone));
+      target.append(button);
+    }
+  }
+
+  function renderOpenedPanels() {
+    const sidebarOpen = ui['panel-sidebar-open'];
+    const bottomOpen = ui['panel-bottom-open'];
+    sidebarOpen.replaceChildren();
+    bottomOpen.replaceChildren();
+    for (const opened of openedPanels) {
+      const card = el('div', 'panel-card');
+      card.dataset.active = opened.active ? 'true' : 'false';
+      card.append(el('strong', '', opened.title || opened.panel_id));
+      card.append(el('span', 'small muted', `${opened.panel_id}${opened.path ? ` · ${opened.path}` : ''}`));
+      const actions = el('div', 'actions');
+      const activate = el('button', 'quiet', '激活');
+      activate.type = 'button';
+      activate.addEventListener('click', () => activateOpenedPanel(opened.instance_id));
+      const close = el('button', 'quiet', '关闭');
+      close.type = 'button';
+      close.addEventListener('click', () => closeOpenedPanel(opened.instance_id));
+      actions.append(activate, close);
+      if (opened.panel_id === 'files') {
+        const reveal = el('button', 'quiet', '揭示路径');
+        reveal.type = 'button';
+        reveal.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'editor', opened.path || 'README.md'));
+        actions.append(reveal);
+      }
+      if (opened.panel_id === 'terminal-bottom') {
+        const focus = el('button', 'quiet', '聚焦终端');
+        focus.type = 'button';
+        focus.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'terminal'));
+        actions.append(focus);
+      }
+      card.append(actions);
+      if (opened.zone === 'bottom') bottomOpen.append(card);
+      else sidebarOpen.append(card);
+    }
+    ui['panel-bottom'].hidden = !(array(panelCatalog?.bottom).length || openedPanels.some(item => item.zone === 'bottom'));
+    ui['panel-bottom-status'].textContent = openedPanels.filter(item => item.zone === 'bottom').length ? `${openedPanels.filter(item => item.zone === 'bottom').length} 个已打开` : '可从目录打开底部面板';
+  }
+
+  async function refreshPanels() {
+    if (!token) return;
+    const login = loginGeneration;
+    ui['panel-sidebar-status'].textContent = '正在读取面板目录…';
+    try {
+      const catalog = await panelsApi('panels.catalog');
+      if (login !== loginGeneration) return;
+      panelCatalog = catalog;
+      renderPanelGuide(ui['panel-sidebar-guide'], catalog?.sidebar, 'sidebar');
+      renderPanelGuide(ui['panel-bottom-guide'], catalog?.bottom, 'bottom');
+      const ids = array(catalog?.sidebar).map(panel => panel.id).concat(array(catalog?.bottom).map(panel => panel.id));
+      ui['panel-sidebar-status'].textContent = ids.length ? `已注册 ${[...new Set(ids)].length} 个面板` : '暂无已注册面板';
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login !== loginGeneration) return;
+      ui['panel-sidebar-status'].textContent = errorText(error);
+      if (error.auth) disconnect(error.message);
+    }
+  }
+
+  async function openRegisteredPanel(panelId, zone) {
+    const login = loginGeneration;
+    report(null);
+    try {
+      const params = { session_id: panelSessionId(), panel_id: panelId, zone, activate: true };
+      if (panelId === 'files') params.path = 'README.md';
+      await panelsApi('panels.open', params);
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
+  async function activateOpenedPanel(instanceId) {
+    const login = loginGeneration;
+    try {
+      await panelsApi('panels.activate', { session_id: panelSessionId(), instance_id: instanceId });
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
+  async function closeOpenedPanel(instanceId) {
+    const login = loginGeneration;
+    try {
+      await panelsApi('panels.close', { session_id: panelSessionId(), instance_id: instanceId });
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
+  async function interactOpenedPanel(instanceId, kind, path) {
+    const login = loginGeneration;
+    try {
+      const params = { session_id: panelSessionId(), instance_id: instanceId, kind };
+      if (path) params.path = path;
+      await panelsApi('panels.interact', params);
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
   function disconnect(reason = '') {
     loginGeneration++;
     selectionGeneration++;
@@ -427,6 +595,14 @@ function boot() {
     ui['session-picker'].open = true;
     ui['prompt'].value = '';
     ui['fork-dialog'].close();
+    panelCatalog = null;
+    openedPanels = [];
+    ui['panel-sidebar-guide'].replaceChildren();
+    ui['panel-sidebar-open'].replaceChildren();
+    ui['panel-bottom-guide'].replaceChildren();
+    ui['panel-bottom-open'].replaceChildren();
+    ui['panel-sidebar-status'].textContent = '连接后显示已注册侧栏面板。';
+    ui['panel-bottom'].hidden = true;
     ui['web-token'].focus();
   }
 
@@ -832,6 +1008,7 @@ function boot() {
       ui['connection-status'].textContent = '已连接本机';
       report(null);
       renderView();
+      await refreshPanels();
       await refreshSessions();
       if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
       else ui['session-label'].focus();
@@ -846,6 +1023,7 @@ function boot() {
 
   ui['logout'].addEventListener('click', () => disconnect());
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
+  ui['refresh-panels'].addEventListener('click', refreshPanels);
   ui['create-form'].addEventListener('submit', async event => {
     event.preventDefault();
     if (ui['create-button'].disabled || !ui['session-label'].value.trim()) return;
