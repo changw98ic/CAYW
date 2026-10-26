@@ -1135,7 +1135,11 @@ pub(crate) async fn execute(
                 .run_in_directory_with_resources(spec, cancel.clone(), None::<()>)
                 .await
                 .map_err(device_error)?;
-            process_value(result, output_filter_options(host, name), host.config.content_store.as_deref())
+            process_value(
+                result,
+                output_filter_options(host, name),
+                host.config.content_store.as_deref(),
+            )
         }
         _ => Err(failure("unknown process capability")),
     }
@@ -1171,7 +1175,11 @@ pub(crate) async fn execute_git_read(
         .map_err(device_error)?;
     // Preserve an uncertain process terminal before reporting a read conflict.
     // A completed read with a replaced repository or index discards its data.
-    let result = process_value(result, output_filter_options(host, name), host.config.content_store.as_deref())?;
+    let result = process_value(
+        result,
+        output_filter_options(host, name),
+        host.config.content_store.as_deref(),
+    )?;
     identity.verify(host)?;
     Ok(result)
 }
@@ -1513,7 +1521,10 @@ mod tests {
         let host = host.expect("host");
         for name in ["git.blame", "git.log", "git.show"] {
             let options = output_filter_options(&host, name).expect("filter enabled");
-            assert_eq!(options.profile, cayw_output_filter::FilterProfile::Passthrough);
+            assert_eq!(
+                options.profile,
+                cayw_output_filter::FilterProfile::Passthrough
+            );
             assert_eq!(options.max_lines, 0);
         }
         let status = output_filter_options(&host, "git.status").unwrap();

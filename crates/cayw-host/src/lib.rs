@@ -106,7 +106,6 @@ pub struct Profile {
     pub io: cayw_device::ProcessIo,
 }
 
-
 /// Durable sink for F02 originals that were removed from the agent-facing summary.
 ///
 /// Runtime wires the Device [`cayw_content::ContentStore`]; tests may use an
