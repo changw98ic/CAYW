@@ -124,7 +124,7 @@ async fn run_inspector_rpc_matches_direct_entry() {
     // Exercise the same folding path the RPC handler calls.
     let encoded = serde_json::to_value(&direct).unwrap();
     assert_eq!(encoded["protocol_version"], RUN_INSPECTOR_PROTOCOL_VERSION);
-    assert!(encoded["snapshot"]["steps"].as_array().unwrap().len() >= 1);
+    assert!(!encoded["snapshot"]["steps"].as_array().unwrap().is_empty());
     assert_eq!(direct.timeline.failure_count, 0);
     assert!(direct.timeline.retry_paths.is_empty());
 }
