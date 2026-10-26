@@ -4,7 +4,9 @@ use cayw_bridge::{
     AccessRequest, DispatchDropState, DispatchJournal, DispatchOutcome, DispatchRecord,
     InvocationContext, Limits, Provenance, Registry, RegistryPolicy, SourceIdentity, Visibility,
 };
-use cayw_sources::{LifecycleMode, ManagedStdio, ServerSpec, StdioConfig, import_mcp_servers_json};
+use cayw_sources::{
+    LifecycleMode, ManagedStdio, ServerSpec, StdioConfig, install_mcp_servers_file,
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -242,30 +244,51 @@ async fn lazy_idle_timeout_recycles_without_dropping_catalog() {
 }
 
 #[tokio::test]
-async fn import_external_mcp_servers_json_prepares_lazy_source() {
+async fn import_product_entry_lands_source_in_registry() {
     let root = tempfile::tempdir().unwrap();
     let program = fixture_program();
     let config_path = root.path().join("mcp.json");
     std::fs::write(
         &config_path,
         format!(
-            r#"{{"mcpServers":{{"local":{{"command":"{}","lifecycle":"lazy","idleTimeout":0.01}}}}}}"#,
+            r#"{{"mcpServers":{{"local":{{"command":"{}","lifecycle":"lazy","idleTimeout":0.01}},"remote":{{"url":"https://example.invalid/mcp"}}}}}}"#,
             program.display()
         ),
     )
     .unwrap();
-    let text = std::fs::read_to_string(&config_path).unwrap();
-    let report = import_mcp_servers_json(&text, Some(&config_path), root.path()).unwrap();
-    assert_eq!(report.accepted.len(), 1);
-    assert_eq!(report.accepted[0].spec.lifecycle, LifecycleMode::Lazy);
+    let registry = Registry::new(Limits::default(), Arc::new(Policy)).unwrap();
+    let report = install_mcp_servers_file(
+        &config_path,
+        root.path(),
+        &registry,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.installed.len(), 1);
+    assert_eq!(report.installed[0].id, "local");
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].name, "remote");
+    assert!(!report.installed[0].control.snapshot().connected);
+    assert_eq!(report.installed[0].server_info.name, "cayw-local-fixture");
 
-    let prepared = ManagedStdio::prepare(report.accepted[0].spec.clone(), CancellationToken::new())
-        .await
-        .unwrap();
-    assert!(!prepared.control().snapshot().connected);
-    assert_eq!(prepared.server_info().name, "cayw-local-fixture");
-    prepared.control().close();
-    tokio::time::timeout(Duration::from_secs(5), prepared.control().wait_closed())
-        .await
-        .unwrap();
+    let result = call(
+        &registry,
+        1,
+        "mcp.call",
+        json!({"server":"local","tool":"add","arguments":{"a":2,"b":3}}),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["value"]["sum"], 5);
+    assert!(report.installed[0].control.snapshot().connected);
+
+    registry.disconnect("local").unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        report.installed[0].control.wait_closed(),
+    )
+    .await
+    .unwrap();
 }

@@ -30,6 +30,8 @@ pub(crate) fn is_external(name: &str) -> bool {
             | "mcp.call"
             | "mcp.resources.list"
             | "mcp.resources.read"
+            | "mcp.prompts.list"
+            | "mcp.prompts.get"
             | "skills.list"
             | "skills.read"
             | "search.query"

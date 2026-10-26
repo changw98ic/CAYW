@@ -28,6 +28,9 @@ pub struct HeadlessConfig {
     profiles: BTreeMap<String, ProcessProfile>,
     permissions: Vec<Permission>,
     requests: Option<Requests>,
+    /// Absolute path to an external `mcpServers` JSON file (Claude Desktop / Cursor style).
+    /// Only absolute-path local stdio entries are installed into the Runtime Bridge.
+    mcp_servers_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -146,12 +149,24 @@ impl HeadlessConfig {
         if let Some(model) = &config.model {
             model.validate()?;
         }
+        if let Some(path) = &config.mcp_servers_file {
+            if !path.is_absolute() || !path.is_file() {
+                return Err(invalid(
+                    "mcp_servers_file must be an absolute existing regular file",
+                ));
+            }
+        }
         Ok(config)
     }
 
     /// Explicit model selection, without reading credentials or making a request.
     pub fn model(&self) -> Option<&ProviderConfig> {
         self.model.as_ref()
+    }
+
+    /// External MCP servers config file for the product import → prepare → Registry path.
+    pub fn mcp_servers_file(&self) -> Option<&Path> {
+        self.mcp_servers_file.as_deref()
     }
 
     /// Validate the existing runtime/Host contract without starting a model or

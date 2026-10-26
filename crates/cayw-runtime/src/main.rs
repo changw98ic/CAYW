@@ -1,10 +1,29 @@
+use async_trait::async_trait;
 use cayw_ai::{CancellationToken, Model, Provider};
+use cayw_bridge::{AccessRequest, Limits, Provenance, Registry, RegistryPolicy, Visibility};
+use cayw_codemode::CapabilityError;
 use cayw_ipc::{ServerConfig, serve};
 use cayw_runtime::{HeadlessConfig, Runtime, ScopedPermission, fixture::OfflineProvider};
+use cayw_sources::{InstalledServer, install_mcp_servers_file};
 use serde_json::json;
 use std::{collections::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
-const USAGE: &str = "cayw serve --db PATH --workspace DIR --listen 127.0.0.1:PORT --token-env ENV [--config PATH] [--offline] [--demo-authorized]\n\nWithout --offline, --config must contain one explicit model object: service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nServices: openai/chat_completions, magpie/chat_completions, anthropic/messages, gemini/stream_generate_content or gemini/generate_content.\nCAYW_PROVIDER_BASE_URL, CAYW_PROVIDER_API_KEY and CAYW_MODEL no longer select the server model.\nStarting a server makes no model request. session.prompt starts one.\n--config also reads host-owned JSON budgets, fixed pipe-based process profiles, exact permissions and optional task request policy/limits. Profiles and request scopes alone grant no permission.\nOffline mode requires model to be omitted and uses a synthetic provider with real bounded Luau + Host file operations.\n--demo-authorized grants only the two exact offline demo file calls. All other calls await approval.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
+const USAGE: &str = "cayw serve --db PATH --workspace DIR --listen 127.0.0.1:PORT --token-env ENV [--config PATH] [--offline] [--demo-authorized]\n\nWithout --offline, --config must contain one explicit model object: service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nServices: openai/chat_completions, magpie/chat_completions, anthropic/messages, gemini/stream_generate_content or gemini/generate_content.\nCAYW_PROVIDER_BASE_URL, CAYW_PROVIDER_API_KEY and CAYW_MODEL no longer select the server model.\nStarting a server makes no model request. session.prompt starts one.\n--config also reads host-owned JSON budgets, fixed pipe-based process profiles, exact permissions, optional task request policy/limits, and optional mcp_servers_file (absolute path to external mcpServers JSON; absolute local stdio only → ManagedStdio prepare → Registry → Runtime Bridge).\nProfiles and request scopes alone grant no permission.\nOffline mode requires model to be omitted and uses a synthetic provider with real bounded Luau + Host file operations.\n--demo-authorized grants only the two exact offline demo file calls. All other calls await approval.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
+
+struct ServeBridgePolicy;
+#[async_trait]
+impl RegistryPolicy for ServeBridgePolicy {
+    fn visible(&self, _: Visibility, _: &Provenance, _: &str) -> bool {
+        true
+    }
+    async fn authorize(
+        &self,
+        _: &AccessRequest,
+        _: CancellationToken,
+    ) -> Result<(), CapabilityError> {
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -52,6 +71,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .remove("--workspace")
             .ok_or("--workspace is required")?,
     );
+    if !workspace.is_absolute() || !workspace.is_dir() {
+        return Err("--workspace must be an absolute existing directory".into());
+    }
     let address: SocketAddr = values
         .remove("--listen")
         .unwrap_or_else(|| "127.0.0.1:0".into())
@@ -87,6 +109,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .into(),
         );
     }
+    let mcp_servers_file = headless.mcp_servers_file().map(PathBuf::from);
     let mut config = headless.into_runtime_config()?;
     let model_configuration = selected.as_ref().map(serde_json::to_value).transpose()?;
     let (provider, model): (Arc<dyn Provider>, Model) = if let Some(selected) = selected {
@@ -107,6 +130,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
             ScopedPermission::exact("fs.read", json!({"path":"cayw-demo.txt"})),
         ]);
     }
+
+    // Keep Registry (and ManagedControl handles) alive for the server lifetime.
+    let mut mcp_keepalive: Option<(Registry, Vec<InstalledServer>)> = None;
+    let mut mcp_installed = 0usize;
+    let mut mcp_skipped = 0usize;
+    if let Some(path) = mcp_servers_file {
+        let registry = Registry::new(Limits::default(), Arc::new(ServeBridgePolicy))?;
+        let report =
+            install_mcp_servers_file(&path, &workspace, &registry, CancellationToken::new())
+                .await
+                .map_err(|error| format!("MCP servers install failed: {error}"))?;
+        mcp_installed = report.installed.len();
+        mcp_skipped = report.skipped.len();
+        config.bridge = Some(registry.consumer());
+        mcp_keepalive = Some((registry, report.installed));
+    }
+
     let configuration = json!({
         "max_total_tokens":config.max_total_tokens,
         "max_turns":config.max_turns,
@@ -118,6 +158,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "profiles":config.host.profiles.keys().collect::<Vec<_>>(),
         "profile_io":"pipes",
         "exact_permission_count":config.permissions.len(),
+        "mcp_installed":mcp_installed,
+        "mcp_skipped":mcp_skipped,
     });
     let provider_name = model.provider.clone();
     let model_name = model.id.clone();
@@ -136,5 +178,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut ipc = ServerConfig::new(token);
     ipc.request_timeout = std::time::Duration::from_secs(360);
     serve(listener, Arc::new(runtime), ipc, shutdown).await?;
+
+    if let Some((registry, installed)) = mcp_keepalive {
+        for entry in installed {
+            let _ = registry.disconnect(&entry.id);
+            entry.control.close();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                entry.control.wait_closed(),
+            )
+            .await;
+        }
+    }
     Ok(())
 }

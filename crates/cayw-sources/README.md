@@ -237,6 +237,30 @@ Catalog entries remain registered while the child is stopped. `mcp.call`,
 connection that returns a different tool/resource/prompt set or server identity
 fails closed and requires an explicit host reconnect.
 
+## Product entry (import → prepare → Registry)
+
+`import_mcp_servers_json` only returns `accepted` / `skipped`. To land sources in
+the live Bridge used by Runtime/Host, call the product entry:
+
+```rust
+use cayw_ai::CancellationToken;
+use cayw_bridge::{Limits, Registry};
+use cayw_sources::install_mcp_servers_file;
+
+let registry = Registry::new(Limits::default(), policy)?;
+let report = install_mcp_servers_file(
+    "/absolute/mcp.json".as_ref(),
+    "/absolute/workspace".as_ref(),
+    &registry,
+    CancellationToken::new(),
+).await?;
+// report.installed[*].control for observations; registry.consumer() → RuntimeConfig.bridge
+```
+
+`install_imported` is the same path when the host already holds an `ImportReport`.
+Remaining limits: absolute-path local stdio only; non-stdio / remote entries stay
+in `skipped` and are never registered.
+
 ## External config import
 
 `import_mcp_servers_json` accepts Claude Desktop / Cursor / VS Code / Codex style
