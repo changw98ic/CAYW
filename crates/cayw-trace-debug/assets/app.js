@@ -21,7 +21,7 @@
   var MODE_DETAILS = {
     observed: '原始记录（observed）：数据来自一次实际 Runtime 执行。',
     replay: '本地重放（replay）：从入口整图本地重放，只用捕获的 Host 响应。',
-    recompute: '局部重算（recompute）：从修改节点起局部重算受影响下游；上游可复用，只用捕获的 Host 响应，不跑整项目构建。'
+    recompute: '局部重算（recompute）：从修改节点起局部重算受影响下游；上游步骤复用且不重跑，只用捕获的 Host 响应，不跑整项目构建。'
   };
 
   var activeControllers = new Set();

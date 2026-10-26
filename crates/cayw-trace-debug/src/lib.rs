@@ -103,6 +103,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 });
                 changed = true;
             }
@@ -328,11 +329,11 @@ impl TraceStore {
             .expect("validated project");
         let parent = project.version();
         let version = parent + 1;
-        // Node saves use mode=recompute: reuse upstream steps in the result, but
-        // evaluate from the entry so context/shared identity stay correct.
-        // Undo uses full-entry replay (mode=replay). The base proves the edited
-        // node was on a captured path; a missing node is a gap, not permission to
-        // borrow an older branch's input.
+        // Node saves use mode=recompute: reuse upstream steps without re-running
+        // their bodies; the VM seeds at the edited node from the captured shared
+        // seed (context + table identity). Undo uses full-entry replay.
+        // The base proves the edited node was on a captured path; a missing node
+        // is a gap, not permission to borrow an older branch's input.
         let base = if changed_node.is_some() {
             project
                 .evaluations
@@ -379,6 +380,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 }
             } else if let Some(error) = &project_trace_error {
                 Evaluation {
@@ -394,6 +396,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 }
             } else {
                 match engine::evaluate(
@@ -420,6 +423,7 @@ impl TraceStore {
                         }],
                         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                         saved_at_ms: now_ms(),
+                        executed_nodes: Vec::new(),
                     },
                 }
             };

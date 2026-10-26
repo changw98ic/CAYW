@@ -66,6 +66,13 @@ pub struct Step {
     pub status: Status,
     pub input: Value,
     pub state_before: Value,
+    /// Context table as of node start. Default null on older captures.
+    #[serde(default)]
+    pub context_before: Value,
+    /// Shared-table seed for local recompute (`tables` + `roots` with `$ref`).
+    /// Absent on older captures that only stored JSON snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<Value>,
     pub output: Option<Value>,
     pub state_after: Option<Value>,
     pub branch: Option<String>,
@@ -94,6 +101,10 @@ pub struct Evaluation {
     pub gaps: Vec<Gap>,
     pub elapsed_ms: f64,
     pub saved_at_ms: u64,
+    /// Node ids whose Luau bodies ran in this evaluation's VM.
+    /// Reused upstream steps are omitted: they were not re-executed.
+    #[serde(default)]
+    pub executed_nodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,6 +221,10 @@ pub enum NodeTrace {
         node_id: String,
         input: Value,
         state_before: Value,
+        #[serde(default)]
+        context_before: Value,
+        #[serde(default)]
+        seed: Option<Value>,
     },
     Completed {
         node_id: String,

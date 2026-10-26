@@ -40,8 +40,8 @@ fn node(id: &str, source: &str) -> Node {
 }
 
 /// Node-save `recompute` and undo `replay` must both preserve upstream context
-/// mutations and shared Luau table identity. Recompute still marks upstream
-/// steps as reused, but the VM runs from the entry so those semantics hold.
+/// mutations and shared Luau table identity. Recompute seeds at the edited node
+/// from the captured shared seed and does not re-execute upstream bodies.
 async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointer: &str) {
     let mut b = node("b", b);
     b.input_pointer = pointer.into();
@@ -153,6 +153,11 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
             result.steps[0].reused && !result.steps[1].reused,
             "upstream reused; edited node recomputed: {result:?}"
         );
+        assert_eq!(
+            result.executed_nodes,
+            vec!["b".to_owned()],
+            "upstream body must not re-run on node-save recompute: {result:?}"
+        );
         assert_eq!(result.output, Some(json!(expected)), "{result:?}");
         assert!(result.gaps.is_empty(), "{result:?}");
         assert_eq!(project.evaluations[0], observed);
@@ -177,6 +182,11 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
     assert!(
         result.steps.iter().all(|step| !step.reused),
         "undo full-entry replay recomputes every step: {result:?}"
+    );
+    assert_eq!(
+        result.executed_nodes,
+        vec!["a".to_owned(), "b".to_owned()],
+        "undo replay re-executes the full entry path: {result:?}"
     );
     assert_eq!(
         result.output,

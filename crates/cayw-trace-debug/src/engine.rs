@@ -5,10 +5,10 @@
 //! never call Host for real work:
 //! - **replay** (`changed_node` is `None`, e.g. undo): run from the entry with
 //!   the revision's input/state/context; every step is recomputed.
-//! - **recompute** (node save): reuse completed upstream steps from the captured
-//!   base for the UI, but still run the Luau graph from the entry so upstream
-//!   context mutations and shared table identity are rebuilt before the edit.
-//!   Fresh steps are kept from the edited node onward.
+//! - **recompute** (node save): skip upstream node bodies, seed the VM at the
+//!   edited node from the captured shared-table `seed` (context + identity),
+//!   attach upstream steps as `reused`, and run only the edited node and its
+//!   downstream. `executed_nodes` lists bodies that actually ran.
 //!
 //! Host calls are answered only from the original captured records, matched to
 //! the node the runner has just started, by exact name, arguments and call order.
@@ -377,24 +377,53 @@ fn write_luau(out: &mut String, value: &Value) {
 
 /// The complete Luau program for the real Runtime execution. Each `started`
 /// trace records the incoming value *before* `input_pointer` mapping so a later
-/// local run can re-map it after the pointer changes.
+/// local run can re-map it after the pointer changes, plus a shared-table `seed`
+/// so local recompute can restore context mutations and object identity without
+/// re-executing upstream bodies.
 pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
     script_from(
         plan,
         &plan.entry,
-        &plan.input,
-        &plan.initial_state,
-        &plan.context,
+        SeedSpec::Values {
+            incoming: &plan.input,
+            state: &plan.initial_state,
+            context: &plan.context,
+        },
         "complete graph execution",
     )
+}
+
+/// Local recompute script: starts at `start_node` with a captured shared seed
+/// (or plain JSON snapshots). Upstream node functions are not invoked.
+fn script_for_local_recompute(
+    plan: &GraphPlan,
+    start_node: &str,
+    seed: SeedSpec<'_>,
+) -> Result<String, crate::Error> {
+    if !plan.nodes.iter().any(|node| node.id == start_node) {
+        return Err(invalid(format!(
+            "local recompute start node {start_node:?} is not in the plan"
+        )));
+    }
+    script_from(plan, start_node, seed, "local recompute from edited node")
+}
+
+enum SeedSpec<'a> {
+    /// Plain JSON snapshots (no shared identity). Used for entry edits and
+    /// older captures that lack a seed.
+    Values {
+        incoming: &'a Value,
+        state: &'a Value,
+        context: &'a Value,
+    },
+    /// Shared-table seed captured at the edited node's original start.
+    Shared(&'a Value),
 }
 
 fn script_from(
     plan: &GraphPlan,
     start_node: &str,
-    incoming: &Value,
-    state: &Value,
-    context: &Value,
+    seed: SeedSpec<'_>,
     banner: &str,
 ) -> Result<String, crate::Error> {
     validate_plan(plan)?;
@@ -464,6 +493,69 @@ fn script_from(
     );
 
     script.push_str(&node_api_script());
+    // Seed encode/decode: preserve Luau table identity across JSON so local
+    // recompute can skip upstream bodies without losing context mutations or
+    // shared input/state/context references.
+    script.push_str(
+        "local function __is_array(value)\n\
+         if type(value) ~= \"table\" then return false end\n\
+         local ok, mt = pcall(getmetatable, value)\n\
+         if not ok or mt == nil then return false end\n\
+         local probe = cayw.array({})\n\
+         local ok2, pmt = pcall(getmetatable, probe)\n\
+         return ok2 and mt == pmt\n\
+         end\n\
+         local function __encode_seed(input, state, context)\n\
+         local seen = {}\n\
+         local tables = {}\n\
+         local next_id = 0\n\
+         local function walk(value)\n\
+           if value == nil or value == cayw.null then return cayw.null end\n\
+           local ty = type(value)\n\
+           if ty ~= \"table\" then return value end\n\
+           local existing = seen[value]\n\
+           if existing ~= nil then return {[\"$ref\"] = existing} end\n\
+           next_id = next_id + 1\n\
+           local id = tostring(next_id)\n\
+           seen[value] = id\n\
+           if __is_array(value) then\n\
+             local items = {}\n\
+             for i, item in ipairs(value) do items[i] = walk(item) end\n\
+             tables[id] = {[\"$array\"] = true, [\"$items\"] = cayw.array(items)}\n\
+           else\n\
+             local fields = {}\n\
+             for key, item in pairs(value) do fields[key] = walk(item) end\n\
+             tables[id] = fields\n\
+           end\n\
+           return {[\"$ref\"] = id}\n\
+         end\n\
+         return {tables = tables, roots = {input = walk(input), state = walk(state), context = walk(context)}}\n\
+         end\n\
+         local function __decode_seed(seed)\n\
+         local tables = seed.tables\n\
+         local cache = {}\n\
+         local function resolve(node)\n\
+           if node == nil or node == cayw.null then return cayw.null end\n\
+           if type(node) ~= \"table\" then return node end\n\
+           local ref = node[\"$ref\"]\n\
+           if ref == nil then return node end\n\
+           if cache[ref] ~= nil then return cache[ref] end\n\
+           local enc = tables[ref]\n\
+           if enc == nil then error(\"seed is missing table \" .. tostring(ref)) end\n\
+           if enc[\"$array\"] == true then\n\
+             local items = {}\n\
+             cache[ref] = items\n\
+             for i, item in ipairs(enc[\"$items\"]) do items[i] = resolve(item) end\n\
+             return cayw.array(items)\n\
+           end\n\
+           local obj = {}\n\
+           cache[ref] = obj\n\
+           for key, item in pairs(enc) do obj[key] = resolve(item) end\n\
+           return obj\n\
+         end\n\
+         return resolve(seed.roots.input), resolve(seed.roots.state), resolve(seed.roots.context)\n\
+         end\n",
+    );
     script.push_str(
         "local __nodes = __build_nodes(__node_api, __node_globals)\n__build_nodes = nil\n",
     );
@@ -521,13 +613,27 @@ fn script_from(
         }
     }
 
-    script.push_str("local __incoming = ");
-    script.push_str(&luau_literal(incoming)?);
-    script.push_str("\nlocal __state = ");
-    script.push_str(&luau_literal(state)?);
-    script.push_str("\nlocal __context = ");
-    script.push_str(&luau_literal(context)?);
-    script.push_str("\nlocal __current = ");
+    match seed {
+        SeedSpec::Values {
+            incoming,
+            state,
+            context,
+        } => {
+            script.push_str("local __incoming = ");
+            script.push_str(&luau_literal(incoming)?);
+            script.push_str("\nlocal __state = ");
+            script.push_str(&luau_literal(state)?);
+            script.push_str("\nlocal __context = ");
+            script.push_str(&luau_literal(context)?);
+            script.push('\n');
+        }
+        SeedSpec::Shared(seed_value) => {
+            script.push_str("local __incoming, __state, __context = __decode_seed(");
+            script.push_str(&luau_literal(seed_value)?);
+            script.push_str(")\n");
+        }
+    }
+    script.push_str("local __current = ");
     push_luau_string(&mut script, start_node);
     script.push('\n');
 
@@ -551,7 +657,7 @@ fn script_from(
     );
     script.push_str(TRACE_SCHEMA);
     script.push_str(
-        "\", trace = {kind = \"started\", node_id = __current, input = __incoming, state_before = __state}})\n\
+        "\", trace = {kind = \"started\", node_id = __current, input = __incoming, state_before = __state, context_before = __context, seed = __encode_seed(__incoming, __state, __context)}})\n\
            local __pointer = __pointers[__current]\n\
            local __mapped = __incoming\n\
            if __pointer ~= nil then __mapped = __resolve(__incoming, __pointer) end\n\
@@ -866,17 +972,23 @@ fn reused_prefix(base: &Evaluation, changed_node: &str) -> Result<Vec<Step>, Gap
         .collect())
 }
 
-/// Reused upstream prefix for a node-save recompute. The Luau program still
-/// starts at the plan entry (see `evaluate`): JSON snapshots of input /
-/// `state_before` / `plan.context` cannot restore upstream context mutations or
-/// shared table identity between input, state, and context.
-fn recompute_prefix(
+/// Upstream reused steps plus the VM seed for the edited node. Prefer the
+/// captured shared `seed` (context + identity). Fall back to JSON snapshots when
+/// an older capture lacks a seed (no shared-identity restore in that case).
+fn local_start(
     plan: &GraphPlan,
     base: Option<&Evaluation>,
     changed_node: &str,
-) -> Result<Vec<Step>, Gap> {
+) -> Result<(Vec<Step>, SeedSpecOwned), Gap> {
     if changed_node == plan.entry {
-        return Ok(Vec::new());
+        return Ok((
+            Vec::new(),
+            SeedSpecOwned::Values {
+                incoming: plan.input.clone(),
+                state: plan.initial_state.clone(),
+                context: plan.context.clone(),
+            },
+        ));
     }
     let Some(base) = base else {
         return Err(Gap {
@@ -884,13 +996,55 @@ fn recompute_prefix(
             message: "no captured input or state exists for the edited node".into(),
         });
     };
-    if !base.steps.iter().any(|step| step.node_id == changed_node) {
+    let Some(step) = base.steps.iter().find(|step| step.node_id == changed_node) else {
         return Err(Gap {
             node_id: Some(changed_node.into()),
             message: "the captured evaluation never reached the edited node".into(),
         });
+    };
+    let prefix = reused_prefix(base, changed_node)?;
+    if let Some(seed) = step.seed.as_ref() {
+        return Ok((prefix, SeedSpecOwned::Shared(seed.clone())));
     }
-    reused_prefix(base, changed_node)
+    let context = if step.context_before.is_null() {
+        plan.context.clone()
+    } else {
+        step.context_before.clone()
+    };
+    Ok((
+        prefix,
+        SeedSpecOwned::Values {
+            incoming: step.input.clone(),
+            state: step.state_before.clone(),
+            context,
+        },
+    ))
+}
+
+enum SeedSpecOwned {
+    Values {
+        incoming: Value,
+        state: Value,
+        context: Value,
+    },
+    Shared(Value),
+}
+
+impl SeedSpecOwned {
+    fn as_spec(&self) -> SeedSpec<'_> {
+        match self {
+            Self::Values {
+                incoming,
+                state,
+                context,
+            } => SeedSpec::Values {
+                incoming,
+                state,
+                context,
+            },
+            Self::Shared(seed) => SeedSpec::Shared(seed),
+        }
+    }
 }
 
 fn blocked_evaluation(
@@ -910,6 +1064,7 @@ fn blocked_evaluation(
         gaps,
         elapsed_ms: elapsed_ms(started),
         saved_at_ms: now_ms(),
+        executed_nodes: Vec::new(),
     }
 }
 
@@ -926,6 +1081,8 @@ fn step_from_trace(
         node_id,
         input,
         state_before,
+        context_before,
+        seed,
     } = started_trace
     else {
         return Err("replay completed a node that has no started trace".into());
@@ -935,6 +1092,8 @@ fn step_from_trace(
         status,
         input: input.clone(),
         state_before: state_before.clone(),
+        context_before: context_before.clone(),
+        seed: seed.clone(),
         output: completed.map(|result| result.output.clone()),
         state_after: completed.map(|result| result.state.clone()),
         branch: completed.and_then(|result| result.branch.clone()),
@@ -950,11 +1109,11 @@ fn step_from_trace(
 ///
 /// - `changed_node == None` → **replay**: run from the entry with the revision's
 ///   input/state/context; every step is recomputed (`reused = false`).
-/// - `changed_node == Some(id)` → **recompute**: run from the entry so upstream
-///   context mutations and shared Luau table identity are rebuilt, keep fresh
-///   steps from the edited node onward, and attach completed upstream steps from
-///   `base` as `reused = true`. Host answers come only from captures. This path
-///   never runs cargo/tsc/full project builds.
+/// - `changed_node == Some(id)` → **recompute**: attach completed upstream steps
+///   from `base` as `reused = true`, seed the VM at the edited node from its
+///   captured shared `seed` (or JSON snapshots), and execute only that node and
+///   its downstream. Upstream bodies are not re-run; see `executed_nodes`.
+///   Host answers come only from captures. Never runs cargo/tsc/full builds.
 ///
 /// Missing captures, unknown outcomes and an uncaptured branch produce `blocked`
 /// with explicit gaps. An error output is not reported as a completed round.
@@ -980,12 +1139,10 @@ pub async fn evaluate(
     }
 
     let (mut steps, script) = if let Some(changed) = changed_node {
-        match recompute_prefix(plan, base, changed) {
-            Ok(prefix) => {
-                // Always start at the entry. Starting at the edit with JSON
-                // clones of input/state_before/plan.context drops upstream
-                // context writes and shared object identity (see replay_state).
-                (prefix, script_for_plan(plan)?)
+        match local_start(plan, base, changed) {
+            Ok((prefix, seed)) => {
+                let script = script_for_local_recompute(plan, changed, seed.as_spec())?;
+                (prefix, script)
             }
             Err(gap) => {
                 return Ok(blocked_evaluation(plan, version, started, vec![gap], mode));
@@ -994,9 +1151,9 @@ pub async fn evaluate(
     } else {
         (Vec::new(), script_for_plan(plan)?)
     };
-    // For recompute, traces include upstream warm-up nodes. Keep the reused
-    // prefix and only record fresh steps once the edited node starts.
-    let mut record_steps = changed_node.is_none();
+    // Local recompute starts at the edit: every VM-started node is fresh.
+    let record_steps = true;
+    let mut executed_nodes = Vec::new();
 
     if cancel.is_cancelled() {
         return Ok(blocked_evaluation(
@@ -1085,11 +1242,6 @@ pub async fn evaluate(
                 }
                 let elapsed = observed_at.duration_since(node_started).as_secs_f64() * 1000.0;
                 let leftover = host.leftover(node_id);
-                if !record_steps {
-                    if changed_node == Some(node_id.as_str()) {
-                        record_steps = true;
-                    }
-                }
                 if leftover > 0 {
                     gaps.push(Gap {
                         node_id: Some(node_id.clone()),
@@ -1098,6 +1250,7 @@ pub async fn evaluate(
                         ),
                     });
                 }
+                executed_nodes.push(node_id.clone());
                 if record_steps {
                     steps.push(
                         step_from_trace(
@@ -1154,13 +1307,7 @@ pub async fn evaluate(
                         _ => plan.entry.clone(),
                     };
                     let message = format!("node {node_id:?}: {}", failure.message);
-                    if !record_steps {
-                        // Warm-up failed before the edit point: drop the reused
-                        // prefix so the failure is not paired with a duplicate
-                        // upstream node id.
-                        steps.clear();
-                        record_steps = true;
-                    }
+                    executed_nodes.push(node_id.clone());
                     steps.push(
                         step_from_trace(
                             &started_trace,
@@ -1191,15 +1338,6 @@ pub async fn evaluate(
         }
     }
 
-    if changed_node.is_some() && !record_steps && status == Status::Completed {
-        gaps.push(Gap {
-            node_id: changed_node.map(str::to_owned),
-            message: format!("{mode} rebuilt upstream state but never reached the edited node"),
-        });
-        status = Status::Blocked;
-        output = None;
-    }
-
     // A failed/blocked recompute still keeps reused upstream steps so the UI can
     // show what was preserved versus what stopped at the edit point.
     let final_output = (status == Status::Completed).then_some(output).flatten();
@@ -1213,6 +1351,7 @@ pub async fn evaluate(
         gaps,
         elapsed_ms: elapsed_ms(started),
         saved_at_ms: now_ms(),
+        executed_nodes,
     })
 }
 

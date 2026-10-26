@@ -56,6 +56,8 @@ fn step(
         status: Status::Completed,
         input,
         state_before,
+        context_before: Value::Null,
+        seed: None,
         output: Some(output),
         state_after: Some(state_after),
         branch: branch.map(str::to_owned),
@@ -79,6 +81,7 @@ fn observed(steps: Vec<Step>) -> Evaluation {
         gaps: Vec::new(),
         elapsed_ms: 5.0,
         saved_at_ms: 1,
+        executed_nodes: Vec::new(),
     }
 }
 
@@ -241,11 +244,15 @@ async fn real_script_emits_manifest_and_started_records_the_raw_incoming_value()
             node_id,
             input,
             state_before,
+            context_before,
+            seed,
         } => {
             assert_eq!(node_id, "read");
             // Raw incoming is the whole plan input, before the "/value" mapping.
             assert_eq!(input, &json!({"value": 21, "ignored": true}));
             assert_eq!(state_before, &json!({}));
+            assert_eq!(context_before, &json!({"context": true}));
+            assert!(seed.is_some(), "started traces carry a shared seed");
         }
         other => panic!("expected started, got {other:?}"),
     }
@@ -787,6 +794,7 @@ fn blocked_evaluation() -> Evaluation {
         }],
         elapsed_ms: 0.0,
         saved_at_ms: 1,
+        executed_nodes: Vec::new(),
     }
 }
 
@@ -1158,6 +1166,11 @@ async fn local_recompute_reuses_upstream_and_marks_mode() {
         Some(json!({"n": 2, "tag": "a"}))
     );
     assert!(!recomputed.steps[1].reused);
+    assert_eq!(
+        recomputed.executed_nodes,
+        vec!["b".to_owned(), "c".to_owned()],
+        "upstream a must not re-execute: {recomputed:?}"
+    );
     assert_eq!(recomputed.output, Some(json!({"final": 20})));
 
     // Undo / full-entry path stays replay and does not reuse.
@@ -1175,4 +1188,95 @@ async fn local_recompute_reuses_upstream_and_marks_mode() {
     assert!(replayed.id.starts_with("replay:"));
     assert!(replayed.steps.iter().all(|step| !step.reused));
     assert_eq!(replayed.output, Some(json!({"final": 2})));
+}
+
+#[tokio::test]
+async fn local_recompute_skips_upstream_bodies_and_counts_execution() {
+    // Upstream performs a Host call. If the body re-ran, the captured response
+    // would be consumed; executed_nodes would also list "a".
+    let base_plan = plan(
+        "a",
+        vec![
+            node(
+                "a",
+                r#"local _ = cayw.call("mark", {node = "a"}); return {output = {n = 1}, state = {count = 1}}"#,
+                "",
+            ),
+            node(
+                "b",
+                "return {output = {final = input.n * 2}, state = {count = state.count + 1}}",
+                "",
+            ),
+            node(
+                "c",
+                "return {output = {final = input.final + 1}, state = state}",
+                "",
+            ),
+        ],
+        vec![edge("a", "b", None), edge("b", "c", None)],
+        json!({}),
+    );
+    let calls = vec![call(
+        "a",
+        "mark",
+        json!({"node": "a"}),
+        CapabilityOutcome::Completed {
+            result: json!({"ok": true}),
+        },
+        10,
+    )];
+    let base = observed(vec![
+        step(
+            "a",
+            json!({}),
+            json!({}),
+            json!({"n": 1}),
+            json!({"count": 1}),
+            None,
+            1,
+        ),
+        step(
+            "b",
+            json!({"n": 1}),
+            json!({"count": 1}),
+            json!({"final": 2}),
+            json!({"count": 2}),
+            None,
+            2,
+        ),
+        step(
+            "c",
+            json!({"final": 2}),
+            json!({"count": 2}),
+            json!({"final": 3}),
+            json!({"count": 2}),
+            None,
+            3,
+        ),
+    ]);
+    let mut edited = base_plan.clone();
+    edited.nodes[1].source =
+        "return {output = {final = input.n * 10}, state = {count = state.count + 1}}".into();
+    let recomputed = evaluate(
+        &edited,
+        Some(&base),
+        Some("b"),
+        &calls,
+        1,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recomputed.status, Status::Completed, "{recomputed:?}");
+    assert_eq!(recomputed.mode, "recompute");
+    assert!(recomputed.steps[0].reused);
+    assert!(!recomputed.steps[1].reused);
+    assert!(!recomputed.steps[2].reused);
+    assert_eq!(
+        recomputed.executed_nodes,
+        vec!["b".to_owned(), "c".to_owned()],
+        "upstream node a must not appear in executed_nodes: {recomputed:?}"
+    );
+    assert_eq!(recomputed.output, Some(json!({"final": 11})));
+    assert!(recomputed.gaps.is_empty(), "{recomputed:?}");
 }
