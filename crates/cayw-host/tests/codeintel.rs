@@ -6,13 +6,13 @@ use cayw_ai::CancellationToken;
 use cayw_codeintel::SymbolVersionBridge;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, HostConfig, PermissionGate};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     fs,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
 };
 
@@ -204,5 +204,24 @@ async fn codeintel_omitted_when_bridge_disabled() {
         err.message.contains("not configured") || err.message.contains("capability"),
         "{}",
         err.message
+    );
+}
+
+#[tokio::test]
+async fn default_host_omits_codeintel_catalog() {
+    let root = Root::new();
+    let host = Host::new(
+        &root.0,
+        Arc::new(Gate),
+        Arc::new(Audit::default()),
+        HostConfig::default(),
+    )
+    .unwrap();
+    assert!(
+        !host
+            .capabilities()
+            .iter()
+            .any(|d| d.name.starts_with("codeintel.")),
+        "ordinary HostConfig::default() must not advertise codeintel.*"
     );
 }

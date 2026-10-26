@@ -148,7 +148,7 @@ pub struct HostConfig {
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
     /// Shared F04 symbol/version bridge for Agent tools, editor, and Trace.
-    /// `None` omits `codeintel.*` capabilities. Default is a fresh shared bridge.
+    /// `None` (the default) omits `codeintel.*` from the ordinary Host catalog.
     pub codeintel: Option<SymbolVersionBridge>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
@@ -171,7 +171,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
-            codeintel: Some(SymbolVersionBridge::new()),
+            codeintel: None,
             external: None,
         }
     }
