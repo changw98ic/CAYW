@@ -19,6 +19,17 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Setup Node.js 22 (Pi ExtensionAPI host)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.20"
+          cache: npm
+          cache-dependency-path: crates/cayw-pi-compat/npm/package-lock.json
+
+      - name: Install Pi npm deps for F15 compat host
+        run: npm ci --omit=dev --no-fund --no-audit
+        working-directory: crates/cayw-pi-compat/npm
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
@@ -27,6 +38,8 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
+        env:
+          CAYW_PI_NODE: node
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
