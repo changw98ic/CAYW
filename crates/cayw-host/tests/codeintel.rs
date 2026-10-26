@@ -6,13 +6,13 @@ use cayw_ai::CancellationToken;
 use cayw_codeintel::SymbolVersionBridge;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, HostConfig, PermissionGate};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
