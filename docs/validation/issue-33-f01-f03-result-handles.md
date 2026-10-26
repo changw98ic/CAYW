@@ -1,6 +1,6 @@
 # Issue #33 SLICE A — F01 + F03 result handles
 
-日期：2026-10-25（America/New_York）。分支：`feat/f01-f03-result-handles`。基线：`dev`。
+日期：2026-10-26（America/New_York）。分支：`feat/f01-f03-result-handles`。基线：`dev`。
 
 ## 目标
 
@@ -19,10 +19,16 @@
 
 实现：`crates/cayw-runtime/src/results.rs`。目录注册与 `content.*` 相同，仅在配置了 `ContentConfig` 时出现。Session/Task 作用域与 `content.read`/`content.put` 一致（记录名哈希绑定 device/session/task/handle）。
 
-## 非范围（本切片未做）
+## 自动外置（本轮补齐）
 
-- 自动把 Cells `result_omitted` 路径改成外置句柄（仍保留 hash/omit；可用 `result.store` 显式外置）。
-- Workspace `fs.*` 大结果自动改写为句柄（分页/检索原语已在 Runtime 侧可复用）。
+Host/tool 成功返回值在进入 Cells 结算前，若已配置 `ContentConfig` 且 JSON UTF-8 字节数超过
+`RuntimeConfig::auto_externalize_threshold_bytes`（默认 **32 KiB**；`0` 关闭），则经与
+`result.store` 相同的 ContentStore 路径外置，并向模型返回带 `externalized=true` 的句柄桩；
+完整正文仍用 `result.get` / `result.search` 取回。`result.*` / `content.*` 自身不二次外置。
+
+## 仍非范围
+
+- Workspace `fs.*`（含 frozen shared-read）大结果自动改写为句柄。
 - ContentStore 物理删除 / GC。
 - F02 命令输出过滤。
 
@@ -51,5 +57,5 @@ cargo test -p cayw-runtime --test results --locked
 - [x] 批量 handle 元数据（及可选首页）。
 - [x] 按查询返回相关行片段。
 - [x] 软释放与后续拒绝；无独立执行器。
-- [ ] Cells 省略路径自动外置（后续切片）。
+- [x] Host/tool 超阈值结果自动外置为句柄（阈值可配，默认 32 KiB）。
 - [ ] Workspace 大读自动句柄化（后续切片）。

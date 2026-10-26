@@ -47,6 +47,8 @@ struct Budgets {
     max_run_time_ms: Option<u64>,
     max_capability_calls: Option<usize>,
     max_capability_bytes: Option<usize>,
+    /// Soft Host/tool result auto-externalize threshold; see RuntimeConfig.
+    auto_externalize_threshold_bytes: Option<usize>,
     host_wait_ms: Option<u64>,
     host_call_timeout_ms: Option<u64>,
 }
@@ -192,6 +194,9 @@ impl HeadlessConfig {
         }
         if let Some(value) = budgets.max_capability_bytes {
             config.max_capability_bytes = value;
+        }
+        if let Some(value) = budgets.auto_externalize_threshold_bytes {
+            config.auto_externalize_threshold_bytes = value;
         }
         if let Some(value) = budgets.host_wait_ms {
             config.codemode.host_wait = Duration::from_millis(value);

@@ -2,6 +2,11 @@
 //! Device ContentStore as #18, retrieve by handle with pagination, search for
 //! snippets, and soft-release without a separate executor.
 //!
+//! Oversized Host/tool results on the requests→Cells→Host path are automatically
+//! externalized when ContentStore is configured and the JSON body exceeds
+//! `RuntimeConfig::auto_externalize_threshold_bytes` (default 32 KiB). The model
+//! receives a handle stub and reads pages via `result.get` / `result.search`.
+//!
 //! ContentStore has no delete API; release flips durable metadata so later
 //! get/search/batch refuse the handle while the body object may remain for
 //! quota accounting (aligned with cayw-content).
@@ -25,6 +30,11 @@ const MAX_PAGE_BYTES: usize = 32 * 1024;
 const MAX_SEARCH_MATCHES: usize = 32;
 const MAX_BATCH: usize = 16;
 const MAX_SNIPPET_BYTES: usize = 512;
+
+/// Default Host/tool result size that triggers automatic ContentStore
+/// externalization (UTF-8 JSON bytes). Configurable via RuntimeConfig;
+/// `0` disables. Matches one result.get page so inline stubs stay compact.
+pub const DEFAULT_AUTO_EXTERNALIZE_THRESHOLD_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,6 +158,73 @@ pub(crate) fn definitions(config: Option<&content::ContentConfig>) -> Vec<ToolDe
 
 pub(crate) fn is_tool(name: &str) -> bool {
     matches!(name, STORE | GET | BATCH_GET | SEARCH | RELEASE)
+}
+
+fn should_externalize(threshold: usize, text_len: usize, max_content: usize) -> bool {
+    threshold > 0 && text_len > threshold && text_len <= max_content
+}
+
+/// Sync core of auto-externalization (shared by Host settle path and unit tests).
+pub(crate) fn externalize_value(
+    store: &ContentStore,
+    session: &str,
+    task_id: &str,
+    threshold: usize,
+    value: Value,
+) -> Result<Value, CapabilityError> {
+    let text = match serde_json::to_string(&value) {
+        Ok(text) => text,
+        Err(_) => return Ok(value),
+    };
+    let max = store.limits().max_content_bytes.min(1024 * 1024) as usize;
+    if !should_externalize(threshold, text.len(), max) {
+        return Ok(value);
+    }
+    let mut stored = store_result(
+        store,
+        session,
+        task_id,
+        json!({
+            "text": text,
+            "encoding": "json",
+            "scope": "session",
+        }),
+    )?;
+    if let Some(obj) = stored.as_object_mut() {
+        obj.insert("externalized".into(), Value::Bool(true));
+    }
+    Ok(stored)
+}
+
+/// When ContentStore is configured and `value`'s JSON exceeds the configured
+/// threshold, store it via the same path as `result.store` and return a compact
+/// handle stub. Under-threshold bodies, result/content tools, missing store,
+/// disabled threshold (`0`), and bodies too large for ContentStore pass through.
+pub(crate) async fn maybe_externalize(
+    scope: &Arc<CallScope>,
+    value: Value,
+) -> Result<Value, CapabilityError> {
+    let threshold = scope.context.inner.config.auto_externalize_threshold_bytes;
+    if threshold == 0 || is_tool(&scope.name) || content::is_tool(&scope.name) {
+        return Ok(value);
+    }
+    let Some(store) = scope.context.inner.content.as_ref() else {
+        return Ok(value);
+    };
+    let session = scope.context.lease.session_id.as_str();
+    let task_id = scope.context.task.id.as_str();
+    // Busy retries mirror explicit result.* tools; brief so Host settle stays bounded.
+    let mut attempts = 0u32;
+    loop {
+        match externalize_value(store, session, task_id, threshold, value.clone()) {
+            Ok(stored) => return Ok(stored),
+            Err(error) if is_busy(&error) && attempts < 50 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn known(error: impl std::fmt::Display) -> CapabilityError {
@@ -804,6 +881,20 @@ mod unit {
     }
 
     #[test]
+    fn auto_externalize_default_threshold_is_32_kib() {
+        assert_eq!(super::DEFAULT_AUTO_EXTERNALIZE_THRESHOLD_BYTES, 32 * 1024);
+    }
+
+    #[test]
+    fn should_externalize_respects_threshold_and_store_cap() {
+        assert!(!super::should_externalize(0, 100, 1024));
+        assert!(!super::should_externalize(64, 64, 1024));
+        assert!(!super::should_externalize(64, 32, 1024));
+        assert!(super::should_externalize(64, 65, 1024));
+        assert!(!super::should_externalize(64, 2048, 1024));
+    }
+
+    #[test]
     fn search_returns_line_snippets() {
         let body = b"alpha\nbeta error here\ngamma\nerror again\n";
         let hits = search_bytes(body, "error", 8);
@@ -919,5 +1010,50 @@ mod unit {
         .unwrap();
         assert_eq!(task_page["text"], "task-body");
         assert_eq!(session_page["text"], "session-body");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn over_threshold_host_result_is_stored_and_retrievable_by_handle() {
+        let (_root, store) = open_store();
+        let threshold = 64usize;
+        let body = json!({"payload": "x".repeat(200), "n": 42});
+        let stub = externalize_value(&store, "sess-a", "task-a", threshold, body.clone()).unwrap();
+        assert_eq!(stub["externalized"], true);
+        assert_eq!(stub["stored"], true);
+        assert_eq!(stub["encoding"], "json");
+        assert!(stub["bytes"].as_u64().unwrap() > threshold as u64);
+        let handle = stub["handle"].as_str().unwrap();
+
+        let page = get_result(
+            &store,
+            "sess-a",
+            "task-a",
+            json!({"handle": handle, "offset": 0, "limit": 4096}),
+        )
+        .unwrap();
+        assert_eq!(page["has_more"], false);
+        let recovered: Value = serde_json::from_str(page["text"].as_str().unwrap()).unwrap();
+        assert_eq!(recovered, body);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn under_threshold_host_result_passes_through_unchanged() {
+        let (_root, store) = open_store();
+        let body = json!({"ok": true, "n": 1});
+        let out = externalize_value(&store, "sess-a", "task-a", 1024, body.clone()).unwrap();
+        assert_eq!(out, body);
+        assert!(out.get("externalized").is_none());
+        assert!(out.get("handle").is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn zero_threshold_disables_auto_externalize() {
+        let (_root, store) = open_store();
+        let body = json!({"payload": "y".repeat(500)});
+        let out = externalize_value(&store, "sess-a", "task-a", 0, body.clone()).unwrap();
+        assert_eq!(out, body);
     }
 }

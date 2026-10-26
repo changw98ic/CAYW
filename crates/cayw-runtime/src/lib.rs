@@ -139,6 +139,10 @@ pub struct RuntimeConfig {
     pub max_queue_time: Duration,
     pub max_capability_calls: usize,
     pub max_capability_bytes: usize,
+    /// Soft UTF-8 JSON size (bytes) above which Host/tool results are stored in
+    /// ContentStore and replaced with a result handle stub for the model.
+    /// Requires `content`. `0` disables. Default: 32 KiB.
+    pub auto_externalize_threshold_bytes: usize,
     pub grant_lifetime: Duration,
     pub codemode: cayw_codemode::Limits,
     pub cells: cayw_cells::CellLimits,
@@ -176,6 +180,8 @@ impl Default for RuntimeConfig {
             max_queue_time: Duration::from_secs(60),
             max_capability_calls: 128,
             max_capability_bytes: 8 * 1024 * 1024,
+            auto_externalize_threshold_bytes:
+                crate::results::DEFAULT_AUTO_EXTERNALIZE_THRESHOLD_BYTES,
             grant_lifetime: Duration::from_secs(300),
             codemode: Default::default(),
             cells: Default::default(),
@@ -196,6 +202,11 @@ impl RuntimeConfig {
         self.resources.validate()?;
         if let Some(content) = &self.content {
             content.validate()?;
+        }
+        if self.auto_externalize_threshold_bytes > 1024 * 1024 {
+            return Err(RuntimeError::InvalidInput(
+                "auto_externalize_threshold_bytes must be at most 1 MiB".into(),
+            ));
         }
         if self.max_concurrent_runs == 0
             || self.max_concurrent_runs > 1024

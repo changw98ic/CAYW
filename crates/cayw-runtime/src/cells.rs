@@ -606,10 +606,13 @@ impl CellBackend for Backend {
         };
         // Core requires a nonempty bounded error. Return that same canonical
         // error to Cells, including refusals before Host audit start.
-        let result = result.map_err(|mut error| {
-            error.message = bounded(&error.message);
-            error
-        });
+        let result = match result {
+            Ok(value) => crate::results::maybe_externalize(&scope, value).await,
+            Err(mut error) => {
+                error.message = bounded(&error.message);
+                Err(error)
+            }
+        };
         scope.settle(&result)?;
         Ok(cayw_cells::BackendResponse::owned(
             result,
