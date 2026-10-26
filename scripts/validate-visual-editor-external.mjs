@@ -4,30 +4,32 @@
  *
  * Purpose
  * -------
- * Fill the Magpie/darwin-blocked gap on Linux (and any non-darwin host) by
- * running a fixture-backed, non-browser acceptance path against real-shaped
- * Vite React / Vue projects. Optionally accept caller-supplied project roots
- * that look like external apps (package.json + Vite + framework sources).
+ * Against a caller-supplied (or in-repo fixture) Vite React/Vue project path:
+ *   1) structural Vite/framework checks
+ *   2) optional npm ci/build
+ *   3) real editor open → edit → Host save → reopen via cayw-visual-editor HTTP API
+ *   4) optional framework source tests + cargo test -p cayw-visual-editor
  *
- * This script does NOT:
- *   - send Magpie generation requests on non-darwin (darwin Magpie path is
- *     documented separately; use validate-visual-editor-magpie.mjs there)
- *   - print secrets (MAGPIE_API_KEY / GATEWAY_KEY values)
- *   - claim full browser Playwright acceptance (that remains macOS-scoped)
+ * Magpie generation is NOT established by this script (darwin-scoped elsewhere).
+ * Browser Playwright acceptance remains macOS-scoped
+ * (validate-visual-editor-framework.mjs). This harness prefers the existing
+ * visual-editor binary + /api/document|/api/operation|/api/save|/api/reload
+ * surface rather than inventing Magpie E2E.
  *
  * Exit codes
  * ----------
- *   0  fixture/external structural + build + package tests passed
+ *   0  required checks passed
  *   1  a required check failed
  *   2  usage / configuration error
  */
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {access, cp, mkdir, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
+import {access, cp, mkdir, readFile, readdir, writeFile} from 'node:fs/promises';
 import {constants as fsConstants} from 'node:fs';
-import {tmpdir, release} from 'node:os';
+import {release} from 'node:os';
 import {dirname, join, resolve, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {once} from 'node:events';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -41,6 +43,8 @@ const REQUIRED_SELECTORS = [
   '#secondary-title', '#counter', '#name-input', '#form-output',
   '#dynamic-list', '#dynamic-style',
 ];
+const EDITOR_TOKEN = 'cayw-f18-external-validation-token-32chars';
+const EDIT_MARKER = 'CAYW-F18-external-edit-marker';
 
 function flag(name) { return process.argv.includes(name); }
 function option(name, fallback = undefined) {
@@ -56,15 +60,17 @@ function usage() {
   --out DIR                 evidence directory (must not already exist)
   --react-project PATH      external or local React Vite project (default: in-repo fixture)
   --vue-project PATH        external or local Vue Vite project (default: in-repo fixture)
+  --editor-binary PATH      cayw-visual-editor binary (default: target/debug/cayw-visual-editor)
   --skip-npm-build          skip npm ci / npm run build for each project
+  --skip-editor-chain       skip open/edit/Host-save/reopen against each project
   --skip-cargo-test         skip cargo test -p cayw-visual-editor --locked
   --skip-source-test        skip node --test framework/source.test.mjs
   --probe-magpie            unauthenticated GET /hello and GET /v1/models (no key sent)
   --help
 
-Credentials are never printed. For macOS Magpie generation, see
+Credentials are never printed. Magpie generation is not claimed here; see
 docs/validation/f18-external-project-validation.md and
-scripts/load-gateway-magpie-env.sh + scripts/validate-visual-editor-magpie.mjs.`);
+scripts/validate-visual-editor-magpie.mjs (darwin).`);
 }
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -114,6 +120,12 @@ async function walkFiles(dir, base = dir, out = []) {
     else out.push(relative(base, full).split('\\').join('/'));
   }
   return out;
+}
+
+function selectorTokens(sel) {
+  if (!sel.startsWith('#')) return [sel];
+  const id = sel.slice(1);
+  return [`id="${id}"`, `id='${id}'`, `id={\`${id}\`}`, `id={"${id}"}`, `id={'${id}'}`];
 }
 
 async function inspectProject(label, projectPath, framework) {
@@ -167,7 +179,6 @@ async function inspectProject(label, projectPath, framework) {
   result.file_count = files.length;
   result.file_sha256 = {};
   for (const rel of files) {
-    // Cap digest map to keep evidence small; still list count.
     if (Object.keys(result.file_sha256).length < 200) {
       result.file_sha256[rel] = await shaFile(join(projectPath, rel));
     }
@@ -183,26 +194,30 @@ async function inspectProject(label, projectPath, framework) {
   const selectorHits = {};
   let missing = 0;
   for (const sel of REQUIRED_SELECTORS) {
-    const token = sel.startsWith('#') ? `id="${sel.slice(1)}"` : sel;
-    const alt = sel.startsWith('#') ? `id='${sel.slice(1)}'` : sel;
-    const hit = joined.includes(token) || joined.includes(alt) || joined.includes(sel.slice(1));
+    const hit = selectorTokens(sel).some((token) => joined.includes(token));
     selectorHits[sel] = hit;
     if (!hit) missing += 1;
   }
   result.selector_hits = selectorHits;
-  result.checks.push({
-    name: 'required-selectors-in-source',
-    passed: missing === 0,
-    missing,
-  });
-  // External projects may not use the Issue-30 fixture ids; only require them for fixtures.
+  result.selector_missing_count = missing;
+
+  // Issue-30 fixture ids are required only for in-repo FIXTURE.md projects.
+  // Caller-supplied external projects must not false-fail when those ids are absent.
   if (fixtureMark) {
+    result.checks.push({
+      name: 'required-selectors-in-source',
+      passed: missing === 0,
+      missing,
+      required: true,
+    });
     assert(missing === 0, `${label}: fixture missing ${missing} required selectors in source`);
   } else {
     result.checks.push({
-      name: 'external-selector-requirement',
+      name: 'issue30-fixture-selectors',
       passed: true,
-      note: 'Caller-supplied projects are not required to use Issue-30 fixture ids; structural Vite/framework checks still apply.',
+      required: false,
+      missing,
+      note: 'Informational only for caller-supplied projects. Missing Issue-30 fixture ids do not fail acceptance; structural Vite/framework checks and the editor open/edit/save/reopen chain still apply.',
     });
   }
 
@@ -270,6 +285,306 @@ function credentialPresence() {
   };
 }
 
+async function ensureNpmInstalled(label, projectPath, outDir) {
+  if (await pathExists(join(projectPath, 'node_modules'))) {
+    return {skipped: true, reason: 'node_modules already present'};
+  }
+  const ci = run('npm', ['ci'], {cwd: projectPath});
+  await writeFile(join(outDir, `${label}-editor-npm-ci.log`), `${ci.stdout_tail}\n---stderr---\n${ci.stderr_tail}\n`);
+  assert(ci.passed, `${label}: npm ci (for editor chain) failed (status=${ci.status})`);
+  return {skipped: false, ...ci, stdout_tail: undefined, stderr_tail: undefined};
+}
+
+function openingTag(source, start) {
+  if (typeof source !== 'string' || start < 0 || start >= source.length) return '';
+  if (source[start] !== '<') return '';
+  const end = source.indexOf('>', start);
+  if (end < 0) return '';
+  return source.slice(start, end + 1);
+}
+
+function findEditableTarget(document, projectPath) {
+  const snapshot = document.snapshot || document;
+  const nodes = snapshot.nodes || [];
+  const files = new Map((snapshot.files || []).map((f) => [f.path, f.source || '']));
+
+  // Prefer the node whose own opening tag carries id="hero-title".
+  for (const node of nodes) {
+    if (!node.editable) continue;
+    const source = files.get(node.file) || '';
+    const open = openingTag(source, Number(node.start) || 0);
+    if (open.includes('id="hero-title"') || open.includes("id='hero-title'")) {
+      return {
+        node,
+        mode: 'text',
+        marker: `${EDIT_MARKER}`,
+        prefer: 'hero-title',
+      };
+    }
+  }
+
+  // Style edit is the most reliable Host-save exercise across React/Vue externals
+  // (text edits need plain static text; many containers fail that check).
+  const preferredTags = new Set(['h1', 'h2', 'p', 'div', 'section', 'span', 'button']);
+  for (const node of nodes) {
+    if (!node.editable || !preferredTags.has(node.tag)) continue;
+    return {
+      node,
+      mode: 'style',
+      marker: 'rgb(18, 140, 126)',
+      prefer: `style-on-${node.tag}`,
+    };
+  }
+
+  const any = nodes.find((n) => n.editable);
+  assert(any, `${projectPath}: no editable node mapped by visual editor`);
+  return {
+    node: any,
+    mode: 'style',
+    marker: 'rgb(18, 140, 126)',
+    prefer: 'first-editable-style',
+  };
+}
+
+async function startEditor(binary, projectPath, stateDir, framework, name) {
+  const argv = [
+    '--project', projectPath,
+    '--state-dir', stateDir,
+    '--framework', framework,
+    '--addr', '127.0.0.1:0',
+    '--preview-addr', '127.0.0.1:0',
+  ];
+  const child = spawn(binary, argv, {
+    cwd: root,
+    env: {...process.env, CAYW_EDITOR_TOKEN: EDITOR_TOKEN},
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  let urls;
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const ready = new Promise((accept, reject) => {
+    child.on('error', reject);
+    child.on('exit', (code, signal) => {
+      if (!urls) reject(new Error(`${name} exited before ready: ${code}/${signal}; ${stderr.slice(-2000)}`));
+    });
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (!urls && stdout.includes('\n')) {
+        try {
+          urls = JSON.parse(stdout.split('\n')[0]);
+          accept(urls);
+        } catch (error) {
+          reject(error);
+        }
+      }
+    });
+  });
+  const timer = setTimeout(() => child.kill('SIGINT'), 120000);
+  try {
+    await ready;
+  } finally {
+    clearTimeout(timer);
+  }
+  assert(urls?.editor_url, `${name}: missing editor_url`);
+  return {child, argv, name, urls, stdout: () => stdout, stderr: () => stderr, finished: false};
+}
+
+async function stopEditor(run, outDir) {
+  if (run.finished) return;
+  let status;
+  if (run.child.exitCode === null && run.child.signalCode === null) {
+    const ended = once(run.child, 'exit');
+    run.child.kill('SIGINT');
+    const timer = setTimeout(() => run.child.kill('SIGKILL'), 15000);
+    try { status = await ended; } finally { clearTimeout(timer); }
+  } else {
+    status = [run.child.exitCode, run.child.signalCode];
+  }
+  run.finished = true;
+  await writeFile(join(outDir, `${run.name}-stdout.log`), run.stdout());
+  await writeFile(join(outDir, `${run.name}-stderr.log`), run.stderr());
+  assert(status[0] === 0, `${run.name} did not stop cleanly: ${JSON.stringify(status)}`);
+}
+
+async function apiGet(editorUrl, path) {
+  const response = await fetch(`${editorUrl.replace(/\/$/, '')}${path}`, {
+    headers: {Authorization: `Bearer ${EDITOR_TOKEN}`},
+    signal: AbortSignal.timeout(30000),
+  });
+  const body = await response.json().catch(() => null);
+  return {status: response.status, body};
+}
+
+async function apiPost(editorUrl, path, payload) {
+  const origin = new URL(editorUrl).origin;
+  const response = await fetch(`${editorUrl.replace(/\/$/, '')}${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${EDITOR_TOKEN}`,
+      'Content-Type': 'application/json',
+      Origin: origin,
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(60000),
+  });
+  const body = await response.json().catch(() => null);
+  return {status: response.status, body};
+}
+
+async function readAuditHostWrite(stateDir) {
+  const raw = await readFile(join(stateDir, 'calls.jsonl'), 'utf8').catch(() => '');
+  const rows = raw.trim() ? raw.trim().split('\n').map((line) => JSON.parse(line)) : [];
+  const writes = rows.filter((row) => row.capability === 'fs.write');
+  return {
+    rows: rows.length,
+    fs_write_events: writes.length,
+    has_fs_write: writes.length > 0,
+  };
+}
+
+async function digestTree(projectPath) {
+  const files = await walkFiles(projectPath);
+  const digests = {};
+  for (const rel of files) {
+    digests[rel] = await shaFile(join(projectPath, rel));
+  }
+  return digests;
+}
+
+async function exerciseEditorChain(label, projectPath, framework, binary, outDir) {
+  const result = {
+    label,
+    framework,
+    project: projectPath,
+    binary,
+    steps: [],
+    passed: false,
+    claims: {
+      magpie_generation: false,
+      browser_playwright: false,
+      editor_http_open_edit_host_save_reopen: true,
+    },
+  };
+
+  assert(await pathExists(binary), `${label}: editor binary missing: ${binary}`, 2);
+  const npm = await ensureNpmInstalled(label, projectPath, outDir);
+  result.steps.push({name: 'ensure-npm', ...npm});
+
+  const stateA = join(outDir, `${label}-editor-state-open`);
+  const stateB = join(outDir, `${label}-editor-state-reopen`);
+  await mkdir(stateA, {recursive: true});
+  await mkdir(stateB, {recursive: true});
+
+  const before = await digestTree(projectPath);
+  let run = await startEditor(binary, projectPath, stateA, framework, `${label}-editor-open`);
+  result.steps.push({name: 'open', urls: run.urls, argv: run.argv});
+
+  try {
+    const doc = await apiGet(run.urls.editor_url, '/api/document');
+    assert(doc.status === 200, `${label}: /api/document failed (${doc.status})`);
+    assert(doc.body?.snapshot?.adapter === framework, `${label}: adapter mismatch`);
+    result.steps.push({
+      name: 'document-open',
+      status: doc.status,
+      adapter: doc.body.snapshot.adapter,
+      files: (doc.body.snapshot.files || []).map((f) => f.path),
+      node_count: (doc.body.snapshot.nodes || []).length,
+      baseline_sha256: doc.body.snapshot.sha256,
+    });
+
+    const target = findEditableTarget(doc.body, projectPath);
+    const baseline = doc.body.snapshot.sha256;
+    assert(baseline && /^[0-9a-f]{64}$/i.test(baseline), `${label}: missing baseline sha256`);
+
+    let operation;
+    if (target.mode === 'text') {
+      operation = {kind: 'text', id: target.node.id, text: target.marker};
+    } else {
+      operation = {kind: 'style', id: target.node.id, properties: {color: target.marker}};
+    }
+    const edited = await apiPost(run.urls.editor_url, '/api/operation', operation);
+    assert(edited.status === 200, `${label}: /api/operation failed (${edited.status}): ${JSON.stringify(edited.body)?.slice(0, 500)}`);
+    assert(edited.body?.dirty === true, `${label}: edit did not mark draft dirty`);
+    const afterEditDisk = await digestTree(projectPath);
+    assert(
+      JSON.stringify(afterEditDisk) === JSON.stringify(before),
+      `${label}: unsaved draft changed project files on disk`,
+    );
+    result.steps.push({
+      name: 'edit',
+      status: edited.status,
+      mode: target.mode,
+      prefer: target.prefer,
+      file: target.node.file,
+      tag: target.node.tag,
+      dirty: edited.body.dirty,
+      disk_unchanged_until_save: true,
+    });
+
+    const saved = await apiPost(run.urls.editor_url, '/api/save', {expected_sha256: baseline});
+    assert(saved.status === 200, `${label}: /api/save failed (${saved.status}): ${JSON.stringify(saved.body)?.slice(0, 500)}`);
+    assert(saved.body?.dirty === false, `${label}: save left draft dirty`);
+    const afterSave = await digestTree(projectPath);
+    const changed = Object.keys(afterSave).filter((path) => afterSave[path] !== before[path]);
+    assert(changed.length >= 1, `${label}: save wrote no source change`);
+    const savedSource = await readFile(join(projectPath, target.node.file), 'utf8');
+    const markerPresent =
+      savedSource.includes(target.marker) ||
+      savedSource.includes(EDIT_MARKER) ||
+      savedSource.includes('rgb(18, 140, 126)') ||
+      savedSource.includes('18, 140, 126') ||
+      savedSource.includes("'18, 140, 126'") ||
+      /color\s*:\s*['"]?rgb\(18,\s*140,\s*126\)/.test(savedSource);
+    assert(markerPresent, `${label}: saved file ${target.node.file} does not contain edit marker`);
+    assert(!savedSource.includes('data-cayw-node'), `${label}: instrumentation leaked into saved source`);
+
+    const auditA = await readAuditHostWrite(stateA);
+    assert(auditA.has_fs_write, `${label}: no Host fs.write recorded in calls.jsonl`);
+    result.steps.push({
+      name: 'save',
+      status: saved.status,
+      changed_files: changed,
+      host_audit: auditA,
+      new_baseline_sha256: saved.body.snapshot?.sha256 || null,
+    });
+  } finally {
+    await stopEditor(run, outDir);
+  }
+
+  // Reopen: fresh editor process + state against the same project path.
+  run = await startEditor(binary, projectPath, stateB, framework, `${label}-editor-reopen`);
+  result.steps.push({name: 'reopen', urls: run.urls, argv: run.argv});
+  try {
+    const again = await apiGet(run.urls.editor_url, '/api/document');
+    assert(again.status === 200, `${label}: reopen /api/document failed (${again.status})`);
+    const files = again.body?.snapshot?.files || [];
+    const fileEntry = files.find((f) => f.path === result.steps.find((s) => s.name === 'edit')?.file);
+    const sourceBlob = files.map((f) => f.source || '').join('\n');
+    assert(
+      sourceBlob.includes(EDIT_MARKER) ||
+        sourceBlob.includes('rgb(18, 140, 126)') ||
+        sourceBlob.includes('18, 140, 126') ||
+        (fileEntry && String(fileEntry.source || '').includes(EDIT_MARKER)),
+      `${label}: reopen document lost the saved edit`,
+    );
+    assert(again.body?.dirty === false, `${label}: reopen unexpectedly dirty`);
+    result.steps.push({
+      name: 'document-reopen',
+      status: again.status,
+      dirty: again.body.dirty,
+      retained_edit: true,
+      adapter: again.body.snapshot.adapter,
+    });
+  } finally {
+    await stopEditor(run, outDir);
+  }
+
+  result.passed = true;
+  await writeFile(join(outDir, `${label}-editor-chain.json`), `${JSON.stringify(result, null, 2)}\n`);
+  return result;
+}
+
 async function main() {
   if (flag('--help')) { usage(); process.exit(0); }
   const out = resolve(option('--out') || '');
@@ -283,7 +598,11 @@ async function main() {
   const skipNpm = flag('--skip-npm-build');
   const skipCargo = flag('--skip-cargo-test');
   const skipSource = flag('--skip-source-test');
+  const skipEditor = flag('--skip-editor-chain');
   const probe = flag('--probe-magpie');
+  const editorBinary = resolve(
+    option('--editor-binary') || join(root, 'target/debug/cayw-visual-editor'),
+  );
 
   const work = join(out, 'work');
   await mkdir(work, {recursive: true});
@@ -295,8 +614,7 @@ async function main() {
     ? resolve(option('--vue-project'))
     : resolve(root, FIXTURES.vue);
 
-  // Copy into work/ so npm installs never dirty the fixture originals or caller trees unexpectedly.
-  // Caller-supplied external projects are copied as well for isolated builds.
+  // Copy into work/ so npm installs and editor Host writes never dirty caller trees.
   const reactWork = join(work, 'react-project');
   const vueWork = join(work, 'vue-project');
   await cp(reactSrc, reactWork, {recursive: true, filter: (src) => {
@@ -309,7 +627,7 @@ async function main() {
   }});
 
   const summary = {
-    schema: 'cayw.f18.external-project-validation.v1',
+    schema: 'cayw.f18.external-project-validation.v2',
     slice: 'L',
     feature: 'F18',
     issue: 30,
@@ -323,9 +641,10 @@ async function main() {
     credentials: credentialPresence(),
     magpie_generation: {
       status: process.platform === 'darwin' ? 'not_run_by_this_harness' : 'darwin_blocked',
+      established_by_this_script: false,
       macos_driver: 'scripts/validate-visual-editor-magpie.mjs',
       credential_loader: 'scripts/load-gateway-magpie-env.sh',
-      note: 'Linux/non-darwin hosts fill the Magpie gap with fixture/external structural+build checks only. Real Magpie generation remains macOS-scoped.',
+      note: 'This harness does not establish Magpie acceptance. Real Magpie generation remains macOS-scoped.',
     },
     projects: {},
     steps: {},
@@ -342,6 +661,17 @@ async function main() {
     summary.steps.vue_npm = await npmBuild('vue', vueWork, out);
   } else {
     summary.steps.npm = {skipped: true};
+  }
+
+  if (!skipEditor) {
+    summary.steps.react_editor_chain = await exerciseEditorChain(
+      'react', reactWork, 'react', editorBinary, out,
+    );
+    summary.steps.vue_editor_chain = await exerciseEditorChain(
+      'vue', vueWork, 'vue', editorBinary, out,
+    );
+  } else {
+    summary.steps.editor_chain = {skipped: true};
   }
 
   if (!skipSource) {
@@ -387,8 +717,6 @@ async function main() {
 
   if (probe) {
     const baseRaw = (process.env.MAGPIE_BASE_URL || 'http://127.0.0.1:3425/v1').replace(/\/$/, '');
-    const origin = new URL(baseRaw.endsWith('/v1') ? baseRaw.slice(0, -3) || baseRaw : baseRaw);
-    // Prefer MAGPIE_BASE_URL host; fall back to constructing from URL.
     let helloUrl;
     let modelsUrl;
     try {
@@ -404,6 +732,7 @@ async function main() {
       hello: await publicProbe(helloUrl, 'public-hello', out),
       models: await publicProbe(modelsUrl, 'public-models', out),
       authorization_sent: false,
+      note: 'Public probes do not establish Magpie generation acceptance.',
     };
   }
 
@@ -412,15 +741,18 @@ async function main() {
     summary.projects.react.passed &&
     summary.projects.vue.passed &&
     (skipNpm || (summary.steps.react_npm?.passed && summary.steps.vue_npm?.passed)) &&
+    (skipEditor || (summary.steps.react_editor_chain?.passed && summary.steps.vue_editor_chain?.passed)) &&
     (skipSource || summary.steps.framework_source_test?.passed) &&
     (skipCargo || summary.steps.cargo_visual_editor_test?.passed);
 
   summary.chinese_ready_facts = {
     slice: 'L',
     feature: 'F18',
-    范围: '外部/夹具 React·Vue 工程的结构、构建与可视化编辑器包测；不在非 darwin 上宣称 Magpie 真实生成通过',
-    linux_填补: '用仓内 fixtures 与可选外部工程路径，完成 npm 构建 + framework source 测试 + cayw-visual-editor cargo 测试',
+    范围: '外部/夹具 React·Vue：结构检查 + 可选构建 + 编辑器 HTTP open/edit/Host-save/reopen；不宣称 Magpie 生成通过',
+    editor_chain: 'cayw-visual-editor /api/document → /api/operation → /api/save（Host fs.write）→ 停服重启再 /api/document',
+    linux_填补: '对传入工程路径（默认仓内 fixtures 副本）跑真实打开编辑保存再打开；缺 Issue-30 fixture id 的外部工程不再误失败',
     magpie_状态: summary.magpie_generation.status,
+    magpie_由本脚本确立: false,
     凭据映射: 'scripts/load-gateway-magpie-env.sh 将 /workspace/.env 的 GATEWAY_URL/GATEWAY_KEY 映射为 MAGPIE_BASE_URL/MAGPIE_API_KEY，证据中只记录 present/absent',
     macos_Magpie入口: 'source scripts/load-gateway-magpie-env.sh && node scripts/validate-visual-editor-magpie.mjs --out NEW_DIR',
     本轮通过: summary.passed,
@@ -431,8 +763,11 @@ async function main() {
     passed: summary.passed,
     out,
     magpie_generation: summary.magpie_generation.status,
+    magpie_established_by_this_script: false,
     react_origin: summary.projects.react.source_origin,
     vue_origin: summary.projects.vue.source_origin,
+    react_editor_chain: summary.steps.react_editor_chain?.passed ?? summary.steps.editor_chain,
+    vue_editor_chain: summary.steps.vue_editor_chain?.passed ?? summary.steps.editor_chain,
     credentials: summary.credentials,
   }, null, 2));
   process.exit(summary.passed ? 0 : 1);

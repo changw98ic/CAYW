@@ -72,4 +72,4 @@ React/Vue 验收使用本项目从零编写的 Vite 测试项目。React 同时�
 
 真实模型生成是独立验收。用户已授权本次 Magpie 调用最多 100,000,000 token，包含失败与未知预留。当前环境没有 `MAGPIE_API_KEY`，真实生成请求为 0 次。公开接口探测、脚手架构建和离线账本导出已运行，但模型生成项目后的编辑、保存与重启仍未验证。
 
-外部工程与 Linux 可复跑入口见 [F18 外部工程验收补强（SLICE L）](validation/f18-external-project-validation.md)：非 darwin 上用 fixtures/外部 Vite 工程做结构与构建验收；macOS Magpie 凭据经 `scripts/load-gateway-magpie-env.sh` 从 `/workspace/.env` 的 `GATEWAY_*` 映射，证据不打印密钥。
+外部工程与 Linux 可复跑入口见 [F18 外部工程验收补强（SLICE L）](validation/f18-external-project-validation.md)：对传入 Vite React/Vue 路径做结构检查与编辑器 HTTP open/edit/Host-save/reopen；缺 Issue-30 fixture id 的外部工程不误失败；不宣称 Magpie 生成通过。macOS Magpie 凭据经 `scripts/load-gateway-magpie-env.sh` 映射，证据不打印密钥。
