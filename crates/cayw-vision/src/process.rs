@@ -154,14 +154,29 @@ mod tests {
     }
 
     fn pid_still_alive(pid: u32) -> bool {
-        // Prefer /proc (no unsafe). Fallback: kill -0 via killall-free path.
+        // Prefer /proc (Linux, no unsafe). macOS CI has no /proc — fall back to
+        // `kill -0`, which succeeds iff the process still exists.
         let proc = PathBuf::from(format!("/proc/{pid}"));
         if proc.exists() {
-            // Zombies still have a /proc entry; treat "running or zombie" as alive
-            // only when status is not Z — after KillOnDrop::wait the entry is gone.
+            // Zombies still have a /proc entry; after KillOnDrop::wait the entry
+            // is gone. Treat any remaining entry as alive for this cancel test.
             return true;
         }
-        false
+        #[cfg(unix)]
+        {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            false
+        }
     }
 
     #[test]
