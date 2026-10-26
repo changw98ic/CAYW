@@ -5,12 +5,12 @@ use cayw_ai::CancellationToken;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, HostConfig, PermissionGate};
 use cayw_web_access::WebAccessOptions;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -144,8 +144,10 @@ async fn disabled_web_access_omits_catalog() {
         ..Default::default()
     };
     let (_ws, host) = open(config);
-    assert!(!host
-        .capabilities()
-        .iter()
-        .any(|d| d.name.starts_with("web.")));
+    assert!(
+        !host
+            .capabilities()
+            .iter()
+            .any(|d| d.name.starts_with("web."))
+    );
 }
