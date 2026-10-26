@@ -1081,9 +1081,11 @@ async fn finish_detached(
     let deadline = parent_deadline.min(own_deadline);
     // Register always inserts the token before this finisher is spawned; a
     // missing handle is a programming error, not a never-cancelled default.
-    let fleet_cancel = context.inner.fleet.cancel_token(&task_id).expect(
-        "detached fleet member must expose its cancel token after register",
-    );
+    let fleet_cancel = context
+        .inner
+        .fleet
+        .cancel_token(&task_id)
+        .expect("detached fleet member must expose its cancel token after register");
     loop {
         if receiver.borrow().is_some() {
             break;
@@ -1150,12 +1152,10 @@ async fn finish_detached(
                 .error
                 .or_else(|| Some("detached child requires reconciliation".into()))
         };
-        context.inner.fleet.mark_terminal(
-            &task_id,
-            FleetMemberState::Unknown,
-            error,
-            false,
-        );
+        context
+            .inner
+            .fleet
+            .mark_terminal(&task_id, FleetMemberState::Unknown, error, false);
     }
     context.inner.changed.notify_waiters();
 }
