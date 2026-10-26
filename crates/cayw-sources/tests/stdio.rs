@@ -89,7 +89,10 @@ async fn one_prepared_connection_discovers_metadata_and_calls_only_after_registr
     let control = prepared.control();
     let snapshot = control.snapshot();
     assert_eq!(snapshot.spawned, 1);
-    assert_eq!(snapshot.methods, vec!["tools/list", "resources/list"]);
+    assert_eq!(
+        snapshot.methods,
+        vec!["tools/list", "resources/list", "prompts/list"]
+    );
     assert_eq!(snapshot.tool_calls, 0);
     assert_eq!(snapshot.resource_reads, 0);
     let (manifest, handle) = prepared.into_parts();
@@ -119,7 +122,7 @@ async fn one_prepared_connection_discovers_metadata_and_calls_only_after_registr
     assert_eq!(control.snapshot().tool_calls, 1);
     assert_eq!(
         control.snapshot().methods,
-        vec!["tools/list", "resources/list", "tools/call"]
+        vec!["tools/list", "resources/list", "prompts/list", "tools/call"]
     );
     let resource = call(
         &registry,

@@ -212,7 +212,7 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 ## MCP、Skills 与外部检索
 
-宿主统一持有 MCP 连接和 Skills loader，Core 只消费被注入的目录与能力桥。发现名称、读取 Schema/Skill、执行调用是独立权限操作；发现结果和 Skill 文本均不授予执行权限。
+宿主统一持有 MCP 连接和 Skills loader，Core 只消费被注入的目录与能力桥。发现名称、读取 Schema/Skill、执行调用是独立权限操作；发现结果和 Skill 文本均不授予执行权限。F14 在宿主侧以 `ManagedStdio` 支持懒启动与按服务空闲回收：目录可在进程停止后保留，`mcp.call` / 资源读取 / `mcp.prompts.get` 再拉起连接；外部 `mcpServers` 配置仅导入绝对路径本地 stdio；产品入口 `install_mcp_servers_file` / `HeadlessConfig.mcp_servers_file` 完成 prepare 并挂入 Runtime 使用的 Bridge/Registry。
 
 Bridge 保存来源 ID、版本、origin、实例/代际、manifest 摘要和原调用关联。来源卸载/替换后，旧快照或迟到结果不能装作当前来源；已开始但未获可靠回执的调用保持 unknown。模型不能通过一个看似相同的工具名改绑连接或伪造来源。
 

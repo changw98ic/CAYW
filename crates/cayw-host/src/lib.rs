@@ -67,7 +67,7 @@ pub trait AuditSink: Send + Sync {
 
 /// Existing application services, injected without creating a loader or connection.
 ///
-/// Names are `search.query`, `mcp.discover`, `mcp.describe`, `mcp.call`,
+/// Names are `search.query`, `mcp.discover`, `mcp.describe`, `mcp.call`, `mcp.prompts.*`,
 /// `skills.list`, and `skills.read`. Their schemas are in `Host::capabilities`.
 /// The child cancellation token is cancelled on timeout, cancellation, or drop.
 /// Dropping a future must not silently detach work. If completion cannot be

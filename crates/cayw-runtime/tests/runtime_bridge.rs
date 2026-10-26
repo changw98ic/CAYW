@@ -101,6 +101,9 @@ impl SourceHandle for Source {
                     json!({"uri":uri,"mime_type":"text/markdown","text":"fixture resource body"})
                 }
                 SourceOperation::Search { arguments } => json!({"hits":[arguments["query"]]}),
+                SourceOperation::GetPrompt { name, arguments } => {
+                    json!({"name": name, "description": "fixture prompt", "arguments": arguments, "messages": []})
+                }
             }
         };
         Ok(SourceReply {
@@ -126,6 +129,7 @@ fn manifest() -> Manifest {
             content_sha256: cayw_bridge::content_sha256(SKILL),
         }],
         resources: Vec::new(),
+        prompts: Vec::new(),
         search: true,
     }
 }

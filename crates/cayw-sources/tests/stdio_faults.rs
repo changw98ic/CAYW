@@ -135,7 +135,7 @@ async fn actual_server_rejection_preserves_original_request_and_allows_no_replay
     assert!(
         error
             .message
-            .contains("MCP error -32602 for original request 3")
+            .contains("MCP error -32602 for original request 4")
     );
     assert_eq!(control.snapshot().tool_calls, 1);
     assert!(!registry.snapshot("local").unwrap().outcome_unknown);
@@ -180,6 +180,9 @@ async fn actual_child_exit_malformed_frames_and_identity_change_retain_unknown()
 }
 fn direct_request(operation: cayw_bridge::SourceOperation, id: u64) -> cayw_bridge::SourceRequest {
     let (kind, target) = match &operation {
+        cayw_bridge::SourceOperation::GetPrompt { name, .. } => {
+            (cayw_bridge::Operation::GetPrompt, name.clone())
+        }
         cayw_bridge::SourceOperation::ReadResource { uri } => {
             (cayw_bridge::Operation::ReadResource, uri.clone())
         }
