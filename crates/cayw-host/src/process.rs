@@ -1135,7 +1135,7 @@ pub(crate) async fn execute(
                 .run_in_directory_with_resources(spec, cancel.clone(), None::<()>)
                 .await
                 .map_err(device_error)?;
-            process_value(result, output_filter_options(host, name))
+            process_value(result, output_filter_options(host, name), host.config.content_store.as_deref())
         }
         _ => Err(failure("unknown process capability")),
     }
@@ -1171,7 +1171,7 @@ pub(crate) async fn execute_git_read(
         .map_err(device_error)?;
     // Preserve an uncertain process terminal before reporting a read conflict.
     // A completed read with a replaced repository or index discards its data.
-    let result = process_value(result, output_filter_options(host, name))?;
+    let result = process_value(result, output_filter_options(host, name), host.config.content_store.as_deref())?;
     identity.verify(host)?;
     Ok(result)
 }
@@ -1207,14 +1207,45 @@ fn output_filter_options(
     Some(options)
 }
 
+/// Content-addressed store of one filtered original. Id == SHA-256 hex digest.
+fn externalize_original(
+    store: Option<&dyn crate::FilteredOriginalStore>,
+    stream: &str,
+    digest: &str,
+    original: &str,
+) -> Result<Value, CapabilityError> {
+    let Some(store) = store else {
+        return Err(failure(format!(
+            "output filter reduced {stream} but ContentStore is not configured; refusing to discard the only copy of the original"
+        )));
+    };
+    let bytes = original.as_bytes();
+    store.put_original(digest, bytes).map_err(|error| {
+        failure(format!(
+            "output filter reduced {stream} but failed to externalize original: {}",
+            error.message
+        ))
+    })?;
+    Ok(json!({
+        "id": digest,
+        "content_hash": digest,
+        "bytes": bytes.len() as u64,
+        "encoding": "utf8",
+        "store": "content",
+        "kind": "output_filter_original",
+    }))
+}
+
 fn stream_filter_fields(
+    stream: &str,
     original: &str,
     options: &cayw_output_filter::FilterOptions,
+    store: Option<&dyn crate::FilteredOriginalStore>,
 ) -> Result<(String, Value), CapabilityError> {
     let filtered = cayw_output_filter::apply_filter(original, options.clone())
         .map_err(|error| failure(format!("output filter failed: {error}")))?;
     let dual = cayw_output_filter::dual_entry(&filtered);
-    let meta = json!({
+    let mut meta = json!({
         "original_digest": dual.original_digest,
         "filter_enabled": dual.filter_enabled,
         "applied_profile": dual.applied_profile,
@@ -1227,16 +1258,27 @@ fn stream_filter_fields(
             "changed": filtered.reduction.changed,
         },
     });
-    // Agent-facing payload is the summary only. Full original stays in the
-    // filter crate / dual_entry for offline compare; Host must not re-embed it
-    // inline (that would cancel context reduction). Oversized bodies may still
-    // be externalized by Runtime ContentStore auto-externalize (F01).
+    // When filtering drops bytes, externalize the full original first so the
+    // agent still has a retrieval path. Unchanged streams need no handle —
+    // the summary already is the complete capture.
+    if filtered.reduction.changed {
+        if original.is_empty() {
+            return Err(failure(format!(
+                "output filter reported a reduction on empty {stream}; refusing inconsistent state"
+            )));
+        }
+        let handle = externalize_original(store, stream, &dual.original_digest, original)?;
+        meta.as_object_mut()
+            .expect("object")
+            .insert("original_handle".into(), handle);
+    }
     Ok((dual.summary, meta))
 }
 
 fn process_value(
     result: cayw_device::ProcessResult,
     filter: Option<cayw_output_filter::FilterOptions>,
+    store: Option<&dyn crate::FilteredOriginalStore>,
 ) -> Result<Value, CapabilityError> {
     if result.termination != TerminationReason::Exited || !result.output_complete {
         return Err(CapabilityError::unknown(format!(
@@ -1261,12 +1303,12 @@ fn process_value(
         "output_complete": result.output_complete,
     });
     if let Some(options) = filter.filter(|options| options.enabled) {
-        let (stdout, stdout_meta) = stream_filter_fields(&stdout_raw, &options)?;
-        let (stderr, stderr_meta) = stream_filter_fields(&stderr_raw, &options)?;
+        let (stdout, stdout_meta) = stream_filter_fields("stdout", &stdout_raw, &options, store)?;
+        let (stderr, stderr_meta) = stream_filter_fields("stderr", &stderr_raw, &options, store)?;
         value["stdout"] = json!(stdout);
         value["stderr"] = json!(stderr);
         // Deliberately omit stdout_original/stderr_original from the capability
-        // result so the model context receives only the filtered summary (+ meta).
+        // result so the model context receives only the filtered summary (+ handle).
         value["output_filter"] = json!({
             "protocol_version": cayw_output_filter::OUTPUT_FILTER_PROTOCOL_VERSION,
             "stdout": stdout_meta,
@@ -1447,6 +1489,38 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn structured_git_reads_select_passthrough_without_line_cap() {
+        let host = Host::new(
+            std::env::temp_dir(),
+            Arc::new(Boundary),
+            Arc::new(Boundary),
+            HostConfig {
+                git_program: Some("/usr/bin/git".into()),
+                output_filter: Some(cayw_output_filter::FilterOptions {
+                    enabled: true,
+                    profile: cayw_output_filter::FilterProfile::Generic,
+                    head_lines: 1,
+                    tail_lines: 1,
+                    max_lines: 2,
+                }),
+                ..Default::default()
+            },
+        );
+        // Host::new needs an existing directory; temp_dir is fine for options only.
+        let host = host.expect("host");
+        for name in ["git.blame", "git.log", "git.show"] {
+            let options = output_filter_options(&host, name).expect("filter enabled");
+            assert_eq!(options.profile, cayw_output_filter::FilterProfile::Passthrough);
+            assert_eq!(options.max_lines, 0);
+        }
+        let status = output_filter_options(&host, "git.status").unwrap();
+        assert_eq!(
+            status.profile,
+            cayw_output_filter::FilterProfile::GitStatusLike
+        );
     }
 
     #[tokio::test]

@@ -106,6 +106,93 @@ pub struct Profile {
     pub io: cayw_device::ProcessIo,
 }
 
+
+/// Durable sink for F02 originals that were removed from the agent-facing summary.
+///
+/// Runtime wires the Device [`cayw_content::ContentStore`]; tests may use an
+/// in-memory implementation. When filtering reduces a stream, Host **must** put
+/// the original here before returning — absence fails closed.
+pub trait FilteredOriginalStore: Send + Sync {
+    fn put_original(&self, digest: &str, bytes: &[u8]) -> Result<(), CapabilityError>;
+    fn get_original(&self, digest: &str) -> Result<Option<Vec<u8>>, CapabilityError>;
+}
+
+/// ContentStore-backed [`FilteredOriginalStore`] (content-addressed id = digest).
+pub struct ContentFilteredOriginalStore {
+    store: Arc<cayw_content::ContentStore>,
+}
+impl ContentFilteredOriginalStore {
+    pub fn new(store: Arc<cayw_content::ContentStore>) -> Self {
+        Self { store }
+    }
+    pub fn store(&self) -> &cayw_content::ContentStore {
+        &self.store
+    }
+}
+impl FilteredOriginalStore for ContentFilteredOriginalStore {
+    fn put_original(&self, digest: &str, bytes: &[u8]) -> Result<(), CapabilityError> {
+        let id = cayw_content::Id::new(digest)
+            .map_err(|error| failure(format!("invalid filtered original digest: {error}")))?;
+        match self.store.try_read(&id) {
+            Ok(Some((_record, existing))) => {
+                if existing.as_slice() != bytes {
+                    return Err(failure(format!(
+                        "ContentStore record {digest} already exists with different bytes"
+                    )));
+                }
+                Ok(())
+            }
+            Ok(None) => match self
+                .store
+                .try_put(&id, cayw_content::ExpectedRevision::Absent, bytes)
+            {
+                Ok(_) => Ok(()),
+                Err(cayw_content::Error::Busy) => Err(failure(
+                    "ContentStore is busy while externalizing a filtered original",
+                )),
+                Err(cayw_content::Error::Conflict { .. }) => match self.store.try_read(&id) {
+                    Ok(Some((_record, existing))) if existing.as_slice() == bytes => Ok(()),
+                    Ok(Some(_)) => Err(failure(format!(
+                        "ContentStore record {digest} conflicted with different bytes"
+                    ))),
+                    Ok(None) => Err(failure(format!(
+                        "ContentStore conflicted then lost filtered original {digest}"
+                    ))),
+                    Err(cayw_content::Error::Busy) => Err(failure(
+                        "ContentStore is busy after conflict while reading a filtered original",
+                    )),
+                    Err(error) => Err(failure(format!(
+                        "failed to re-read filtered original after conflict: {error}"
+                    ))),
+                },
+                Err(error) => Err(failure(format!(
+                    "failed to externalize filtered original to ContentStore: {error}"
+                ))),
+            },
+            Err(cayw_content::Error::Busy) => Err(failure(
+                "ContentStore is busy while checking a filtered original",
+            )),
+            Err(error) => Err(failure(format!(
+                "failed to check ContentStore for filtered original: {error}"
+            ))),
+        }
+    }
+    fn get_original(&self, digest: &str) -> Result<Option<Vec<u8>>, CapabilityError> {
+        let id = cayw_content::Id::new(digest)
+            .map_err(|error| failure(format!("invalid filtered original handle: {error}")))?;
+        match self.store.try_read(&id) {
+            Ok(None) => Ok(None),
+            Ok(Some((_record, bytes))) => Ok(Some(bytes)),
+            Err(cayw_content::Error::Busy) => Err(failure(
+                "ContentStore is busy while reading a filtered original",
+            )),
+            Err(error) => Err(failure(format!(
+                "failed to read filtered original from ContentStore: {error}"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HostConfig {
     /// Trusted opt-in to a cooperating, explicitly frozen fs.read view. Outside
@@ -149,11 +236,17 @@ pub struct HostConfig {
     /// Optional F02 command-output filter applied when presenting process/git
     /// results to agents/UI. `None` keeps the legacy stdout/stderr-only shape.
     /// When `Some` and enabled, `stdout`/`stderr` are filtered summaries only;
-    /// the full capture is **not** re-embedded inline (digest + reduction live
-    /// under `output_filter`). Structured git reads (`blame`/`log`/`show`) use
-    /// Passthrough so porcelain records stay intact. Task wall/cost are not
-    /// measured here; callers pass those to compare APIs.
+    /// the full original is externalized to [`Self::content_store`] (digest handle
+    /// under `output_filter`) before return — never discarded and never re-inlined.
+    /// Structured git reads (`blame`/`log`/`show`) use Passthrough so porcelain
+    /// records stay intact. Task wall/cost are not measured here; callers pass
+    /// those to compare APIs.
     pub output_filter: Option<FilterOptions>,
+    /// Store used to retain full process/git captures when F02 filtering
+    /// reduces them. Required whenever filtering would drop bytes; absence
+    /// fails closed instead of silently discarding the only copy. Runtime
+    /// injects a ContentStore adapter; tests may use an in-memory sink.
+    pub content_store: Option<Arc<dyn FilteredOriginalStore>>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
 impl Default for HostConfig {
@@ -176,6 +269,7 @@ impl Default for HostConfig {
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
             output_filter: Some(FilterOptions::default()),
+            content_store: None,
             external: None,
         }
     }
@@ -382,6 +476,17 @@ impl Host {
     /// Identity of the directory actually held open by this host. Independent
     /// opens of the same live directory agree; renaming/replacing its pathname
     /// cannot change this identity or redirect the metadata lookup.
+    /// Read a previously externalized F02 original by handle id (the
+    /// `original_handle.id` / `original_digest` returned on filtered results).
+    /// Returns `Ok(None)` when the store is configured but the id is absent.
+    pub fn read_output_original(&self, handle_id: &str) -> Result<Option<String>, CapabilityError> {
+        let store = self.config.content_store.as_ref().ok_or_else(|| {
+            failure("filtered-original store is not configured; originals cannot be retrieved")
+        })?;
+        Ok(store
+            .get_original(handle_id)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
     pub fn workspace_identity(&self) -> Result<String, CapabilityError> {
         #[cfg(unix)]
         {

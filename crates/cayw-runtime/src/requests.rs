@@ -186,7 +186,7 @@ fn catalog(inner: &Inner, host: &cayw_host::Host) -> Result<OperationCatalog, Ru
         crate::bridge::permission_policy_id(&inner.config, &policy.permission_policy_id)?;
     let identity = HostIdentity::from_host(
         host,
-        &crate::bridge::effective_host_config(&inner.config),
+        &crate::bridge::effective_host_config(&inner.config, inner.content.clone()),
         &service_policy_id(inner, &base_policy)?,
     )?;
     Ok(OperationCatalog::bind(

@@ -29,17 +29,20 @@
 
 - `HostConfig::output_filter`：默认 `Some(FilterOptions::default())`
 - `build.run`/`test.run`/`check.run`/`lint.run`/`format.run` 与 `git.*` 读结果经 `process_value` 调用 `apply_filter` + `dual_entry`
-- 启用时 JSON 中 `stdout`/`stderr` **仅为**过滤摘要；**不**再内联 `stdout_original`/`stderr_original`（否则无真实上下文减量）。`output_filter` 元数据含 `original_digest` / reduction / `original_inline: false`
-- `git.blame` / `git.log` / `git.show` 自动 `Passthrough`（`max_lines=0`），避免 Generic head/tail 拆坏 porcelain 记录
+- 启用时 JSON 中 `stdout`/`stderr` **仅为**过滤摘要；**不**再内联 `stdout_original`/`stderr_original`（否则无真实上下文减量）
+- 当过滤实际减量（`reduction.changed`）时，**先**把完整原文写入 Host/`Runtime` 共用的 Device **ContentStore**（content-addressed id = `original_digest`），再返回摘要 + `output_filter.*.original_handle`
+- `output_filter` 元数据含 `original_digest` / reduction / `original_inline: false` / 可选 `original_handle`
+- ContentStore 未配置却需要外置时 **fail closed**（明确报错），绝不静默丢弃唯一原文副本
+- `git.blame` / `git.log` / `git.show` 自动 `Passthrough`（`max_lines=0`），避免 Generic head/tail 拆坏 porcelain 记录；未减量时无需 handle
 - 设为 `None` 或 `enabled: false` 保持旧 stdout/stderr-only 形状
-- 完整原文仍可由 filter crate 的 `dual_entry` 离线对比保留；超大结果走 Runtime F01 ContentStore 自动外置
+- Host 可通过 `Host::read_output_original(handle_id)` 取回外置原文；与 F01 `result.*` 句柄工具的进一步对齐另计
 - 不测量任务 wall/cost（仍由调用方传入 `compare_filter_toggle`）
 - 终端流式 `terminal.read` 字节游标语义不变，本切片不改
 
 ## 明确未交付（后续）
 
 - 终端会话流式输出过滤
-- F01 ContentStore 结果句柄持久化对齐
+- F01 `result.get`/`result.store` 工具面与 F02 handle 的统一命名/分页对齐（Host 已可写入同一 ContentStore）
 - 可配置 TOML 规则包与社区过滤器导入
 - 将 F02 全范围标为完成
 

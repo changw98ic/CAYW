@@ -547,6 +547,7 @@ dependencies = [
  "cap-std 4.0.3",
  "cayw-ai",
  "cayw-codemode",
+ "cayw-content",
  "cayw-data",
  "cayw-device",
  "cayw-output-filter",

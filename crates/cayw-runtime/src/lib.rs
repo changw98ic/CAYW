@@ -298,7 +298,6 @@ impl Runtime {
                 "workspace must be a directory".into(),
             ));
         }
-        let host_root = cells::catalog_host(&root, bridge::effective_host_config(&config))?;
         let store = SessionStore::open(store_path.as_ref())?;
         let store = Arc::new(match &config.reconciliation_verifier {
             Some(verifier) => store.with_reconciliation_verifier(verifier.clone()),
@@ -333,7 +332,13 @@ impl Runtime {
             config.fairness_after_dispatches,
             &config.resources,
         )?;
+        // Open ContentStore before Host so F02 can externalize filtered originals
+        // into the same Device store Runtime already holds for content.*.
         let content = content::open(store_path.as_ref(), &root, config.content.as_ref())?;
+        let host_root = cells::catalog_host(
+            &root,
+            bridge::effective_host_config(&config, content.clone()),
+        )?;
         // RequestStore owns its authority fence and database as one unit. It
         // must not mistake the pre-existing Core database for a new authority.
         let requests = Arc::new(request_recovery::open_requests(

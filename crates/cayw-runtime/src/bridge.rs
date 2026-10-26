@@ -51,8 +51,18 @@ impl cayw_host::ExternalHost for CatalogOnly {
     }
 }
 
-pub(crate) fn effective_host_config(config: &RuntimeConfig) -> cayw_host::HostConfig {
+pub(crate) fn effective_host_config(
+    config: &RuntimeConfig,
+    content: Option<std::sync::Arc<cayw_content::ContentStore>>,
+) -> cayw_host::HostConfig {
     let mut host = config.host.clone();
+    // Prefer the Runtime-opened ContentStore so F02 filtered originals share
+    // the same Device store as content.* (and later F01 result handles).
+    if let Some(store) = content {
+        host.content_store = Some(std::sync::Arc::new(
+            cayw_host::ContentFilteredOriginalStore::new(store),
+        ));
+    }
     if config.bridge.is_some() {
         host.external = Some(Arc::new(CatalogOnly));
     }

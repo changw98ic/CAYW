@@ -36,3 +36,16 @@ cargo test -p cayw-output-filter --locked
 ```
 
 不声明终端流式过滤或 F01 句柄对齐已完成。
+
+
+## Host ContentStore externalize (remediation)
+
+Filtered process results no longer discard the full capture. When `reduction.changed`:
+
+1. Put original bytes into Device ContentStore under id = `original_digest`
+2. Return agent payload = filtered `stdout`/`stderr` + `output_filter.*.original_handle`
+3. Without ContentStore → fail closed
+
+```sh
+cargo test -p cayw-host --test output_filter --locked
+```
