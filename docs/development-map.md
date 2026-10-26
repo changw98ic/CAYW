@@ -54,7 +54,7 @@
 
 ### 当前页面的可视化编辑
 
-#30 依赖 #1 的公开接口与 #6 的执行底座，作为独立可选应用交付。核心路径是当前项目页面进入编辑、拖拽与右键修改、插入组件、保存回源码及重启后继续编辑。HTML/CSS 已完成 macOS ARM64 本地验收；Vite React JSX/TSX 与 Vue 3 已适配，并通过合成项目的多文件保存、停服重启和外部修改冲突流程。当前范围见[可视化编辑说明](visual-editor.md)，最新结果见[精简重测记录](validation/issue-30-editor-simplification-macos.md)；适配阶段见[框架验收记录](validation/issue-30-framework-editor-macos.md)，较早的 HTML 结果见[历史记录](validation/issue-30-visual-editor-macos.md)。当次 Magpie 100M token 验收已获授权，但环境缺少凭据，真实生成请求为 0，生成项目后的完整验收仍待完成。该任务不要求先恢复 #12/#14 的历史范围。
+#30 依赖 #1 的公开接口与 #6 的执行底座，作为独立可选应用交付。核心路径是当前项目页面进入编辑、拖拽与右键修改、插入组件、保存回源码及重启后继续编辑。HTML/CSS 已完成 macOS ARM64 本地验收；Vite React JSX/TSX 与 Vue 3 已适配，并通过合成项目的多文件保存、停服重启和外部修改冲突流程。当前范围见[可视化编辑说明](visual-editor.md)，最新结果见[精简重测记录](validation/issue-30-editor-simplification-macos.md)；适配阶段见[框架验收记录](validation/issue-30-framework-editor-macos.md)，较早的 HTML 结果见[历史记录](validation/issue-30-visual-editor-macos.md)。当次 Magpie 100M token 验收已获授权，但环境缺少凭据，真实生成请求为 0，生成项目后的完整验收仍待完成。 F18 外部工程验收入口见 [f18-external-project-validation.md](validation/f18-external-project-validation.md)（SLICE L：结构 + 编辑器 open/edit/Host-save/reopen；不替代 macOS Magpie 生成）。该任务不要求先恢复 #12/#14 的历史范围。
 
 ### 新增：Trace Debug
 
