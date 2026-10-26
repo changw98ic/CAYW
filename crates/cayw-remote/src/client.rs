@@ -370,9 +370,13 @@ impl RemoteDevice {
         for token in tokens.values() {
             token.cancel();
         }
-        // Allow cooperative handlers to observe their cancelled tokens before
-        // aborting any that do not yield. This is bounded by one scheduling turn.
-        tokio::task::yield_now().await;
+        // After cancel, drive JoinSet via join_next so cooperative handlers are
+        // actually polled and can finish cancelled().await. A yield/sleep grace
+        // does not guarantee that. Bound the wait, then abort stragglers.
+        let _ = timeout(Duration::from_millis(50), async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await;
         tasks.shutdown().await;
         result
     }

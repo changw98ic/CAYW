@@ -1,4 +1,5 @@
 //! Headless runtime with one durable session history and explicit host authority.
+mod artifacts;
 mod audit;
 mod bridge;
 mod cancellation;
@@ -34,9 +35,15 @@ mod session;
 mod shared_read;
 mod values;
 
+pub use artifacts::RuntimeHostDispatch;
 pub use audit::{AuditRecord, GrantRecord};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
+pub use cayw_artifacts::{
+    ActionIntent, ActionKind, ActionOutcome, ActionRecord, ActionRequest, ActionStatus,
+    ArtifactKind, ArtifactPreview, ArtifactRecord, HostActionDispatch, PutArtifactRequest,
+    RecoveryBundle, UpdateArtifactRequest,
+};
 pub use cayw_requests::TaskIntent;
 pub use children::LocalAgents;
 pub use collaboration::{
@@ -256,6 +263,7 @@ pub(crate) struct Inner {
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
+    artifacts: Mutex<artifacts::ArtifactState>,
     #[cfg(feature = "plugins")]
     registry: Arc<cayw_plugins::PluginRegistry>,
 }
@@ -379,10 +387,15 @@ impl Runtime {
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
+                // Placeholder; replaced immediately after Arc construction with Weak dispatch.
+                artifacts: Mutex::new(artifacts::ArtifactState {
+                    workspace: cayw_artifacts::ArtifactWorkspace::new(),
+                }),
                 #[cfg(feature = "plugins")]
                 registry: Arc::new(cayw_plugins::PluginRegistry::new()),
             }),
         };
+        *crate::lock(&rt.inner.artifacts) = artifacts::new_state(Arc::downgrade(&rt.inner));
         rt.capabilities()?; // Validate actual injected Host configuration before serving.
         Ok(rt)
     }

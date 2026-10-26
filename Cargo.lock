@@ -422,6 +422,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-artifacts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-bridge"
 version = "0.1.0"
 dependencies = [
@@ -649,6 +659,7 @@ dependencies = [
  "base64 0.22.1",
  "cayw-agent",
  "cayw-ai",
+ "cayw-artifacts",
  "cayw-bridge",
  "cayw-cells",
  "cayw-codemode",

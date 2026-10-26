@@ -1,0 +1,20 @@
+[package]
+name = "cayw-artifacts"
+description = "HTML artifact display + host action protocol (F09/F19 first cut)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+
+[[example]]
+name = "offline_artifacts"
