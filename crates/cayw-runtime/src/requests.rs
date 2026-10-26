@@ -96,6 +96,7 @@ pub(crate) fn operation_definitions(inner: &Inner, host: &cayw_host::Host) -> Ve
     definitions.extend(crate::collaboration::definitions());
     definitions.extend(crate::children::definitions(inner));
     definitions.extend(crate::content::definitions(inner.config.content.as_ref()));
+    definitions.extend(crate::results::definitions(inner.config.content.as_ref()));
     definitions
 }
 fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {
