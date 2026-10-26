@@ -6,8 +6,9 @@
 //! - **replay** (`changed_node` is `None`, e.g. undo): run from the entry with
 //!   the revision's input/state/context; every step is recomputed.
 //! - **recompute** (node save): reuse completed upstream steps from the captured
-//!   base, then run from the edited node with that step's input and
-//!   `state_before`, updating only affected downstream nodes.
+//!   base for the UI, but still run the Luau graph from the entry so upstream
+//!   context mutations and shared table identity are rebuilt before the edit.
+//!   Fresh steps are kept from the edited node onward.
 //!
 //! Host calls are answered only from the original captured records, matched to
 //! the node the runner has just started, by exact name, arguments and call order.
@@ -385,31 +386,6 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
         &plan.initial_state,
         &plan.context,
         "complete graph execution",
-    )
-}
-
-/// Local recompute script that starts at `start_node` with the captured incoming
-/// value and pre-state. Upstream nodes are not executed in the VM; the caller
-/// attaches their reused steps separately.
-fn script_for_local_recompute(
-    plan: &GraphPlan,
-    start_node: &str,
-    incoming: &Value,
-    state: &Value,
-    context: &Value,
-) -> Result<String, crate::Error> {
-    if !plan.nodes.iter().any(|node| node.id == start_node) {
-        return Err(invalid(format!(
-            "local recompute start node {start_node:?} is not in the plan"
-        )));
-    }
-    script_from(
-        plan,
-        start_node,
-        incoming,
-        state,
-        context,
-        "local recompute from edited node",
     )
 }
 
@@ -890,19 +866,17 @@ fn reused_prefix(base: &Evaluation, changed_node: &str) -> Result<Vec<Step>, Gap
         .collect())
 }
 
-fn local_start(
+/// Reused upstream prefix for a node-save recompute. The Luau program still
+/// starts at the plan entry (see `evaluate`): JSON snapshots of input /
+/// `state_before` / `plan.context` cannot restore upstream context mutations or
+/// shared table identity between input, state, and context.
+fn recompute_prefix(
     plan: &GraphPlan,
     base: Option<&Evaluation>,
     changed_node: &str,
-) -> Result<(Vec<Step>, Value, Value, Value), Gap> {
+) -> Result<Vec<Step>, Gap> {
     if changed_node == plan.entry {
-        // Entry edits use the revision's own input and initial state.
-        return Ok((
-            Vec::new(),
-            plan.input.clone(),
-            plan.initial_state.clone(),
-            plan.context.clone(),
-        ));
+        return Ok(Vec::new());
     }
     let Some(base) = base else {
         return Err(Gap {
@@ -910,19 +884,13 @@ fn local_start(
             message: "no captured input or state exists for the edited node".into(),
         });
     };
-    let Some(step) = base.steps.iter().find(|step| step.node_id == changed_node) else {
+    if !base.steps.iter().any(|step| step.node_id == changed_node) {
         return Err(Gap {
             node_id: Some(changed_node.into()),
             message: "the captured evaluation never reached the edited node".into(),
         });
-    };
-    let prefix = reused_prefix(base, changed_node)?;
-    Ok((
-        prefix,
-        step.input.clone(),
-        step.state_before.clone(),
-        plan.context.clone(),
-    ))
+    }
+    reused_prefix(base, changed_node)
 }
 
 fn blocked_evaluation(
@@ -982,10 +950,11 @@ fn step_from_trace(
 ///
 /// - `changed_node == None` → **replay**: run from the entry with the revision's
 ///   input/state/context; every step is recomputed (`reused = false`).
-/// - `changed_node == Some(id)` → **recompute**: reuse completed upstream steps
-///   from `base`, then run from the edited node with that step's captured input
-///   and `state_before`. Downstream nodes are recomputed; Host answers come only
-///   from captures. This path never runs cargo/tsc/full project builds.
+/// - `changed_node == Some(id)` → **recompute**: run from the entry so upstream
+///   context mutations and shared Luau table identity are rebuilt, keep fresh
+///   steps from the edited node onward, and attach completed upstream steps from
+///   `base` as `reused = true`. Host answers come only from captures. This path
+///   never runs cargo/tsc/full project builds.
 ///
 /// Missing captures, unknown outcomes and an uncaptured branch produce `blocked`
 /// with explicit gaps. An error output is not reported as a completed round.
@@ -1011,11 +980,12 @@ pub async fn evaluate(
     }
 
     let (mut steps, script) = if let Some(changed) = changed_node {
-        match local_start(plan, base, changed) {
-            Ok((prefix, incoming, state, context)) => {
-                let script =
-                    script_for_local_recompute(plan, changed, &incoming, &state, &context)?;
-                (prefix, script)
+        match recompute_prefix(plan, base, changed) {
+            Ok(prefix) => {
+                // Always start at the entry. Starting at the edit with JSON
+                // clones of input/state_before/plan.context drops upstream
+                // context writes and shared object identity (see replay_state).
+                (prefix, script_for_plan(plan)?)
             }
             Err(gap) => {
                 return Ok(blocked_evaluation(plan, version, started, vec![gap], mode));
@@ -1024,6 +994,9 @@ pub async fn evaluate(
     } else {
         (Vec::new(), script_for_plan(plan)?)
     };
+    // For recompute, traces include upstream warm-up nodes. Keep the reused
+    // prefix and only record fresh steps once the edited node starts.
+    let mut record_steps = changed_node.is_none();
 
     if cancel.is_cancelled() {
         return Ok(blocked_evaluation(
@@ -1112,18 +1085,11 @@ pub async fn evaluate(
                 }
                 let elapsed = observed_at.duration_since(node_started).as_secs_f64() * 1000.0;
                 let leftover = host.leftover(node_id);
-                steps.push(
-                    step_from_trace(
-                        &started_trace,
-                        Some(result),
-                        Status::Completed,
-                        None,
-                        started_at_ms,
-                        elapsed,
-                        *evidence,
-                    )
-                    .map_err(invalid)?,
-                );
+                if !record_steps {
+                    if changed_node == Some(node_id.as_str()) {
+                        record_steps = true;
+                    }
+                }
                 if leftover > 0 {
                     gaps.push(Gap {
                         node_id: Some(node_id.clone()),
@@ -1132,7 +1098,21 @@ pub async fn evaluate(
                         ),
                     });
                 }
-                output = Some(result.output.clone());
+                if record_steps {
+                    steps.push(
+                        step_from_trace(
+                            &started_trace,
+                            Some(result),
+                            Status::Completed,
+                            None,
+                            started_at_ms,
+                            elapsed,
+                            *evidence,
+                        )
+                        .map_err(invalid)?,
+                    );
+                    output = Some(result.output.clone());
+                }
             }
         }
     }
@@ -1174,6 +1154,13 @@ pub async fn evaluate(
                         _ => plan.entry.clone(),
                     };
                     let message = format!("node {node_id:?}: {}", failure.message);
+                    if !record_steps {
+                        // Warm-up failed before the edit point: drop the reused
+                        // prefix so the failure is not paired with a duplicate
+                        // upstream node id.
+                        steps.clear();
+                        record_steps = true;
+                    }
                     steps.push(
                         step_from_trace(
                             &started_trace,
@@ -1202,6 +1189,15 @@ pub async fn evaluate(
                 };
             }
         }
+    }
+
+    if changed_node.is_some() && !record_steps && status == Status::Completed {
+        gaps.push(Gap {
+            node_id: changed_node.map(str::to_owned),
+            message: format!("{mode} rebuilt upstream state but never reached the edited node"),
+        });
+        status = Status::Blocked;
+        output = None;
     }
 
     // A failed/blocked recompute still keeps reused upstream steps so the UI can

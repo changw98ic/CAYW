@@ -7,8 +7,8 @@
 | 模式 | 触发 | 行为 |
 | --- | --- | --- |
 | `observed` | 原始 Runtime | 不变 |
-| `recompute` | 节点保存 / edit | 复用修改点上游已完成步骤（`reused=true`）；从该节点捕获的 input / state_before 起局部求值并更新下游 |
-| `replay` | 撤销等无 `changed_node` 路径 | 仍从入口整图本地重放；步骤不标复用；同 VM 内可重建共享表引用 |
+| `recompute` | 节点保存 / edit | 复用修改点上游已完成步骤（`reused=true`）；VM 仍从入口执行以重建 context 变更与共享表身份，从编辑节点起保留新步骤并更新下游 |
+| `replay` | 撤销等无 `changed_node` 路径 | 仍从入口整图本地重放；步骤不标复用 |
 
 快速路径不启动 Cargo / tsc / 整项目构建或全量测试。Host 仍只返回精确匹配的捕获响应。
 

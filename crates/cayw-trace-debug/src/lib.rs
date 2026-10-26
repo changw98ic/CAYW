@@ -328,7 +328,8 @@ impl TraceStore {
             .expect("validated project");
         let parent = project.version();
         let version = parent + 1;
-        // Node saves use local recompute from the edited node (mode=recompute).
+        // Node saves use mode=recompute: reuse upstream steps in the result, but
+        // evaluate from the entry so context/shared identity stay correct.
         // Undo uses full-entry replay (mode=replay). The base proves the edited
         // node was on a captured path; a missing node is a gap, not permission to
         // borrow an older branch's input.
