@@ -14,7 +14,8 @@ use cayw_runtime::{
 };
 use serde_json::json;
 use std::{
-    collections::BTreeMap, fs,
+    collections::BTreeMap,
+    fs,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
