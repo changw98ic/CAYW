@@ -42,7 +42,11 @@ CLAIM_MAP = {
     "base_combo_session_reopen_isolation_and_child_agent": ["Q1", "Q2", "Q3"],
     "base_combo_content_survives_reopen_on_macos": ["Q1"],
     "process_cleanup_and_settled_result_survive_reopen": ["Q4"],
+    "result_release_not_registered_on_tip": ["Q4"],
     "mcp_resources_share_session_and_survive_reopen": ["Q6"],
+    "mcp_stdio_process_lifecycle_cleanup_and_session_reopen": ["Q6"],
+    # Tip-tree combo proves strongest same-tree path; does NOT clear Q8 seal.
+    "tip_tree_session_child_process_and_mcp_stdio_combo": ["Q4", "Q6"],
 }
 PENDING_MAP = {
     "pending_background_ownership_survives_reopen": "Q5",
@@ -53,13 +57,13 @@ questions_exercised = sorted({
 questions_pending = sorted({
     PENDING_MAP[name] for name in ignored_names if name in PENDING_MAP
 } | {"Q7", "Q8"})
-# result.release half of Q4 is still pending even when process half ran.
+# Honesty: process/stdio halves do not clear Slice A / F14 ManagedStdio / Q8 seal.
 gaps = [
-    "Q4 result.release (SLICE A) — tip only proved process cleanup + settled reopen",
-    "Q5 bg.* + gateway OwnershipStore (SLICE P)",
-    "Q6 F14 lazy-start/idle-stop lifecycle (SLICE R) — tip only proved MCP resources+reopen",
+    "Q4 result.release execute path (SLICE A / #40) — tip only proves process cleanup + settled reopen + honest absence of result.release",
+    "Q5 bg.* + gateway OwnershipStore (SLICE P / #45)",
+    "Q6 F14 ManagedStdio lazy-start/idle-stop (SLICE R / #41) — tip proved MCP resources+reopen AND real stdio spawn/disconnect/reap",
     "Q7 WebUI/TUI/SDK auth IPC same-field consumption",
-    "Q8 multi-module same-tree merge seal",
+    "Q8 multi-module same-tree merge seal (needs A+P+R; tip_tree proves process+MCP stdio same Session only — child+Bridge same-Runtime multi-turn still blocked on tip)",
 ]
 base_ok = status == 0 and failed_n == 0
 # Hard rule: ignored items must never make f20_combo_complete true.
@@ -96,9 +100,9 @@ summary = {
     },
     "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "chinese_ready_facts": [
-        "切片 Q 交付 F20 组合验收烟测：Q1–Q3 底座 + tip 可证的 Q4 进程清理/结果重开 + Q6 MCP 资源同 Session 重开。",
+        "切片 Q 交付 F20 组合验收烟测：Q1–Q3 底座 + Q4 进程清理/结果重开 + Q4 result.release 缺席证明 + Q6 MCP 资源重开 + Q6 真实 stdio 启停清理 + tip 同树多能力组合。",
         "exit 0 / summary.passed 只表示已启用用例通过；有 ignored 或 remaining_gaps 时 f20_combo_complete 恒为 false，不等于 F20/#33 封口。",
-        "Q5 bg.* 网关归属、Q4 result.release、F14 懒起/空闲停、Q7 WebUI/TUI/auth IPC、Q8 多模块同树仍 pending。",
+        "Q5 bg.*、Q4 result.release 执行路径（#40）、F14 ManagedStdio 懒起/空闲停（#41）、Q7/Q8 完整封口仍 pending；未合并其他功能 PR。",
         "本 PR 不自动合并；不宣称 F20 或 #33 复选框完成。",
     ],
 }
