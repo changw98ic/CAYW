@@ -15,6 +15,7 @@ pub mod project;
 pub use audit::DurableAudit;
 pub use project::{NODE_ATTRIBUTE, Project, ProjectError, Snapshot, SourceFile, SourceNode};
 
+use cayw_codeintel::SymbolVersionBridge;
 use companion::Companion;
 use framework::FrameworkProject;
 
@@ -71,6 +72,8 @@ pub struct EditorConfig {
     pub framework: Option<String>,
     pub node: PathBuf,
     pub companion: PathBuf,
+    /// Shared F04 symbol/version bridge (same instance as Host/Trace when wired).
+    pub codeintel: Option<SymbolVersionBridge>,
 }
 
 impl std::fmt::Debug for EditorConfig {
@@ -85,6 +88,7 @@ impl std::fmt::Debug for EditorConfig {
             .field("framework", &self.framework)
             .field("node", &self.node)
             .field("companion", &self.companion)
+            .field("codeintel", &self.codeintel.is_some())
             .field("token", &"<redacted>")
             .finish()
     }

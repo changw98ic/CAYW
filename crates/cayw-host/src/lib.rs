@@ -4,6 +4,7 @@
 //! and optional external services. Catalog membership never grants permission.
 
 mod catalog;
+mod codeintel;
 mod filesystem;
 mod git;
 mod process;
@@ -19,6 +20,7 @@ pub use terminal::{TerminalConfig, TerminalLimits};
 use async_trait::async_trait;
 use cap_std::fs::Dir;
 use cayw_ai::{ArgumentValidator, CancellationToken, ToolDefinition};
+use cayw_codeintel::SymbolVersionBridge;
 use cayw_codemode::{CapabilityError, CapabilityHost, CapabilityStop};
 pub use cayw_device::{DeviceError, ProcessIdentity, ProcessIo, ProcessObserver};
 use serde_json::Value;
@@ -145,6 +147,9 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
+    /// Shared F04 symbol/version bridge for Agent tools, editor, and Trace.
+    /// `None` omits `codeintel.*` capabilities. Default is a fresh shared bridge.
+    pub codeintel: Option<SymbolVersionBridge>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
 impl Default for HostConfig {
@@ -166,6 +171,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
+            codeintel: Some(SymbolVersionBridge::new()),
             external: None,
         }
     }
@@ -259,6 +265,7 @@ pub(crate) enum Executor {
     Terminal,
     Data,
     Workspace,
+    CodeIntel,
     External,
 }
 
@@ -372,6 +379,10 @@ impl Host {
     /// Identity of the directory actually held open by this host. Independent
     /// opens of the same live directory agree; renaming/replacing its pathname
     /// cannot change this identity or redirect the metadata lookup.
+    /// Shared F04 bridge handle (same instance as editor/Trace when they clone it).
+    pub fn codeintel_bridge(&self) -> Option<SymbolVersionBridge> {
+        self.config.codeintel.clone()
+    }
     pub fn workspace_identity(&self) -> Result<String, CapabilityError> {
         #[cfg(unix)]
         {
@@ -687,6 +698,7 @@ impl Host {
                     .execute_until(name, &args, cancel.clone(), workspace_deadline)
                     .await
             }
+            Executor::CodeIntel => codeintel::execute(self, name, &args, cancel, deadline).await,
             Executor::External => {
                 let external = service
                     .or(self.external.as_deref())
@@ -701,7 +713,7 @@ impl Host {
         }
     }
 
-    async fn open_workspace(
+    pub(crate) async fn open_workspace(
         &self,
         cancel: &CancellationToken,
         deadline: Instant,

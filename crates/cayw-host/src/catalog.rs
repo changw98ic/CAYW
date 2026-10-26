@@ -78,6 +78,52 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
                 .map(|definition| (definition, Executor::Workspace)),
         );
     }
+
+    if config.codeintel.is_some() {
+        definitions.extend([
+            (
+                definition(
+                    "codeintel.refresh",
+                    "Read one workspace file, publish its digest and outline into the shared symbol/version bridge (prefers code.outline; lightweight Rust scan otherwise).",
+                    json!({"path":path(),"language":{"type":"string","minLength":1,"maxLength":64}}),
+                    &["path"],
+                ),
+                Executor::CodeIntel,
+            ),
+            (
+                definition(
+                    "codeintel.definitions",
+                    "Query same-index symbol definitions from the shared F04 bridge.",
+                    json!({
+                        "name":string(256),
+                        "path":path(),
+                        "kind":string(64),
+                        "file_version":{"type":"integer","minimum":1}
+                    }),
+                    &["name"],
+                ),
+                Executor::CodeIntel,
+            ),
+            (
+                definition(
+                    "codeintel.file_version",
+                    "Return the indexed file version and content digest for a path.",
+                    json!({"path":path()}),
+                    &["path"],
+                ),
+                Executor::CodeIntel,
+            ),
+            (
+                definition(
+                    "codeintel.symbols",
+                    "List symbols currently indexed for one path in the shared F04 bridge.",
+                    json!({"path":path()}),
+                    &["path"],
+                ),
+                Executor::CodeIntel,
+            ),
+        ]);
+    }
     definitions.extend(
         git::definitions(config)
             .into_iter()

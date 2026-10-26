@@ -17,6 +17,7 @@ cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 cayw-device = { path = "../cayw-device", version = "0.1.0" }
 cayw-data = { path = "../cayw-data", version = "0.1.0" }
 cayw-workspace = { path = "../cayw-workspace", version = "0.1.0" }
+cayw-codeintel = { workspace = true }
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 serde.workspace = true

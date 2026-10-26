@@ -10,13 +10,14 @@ Shared **file / symbol version bridge** for CAYW Agent、编辑器与 Trace（F0
 - **diagnostics** 必须携带版本化 `SourceLocation`，错误路径可回链源码证据
 - Agent / 编辑器 / Trace 通过同一桥接对象拿到一致的 file/symbol 版本
 
-本 crate **不**解析源码、不重复建设 `code.outline`、不把 CodeGraph / 依赖图塞进 Core，也不启动语言服务器进程。
+本 crate **不**启动语言服务器、不把 CodeGraph / 依赖图塞进 Core。宿主可喂入
+`code.outline` 快照；也可用 [`publish_bytes`] / [`publish_path`] 从工作区文件
+字节做轻量 Rust outline 并写入同一桥接（闭环，非完整 `syn` 复刻）。
 
 ## 非本切片
 
 - 跨文件影响级联、依赖图 / `/lens-map`
 - 实况 LSP 连接池、linter / formatter runners
-- Host / Runtime / CodeMode 工具接线与 IPC 暴露
 - Trace 节点自动挂符号（属 SLICE E）
 
 ## 快速使用
@@ -24,20 +25,23 @@ Shared **file / symbol version bridge** for CAYW Agent、编辑器与 Trace（F0
 ```rust
 use cayw_codeintel::*;
 
+// Shared handle (Clone = same index) for Host / editor / Trace.
 let bridge = SymbolVersionBridge::new();
-let file = bridge.publish_file(
-    "src/lib.rs",
-    &content_sha256_hex,
-    "rust",
-    vec![/* SymbolInput from outline */],
-)?;
-let hits = bridge.definitions(DefinitionQuery {
+let editor = bridge.clone();
+
+// Producer: read workspace bytes → digest + lightweight outline → publish.
+let file = publish_bytes(&bridge, "src/lib.rs", src_bytes, "rust")?;
+
+let hits = editor.definitions(DefinitionQuery {
     name: "hello".into(),
     path: None,
     kind: Some("function".into()),
     file_version: Some(file.version),
 })?;
 ```
+
+Host tools (when `HostConfig::codeintel` is set): `codeintel.refresh`,
+`codeintel.definitions`, `codeintel.file_version`.
 
 协议常量：`CODEINTEL_PROTOCOL_VERSION = 1`。
 

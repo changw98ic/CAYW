@@ -8,8 +8,8 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// SHA-256 hex digest of file bytes (same alphabet as Workspace `code.outline` sha256).
 pub fn content_sha256(bytes: &[u8]) -> String {
@@ -89,12 +89,18 @@ struct Inner {
     diagnostics: Vec<Diagnostic>,
 }
 
-/// Host-owned shared catalog. Safe to clone cheaply via handles that share state.
-pub struct SymbolVersionBridge {
+struct Shared {
     inner: Mutex<Inner>,
     diag_seq: AtomicU64,
     max_symbols_per_file: usize,
     max_diagnostics: usize,
+}
+
+/// Host-owned shared catalog. [`Clone`] is cheap and shares the same index so
+/// Host tools, editor, and Trace can hold one instance.
+#[derive(Clone)]
+pub struct SymbolVersionBridge {
+    shared: Arc<Shared>,
 }
 
 impl Default for SymbolVersionBridge {
@@ -106,18 +112,23 @@ impl Default for SymbolVersionBridge {
 impl SymbolVersionBridge {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Inner::default()),
-            diag_seq: AtomicU64::new(1),
-            max_symbols_per_file: DEFAULT_MAX_SYMBOLS_PER_FILE,
-            max_diagnostics: DEFAULT_MAX_DIAGNOSTICS,
+            shared: std::sync::Arc::new(Shared {
+                inner: Mutex::new(Inner::default()),
+                diag_seq: AtomicU64::new(1),
+                max_symbols_per_file: DEFAULT_MAX_SYMBOLS_PER_FILE,
+                max_diagnostics: DEFAULT_MAX_DIAGNOSTICS,
+            }),
         }
     }
 
     pub fn with_budgets(max_symbols_per_file: usize, max_diagnostics: usize) -> Self {
         Self {
-            max_symbols_per_file: max_symbols_per_file.max(1),
-            max_diagnostics: max_diagnostics.max(1),
-            ..Self::new()
+            shared: std::sync::Arc::new(Shared {
+                inner: Mutex::new(Inner::default()),
+                diag_seq: AtomicU64::new(1),
+                max_symbols_per_file: max_symbols_per_file.max(1),
+                max_diagnostics: max_diagnostics.max(1),
+            }),
         }
     }
 
@@ -137,8 +148,10 @@ impl SymbolVersionBridge {
         let content_sha256 =
             validate_sha256_hex(content_sha256).map_err(CodeIntelError::Invalid)?;
         let language = validate_kind(language).map_err(CodeIntelError::Invalid)?;
-        if symbols.len() > self.max_symbols_per_file {
-            return Err(CodeIntelError::BudgetExceeded(self.max_symbols_per_file));
+        if symbols.len() > self.shared.max_symbols_per_file {
+            return Err(CodeIntelError::BudgetExceeded(
+                self.shared.max_symbols_per_file,
+            ));
         }
 
         let mut prepared = Vec::with_capacity(symbols.len());
@@ -161,6 +174,7 @@ impl SymbolVersionBridge {
         }
 
         let mut guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -230,6 +244,7 @@ impl SymbolVersionBridge {
     pub fn file_version(&self, path: &str) -> Result<Option<FileVersion>, CodeIntelError> {
         let path = normalize_path(path).map_err(CodeIntelError::Invalid)?;
         let guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -239,6 +254,7 @@ impl SymbolVersionBridge {
     pub fn symbols_for(&self, path: &str) -> Result<Vec<SymbolHit>, CodeIntelError> {
         let path = normalize_path(path).map_err(CodeIntelError::Invalid)?;
         let guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -254,6 +270,7 @@ impl SymbolVersionBridge {
     pub fn resolve_symbol(&self, id: &SymbolId) -> Result<SymbolHit, CodeIntelError> {
         let path = normalize_path(&id.path).map_err(CodeIntelError::Invalid)?;
         let guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -291,6 +308,7 @@ impl SymbolVersionBridge {
             None => None,
         };
         let guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -356,11 +374,12 @@ impl SymbolVersionBridge {
         }
 
         let mut guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.diagnostics.len() >= self.max_diagnostics {
-            return Err(CodeIntelError::BudgetExceeded(self.max_diagnostics));
+        if guard.diagnostics.len() >= self.shared.max_diagnostics {
+            return Err(CodeIntelError::BudgetExceeded(self.shared.max_diagnostics));
         }
         let entry = guard
             .files
@@ -404,7 +423,10 @@ impl SymbolVersionBridge {
             start_line: None,
             end_line: None,
         };
-        let id = format!("diag-{}", self.diag_seq.fetch_add(1, Ordering::Relaxed));
+        let id = format!(
+            "diag-{}",
+            self.shared.diag_seq.fetch_add(1, Ordering::Relaxed)
+        );
         let diagnostic = Diagnostic {
             id,
             severity: input.severity,
@@ -428,6 +450,7 @@ impl SymbolVersionBridge {
             None => None,
         };
         let guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -444,6 +467,7 @@ impl SymbolVersionBridge {
 
     pub fn indexed_paths(&self) -> Vec<String> {
         let guard = self
+            .shared
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

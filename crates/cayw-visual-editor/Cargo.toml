@@ -19,6 +19,7 @@ cap-std.workspace = true
 cayw-ai.workspace = true
 cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
+cayw-codeintel = { workspace = true }
 html5gum.workspace = true
 libc = "0.2"
 serde.workspace = true
