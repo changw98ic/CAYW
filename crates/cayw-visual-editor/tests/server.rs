@@ -70,6 +70,7 @@ impl Fixture {
             framework: None,
             node: "node".into(),
             companion: cayw_visual_editor::default_companion(),
+            codeintel: None,
         };
         let handle = start(config).await.expect("editor starts");
         let client = reqwest::Client::builder()
@@ -943,6 +944,7 @@ async fn nested_uppercase_page_redirects_the_root_alias() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await
     .expect("uppercase nested page starts");
@@ -1006,6 +1008,7 @@ async fn state_directory_alias_is_refused_before_creating_inside_the_project() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await;
     assert!(
@@ -1033,6 +1036,7 @@ async fn state_directory_inside_the_project_is_refused() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await;
     assert!(error.is_err());
@@ -1054,6 +1058,7 @@ async fn retained_unknown_outcome_refuses_startup() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await;
     assert!(

@@ -18,7 +18,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
@@ -28,6 +28,7 @@ use crate::{
     Error, TraceStore,
     types::{Document, Edit, Undo},
 };
+use cayw_codeintel::{DefinitionQuery, SymbolVersionBridge};
 
 /// Requests are rejected before JSON parsing or store access at this size.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -42,6 +43,8 @@ struct Server {
     web_token: String,
     authorities: Vec<String>,
     cancel: CancellationToken,
+    /// Same F04 bridge instance Host/editor hold when the app wires one.
+    codeintel: Option<SymbolVersionBridge>,
 }
 
 /// Serve the trace debug interface on an already-bound loopback listener.
@@ -54,6 +57,17 @@ pub async fn serve(
     store: Arc<TraceStore>,
     web_token: String,
     cancel: CancellationToken,
+) -> Result<(), Error> {
+    serve_with_codeintel(listener, store, web_token, cancel, None).await
+}
+
+/// Same as [`serve`], sharing one F04 [`SymbolVersionBridge`] with Host/editor.
+pub async fn serve_with_codeintel(
+    listener: TcpListener,
+    store: Arc<TraceStore>,
+    web_token: String,
+    cancel: CancellationToken,
+    codeintel: Option<SymbolVersionBridge>,
 ) -> Result<(), Error> {
     let address = listener.local_addr().map_err(|error| {
         Error::Invalid(format!("cannot read trace debug listener address: {error}"))
@@ -73,6 +87,7 @@ pub async fn serve(
         web_token,
         authorities: authorities(address),
         cancel: cancel.clone(),
+        codeintel,
     });
     let app = Router::new()
         .route("/", get(index))
@@ -80,6 +95,14 @@ pub async fn serve(
         .route("/styles.css", get(styles))
         .route("/favicon.svg", get(favicon))
         .route("/api/state", get(state_route))
+        .route(
+            "/api/codeintel/definitions",
+            post(codeintel_definitions_route),
+        )
+        .route(
+            "/api/codeintel/file-version",
+            post(codeintel_file_version_route),
+        )
         .route("/api/projects/{project_id}/edit", post(edit_route))
         .route("/api/projects/{project_id}/undo", post(undo_route))
         .fallback(not_found)
@@ -274,6 +297,87 @@ async fn wait_for_change(state: &Server, after: u64) -> Option<Document> {
             _ = state.cancel.cancelled() => return None,
             _ = tokio::time::sleep(POLL_INTERVAL.min(remaining)) => {}
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeintelDefinitionsBody {
+    name: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    file_version: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeintelPathBody {
+    path: String,
+}
+
+async fn codeintel_definitions_route(
+    State(state): State<Arc<Server>>,
+    payload: Result<Json<CodeintelDefinitionsBody>, JsonRejection>,
+) -> Response {
+    let Some(bridge) = state.codeintel.as_ref() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "codeintel bridge not attached",
+        );
+    };
+    let body = match decode_body(payload) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    match bridge.definitions(DefinitionQuery {
+        name: body.name,
+        path: body.path,
+        kind: body.kind,
+        file_version: body.file_version,
+    }) {
+        Ok(definitions) => Json(json!({
+            "protocol_version": cayw_codeintel::CODEINTEL_PROTOCOL_VERSION,
+            "definitions": definitions,
+        }))
+        .into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &error.to_string(),
+        ),
+    }
+}
+
+async fn codeintel_file_version_route(
+    State(state): State<Arc<Server>>,
+    payload: Result<Json<CodeintelPathBody>, JsonRejection>,
+) -> Response {
+    let Some(bridge) = state.codeintel.as_ref() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "codeintel bridge not attached",
+        );
+    };
+    let body = match decode_body(payload) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    match bridge.file_version(&body.path) {
+        Ok(file) => Json(json!({
+            "protocol_version": cayw_codeintel::CODEINTEL_PROTOCOL_VERSION,
+            "file": file,
+        }))
+        .into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &error.to_string(),
+        ),
     }
 }
 

@@ -84,6 +84,7 @@ async fn main() -> ExitCode {
         framework: options.framework,
         node: options.node,
         companion: options.companion,
+        codeintel: None,
     })
     .await
     {

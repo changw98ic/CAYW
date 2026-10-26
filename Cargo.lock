@@ -461,6 +461,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-codeintel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-codemode"
 version = "0.1.0"
 dependencies = [
@@ -546,6 +556,7 @@ dependencies = [
  "cap-fs-ext 4.0.3",
  "cap-std 4.0.3",
  "cayw-ai",
+ "cayw-codeintel",
  "cayw-codemode",
  "cayw-data",
  "cayw-device",
@@ -699,6 +710,7 @@ dependencies = [
  "cayw-agent",
  "cayw-ai",
  "cayw-cells",
+ "cayw-codeintel",
  "cayw-codemode",
  "cayw-core",
  "cayw-ipc",
@@ -766,6 +778,7 @@ dependencies = [
  "cap-fs-ext 4.0.3",
  "cap-std 4.0.3",
  "cayw-ai",
+ "cayw-codeintel",
  "cayw-codemode",
  "cayw-host",
  "html5gum",
