@@ -42,7 +42,8 @@ pub struct TraceStore {
     /// Shared F04 bridge used to hang declared nodes onto engineering versions.
     linker: SymbolGraphLinker,
     /// Open project / workspace root. When set, ingest/revise feed the bridge
-    /// via the codeintel producer before hanging symbols (default product path).
+    /// via the codeintel producer before hanging symbols (default product path),
+    /// refreshing already-indexed paths when on-disk content digest changes.
     workspace_root: Option<PathBuf>,
     _lock: File,
 }
@@ -83,9 +84,9 @@ impl TraceStore {
     /// Open with both a shared bridge and an optional workspace producer root.
     ///
     /// Ingest and revise populate [`Project::symbol_hangs`] through
-    /// [`SymbolGraphLinker`] after feeding missing paths from `workspace_root`;
-    /// call [`Self::refresh_symbol_hangs`] after the bridge publishes a new file
-    /// version so HTTP state / UI see the bump.
+    /// [`SymbolGraphLinker`] after feeding (or digest-refreshing) plan paths from
+    /// `workspace_root`; call [`Self::refresh_symbol_hangs`] after an external
+    /// bridge publish or workspace edit so HTTP state / UI see the bump.
     pub fn open_with_bridge_and_workspace(
         path: impl AsRef<Path>,
         bridge: Arc<SymbolVersionBridge>,
@@ -546,8 +547,8 @@ impl TraceStore {
 /// Populate [`Project::symbol_hangs`] from the project's latest plan via the
 /// shared linker. Empty when there is no plan yet or no indexed path matches.
 ///
-/// When `workspace` is set, missing plan paths are published through the
-/// codeintel workspace producer before hanging (default product path).
+/// When `workspace` is set, plan paths are published (and re-published on
+/// content-digest change) through the codeintel workspace producer before hanging.
 fn link_project(
     project: &mut Project,
     linker: &SymbolGraphLinker,

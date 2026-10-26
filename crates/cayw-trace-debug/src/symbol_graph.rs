@@ -8,7 +8,7 @@
 use crate::types::{ErrorEvidenceLink, GraphPlan, Node, NodeSymbolHang, Status, Step};
 use cayw_codeintel::{
     CodeIntelError, DefinitionQuery, DiagnosticInput, DiagnosticSeverity, SymbolVersionBridge,
-    language_for_path, publish_under_workspace,
+    content_sha256, language_for_path, publish_under_workspace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -141,6 +141,11 @@ impl SymbolGraphLinker {
 ///
 /// Used on the default Trace product path so ingest/mount does not depend on a
 /// pre-filled empty bridge. Missing files are skipped (no hang invented).
+///
+/// Already-indexed paths are re-published when on-disk content digest differs
+/// from the bridge entry (mtime alone is not trusted). Unchanged digests are
+/// left alone so a host/manual outline is not overwritten by the lightweight
+/// producer on every ingest/revise/refresh.
 /// Returns how many paths were newly published or refreshed.
 pub fn feed_plan_from_workspace(
     bridge: &SymbolVersionBridge,
@@ -156,21 +161,27 @@ pub fn feed_plan_from_workspace(
         if !seen.insert(path.clone()) {
             continue;
         }
-        // Already indexed: keep host/manual snapshot; do not overwrite on every ingest.
-        match bridge.file_version(&path) {
-            Ok(Some(_)) => continue,
-            Ok(None) => {}
-            Err(err) => return Err(map_codeintel(err)),
-        }
         let abs = workspace.join(&path);
         if !abs.is_file() {
             continue;
+        }
+        match bridge.file_version(&path) {
+            Ok(Some(existing)) => {
+                // Digest check: refresh only when workspace bytes moved on.
+                match std::fs::read(&abs) {
+                    Ok(bytes) if content_sha256(&bytes) == existing.content_sha256 => continue,
+                    Ok(_) => {}
+                    Err(_) => continue, // unreadable: keep prior index
+                }
+            }
+            Ok(None) => {}
+            Err(err) => return Err(map_codeintel(err)),
         }
         let language = language_for_path(&path);
         match publish_under_workspace(bridge, workspace, &path, language) {
             Ok(_) => published += 1,
             Err(err) => {
-                // Unreadable / non-UTF-8 Rust: skip; hang stays absent.
+                // Unreadable / non-UTF-8 Rust: skip; hang stays absent / prior.
                 let _ = err;
             }
         }

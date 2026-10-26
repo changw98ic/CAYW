@@ -24,5 +24,6 @@ cargo clippy -p cayw-codeintel -p cayw-trace-debug --all-targets --locked --no-d
 
 - Full Host `codeintel.refresh` tool wiring remains on F04 / #42 (not duplicated here to avoid cross-PR Host conflict)
 - No whole-tree startup scan; producer is plan-driven from the open workspace
+- ~~Existing indexed paths not refreshed on edit~~ → fixed in f16-refresh-on-change-20261026.md
 - Non-Rust languages publish with empty symbol lists (file hang only)
 - EditorConfig / Trace sharing one Host bridge instance is still an F04 product gap

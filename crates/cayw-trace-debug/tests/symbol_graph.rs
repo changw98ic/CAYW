@@ -441,3 +441,89 @@ fn default_open_without_matching_workspace_file_still_skips_hang() {
         "missing workspace files must not invent hangs"
     );
 }
+
+#[test]
+fn workspace_file_change_refreshes_indexed_symbols_on_reingest() {
+    // Audit: first appearance indexes; a later content change must refresh
+    // (not keep the stale first-version symbol set).
+    let workspace = tempfile::tempdir().unwrap();
+    let examples = workspace.path().join("examples");
+    std::fs::create_dir_all(&examples).unwrap();
+    let v1 = b"pub fn input() {}\npub fn condition(x: i32) -> bool { x > 0 }\n";
+    let demo = examples.join("demo.rs");
+    std::fs::write(&demo, v1).unwrap();
+
+    let store =
+        TraceStore::open_with_workspace(workspace.path().join("trace.json"), workspace.path())
+            .unwrap();
+    ingest_manifest(&store, demo_plan());
+
+    let file_v1 = store
+        .bridge()
+        .file_version("examples/demo.rs")
+        .unwrap()
+        .expect("first ingest indexes the file");
+    assert_eq!(file_v1.version, 1);
+    assert_eq!(file_v1.content_sha256, sha(v1));
+    let names_v1: Vec<_> = store
+        .bridge()
+        .symbols_for("examples/demo.rs")
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id.name)
+        .collect();
+    assert!(names_v1.contains(&"input".into()));
+    assert!(names_v1.contains(&"condition".into()));
+    assert!(!names_v1.contains(&"revised".into()));
+    assert_eq!(
+        store.snapshot().projects["exec"].symbol_hangs["input"]
+            .file
+            .version,
+        1
+    );
+
+    // Modify on disk: drop condition, add revised — digest must change.
+    let v2 = b"pub fn input() {}\npub fn revised() -> i32 { 1 }\n";
+    std::fs::write(&demo, v2).unwrap();
+    assert_ne!(sha(v1), sha(v2));
+
+    // refresh_symbol_hangs → link_project → feed_plan_from_workspace (same path as
+    // ingest/revise). Also covers the explicit refresh-on-change product entry.
+    let before_seq = store.snapshot().sequence;
+    store.refresh_symbol_hangs().unwrap();
+
+    let file_v2 = store
+        .bridge()
+        .file_version("examples/demo.rs")
+        .unwrap()
+        .expect("refresh keeps the path indexed");
+    assert_eq!(file_v2.version, 2, "content change must bump FileVersion");
+    assert_eq!(file_v2.content_sha256, sha(v2));
+    let symbols = store.bridge().symbols_for("examples/demo.rs").unwrap();
+    let names: Vec<_> = symbols.iter().map(|s| s.id.name.as_str()).collect();
+    assert!(
+        names.contains(&"revised"),
+        "refreshed outline must include new symbol: {names:?}"
+    );
+    assert!(
+        !names.contains(&"condition"),
+        "stale first-version symbol must not linger: {names:?}"
+    );
+    assert!(names.contains(&"input"));
+
+    let after = store.snapshot();
+    assert!(
+        after.sequence > before_seq,
+        "hang refresh must advance sequence for watchers"
+    );
+    let hang = &after.projects["exec"].symbol_hangs["input"];
+    assert_eq!(hang.file.version, 2);
+    assert_eq!(hang.file.content_sha256, sha(v2));
+    // condition hang may remain keyed from plan, but without a matching symbol.
+    let condition = &after.projects["exec"].symbol_hangs["condition"];
+    assert_eq!(condition.file.version, 2);
+    assert!(
+        condition.symbol.is_none(),
+        "condition removed from source must clear symbol hang"
+    );
+}
