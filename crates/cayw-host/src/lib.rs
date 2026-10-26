@@ -233,18 +233,21 @@ pub struct HostConfig {
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
     /// Optional F02 command-output filter applied when presenting process/git
-    /// results to agents/UI. `None` keeps the legacy stdout/stderr-only shape.
-    /// When `Some` and enabled, `stdout`/`stderr` are filtered summaries only;
-    /// the full original is externalized to [`Self::content_store`] (digest handle
-    /// under `output_filter`) before return — never discarded and never re-inlined.
-    /// Structured git reads (`blame`/`log`/`show`) use Passthrough so porcelain
-    /// records stay intact. Task wall/cost are not measured here; callers pass
-    /// those to compare APIs.
+    /// results to agents/UI. `None` (the product default) keeps the legacy
+    /// stdout/stderr-only shape and avoids enabling reduction until a
+    /// [`Self::content_store`] is wired. When `Some` and enabled, `stdout`/
+    /// `stderr` are filtered summaries only; the full original is externalized
+    /// to the store (digest handle under `output_filter`) before return — never
+    /// discarded and never re-inlined. Structured git reads (`blame`/`log`/
+    /// `show`) use Passthrough so porcelain records stay intact. Task wall/cost
+    /// are not measured here; callers pass those to compare APIs.
     pub output_filter: Option<FilterOptions>,
     /// Store used to retain full process/git captures when F02 filtering
     /// reduces them. Required whenever filtering would drop bytes; absence
     /// fails closed instead of silently discarding the only copy. Runtime
-    /// injects a ContentStore adapter; tests may use an in-memory sink.
+    /// injects a ContentStore adapter and enables [`Self::output_filter`] when
+    /// the store is available; tests that exercise reduction must wire an
+    /// in-memory [`FilteredOriginalStore`].
     pub content_store: Option<Arc<dyn FilteredOriginalStore>>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
@@ -267,7 +270,10 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
-            output_filter: Some(FilterOptions::default()),
+            // Do not enable reducing filters without a store: reduction fails
+            // closed when ContentStore is absent. Runtime enables filtering
+            // together with ContentFilteredOriginalStore when content is open.
+            output_filter: None,
             content_store: None,
             external: None,
         }
