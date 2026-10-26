@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_codemode::{CapabilityError, CapabilityHost, CodeMode, Limits};
 use cayw_host::{AuditSink, ExternalHost, Host, HostConfig, PermissionGate, Profile, ProfileKind};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -128,25 +128,21 @@ async fn schema_permission_and_audit_failures_prevent_file_changes() {
         HostConfig::default(),
     )
     .unwrap();
-    assert!(
-        call(
-            &denied,
-            "fs.write",
-            json!({"path":"new", "content":"hello", "arbitrary":true})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &denied,
+        "fs.write",
+        json!({"path":"new", "content":"hello", "arbitrary":true})
+    )
+    .await
+    .is_err());
     assert!(gate.calls.lock().unwrap().is_empty());
-    assert!(
-        call(
-            &denied,
-            "fs.write",
-            json!({"path":"new", "content":"hello"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &denied,
+        "fs.write",
+        json!({"path":"new", "content":"hello"})
+    )
+    .await
+    .is_err());
     assert!(!root.path().join("new").exists());
     assert!(audit.records.lock().unwrap().is_empty());
     let gate = Arc::new(Gate {
@@ -158,15 +154,13 @@ async fn schema_permission_and_audit_failures_prevent_file_changes() {
         ..Default::default()
     });
     let no_journal = Host::new(root.path(), gate, audit, HostConfig::default()).unwrap();
-    assert!(
-        call(
-            &no_journal,
-            "fs.write",
-            json!({"path":"new", "content":"hello"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &no_journal,
+        "fs.write",
+        json!({"path":"new", "content":"hello"})
+    )
+    .await
+    .is_err());
     assert!(!root.path().join("new").exists());
 }
 
@@ -195,15 +189,13 @@ async fn real_file_round_trip_requires_compare_and_swap_and_exact_patch() {
             .await
             .is_err()
     );
-    assert!(
-        call(
-            &host,
-            "fs.write",
-            json!({"path":"note", "content":"lost", "overwrite":true})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "fs.write",
+        json!({"path":"note", "content":"lost", "overwrite":true})
+    )
+    .await
+    .is_err());
     let patched = call(
         &host,
         "fs.patch",
@@ -215,28 +207,24 @@ async fn real_file_round_trip_requires_compare_and_swap_and_exact_patch() {
         std::fs::read_to_string(root.path().join("note")).unwrap(),
         "hello Rust"
     );
-    assert!(
-        call(
-            &host,
-            "fs.patch",
-            json!({"path":"note", "expected_sha256":read["sha256"], "old":"hello", "new":"lost"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "fs.patch",
+        json!({"path":"note", "expected_sha256":read["sha256"], "old":"hello", "new":"lost"})
+    )
+    .await
+    .is_err());
     call(&host, "fs.write", json!({"path":"note", "content":"aa", "overwrite":true, "expected_sha256":patched["sha256"]})).await.unwrap();
     let duplicate = call(&host, "fs.read", json!({"path":"note"}))
         .await
         .unwrap();
-    assert!(
-        call(
-            &host,
-            "fs.patch",
-            json!({"path":"note", "expected_sha256":duplicate["sha256"], "old":"a", "new":"b"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "fs.patch",
+        json!({"path":"note", "expected_sha256":duplicate["sha256"], "old":"a", "new":"b"})
+    )
+    .await
+    .is_err());
     let stat = call(&host, "fs.stat", json!({"path":"note"}))
         .await
         .unwrap();
@@ -256,20 +244,24 @@ async fn patch_rejects_overlapping_matches_and_changed_or_missing_targets() {
     let read = call(&host, "fs.read", json!({"path":"note"}))
         .await
         .unwrap();
-    assert!(
-        call(
-            &host,
-            "fs.patch",
-            json!({"path":"note","expected_sha256":read["sha256"],"old":"aa","new":"b"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "fs.patch",
+        json!({"path":"note","expected_sha256":read["sha256"],"old":"aa","new":"b"})
+    )
+    .await
+    .is_err());
     assert_eq!(
         std::fs::read_to_string(root.path().join("note")).unwrap(),
         "aaa"
     );
-    assert!(call(&host, "fs.write", json!({"path":"missing","content":"bad","overwrite":true,"expected_sha256":read["sha256"]})).await.is_err());
+    assert!(call(
+        &host,
+        "fs.write",
+        json!({"path":"missing","content":"bad","overwrite":true,"expected_sha256":read["sha256"]})
+    )
+    .await
+    .is_err());
     let missing = call(
         &host,
         "fs.patch",
@@ -372,22 +364,18 @@ async fn paths_symlinks_and_byte_limits_are_enforced() {
             "{path}"
         );
     }
-    assert!(
-        call(
-            &host,
-            "fs.write",
-            json!({"path":"too-big","content":"你好世界"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "fs.write",
+        json!({"path":"too-big","content":"你好世界"})
+    )
+    .await
+    .is_err());
     assert!(!root.path().join("too-big").exists());
     std::fs::write(root.path().join("too-big"), "123456789").unwrap();
-    assert!(
-        call(&host, "fs.read", json!({"path":"too-big"}))
-            .await
-            .is_err()
-    );
+    assert!(call(&host, "fs.read", json!({"path":"too-big"}))
+        .await
+        .is_err());
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
@@ -457,11 +445,9 @@ async fn result_and_directory_budgets_prevent_unbounded_data() {
             ..Default::default()
         },
     );
-    assert!(
-        call(&limited, "fs.list", json!({"path":"."}))
-            .await
-            .is_err()
-    );
+    assert!(call(&limited, "fs.list", json!({"path":"."}))
+        .await
+        .is_err());
     let (tiny, _, audit) = host(
         root.path(),
         HostConfig {
@@ -788,15 +774,13 @@ async fn external_services_use_strict_schemas_permission_and_settlement() {
     }
     assert_eq!(gate.calls.lock().unwrap().len(), 6);
     assert_eq!(audit.records.lock().unwrap().len(), 12);
-    assert!(
-        call(
-            &host,
-            "mcp.call",
-            json!({"server":"fixture","tool":"echo","arguments":[],"extra":true})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "mcp.call",
+        json!({"server":"fixture","tool":"echo","arguments":[],"extra":true})
+    )
+    .await
+    .is_err());
     assert_eq!(gate.calls.lock().unwrap().len(), 6);
     let denied_gate = Arc::new(Gate {
         allow: false,
@@ -915,29 +899,24 @@ async fn cancelled_and_over_budget_calls_do_not_reach_permission_or_storage() {
     );
     let cancel = CancellationToken::new();
     cancel.cancel();
-    assert!(
-        host.call("fs.write", json!({"path":"x","content":"a"}), cancel)
-            .await
-            .is_err()
-    );
-    assert!(
-        call(
-            &host,
-            "fs.write",
-            json!({"path":"x","content":"a".repeat(65)})
-        )
+    assert!(host
+        .call("fs.write", json!({"path":"x","content":"a"}), cancel)
         .await
-        .is_err()
-    );
+        .is_err());
+    assert!(call(
+        &host,
+        "fs.write",
+        json!({"path":"x","content":"a".repeat(65)})
+    )
+    .await
+    .is_err());
     assert!(gate.calls.lock().unwrap().is_empty());
     call(&host, "fs.write", json!({"path":"x","content":"a"}))
         .await
         .unwrap();
-    assert!(
-        call(&host, "fs.write", json!({"path":"y","content":"b"}))
-            .await
-            .is_err()
-    );
+    assert!(call(&host, "fs.write", json!({"path":"y","content":"b"}))
+        .await
+        .is_err());
     assert!(!root.path().join("y").exists());
     assert_eq!(audit.records.lock().unwrap().len(), 2);
 }
@@ -1011,14 +990,12 @@ async fn luau_data_and_change_batch_share_the_host_gate_and_durable_lane() {
         ]
     );
     assert_eq!(audit.records.lock().unwrap().len(), 14);
-    assert!(
-        audit
-            .records
-            .lock()
-            .unwrap()
-            .chunks_exact(2)
-            .all(|records| records[1] == "success")
-    );
+    assert!(audit
+        .records
+        .lock()
+        .unwrap()
+        .chunks_exact(2)
+        .all(|records| records[1] == "success"));
 }
 
 #[tokio::test]
@@ -1278,15 +1255,13 @@ async fn archives_use_the_builtin_executor_and_cannot_reach_outside_the_root() {
     .unwrap();
     assert_eq!(read["data"]["content"], "abc");
     assert_eq!(read["data"]["encoding"], "utf8");
-    assert!(
-        call(
-            &host,
-            "archive.list",
-            json!({"path":"../outside.tar","format":"tar"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &host,
+        "archive.list",
+        json!({"path":"../outside.tar","format":"tar"})
+    )
+    .await
+    .is_err());
     assert_eq!(gate.calls.lock().unwrap().len(), 2);
     assert_eq!(audit.records.lock().unwrap().len(), 4);
 }
@@ -1429,14 +1404,12 @@ async fn pending_workspace_batches_fence_ordinary_writes_across_fresh_hosts() {
             .await
             .unwrap();
         assert_eq!(read["content"], "{\"value\":1}");
-        assert!(
-            audit
-                .records
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|record| record == "failure")
-        );
+        assert!(audit
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| record == "failure"));
     }
     let (host, _, _) = host(root.path(), HostConfig::default());
     for (name, args) in [
@@ -1512,15 +1485,13 @@ async fn pending_batches_block_named_profiles_and_denied_recovery_changes_nothin
         "{\"value\":1}"
     );
     assert!(!root.path().join("two.json").exists());
-    assert!(
-        call(
-            &fresh,
-            "fs.write",
-            json!({"path":"never","content":"blocked"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &fresh,
+        "fs.write",
+        json!({"path":"never","content":"blocked"})
+    )
+    .await
+    .is_err());
     call(&fresh,"fs.recover_change_batch",json!({"batch_id":prepared["batch_id"],"expected_batch_digest":prepared["batch_digest"],"action":"commit"})).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(root.path().join("two.json")).unwrap(),
@@ -1559,15 +1530,13 @@ async fn third_party_content_blocks_recovery_and_never_releases_the_write_fence(
     .unwrap();
     assert_eq!(status["outcome_unknown"], true);
     assert_eq!(status["paths"][0]["matches"], "third_party");
-    assert!(
-        call(
-            &fresh,
-            "fs.write",
-            json!({"path":"never","content":"blocked"})
-        )
-        .await
-        .is_err()
-    );
+    assert!(call(
+        &fresh,
+        "fs.write",
+        json!({"path":"never","content":"blocked"})
+    )
+    .await
+    .is_err());
     assert!(!root.path().join("never").exists());
 }
 
@@ -1715,30 +1684,24 @@ async fn named_build_profile_executes_a_real_device_process_and_rejects_argv() {
         ..Default::default()
     };
     let (host, _, audit) = host(root.path(), config);
-    assert!(
-        call(
-            &host,
-            "build.run",
-            json!({"profile":"fixture", "args":["anything"]})
-        )
+    assert!(call(
+        &host,
+        "build.run",
+        json!({"profile":"fixture", "args":["anything"]})
+    )
+    .await
+    .is_err());
+    assert!(call(&host, "test.run", json!({"profile":"fixture"}))
         .await
-        .is_err()
-    );
-    assert!(
-        call(&host, "test.run", json!({"profile":"fixture"}))
-            .await
-            .is_err()
-    );
+        .is_err());
     let result = call(&host, "build.run", json!({"profile":"fixture"}))
         .await
         .unwrap();
     assert_eq!(result["success"], true);
-    assert!(
-        result["stdout"]
-            .as_str()
-            .unwrap()
-            .contains("fixture-complete")
-    );
+    assert!(result["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("fixture-complete"));
     assert_eq!(
         std::fs::read_to_string(root.path().join("process-output")).unwrap(),
         "real-device"
@@ -1931,16 +1894,12 @@ async fn git_fixed_commands_use_real_device_without_running_repo_helpers() {
     assert!(!root.path().join("helper-ran").exists());
     assert_eq!(gate.calls.lock().unwrap().len(), 4);
     assert_eq!(audit.records.lock().unwrap().len(), 8);
-    assert!(
-        call(&host, "git.show", json!({"commit":"--output=escape"}))
-            .await
-            .is_err()
-    );
-    assert!(
-        call(&host, "git.diff", json!({"args":["--ext-diff"]}))
-            .await
-            .is_err()
-    );
+    assert!(call(&host, "git.show", json!({"commit":"--output=escape"}))
+        .await
+        .is_err());
+    assert!(call(&host, "git.diff", json!({"args":["--ext-diff"]}))
+        .await
+        .is_err());
 }
 
 #[cfg(unix)]
@@ -2012,7 +1971,13 @@ async fn real_device_timeout_and_output_overflow_remain_unknown() {
 async fn vision_tools_are_in_catalog_and_crop_works() {
     use base64::Engine;
     let root = Workspace::new();
-    let (host, _, _) = host(root.path(), Default::default());
+    let (host, _, _) = host(
+        root.path(),
+        HostConfig {
+            vision: Some(cayw_vision::Limits::default()),
+            ..HostConfig::default()
+        },
+    );
     let names: Vec<_> = host.capabilities().into_iter().map(|d| d.name).collect();
     for expected in [
         "vision.crop",
@@ -2053,4 +2018,17 @@ async fn vision_tools_are_in_catalog_and_crop_works() {
     .expect("vision.crop");
     assert_eq!(result["width"], 4);
     assert_eq!(result["height"], 4);
+}
+
+#[tokio::test]
+async fn default_host_omits_vision_catalog() {
+    let root = Workspace::new();
+    let (host, _, _) = host(root.path(), HostConfig::default());
+    assert!(
+        !host
+            .capabilities()
+            .iter()
+            .any(|d| d.name.starts_with("vision.")),
+        "ordinary HostConfig::default() must not advertise vision.*"
+    );
 }

@@ -145,7 +145,8 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
-    /// Vision tools (crop / pixel_diff / colors / ocr / describe). None omits them.
+    /// Vision tools (crop / pixel_diff / colors / ocr / describe).
+    /// `None` (the default) omits them from the ordinary Host catalog.
     pub vision: Option<cayw_vision::Limits>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
@@ -168,7 +169,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
-            vision: Some(cayw_vision::Limits::default()),
+            vision: None,
             external: None,
         }
     }
