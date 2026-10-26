@@ -168,6 +168,25 @@
     }
   }
 
+
+  function hangFor(project, nodeId) {
+    if (!project || !project.symbol_hangs || !nodeId) return null;
+    return project.symbol_hangs[nodeId] || null;
+  }
+
+  function formatHang(hang) {
+    if (!hang || !hang.file) return null;
+    var parts = [hang.file.path + ' @v' + hang.file.version];
+    if (hang.symbol && hang.symbol.name) {
+      parts.push(hang.symbol.kind ? (hang.symbol.kind + ' ' + hang.symbol.name) : hang.symbol.name);
+    }
+    if (hang.file.content_sha256) {
+      parts.push('sha256:' + String(hang.file.content_sha256).slice(0, 12) + '…');
+    }
+    return parts.join(' · ');
+  }
+
+
   function formatClock(ms) {
     if (typeof ms !== 'number' || !isFinite(ms) || ms <= 0) return '—';
     try {
@@ -907,6 +926,13 @@
       card.append(el('h3', null, '节点 ' + item.node + (nodeLabels.has(item.node) ? ' · ' + nodeLabels.get(item.node) : '')));
       card.append(el('p', 'fact-meta', '状态：' + statusLabel(item.status) + ' · 耗时：' + formatMs(item.elapsed) + ' · 证据游标：' + (item.evidence === null || item.evidence === undefined ? '无' : item.evidence)));
       card.append(el('p', 'fact-error', clip(String(item.message).split('\n')[0], 300)));
+      var errHang = hangFor(project, item.node);
+      if (errHang) {
+        card.append(el('p', 'fact-meta', '工程挂载：' + (formatHang(errHang) || '—')));
+        if (errHang.location) {
+          card.append(el('p', 'fact-meta', '证据位置：' + errHang.file.path + ' bytes [' + errHang.location.byte_start + ',' + errHang.location.byte_end + ') @v' + errHang.location.file_version));
+        }
+      }
       card.append(el('p', 'fact-meta', '关键输入：' + summaryJson(item.input, 520)));
       card.append(el('p', 'fact-meta', '前置状态：' + summaryJson(item.state, 420)));
       if (item.branch !== null && item.branch !== undefined) {
@@ -1728,6 +1754,20 @@
     else factRow(facts, '证据游标', '无');
     factRow(facts, '复用', step ? (step.reused ? '是（复用上轮结果）' : '否') : '—');
     factRow(facts, '实现', node.implementation || '—');
+    var hang = hangFor(project, node.id);
+    if (hang) {
+      factRow(facts, '工程挂载', formatHang(hang) || '—');
+      if (hang.symbol && hang.symbol.wire) {
+        factRow(facts, '符号标识', hang.symbol.wire);
+      } else if (hang.symbol) {
+        factRow(facts, '符号', (hang.symbol.kind || '') + ' ' + (hang.symbol.name || ''));
+      }
+      if (hang.location) {
+        factRow(facts, '源码位置', hang.file.path + ' [' + hang.location.byte_start + ',' + hang.location.byte_end + ') @v' + hang.location.file_version);
+      }
+    } else {
+      factRow(facts, '工程挂载', '未挂载（无索引路径或非工程实现）');
+    }
     factRow(facts, '模块', node.module || '未命名');
     factRow(facts, '输入指针', node.input_pointer ? node.input_pointer : '（完整输入）');
 

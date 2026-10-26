@@ -1,3 +1,4 @@
+use cayw_codeintel::{FileVersion, SourceLocation, SymbolId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -135,6 +136,9 @@ pub struct Project {
     pub active_node: Option<String>,
     pub trace_error: Option<String>,
     pub runtime_status: Status,
+    /// F16：节点 → 工程文件/符号/内容版本挂载（仅声明路径；非任意程序自动构图）。
+    #[serde(default)]
+    pub symbol_hangs: BTreeMap<String, NodeSymbolHang>,
 }
 
 impl Project {
@@ -223,6 +227,32 @@ pub enum NodeTrace {
 pub struct TraceEnvelope {
     pub schema: String,
     pub trace: NodeTrace,
+}
+
+/// Trace 节点在工程上的挂载：文件版本 + 可选符号与源码位置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSymbolHang {
+    pub node_id: String,
+    pub file: FileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<SymbolId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
+/// 失败步骤的错误摘要，回链节点挂载与 Runtime 证据游标。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorEvidenceLink {
+    pub node_id: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hang: Option<NodeSymbolHang>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_id: Option<String>,
 }
 
 pub fn now_ms() -> u64 {
