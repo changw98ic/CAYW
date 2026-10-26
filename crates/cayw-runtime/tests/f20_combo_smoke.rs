@@ -420,10 +420,7 @@ async fn process_cleanup_and_settled_result_survive_reopen() {
             .find_map(|record| match record.event {
                 Ev::CapabilitySettled { call }
                     if call.name == "test.run"
-                        && matches!(
-                            &call.outcome,
-                            Some(CapabilityOutcome::Completed { .. })
-                        ) =>
+                        && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. })) =>
                 {
                     Some(serde_json::to_value(&call).unwrap())
                 }
@@ -556,14 +553,12 @@ async fn result_release_not_registered_on_tip() {
 async fn mcp_resources_share_session_and_survive_reopen() {
     use async_trait::async_trait;
     use cayw_bridge::{
-        AccessRequest, DispatchOutcome, Limits, Manifest, Provenance, Registry,
-        RegistryPolicy, ResourceSpec, SourceHandle, SourceIdentity, SourceOperation, SourceReply,
-        SourceRequest, Visibility,
+        AccessRequest, DispatchOutcome, Limits, Manifest, Provenance, Registry, RegistryPolicy,
+        ResourceSpec, SourceHandle, SourceIdentity, SourceOperation, SourceReply, SourceRequest,
+        Visibility,
     };
     use cayw_codemode::CapabilityError;
-    use cayw_core::{
-        CapabilityCallRecord, CapabilityOutcome, CoreEvent as Ev, SessionState,
-    };
+    use cayw_core::{CapabilityCallRecord, CapabilityOutcome, CoreEvent as Ev, SessionState};
     use cayw_runtime::BridgeDispatchEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -693,10 +688,7 @@ async fn mcp_resources_share_session_and_survive_reopen() {
         max_run_time: WATCHDOG,
         permissions: vec![
             ScopedPermission::exact("mcp.resources.list", json!({})),
-            ScopedPermission::exact(
-                "mcp.resources.read",
-                json!({"server":"local","uri":URI}),
-            ),
+            ScopedPermission::exact("mcp.resources.read", json!({"server":"local","uri":URI})),
         ],
         ..Default::default()
     };
@@ -785,9 +777,7 @@ async fn mcp_stdio_process_lifecycle_cleanup_and_session_reopen() {
         SourceIdentity, Visibility,
     };
     use cayw_codemode::CapabilityError;
-    use cayw_core::{
-        CapabilityCallRecord, CapabilityOutcome, CoreEvent as Ev, SessionState,
-    };
+    use cayw_core::{CapabilityCallRecord, CapabilityOutcome, CoreEvent as Ev, SessionState};
     use cayw_runtime::BridgeDispatchEvent;
     use cayw_sources::{StdioConfig, StdioSource};
     use std::path::Path;
@@ -889,10 +879,7 @@ async fn mcp_stdio_process_lifecycle_cleanup_and_session_reopen() {
         max_run_time: WATCHDOG,
         permissions: vec![
             ScopedPermission::exact("mcp.resources.list", json!({"server":"local"})),
-            ScopedPermission::exact(
-                "mcp.resources.read",
-                json!({"server":"local","uri":URI}),
-            ),
+            ScopedPermission::exact("mcp.resources.read", json!({"server":"local","uri":URI})),
             ScopedPermission::exact(
                 "mcp.call",
                 json!({"server":"local","tool":"add","arguments":{"a":17,"b":25}}),
@@ -932,9 +919,9 @@ async fn mcp_stdio_process_lifecycle_cleanup_and_session_reopen() {
         "Q6: list+read+call should settle: {settled:#?}"
     );
     assert!(
-        settled.iter().all(|call| {
-            matches!(call.outcome, Some(CapabilityOutcome::Completed { .. }))
-        }),
+        settled
+            .iter()
+            .all(|call| { matches!(call.outcome, Some(CapabilityOutcome::Completed { .. })) }),
         "Q6: MCP stdio capabilities must complete"
     );
     let after_call = control.snapshot();
@@ -983,7 +970,10 @@ async fn mcp_stdio_process_lifecycle_cleanup_and_session_reopen() {
         .await
         .expect("Q6: stdio cleanup watchdog");
     let cleaned = control.snapshot();
-    assert!(cleaned.reaped, "Q6: MCP child must be reaped after disconnect");
+    assert!(
+        cleaned.reaped,
+        "Q6: MCP child must be reaped after disconnect"
+    );
     assert!(
         cleaned.cleanup_complete,
         "Q6: MCP stdio cleanup_complete after disconnect"
@@ -1186,10 +1176,7 @@ async fn tip_tree_session_child_process_and_mcp_stdio_combo() {
             .any(|record| match record.event {
                 Ev::CapabilitySettled { call }
                     if call.name == "test.run"
-                        && matches!(
-                            &call.outcome,
-                            Some(CapabilityOutcome::Completed { .. })
-                        ) =>
+                        && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. })) =>
                 {
                     true
                 }
@@ -1207,10 +1194,7 @@ async fn tip_tree_session_child_process_and_mcp_stdio_combo() {
             .any(|record| match record.event {
                 Ev::CapabilitySettled { call }
                     if call.name == "mcp.call"
-                        && matches!(
-                            &call.outcome,
-                            Some(CapabilityOutcome::Completed { .. })
-                        ) =>
+                        && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. })) =>
                 {
                     true
                 }
