@@ -29,8 +29,9 @@ mod types;
 
 pub use compare::{AlignedTurn, SessionCompare, TurnLane, compare_sessions};
 pub use from_runtime::{
-    RunInspectorView, inspect_runtime_events, params_digest, snapshot_from_runtime_events,
-    snapshots_from_runtime_events, timelines_from_runtime_events,
+    RunInspectorPage, RunInspectorView, inspect_runtime_events, inspect_runtime_events_page,
+    params_digest, snapshot_from_runtime_events, snapshots_from_runtime_events,
+    timelines_from_runtime_events,
 };
 pub use paths::{RetryPath, build_retry_paths};
 pub use timeline::{RunTimeline, build_run_timeline};
@@ -41,4 +42,4 @@ pub use tracks::{
 pub use types::*;
 
 /// Wire / document protocol for this first-cut inspector.
-pub const RUN_INSPECTOR_PROTOCOL_VERSION: u32 = 1;
+pub const RUN_INSPECTOR_PROTOCOL_VERSION: u32 = 2;

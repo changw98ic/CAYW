@@ -436,19 +436,92 @@ impl Runtime {
     }
     /// Fold durable session events into a run-inspector view (F06).
     ///
-    /// Reads the Core event log via the same authority as `events`, translates
-    /// tool execution pairs into `RunStep`s, then builds retry paths / tracks.
+    /// Pages the Core event log from `after` (same authority as [`Self::events`])
+    /// until `limit` events are scanned or the session cursor is reached.
+    /// When `limit` is `None`, every remaining event is included via internal
+    /// `MAX_EVENT_PAGE` paging — long sessions are not silently truncated.
+    ///
+    /// The response always carries `events_total` / `has_more` / `next_after`
+    /// so callers can continue from a windowed page when they pass a limit.
     pub fn run_inspector(
         &self,
         id: &str,
     ) -> Result<cayw_run_inspector::RunInspectorView, RuntimeError> {
+        self.run_inspector_page(id, 0, None)
+    }
+
+    /// Windowed run-inspector read. See [`Self::run_inspector`].
+    ///
+    /// `limit` caps how many Core events are folded into this response. Values
+    /// above [`cayw_core::MAX_EVENT_PAGE`] are allowed; the store is still read
+    /// in `MAX_EVENT_PAGE` chunks. `None` means "all remaining events".
+    pub fn run_inspector_page(
+        &self,
+        id: &str,
+        after: u64,
+        limit: Option<usize>,
+    ) -> Result<cayw_run_inspector::RunInspectorView, RuntimeError> {
         let view = self.get(id)?;
-        let records = self.inner.store.events(id, 0, cayw_core::MAX_EVENT_PAGE)?;
-        Ok(cayw_run_inspector::inspect_runtime_events(
+        let events_total = view.cursor;
+        if after > events_total {
+            return Err(RuntimeError::Core(cayw_core::CoreError::FutureCursor {
+                after,
+                current: events_total,
+            }));
+        }
+        if matches!(limit, Some(0)) {
+            return Err(RuntimeError::InvalidInput(
+                "run inspector limit must be at least 1 when set".into(),
+            ));
+        }
+        // Bound a single response so a runaway client cannot ask for unbounded
+        // materialization in one RPC; full history still uses limit=None.
+        const MAX_INSPECTOR_EVENTS: usize = 200_000;
+        if let Some(limit) = limit {
+            if limit > MAX_INSPECTOR_EVENTS {
+                return Err(RuntimeError::InvalidInput(format!(
+                    "run inspector limit may not exceed {MAX_INSPECTOR_EVENTS}"
+                )));
+            }
+        }
+        let mut records = Vec::new();
+        let mut cursor = after;
+        let remaining_cap = limit.unwrap_or(MAX_INSPECTOR_EVENTS);
+        while cursor < events_total && records.len() < remaining_cap {
+            let want = (events_total - cursor)
+                .min(cayw_core::MAX_EVENT_PAGE as u64)
+                .min((remaining_cap - records.len()) as u64) as usize;
+            if want == 0 {
+                break;
+            }
+            let page = self.inner.store.events(id, cursor, want)?;
+            if page.is_empty() {
+                break;
+            }
+            let next = page.last().map_or(cursor, |record| record.cursor);
+            if next <= cursor {
+                break;
+            }
+            cursor = next;
+            records.extend(page);
+        }
+        let events_scanned = records.len() as u64;
+        let next_after = records.last().map(|record| record.cursor).unwrap_or(after);
+        // When the caller asked for the full log (limit=None) but hit the
+        // safety cap, still signal truncation instead of lying.
+        let has_more = next_after < events_total;
+        Ok(cayw_run_inspector::inspect_runtime_events_page(
             id,
             Some(view.label),
             None,
             &records,
+            cayw_run_inspector::RunInspectorPage {
+                events_total,
+                after,
+                events_scanned,
+                has_more,
+                next_after,
+            },
         ))
     }
     pub async fn wait_events(

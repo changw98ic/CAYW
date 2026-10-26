@@ -10,7 +10,7 @@ CAYW 运行检查器（F06 首刀，SLICE G）：通用**重试/恢复路径**�
 - 耗时轨道：`DurationTrack`（会话本地或墙钟对齐）
 - 会话比较：`SessionCompare`（同 `task_fingerprint` 时按 turn 对齐）
 - 单会话时间线：`RunTimeline`
-- 协议版本：`RUN_INSPECTOR_PROTOCOL_VERSION = 1`
+- 协议版本：`RUN_INSPECTOR_PROTOCOL_VERSION = 2`（含事件分页元数据）
 
 本切片另含：`EventRecord` → `RunStep` 翻译（`from_runtime`）、Runtime RPC `session.run_inspector`、Trace `GET /api/run-inspector`。
 
@@ -29,8 +29,10 @@ assert!(compare.same_task);
 
 产品入口：
 
-- Runtime：`Runtime::run_inspector(session_id)` / RPC `session.run_inspector`
-- Trace Debug：`GET /api/run-inspector`（从已摄入的 `Document.events` 折叠）
+- Runtime：`Runtime::run_inspector(session_id)` / `run_inspector_page(session_id, after, limit)` / RPC `session.run_inspector`（可选 `after` / `limit`；省略 `limit` 时内部按页读完整个会话，响应含 `events_total` / `events_scanned` / `has_more` / `next_after`）
+- Trace Debug：`GET /api/run-inspector?after=&limit=`（从已摄入的 `Document.events` 折叠，同样返回分页元数据）
+
+长会话不会再静默截断在前 1000 条；若调用方显式传 `limit`，必须看 `has_more` 并用 `next_after` 继续拉。
 
 ## 来源与边界
 

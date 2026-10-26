@@ -30,3 +30,11 @@ cargo run -p cayw-run-inspector --example offline_inspector --locked
 - 入口：`Runtime::run_inspector` + RPC `session.run_inspector`；Trace `GET /api/run-inspector`
 - 证明：`cargo test -p cayw-run-inspector --test from_runtime --locked`
 - 证明：`cargo test -p cayw-runtime --test run_inspector --locked`
+
+## 续：长会话事件分页（审计修复）
+
+- 问题：`Runtime::run_inspector` 只读 `events(id, 0, MAX_EVENT_PAGE)`，长会话静默丢后续记录，且无 `has_more` 提示。
+- 修复：内部按 `MAX_EVENT_PAGE` 分页读完整日志；RPC/HTTP 支持 `after`/`limit`；响应固定带 `events_total` / `events_scanned` / `has_more` / `next_after`。
+- 证明：`cargo test -p cayw-runtime --test run_inspector --locked`
+- 证明：`cargo test -p cayw-run-inspector --test from_runtime --locked`
+- 前端/WebUI 仍未消费该 API（本波不在范围）。

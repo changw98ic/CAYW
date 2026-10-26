@@ -92,7 +92,8 @@ impl SessionBuilder {
                     .remove(&call.id)
                     .map(|open| open.started_at_ms)
                     .unwrap_or(record.timestamp);
-                let elapsed = duration_ms.unwrap_or_else(|| record.timestamp.saturating_sub(started));
+                let elapsed =
+                    duration_ms.unwrap_or_else(|| record.timestamp.saturating_sub(started));
                 if self.turn == 0 {
                     // Tool ends without TurnStart still land in turn 1.
                     self.turn = 1;
@@ -169,28 +170,104 @@ pub fn timelines_from_runtime_events(records: &[EventRecord]) -> Vec<RunTimeline
         .collect()
 }
 
-/// One RPC / product payload: raw steps plus folded timeline.
+/// Pagination / truncation signal for a run-inspector response.
+///
+/// Callers must not assume a single Core event page covers a long session.
+/// When `has_more` is true, request again with `after = next_after`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunInspectorPage {
+    /// Durable session cursor (exclusive end / total event count).
+    pub events_total: u64,
+    /// Exclusive start cursor used for this response.
+    pub after: u64,
+    /// How many Core events were scanned into this view.
+    pub events_scanned: u64,
+    /// More durable events exist beyond [`Self::next_after`].
+    pub has_more: bool,
+    /// Pass as `after` on the next request when `has_more`.
+    pub next_after: u64,
+}
+
+/// One RPC / product payload: raw steps plus folded timeline and page meta.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunInspectorView {
     pub protocol_version: u32,
     pub snapshot: SessionRunSnapshot,
     pub timeline: RunTimeline,
+    pub events_total: u64,
+    pub after: u64,
+    pub events_scanned: u64,
+    pub has_more: bool,
+    pub next_after: u64,
 }
 
-/// Build the product view for one session from its event page.
+impl RunInspectorView {
+    fn with_page(mut self, page: RunInspectorPage) -> Self {
+        self.events_total = page.events_total;
+        self.after = page.after;
+        self.events_scanned = page.events_scanned;
+        self.has_more = page.has_more;
+        self.next_after = page.next_after;
+        self
+    }
+}
+
+/// Build the product view for one session from a supplied event slice.
+///
+/// Page metadata assumes the slice is complete for the session (has_more=false).
+/// Prefer [`inspect_runtime_events_page`] when the caller knows session totals.
 pub fn inspect_runtime_events(
     session_id: &str,
     label: Option<String>,
     task_fingerprint: Option<String>,
     records: &[EventRecord],
 ) -> RunInspectorView {
-    let snapshot =
-        snapshot_from_runtime_events(session_id, label, task_fingerprint, records);
+    let scanned = records
+        .iter()
+        .filter(|record| record.session_id == session_id)
+        .count() as u64;
+    let next_after = records
+        .iter()
+        .filter(|record| record.session_id == session_id)
+        .map(|record| record.cursor)
+        .max()
+        .unwrap_or(0);
+    inspect_runtime_events_page(
+        session_id,
+        label,
+        task_fingerprint,
+        records,
+        RunInspectorPage {
+            events_total: next_after,
+            after: 0,
+            events_scanned: scanned,
+            has_more: false,
+            next_after,
+        },
+    )
+}
+
+/// Build the product view and attach explicit pagination metadata.
+pub fn inspect_runtime_events_page(
+    session_id: &str,
+    label: Option<String>,
+    task_fingerprint: Option<String>,
+    records: &[EventRecord],
+    page: RunInspectorPage,
+) -> RunInspectorView {
+    let snapshot = snapshot_from_runtime_events(session_id, label, task_fingerprint, records);
     let timeline = build_run_timeline(&snapshot);
     RunInspectorView {
         protocol_version: crate::RUN_INSPECTOR_PROTOCOL_VERSION,
         snapshot,
         timeline,
+        events_total: 0,
+        after: 0,
+        events_scanned: 0,
+        has_more: false,
+        next_after: 0,
     }
+    .with_page(page)
 }
