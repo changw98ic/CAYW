@@ -477,12 +477,12 @@ impl Runtime {
         // Bound a single response so a runaway client cannot ask for unbounded
         // materialization in one RPC; full history still uses limit=None.
         const MAX_INSPECTOR_EVENTS: usize = 200_000;
-        if let Some(limit) = limit {
-            if limit > MAX_INSPECTOR_EVENTS {
-                return Err(RuntimeError::InvalidInput(format!(
-                    "run inspector limit may not exceed {MAX_INSPECTOR_EVENTS}"
-                )));
-            }
+        if let Some(limit) = limit
+            && limit > MAX_INSPECTOR_EVENTS
+        {
+            return Err(RuntimeError::InvalidInput(format!(
+                "run inspector limit may not exceed {MAX_INSPECTOR_EVENTS}"
+            )));
         }
         let mut records = Vec::new();
         let mut cursor = after;
