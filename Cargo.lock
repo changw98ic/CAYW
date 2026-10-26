@@ -543,12 +543,14 @@ name = "cayw-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "cap-fs-ext 4.0.3",
  "cap-std 4.0.3",
  "cayw-ai",
  "cayw-codemode",
  "cayw-data",
  "cayw-device",
+ "cayw-vision",
  "cayw-workspace",
  "futures",
  "serde",
@@ -754,6 +756,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "cayw-vision"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cayw-ai",
+ "cayw-codemode",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
  "tokio",
 ]
 

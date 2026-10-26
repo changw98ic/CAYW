@@ -78,6 +78,13 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
                 .map(|definition| (definition, Executor::Workspace)),
         );
     }
+    if config.vision.is_some() {
+        definitions.extend(
+            cayw_vision::definitions()
+                .into_iter()
+                .map(|definition| (definition, Executor::Vision)),
+        );
+    }
     definitions.extend(
         git::definitions(config)
             .into_iter()
