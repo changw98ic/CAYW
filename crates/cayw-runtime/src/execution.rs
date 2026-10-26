@@ -1034,9 +1034,15 @@ async fn execute_with_cells(
             sections: [("cayw-runtime-codemode".into(), Some(INSTRUCTION.into()))].into(),
             ..Default::default()
         });
-        let result = agent
-            .prompt_messages(vec![instruction, input.message()])
-            .await?;
+        // F08: fold Applied plannotator feedback into the next Agent attempt.
+        let _ = crate::plannotator::refresh_plan_live_files(inner, &context.lease.session_id);
+        let mut prompt = vec![instruction];
+        prompt.extend(crate::plannotator::feedback_messages_for_attempt(
+            inner,
+            &context.lease.session_id,
+        )?);
+        prompt.push(input.message());
+        let result = agent.prompt_messages(prompt).await?;
         // The Agent reports hook rejections as failed model turns. Restore the
         // completion decision the hook actually made.
         if let Some(error) = lock(&rejection).take() {

@@ -622,7 +622,7 @@ fn validate_request(request: &str) -> Result<(), RuntimeError> {
         .map_err(RuntimeError::InvalidInput)
 }
 
-fn read_log(inner: &Inner, session: &str) -> Result<Vec<EventRecord>, RuntimeError> {
+pub(crate) fn read_log(inner: &Inner, session: &str) -> Result<Vec<EventRecord>, RuntimeError> {
     let snapshot = inner.store.snapshot(session)?;
     let mut cursor = 0u64;
     let mut events = Vec::new();

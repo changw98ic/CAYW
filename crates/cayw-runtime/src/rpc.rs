@@ -386,6 +386,17 @@ impl RpcHandler for Runtime {
                 let p: Session = parse(params)?;
                 encode(self.plan(&p.session_id)?)
             }
+            "plannotator.submit" => {
+                let mut p: crate::PlanFeedbackInput = parse(params)?;
+                if p.actor.trim().is_empty() {
+                    p.actor = "rpc-user".into();
+                }
+                encode(self.submit_plan_feedback(p)?)
+            }
+            "plannotator.list" => {
+                let p: Session = parse(params)?;
+                encode(self.plannotator_feedback(&p.session_id)?)
+            }
             "question.answer" => {
                 let p: AnswerQuestion = parse(params)?;
                 encode(self.answer_question(&p.session_id, &p.request_id, &p.answer, "rpc-user")?)

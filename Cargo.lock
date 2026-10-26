@@ -571,6 +571,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-plannotator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "cayw-plugins"
 version = "0.1.0"
 dependencies = [
@@ -656,6 +666,7 @@ dependencies = [
  "cayw-core",
  "cayw-host",
  "cayw-ipc",
+ "cayw-plannotator",
  "cayw-plugins",
  "cayw-providers",
  "cayw-remote",
@@ -666,6 +677,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

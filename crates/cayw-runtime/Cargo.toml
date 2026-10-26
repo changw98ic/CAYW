@@ -28,6 +28,7 @@ cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }
 cayw-providers = { path = "../cayw-providers", version = "0.1.0" }
+cayw-plannotator = { path = "../cayw-plannotator", version = "0.1.0" }
 cayw-requests = { path = "../cayw-requests", version = "0.1.0" }
 cayw-plugins = { path = "../cayw-plugins", version = "0.1.0", default-features = false, optional = true }
 cayw-remote = { path = "../cayw-remote", version = "0.1.0", optional = true }
@@ -36,6 +37,7 @@ reqwest.workspace = true
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.9"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
 tokio-util.workspace = true
