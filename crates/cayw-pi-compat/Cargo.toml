@@ -20,5 +20,9 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 serde_json.workspace = true
 
+[[bin]]
+name = "cayw-pi-sample-ext"
+path = "src/bin/cayw-pi-sample-ext.rs"
+
 [[example]]
 name = "offline_pi_compat"

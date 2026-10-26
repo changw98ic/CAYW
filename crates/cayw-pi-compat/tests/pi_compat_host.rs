@@ -1,6 +1,7 @@
 use cayw_ai::CancellationToken;
 use cayw_pi_compat::*;
 use serde_json::json;
+use std::path::PathBuf;
 
 #[tokio::test]
 async fn disabled_host_refuses_without_silent_success() {
@@ -22,7 +23,12 @@ async fn fixture_install_call_unload_smoke() {
     assert_eq!(installed.manifest.version, package.version);
 
     let value = host
-        .call_tool(&package, json!({"text": "你好"}), CancellationToken::new())
+        .call_tool(
+            &package,
+            PiFixturePlugin::TOOL,
+            json!({"text": "你好"}),
+            CancellationToken::new(),
+        )
         .await
         .expect("call tool");
     assert_eq!(value["echo"], "你好");
@@ -31,10 +37,68 @@ async fn fixture_install_call_unload_smoke() {
     let unloaded = host.unload(&package).expect("unload");
     assert_eq!(unloaded.manifest.name, package.name);
     assert!(matches!(
-        host.call_tool(&package, json!({"text": "x"}), CancellationToken::new())
-            .await,
+        host.call_tool(
+            &package,
+            PiFixturePlugin::TOOL,
+            json!({"text": "x"}),
+            CancellationToken::new()
+        )
+        .await,
         Err(PiCompatError::NotLoaded(_))
     ));
+}
+
+#[tokio::test]
+async fn sample_extension_from_disk_install_call_unload() {
+    let host = PiCompatHost::new(true);
+    let package = PiSampleExtension::package_id();
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_cayw-pi-sample-ext"));
+    assert!(
+        exe.is_file(),
+        "sample extension binary must be built for this test"
+    );
+
+    let installed = host
+        .install_sample_extension(&exe, CancellationToken::new())
+        .await
+        .expect("install sample from disk");
+    assert_eq!(installed.manifest.name, package.name);
+    assert_eq!(installed.manifest.kind, cayw_plugins::PluginKind::External);
+
+    let value = host
+        .call_tool(
+            &package,
+            PiSampleExtension::TOOL,
+            json!({"note": "from-disk"}),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("call sample tool");
+    assert_eq!(value["pong"], true);
+    assert_eq!(value["path"], "external-subprocess");
+    assert_eq!(value["note"], "from-disk");
+
+    host.unload(&package).expect("unload sample");
+}
+
+#[tokio::test]
+async fn missing_sample_executable_is_unavailable_not_silent() {
+    let host = PiCompatHost::new(true);
+    let missing = PathBuf::from("/tmp/cayw-pi-sample-ext-does-not-exist-f15");
+    let err = host
+        .install_sample_extension(&missing, CancellationToken::new())
+        .await
+        .expect_err("missing path must refuse");
+    assert!(
+        matches!(err, PiCompatError::Unavailable(_)),
+        "got {err:?}"
+    );
+    let matrix = host.matrix_snapshot();
+    let row = matrix.lookup(
+        &PiSampleExtension::package_id(),
+        &SurfaceId::new(SurfaceFamily::Lifecycle, "install"),
+    );
+    assert_eq!(row.level, CompatibilityLevel::Unavailable);
 }
 
 #[tokio::test]
@@ -63,12 +127,14 @@ async fn real_npm_package_row_is_unavailable() {
 }
 
 #[test]
-fn matrix_markdown_lists_fixture_and_pinned_abi() {
+fn matrix_markdown_lists_fixture_sample_and_pinned_abi() {
     let md = CompatMatrix::first_cut_baseline().markdown_table();
     assert!(md.contains("cayw-pi-fixture@0.1.0"));
+    assert!(md.contains("cayw-pi-sample-ext@0.1.0"));
     assert!(md.contains(PINNED_PI_CODING_AGENT));
     assert!(md.contains(PINNED_PI_CODING_AGENT_VERSION));
     assert!(md.contains("incompatible") || md.contains("unavailable"));
+    assert!(md.contains("load_external"));
 }
 
 #[test]
@@ -88,7 +154,7 @@ async fn cancelled_call_is_known_not_outcome_unknown() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let err = host
-        .call_tool(&package, json!({"text": "x"}), cancel)
+        .call_tool(&package, PiFixturePlugin::TOOL, json!({"text": "x"}), cancel)
         .await
         .expect_err("pre-cancelled call must fail");
     assert!(

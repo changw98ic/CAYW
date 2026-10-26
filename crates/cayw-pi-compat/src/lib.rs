@@ -6,11 +6,15 @@
 //! - an optional [`PiCompatHost`] that installs / calls / unloads through
 //!   `cayw-plugins::PluginRegistry`
 //!
-//! First cut does **not** load unmodified npm Pi ExtensionAPI packages. The
-//! offline [`PiFixturePlugin`] (`cayw-pi-fixture@0.1.0`) proves the host
-//! lifecycle path; real package rows are recorded as `unavailable` until a
-//! later Node/ABI bridge lands. Refusals are always explicit
-//! (`incompatible` / `unavailable`), never silent success.
+//! Install paths:
+//! - [`PiFixturePlugin`] (`cayw-pi-fixture@0.1.0`) via `load_native` — CI / offline smoke
+//! - [`PiSampleExtension`] (`cayw-pi-sample-ext@0.1.0`) via `load_external` — disk
+//!   subprocess sample when the binary is present
+//!
+//! Unmodified npm Pi ExtensionAPI packages remain **unavailable** (no Node/ABI
+//! bridge in this slice). Commands / session / events / UI maps are description-
+//! grade only. Refusals are always explicit (`incompatible` / `unavailable`),
+//! never silent success.
 //!
 //! Design reference (not a code transplant):
 //! [weijiafu14/pi2dsh](https://github.com/weijiafu14/pi2dsh) compat-layer shape.
@@ -22,6 +26,7 @@ mod fixture;
 mod host;
 mod mapping;
 mod matrix;
+mod sample;
 mod types;
 
 pub use error::PiCompatError;
@@ -29,4 +34,5 @@ pub use fixture::PiFixturePlugin;
 pub use host::PiCompatHost;
 pub use mapping::{FAMILY_MAPPINGS, FamilyMapping, mapping_for};
 pub use matrix::{CompatMatrix, CompatRow};
+pub use sample::PiSampleExtension;
 pub use types::*;

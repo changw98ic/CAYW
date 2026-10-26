@@ -1,10 +1,14 @@
 use crate::error::PiCompatError;
 use crate::fixture::PiFixturePlugin;
+use crate::sample::PiSampleExtension;
 use crate::matrix::CompatMatrix;
 use crate::types::*;
 use cayw_ai::CancellationToken;
-use cayw_plugins::{PluginContext, PluginDescription, PluginError, PluginRegistry};
+use cayw_plugins::{
+    ExternalConfig, PluginContext, PluginDescription, PluginError, PluginRegistry,
+};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,6 +18,11 @@ use std::time::Duration;
 /// install/call/unload go through `cayw-plugins::PluginRegistry`. Surface
 /// checks consult the [`CompatMatrix`]; refused surfaces are recorded as
 /// incompatible / unavailable — never silent success.
+///
+/// Two install paths:
+/// - [`Self::install_fixture`] — in-process Rust [`PiFixturePlugin`] via `load_native` (CI).
+/// - [`Self::install_sample_extension`] / [`Self::install_external`] — disk subprocess
+///   via `load_external` (real extension path beyond the fixture).
 pub struct PiCompatHost {
     enabled: bool,
     registry: PluginRegistry,
@@ -45,14 +54,13 @@ impl PiCompatHost {
         }
     }
 
-    /// Install the offline fixture package (`cayw-pi-fixture@0.1.0`).
+    /// Install the offline fixture package (`cayw-pi-fixture@0.1.0`) via `load_native`.
     pub fn install_fixture(&self) -> Result<PluginDescription, PiCompatError> {
         self.ensure_enabled()?;
         let package = PiFixturePlugin::package_id();
         let surface = SurfaceId::new(SurfaceFamily::Lifecycle, "install");
         let level = {
             let matrix = self.matrix.lock().expect("compat matrix poisoned");
-            // Lifecycle unload/install share family mapping; use unload row or tools.registerTool.
             let row = matrix.lookup(
                 &package,
                 &SurfaceId::new(SurfaceFamily::Tools, "registerTool"),
@@ -82,10 +90,98 @@ impl PiCompatHost {
         }
     }
 
-    /// Invoke a mapped tool surface for a loaded package.
+    /// Install a disk/subprocess extension via `PluginRegistry::load_external`.
+    ///
+    /// This is the real path beyond the in-process fixture. The executable must
+    /// already exist; missing paths refuse with [`PiCompatError::Unavailable`]
+    /// (never silent success). Unmodified npm Pi ExtensionAPI packages are still
+    /// out of scope — use a CAYW external-protocol speaker (see sample ext).
+    pub async fn install_external(
+        &self,
+        config: ExternalConfig,
+        cancel: CancellationToken,
+    ) -> Result<PluginDescription, PiCompatError> {
+        self.ensure_enabled()?;
+        let package = PiPackageId::new(
+            config.expected_manifest.name.clone(),
+            config.expected_manifest.version.clone(),
+        );
+        let surface = SurfaceId::new(SurfaceFamily::Lifecycle, "install");
+
+        if !config.executable.is_file() {
+            let detail = format!(
+                "external executable missing: {}",
+                config.executable.display()
+            );
+            let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+            matrix.record_unavailable(package.clone(), surface, detail.clone());
+            return Err(PiCompatError::Unavailable(detail));
+        }
+
+        let level = {
+            let matrix = self.matrix.lock().expect("compat matrix poisoned");
+            matrix
+                .lookup(
+                    &package,
+                    &SurfaceId::new(SurfaceFamily::Tools, "registerTool"),
+                )
+                .level
+        };
+        if !level.allows_invoke() {
+            let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+            matrix.record_incompatible(
+                package.clone(),
+                surface,
+                format!("install_external refused: matrix level {}", level.as_str()),
+            );
+            return Err(PiCompatError::Incompatible(package.key()));
+        }
+
+        let granted: Vec<String> = config
+            .expected_manifest
+            .capabilities
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        let context = PluginContext::new(granted, []);
+        match self.registry.load_external(config, context, cancel).await {
+            Ok(desc) => Ok(desc),
+            Err(PluginError::Conflict(name)) => Err(PiCompatError::AlreadyLoaded(name)),
+            Err(PluginError::Cancelled) => Err(PiCompatError::Cancelled),
+            Err(PluginError::Timeout) => Err(PiCompatError::Timeout),
+            Err(err) => {
+                let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+                matrix.record_incompatible(package, surface, err.to_string());
+                Err(map_plugin_err(err))
+            }
+        }
+    }
+
+    /// Convenience: load the documented sample extension from an absolute path
+    /// when present (`cayw-pi-sample-ext@0.1.0` → `pi_sample.ping`).
+    pub async fn install_sample_extension(
+        &self,
+        executable: impl AsRef<Path>,
+        cancel: CancellationToken,
+    ) -> Result<PluginDescription, PiCompatError> {
+        let executable = absolute_existing_or_path(executable.as_ref());
+        let config = ExternalConfig::new(
+            executable,
+            vec![],
+            PiSampleExtension::expected_manifest(),
+        );
+        self.install_external(config, cancel).await
+    }
+
+    /// Invoke a mapped tool capability for a loaded package.
+    ///
+    /// `tool` is the capability name from the loaded manifest (e.g.
+    /// [`PiFixturePlugin::TOOL`] or [`PiSampleExtension::TOOL`]) — not hardcoded
+    /// to the fixture.
     pub async fn call_tool(
         &self,
         package: &PiPackageId,
+        tool: &str,
         arguments: Value,
         cancel: CancellationToken,
     ) -> Result<Value, PiCompatError> {
@@ -112,19 +208,25 @@ impl PiCompatHost {
             };
         }
 
-        self.registry
+        let desc = self
+            .registry
             .describe(&package.name)
             .map_err(|_| PiCompatError::NotLoaded(package.key()))?;
+        if !desc
+            .manifest
+            .capabilities
+            .iter()
+            .any(|c| c.name == tool)
+        {
+            return Err(PiCompatError::Failed(format!(
+                "capability `{tool}` not in loaded manifest for {}",
+                package.key()
+            )));
+        }
 
         match self
             .registry
-            .call(
-                &package.name,
-                PiFixturePlugin::TOOL,
-                arguments,
-                cancel,
-                Duration::from_secs(5),
-            )
+            .call(&package.name, tool, arguments, cancel, Duration::from_secs(5))
             .await
         {
             Ok(value) => Ok(value),
@@ -204,6 +306,16 @@ impl PiCompatHost {
                 other.as_str()
             ))),
         }
+    }
+}
+
+fn absolute_existing_or_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
     }
 }
 

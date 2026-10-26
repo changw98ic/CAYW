@@ -94,6 +94,58 @@ impl CompatMatrix {
             cayw_seam: None,
         });
 
+        // Disk/subprocess sample extension (real path beyond in-process fixture).
+        let sample = PiPackageId::new("cayw-pi-sample-ext", "0.1.0");
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Tools, "registerTool"),
+            level: CompatibilityLevel::Partial,
+            detail: "Maps to PluginRegistry::load_external when the sample binary is present on disk.".into(),
+            cayw_seam: Some("cayw_plugins::PluginRegistry::load_external".into()),
+        });
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Tools, "invoke"),
+            level: CompatibilityLevel::Partial,
+            detail: "Maps to PluginRegistry::call for pi_sample.ping via external JSON protocol.".into(),
+            cayw_seam: Some("cayw_plugins::PluginRegistry::call".into()),
+        });
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Lifecycle, "unload"),
+            level: CompatibilityLevel::Partial,
+            detail: "Maps to PluginRegistry::unload for the external child.".into(),
+            cayw_seam: Some("cayw_plugins::PluginRegistry::unload".into()),
+        });
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Commands, "registerCommand"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Slash/command registration not in F15 first cut.".into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Events, "on"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Pi event bus subscription not wired in first cut.".into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Session, "sessionManager"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Pi SessionManager not exposed; CAYW Session remains authoritative.".into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: sample.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Interaction, "ui.select"),
+            level: CompatibilityLevel::Incompatible,
+            detail: "No Pi UIContext bridge in Rust Core first cut; explicit incompatible.".into(),
+            cayw_seam: None,
+        });
+
         // Documented real upstream package: unmodified npm load is unavailable.
         let real = PiPackageId::new(PINNED_PI_CODING_AGENT, PINNED_PI_CODING_AGENT_VERSION);
         for family in SurfaceFamily::ALL {
@@ -152,6 +204,24 @@ impl CompatMatrix {
             package,
             surface,
             level: CompatibilityLevel::Incompatible,
+            detail: detail.into(),
+            cayw_seam: None,
+        };
+        self.insert(row.clone());
+        row
+    }
+
+    /// Record a missing / not-yet-wired surface as unavailable (never silent).
+    pub fn record_unavailable(
+        &mut self,
+        package: PiPackageId,
+        surface: SurfaceId,
+        detail: impl Into<String>,
+    ) -> CompatRow {
+        let row = CompatRow {
+            package,
+            surface,
+            level: CompatibilityLevel::Unavailable,
             detail: detail.into(),
             cayw_seam: None,
         };
