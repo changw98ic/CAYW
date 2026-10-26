@@ -1,6 +1,6 @@
 [package]
 name = "cayw-web-access"
-description = "Web search / URL fetch / HTML+PDF extraction with source citations (F10 first cut)"
+description = "Web search / URL fetch / HTML+PDF extraction with source citations (F10)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+cayw-ai.workspace = true
 html5gum.workspace = true
 reqwest.workspace = true
 serde.workspace = true

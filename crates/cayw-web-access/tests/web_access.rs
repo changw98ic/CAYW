@@ -157,3 +157,64 @@ fn capability_names_are_stable() {
     assert_eq!(capabilities::WEB_EXTRACT, "web.extract");
     assert_eq!(WEB_ACCESS_PROTOCOL_VERSION, 1);
 }
+
+#[tokio::test]
+async fn duckduckgo_html_search_via_fixture_transport() {
+    let results_html = r#"<!doctype html><html><body>
+<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F&amp;rut=1">Example</a>
+<a class="result__snippet">Example snippet</a>
+</body></html>"#;
+    let search_url = {
+        let mut u = url::Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        u.query_pairs_mut().append_pair("q", "example domain");
+        u.to_string()
+    };
+    let transport = FixtureTransport::new()
+        .insert_html(&search_url, results_html)
+        .insert_html("https://example.com/", demo_html());
+    let search = DuckDuckGoHtmlSearch::new(std::sync::Arc::new(transport.clone()));
+    // DuckDuckGoHtmlSearch needs the same transport the WebAccess fetch uses.
+    let access = WebAccess::new(
+        std::sync::Arc::new(transport),
+        std::sync::Arc::new(search),
+        ContentStore::new(),
+        Limits::default(),
+    );
+    let found = access.search("example domain", Some(5)).await.unwrap();
+    assert_eq!(found.provider, "duckduckgo_html");
+    assert_eq!(found.hits.len(), 1);
+    assert_eq!(found.hits[0].url, "https://example.com/");
+    assert_eq!(found.hits[0].title.as_deref(), Some("Example"));
+}
+
+#[test]
+fn definitions_register_web_tools_not_search_query() {
+    let defs = definitions();
+    let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["web.search", "web.fetch", "web.extract"]);
+    assert!(!names.contains(&"search.query"));
+}
+
+#[test]
+fn options_fixture_builds_without_network_client_path() {
+    let access = WebAccessOptions::fixture().build().unwrap();
+    assert!(access.store().is_empty());
+}
+
+#[test]
+fn pdf_scope_is_literal_only_not_full_engine() {
+    // Compressed / binary streams without parenthesis literals yield extract failure —
+    // documenting that we do not claim full PDF support.
+    let access = fixture_stack();
+    let pdf =
+        b"%PDF-1.4\n1 0 obj<< /Length 4 >>stream\n\x00\x01\x02\x03\nendstream\nendobj\n%%EOF\n";
+    let err = access
+        .extract_bytes(
+            "https://example.com/bin.pdf",
+            "https://example.com/bin.pdf",
+            Some("application/pdf"),
+            pdf,
+        )
+        .expect_err("no literals");
+    assert_eq!(err.diagnostic().class, FailureClass::ExtractFailed);
+}

@@ -549,6 +549,7 @@ dependencies = [
  "cayw-codemode",
  "cayw-data",
  "cayw-device",
+ "cayw-web-access",
  "cayw-workspace",
  "futures",
  "serde",
@@ -784,6 +785,7 @@ dependencies = [
 name = "cayw-web-access"
 version = "0.1.0"
 dependencies = [
+ "cayw-ai",
  "html5gum",
  "reqwest",
  "serde",

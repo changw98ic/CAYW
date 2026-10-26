@@ -112,6 +112,13 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
                 .map(|definition| (definition, Executor::Terminal)),
         );
     }
+    if config.web_access.is_some() {
+        definitions.extend(
+            cayw_web_access::definitions()
+                .into_iter()
+                .map(|definition| (definition, Executor::WebAccess)),
+        );
+    }
     if config.external.is_some() {
         definitions.extend([
             definition("search.query", "Query the application's existing bounded search service.", json!({
