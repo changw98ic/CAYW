@@ -545,6 +545,9 @@ impl CellBackend for Backend {
             Ok(()) if crate::content::is_tool(name) => {
                 crate::content::invoke(&scope, &self.base, arguments, cancel).await
             }
+            Ok(()) if crate::background::is_tool(name) => {
+                crate::background::invoke(&scope, &self.base, arguments, cancel).await
+            }
             Ok(())
                 if crate::children::is_capability(name)
                     && self.context.inner.config.local_agents.is_some() =>

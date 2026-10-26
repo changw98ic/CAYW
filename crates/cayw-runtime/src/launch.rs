@@ -239,6 +239,10 @@ impl HeadlessConfig {
             .map_err(|_| invalid("has an invalid process profile or Host budget"))?;
         let mut definitions = cayw_codemode::CapabilityHost::capabilities(&host);
         definitions.extend(crate::content::definitions(config.content.as_ref()));
+        definitions.extend(crate::background::definitions(
+            config.background.as_ref(),
+            &config.host.profiles,
+        ));
         for permission in self.permissions {
             if !permission.arguments.is_object() {
                 return Err(invalid("permission arguments must be an object"));

@@ -96,6 +96,10 @@ pub(crate) fn operation_definitions(inner: &Inner, host: &cayw_host::Host) -> Ve
     definitions.extend(crate::collaboration::definitions());
     definitions.extend(crate::children::definitions(inner));
     definitions.extend(crate::content::definitions(inner.config.content.as_ref()));
+    definitions.extend(crate::background::definitions(
+        inner.config.background.as_ref(),
+        &inner.config.host.profiles,
+    ));
     definitions
 }
 fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {
@@ -141,6 +145,11 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
     let identity = json!({
         "base_policy": base_policy,
         "local_agents": local_agents,
+        "background": inner.config.background.as_ref().map(|c| json!({
+            "max_tasks": c.max_tasks,
+            "max_log_bytes": c.max_log_bytes,
+            "max_retained_finished": c.max_retained_finished,
+        })),
         "cells": {
             "max_cells": cells.max_cells,
             "max_running": cells.max_running,
