@@ -35,6 +35,5 @@ pub fn collect_applied_section(
 pub fn applied_feedback_section(
     outcomes: &[ApplyOutcome],
 ) -> Result<Option<(String, String)>, PlannotatorError> {
-    Ok(collect_applied_section(outcomes)?
-        .map(|body| (FEEDBACK_SECTION_KEY.to_string(), body)))
+    Ok(collect_applied_section(outcomes)?.map(|body| (FEEDBACK_SECTION_KEY.to_string(), body)))
 }

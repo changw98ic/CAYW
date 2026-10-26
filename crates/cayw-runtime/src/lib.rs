@@ -38,6 +38,7 @@ mod values;
 pub use audit::{AuditRecord, GrantRecord};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
+pub use cayw_plannotator::{FeedbackDecision, FeedbackDraft, LiveFileVersion, StructuredFeedback};
 pub use cayw_requests::TaskIntent;
 pub use children::LocalAgents;
 pub use collaboration::{
@@ -52,9 +53,6 @@ pub use model_requests::{
 };
 pub use permissions::{ApprovalChoice, ScopedPermission};
 pub use plannotator::PlanFeedbackInput;
-pub use cayw_plannotator::{
-    FeedbackDecision, FeedbackDraft, LiveFileVersion, StructuredFeedback,
-};
 pub use processes::{ProcessCleanupInspection, ProcessCleanupProcess};
 pub use provider::{ConfiguredProvider, ProviderApi, ProviderConfig, ProviderService};
 pub use queue::{TaskPriority, TaskRecord, TaskState};

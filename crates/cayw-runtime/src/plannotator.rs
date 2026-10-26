@@ -5,9 +5,9 @@ use crate::{Inner, Runtime, RuntimeError, collaboration, lock};
 use cayw_ai::{Message, SystemMessage};
 use cayw_core::CoreEvent;
 use cayw_plannotator::{
-    ApplyContext, ApplyOutcome, FeedbackDecision, FeedbackDraft, FeedbackStore,
-    FileVersionBinding, LiveFileVersion, StructuredFeedback, TargetKind,
-    applied_feedback_section, apply_feedback_for_attempt,
+    ApplyContext, ApplyOutcome, FeedbackDecision, FeedbackDraft, FeedbackStore, FileVersionBinding,
+    LiveFileVersion, StructuredFeedback, TargetKind, applied_feedback_section,
+    apply_feedback_for_attempt,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -81,10 +81,7 @@ fn hydrate_session(inner: &Inner, session: &str) -> Result<(), RuntimeError> {
         if kind != FEEDBACK_RECORDED {
             continue;
         }
-        let payload = data
-            .get("decision")
-            .cloned()
-            .unwrap_or(data);
+        let payload = data.get("decision").cloned().unwrap_or(data);
         let feedback: StructuredFeedback = serde_json::from_value(payload).map_err(|error| {
             RuntimeError::InvalidInput(format!("invalid plannotator feedback event: {error}"))
         })?;
@@ -158,9 +155,9 @@ impl Runtime {
         &self,
         input: PlanFeedbackInput,
     ) -> Result<StructuredFeedback, RuntimeError> {
-        let plan = self.plan(&input.session_id)?.ok_or_else(|| {
-            RuntimeError::InvalidInput("session has no plan to annotate".into())
-        })?;
+        let plan = self
+            .plan(&input.session_id)?
+            .ok_or_else(|| RuntimeError::InvalidInput("session has no plan to annotate".into()))?;
         let path = plan_path(&plan.task_id);
         let sha = plan_content_sha(&plan.steps)?;
         let current_attempt = attempt_ordinal(&self.inner, &input.session_id)?;
@@ -288,10 +285,7 @@ pub(crate) fn feedback_messages_for_attempt(
 }
 
 /// Sync live plan identity from Core before apply when a plan exists.
-pub(crate) fn refresh_plan_live_files(
-    inner: &Inner,
-    session_id: &str,
-) -> Result<(), RuntimeError> {
+pub(crate) fn refresh_plan_live_files(inner: &Inner, session_id: &str) -> Result<(), RuntimeError> {
     let events = collaboration::read_log(inner, session_id)?;
     let Some(stored) = latest_plan_any(&events)? else {
         return Ok(());

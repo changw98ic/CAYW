@@ -18,10 +18,15 @@ pub struct FeedbackDraft {
 }
 
 /// Process-local store (first cut). Durable Session ledger wiring is later.
+///
+/// Feedback IDs are globally unique (`fb-{uuid}`) so per-Session lazy restore
+/// cannot collide with newly allocated IDs after process restart. Legacy
+/// monotonic `fb-N` records remain readable; restore is idempotent on
+/// `(session_id, feedback_id)` so an unrelated session's same legacy id does
+/// not swallow another session's record.
 #[derive(Debug, Default, Clone)]
 pub struct FeedbackStore {
     items: Vec<StructuredFeedback>,
-    next_id: u64,
 }
 
 impl FeedbackStore {
@@ -35,9 +40,8 @@ impl FeedbackStore {
     /// Agent attempt sees the structured feedback (SLICE I smoke).
     pub fn submit(&mut self, draft: FeedbackDraft) -> Result<StructuredFeedback, PlannotatorError> {
         validate_draft(&draft)?;
-        self.next_id = self.next_id.saturating_add(1);
         let feedback = StructuredFeedback {
-            feedback_id: format!("fb-{}", self.next_id),
+            feedback_id: allocate_feedback_id(),
             session_id: draft.session_id,
             target: draft.target,
             decision: draft.decision,
@@ -82,20 +86,20 @@ impl FeedbackStore {
     /// Rehydrate one previously recorded feedback (Core event replay / import).
     ///
     /// Skips draft validation; callers must supply already-accepted records.
-    /// Idempotent on `feedback_id`.
+    /// Idempotent on `(session_id, feedback_id)` — a colliding id from another
+    /// session does not suppress restore (legacy `fb-N` restart hazard).
     pub fn restore(&mut self, feedback: StructuredFeedback) {
-        if self.items.iter().any(|item| item.feedback_id == feedback.feedback_id) {
+        if self.items.iter().any(|item| {
+            item.feedback_id == feedback.feedback_id && item.session_id == feedback.session_id
+        }) {
             return;
-        }
-        if let Some(n) = feedback
-            .feedback_id
-            .strip_prefix("fb-")
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            self.next_id = self.next_id.max(n);
         }
         self.items.push(feedback);
     }
+}
+
+fn allocate_feedback_id() -> String {
+    format!("fb-{}", uuid::Uuid::new_v4())
 }
 
 fn validate_draft(draft: &FeedbackDraft) -> Result<(), PlannotatorError> {
@@ -160,4 +164,116 @@ fn validate_draft(draft: &FeedbackDraft) -> Result<(), PlannotatorError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FileVersionBinding, TargetKind};
+
+    fn draft(session: &str, target_id: &str) -> FeedbackDraft {
+        FeedbackDraft {
+            session_id: session.into(),
+            target: AnnotationTarget {
+                target_id: target_id.into(),
+                kind: TargetKind::Plan,
+                file: FileVersionBinding {
+                    path: format!("plan:{target_id}"),
+                    version: 1,
+                    content_sha256: "sha".into(),
+                },
+                label: None,
+            },
+            decision: FeedbackDecision::Approve,
+            comments: vec![],
+            summary: None,
+            created_at_ms: 1,
+            current_attempt: 0,
+        }
+    }
+
+    #[test]
+    fn submit_allocates_unique_uuid_ids() {
+        let mut store = FeedbackStore::new();
+        let a = store.submit(draft("s1", "t1")).unwrap();
+        let b = store.submit(draft("s1", "t2")).unwrap();
+        assert!(a.feedback_id.starts_with("fb-"));
+        assert!(b.feedback_id.starts_with("fb-"));
+        assert_ne!(a.feedback_id, b.feedback_id);
+        // UUID form: fb- + 36-char hyphenated uuid
+        assert_eq!(a.feedback_id.len(), 3 + 36);
+    }
+
+    #[test]
+    fn restore_does_not_swallow_legacy_id_from_other_session() {
+        // Simulates the pre-fix hazard: global fb-N + lazy per-session restore
+        // where session B claimed fb-1 after restart before session A hydrated.
+        let mut store = FeedbackStore::new();
+        let mut legacy_b = StructuredFeedback {
+            feedback_id: "fb-1".into(),
+            session_id: "sess-b".into(),
+            target: AnnotationTarget {
+                target_id: "tb".into(),
+                kind: TargetKind::Plan,
+                file: FileVersionBinding {
+                    path: "plan:b".into(),
+                    version: 1,
+                    content_sha256: "sha-b".into(),
+                },
+                label: None,
+            },
+            decision: FeedbackDecision::Approve,
+            comments: vec![],
+            summary: Some("new after restart".into()),
+            created_at_ms: 2,
+            visible_from_attempt: 1,
+        };
+        store.restore(legacy_b.clone());
+
+        let legacy_a = StructuredFeedback {
+            feedback_id: "fb-1".into(),
+            session_id: "sess-a".into(),
+            target: AnnotationTarget {
+                target_id: "ta".into(),
+                kind: TargetKind::Plan,
+                file: FileVersionBinding {
+                    path: "plan:a".into(),
+                    version: 1,
+                    content_sha256: "sha-a".into(),
+                },
+                label: None,
+            },
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![AnnotationComment {
+                comment_id: "c1".into(),
+                body: "old feedback".into(),
+                anchor: None,
+                created_at_ms: 1,
+            }],
+            summary: Some("old before restart".into()),
+            created_at_ms: 1,
+            visible_from_attempt: 2,
+        };
+        store.restore(legacy_a.clone());
+
+        assert_eq!(store.list_for_session("sess-a").len(), 1);
+        assert_eq!(store.list_for_session("sess-b").len(), 1);
+        assert_eq!(
+            store.list_for_session("sess-a")[0].summary.as_deref(),
+            Some("old before restart")
+        );
+        assert_eq!(
+            store.list_for_session("sess-b")[0].summary.as_deref(),
+            Some("new after restart")
+        );
+
+        // Idempotent for the same session+id.
+        legacy_b.summary = Some("mutated".into());
+        store.restore(legacy_b);
+        assert_eq!(
+            store.list_for_session("sess-b")[0].summary.as_deref(),
+            Some("new after restart")
+        );
+        assert_eq!(store.len(), 2);
+    }
 }

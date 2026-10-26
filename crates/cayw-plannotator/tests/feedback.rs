@@ -326,7 +326,7 @@ fn rejected_outcomes_do_not_inject() {
 }
 
 #[test]
-fn restore_is_idempotent_and_advances_ids() {
+fn restore_is_idempotent_and_new_ids_stay_unique() {
     let mut store = FeedbackStore::new();
     let fb = store
         .submit(FeedbackDraft {
@@ -353,4 +353,40 @@ fn restore_is_idempotent_and_advances_ids() {
         })
         .expect("submit");
     assert_ne!(again.feedback_id, fb.feedback_id);
+    assert!(fb.feedback_id.starts_with("fb-"));
+    assert!(again.feedback_id.starts_with("fb-"));
+}
+
+#[test]
+fn legacy_fb_n_restore_survives_cross_session_collision() {
+    // Would fail with global next_id + restore keyed only on feedback_id:
+    // after restart, session B claims fb-1 before session A hydrates, and A's
+    // restore is skipped — old feedback swallowed.
+    let mut store = FeedbackStore::new();
+    store.restore(StructuredFeedback {
+        feedback_id: "fb-1".into(),
+        session_id: "sess-b".into(),
+        target: target("tb", "plans/b.md", 1, "sha-b"),
+        decision: FeedbackDecision::Approve,
+        comments: vec![],
+        summary: Some("b-new".into()),
+        created_at_ms: 2,
+        visible_from_attempt: 1,
+    });
+    store.restore(StructuredFeedback {
+        feedback_id: "fb-1".into(),
+        session_id: "sess-a".into(),
+        target: target("ta", "plans/a.md", 1, "sha-a"),
+        decision: FeedbackDecision::DenyWithFeedback,
+        comments: vec![comment("c1", "keep me")],
+        summary: Some("a-old".into()),
+        created_at_ms: 1,
+        visible_from_attempt: 2,
+    });
+    assert_eq!(store.list_for_session("sess-a").len(), 1);
+    assert_eq!(store.list_for_session("sess-b").len(), 1);
+    assert_eq!(
+        store.list_for_session("sess-a")[0].summary.as_deref(),
+        Some("a-old")
+    );
 }

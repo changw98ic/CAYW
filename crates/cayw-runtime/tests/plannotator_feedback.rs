@@ -6,9 +6,7 @@ use cayw_ai::{
 };
 use cayw_ipc::RpcHandler;
 use cayw_plannotator::{FEEDBACK_SECTION_KEY, FeedbackDecision};
-use cayw_runtime::{
-    PlanFeedbackInput, Runtime, RuntimeConfig, ScopedPermission, TaskState,
-};
+use cayw_runtime::{PlanFeedbackInput, Runtime, RuntimeConfig, ScopedPermission, TaskState};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +20,9 @@ impl Provider for Script {
             self.0,
             &format!("tool-{}", r.messages.len()),
         );
-        Box::pin(futures::stream::iter(vec![AssistantEvent::Done { message }]))
+        Box::pin(futures::stream::iter(vec![AssistantEvent::Done {
+            message,
+        }]))
     }
 }
 
@@ -46,7 +46,9 @@ impl Provider for Capture {
             self.script,
             &format!("tool-{}", r.messages.len()),
         );
-        Box::pin(futures::stream::iter(vec![AssistantEvent::Done { message }]))
+        Box::pin(futures::stream::iter(vec![AssistantEvent::Done {
+            message,
+        }]))
     }
 }
 
@@ -83,7 +85,10 @@ fn start(
 ) -> tokio::task::JoinHandle<Result<cayw_runtime::SessionView, cayw_runtime::RuntimeError>> {
     let rt = rt.clone();
     let id = id.to_string();
-    tokio::spawn(async move { rt.prompt(&id, "collaborate", CancellationToken::new()).await })
+    tokio::spawn(async move {
+        rt.prompt(&id, "collaborate", CancellationToken::new())
+            .await
+    })
 }
 
 #[tokio::test]
@@ -208,4 +213,76 @@ async fn applied_feedback_injects_system_section_on_next_prompt() {
         injected,
         "next attempt must carry {FEEDBACK_SECTION_KEY} section; seen={seen:?}"
     );
+}
+
+#[tokio::test]
+async fn restart_does_not_clobber_prior_session_feedback_ids() {
+    // Critical F08 audit path: global fb-N + lazy per-Session hydrate let a
+    // fresh session after restart allocate the same id and swallow the prior
+    // session's restored record. UUID ids + (session, id) restore fix this.
+    let (dir, rt) = setup(PLAN_SCRIPT);
+    let a = rt.create(None).unwrap().id;
+    start(&rt, &a).await.unwrap().unwrap();
+    let old = rt
+        .submit_plan_feedback(PlanFeedbackInput {
+            session_id: a.clone(),
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![cayw_plannotator::AnnotationComment {
+                comment_id: "c-old".into(),
+                body: "must survive restart".into(),
+                anchor: None,
+                created_at_ms: 1,
+            }],
+            summary: Some("session-a-old".into()),
+            actor: "tester".into(),
+        })
+        .unwrap();
+
+    // Simulate process restart with a new Runtime on the same Core db.
+    let rt2 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(Script(PLAN_SCRIPT)),
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig {
+            permissions: vec![ScopedPermission::exact("plan.update", plan_scope())],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // New session submits BEFORE the old session is hydrated (lazy restore).
+    let b = rt2.create(None).unwrap().id;
+    start(&rt2, &b).await.unwrap().unwrap();
+    let fresh = rt2
+        .submit_plan_feedback(PlanFeedbackInput {
+            session_id: b.clone(),
+            decision: FeedbackDecision::ApproveWithNotes,
+            comments: vec![cayw_plannotator::AnnotationComment {
+                comment_id: "c-new".into(),
+                body: "new session after restart".into(),
+                anchor: None,
+                created_at_ms: 2,
+            }],
+            summary: Some("session-b-new".into()),
+            actor: "tester".into(),
+        })
+        .unwrap();
+    assert_ne!(
+        fresh.feedback_id, old.feedback_id,
+        "new allocation must not reuse the durable id from the prior session"
+    );
+
+    // Hydrate the prior session afterward — its record must still be present.
+    let restored_a = rt2.plannotator_feedback(&a).unwrap();
+    assert_eq!(restored_a.len(), 1);
+    assert_eq!(restored_a[0].feedback_id, old.feedback_id);
+    assert_eq!(
+        restored_a[0].summary.as_deref(),
+        Some("session-a-old"),
+        "old feedback must not be swallowed by a same-id new record"
+    );
+    let restored_b = rt2.plannotator_feedback(&b).unwrap();
+    assert_eq!(restored_b.len(), 1);
+    assert_eq!(restored_b[0].feedback_id, fresh.feedback_id);
 }
