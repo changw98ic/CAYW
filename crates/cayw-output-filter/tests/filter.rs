@@ -153,3 +153,62 @@ fn compare_rejects_digest_mismatch() {
     .unwrap_err();
     assert!(err.to_string().contains("original_digest"));
 }
+
+#[test]
+fn passthrough_preserves_git_blame_porcelain_that_generic_splits() {
+    // Two-line line-porcelain (same shape Runtime git fixture produces).
+    let raw = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1 2
+author Fixture
+author-mail <fixture@example.invalid>
+author-time 1700000000
+author-tz +0000
+committer Fixture
+committer-mail <fixture@example.invalid>
+committer-time 1700000000
+committer-tz +0000
+summary fixture
+boundary
+filename note
+	alpha
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 2 2
+author Fixture
+author-mail <fixture@example.invalid>
+author-time 1700000000
+author-tz +0000
+committer Fixture
+committer-mail <fixture@example.invalid>
+committer-time 1700000000
+committer-tz +0000
+summary fixture
+boundary
+filename note
+	beta
+";
+    let generic = apply_filter(raw, FilterOptions::default()).unwrap();
+    assert!(
+        !(generic.filtered.contains("alpha") && generic.filtered.contains("beta")),
+        "default Generic head/tail must demonstrably drop a blamed content line: {}",
+        generic.filtered
+    );
+
+    let passthrough = apply_filter(
+        raw,
+        FilterOptions {
+            enabled: true,
+            profile: FilterProfile::Passthrough,
+            head_lines: 8,
+            tail_lines: 12,
+            max_lines: 0,
+        },
+    )
+    .unwrap();
+    assert!(passthrough.filtered.contains("alpha"));
+    assert!(passthrough.filtered.contains("beta"));
+    assert!(passthrough.filtered.contains("author Fixture"));
+    assert!(passthrough.filtered.contains("filename note"));
+    // dual_entry still retains original for offline compare; Host must not
+    // re-embed it in the capability JSON.
+    let dual = dual_entry(&passthrough);
+    assert_eq!(dual.original, raw);
+    assert_eq!(dual.summary, passthrough.filtered);
+}

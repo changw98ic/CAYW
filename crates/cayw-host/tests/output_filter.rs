@@ -1,4 +1,4 @@
-//! F02: Host process results present filtered summary + original dual entry.
+//! F02: Host process results present filtered summary without inlining original.
 #![cfg(unix)]
 
 use async_trait::async_trait;
@@ -102,7 +102,7 @@ fn host(root: &Path, config: HostConfig) -> Arc<Host> {
 }
 
 #[tokio::test]
-async fn process_profile_result_exposes_filtered_summary_and_original() {
+async fn process_profile_result_exposes_filtered_summary_without_inline_original() {
     let root = Root::new();
     let script = noisy_script(&root.0);
     let profile = Profile {
@@ -140,24 +140,22 @@ async fn process_profile_result_exposes_filtered_summary_and_original() {
     host.drain_processes().await.unwrap();
 
     let stdout = result["stdout"].as_str().unwrap();
-    let original = result["stdout_original"].as_str().unwrap();
     assert!(
-        original.contains("Compiling unused"),
-        "original must retain full capture"
+        result.get("stdout_original").is_none(),
+        "full original must not be inlined alongside the summary"
     );
     assert!(
-        original.contains("test result: ok."),
-        "original must retain test summary"
+        result.get("stderr_original").is_none(),
+        "full stderr original must not be inlined alongside the summary"
     );
     assert!(
         stdout.contains("test result: ok.") || stdout.contains("Finished "),
         "summary must keep cargo-like signal lines: {stdout}"
     );
+    // Per-test "ok" noise from the raw script should be reduced out of the summary.
     assert!(
-        stdout.len() < original.len(),
-        "filtered summary must be smaller than original ({} vs {})",
-        stdout.len(),
-        original.len()
+        !stdout.contains("test a::ok ... ok"),
+        "summary should drop per-test ok noise: {stdout}"
     );
     assert_eq!(result["output_filter"]["protocol_version"], 1);
     assert_eq!(
@@ -165,14 +163,37 @@ async fn process_profile_result_exposes_filtered_summary_and_original() {
         "cargo_like"
     );
     assert_eq!(result["output_filter"]["stdout"]["filter_enabled"], true);
+    assert_eq!(result["output_filter"]["stdout"]["original_inline"], false);
     assert_eq!(
         result["output_filter"]["stdout"]["reduction"]["changed"],
         true
     );
+    let original_bytes = result["output_filter"]["stdout"]["reduction"]["original_bytes"]
+        .as_u64()
+        .unwrap();
+    let filtered_bytes = result["output_filter"]["stdout"]["reduction"]["filtered_bytes"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        filtered_bytes < original_bytes,
+        "filtered summary must be smaller than original ({filtered_bytes} vs {original_bytes})"
+    );
+    assert_eq!(filtered_bytes as usize, stdout.len());
     let digest = result["output_filter"]["stdout"]["original_digest"]
         .as_str()
         .unwrap();
     assert_eq!(digest.len(), 64);
+    // Re-embedding the full capture would grow the agent payload by ~original_bytes.
+    let encoded = serde_json::to_string(&result).unwrap();
+    let mut with_original = result.clone();
+    with_original["stdout_original"] = json!("X".repeat(original_bytes as usize));
+    let dual_encoded = serde_json::to_string(&with_original).unwrap();
+    assert!(
+        dual_encoded.len() > encoded.len() + (original_bytes as usize / 2),
+        "inlining original must be what inflates the payload ({} vs {})",
+        encoded.len(),
+        dual_encoded.len()
+    );
 }
 
 #[tokio::test]

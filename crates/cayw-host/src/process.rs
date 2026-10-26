@@ -1178,19 +1178,31 @@ pub(crate) async fn execute_git_read(
 
 /// Resolve host filter options for one capability. Profile auto-selects for
 /// known process/git shapes; other fields come from `HostConfig::output_filter`.
+///
+/// Structured git records (`blame` / `log` / `show`) use Passthrough with no
+/// line cap so Generic head/tail selection cannot split porcelain records.
 fn output_filter_options(
     host: &Host,
     capability: &str,
 ) -> Option<cayw_output_filter::FilterOptions> {
     let mut options = host.config.output_filter.clone()?;
     if options.enabled {
-        options.profile = match capability {
+        match capability {
             "build.run" | "test.run" | "check.run" | "lint.run" | "format.run" => {
-                cayw_output_filter::FilterProfile::CargoLike
+                options.profile = cayw_output_filter::FilterProfile::CargoLike;
             }
-            "git.status" => cayw_output_filter::FilterProfile::GitStatusLike,
-            _ => options.profile,
-        };
+            "git.status" => {
+                options.profile = cayw_output_filter::FilterProfile::GitStatusLike;
+            }
+            // Line-porcelain blame and commit-oriented log/show must stay
+            // parseable; destructive Generic selection drops mid-record lines
+            // (e.g. first blamed content line) and breaks Runtime git tests.
+            "git.blame" | "git.log" | "git.show" => {
+                options.profile = cayw_output_filter::FilterProfile::Passthrough;
+                options.max_lines = 0;
+            }
+            _ => {}
+        }
     }
     Some(options)
 }
@@ -1198,7 +1210,7 @@ fn output_filter_options(
 fn stream_filter_fields(
     original: &str,
     options: &cayw_output_filter::FilterOptions,
-) -> Result<(String, String, Value), CapabilityError> {
+) -> Result<(String, Value), CapabilityError> {
     let filtered = cayw_output_filter::apply_filter(original, options.clone())
         .map_err(|error| failure(format!("output filter failed: {error}")))?;
     let dual = cayw_output_filter::dual_entry(&filtered);
@@ -1206,6 +1218,7 @@ fn stream_filter_fields(
         "original_digest": dual.original_digest,
         "filter_enabled": dual.filter_enabled,
         "applied_profile": dual.applied_profile,
+        "original_inline": false,
         "reduction": {
             "original_bytes": filtered.reduction.original_bytes,
             "filtered_bytes": filtered.reduction.filtered_bytes,
@@ -1214,8 +1227,11 @@ fn stream_filter_fields(
             "changed": filtered.reduction.changed,
         },
     });
-    // Agents/UI consume `summary` as the primary stream; original stays available.
-    Ok((dual.summary, dual.original, meta))
+    // Agent-facing payload is the summary only. Full original stays in the
+    // filter crate / dual_entry for offline compare; Host must not re-embed it
+    // inline (that would cancel context reduction). Oversized bodies may still
+    // be externalized by Runtime ContentStore auto-externalize (F01).
+    Ok((dual.summary, meta))
 }
 
 fn process_value(
@@ -1245,12 +1261,12 @@ fn process_value(
         "output_complete": result.output_complete,
     });
     if let Some(options) = filter.filter(|options| options.enabled) {
-        let (stdout, stdout_original, stdout_meta) = stream_filter_fields(&stdout_raw, &options)?;
-        let (stderr, stderr_original, stderr_meta) = stream_filter_fields(&stderr_raw, &options)?;
+        let (stdout, stdout_meta) = stream_filter_fields(&stdout_raw, &options)?;
+        let (stderr, stderr_meta) = stream_filter_fields(&stderr_raw, &options)?;
         value["stdout"] = json!(stdout);
         value["stderr"] = json!(stderr);
-        value["stdout_original"] = json!(stdout_original);
-        value["stderr_original"] = json!(stderr_original);
+        // Deliberately omit stdout_original/stderr_original from the capability
+        // result so the model context receives only the filtered summary (+ meta).
         value["output_filter"] = json!({
             "protocol_version": cayw_output_filter::OUTPUT_FILTER_PROTOCOL_VERSION,
             "stdout": stdout_meta,

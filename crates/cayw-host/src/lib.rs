@@ -148,9 +148,11 @@ pub struct HostConfig {
     pub workspace: Option<cayw_workspace::Limits>,
     /// Optional F02 command-output filter applied when presenting process/git
     /// results to agents/UI. `None` keeps the legacy stdout/stderr-only shape.
-    /// When `Some` and enabled, `stdout`/`stderr` are filtered summaries and
-    /// `stdout_original`/`stderr_original` retain the full capture (dual entry).
-    /// Task wall/cost are not measured here; callers pass those to compare APIs.
+    /// When `Some` and enabled, `stdout`/`stderr` are filtered summaries only;
+    /// the full capture is **not** re-embedded inline (digest + reduction live
+    /// under `output_filter`). Structured git reads (`blame`/`log`/`show`) use
+    /// Passthrough so porcelain records stay intact. Task wall/cost are not
+    /// measured here; callers pass those to compare APIs.
     pub output_filter: Option<FilterOptions>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }

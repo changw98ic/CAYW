@@ -2,7 +2,9 @@
 //!
 //! First cut:
 //! - toggleable [`FilterOptions`] with built-in deterministic profiles
-//! - dual entry: filtered summary **and** full original text (never dropped)
+//! - dual entry for offline compare: filtered summary **and** full original
+//! - Host presentation must inject only the summary into agent context (no
+//!   inline `stdout_original`); digest/reduction travel as metadata
 //! - output-reduction metrics kept separate from task wall/cost/re-read compare
 //!
 //! Host process/git presentation consumes this crate when

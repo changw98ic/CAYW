@@ -10,7 +10,7 @@ Issue [#33](https://github.com/changw98ic/CAYW/issues/33) **F02** / SLICE B 首�
 
 ## Host 接线
 
-`cayw-host` 的 `HostConfig::output_filter`（默认启用）在 process/git 结果呈现时调用本 crate；`stdout`/`stderr` 为摘要，`stdout_original`/`stderr_original` 为原文。
+`cayw-host` 的 `HostConfig::output_filter`（默认启用）在 process/git 结果呈现时调用本 crate；agent 侧 `stdout`/`stderr` **只含摘要**，并附 `output_filter` 元数据（digest/reduction）。完整原文不内联进 capability JSON（否则无真实减量）；`git.blame`/`log`/`show` 走 Passthrough 以免拆坏记录。`dual_entry` 仍供离线对比。
 
 ## 不做（本切片）
 

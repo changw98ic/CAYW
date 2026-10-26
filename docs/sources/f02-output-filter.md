@@ -29,8 +29,10 @@
 
 - `HostConfig::output_filter`：默认 `Some(FilterOptions::default())`
 - `build.run`/`test.run`/`check.run`/`lint.run`/`format.run` 与 `git.*` 读结果经 `process_value` 调用 `apply_filter` + `dual_entry`
-- 启用时 JSON 中 `stdout`/`stderr` 为摘要，`stdout_original`/`stderr_original` 为原文，并附 `output_filter` 元数据（含 `original_digest` / reduction）
+- 启用时 JSON 中 `stdout`/`stderr` **仅为**过滤摘要；**不**再内联 `stdout_original`/`stderr_original`（否则无真实上下文减量）。`output_filter` 元数据含 `original_digest` / reduction / `original_inline: false`
+- `git.blame` / `git.log` / `git.show` 自动 `Passthrough`（`max_lines=0`），避免 Generic head/tail 拆坏 porcelain 记录
 - 设为 `None` 或 `enabled: false` 保持旧 stdout/stderr-only 形状
+- 完整原文仍可由 filter crate 的 `dual_entry` 离线对比保留；超大结果走 Runtime F01 ContentStore 自动外置
 - 不测量任务 wall/cost（仍由调用方传入 `compare_filter_toggle`）
 - 终端流式 `terminal.read` 字节游标语义不变，本切片不改
 
