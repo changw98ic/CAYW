@@ -1,4 +1,4 @@
-# F09 / F19 / SLICE J+K 验收说明（2026-10-25）
+# F09 / F19 / SLICE J+K 验收说明（2026-10-25，含审计补强）
 
 ## 范围
 
@@ -16,9 +16,9 @@ cargo run -p cayw-artifacts --example offline_artifacts --locked
 
 ## 结果
 
-- 单元测试覆盖：HTML 预览与 Session 列表、重启快照恢复、只读动作、同 Session follow-up 意图、跨 Session 拒绝、版本不匹配拒绝、动作状态刷新恢复、外 Session 更新拒绝。
-- 示例打印预览字节、follow-up Accepted 与跨 Session Rejected，以及恢复后产物/动作数量；无网络、无 Provider、无真实模型请求。
+- 单元/集成覆盖：`ArtifactPreview` 渲染投影、内存与 `{root}/artifacts/recovery.json` 磁盘恢复、只读/状态动作、同 Session follow-up/tool **实调** `HostActionDispatch`、桥错误 Rejected、跨 Session / 版本不匹配拒绝且不调桥、外 Session 更新拒绝。
+- 示例打印 preview `content_type`、follow-up/tool Applied 与 bridge call 计数、跨 Session Rejected，以及磁盘恢复后产物/动作数量；无网络、无 Provider、无真实模型请求。
 
 ## 不做声明
 
-本记录不证明 F09/F19 全范围完成，也不证明 WebUI 渲染或 Runtime 真实启任务已交付。
+本记录不证明 F09/F19 全范围完成，也不证明 WebUI 外壳或生产 Runtime adapter 已合入主路径；证明的是协议层桥被真实调用，以及磁盘恢复路径可用。

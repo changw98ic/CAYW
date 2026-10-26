@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{validate_body, validate_id, validate_title};
-use crate::types::{ArtifactError, ArtifactRecord, PutArtifactRequest, UpdateArtifactRequest};
+use crate::types::{
+    ArtifactError, ArtifactPreview, ArtifactRecord, PutArtifactRequest, UpdateArtifactRequest,
+};
 
 /// In-memory artifact catalog keyed by `artifact_id`.
 #[derive(Debug, Default)]
@@ -117,9 +119,10 @@ impl ArtifactStore {
             .ok_or_else(|| ArtifactError::NotFound(artifact_id.to_owned()))
     }
 
-    /// Preview projection: title + kind + body + version for UI/read-only consumers.
-    pub fn preview(&self, artifact_id: &str) -> Result<ArtifactRecord, ArtifactError> {
-        self.get(artifact_id)
+    /// Renderer projection for UI / read-only consumers (not the storage record).
+    pub fn preview(&self, artifact_id: &str) -> Result<ArtifactPreview, ArtifactError> {
+        let record = self.get(artifact_id)?;
+        Ok(ArtifactPreview::from_record(&record))
     }
 
     pub fn list_by_session(&self, session_id: &str) -> Result<Vec<ArtifactRecord>, ArtifactError> {
@@ -194,7 +197,8 @@ mod tests {
             .unwrap();
         assert_eq!(put.content_version, 1);
         let preview = store.preview("card-1").unwrap();
-        assert_eq!(preview.body, "<p>hello</p>");
+        assert_eq!(preview.html, "<p>hello</p>");
+        assert_eq!(preview.content_type, ArtifactPreview::HTML_CONTENT_TYPE);
         let updated = store
             .update(UpdateArtifactRequest {
                 artifact_id: "card-1".into(),

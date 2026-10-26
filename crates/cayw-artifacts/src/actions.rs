@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::dispatch::{FollowUpDispatch, HostActionDispatch, SharedHostDispatch, ToolDispatch};
 use crate::identity::validate_id;
 use crate::store::ArtifactStore;
 use crate::types::{
@@ -13,10 +14,22 @@ use crate::types::{
 };
 
 /// Dispatches and persists artifact actions with Session ownership checks.
-#[derive(Debug)]
+///
+/// `FollowUpTask` / `InvokeTool` call the injected [`HostActionDispatch`] bridge
+/// so they actually hand off to Runtime/Host (or a recording stand-in). They no
+/// longer stop at pending JSON.
 pub struct ActionProtocol {
     artifacts: Arc<ArtifactStore>,
+    dispatch: SharedHostDispatch,
     inner: Mutex<ActionInner>,
+}
+
+impl std::fmt::Debug for ActionProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionProtocol")
+            .field("artifacts", &self.artifacts)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -36,9 +49,10 @@ pub struct ActionSnapshot {
 }
 
 impl ActionProtocol {
-    pub fn new(artifacts: Arc<ArtifactStore>) -> Self {
+    pub fn new(artifacts: Arc<ArtifactStore>, dispatch: SharedHostDispatch) -> Self {
         Self {
             artifacts,
+            dispatch,
             inner: Mutex::new(ActionInner::default()),
         }
     }
@@ -47,7 +61,14 @@ impl ActionProtocol {
         &self.artifacts
     }
 
+    pub fn host_dispatch(&self) -> &SharedHostDispatch {
+        &self.dispatch
+    }
+
     /// Accept or reject an action. Never grants new Host capabilities.
+    ///
+    /// `FollowUpTask` / `InvokeTool` invoke [`HostActionDispatch`] and record
+    /// `Applied` on success or `Rejected` when the bridge returns an error.
     pub fn dispatch(&self, req: ActionRequest) -> Result<ActionOutcome, ArtifactError> {
         validate_id("action_id", &req.action_id).map_err(ArtifactError::Invalid)?;
         validate_id("artifact_id", &req.artifact_id).map_err(ArtifactError::Invalid)?;
@@ -94,18 +115,28 @@ impl ActionProtocol {
             return Ok(ActionOutcome { record });
         }
 
-        let (status, outcome_json) = apply_intent(&req, &mut guard)?;
-        let record = ActionRecord {
-            action_id: req.action_id.clone(),
-            artifact_id: req.artifact_id.clone(),
-            session_id: req.session_id.clone(),
-            kind: req.kind,
-            intent: req.intent,
-            status,
-            requested_at_ms: req.requested_at_ms,
-            recorded_at_ms,
-            rejection_reason: None,
-            outcome_json: Some(outcome_json),
+        // Drop the lock before calling the host bridge (may block / call out).
+        drop(guard);
+        let applied = apply_intent(&req, self.dispatch.as_ref(), &self.inner)?;
+        let mut guard = self.inner.lock().expect("action lock");
+        // Re-check duplicate in case of concurrent dispatch with same id.
+        if guard.actions.contains_key(&req.action_id) {
+            return Err(ArtifactError::DuplicateAction(req.action_id));
+        }
+        let record = match applied {
+            IntentApply::Applied { outcome_json } => ActionRecord {
+                action_id: req.action_id.clone(),
+                artifact_id: req.artifact_id.clone(),
+                session_id: req.session_id.clone(),
+                kind: req.kind,
+                intent: req.intent,
+                status: ActionStatus::Applied,
+                requested_at_ms: req.requested_at_ms,
+                recorded_at_ms,
+                rejection_reason: None,
+                outcome_json: Some(outcome_json),
+            },
+            IntentApply::Rejected { reason } => rejected_record(&req, recorded_at_ms, reason),
         };
         guard
             .actions
@@ -241,46 +272,69 @@ fn validate_intent(intent: &ActionIntent) -> Result<(), ArtifactError> {
     Ok(())
 }
 
+enum IntentApply {
+    Applied { outcome_json: String },
+    Rejected { reason: String },
+}
+
 fn apply_intent(
     req: &ActionRequest,
-    inner: &mut ActionInner,
-) -> Result<(ActionStatus, String), ArtifactError> {
+    dispatch: &dyn HostActionDispatch,
+    inner: &Mutex<ActionInner>,
+) -> Result<IntentApply, ArtifactError> {
     match &req.intent {
         ActionIntent::FollowUpTask { prompt } => {
-            let payload = json!({
-                "kind": "pending_follow_up_task",
-                "session_id": req.session_id,
-                "artifact_id": req.artifact_id,
-                "prompt": prompt,
-            });
-            Ok((ActionStatus::Accepted, payload.to_string()))
+            match dispatch.follow_up_task(FollowUpDispatch {
+                action_id: &req.action_id,
+                artifact_id: &req.artifact_id,
+                session_id: &req.session_id,
+                prompt,
+            }) {
+                Ok(result) => Ok(IntentApply::Applied {
+                    outcome_json: result.outcome_json,
+                }),
+                Err(reason) => Ok(IntentApply::Rejected {
+                    reason: format!("host_dispatch_follow_up: {reason}"),
+                }),
+            }
         }
         ActionIntent::InvokeTool { tool, args_json } => {
-            let payload = json!({
-                "kind": "pending_tool_invoke",
-                "session_id": req.session_id,
-                "artifact_id": req.artifact_id,
-                "tool": tool,
-                "args_json": args_json,
-            });
-            Ok((ActionStatus::Accepted, payload.to_string()))
+            match dispatch.invoke_tool(ToolDispatch {
+                action_id: &req.action_id,
+                artifact_id: &req.artifact_id,
+                session_id: &req.session_id,
+                tool,
+                args_json,
+            }) {
+                Ok(result) => Ok(IntentApply::Applied {
+                    outcome_json: result.outcome_json,
+                }),
+                Err(reason) => Ok(IntentApply::Rejected {
+                    reason: format!("host_dispatch_invoke_tool: {reason}"),
+                }),
+            }
         }
         ActionIntent::UpdateState { key, value_json } => {
-            let entry = inner.state.entry(req.artifact_id.clone()).or_default();
+            let mut guard = inner.lock().expect("action lock");
+            let entry = guard.state.entry(req.artifact_id.clone()).or_default();
             entry.insert(key.clone(), value_json.clone());
             let payload = json!({
                 "kind": "state_updated",
                 "artifact_id": req.artifact_id,
                 "key": key,
             });
-            Ok((ActionStatus::Applied, payload.to_string()))
+            Ok(IntentApply::Applied {
+                outcome_json: payload.to_string(),
+            })
         }
         ActionIntent::ReadOnly { note } => {
             let payload = json!({
                 "kind": "read_only",
                 "note": note,
             });
-            Ok((ActionStatus::Applied, payload.to_string()))
+            Ok(IntentApply::Applied {
+                outcome_json: payload.to_string(),
+            })
         }
     }
 }

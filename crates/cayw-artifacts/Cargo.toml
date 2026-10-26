@@ -14,6 +14,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 
 [[example]]
 name = "offline_artifacts"
