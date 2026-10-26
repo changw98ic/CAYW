@@ -64,9 +64,8 @@ impl FeedbackStore {
     /// durable write when memory was updated first). No-op if absent.
     pub fn rollback(&mut self, session_id: &str, feedback_id: &str) -> bool {
         let before = self.items.len();
-        self.items.retain(|item| {
-            !(item.session_id == session_id && item.feedback_id == feedback_id)
-        });
+        self.items
+            .retain(|item| !(item.session_id == session_id && item.feedback_id == feedback_id));
         self.items.len() != before
     }
 

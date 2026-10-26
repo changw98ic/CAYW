@@ -287,7 +287,6 @@ async fn restart_does_not_clobber_prior_session_feedback_ids() {
     assert_eq!(restored_b[0].feedback_id, fresh.feedback_id);
 }
 
-
 #[tokio::test]
 async fn persist_failure_leaves_no_injectable_memory_state() {
     // F08 durability consistency: submit must not leave memory-only feedback
@@ -346,9 +345,13 @@ async fn persist_failure_leaves_no_injectable_memory_state() {
     )
     .unwrap();
     assert!(rt2.plannotator_feedback(&id).unwrap().is_empty());
-    rt2.prompt(&id, "follow up after failed persist", CancellationToken::new())
-        .await
-        .unwrap();
+    rt2.prompt(
+        &id,
+        "follow up after failed persist",
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
     let seen = capture.seen.lock().unwrap().clone();
     assert!(!seen.is_empty(), "provider must see follow-up messages");
     let injected = seen.iter().any(|turn| {
