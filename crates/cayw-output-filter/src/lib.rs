@@ -5,8 +5,9 @@
 //! - dual entry: filtered summary **and** full original text (never dropped)
 //! - output-reduction metrics kept separate from task wall/cost/re-read compare
 //!
-//! Host/Runtime/CodeMode wiring and F01 result-handle persistence are out of
-//! scope. Design reference (not a code transplant):
+//! Host process/git presentation consumes this crate when
+//! `HostConfig::output_filter` is set (see `cayw-host`). F01 result-handle
+//! persistence remains out of scope. Design reference (not a code transplant):
 //! [rtk-ai/rtk](https://github.com/rtk-ai/rtk) (rtk-oss command filters).
 //! See `docs/sources/f02-output-filter.md`.
 #![forbid(unsafe_code)]

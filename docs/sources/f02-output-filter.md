@@ -25,9 +25,18 @@
 - 同任务开/关对比记录（wall / 可选 cost / 失败重读）与明确 disclaimer
 - 单元测试、`offline_filter` 示例、本源记录与 crate README
 
+## Host 接线（本分支后续提交）
+
+- `HostConfig::output_filter`：默认 `Some(FilterOptions::default())`
+- `build.run`/`test.run`/`check.run`/`lint.run`/`format.run` 与 `git.*` 读结果经 `process_value` 调用 `apply_filter` + `dual_entry`
+- 启用时 JSON 中 `stdout`/`stderr` 为摘要，`stdout_original`/`stderr_original` 为原文，并附 `output_filter` 元数据（含 `original_digest` / reduction）
+- 设为 `None` 或 `enabled: false` 保持旧 stdout/stderr-only 形状
+- 不测量任务 wall/cost（仍由调用方传入 `compare_filter_toggle`）
+- 终端流式 `terminal.read` 字节游标语义不变，本切片不改
+
 ## 明确未交付（后续）
 
-- Host 终端/`exec_command` 自动接线
+- 终端会话流式输出过滤
 - F01 ContentStore 结果句柄持久化对齐
 - 可配置 TOML 规则包与社区过滤器导入
 - 将 F02 全范围标为完成

@@ -9,6 +9,7 @@ mod git;
 mod process;
 mod read_fence;
 pub mod terminal;
+pub use cayw_output_filter::{FilterOptions, FilterProfile};
 pub use git::GitWritePolicy;
 pub use read_fence::{
     FenceRecovery, FrozenReadStamp, FrozenReadTicket, FrozenReadValue, PendingMutation,
@@ -145,6 +146,12 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
+    /// Optional F02 command-output filter applied when presenting process/git
+    /// results to agents/UI. `None` keeps the legacy stdout/stderr-only shape.
+    /// When `Some` and enabled, `stdout`/`stderr` are filtered summaries and
+    /// `stdout_original`/`stderr_original` retain the full capture (dual entry).
+    /// Task wall/cost are not measured here; callers pass those to compare APIs.
+    pub output_filter: Option<FilterOptions>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
 impl Default for HostConfig {
@@ -166,6 +173,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
+            output_filter: Some(FilterOptions::default()),
             external: None,
         }
     }

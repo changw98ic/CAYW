@@ -8,9 +8,13 @@ Issue [#33](https://github.com/changw98ic/CAYW/issues/33) **F02** / SLICE B 首�
 - `dual_entry`：同一 `original_digest` 下取 `summary` 与 `original`
 - `compare_filter_toggle`：同任务开/关对比；**输出减少量与 wall/cost/重读成本分列**，禁止把压缩率当作任务总收益
 
+## Host 接线
+
+`cayw-host` 的 `HostConfig::output_filter`（默认启用）在 process/git 结果呈现时调用本 crate；`stdout`/`stderr` 为摘要，`stdout_original`/`stderr_original` 为原文。
+
 ## 不做（本切片）
 
-- Host / Runtime / CodeMode / 终端自动接线
+- 终端流式输出过滤
 - 与 F01 结果句柄持久化对齐
 - 移植 RTK TOML 规则或压缩引擎
 - 将 F02 全范围标为完成

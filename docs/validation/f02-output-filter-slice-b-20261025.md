@@ -25,3 +25,14 @@ cargo run -p cayw-output-filter --example offline_filter --locked
 ## 不做声明
 
 本记录不证明 F02 全范围完成，也不证明 Host/Runtime/终端已接线或 F01 句柄已对齐。输出压缩率不得写成任务总收益。
+
+## Host 接线补记
+
+`HostConfig::output_filter` 默认启用；`cayw-host` 的 process/git 结果路径调用 `apply_filter`/`dual_entry`，agent/UI 看到的 `stdout`/`stderr` 为摘要并保留 `*_original`。
+
+```sh
+cargo test -p cayw-host --test output_filter --locked
+cargo test -p cayw-output-filter --locked
+```
+
+不声明终端流式过滤或 F01 句柄对齐已完成。

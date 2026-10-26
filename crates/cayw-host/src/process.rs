@@ -1135,7 +1135,7 @@ pub(crate) async fn execute(
                 .run_in_directory_with_resources(spec, cancel.clone(), None::<()>)
                 .await
                 .map_err(device_error)?;
-            process_value(result)
+            process_value(result, output_filter_options(host, name))
         }
         _ => Err(failure("unknown process capability")),
     }
@@ -1171,12 +1171,57 @@ pub(crate) async fn execute_git_read(
         .map_err(device_error)?;
     // Preserve an uncertain process terminal before reporting a read conflict.
     // A completed read with a replaced repository or index discards its data.
-    let result = process_value(result)?;
+    let result = process_value(result, output_filter_options(host, name))?;
     identity.verify(host)?;
     Ok(result)
 }
 
-fn process_value(result: cayw_device::ProcessResult) -> Result<Value, CapabilityError> {
+/// Resolve host filter options for one capability. Profile auto-selects for
+/// known process/git shapes; other fields come from `HostConfig::output_filter`.
+fn output_filter_options(
+    host: &Host,
+    capability: &str,
+) -> Option<cayw_output_filter::FilterOptions> {
+    let mut options = host.config.output_filter.clone()?;
+    if options.enabled {
+        options.profile = match capability {
+            "build.run" | "test.run" | "check.run" | "lint.run" | "format.run" => {
+                cayw_output_filter::FilterProfile::CargoLike
+            }
+            "git.status" => cayw_output_filter::FilterProfile::GitStatusLike,
+            _ => options.profile,
+        };
+    }
+    Some(options)
+}
+
+fn stream_filter_fields(
+    original: &str,
+    options: &cayw_output_filter::FilterOptions,
+) -> Result<(String, String, Value), CapabilityError> {
+    let filtered = cayw_output_filter::apply_filter(original, options.clone())
+        .map_err(|error| failure(format!("output filter failed: {error}")))?;
+    let dual = cayw_output_filter::dual_entry(&filtered);
+    let meta = json!({
+        "original_digest": dual.original_digest,
+        "filter_enabled": dual.filter_enabled,
+        "applied_profile": dual.applied_profile,
+        "reduction": {
+            "original_bytes": filtered.reduction.original_bytes,
+            "filtered_bytes": filtered.reduction.filtered_bytes,
+            "original_lines": filtered.reduction.original_lines,
+            "filtered_lines": filtered.reduction.filtered_lines,
+            "changed": filtered.reduction.changed,
+        },
+    });
+    // Agents/UI consume `summary` as the primary stream; original stays available.
+    Ok((dual.summary, dual.original, meta))
+}
+
+fn process_value(
+    result: cayw_device::ProcessResult,
+    filter: Option<cayw_output_filter::FilterOptions>,
+) -> Result<Value, CapabilityError> {
     if result.termination != TerminationReason::Exited || !result.output_complete {
         return Err(CapabilityError::unknown(format!(
             "process stopped with {:?}; exit={:?}, stdout_bytes={}, stderr_bytes={}, complete={}",
@@ -1189,16 +1234,31 @@ fn process_value(result: cayw_device::ProcessResult) -> Result<Value, Capability
     }
     // Text is lossy only at this JSON presentation boundary. Device byte budgets
     // are checked before allocation; the JSON result budget is checked afterward.
-    let value = json!({
-        "success":result.status.success(), "exit_code":result.status.code(),
-        "stdout":String::from_utf8_lossy(&result.stdout), "stderr":String::from_utf8_lossy(&result.stderr),
-        "termination":"exited", "output_complete":result.output_complete,
+    let stdout_raw = String::from_utf8_lossy(&result.stdout).into_owned();
+    let stderr_raw = String::from_utf8_lossy(&result.stderr).into_owned();
+    let mut value = json!({
+        "success": result.status.success(),
+        "exit_code": result.status.code(),
+        "stdout": stdout_raw.clone(),
+        "stderr": stderr_raw.clone(),
+        "termination": "exited",
+        "output_complete": result.output_complete,
     });
-    if !result.status.success() {
-        // A normal nonzero exit is a confirmed terminal result, not an unknown
-        // effect and not an assertion that a build has rolled back its outputs.
-        return Ok(value);
+    if let Some(options) = filter.filter(|options| options.enabled) {
+        let (stdout, stdout_original, stdout_meta) = stream_filter_fields(&stdout_raw, &options)?;
+        let (stderr, stderr_original, stderr_meta) = stream_filter_fields(&stderr_raw, &options)?;
+        value["stdout"] = json!(stdout);
+        value["stderr"] = json!(stderr);
+        value["stdout_original"] = json!(stdout_original);
+        value["stderr_original"] = json!(stderr_original);
+        value["output_filter"] = json!({
+            "protocol_version": cayw_output_filter::OUTPUT_FILTER_PROTOCOL_VERSION,
+            "stdout": stdout_meta,
+            "stderr": stderr_meta,
+        });
     }
+    // A normal nonzero exit is a confirmed terminal result, not an unknown
+    // effect and not an assertion that a build has rolled back its outputs.
     Ok(value)
 }
 
