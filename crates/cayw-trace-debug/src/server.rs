@@ -80,6 +80,7 @@ pub async fn serve(
         .route("/styles.css", get(styles))
         .route("/favicon.svg", get(favicon))
         .route("/api/state", get(state_route))
+        .route("/api/run-inspector", get(run_inspector_route))
         .route("/api/projects/{project_id}/edit", post(edit_route))
         .route("/api/projects/{project_id}/undo", post(undo_route))
         .fallback(not_found)
@@ -275,6 +276,18 @@ async fn wait_for_change(state: &Server, after: u64) -> Option<Document> {
             _ = tokio::time::sleep(POLL_INTERVAL.min(remaining)) => {}
         }
     }
+}
+
+
+/// Fold ingested Runtime events into run-inspector timelines (F06 product entry).
+async fn run_inspector_route(State(state): State<Arc<Server>>) -> Response {
+    let document = state.store.snapshot();
+    let timelines = cayw_run_inspector::timelines_from_runtime_events(&document.events);
+    Json(json!({
+        "protocol_version": cayw_run_inspector::RUN_INSPECTOR_PROTOCOL_VERSION,
+        "timelines": timelines,
+    }))
+    .into_response()
 }
 
 async fn edit_route(

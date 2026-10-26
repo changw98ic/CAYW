@@ -22,3 +22,11 @@ cargo run -p cayw-run-inspector --example offline_inspector --locked
 ## 不做声明
 
 本记录不证明 F06 全范围完成，也不证明迷宫 UI / Trace 接线已交付。
+
+
+## 续：Runtime / Trace 接线（审计补齐）
+
+- 翻译：`crates/cayw-run-inspector/src/from_runtime.rs`
+- 入口：`Runtime::run_inspector` + RPC `session.run_inspector`；Trace `GET /api/run-inspector`
+- 证明：`cargo test -p cayw-run-inspector --test from_runtime --locked`
+- 证明：`cargo test -p cayw-runtime --test run_inspector --locked`

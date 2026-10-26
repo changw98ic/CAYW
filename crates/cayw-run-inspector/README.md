@@ -12,17 +12,25 @@ CAYW 运行检查器（F06 首刀，SLICE G）：通用**重试/恢复路径**�
 - 单会话时间线：`RunTimeline`
 - 协议版本：`RUN_INSPECTOR_PROTOCOL_VERSION = 1`
 
-本切片**不**交付：迷宫 UI / 回放、CodeMode 内部工具 span、源码关联、节点重新求值接线、TUI/WebUI 渲染。
+本切片另含：`EventRecord` → `RunStep` 翻译（`from_runtime`）、Runtime RPC `session.run_inspector`、Trace `GET /api/run-inspector`。
+
+仍**不**交付：迷宫 UI / 回放、CodeMode 内部工具 span、源码关联、节点重新求值接线、完整 TUI/WebUI 渲染。
 
 ## 快速使用
 
 ```rust
 use cayw_run_inspector::*;
 
+let view = inspect_runtime_events(&session_id, Some(label), None, &event_records);
 let timeline = build_run_timeline(&snapshot_a);
 let compare = compare_sessions(&[snapshot_a, snapshot_b])?;
 assert!(compare.same_task);
 ```
+
+产品入口：
+
+- Runtime：`Runtime::run_inspector(session_id)` / RPC `session.run_inspector`
+- Trace Debug：`GET /api/run-inspector`（从已摄入的 `Document.events` 折叠）
 
 ## 来源与边界
 
@@ -35,8 +43,9 @@ assert!(compare.same_task);
 
 ```sh
 cargo test -p cayw-run-inspector --locked
+cargo test -p cayw-runtime --test run_inspector --locked
 cargo clippy -p cayw-run-inspector --all-targets --locked -- -D warnings
 cargo run -p cayw-run-inspector --example offline_inspector --locked
 ```
 
-测试为本地纯函数折叠，无网络、无 Provider、无真实 UI。
+折叠测试为本地纯函数；`from_runtime` / `run_inspector` 测试用真实 `EventRecord` / Runtime 事件页，无网络、无真实 UI。

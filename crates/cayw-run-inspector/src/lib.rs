@@ -11,8 +11,9 @@
 //! - per-session duration tracks (and wall-aligned tracks for compare)
 //! - session A/B turn-aligned comparison when `task_fingerprint` matches
 //!
-//! Maze UI, live replay, CodeMode internal spans, source association, and
-//! Trace Debug node re-eval wiring are out of scope for this slice.
+//! Runtime / Trace `EventRecord` → [`RunStep`] translation lives in
+//! [`from_runtime`]. Maze UI, live replay, CodeMode internal spans, source
+//! association, and Trace Debug node re-eval wiring stay out of scope.
 //!
 //! Design reference (not a code transplant):
 //! [lamost423/dsh-maze](https://github.com/lamost423/dsh-maze) (formerly
@@ -20,12 +21,17 @@
 #![forbid(unsafe_code)]
 
 mod compare;
+mod from_runtime;
 mod paths;
 mod timeline;
 mod tracks;
 mod types;
 
 pub use compare::{AlignedTurn, SessionCompare, TurnLane, compare_sessions};
+pub use from_runtime::{
+    RunInspectorView, inspect_runtime_events, params_digest, snapshot_from_runtime_events,
+    snapshots_from_runtime_events, timelines_from_runtime_events,
+};
 pub use paths::{RetryPath, build_retry_paths};
 pub use timeline::{RunTimeline, build_run_timeline};
 pub use tracks::{

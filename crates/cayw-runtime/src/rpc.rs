@@ -320,6 +320,10 @@ impl RpcHandler for Runtime {
                     .await?,
                 )
             }
+            "session.run_inspector" => {
+                let p: Session = parse(params)?;
+                encode(self.run_inspector(&p.session_id)?)
+            }
             "session.audit" => {
                 let p: Events = parse(params)?;
                 encode(self.audit(&p.session_id, p.after, p.limit)?)

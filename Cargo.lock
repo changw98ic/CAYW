@@ -644,8 +644,12 @@ dependencies = [
 name = "cayw-run-inspector"
 version = "0.1.0"
 dependencies = [
+ "cayw-agent",
+ "cayw-ai",
+ "cayw-core",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
@@ -669,6 +673,7 @@ dependencies = [
  "cayw-providers",
  "cayw-remote",
  "cayw-requests",
+ "cayw-run-inspector",
  "cayw-sources",
  "futures",
  "reqwest",
@@ -711,6 +716,7 @@ dependencies = [
  "cayw-codemode",
  "cayw-core",
  "cayw-ipc",
+ "cayw-run-inspector",
  "cayw-runtime",
  "futures",
  "reqwest",

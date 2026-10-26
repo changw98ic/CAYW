@@ -434,6 +434,23 @@ impl Runtime {
         self.get(id)?;
         Ok(self.inner.store.events(id, after, limit)?)
     }
+    /// Fold durable session events into a run-inspector view (F06).
+    ///
+    /// Reads the Core event log via the same authority as `events`, translates
+    /// tool execution pairs into `RunStep`s, then builds retry paths / tracks.
+    pub fn run_inspector(
+        &self,
+        id: &str,
+    ) -> Result<cayw_run_inspector::RunInspectorView, RuntimeError> {
+        let view = self.get(id)?;
+        let records = self.inner.store.events(id, 0, cayw_core::MAX_EVENT_PAGE)?;
+        Ok(cayw_run_inspector::inspect_runtime_events(
+            id,
+            Some(view.label),
+            None,
+            &records,
+        ))
+    }
     pub async fn wait_events(
         &self,
         id: &str,

@@ -22,7 +22,10 @@
 
 - `RetryPath` / `RunTimeline` / `DurationTrack` / `SessionCompare`
 - 两次失败重试路径可区分；同任务会话 A/B 墙钟轨道 + turn 对齐
-- 单元测试与 `offline_inspector` 示例
+- `EventRecord` → `RunStep` 翻译（`from_runtime`）与产品入口：
+  - Runtime `run_inspector` / RPC `session.run_inspector`
+  - Trace Debug `GET /api/run-inspector`
+- 单元测试、`from_runtime` 事件记录测试、Runtime 实事件烟测与 `offline_inspector` 示例
 - 本源记录与 crate README
 
 ## 明确未交付（后续切片）
@@ -30,7 +33,7 @@
 - 迷宫 UI、缩放回放、密度聚合徽标
 - CodeMode 内部工具 span、源码/符号关联
 - Trace Debug 节点重新求值接线
-- TUI / WebUI 渲染与 Runtime 事件直连导出
+- 完整 TUI / WebUI 渲染
 
 ## 验收口径（本切片）
 
