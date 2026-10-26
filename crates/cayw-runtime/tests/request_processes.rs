@@ -75,6 +75,14 @@ struct Script {
     calls: AtomicUsize,
     resume: Arc<Semaphore>,
 }
+impl Script {
+    /// Model turns before the post-yield wait. The budget test releases the
+    /// resume permit only after this turn has started so a banked permit cannot
+    /// race ahead of Host admission for the shared request/execution charge.
+    fn post_yield_turn_started(&self) -> bool {
+        self.calls.load(Ordering::Acquire) >= 2
+    }
+}
 impl Provider for Script {
     fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantStream {
         let message = cayw_runtime::fixture::script_response(
@@ -144,19 +152,26 @@ fn script(tail: &str) -> String {
         "local request=cayw.call('capability.request',{{purpose='run the project test selected by the user',gap='the project process requires a task grant',operation_id='project-test',capability='test.run',arguments={{profile='project-test'}}}}); cayw.emit(request); yield_control(); {tail}"
     )
 }
-fn open(project: &Project, config: RuntimeConfig, tail: &str, resume: Arc<Semaphore>) -> Runtime {
-    Runtime::open(
+fn open(
+    project: &Project,
+    config: RuntimeConfig,
+    tail: &str,
+    resume: Arc<Semaphore>,
+) -> (Runtime, Arc<Script>) {
+    let provider = Arc::new(Script {
+        script: script(tail),
+        calls: AtomicUsize::new(0),
+        resume,
+    });
+    let rt = Runtime::open(
         project.root.join("session.db"),
         project.workspace(),
-        Arc::new(Script {
-            script: script(tail),
-            calls: AtomicUsize::new(0),
-            resume,
-        }),
+        provider.clone(),
         Model::new("fixture", "task-project-process"),
         config,
     )
-    .unwrap()
+    .unwrap();
+    (rt, provider)
 }
 fn start(
     rt: &Runtime,
@@ -418,7 +433,7 @@ async fn one_trusted_project_request_runs_the_exact_real_test_after_approval() {
     let project = Project::new("project-allowed");
     let settings = config("complete");
     let resume = Arc::new(Semaphore::new(0));
-    let rt = open(
+    let (rt, _provider) = open(
         &project,
         settings.clone(),
         "return cayw.call('test.run',{profile='project-test'})",
@@ -469,7 +484,7 @@ async fn one_trusted_project_request_runs_the_exact_real_test_after_approval() {
     ));
     snapshot(&project, &rt, &task, &record, "project-completed");
     drop(rt);
-    let reopened = open(
+    let (reopened, _) = open(
         &project,
         settings,
         "return nil",
@@ -490,7 +505,7 @@ async fn one_trusted_project_request_runs_the_exact_real_test_after_approval() {
 async fn revoking_before_project_launch_never_starts_the_program() {
     let project = Project::new("project-revoke-before");
     let resume = Arc::new(Semaphore::new(0));
-    let rt = open(
+    let (rt, _provider) = open(
         &project,
         config("complete"),
         "return cayw.call('test.run',{profile='project-test'})",
@@ -527,7 +542,7 @@ async fn revoking_a_running_project_stops_its_original_process_and_preserves_eff
     let project = Project::new("project-revoke-running");
     let settings = config("wait");
     let resume = Arc::new(Semaphore::new(0));
-    let rt = open(
+    let (rt, _provider) = open(
         &project,
         settings.clone(),
         "return cayw.call('test.run',{profile='project-test'})",
@@ -574,7 +589,7 @@ async fn revoking_a_running_project_stops_its_original_process_and_preserves_eff
     );
     snapshot(&project, &rt, &task, &record, "revoked-running-settled");
     drop(rt);
-    let reopened = open(
+    let (reopened, _) = open(
         &project,
         settings,
         "return nil",
@@ -607,7 +622,7 @@ async fn revoking_a_running_project_stops_its_original_process_and_preserves_eff
 async fn authenticated_revoke_stops_the_already_started_original_project_process() {
     let project = Project::new("project-revoke-rpc");
     let resume = Arc::new(Semaphore::new(0));
-    let rt = open(
+    let (rt, _provider) = open(
         &project,
         config("wait"),
         "return cayw.call('test.run',{profile='project-test'})",
@@ -707,7 +722,7 @@ async fn authenticated_revoke_stops_the_already_started_original_project_process
 async fn revoked_project_keeps_its_slot_until_cleanup_is_recorded_and_recovery_runs() {
     let project = Project::new("project-cleanup-record-failed");
     let resume = Arc::new(Semaphore::new(0));
-    let rt = open(
+    let (rt, _provider) = open(
         &project,
         config("wait"),
         "return cayw.call('test.run',{profile='project-test'})",
@@ -858,7 +873,7 @@ async fn requested_project_keeps_profile_host_process_and_call_time_limits() {
             _ => unreachable!(),
         }
         let resume = Arc::new(Semaphore::new(0));
-        let rt = open(
+        let (rt, _provider) = open(
             &project,
             settings,
             "return cayw.call('test.run',{profile='project-test'})",
@@ -904,7 +919,7 @@ async fn requested_project_keeps_profile_and_host_combined_output_limits() {
             _ => unreachable!(),
         }
         let resume = Arc::new(Semaphore::new(0));
-        let rt = open(
+        let (rt, _provider) = open(
             &project,
             settings,
             "return cayw.call('test.run',{profile='project-test'})",
@@ -940,7 +955,7 @@ async fn project_request_and_execution_share_the_existing_host_call_budget() {
     let mut settings = config("complete");
     settings.host.max_calls = 2;
     let resume = Arc::new(Semaphore::new(0));
-    let rt = open(
+    let (rt, provider) = open(
         &project,
         settings,
         "local first=cayw.call('test.run',{profile='project-test'}); return cayw.call('test.run',{profile='project-test'})",
@@ -948,11 +963,26 @@ async fn project_request_and_execution_share_the_existing_host_call_budget() {
     );
     let (session, task, worker) = start(&rt);
     let record = approve(&rt, &project, &task).await;
+    // Release only after the post-yield model turn is blocked on the shared
+    // resume permit, so Host still sees capability.request + first test.run as
+    // the two charges under max_calls=2.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !provider.post_yield_turn_started() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("post-yield model turn did not start after approval");
     resume.add_permits(1);
-    assert!(matches!(
-        finished(worker).await,
-        Err(RuntimeError::Worker(ref reason)) if reason == "host call or total byte budget exhausted"
-    ));
+    let terminal = finished(worker).await;
+    assert!(
+        matches!(
+            &terminal,
+            Err(RuntimeError::Worker(reason))
+                if reason == "host call or total byte budget exhausted"
+        ),
+        "request tool and first test.run must share the existing Host call budget; got {terminal:?}"
+    );
     let view = rt.get(&session).unwrap();
     assert_eq!(view.state, SessionState::Idle);
     assert!(view.unresolved_calls.is_empty());
