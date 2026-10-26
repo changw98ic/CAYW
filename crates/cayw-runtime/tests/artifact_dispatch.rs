@@ -180,7 +180,15 @@ fn recovery_round_trip_keeps_runtime_dispatch() {
     .unwrap();
 
     let path = rt.save_artifact_recovery().unwrap();
-    assert_eq!(path, dir.path().join("workspace/artifacts/recovery.json"));
+    // Runtime::open canonicalizes the workspace root; compare that way so macOS
+    // /var vs /private/var does not break the assertion (Linux is a no-op).
+    assert_eq!(
+        path.canonicalize().unwrap(),
+        dir.path()
+            .join("workspace/artifacts/recovery.json")
+            .canonicalize()
+            .unwrap()
+    );
 
     // Peer Runtime on the same workspace loads recovery with RuntimeHostDispatch.
     let peer = Runtime::open(
