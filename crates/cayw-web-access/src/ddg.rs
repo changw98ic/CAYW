@@ -182,8 +182,11 @@ fn prefix_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 }
 
 fn nearby_snippet(full: &str, result_idx: usize) -> Option<String> {
-    let window_end = (result_idx + 1200).min(full.len());
-    let window = &full[result_idx..window_end];
+    // `result_idx + 1200` is a raw byte offset and can land mid Chinese / emoji
+    // scalar; slicing `&full[result_idx..window_end]` then panics. Floor both ends.
+    let start = full.floor_char_boundary(result_idx.min(full.len()));
+    let window_end = full.floor_char_boundary(start.saturating_add(1200).min(full.len()));
+    let window = &full[start..window_end];
     for marker in ["result__snippet", "result__body"] {
         if let Some(m) = window.find(marker) {
             let slice = &window[m..];
@@ -325,5 +328,63 @@ mod tests {
         assert_eq!(prefix_at_char_boundary(s, 2), "");
         assert_eq!(prefix_at_char_boundary(s, 3), "中");
         assert_eq!(prefix_at_char_boundary(s, 100), s);
+    }
+
+    /// Window cut at `result_idx + 1200` used to panic when that byte offset
+    /// landed mid multi-byte Chinese / emoji scalar (separate from the 280 cap).
+    #[test]
+    fn nearby_snippet_window_cut_mid_scalar_does_not_panic() {
+        let base =
+            r#"<a class="result__a" href="https://x.com/">T</a><span class="result__snippet">"#;
+        let idx = base.find("result__a").expect("marker");
+        let after_marker_bytes = base[idx..].len();
+        // Pad ASCII so result_idx+1200 falls inside '中' (continuation byte).
+        let pad = 1199 - after_marker_bytes;
+        assert!(pad > 0, "fixture pad must be positive");
+        let zh = "中文emoji🚀".repeat(50);
+        let html = format!("<div>{base}{}{zh}</span></div>", "x".repeat(pad));
+        let result_idx = html.find("result__a").expect("result__a");
+        let raw_end = result_idx + 1200;
+        assert!(raw_end < html.len());
+        assert!(
+            !html.is_char_boundary(raw_end),
+            "fixture must place window_end mid-scalar"
+        );
+        // Direct call — previously panicked on `&full[result_idx..raw_end]`.
+        let snip = nearby_snippet(&html, result_idx);
+        assert!(snip.is_some());
+        let snip = snip.unwrap();
+        assert!(snip.contains('x') || snip.contains('中') || snip.contains('🚀'));
+        assert!(snip.is_char_boundary(snip.len()));
+
+        let hits = parse_duckduckgo_html(&html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://x.com/");
+        assert!(hits[0].snippet.is_some());
+    }
+
+    /// `result__body` marker path must also survive a mid-scalar window end.
+    #[test]
+    fn nearby_snippet_result_body_window_mid_scalar() {
+        let base = r#"<a class="result__a" href="https://example.cn/z">标题🚀</a><div class="result__body">"#;
+        let idx = base.find("result__a").expect("marker");
+        let after_marker_bytes = base[idx..].len();
+        let pad = 1199 - after_marker_bytes;
+        assert!(pad > 0);
+        let zh = "摘要内容✨".repeat(80);
+        let html = format!("<div>{base}{}{zh}</div></div>", "y".repeat(pad));
+        let result_idx = html.find("result__a").expect("result__a");
+        assert!(!html.is_char_boundary(result_idx + 1200));
+        let snip = nearby_snippet(&html, result_idx).expect("snippet");
+        assert!(snip.is_char_boundary(snip.len()));
+        let hits = parse_duckduckgo_html(&html);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].title.as_deref().unwrap_or("").contains('🚀'));
+    }
+
+    #[test]
+    fn nearby_snippet_accepts_result_idx_past_end() {
+        assert_eq!(nearby_snippet("short", 999), None);
+        assert_eq!(nearby_snippet("", 0), None);
     }
 }
