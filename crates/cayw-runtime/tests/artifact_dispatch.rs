@@ -279,11 +279,11 @@ fn follow_up_action_cancel_cancels_queued_task_and_audits() {
     let audit = rt.audit(&session, 0, 100).unwrap();
     let kinds: Vec<_> = audit.iter().map(|e| e.kind.as_str()).collect();
     assert!(
-        kinds.iter().any(|k| *k == "artifact.action.applied"),
+        kinds.contains(&"artifact.action.applied"),
         "expected applied audit row, got {kinds:?}"
     );
     assert!(
-        kinds.iter().any(|k| *k == "artifact.action.cancelled"),
+        kinds.contains(&"artifact.action.cancelled"),
         "expected cancelled audit row, got {kinds:?}"
     );
 }
