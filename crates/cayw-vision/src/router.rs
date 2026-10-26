@@ -9,6 +9,7 @@ use crate::pixel::{
 use crate::types::{
     CropResult, DescribeRequest, DescribeResult, OcrRequest, OcrResult, VisionError,
 };
+use cayw_ai::CancellationToken;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,11 @@ use std::sync::{Arc, Mutex};
 /// Local / fixture OCR engine. Production hosts inject a real backend later.
 pub trait OcrEngine: Send + Sync {
     fn name(&self) -> &str;
-    fn recognize(&self, image: &ImageBuffer) -> Result<String, VisionError>;
+    fn recognize(
+        &self,
+        image: &ImageBuffer,
+        cancel: &CancellationToken,
+    ) -> Result<String, VisionError>;
 }
 
 /// Visual Q&A / describe backend. Each successful call is one billable request
@@ -26,6 +31,7 @@ pub trait DescribeBackend: Send + Sync {
         &self,
         image: &ImageBuffer,
         request: &DescribeRequest,
+        cancel: &CancellationToken,
     ) -> Result<String, VisionError>;
     fn billed_requests(&self) -> u64;
 }
@@ -61,7 +67,14 @@ impl OcrEngine for FixtureOcrEngine {
         "fixture"
     }
 
-    fn recognize(&self, image: &ImageBuffer) -> Result<String, VisionError> {
+    fn recognize(
+        &self,
+        image: &ImageBuffer,
+        cancel: &CancellationToken,
+    ) -> Result<String, VisionError> {
+        if cancel.is_cancelled() {
+            return Err(VisionError::Cancelled);
+        }
         self.by_sha.get(image.sha256()).cloned().ok_or_else(|| {
             VisionError::OcrFailed(format!("no fixture OCR text for image {}", image.sha256()))
         })
@@ -103,7 +116,11 @@ impl DescribeBackend for CountingDescribeBackend {
         &self,
         image: &ImageBuffer,
         request: &DescribeRequest,
+        cancel: &CancellationToken,
     ) -> Result<String, VisionError> {
+        if cancel.is_cancelled() {
+            return Err(VisionError::Cancelled);
+        }
         let q = content_sha256(request.question.as_bytes());
         let key = (image.sha256().to_string(), q);
         let answer = self
@@ -182,7 +199,15 @@ impl VisionRouter {
     }
 
     /// OCR with answer cache. Cache hits do not call the OCR engine again.
-    pub fn ocr(&self, image: &ImageBuffer, request: &OcrRequest) -> Result<OcrResult, VisionError> {
+    pub fn ocr(
+        &self,
+        image: &ImageBuffer,
+        request: &OcrRequest,
+        cancel: &CancellationToken,
+    ) -> Result<OcrResult, VisionError> {
+        if cancel.is_cancelled() {
+            return Err(VisionError::Cancelled);
+        }
         let key = CacheKey {
             operation: "ocr".into(),
             image_sha256: image.sha256().to_string(),
@@ -198,7 +223,7 @@ impl VisionRouter {
             result.from_cache = true;
             return Ok(result);
         }
-        let text = self.ocr.recognize(image)?;
+        let text = self.ocr.recognize(image, cancel)?;
         let result = OcrResult {
             text,
             engine: self.ocr.name().to_string(),
@@ -216,7 +241,11 @@ impl VisionRouter {
         &self,
         image: &ImageBuffer,
         request: &DescribeRequest,
+        cancel: &CancellationToken,
     ) -> Result<DescribeResult, VisionError> {
+        if cancel.is_cancelled() {
+            return Err(VisionError::Cancelled);
+        }
         if request.question.trim().is_empty() {
             return Err(VisionError::InvalidInput(
                 "describe question must not be empty".into(),
@@ -242,7 +271,7 @@ impl VisionRouter {
             return Ok(result);
         }
         let before = self.describe.billed_requests();
-        let answer = self.describe.describe(image, request)?;
+        let answer = self.describe.describe(image, request, cancel)?;
         let after = self.describe.billed_requests();
         let billed = after.saturating_sub(before);
         let result = DescribeResult {

@@ -1,5 +1,6 @@
 //! SLICE N / F11 smoke: stable OCR / pixel-diff + cache avoids re-billing.
 
+use cayw_ai::CancellationToken;
 use cayw_vision::*;
 use std::sync::Arc;
 
@@ -28,8 +29,20 @@ fn router_with_fixture(img: &ImageBuffer) -> (VisionRouter, Arc<CountingDescribe
 fn fixed_sample_ocr_is_stable() {
     let img = sample_glyph();
     let (router, _) = router_with_fixture(&img);
-    let first = router.ocr(&img, &OcrRequest { engine_hint: None }).unwrap();
-    let second = router.ocr(&img, &OcrRequest { engine_hint: None }).unwrap();
+    let first = router
+        .ocr(
+            &img,
+            &OcrRequest { engine_hint: None },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let second = router
+        .ocr(
+            &img,
+            &OcrRequest { engine_hint: None },
+            &CancellationToken::new(),
+        )
+        .unwrap();
     assert_eq!(first.text, "CAYW");
     assert_eq!(second.text, "CAYW");
     assert_eq!(first.image_sha256, img.sha256());
@@ -68,12 +81,16 @@ fn describe_cache_hit_does_not_rebill() {
         question: "what text?".into(),
         json: false,
     };
-    let first = router.describe(&img, &req).unwrap();
+    let first = router
+        .describe(&img, &req, &CancellationToken::new())
+        .unwrap();
     assert!(!first.from_cache);
     assert_eq!(first.billed_requests, 1);
     assert_eq!(backend.billed_requests(), 1);
 
-    let second = router.describe(&img, &req).unwrap();
+    let second = router
+        .describe(&img, &req, &CancellationToken::new())
+        .unwrap();
     assert!(second.from_cache);
     assert_eq!(second.billed_requests, 0);
     assert_eq!(backend.billed_requests(), 1, "cache hit must not re-bill");

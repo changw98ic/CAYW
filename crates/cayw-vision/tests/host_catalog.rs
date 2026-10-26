@@ -1,5 +1,6 @@
 //! Vision tools appear in definitions and execute through VisionService.
 
+use cayw_ai::CancellationToken;
 use cayw_vision::*;
 use serde_json::json;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ fn service_crop_and_colors_are_real_pixels() {
                 "image": image_arg(&img),
                 "x": 0, "y": 0, "width": 4, "height": 4
             }),
+            &CancellationToken::new(),
         )
         .unwrap();
     assert_eq!(cropped["width"], 4);
@@ -65,6 +67,7 @@ fn service_crop_and_colors_are_real_pixels() {
         .execute_value(
             "vision.colors",
             &json!({ "image": image_arg(&img), "top": 2 }),
+            &CancellationToken::new(),
         )
         .unwrap();
     assert_eq!(colors[0]["hex"], "#ffffff");
@@ -78,7 +81,11 @@ fn service_ocr_uses_injected_fixture_backend() {
     let router = VisionRouter::new(Arc::new(ocr), Arc::new(CountingDescribeBackend::new()));
     let service = VisionService::with_router(router, Limits::default()).unwrap();
     let result = service
-        .execute_value("vision.ocr", &json!({ "image": image_arg(&img) }))
+        .execute_value(
+            "vision.ocr",
+            &json!({ "image": image_arg(&img) }),
+            &CancellationToken::new(),
+        )
         .unwrap();
     assert_eq!(result["text"], "CAYW");
     assert_eq!(result["engine"], "fixture");
@@ -92,5 +99,57 @@ fn tesseract_backend_runs_when_installed() {
     let img = ImageBuffer::solid(48, 24, [255, 255, 255, 255]).unwrap();
     let engine = TesseractOcrEngine::detect().unwrap();
     assert_eq!(engine.name(), "tesseract");
-    assert!(engine.recognize(&img).is_ok());
+    assert!(engine.recognize(&img, &CancellationToken::new()).is_ok());
+}
+
+/// Slow OCR that polls cancel — mirrors subprocess backends without needing tesseract.
+struct PollingSlowOcr;
+
+impl OcrEngine for PollingSlowOcr {
+    fn name(&self) -> &str {
+        "slow-poll"
+    }
+
+    fn recognize(
+        &self,
+        _image: &ImageBuffer,
+        cancel: &CancellationToken,
+    ) -> Result<String, VisionError> {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(30) {
+            if cancel.is_cancelled() {
+                return Err(VisionError::Cancelled);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Ok("should-not-finish".into())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execute_cancel_aborts_ocr_before_completion() {
+    let img = sample();
+    let router = VisionRouter::new(
+        Arc::new(PollingSlowOcr),
+        Arc::new(CountingDescribeBackend::new()),
+    );
+    let service = Arc::new(VisionService::with_router(router, Limits::default()).unwrap());
+    let cancel = CancellationToken::new();
+    let cancel_trigger = cancel.clone();
+    let args = json!({ "image": image_arg(&img) });
+
+    let join = tokio::spawn(async move { execute(service, "vision.ocr", args, cancel).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    cancel_trigger.cancel();
+
+    let err = join
+        .await
+        .expect("join")
+        .expect_err("ocr must fail with cancelled");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cancelled"),
+        "expected cancelled error, got {msg}"
+    );
 }

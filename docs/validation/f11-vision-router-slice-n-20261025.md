@@ -22,6 +22,12 @@ cargo run -p cayw-vision --example offline_vision --locked
 - Host catalog：`vision.crop` / `vision.pixel_diff` / `vision.colors` / `vision.ocr` / `vision.describe` 经 `definitions()` 注册；`HostConfig.vision` 默认启用。
 - 示例打印 OCR、像素差比与缓存二次 describe（`billed_second=0`）。
 - 无 `CAYW_VISION_DESCRIBE_URL`、无 tesseract 时仍可离线测试（fixture / counting）。
+- **Cancel / cleanup（本轮）**：`tesseract` 与 describe 的 `curl` 经 `run_command_cancellable` + `KillOnDrop` 接入 Host `CancellationToken`；取消时杀子进程并在 `execute` 内 await join，避免孤儿进程。单测覆盖 cancel 杀子进程与 `execute` 超时取消。
+
+## 仍缺（不在本轮）
+
+- 桌面 / HTML 截图 → OCR / 元素定位（ground/detect）产品闭环。
+- 云端 / Ollama / LM Studio 视觉链与故障转移。
 
 ## 不做声明
 

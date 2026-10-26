@@ -80,8 +80,16 @@ impl VisionService {
         self.limits
     }
 
-    pub fn execute_value(&self, name: &str, args: &Value) -> Result<Value, CapabilityError> {
+    pub fn execute_value(
+        &self,
+        name: &str,
+        args: &Value,
+        cancel: &CancellationToken,
+    ) -> Result<Value, CapabilityError> {
         self.limits.validate()?;
+        if cancel.is_cancelled() {
+            return Err(error("cancelled", "vision operation cancelled"));
+        }
         let encoded = serde_json::to_vec(args).map_err(|err| error("arguments", err))?;
         if encoded.len() > self.limits.input_bytes {
             return Err(error(
@@ -93,8 +101,8 @@ impl VisionService {
             "vision.crop" => self.crop(args),
             "vision.pixel_diff" => self.pixel_diff(args),
             "vision.colors" => self.colors(args),
-            "vision.ocr" => self.ocr(args),
-            "vision.describe" => self.describe(args),
+            "vision.ocr" => self.ocr(args, cancel),
+            "vision.describe" => self.describe(args, cancel),
             _ => Err(VisionError::InvalidInput(format!(
                 "unknown vision capability: {name}"
             ))),
@@ -179,18 +187,20 @@ impl VisionService {
             .map_err(|err| VisionError::InvalidInput(format!("serialize colors: {err}")))
     }
 
-    fn ocr(&self, args: &Value) -> Result<Value, VisionError> {
+    fn ocr(&self, args: &Value, cancel: &CancellationToken) -> Result<Value, VisionError> {
         let image = self.decode_image(&args["image"])?;
         let engine_hint = args
             .get("engine_hint")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let result = self.router.ocr(&image, &OcrRequest { engine_hint })?;
+        let result = self
+            .router
+            .ocr(&image, &OcrRequest { engine_hint }, cancel)?;
         serde_json::to_value(result)
             .map_err(|err| VisionError::OcrFailed(format!("serialize ocr: {err}")))
     }
 
-    fn describe(&self, args: &Value) -> Result<Value, VisionError> {
+    fn describe(&self, args: &Value, cancel: &CancellationToken) -> Result<Value, VisionError> {
         let image = self.decode_image(&args["image"])?;
         let question = args["question"]
             .as_str()
@@ -203,6 +213,7 @@ impl VisionService {
                 question,
                 json: json_mode,
             },
+            cancel,
         )?;
         serde_json::to_value(result)
             .map_err(|err| VisionError::DescribeFailed(format!("serialize describe: {err}")))
@@ -215,6 +226,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
 }
 
 /// Validate + execute one vision capability on a blocking worker (Host pattern).
+///
+/// The Host `CancellationToken` is a child-token drop-guarded here: when the
+/// Host cancels (or this future is dropped by `select!`), the token cancels and
+/// OCR/describe backends kill their subprocess via KillOnDrop. When cancel wins
+/// the race against the worker, we still await the join so cleanup finishes
+/// before returning (no orphan tesseract/curl from a detached blocking task).
 pub fn execute(
     service: Arc<VisionService>,
     name: &str,
@@ -228,26 +245,43 @@ pub fn execute(
         if token.is_cancelled() {
             return Err(error("cancelled", "vision operation cancelled"));
         }
-        let result = tokio::task::spawn_blocking(move || {
-            if token.is_cancelled() {
+        let worker_token = token.clone();
+        let mut handle = tokio::task::spawn_blocking(move || {
+            if worker_token.is_cancelled() {
                 return Err(error("cancelled", "vision operation cancelled"));
             }
-            let result = service.execute_value(&name, &args);
-            if token.is_cancelled() {
+            let result = service.execute_value(&name, &args, &worker_token);
+            if worker_token.is_cancelled() {
                 Err(error("cancelled", "vision operation cancelled"))
             } else {
                 result
             }
-        })
-        .await
-        .map_err(|_| error("worker", "vision worker failed"))?;
+        });
+        let cancelled = tokio::select! {
+            biased;
+            _ = token.cancelled() => true,
+            joined = &mut handle => {
+                drop(guard);
+                return joined.map_err(|_| error("worker", "vision worker failed"))?;
+            }
+        };
+        let _ = cancelled;
+        // Cancel won: backends KillOnDrop the child; await join so cleanup finishes.
+        let result = match handle.await {
+            Ok(Err(err)) => Err(err),
+            Ok(Ok(_)) => Err(error("cancelled", "vision operation cancelled")),
+            Err(_) => Err(error("worker", "vision worker failed")),
+        };
         drop(guard);
         result
     }
 }
 
 fn vision_error(err: VisionError) -> CapabilityError {
-    error("vision", err)
+    match err {
+        VisionError::Cancelled => error("cancelled", "vision operation cancelled"),
+        other => error("vision", other),
+    }
 }
 
 fn error(kind: &str, message: impl std::fmt::Display) -> CapabilityError {

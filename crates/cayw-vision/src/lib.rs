@@ -12,7 +12,8 @@
 //!
 //! Host / Runtime expose `vision.crop` / `vision.pixel_diff` / `vision.colors` /
 //! `vision.ocr` / `vision.describe` via [`definitions`] and [`VisionService`].
-//! Desktop capture and cloud model failover remain out of scope.
+//! OCR/describe subprocesses honor Host [`cayw_ai::CancellationToken`] (KillOnDrop).
+//! Desktop capture, element locate, and cloud model failover remain out of scope.
 //!
 //! Design reference (not a code transplant):
 //! [ysr666/dsh-vision-router](https://github.com/ysr666/dsh-vision-router).
@@ -24,6 +25,7 @@ mod cache;
 mod catalog;
 mod image;
 mod pixel;
+mod process;
 mod router;
 mod service;
 mod types;

@@ -28,6 +28,7 @@ CAYW 视觉工具路由（F11，SLICE N）。
 ## 快速使用
 
 ```rust
+use cayw_ai::CancellationToken;
 use cayw_vision::*;
 use std::sync::Arc;
 
@@ -36,10 +37,10 @@ let mut ocr = FixtureOcrEngine::new();
 ocr.insert(img.sha256(), "HELLO");
 let describe = Arc::new(CountingDescribeBackend::new());
 let router = VisionRouter::new(Arc::new(ocr), describe);
-let text = router.ocr(&img, &OcrRequest { engine_hint: None })?;
+let text = router.ocr(&img, &OcrRequest { engine_hint: None }, &CancellationToken::new())?;
 ```
 
-生产 Host 侧用 `VisionService::from_env(Limits::default())`：有 tesseract 则走真实 OCR，否则 fixture。
+生产 Host 侧用 `VisionService::from_env(Limits::default())`：有 tesseract 则走真实 OCR，否则 fixture。Host 取消时 `tesseract` / describe 的 `curl` 经 KillOnDrop 杀掉，不留孤儿进程。
 
 ## 来源与边界
 
@@ -48,7 +49,7 @@ let text = router.ocr(&img, &OcrRequest { engine_hint: None })?;
 - 参考：[ysr666/dsh-vision-router](https://github.com/ysr666/dsh-vision-router)
 - 记录：[`docs/sources/f11-vision-router.md`](../../docs/sources/f11-vision-router.md)
 
-本切片**不**交付：云端故障转移链、桌面 / HTML 截图、ground/detect、SVG trace、与 F18 预览关联、将 F11 全范围标完成。
+本切片**不**交付：云端故障转移链、桌面 / HTML 截图→元素定位闭环、ground/detect、SVG trace、与 F18 预览关联、将 F11 全范围标完成。
 
 ## 验证
 

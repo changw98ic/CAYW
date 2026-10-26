@@ -5,10 +5,16 @@
 //!   is set (Bearer token from `CAYW_VISION_DESCRIBE_KEY` when present).
 //! - [`FixtureOcrEngine`] / [`CountingDescribeBackend`]: remain the default when
 //!   those deps / env keys are absent so CI stays offline and dependency-free.
+//!
+//! Subprocess OCR / curl describe honor [`CancellationToken`]: cancel kills the
+//! child via [`crate::process::run_command_cancellable`] (KillOnDrop), so Host
+//! cancel does not leave orphan tesseract/curl processes.
 
 use crate::image::ImageBuffer;
+use crate::process::{RunError, run_command_cancellable};
 use crate::router::{CountingDescribeBackend, DescribeBackend, FixtureOcrEngine, OcrEngine};
 use crate::types::{DescribeRequest, VisionError};
+use cayw_ai::CancellationToken;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -66,21 +72,30 @@ impl OcrEngine for TesseractOcrEngine {
         "tesseract"
     }
 
-    fn recognize(&self, image: &ImageBuffer) -> Result<String, VisionError> {
+    fn recognize(
+        &self,
+        image: &ImageBuffer,
+        cancel: &CancellationToken,
+    ) -> Result<String, VisionError> {
+        if cancel.is_cancelled() {
+            return Err(VisionError::Cancelled);
+        }
         let dir = tempfile::tempdir()
             .map_err(|err| VisionError::OcrFailed(format!("tempdir for tesseract: {err}")))?;
         let ppm_path = dir.path().join("input.ppm");
         write_ppm(&ppm_path, image)?;
         let out_base = dir.path().join("out");
-        let output = Command::new(&self.program)
-            .arg(&ppm_path)
+        let mut cmd = Command::new(&self.program);
+        cmd.arg(&ppm_path)
             .arg(&out_base)
             .arg("-l")
             .arg(&self.lang)
             .arg("--psm")
-            .arg("6")
-            .output()
-            .map_err(|err| VisionError::OcrFailed(format!("spawn tesseract: {err}")))?;
+            .arg("6");
+        let output = run_command_cancellable(cmd, cancel).map_err(|err| match err {
+            RunError::Cancelled => VisionError::Cancelled,
+            other => VisionError::OcrFailed(format!("spawn tesseract: {}", other.message())),
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(VisionError::OcrFailed(format!(
@@ -148,7 +163,11 @@ impl DescribeBackend for HttpDescribeBackend {
         &self,
         image: &ImageBuffer,
         request: &DescribeRequest,
+        cancel: &CancellationToken,
     ) -> Result<String, VisionError> {
+        if cancel.is_cancelled() {
+            return Err(VisionError::Cancelled);
+        }
         let body = serde_json::json!({
             "width": image.width(),
             "height": image.height(),
@@ -162,6 +181,7 @@ impl DescribeBackend for HttpDescribeBackend {
         })?;
         // Prefer curl so cayw-vision stays free of a blocking HTTP client feature
         // in the default build; CI never sets the URL and never reaches here.
+        // --max-time 60 is a ceiling; Host cancel kills curl earlier via KillOnDrop.
         let mut cmd = Command::new("curl");
         cmd.args([
             "--silent",
@@ -180,9 +200,10 @@ impl DescribeBackend for HttpDescribeBackend {
             cmd.args(["-H", &format!("authorization: Bearer {key}")]);
         }
         cmd.arg(&self.url);
-        let output = cmd
-            .output()
-            .map_err(|err| VisionError::DescribeFailed(format!("spawn curl: {err}")))?;
+        let output = run_command_cancellable(cmd, cancel).map_err(|err| match err {
+            RunError::Cancelled => VisionError::Cancelled,
+            other => VisionError::DescribeFailed(format!("spawn curl: {}", other.message())),
+        })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -260,7 +281,7 @@ mod tests {
         }
         let img = ImageBuffer::solid(32, 16, [255, 255, 255, 255]).unwrap();
         let engine = TesseractOcrEngine::detect().unwrap();
-        let text = engine.recognize(&img).unwrap();
+        let text = engine.recognize(&img, &CancellationToken::new()).unwrap();
         // Blank image: engine must succeed; text may be empty.
         let _ = text;
         assert_eq!(engine.name(), "tesseract");

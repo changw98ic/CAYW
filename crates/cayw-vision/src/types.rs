@@ -16,6 +16,8 @@ pub enum VisionError {
     DescribeFailed(String),
     #[error("cache poisoned")]
     CachePoisoned,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// OCR request over one image buffer.

@@ -1,5 +1,6 @@
 //! Offline demo: OCR + pixel-diff + describe cache (no network).
 
+use cayw_ai::CancellationToken;
 use cayw_vision::*;
 use std::sync::Arc;
 
@@ -21,7 +22,11 @@ fn main() {
     let router = VisionRouter::new(Arc::new(ocr), describe.clone());
 
     let ocr_hit = router
-        .ocr(&img, &OcrRequest { engine_hint: None })
+        .ocr(
+            &img,
+            &OcrRequest { engine_hint: None },
+            &CancellationToken::new(),
+        )
         .expect("ocr");
     println!(
         "ocr text={} from_cache={}",
@@ -38,8 +43,12 @@ fn main() {
         question: "label?".into(),
         json: false,
     };
-    let d1 = router.describe(&img, &q).expect("describe");
-    let d2 = router.describe(&img, &q).expect("describe cached");
+    let d1 = router
+        .describe(&img, &q, &CancellationToken::new())
+        .expect("describe");
+    let d2 = router
+        .describe(&img, &q, &CancellationToken::new())
+        .expect("describe cached");
     println!(
         "describe answer={:?} billed_first={} billed_second={} backend_total={}",
         d1.answer,
