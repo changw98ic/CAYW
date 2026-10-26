@@ -494,6 +494,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-context"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-core"
 version = "0.1.0"
 dependencies = [
@@ -653,6 +662,7 @@ dependencies = [
  "cayw-cells",
  "cayw-codemode",
  "cayw-content",
+ "cayw-context",
  "cayw-core",
  "cayw-host",
  "cayw-ipc",

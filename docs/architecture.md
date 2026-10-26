@@ -178,6 +178,8 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 `max_output_tokens` 是现有 API 字段名，Cells 当前按保守的**序列化 UTF-8 字节预算**计费，不是 Provider tokenizer 或媒体 token 估算。页预算不足以容纳下一项时保留游标并报告所需预算，不能静默跳过输出。文本、媒体和 JSON 输出支持也不等于每个 Provider 都能接收相同多模态格式；UI 呈现与模型协议支持分别核对。
 
+F05 首刀的上下文 / token / 费用 / 缓存观测面见 [`cayw-context`](../crates/cayw-context/README.md)：从原生模型请求账本快照折叠会话、跨会话与父子 Agent 总览；未知费用保持空值，不编造价目或 tokenizer。消息类别组成、热力图与 UI 接线不在本切片。
+
 重启可恢复 cell 记录、输出、会话值和子调用事实，不能恢复已经丢失的 Lua 栈。明确未执行的调用、已结算调用和未知调用分别处理；丢失的 VM 不自动重跑源码，即使没有未知调用，也只能记录中断并由宿主决定后续新执行。
 
 依据：[CodeMode 边界](../crates/cayw-codemode/README.md)、[CellTool](../crates/cayw-cells/src/tool.rs)、[Cells 类型与输出](../crates/cayw-cells/src/types.rs)。

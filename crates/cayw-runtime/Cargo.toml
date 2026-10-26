@@ -24,6 +24,7 @@ cayw-core = { path = "../cayw-core", version = "0.1.0" }
 cayw-cells = { path = "../cayw-cells", version = "0.1.0" }
 cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 cayw-content = { path = "../cayw-content", version = "0.1.0", default-features = false }
+cayw-context = { path = "../cayw-context", version = "0.1.0" }
 cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }

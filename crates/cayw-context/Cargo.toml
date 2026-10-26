@@ -1,0 +1,19 @@
+[package]
+name = "cayw-context"
+description = "Context / token / cost / cache overview views from CAYW native model accounting (F05 first cut)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[example]]
+name = "offline_overview"
