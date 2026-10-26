@@ -11,7 +11,7 @@ CAYW 面板 / 文件查看器扩展 API（F07 首刀，SLICE H）。
 - 钩子：按 Session 的 `open` / `activate` / `close` / `list_open`（内存态）
 - 协议版本：`PANEL_PROTOCOL_VERSION = 1`
 
-本切片**不**交付完整文件编辑、Git、交互终端、后台任务页或子代理页的产品实现；这些后续可经同一 API 注册。也不接线具体 TUI/WebUI 渲染。
+本切片**不**交付完整文件编辑、Git、交互终端、后台任务页或子代理页的产品实现；这些后续可经同一 API 注册。WebUI 已通过 `/api/panels` 与侧栏/底部工作区表面接线首刀官方与样例面板（见 `cayw-webui`）；完整编辑器/终端产品 UI 仍属后续。
 
 ## 快速使用
 

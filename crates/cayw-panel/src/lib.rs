@@ -11,7 +11,8 @@
 //! contributions, and file-viewer contributions with extension-based resolve.
 //! Built-in file editing, Git, interactive terminals, background-task pages,
 //! and sub-agent pages are out of scope for this slice; they can later register
-//! through this same API.
+//! through this same API. The loopback WebUI hosts this registry for a first-cut
+//! sidebar/bottom surface (`/api/panels`).
 //!
 //! Design reference (not a code transplant): the registerTab /
 //! registerFileViewer shape described by

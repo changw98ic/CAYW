@@ -25,13 +25,13 @@
 - 扩展名文件查看器解析（优先级 + id 平局）
 - 单元测试与 `offline_panels` 示例
 - 本源记录与 crate README
+- WebUI 接线：`cayw-webui` 托管 `PanelRegistry`/`WorkspaceHooks`，提供 `/api/panels` 与侧栏/底部表面；内置 `files` / `terminal-bottom` / `vendor:demo`
 
 ## 明确未交付（后续切片）
 
 - 完整文件编辑、Git、交互终端、后台任务、子代理页面产品 UI
-- TUI / WebUI 实际渲染接线
-- 布局持久化、跨会话排队打开、原生 tab keepMounted 等上游细节
+- TUI 渲染接线；布局持久化、跨会话排队打开、原生 tab keepMounted 等上游细节
 
 ## 验收口径（本切片）
 
-本地 `cargo test -p cayw-panel` 证明注册、冲突、区域约束、查看器解析与工作区钩子行为。不把本切片标为 F07 全范围完成。
+本地 `cargo test -p cayw-panel` 证明注册、冲突、区域约束、查看器解析与工作区钩子行为；`cargo test -p cayw-webui --test gateway registered_panels_are_reachable_from_webui_product_entry` 证明产品入口可看到并打开已注册面板。不把本切片标为 F07 全范围完成。
