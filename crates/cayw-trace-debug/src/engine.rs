@@ -393,8 +393,9 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
     )
 }
 
-/// Local recompute script: starts at `start_node` with a captured shared seed
-/// (or plain JSON snapshots). Upstream node functions are not invoked.
+/// Local recompute script: starts at `start_node` with a captured shared seed.
+/// Upstream node functions are not invoked. Callers must supply a seed for
+/// non-entry starts; plain JSON Values are only used for entry-node edits.
 fn script_for_local_recompute(
     plan: &GraphPlan,
     start_node: &str,
@@ -409,8 +410,8 @@ fn script_for_local_recompute(
 }
 
 enum SeedSpec<'a> {
-    /// Plain JSON snapshots (no shared identity). Used for entry edits and
-    /// older captures that lack a seed.
+    /// Plain JSON snapshots (no shared identity). Only for entry-node edits,
+    /// where there is no upstream shared-table identity to restore.
     Values {
         incoming: &'a Value,
         state: &'a Value,
@@ -972,9 +973,13 @@ fn reused_prefix(base: &Evaluation, changed_node: &str) -> Result<Vec<Step>, Gap
         .collect())
 }
 
-/// Upstream reused steps plus the VM seed for the edited node. Prefer the
-/// captured shared `seed` (context + identity). Fall back to JSON snapshots when
-/// an older capture lacks a seed (no shared-identity restore in that case).
+/// Upstream reused steps plus the VM seed for the edited node.
+///
+/// Non-entry local recompute **requires** the captured shared `seed` (context +
+/// identity). Older captures without a seed are rejected with an explicit gap —
+/// never silently started from JSON / `context_before` / plan.context, which can
+/// drop shared Luau table identity and compute wrong results. Entry-node edits
+/// still use the revision's plan input/state/context (no upstream identity).
 fn local_start(
     plan: &GraphPlan,
     base: Option<&Evaluation>,
@@ -1003,22 +1008,14 @@ fn local_start(
         });
     };
     let prefix = reused_prefix(base, changed_node)?;
-    if let Some(seed) = step.seed.as_ref() {
-        return Ok((prefix, SeedSpecOwned::Shared(seed.clone())));
-    }
-    let context = if step.context_before.is_null() {
-        plan.context.clone()
-    } else {
-        step.context_before.clone()
+    let Some(seed) = step.seed.as_ref() else {
+        return Err(Gap {
+            node_id: Some(changed_node.into()),
+            message: "cannot safely locally recompute without a captured shared seed; this historical capture predates seed recording — re-run the graph (full replay) or capture a new observed run before node-save recompute"
+                .into(),
+        });
     };
-    Ok((
-        prefix,
-        SeedSpecOwned::Values {
-            incoming: step.input.clone(),
-            state: step.state_before.clone(),
-            context,
-        },
-    ))
+    Ok((prefix, SeedSpecOwned::Shared(seed.clone())))
 }
 
 enum SeedSpecOwned {
@@ -1111,9 +1108,10 @@ fn step_from_trace(
 ///   input/state/context; every step is recomputed (`reused = false`).
 /// - `changed_node == Some(id)` → **recompute**: attach completed upstream steps
 ///   from `base` as `reused = true`, seed the VM at the edited node from its
-///   captured shared `seed` (or JSON snapshots), and execute only that node and
-///   its downstream. Upstream bodies are not re-run; see `executed_nodes`.
-///   Host answers come only from captures. Never runs cargo/tsc/full builds.
+///   captured shared `seed`, and execute only that node and its downstream.
+///   Missing seed on a non-entry edit is blocked (no silent JSON fallback).
+///   Upstream bodies are not re-run; see `executed_nodes`. Host answers come
+///   only from captures. Never runs cargo/tsc/full builds.
 ///
 /// Missing captures, unknown outcomes and an uncaptured branch produce `blocked`
 /// with explicit gaps. An error output is not reported as a completed round.

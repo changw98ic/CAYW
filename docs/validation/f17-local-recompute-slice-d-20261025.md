@@ -18,9 +18,13 @@
 2. `__encode_seed` / `__decode_seed` 在 JSON 上保留 input/state/context 的 Luau 表身份与 context 变更，避免「整图预热」作弊。
 3. 测试用 `executed_nodes`（及 Host 捕获未消费）证明上游未重跑，而不仅依赖 `reused` 展示字段。
 
+## 旧捕获兼容
+
+- **无 `seed` 的历史捕获**：非入口节点的局部重算**显式拒绝**（`status=blocked` + gap，说明无法在无 seed 时安全局部重算），不再静默走 JSON / `context_before` / `plan.context` 路径（该路径会丢掉共享表身份并可能算错）。入口节点编辑仍用 revision 的 plan input/state/context。
+- 新 observed 路径都会写 `seed`；缺 seed 时应整图 replay 或重新 observed 后再做节点保存重算。
+
 ## 已知缺口
 
-- 更旧的、没有 `seed` 的捕获在局部重算时回退为分列 JSON 快照：无共享身份时结果仍正确；依赖共享表身份的图在缺 seed 时可能不等价（新 observed 路径都会写 seed）。
 - F16 符号/文件关联仍未做。
 
 ## 验证

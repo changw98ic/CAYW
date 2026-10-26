@@ -42,6 +42,54 @@ fn plan(entry: &str, nodes: Vec<Node>, edges: Vec<Edge>, input: Value) -> GraphP
     }
 }
 
+/// Encode JSON snapshots into the shared-table seed shape used by local
+/// recompute. Unit fixtures that are not about Luau identity still need a seed
+/// so recompute does not reject them as historical seed-less captures.
+/// Encode JSON snapshots into the shared-table seed shape used by local
+/// recompute. Unit fixtures that are not about Luau identity still need a seed
+/// so recompute does not reject them as historical seed-less captures.
+fn snapshot_seed(input: &Value, state: &Value, context: &Value) -> Value {
+    use serde_json::Map;
+    fn walk(value: &Value, tables: &mut Map<String, Value>, next_id: &mut u64) -> Value {
+        match value {
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.clone(),
+            Value::Array(items) => {
+                *next_id += 1;
+                let id = next_id.to_string();
+                let walked: Vec<Value> = items
+                    .iter()
+                    .map(|item| walk(item, tables, next_id))
+                    .collect();
+                tables.insert(id.clone(), json!({ "$array": true, "$items": walked }));
+                json!({ "$ref": id })
+            }
+            Value::Object(fields) => {
+                *next_id += 1;
+                let id = next_id.to_string();
+                let mut out = Map::new();
+                for (key, item) in fields {
+                    out.insert(key.clone(), walk(item, tables, next_id));
+                }
+                tables.insert(id.clone(), Value::Object(out));
+                json!({ "$ref": id })
+            }
+        }
+    }
+    let mut tables = Map::new();
+    let mut next_id = 0u64;
+    let input_root = walk(input, &mut tables, &mut next_id);
+    let state_root = walk(state, &mut tables, &mut next_id);
+    let context_root = walk(context, &mut tables, &mut next_id);
+    json!({
+        "tables": Value::Object(tables),
+        "roots": {
+            "input": input_root,
+            "state": state_root,
+            "context": context_root,
+        }
+    })
+}
+
 fn step(
     node_id: &str,
     input: Value,
@@ -51,16 +99,45 @@ fn step(
     branch: Option<&str>,
     evidence: u64,
 ) -> Step {
+    let context = json!({"context": true});
+    let seed = Some(snapshot_seed(&input, &state_before, &context));
     Step {
         node_id: node_id.into(),
         status: Status::Completed,
         input,
         state_before,
-        context_before: Value::Null,
-        seed: None,
+        context_before: context,
+        seed,
         output: Some(output),
         state_after: Some(state_after),
         branch: branch.map(str::to_owned),
+        error: None,
+        started_at_ms: 1,
+        elapsed_ms: 1.0,
+        evidence_cursor: Some(evidence),
+        reused: false,
+    }
+}
+
+/// Historical pre-seed capture shape: JSON snapshots only, `seed = None`.
+fn seedless_step(
+    node_id: &str,
+    input: Value,
+    state_before: Value,
+    output: Value,
+    state_after: Value,
+    evidence: u64,
+) -> Step {
+    Step {
+        node_id: node_id.into(),
+        status: Status::Completed,
+        input,
+        state_before,
+        context_before: json!({"context": true}),
+        seed: None,
+        output: Some(output),
+        state_after: Some(state_after),
+        branch: None,
         error: None,
         started_at_ms: 1,
         elapsed_ms: 1.0,
@@ -1279,4 +1356,88 @@ async fn local_recompute_skips_upstream_bodies_and_counts_execution() {
     );
     assert_eq!(recomputed.output, Some(json!({"final": 11})));
     assert!(recomputed.gaps.is_empty(), "{recomputed:?}");
+}
+
+#[tokio::test]
+async fn local_recompute_rejects_seedless_historical_capture() {
+    // Pre-seed captures only have JSON snapshots. Local recompute must not
+    // silently fall back to those paths (shared-identity graphs would recompute wrong).
+    let base_plan = plan(
+        "a",
+        vec![
+            node("a", "return {output = {n = 1}, state = {count = 1}}", ""),
+            node(
+                "b",
+                "return {output = {final = input.n * 2}, state = {count = state.count + 1}}",
+                "",
+            ),
+        ],
+        vec![edge("a", "b", None)],
+        json!({}),
+    );
+    let base = observed(vec![
+        seedless_step(
+            "a",
+            json!({}),
+            json!({}),
+            json!({"n": 1}),
+            json!({"count": 1}),
+            1,
+        ),
+        seedless_step(
+            "b",
+            json!({"n": 1}),
+            json!({"count": 1}),
+            json!({"final": 2}),
+            json!({"count": 2}),
+            2,
+        ),
+    ]);
+    assert!(
+        base.steps.iter().all(|step| step.seed.is_none()),
+        "fixture must omit seed"
+    );
+
+    let mut edited = base_plan.clone();
+    edited.nodes[1].source =
+        "return {output = {final = input.n * 10}, state = {count = state.count + 1}}".into();
+    let blocked = evaluate(
+        &edited,
+        Some(&base),
+        Some("b"),
+        &[],
+        1,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.status, Status::Blocked, "{blocked:?}");
+    assert_eq!(blocked.mode, "recompute");
+    assert!(
+        blocked.steps.is_empty(),
+        "must not invent a wrong partial run: {blocked:?}"
+    );
+    assert!(
+        blocked.gaps.iter().any(|gap| {
+            gap.node_id.as_deref() == Some("b")
+                && gap
+                    .message
+                    .contains("cannot safely locally recompute without a captured shared seed")
+        }),
+        "expected explicit seed-missing gap, got {blocked:?}"
+    );
+
+    // Entry-node edit still works without a step seed (uses plan Values).
+    let entry_edit = evaluate(
+        &base_plan,
+        Some(&base),
+        Some("a"),
+        &[],
+        2,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(entry_edit.status, Status::Completed, "{entry_edit:?}");
+    assert_eq!(entry_edit.mode, "recompute");
 }

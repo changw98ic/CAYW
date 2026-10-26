@@ -70,7 +70,8 @@ pub struct Step {
     #[serde(default)]
     pub context_before: Value,
     /// Shared-table seed for local recompute (`tables` + `roots` with `$ref`).
-    /// Absent on older captures that only stored JSON snapshots.
+    /// Absent on older captures that only stored JSON snapshots; those cannot
+    /// safely use node-save local recompute (explicit gap, not silent fallback).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<Value>,
     pub output: Option<Value>,
