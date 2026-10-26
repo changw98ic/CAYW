@@ -286,3 +286,79 @@ async fn restart_does_not_clobber_prior_session_feedback_ids() {
     assert_eq!(restored_b.len(), 1);
     assert_eq!(restored_b[0].feedback_id, fresh.feedback_id);
 }
+
+
+#[tokio::test]
+async fn persist_failure_leaves_no_injectable_memory_state() {
+    // F08 durability consistency: submit must not leave memory-only feedback
+    // when Core append fails. Disk-first commit — failed API ⇒ not listed,
+    // not injected on the next Agent turn.
+    let (dir, rt) = setup(PLAN_SCRIPT);
+    let id = rt.create(None).unwrap().id;
+    start(&rt, &id).await.unwrap().unwrap();
+    assert!(rt.plan(&id).unwrap().is_some());
+
+    let db = rusqlite::Connection::open(dir.path().join("session.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_plannotator_persist BEFORE INSERT ON core_events          WHEN json_extract(NEW.record,'$.event.type')='host'           AND json_extract(NEW.record,'$.event.kind')='plannotator_feedback_recorded'          BEGIN SELECT RAISE(ABORT,'injected plannotator persist failure'); END;",
+    )
+    .unwrap();
+
+    let error = rt
+        .submit_plan_feedback(PlanFeedbackInput {
+            session_id: id.clone(),
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![cayw_plannotator::AnnotationComment {
+                comment_id: "c-fail".into(),
+                body: "must not inject after persist failure".into(),
+                anchor: None,
+                created_at_ms: 1,
+            }],
+            summary: Some("persist-fail".into()),
+            actor: "tester".into(),
+        })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected plannotator persist failure"),
+        "submit must surface persist failure, got: {error}"
+    );
+
+    // No durable record and no injectable memory state.
+    let listed = rt.plannotator_feedback(&id).unwrap();
+    assert!(
+        listed.is_empty(),
+        "failed persist must not leave feedback in memory/list: {listed:?}"
+    );
+
+    db.execute_batch("DROP TRIGGER fail_plannotator_persist;")
+        .unwrap();
+
+    // Follow-up attempt must not see a cayw-plannotator-feedback section.
+    let capture = Arc::new(Capture::new("return 1"));
+    let rt2 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        capture.clone(),
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    assert!(rt2.plannotator_feedback(&id).unwrap().is_empty());
+    rt2.prompt(&id, "follow up after failed persist", CancellationToken::new())
+        .await
+        .unwrap();
+    let seen = capture.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "provider must see follow-up messages");
+    let injected = seen.iter().any(|turn| {
+        turn.iter().any(|message| match message {
+            Message::System(system) => system.sections.contains_key(FEEDBACK_SECTION_KEY),
+            _ => false,
+        })
+    });
+    assert!(
+        !injected,
+        "failed persist must not inject {FEEDBACK_SECTION_KEY}; seen={seen:?}"
+    );
+}

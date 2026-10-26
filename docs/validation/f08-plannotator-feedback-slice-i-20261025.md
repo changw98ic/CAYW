@@ -19,6 +19,7 @@ cargo run -p cayw-plannotator --example offline_feedback --locked
 
 - 单元测试覆盖：批注一条 → 后续 attempt 可见；版本匹配则 Applied；版本不匹配 / 缺 live 文件则拒绝静默套用；跨 Session 隔离；Deny 无评论拒绝；Applied → inject section。
 - Runtime 集成：`plannotator.submit` 持久化并可 reopen；下次 `prompt` 携带 `cayw-plannotator-feedback` SystemMessage section。
+- 持久化一致性：Core 落盘成功后再 commit 内存；落盘失败时 list/inject 均不可见（SQLite trigger 模拟）。
 - 示例打印匹配注入与版本冲突拒绝；无网络、无 Provider、无真实模型请求。
 
 ## 不做声明

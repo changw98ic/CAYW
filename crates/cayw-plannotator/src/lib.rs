@@ -7,7 +7,8 @@
 //!
 //! First cut (F08 / SLICE I) + audit remediation:
 //! - `FeedbackStore` records `StructuredFeedback` with globally unique `fb-{uuid}`
-//!   ids (process-local; Runtime may mirror into the Core session event log)
+//!   ids; Runtime persists to the Core session log **before** committing memory
+//!   so a failed write cannot inject into the next Agent turn
 //! - `apply_feedback_for_attempt` checks live file versions before injection
 //! - `inject` folds [`ApplyOutcome::Applied`] into Agent SystemMessage sections
 //! - decisions: `Approve` / `DenyWithFeedback` / `ApproveWithNotes`

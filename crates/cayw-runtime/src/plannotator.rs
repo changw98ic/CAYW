@@ -122,8 +122,10 @@ fn persist_feedback(
 impl Runtime {
     /// Record structured annotation feedback for a subsequent Agent attempt.
     ///
-    /// Persists into the Core session event log (same durable surface as plan /
-    /// question collaboration notes) and keeps a process-local store for apply.
+    /// Durability order: **disk (Core session log) first, then memory**. A
+    /// failed persist must not leave an injectable record for the next Agent
+    /// turn — prepare validates/allocates, append to Core, only then commit
+    /// into the process-local store used by apply/inject.
     pub fn submit_plannotator_feedback(
         &self,
         draft: FeedbackDraft,
@@ -136,14 +138,15 @@ impl Runtime {
         }
         self.get(&draft.session_id)?;
         hydrate_session(&self.inner, &draft.session_id)?;
-        let feedback = {
-            let mut state = lock(&self.inner.plannotator);
-            state
-                .store
-                .submit(draft)
-                .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
-        };
+        let feedback = FeedbackStore::prepare(draft)
+            .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+        // Durable write before memory commit so a failed API cannot leave
+        // injectable state for for_attempt / feedback_messages_for_attempt.
         persist_feedback(&self.inner, &feedback.session_id, actor, &feedback)?;
+        {
+            let mut state = lock(&self.inner.plannotator);
+            state.store.commit(feedback.clone());
+        }
         Ok(feedback)
     }
 

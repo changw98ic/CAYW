@@ -34,13 +34,14 @@ impl FeedbackStore {
         Self::default()
     }
 
-    /// Record one annotation submission.
+    /// Validate and allocate a feedback record **without** committing it to the
+    /// in-memory store.
     ///
-    /// `visible_from_attempt` is `current_attempt + 1` so the *subsequent*
-    /// Agent attempt sees the structured feedback (SLICE I smoke).
-    pub fn submit(&mut self, draft: FeedbackDraft) -> Result<StructuredFeedback, PlannotatorError> {
+    /// Runtime persist must succeed before [`Self::commit`]; otherwise a failed
+    /// disk write must not leave injectable state for the next Agent turn.
+    pub fn prepare(draft: FeedbackDraft) -> Result<StructuredFeedback, PlannotatorError> {
         validate_draft(&draft)?;
-        let feedback = StructuredFeedback {
+        Ok(StructuredFeedback {
             feedback_id: allocate_feedback_id(),
             session_id: draft.session_id,
             target: draft.target,
@@ -49,8 +50,36 @@ impl FeedbackStore {
             summary: draft.summary,
             created_at_ms: draft.created_at_ms,
             visible_from_attempt: draft.current_attempt.saturating_add(1),
-        };
-        self.items.push(feedback.clone());
+        })
+    }
+
+    /// Commit a prepared (or restored) record into the in-memory store.
+    ///
+    /// Idempotent on `(session_id, feedback_id)` — same contract as [`Self::restore`].
+    pub fn commit(&mut self, feedback: StructuredFeedback) {
+        self.restore(feedback);
+    }
+
+    /// Remove one `(session_id, feedback_id)` record (rollback after a failed
+    /// durable write when memory was updated first). No-op if absent.
+    pub fn rollback(&mut self, session_id: &str, feedback_id: &str) -> bool {
+        let before = self.items.len();
+        self.items.retain(|item| {
+            !(item.session_id == session_id && item.feedback_id == feedback_id)
+        });
+        self.items.len() != before
+    }
+
+    /// Record one annotation submission (memory-only convenience).
+    ///
+    /// `visible_from_attempt` is `current_attempt + 1` so the *subsequent*
+    /// Agent attempt sees the structured feedback (SLICE I smoke).
+    ///
+    /// Prefer [`Self::prepare`] + durable write + [`Self::commit`] when a
+    /// Session ledger is involved so disk failure cannot leave injectable state.
+    pub fn submit(&mut self, draft: FeedbackDraft) -> Result<StructuredFeedback, PlannotatorError> {
+        let feedback = Self::prepare(draft)?;
+        self.commit(feedback.clone());
         Ok(feedback)
     }
 
@@ -275,5 +304,30 @@ mod tests {
             Some("new after restart")
         );
         assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn prepare_does_not_commit_until_explicit_commit() {
+        let mut store = FeedbackStore::new();
+        let prepared = FeedbackStore::prepare(draft("s1", "t1")).unwrap();
+        assert!(store.is_empty());
+        assert!(prepared.feedback_id.starts_with("fb-"));
+        assert_eq!(prepared.feedback_id.len(), 3 + 36);
+        store.commit(prepared.clone());
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get(&prepared.feedback_id).unwrap().session_id, "s1");
+    }
+
+    #[test]
+    fn rollback_removes_only_matching_session_id() {
+        let mut store = FeedbackStore::new();
+        let a = store.submit(draft("s1", "t1")).unwrap();
+        let b = store.submit(draft("s2", "t2")).unwrap();
+        // Same id string cannot happen with uuid alloc, but rollback is keyed.
+        assert!(store.rollback("s1", &a.feedback_id));
+        assert!(!store.rollback("s1", &a.feedback_id));
+        assert_eq!(store.len(), 1);
+        assert!(store.get(&b.feedback_id).is_some());
+        assert!(store.list_for_session("s1").is_empty());
     }
 }
