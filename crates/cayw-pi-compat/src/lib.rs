@@ -14,8 +14,11 @@
 //!   Node adapter + `load_external` — **primary acceptance**: real unmodified npm Pi
 //!   extension speaking Pi ExtensionAPI; adapter translates on the CAYW side only
 //!
-//! Commands / session / events / UI maps remain description-grade. Refusals are
-//! always explicit (`incompatible` / `unavailable`), never silent success.
+//! **Proven this cut:** `tools.registerTool` + `tools.invoke` for the pinned
+//! `hello.ts` only. Commands / events / `sendMessage` / session / UI are
+//! unavailable or incompatible; the npm bridge throws `unsupported:` (not silent
+//! noop). This is **not** full Pi ExtensionAPI compatibility and **not** F15
+//! complete. Refusals are always explicit.
 //!
 //! Design reference (not a code transplant):
 //! [weijiafu14/pi2dsh](https://github.com/weijiafu14/pi2dsh) compat-layer shape.

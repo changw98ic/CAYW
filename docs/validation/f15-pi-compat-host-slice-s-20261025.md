@@ -1,6 +1,6 @@
 # F15 / SLICE S 验收说明（Pi 兼容宿主）
 
-日期：2026-10-25（npm ExtensionAPI 路径补强：2026-10-26）
+日期：2026-10-25（npm ExtensionAPI 路径补强：2026-10-26；诚实范围/unsupported 补强：2026-10-26）
 
 ## 命令
 
@@ -22,6 +22,7 @@ cargo run -p cayw-pi-compat --example offline_pi_compat --locked
 
 ## 诚实缺口
 
-- commands / session / events 仍 unavailable；interaction incompatible
-- 适配器 UI/exec/session 为 stub
-- 未声明「全插件兼容」或 F15 全范围完成
+- **已证明范围：** 仅 npm `hello.ts` 工具切片（`registerTool` / `invoke`）
+- commands / session / events / `sendMessage` 仍 `unavailable`；interaction `incompatible`
+- 适配器对上述表面**抛 `unsupported:`**（不再静默 noop）；exec/UI 同
+- **未**声明「全插件兼容」「完整 ExtensionAPI 兼容」或 F15 全范围完成

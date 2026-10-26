@@ -260,6 +260,29 @@ async fn real_npm_package_tools_are_partial_not_unavailable() {
         &SurfaceId::new(SurfaceFamily::Commands, "registerCommand"),
     );
     assert_eq!(commands.level, CompatibilityLevel::Unavailable);
+    assert!(
+        commands.detail.contains("unsupported") || commands.detail.contains("not a CAYW"),
+        "commands detail should admit bridge throws unsupported, got {}",
+        commands.detail
+    );
+    let events = matrix.lookup(&real, &SurfaceId::new(SurfaceFamily::Events, "on"));
+    assert_eq!(events.level, CompatibilityLevel::Unavailable);
+    let send = matrix.lookup(
+        &real,
+        &SurfaceId::new(SurfaceFamily::Session, "sendMessage"),
+    );
+    assert_eq!(send.level, CompatibilityLevel::Unavailable);
+    assert!(
+        send.detail.contains("unsupported") || send.detail.contains("sendMessage"),
+        "sendMessage must be explicit unavailable, got {}",
+        send.detail
+    );
+    // Honesty: tools partial must not be marketed as full ExtensionAPI.
+    assert!(
+        register.detail.contains("hello") || register.detail.contains("Not full"),
+        "registerTool detail should scope to hello slice, got {}",
+        register.detail
+    );
 }
 
 #[test]

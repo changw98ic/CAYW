@@ -2,11 +2,16 @@
 
 可选的 **Pi → CAYW** 外部兼容宿主映射（F15 首刀，SLICE S）。
 
+**诚实范围：** 本切片**只证明**钉扎 npm 包的 `hello.ts` **工具切片**
+（`tools.registerTool` / `tools.invoke`）。commands / events / `sendMessage` /
+session / UI **未交付**（矩阵 `unavailable` / `incompatible`；桥接显式抛
+`unsupported:`，禁止静默 noop）。**不是**完整 Pi ExtensionAPI 兼容，**不是** F15 完成。
+
 提供：
 
 - 按「插件@version × 表面」记录的**版本/兼容矩阵**（`CompatMatrix`）
-- Pi 公共扩展表面族（工具 / 命令 / 会话 / 事件 / 交互 / 生命周期）到 CAYW 接缝的首刀映射
-- 可选启用的 [`PiCompatHost`]：经 `cayw-plugins::PluginRegistry` 完成装 / 调 / 卸
+- 表面族清单（工具 / 命令 / 会话 / 事件 / 交互 / 生命周期）→ CAYW 接缝的**记账**映射（多数仍为 unavailable）
+- 可选启用的 [`PiCompatHost`]：经 `cayw-plugins::PluginRegistry` 完成装 / 调 / 卸（tools 路径）
 
 ## 首刀范围
 
@@ -29,16 +34,21 @@ cd crates/cayw-pi-compat/npm && npm ci --omit=dev
 cargo test -p cayw-pi-compat --locked npm_hello_extension
 ```
 
-适配器（`npm/pi-npm-bridge.mjs`）在 CAYW 侧实现最小 `ExtensionAPI`（`registerTool` / stubs），用 jiti **原样加载**官方 `hello.ts`，再把 `execute()` 结果翻译成 CAYW external JSON。npm 包本身不做任何改写。
+适配器（`npm/pi-npm-bridge.mjs`）在 CAYW 侧实现最小 `ExtensionAPI`：`registerTool` 实作；
+`registerCommand` / `on` / `events` / `sendMessage` / UI 等**显式抛 `unsupported:`**
+（不再静默 noop）。用 jiti **原样加载**官方 `hello.ts`，再把 `execute()` 结果翻译成
+CAYW external JSON。npm 包本身不做任何改写。
 
 自制 `cayw-pi-sample-ext` **不能**单独关闭 F15：验收测试要求响应含 `pi_extension_api: true` 且 `extension_path` 指向 `hello.ts`。
 
 ## 仍不支持（明确未交付）
 
-- 完整事件总线、`SessionManager`、`registerCommand` 作为 CAYW capability、UIContext（commands/session/events = `unavailable`；interaction = `incompatible`）
+- `registerCommand` / `pi.on` / `events.*` / `sendMessage` / `SessionManager` / UIContext
+  （commands/session/events/`sendMessage` = `unavailable`；interaction = `incompatible`；
+  桥接调用即抛 `unsupported:`）
 - Host/Bridge/WebUI 默认启用该可选宿主
-- 将 F15 全范围或「全插件兼容」标为完成
-- 任意 Pi 扩展的全表面自动兼容（矩阵按包@version×表面记账）
+- 将 F15 全范围或「全插件兼容」/「完整 ExtensionAPI 兼容」标为完成
+- 任意 Pi 扩展的全表面自动兼容（矩阵按包@version×表面记账；已证明的仅 hello 工具切片）
 
 ## 快速使用
 

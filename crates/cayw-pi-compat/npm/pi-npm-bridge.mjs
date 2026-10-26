@@ -7,6 +7,10 @@
  * stdin/stdout. The npm package itself is never rewritten; translation lives
  * only in this adapter.
  *
+ * Scope (honest): tools.registerTool / tools.invoke for the pinned hello.ts
+ * slice only. commands / events / sendMessage / session / UI throw
+ * `unsupported:` — not silent noops, not full Pi ExtensionAPI compatibility.
+ *
  * Usage:
  *   node pi-npm-bridge.mjs \
  *     --extension <abs-path-to-extension.ts|js> \
@@ -62,8 +66,17 @@ function schemaFromParameters(parameters) {
   return parameters;
 }
 
+function unsupported(surface) {
+  // Honest refusal: never silent noop for unavailable / incompatible surfaces.
+  // Proven path this cut: tools.registerTool + tools.invoke (hello.ts only).
+  return (..._args) => {
+    throw new Error(
+      `unsupported: ExtensionAPI.${surface} is unavailable in the CAYW Pi npm bridge (F15 hello-tool slice only; not full Pi extension compatibility)`,
+    );
+  };
+}
+
 function createExtensionApi(state) {
-  const noop = () => {};
   const api = {
     registerTool(tool) {
       if (!tool || typeof tool.name !== "string" || !tool.name) {
@@ -74,27 +87,30 @@ function createExtensionApi(state) {
       }
       state.tools.set(tool.name, tool);
     },
-    registerCommand: noop,
-    registerShortcut: noop,
-    registerFlag: noop,
+    // Everything below is explicit unsupported — matrix marks these unavailable /
+    // incompatible. Do not silent-noop; hello.ts only needs registerTool.
+    registerCommand: unsupported("registerCommand"),
+    registerShortcut: unsupported("registerShortcut"),
+    registerFlag: unsupported("registerFlag"),
     getFlag: () => undefined,
-    on: noop,
-    events: { on: noop, emit: noop, off: noop },
-    appendEntry: noop,
-    setActiveTools: noop,
+    on: unsupported("on"),
+    events: {
+      on: unsupported("events.on"),
+      emit: unsupported("events.emit"),
+      off: unsupported("events.off"),
+    },
+    appendEntry: unsupported("appendEntry"),
+    setActiveTools: unsupported("setActiveTools"),
     getAllTools: () =>
       [...state.tools.values()].map((t) => ({
         name: t.name,
         description: t.description ?? "",
       })),
     getActiveTools: () => [...state.tools.keys()],
-    sendMessage: noop,
-    exec: async () => {
-      throw new Error("pi.exec is unavailable in the CAYW Pi npm bridge");
-    },
-    // Stubs for surfaces we mark unavailable / incompatible
-    unregisterTool: noop,
-    setModel: noop,
+    sendMessage: unsupported("sendMessage"),
+    exec: unsupported("exec"),
+    unregisterTool: unsupported("unregisterTool"),
+    setModel: unsupported("setModel"),
     getModel: () => undefined,
   };
   return api;
@@ -157,11 +173,12 @@ async function handleCall(state, method, arguments_) {
         cwd: process.cwd(),
         hasUI: false,
         ui: {
-          notify: () => {},
-          select: async () => undefined,
-          confirm: async () => false,
-          input: async () => undefined,
+          notify: unsupported("ui.notify"),
+          select: unsupported("ui.select"),
+          confirm: unsupported("ui.confirm"),
+          input: unsupported("ui.input"),
         },
+        // shutdown is lifecycle housekeeping; keep no-op (no claimed side effect).
         shutdown: () => {},
       },
     );

@@ -16,9 +16,10 @@ pub struct CompatRow {
 
 /// Version / compatibility matrix for the optional Pi→CAYW host.
 ///
-/// First cut does **not** claim all Pi plugins. Rows are explicit; missing
-/// combinations are treated as [`CompatibilityLevel::Unavailable`] when queried,
-/// never as silent success.
+/// First cut proves the **hello tool slice** only (`registerTool` / `invoke`).
+/// Commands / events / sendMessage / session / UI are unavailable or incompatible.
+/// Does **not** claim full Pi ExtensionAPI or F15 complete. Missing combinations
+/// are [`CompatibilityLevel::Unavailable`] when queried, never silent success.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompatMatrix {
     pub pi_abi_package: String,
@@ -153,14 +154,14 @@ impl CompatMatrix {
             package: real.clone(),
             surface: SurfaceId::new(SurfaceFamily::Tools, "registerTool"),
             level: CompatibilityLevel::Partial,
-            detail: "Unmodified examples/extensions/hello.ts loaded via npm/pi-npm-bridge.mjs ExtensionAPI stub + load_external.".into(),
+            detail: "Proven hello-tool slice only: unmodified examples/extensions/hello.ts via npm/pi-npm-bridge.mjs (registerTool) + load_external. Not full ExtensionAPI.".into(),
             cayw_seam: Some("cayw_plugins::PluginRegistry::load_external + pi-npm-bridge".into()),
         });
         self.insert(CompatRow {
             package: real.clone(),
             surface: SurfaceId::new(SurfaceFamily::Tools, "invoke"),
             level: CompatibilityLevel::Partial,
-            detail: "hello tool execute() from unmodified npm extension; adapter returns Pi AgentToolResult as CAYW JSON.".into(),
+            detail: "hello tool execute() from unmodified npm extension only; adapter returns Pi AgentToolResult as CAYW JSON. Other ExtensionAPI surfaces unsupported.".into(),
             cayw_seam: Some("cayw_plugins::PluginRegistry::call + pi-npm-bridge".into()),
         });
         self.insert(CompatRow {
@@ -182,7 +183,7 @@ impl CompatMatrix {
             package: real.clone(),
             surface: SurfaceId::new(SurfaceFamily::Commands, "registerCommand"),
             level: CompatibilityLevel::Unavailable,
-            detail: "Bridge stubs registerCommand; not invoked as a CAYW capability in this cut."
+            detail: "Bridge throws unsupported on registerCommand (not a silent noop); not a CAYW capability."
                 .into(),
             cayw_seam: None,
         });
@@ -190,7 +191,8 @@ impl CompatMatrix {
             package: real.clone(),
             surface: SurfaceId::new(SurfaceFamily::Events, "on"),
             level: CompatibilityLevel::Unavailable,
-            detail: "Bridge stubs pi.on; event bus not wired to CAYW.".into(),
+            detail: "Bridge throws unsupported on pi.on / events.*; event bus not wired to CAYW."
+                .into(),
             cayw_seam: None,
         });
         self.insert(CompatRow {
@@ -202,9 +204,16 @@ impl CompatMatrix {
         });
         self.insert(CompatRow {
             package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Session, "sendMessage"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Bridge throws unsupported on sendMessage; not wired to CAYW Session.".into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
             surface: SurfaceId::new(SurfaceFamily::Interaction, "ui.select"),
             level: CompatibilityLevel::Incompatible,
-            detail: "Bridge UI stubs are non-interactive; no Pi UIContext bridge.".into(),
+            detail: "Bridge throws unsupported on ui.select/confirm/input/notify; no Pi UIContext bridge.".into(),
             cayw_seam: None,
         });
     }
