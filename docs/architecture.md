@@ -269,6 +269,8 @@ Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。�
 
 ## Trace Debug：实时节点图与本地重新求值
 
+F06 首刀的运行检查器见 [`cayw-run-inspector`](../crates/cayw-run-inspector/README.md)：从原生运行步骤快照折叠重试/恢复路径、耗时轨道与会话间比较；不编造结局，不替代 Trace Debug 节点图。迷宫 UI、源码关联与节点重求值不在本切片。
+
 `cayw-trace-debug` 是可独立启停的本机插件应用。它经认证 IPC 按 Session 游标消费事件，维护自己的追踪文件和网页，不直接读写 Core 或 Cells 数据库。Runtime 和普通无界面任务不依赖该包；没有安装插件时仍可正常执行。该接入不依赖 #30 的页面编辑器，也不要求启用其他 plugin feature。
 
 节点适配用 `GraphPlan` 描述输入、初始状态、上下文、Luau 节点和分支边。实际 Runtime 执行通过普通有界输出产生带 `cayw.trace.v1` 标识的节点事实。Cells 保存输出后调用 `CellBackend::output`；Runtime 仅将这类输出发布为 `Host { kind: "trace_node" }`，保留原 execution、Task、父调用、源码摘要和输出游标。它是观测记录，不授予执行权限。原能力调用仍经过原有审批、预算、取消和结算。未提供节点适配的普通执行只显示已观察的调用事实，并列明不能局部求值的上下文缺口。

@@ -80,6 +80,7 @@ pub async fn serve(
         .route("/styles.css", get(styles))
         .route("/favicon.svg", get(favicon))
         .route("/api/state", get(state_route))
+        .route("/api/run-inspector", get(run_inspector_route))
         .route("/api/projects/{project_id}/edit", post(edit_route))
         .route("/api/projects/{project_id}/undo", post(undo_route))
         .fallback(not_found)
@@ -275,6 +276,70 @@ async fn wait_for_change(state: &Server, after: u64) -> Option<Document> {
             _ = tokio::time::sleep(POLL_INTERVAL.min(remaining)) => {}
         }
     }
+}
+
+/// Optional `after` (exclusive offset into the ingested event list) and `limit`
+/// for `GET /api/run-inspector`. Unknown keys fail closed.
+fn query_run_inspector(query: Option<&str>) -> Result<(u64, Option<usize>), ()> {
+    let Some(query) = query else {
+        return Ok((0, None));
+    };
+    let mut after = None;
+    let mut limit = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').ok_or(())?;
+        match key {
+            "after" if after.is_none() => {
+                after = Some(value.parse::<u64>().map_err(|_| ())?);
+            }
+            "limit" if limit.is_none() => {
+                let parsed = value.parse::<usize>().map_err(|_| ())?;
+                if parsed == 0 {
+                    return Err(());
+                }
+                limit = Some(parsed);
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok((after.unwrap_or(0), limit))
+}
+
+/// Fold ingested Runtime events into run-inspector timelines (F06 product entry).
+///
+/// Supports `?after=&limit=` over the ingested event list so long captures are
+/// not silently truncated. The response always reports page metadata.
+async fn run_inspector_route(State(state): State<Arc<Server>>, uri: Uri) -> Response {
+    let (after, limit) = match query_run_inspector(uri.query()) {
+        Ok(page) => page,
+        Err(()) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Accepted query parameters are non-negative `after` and positive `limit`",
+            );
+        }
+    };
+    let document = state.store.snapshot();
+    let events_total = document.events.len() as u64;
+    let start = after.min(events_total) as usize;
+    let end = match limit {
+        Some(limit) => start.saturating_add(limit).min(document.events.len()),
+        None => document.events.len(),
+    };
+    let page = &document.events[start..end];
+    let timelines = cayw_run_inspector::timelines_from_runtime_events(page);
+    let next_after = end as u64;
+    Json(json!({
+        "protocol_version": cayw_run_inspector::RUN_INSPECTOR_PROTOCOL_VERSION,
+        "timelines": timelines,
+        "events_total": events_total,
+        "after": start as u64,
+        "events_scanned": (end - start) as u64,
+        "has_more": end < document.events.len(),
+        "next_after": next_after,
+    }))
+    .into_response()
 }
 
 async fn edit_route(

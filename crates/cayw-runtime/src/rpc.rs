@@ -93,6 +93,18 @@ fn page_limit() -> usize {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RunInspector {
+    session_id: String,
+    /// Exclusive Core cursor to start from (same meaning as `session.events`).
+    #[serde(default)]
+    after: u64,
+    /// Max Core events to fold. Omit to scan the full remaining log (paged
+    /// internally past the first 1000). Explicit `null` is also "all remaining".
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Approval {
     session_id: String,
     approval_id: String,
@@ -319,6 +331,10 @@ impl RpcHandler for Runtime {
                     )
                     .await?,
                 )
+            }
+            "session.run_inspector" => {
+                let p: RunInspector = parse(params)?;
+                encode(self.run_inspector_page(&p.session_id, p.after, p.limit)?)
             }
             "session.audit" => {
                 let p: Events = parse(params)?;
