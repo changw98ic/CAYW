@@ -2007,3 +2007,50 @@ async fn real_device_timeout_and_output_overflow_remain_unknown() {
         assert_eq!(audit.records.lock().unwrap().last().unwrap(), "unknown");
     }
 }
+
+#[tokio::test]
+async fn vision_tools_are_in_catalog_and_crop_works() {
+    use base64::Engine;
+    let root = Workspace::new();
+    let (host, _, _) = host(root.path(), Default::default());
+    let names: Vec<_> = host.capabilities().into_iter().map(|d| d.name).collect();
+    for expected in [
+        "vision.crop",
+        "vision.pixel_diff",
+        "vision.colors",
+        "vision.ocr",
+        "vision.describe",
+    ] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "missing {expected} in {names:?}"
+        );
+    }
+    let rgba = {
+        let mut buf = vec![0u8; 8 * 8 * 4];
+        for i in 0..16 {
+            let idx = i * 4;
+            buf[idx..idx + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        buf
+    };
+    let result = call(
+        &host,
+        "vision.crop",
+        json!({
+            "image": {
+                "width": 8,
+                "height": 8,
+                "rgba_base64": base64::engine::general_purpose::STANDARD.encode(&rgba),
+            },
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 4
+        }),
+    )
+    .await
+    .expect("vision.crop");
+    assert_eq!(result["width"], 4);
+    assert_eq!(result["height"], 4);
+}

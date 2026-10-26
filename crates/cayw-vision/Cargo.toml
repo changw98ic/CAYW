@@ -1,6 +1,6 @@
 [package]
 name = "cayw-vision"
-description = "Vision router: local pixel tools, OCR/Q&A backends, and answer cache (F11 first cut)"
+description = "Vision router: local pixel tools, OCR/Q&A backends, Host catalog, and answer cache (F11)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,19 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
+cayw-ai.workspace = true
+cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [[example]]
 name = "offline_vision"

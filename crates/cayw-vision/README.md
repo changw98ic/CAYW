@@ -1,18 +1,29 @@
 # cayw-vision
 
-CAYW 视觉工具路由（F11 首刀，SLICE N）。
+CAYW 视觉工具路由（F11，SLICE N）。
 
-提供**本地像素工具**（裁切 / 像素差 / 主色）、可注入的 OCR / 视觉问答后端，以及按内容摘要命中的答案缓存。缓存命中**不重复计费**后端请求。本 crate **不**直连云端视觉 Provider、不做桌面截图、不暴露 Host/Runtime 工具名——那些在后续切片接结果句柄与模型后端。
+提供**本地像素工具**（裁切 / 像素差 / 主色）、可注入的 OCR / 视觉问答后端，以及按内容摘要命中的答案缓存。缓存命中**不重复计费**后端请求。
 
-## 首刀范围
+## 后端
 
-- `ImageBuffer`：宿主规范 RGBA8 光栅 + 内容 SHA-256
-- 本地：`crop` / `pixel_diff`（差比 + 8×8 最差格）/ `dominant_colors`
-- `FixtureOcrEngine` + `CountingDescribeBackend`（离线 fixture / 计量）
-- `VisionRouter`：统一入口；OCR / describe 走 `AnswerCache`
-- 协议版本：`VISION_PROTOCOL_VERSION = 1`
+| 能力 | 真实后端 | CI / 无依赖回退 |
+| --- | --- | --- |
+| OCR | `TesseractOcrEngine`（系统 `tesseract` CLI；可用 `CAYW_VISION_TESSERACT` 指定路径） | `FixtureOcrEngine`（`CAYW_VISION_OCR=fixture` 强制；未安装 tesseract 时自动选用） |
+| describe | `HttpDescribeBackend`（`CAYW_VISION_DESCRIBE_URL`，可选 `CAYW_VISION_DESCRIBE_KEY`） | `CountingDescribeBackend`（离线计量 / 可 seed） |
 
-本切片**不**交付：真实云端 / Ollama 视觉链、桌面 / HTML 截图、SVG trace / 抠图、Host 工具接线、与 F18 预览关联、将 F11 全范围标完成。
+像素算法（`crop` / `pixel_diff` / `dominant_colors`）始终在进程内运行，不依赖外部二进制或网络。
+
+## Host / Runtime 目录
+
+`definitions()` 注册：
+
+- `vision.crop`
+- `vision.pixel_diff`
+- `vision.colors`
+- `vision.ocr`
+- `vision.describe`
+
+`cayw-host` 在 `HostConfig.vision = Some(Limits)` 时把上述工具编入目录；Runtime 通过 `host.capabilities()` 自动可见。图像参数为 RGBA8 + `rgba_base64`。
 
 ## 快速使用
 
@@ -28,12 +39,16 @@ let router = VisionRouter::new(Arc::new(ocr), describe);
 let text = router.ocr(&img, &OcrRequest { engine_hint: None })?;
 ```
 
+生产 Host 侧用 `VisionService::from_env(Limits::default())`：有 tesseract 则走真实 OCR，否则 fixture。
+
 ## 来源与边界
 
 - 功能：F11（[#33](https://github.com/changw98ic/CAYW/issues/33)）
 - 采用方式：设计参考（非代码移植）
-- 参考：[ysr666/dsh-vision-router](https://github.com/ysr666/dsh-vision-router) 的视觉问答 / OCR / 定位裁切 / 像素差 / 缓存产品形状
+- 参考：[ysr666/dsh-vision-router](https://github.com/ysr666/dsh-vision-router)
 - 记录：[`docs/sources/f11-vision-router.md`](../../docs/sources/f11-vision-router.md)
+
+本切片**不**交付：云端故障转移链、桌面 / HTML 截图、ground/detect、SVG trace、与 F18 预览关联、将 F11 全范围标完成。
 
 ## 验证
 
@@ -43,4 +58,4 @@ cargo clippy -p cayw-vision --all-targets --locked -- -D warnings
 cargo run -p cayw-vision --example offline_vision --locked
 ```
 
-测试为本地纯函数与内存缓存，无网络、无 Provider、无真实 UI。
+无 tesseract、无 `CAYW_VISION_DESCRIBE_URL` 时，fixture / counting 后端保证 CI 可离线通过。

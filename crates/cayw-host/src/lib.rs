@@ -145,6 +145,8 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
+    /// Vision tools (crop / pixel_diff / colors / ocr / describe). None omits them.
+    pub vision: Option<cayw_vision::Limits>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
 impl Default for HostConfig {
@@ -166,6 +168,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
+            vision: Some(cayw_vision::Limits::default()),
             external: None,
         }
     }
@@ -194,6 +197,9 @@ impl HostConfig {
             limits.validate()?;
         }
         if let Some(limits) = &self.workspace {
+            limits.validate()?;
+        }
+        if let Some(limits) = self.vision {
             limits.validate()?;
         }
         if let Some(program) = &self.git_program {
@@ -259,6 +265,7 @@ pub(crate) enum Executor {
     Terminal,
     Data,
     Workspace,
+    Vision,
     External,
 }
 
@@ -292,6 +299,7 @@ pub struct Host {
     safety: Arc<Safety>,
     runner: Arc<cayw_device::ProcessRunner>,
     terminal: Option<Arc<terminal::TerminalManager>>,
+    vision: Option<Arc<cayw_vision::VisionService>>,
     external: Option<Arc<dyn ExternalHost>>,
 }
 impl Host {
@@ -355,6 +363,10 @@ impl Host {
             .transpose()?
             .map(Arc::new);
         let external = config.external.clone();
+        let vision = match config.vision {
+            Some(limits) => Some(Arc::new(cayw_vision::VisionService::from_env(limits)?)),
+            None => None,
+        };
         Ok(Self {
             root: Arc::new(root),
             gate,
@@ -366,6 +378,7 @@ impl Host {
             safety: Arc::default(),
             runner: Arc::new(runner),
             terminal,
+            vision,
             external,
         })
     }
@@ -444,6 +457,7 @@ impl Host {
             safety: self.safety.clone(),
             runner: self.runner.clone(),
             terminal: self.terminal.clone(),
+            vision: self.vision.clone(),
             external: self.external.clone(),
         })
     }
@@ -687,6 +701,19 @@ impl Host {
                     .execute_until(name, &args, cancel.clone(), workspace_deadline)
                     .await
             }
+            Executor::Vision => {
+                let service = self
+                    .vision
+                    .as_ref()
+                    .ok_or_else(|| failure("vision capabilities are disabled"))?
+                    .clone();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "vision capability cancelled")),
+                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "vision capability deadline reached")),
+                    result = cayw_vision::execute(service, name, args, cancel.clone()) => result,
+                }
+            }
             Executor::External => {
                 let external = service
                     .or(self.external.as_deref())
@@ -894,6 +921,7 @@ impl Host {
                     .workspace
                     .as_ref()
                     .map(|limits| limits.max_argument_bytes),
+                Executor::Vision => self.config.vision.map(|limits| limits.input_bytes),
                 _ => None,
             }
             .unwrap_or(self.config.max_argument_bytes)
