@@ -5,6 +5,8 @@
 //! with atomic replace so ownership survives process restart. Results of
 //! background commands remain keyed by Session in Runtime; this store only
 //! restores which device should resume a Session/Task after the gateway returns.
+//! Pair with [`crate::DeviceRouter`]: store supplies the device id, router supplies
+//! the IPC endpoint; metadata restore alone does not route RPCs.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,

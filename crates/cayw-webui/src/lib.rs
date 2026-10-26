@@ -101,6 +101,7 @@ impl GatewayLimits {
 /// Explicit host credentials stay exclusively on the gateway. Each HTTP call
 /// gets its own IPC connection, so a dropped prompt cannot cancel event reads.
 /// Opening a connection never repeats a previous call.
+#[derive(Clone)]
 pub struct IpcEndpoint {
     address: SocketAddr,
     token: String,
@@ -141,8 +142,94 @@ impl fmt::Debug for IpcEndpoint {
     }
 }
 
+/// Live `device_id` → IPC connect targets.
+///
+/// [`OwnershipStore`] restores which device owns a Session/Task after a gateway
+/// restart; this router turns that device id into the IPC endpoint used for the
+/// RPC. Fallback to the default/local endpoint happens **only** when the store
+/// has no entry (or the bound id is empty/`local`). A non-local owned device
+/// that is not registered is an error — never a silent fallback to default.
+pub struct DeviceRouter {
+    default: IpcEndpoint,
+    by_device: std::sync::Mutex<std::collections::BTreeMap<String, IpcEndpoint>>,
+}
+
+impl DeviceRouter {
+    pub fn new(default: IpcEndpoint) -> Self {
+        Self {
+            default,
+            by_device: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// Register (or replace) the IPC endpoint for `device_id`.
+    pub fn register(&self, device_id: &str, endpoint: IpcEndpoint) -> io::Result<()> {
+        if device_id.is_empty()
+            || device_id == "local"
+            || device_id.len() > 256
+            || device_id
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid device id for endpoint registration",
+            ));
+        }
+        self.by_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device_id.to_owned(), endpoint);
+        Ok(())
+    }
+
+    /// Choose the IPC endpoint for an OwnershipStore-resolved device id.
+    ///
+    /// - `None` / `""` / `"local"` → default (local) endpoint
+    /// - registered non-local device → that device's endpoint
+    /// - owned but unregistered non-local device → `Err("unknown_device")`
+    ///   (never a silent fallback to default)
+    pub fn endpoint_for(&self, owned_device: Option<&str>) -> Result<IpcEndpoint, &'static str> {
+        match owned_device.map(str::trim).filter(|s| !s.is_empty()) {
+            None | Some("local") => Ok(self.default.clone()),
+            Some(device_id) => self
+                .by_device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(device_id)
+                .cloned()
+                .ok_or("unknown_device"),
+        }
+    }
+
+    fn contains_ipc_token(&self, text: &str) -> bool {
+        if text.contains(&self.default.token) {
+            return true;
+        }
+        self.by_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|ep| text.contains(&ep.token))
+    }
+
+    fn redact_ipc_tokens(&self, text: &str) -> String {
+        let mut out = text.replace(&self.default.token, "[redacted]");
+        for ep in self
+            .by_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            out = out.replace(&ep.token, "[redacted]");
+        }
+        out
+    }
+}
+
 struct Gateway {
-    ipc: IpcEndpoint,
+    /// Default local IPC plus any registered device endpoints (F13 routing).
+    devices: Arc<DeviceRouter>,
     web_token: String,
     authorities: Vec<String>,
     limits: GatewayLimits,
@@ -185,15 +272,26 @@ pub async fn serve_with_limits(
     limits: GatewayLimits,
     cancel: CancellationToken,
 ) -> io::Result<()> {
-    serve_inner(listener, ipc_client, web_token, limits, None, cancel).await
+    serve_inner(
+        listener,
+        Arc::new(DeviceRouter::new(ipc_client)),
+        web_token,
+        limits,
+        None,
+        cancel,
+    )
+    .await
 }
 
 /// Same as [`serve_with_limits`], with a durable [`OwnershipStore`] injected into
 /// the live Gateway so create/bind persists Session/Task → device affinity and
-/// route/restore queries it after a gateway restart (F13).
+/// RPC connect selection restores that device after a gateway restart (F13).
+///
+/// Pass a shared [`DeviceRouter`] so callers can [`DeviceRouter::register`]
+/// non-local device IPC endpoints; OwnershipStore device ids select among them.
 pub async fn serve_with_ownership(
     listener: TcpListener,
-    ipc_client: IpcEndpoint,
+    devices: Arc<DeviceRouter>,
     web_token: impl Into<String>,
     limits: GatewayLimits,
     ownership: Arc<OwnershipStore>,
@@ -201,7 +299,7 @@ pub async fn serve_with_ownership(
 ) -> io::Result<()> {
     serve_inner(
         listener,
-        ipc_client,
+        devices,
         web_token,
         limits,
         Some(ownership),
@@ -212,7 +310,7 @@ pub async fn serve_with_ownership(
 
 async fn serve_inner(
     listener: TcpListener,
-    ipc_client: IpcEndpoint,
+    devices: Arc<DeviceRouter>,
     web_token: impl Into<String>,
     limits: GatewayLimits,
     ownership: Option<Arc<OwnershipStore>>,
@@ -232,7 +330,7 @@ async fn serve_inner(
             "Web token must contain 32..4096 ASCII bytes without whitespace",
         ));
     }
-    if web_token == ipc_client.token {
+    if web_token == devices.default.token {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Web and IPC access tokens must differ",
@@ -240,7 +338,7 @@ async fn serve_inner(
     }
     limits.validate()?;
     let state = Arc::new(Gateway {
-        ipc: ipc_client,
+        devices,
         web_token,
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
@@ -478,14 +576,26 @@ async fn rpc(
     } else {
         state.limits.request_timeout
     };
-    // Consult durable affinity on every session/task route so a restarted
-    // gateway restores the original device binding (F13 / DeviceChannelHub maps).
+    // OwnershipStore restores Session/Task → device; DeviceRouter turns that
+    // into the IPC endpoint. Fallback to default only when the store has no entry
+    // (or the bound id is local/empty) — never when a non-local owner is missing.
     let owned_device = resolve_owned_device(&state, &request.method, &request.params);
+    let endpoint = match state.devices.endpoint_for(owned_device.as_deref()) {
+        Ok(endpoint) => endpoint,
+        Err(code) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                code,
+                "Owned device has no registered IPC endpoint; register the device or clear ownership",
+                false,
+            );
+        }
+    };
     let method = request.method.clone();
     let params = request.params.clone();
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
-        result = state.ipc.connect(budget) => match result {
+        result = endpoint.connect(budget) => match result {
             Ok(client) => client,
             Err(error) => return upstream_error(&state, error),
         }
@@ -595,12 +705,14 @@ fn side_effecting(method: &str) -> bool {
 }
 
 fn redact(text: &str, state: &Gateway) -> String {
-    text.replace(&state.ipc.token, "[redacted]")
+    state
+        .devices
+        .redact_ipc_tokens(text)
         .replace(&state.web_token, "[redacted]")
 }
 
 fn contains_token(text: &str, state: &Gateway) -> bool {
-    text.contains(&state.ipc.token) || text.contains(&state.web_token)
+    state.devices.contains_ipc_token(text) || text.contains(&state.web_token)
 }
 
 fn contains_credential(value: &Value, state: &Gateway) -> bool {
@@ -686,4 +798,30 @@ async fn styles() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/styles.css"),
     )
+}
+
+#[cfg(test)]
+mod device_router_tests {
+    use super::*;
+
+    fn ep(port: u16, token: &str) -> IpcEndpoint {
+        IpcEndpoint::new(format!("127.0.0.1:{port}").parse().unwrap(), token).unwrap()
+    }
+
+    #[test]
+    fn endpoint_for_falls_back_only_without_store_entry() {
+        let router = DeviceRouter::new(ep(4100, "fedcba9876543210fedcba9876543210"));
+        router
+            .register("device-alpha", ep(4101, "aabbccddeeff00112233445566778899"))
+            .unwrap();
+
+        assert!(router.endpoint_for(None).is_ok());
+        assert!(router.endpoint_for(Some("local")).is_ok());
+        assert!(router.endpoint_for(Some("")).is_ok());
+        assert!(router.endpoint_for(Some("device-alpha")).is_ok());
+        assert_eq!(
+            router.endpoint_for(Some("device-missing")).unwrap_err(),
+            "unknown_device"
+        );
+    }
 }

@@ -19,6 +19,7 @@ cargo fmt -p cayw-runtime -p cayw-webui -- --check
 2. 完成后 Session 事件含 `background_task_completed`；`bg.result` / host inspect 仍绑定原 `session_id`。
 3. Runtime 重开后已完成任务的元数据、日志与 Session 归属可恢复；仍为 `running` 的行标记 `runtime_restarted`（不宣称跨进程领养）。
 4. `OwnershipStore` 写入 Session/Task→device 后，进程重开仍可读回。
+5. 重开后带 `session_id`/`task_id` 的 RPC 按归属选择已注册设备 IPC；无归属时才回退默认 endpoint；有归属但未注册设备时返回 `unknown_device`（不静默走默认）。
 
 ## 未宣称
 

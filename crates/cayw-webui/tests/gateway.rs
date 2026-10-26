@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig};
 use cayw_webui::{
-    GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, OwnershipStore, serve_with_limits,
+    DeviceRouter, GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, OwnershipStore, serve_with_limits,
     serve_with_ownership,
 };
 use reqwest::{Client as HttpClient, StatusCode};
@@ -130,8 +130,49 @@ impl Fixture {
         Self::start_inner(limits, None).await
     }
 
-    async fn start_with_ownership(limits: GatewayLimits, ownership: Arc<OwnershipStore>) -> Self {
-        Self::start_inner(limits, Some(ownership)).await
+    /// Ownership + DeviceRouter that registers `device_id` against the fixture IPC
+    /// so Session/Task routes actually select that endpoint (same process in tests).
+    async fn start_with_ownership_device(
+        limits: GatewayLimits,
+        ownership: Arc<OwnershipStore>,
+        device_id: &str,
+    ) -> Self {
+        let stop = CancellationToken::new();
+        let runtime = Arc::new(RuntimeFixture::default());
+        let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ipc_addr = ipc_listener.local_addr().unwrap();
+        let mut ipc_config = ServerConfig::new(IPC_TOKEN);
+        ipc_config.request_timeout = Duration::from_secs(20);
+        let ipc_task = tokio::spawn(cayw_ipc::serve(
+            ipc_listener,
+            runtime.clone(),
+            ipc_config,
+            stop.clone(),
+        ));
+        let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
+        let devices = Arc::new(DeviceRouter::new(ipc.clone()));
+        devices.register(device_id, ipc.clone()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let web_task = tokio::spawn(serve_with_ownership(
+            listener,
+            devices,
+            WEB_TOKEN,
+            limits,
+            ownership,
+            stop.clone(),
+        ));
+        Self {
+            addr,
+            http: HttpClient::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            runtime,
+            stop,
+            tasks: vec![ipc_task, web_task],
+        }
     }
 
     async fn start_inner(limits: GatewayLimits, ownership: Option<Arc<OwnershipStore>>) -> Self {
@@ -151,9 +192,10 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let web_task = if let Some(store) = ownership.clone() {
+            let devices = Arc::new(DeviceRouter::new(ipc));
             tokio::spawn(serve_with_ownership(
                 listener,
-                ipc,
+                devices,
                 WEB_TOKEN,
                 limits,
                 store,
@@ -819,7 +861,13 @@ async fn serve_with_ownership_binds_session_and_reopen_restores_it() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("ownership.json");
     let store = Arc::new(OwnershipStore::open(&path).unwrap());
-    let fixture = Fixture::start_with_ownership(GatewayLimits::default(), store.clone()).await;
+    // Register device-alpha against the fixture IPC so route selection is real.
+    let fixture = Fixture::start_with_ownership_device(
+        GatewayLimits::default(),
+        store.clone(),
+        "device-alpha",
+    )
+    .await;
 
     let created = envelope(
         fixture
@@ -882,4 +930,228 @@ async fn serve_with_ownership_binds_session_and_reopen_restores_it() {
         restored.task_device("task-child").as_deref(),
         Some("device-alpha")
     );
+}
+
+const ALPHA_IPC_TOKEN: &str = "aabbccddeeff00112233445566778899";
+
+/// Distinct Runtime markers so the test can prove which IPC endpoint was used.
+struct MarkerRuntime {
+    marker: &'static str,
+}
+
+#[async_trait]
+impl RpcHandler for MarkerRuntime {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        _cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        match method {
+            "session.create" | "session.fork"
+                if params.get("id").and_then(Value::as_str).is_some() =>
+            {
+                Ok(json!({
+                    "id": params["id"],
+                    "state": "idle",
+                    "runtime_marker": self.marker,
+                }))
+            }
+            "session.get" => Ok(json!({
+                "id": params.get("session_id").cloned().unwrap_or(json!("")),
+                "state": "idle",
+                "runtime_marker": self.marker,
+            })),
+            "task.enqueue" if params.get("id").and_then(Value::as_str).is_some() => Ok(json!({
+                "id": params["id"],
+                "state": "queued",
+                "runtime_marker": self.marker,
+            })),
+            "runtime.health" => Ok(json!({
+                "status": "ok",
+                "runtime_marker": self.marker,
+            })),
+            _ => Ok(json!({
+                "method": method,
+                "params": params,
+                "runtime_marker": self.marker,
+            })),
+        }
+    }
+}
+
+async fn serve_marker_ipc(
+    marker: &'static str,
+    token: &str,
+    stop: CancellationToken,
+) -> (SocketAddr, JoinHandle<std::io::Result<()>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut config = ServerConfig::new(token);
+    config.request_timeout = Duration::from_secs(20);
+    let task = tokio::spawn(cayw_ipc::serve(
+        listener,
+        Arc::new(MarkerRuntime { marker }),
+        config,
+        stop,
+    ));
+    (addr, task)
+}
+
+/// Restore + route: OwnershipStore device id must select the registered device
+/// IPC, not the fixed default `state.ipc` connect target.
+#[tokio::test]
+async fn ownership_restore_routes_rpc_to_registered_device_endpoint() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    {
+        let store = OwnershipStore::open(&path).unwrap();
+        store.bind_session("sess-original", "device-alpha").unwrap();
+        store.bind_task("task-child", "device-alpha").unwrap();
+    }
+
+    let stop = CancellationToken::new();
+    let (default_addr, default_task) =
+        serve_marker_ipc("default-runtime", IPC_TOKEN, stop.clone()).await;
+    let (alpha_addr, alpha_task) =
+        serve_marker_ipc("alpha-runtime", ALPHA_IPC_TOKEN, stop.clone()).await;
+
+    let devices = Arc::new(DeviceRouter::new(
+        IpcEndpoint::new(default_addr, IPC_TOKEN).unwrap(),
+    ));
+    devices
+        .register(
+            "device-alpha",
+            IpcEndpoint::new(alpha_addr, ALPHA_IPC_TOKEN).unwrap(),
+        )
+        .unwrap();
+
+    // Gateway "restart": reopen the durable store and inject the same router.
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    assert_eq!(
+        store.session_device("sess-original").as_deref(),
+        Some("device-alpha")
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_ownership(
+        listener,
+        devices.clone(),
+        WEB_TOKEN,
+        GatewayLimits::default(),
+        store,
+        stop.clone(),
+    ));
+
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let routed = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.get","params":{"session_id":"sess-original"}}))
+        .send()
+        .await
+        .unwrap();
+    let body = envelope(routed, StatusCode::OK).await;
+    assert_eq!(
+        body["result"]["runtime_marker"], "alpha-runtime",
+        "restored ownership must connect to the registered device IPC, not default"
+    );
+
+    let task_routed = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"task.get","params":{"task_id":"task-child"}}))
+        .send()
+        .await
+        .unwrap();
+    let task_body = envelope(task_routed, StatusCode::OK).await;
+    assert_eq!(
+        task_body["result"]["runtime_marker"], "alpha-runtime",
+        "task ownership must also select the device endpoint"
+    );
+
+    // No store entry → fallback to default IPC only.
+    let fallback = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"runtime.health","params":{}}))
+        .send()
+        .await
+        .unwrap();
+    let fallback_body = envelope(fallback, StatusCode::OK).await;
+    assert_eq!(
+        fallback_body["result"]["runtime_marker"], "default-runtime",
+        "fallback to default IPC only when OwnershipStore has no entry"
+    );
+
+    stop.cancel();
+    for task in [web_task, default_task, alpha_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown")
+            .unwrap()
+            .unwrap();
+    }
+}
+
+/// Owned non-local device without a registered endpoint must not silently use default.
+#[tokio::test]
+async fn owned_unregistered_device_does_not_fall_back_to_default_ipc() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    store.bind_session("sess-orphan", "device-missing").unwrap();
+
+    let stop = CancellationToken::new();
+    let (default_addr, default_task) =
+        serve_marker_ipc("default-runtime", IPC_TOKEN, stop.clone()).await;
+    let devices = Arc::new(DeviceRouter::new(
+        IpcEndpoint::new(default_addr, IPC_TOKEN).unwrap(),
+    ));
+    // Intentionally do not register device-missing.
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_ownership(
+        listener,
+        devices,
+        WEB_TOKEN,
+        GatewayLimits::default(),
+        store,
+        stop.clone(),
+    ));
+
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let response = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.get","params":{"session_id":"sess-orphan"}}))
+        .send()
+        .await
+        .unwrap();
+    let body = envelope(response, StatusCode::BAD_GATEWAY).await;
+    assert_eq!(body["error"]["code"], "unknown_device");
+    assert!(
+        body["result"].is_null() || body.get("result").is_none(),
+        "must not return default-runtime result for an unregistered owned device"
+    );
+
+    stop.cancel();
+    for task in [web_task, default_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown")
+            .unwrap()
+            .unwrap();
+    }
 }

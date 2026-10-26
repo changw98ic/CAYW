@@ -212,7 +212,7 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 ## 后台命令与网关归属（F13）
 
-可选的 `bg.*` 能力由 Runtime 持有：仅启动 Host 预置进程 profile，日志与结果绑定所属 Session；浏览器断开不终止仍由本 Runtime 进程监护的子进程。网关侧 `OwnershipStore` 持久化 Session/Task → device 映射，避免仅存内存时重启丢失归属。
+可选的 `bg.*` 能力由 Runtime 持有：仅启动 Host 预置进程 profile，日志与结果绑定所属 Session；浏览器断开不终止仍由本 Runtime 进程监护的子进程。网关侧 `OwnershipStore` 持久化 Session/Task → device 映射；`DeviceRouter` 按该映射选择 IPC 连接（仅在无归属或 `local` 时回退默认 endpoint），避免仅恢复元数据却仍走固定 `state.ipc.connect`。
 
 ## MCP、Skills 与外部检索
 

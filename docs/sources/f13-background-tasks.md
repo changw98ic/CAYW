@@ -7,8 +7,8 @@
 - **CAYW 新增**：
   - `cayw-runtime::background`：`bg.run` / `bg.status` / `bg.list` / `bg.logs` / `bg.kill` / `bg.result`；SQLite 元数据 + 日志索引；完成时 `background_task_completed` 控制事件归所属 Session
   - 启动仅选 **Host 进程 profile**（不向 Agent 暴露自由 shell/argv）
-  - `cayw-webui::OwnershipStore`：Session/Task → device 持久映射，补内存 `HashMap` 重启丢失缺口
+  - `cayw-webui::OwnershipStore` + `DeviceRouter`：Session/Task → device 持久映射，并按归属选择 IPC 连接（无条目才回退默认）
 - **边界（本切片不做）**：
   - 任意 shell 命令行、Fusion、跨 Runtime 进程领养 OS 子进程
   - 将 F13 / F20 全范围标为完成；设备常驻 daemon 真机验收另记
-- **可复跑**：`cargo test -p cayw-runtime --lib background:: --locked`；`cargo test -p cayw-runtime --test background --locked`；`cargo test -p cayw-webui ownership --locked`
+- **可复跑**：`cargo test -p cayw-runtime --lib background:: --locked`；`cargo test -p cayw-runtime --test background --locked`；`cargo test -p cayw-webui --locked`（含 OwnershipStore 恢复路由到已注册设备 IPC）
