@@ -1035,10 +1035,10 @@ async fn execute_with_cells(
             ..Default::default()
         });
         // F08: fold Applied plannotator feedback into the next Agent attempt.
-        let _ = crate::plannotator::refresh_plan_live_files(&inner, &context.lease.session_id);
+        let _ = crate::plannotator::refresh_plan_live_files(inner, &context.lease.session_id);
         let mut prompt = vec![instruction];
         prompt.extend(crate::plannotator::feedback_messages_for_attempt(
-            &inner,
+            inner,
             &context.lease.session_id,
         )?);
         prompt.push(input.message());
