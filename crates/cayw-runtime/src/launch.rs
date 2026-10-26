@@ -149,12 +149,12 @@ impl HeadlessConfig {
         if let Some(model) = &config.model {
             model.validate()?;
         }
-        if let Some(path) = &config.mcp_servers_file {
-            if !path.is_absolute() || !path.is_file() {
-                return Err(invalid(
-                    "mcp_servers_file must be an absolute existing regular file",
-                ));
-            }
+        if let Some(path) = &config.mcp_servers_file
+            && (!path.is_absolute() || !path.is_file())
+        {
+            return Err(invalid(
+                "mcp_servers_file must be an absolute existing regular file",
+            ));
         }
         Ok(config)
     }
