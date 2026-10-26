@@ -254,6 +254,10 @@ fn validate_payload(text: &str, encoding: &Encoding) -> Result<(), CapabilityErr
 /// Clamp a byte offset to a UTF-8 character boundary at or before `offset`.
 pub fn utf8_floor(bytes: &[u8], offset: usize) -> usize {
     let mut at = offset.min(bytes.len());
+    // EOF is a valid boundary — never index at `len`.
+    if at == bytes.len() {
+        return at;
+    }
     while at > 0 && bytes[at] & 0b1100_0000 == 0b1000_0000 {
         at -= 1;
     }
@@ -271,7 +275,20 @@ pub fn utf8_ceil_end(bytes: &[u8], start: usize, end: usize) -> usize {
 
 pub fn page_bytes(bytes: &[u8], offset: u64, limit: usize) -> (u64, u64, bool, String) {
     let start = utf8_floor(bytes, offset as usize);
-    let end = utf8_ceil_end(bytes, start, start.saturating_add(limit));
+    if start >= bytes.len() {
+        let eof = bytes.len() as u64;
+        return (eof, eof, false, String::new());
+    }
+    let mut end = utf8_ceil_end(bytes, start, start.saturating_add(limit));
+    // Limit smaller than one multibyte char would otherwise yield an empty
+    // page with next==start and has_more, stalling pagination — advance past
+    // that character instead.
+    if end == start {
+        end = start + 1;
+        while end < bytes.len() && bytes[end] & 0b1100_0000 == 0b1000_0000 {
+            end += 1;
+        }
+    }
     let slice = &bytes[start..end];
     let text = String::from_utf8_lossy(slice).into_owned();
     let next = end as u64;
@@ -752,6 +769,38 @@ mod unit {
         assert!(page.starts_with('😀') || page == "😀");
         assert!(next > offset);
         assert!(has_more || next == bytes.len() as u64);
+    }
+
+    #[test]
+    fn pagination_eof_offset_returns_empty_page() {
+        let bytes = b"abc";
+        // offset == len and offset > len must not panic; return empty EOF page.
+        for offset in [3u64, 4, 100] {
+            let (start, next, has_more, page) = page_bytes(bytes, offset, 8);
+            assert_eq!(start, 3, "offset={offset}");
+            assert_eq!(next, 3, "offset={offset}");
+            assert!(!has_more, "offset={offset}");
+            assert_eq!(page, "", "offset={offset}");
+        }
+        assert_eq!(utf8_floor(bytes, 3), 3);
+        assert_eq!(utf8_floor(bytes, 99), 3);
+    }
+
+    #[test]
+    fn pagination_advances_when_limit_smaller_than_multibyte_char() {
+        let text = "a😀b";
+        let bytes = text.as_bytes();
+        // 😀 is 4 bytes starting at offset 1; limit=1 must still advance past it.
+        let (offset, next, has_more, page) = page_bytes(bytes, 1, 1);
+        assert_eq!(offset, 1);
+        assert_eq!(page, "😀");
+        assert_eq!(next, 5);
+        assert!(has_more);
+        let (offset2, next2, has_more2, page2) = page_bytes(bytes, next, 8);
+        assert_eq!(offset2, 5);
+        assert_eq!(page2, "b");
+        assert_eq!(next2, 6);
+        assert!(!has_more2);
     }
 
     #[test]
