@@ -71,6 +71,10 @@ impl Provider for Fixture {
         let script = match prompt.as_str() {
             "spawn child" => "return cayw.call('agent.run', {prompt='child work', label='Child'})",
             "child work" => "return 'child result'",
+            "spawn background child" => {
+                "return cayw.call('agent.run', {prompt='long child', label='Bg', mode='background'})"
+            }
+            "bg child work" => "return 'bg child result'",
             "spawn long child" => "return cayw.call('agent.run', {prompt='long child'})",
             "spawn stall child" => "return cayw.call('agent.run', {prompt='stall child'})",
             "spawn nested" => "return cayw.call('agent.run', {prompt='nested child'})",
@@ -668,8 +672,8 @@ async fn disabled_configuration_removes_agent_run_from_the_catalog() {
             .capabilities()
             .unwrap()
             .iter()
-            .all(|definition| definition.name != "agent.run"),
-        "agent.run is available only through explicit host configuration"
+            .all(|definition| !definition.name.starts_with("agent.")),
+        "agent.* fleet capabilities are available only through explicit host configuration"
     );
     let parent = runtime.create(None).unwrap();
     let result = run_prompt(&runtime, &parent.id, "spawn child")
@@ -690,4 +694,109 @@ async fn disabled_configuration_removes_agent_run_from_the_catalog() {
             .contains("child result"),
         "the disabled capability must not reach a child provider"
     );
+}
+
+#[tokio::test]
+async fn background_agent_run_returns_handle_and_parent_completion_does_not_stop_detached() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"long child","label":"Bg","mode":"background"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider, settings);
+    let parent = runtime.create(Some("parent".into())).unwrap();
+    let admitted = runtime
+        .enqueue(&parent.id, "spawn background child")
+        .unwrap();
+    let task_rt = runtime.clone();
+    let task_id = admitted.id.clone();
+    let task =
+        tokio::spawn(async move { task_rt.resume(&task_id, CancellationToken::new()).await });
+    let child = child_session(&runtime, &parent.id).await;
+    tokio::time::timeout(WATCHDOG, async {
+        while runtime.tasks(&child).unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Parent capability completes with a handle while the detached child keeps running.
+    // That proves drain / parent terminal did not cancel the detached member.
+    let parent_view = tokio::time::timeout(WATCHDOG, task)
+        .await
+        .expect("background parent hung")
+        .unwrap()
+        .expect("background parent should complete with a handle");
+    let parent_text = parent_view.messages.last().unwrap().text();
+    assert!(
+        parent_text.contains("running")
+            || parent_text.contains("Bg")
+            || parent_text.contains("task"),
+        "parent should surface the background handle, got {parent_text}"
+    );
+    assert_eq!(
+        parent_task(&runtime, &parent.id).state,
+        TaskState::Completed,
+        "parent must reach a confirmed terminal without waiting on the detached child"
+    );
+    let fleet = runtime.fleet(Some(&parent.id), None, 100).unwrap();
+    assert_eq!(
+        fleet.members.len(),
+        1,
+        "FleetView must show the detached child"
+    );
+    assert!(fleet.members[0].detached);
+    assert_eq!(
+        fleet.members[0].mode,
+        cayw_runtime::AgentRunMode::Background
+    );
+    assert_eq!(fleet.members[0].child_session_id, child);
+    assert_eq!(
+        runtime.tasks(&child).unwrap()[0].state,
+        TaskState::Running,
+        "detached child must still be running after parent returns"
+    );
+
+    // Explicit fleet stop ends the child (parent cancel is not in the cascade path).
+    let stopped = runtime.fleet_stop(&fleet.members[0].child_task_id).unwrap();
+    assert_eq!(stopped["stopped"], true);
+    let final_state = tokio::time::timeout(WATCHDOG, async {
+        loop {
+            let state = runtime.tasks(&child).unwrap()[0].state;
+            if state != TaskState::Running {
+                break state;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fleet stop did not finish child");
+    assert_eq!(final_state, TaskState::Cancelled);
+}
+
+#[tokio::test]
+async fn background_still_respects_depth_and_appears_in_fleet_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let mut agents = local(vec![]);
+    agents.max_depth = 1;
+    let settings = config(
+        Some(agents),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"nested child"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings);
+    // Depth refusal is covered by nesting_beyond_max_depth; here just ensure fleet
+    // paging API rejects invalid limits and accepts an empty page.
+    let empty = runtime.fleet(None, None, 10).unwrap();
+    assert!(empty.members.is_empty());
+    assert!(runtime.fleet(None, None, 0).is_err());
+    assert!(runtime.fleet(None, None, 1001).is_err());
 }

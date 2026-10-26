@@ -182,6 +182,27 @@ struct Scheduler {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Fleet {
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default = "page_limit")]
+    limit: usize,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetStop {
+    child_task_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetSteer {
+    child_task_id: String,
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RequestEvents {
     task_id: String,
     #[serde(default)]
@@ -278,6 +299,18 @@ impl RpcHandler for Runtime {
             "runtime.scheduler" => {
                 let p: Scheduler = parse(params)?;
                 encode(self.scheduler_page(p.after.as_deref(), p.limit)?)
+            }
+            "runtime.fleet" => {
+                let p: Fleet = parse(params)?;
+                encode(self.fleet(p.parent_session_id.as_deref(), p.after.as_deref(), p.limit)?)
+            }
+            "runtime.fleet.stop" => {
+                let p: FleetStop = parse(params)?;
+                encode(self.fleet_stop(&p.child_task_id)?)
+            }
+            "runtime.fleet.steer" => {
+                let p: FleetSteer = parse(params)?;
+                encode(self.fleet_steer(&p.child_task_id, &p.text)?)
             }
             "task.enqueue_scheduled" => {
                 let p: Scheduled = parse(params)?;
