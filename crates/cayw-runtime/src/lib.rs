@@ -14,6 +14,7 @@ mod input;
 mod launch;
 mod model_requests;
 mod permissions;
+mod plannotator;
 #[cfg(feature = "plugins")]
 mod plugins;
 #[cfg(all(test, target_os = "macos"))]
@@ -50,6 +51,10 @@ pub use model_requests::{
     ModelRequestRecord, ModelRequestTerminal, ModelReservationPolicy, ModelUsageObservation,
 };
 pub use permissions::{ApprovalChoice, ScopedPermission};
+pub use plannotator::PlanFeedbackInput;
+pub use cayw_plannotator::{
+    FeedbackDecision, FeedbackDraft, LiveFileVersion, StructuredFeedback,
+};
 pub use processes::{ProcessCleanupInspection, ProcessCleanupProcess};
 pub use provider::{ConfiguredProvider, ProviderApi, ProviderConfig, ProviderService};
 pub use queue::{TaskPriority, TaskRecord, TaskState};
@@ -256,6 +261,7 @@ pub(crate) struct Inner {
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
+    plannotator: Mutex<plannotator::PlannotatorState>,
     #[cfg(feature = "plugins")]
     registry: Arc<cayw_plugins::PluginRegistry>,
 }
@@ -379,6 +385,7 @@ impl Runtime {
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
+                plannotator: Mutex::new(plannotator::PlannotatorState::default()),
                 #[cfg(feature = "plugins")]
                 registry: Arc::new(cayw_plugins::PluginRegistry::new()),
             }),

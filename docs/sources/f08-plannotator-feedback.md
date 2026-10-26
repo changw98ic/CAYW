@@ -21,16 +21,18 @@
 
 ## 本切片交付
 
-- `StructuredFeedback` / `FeedbackStore` / `apply_feedback_for_attempt`
+- `StructuredFeedback` / `FeedbackStore` / `apply_feedback_for_attempt` / `inject`
 - 批注一条 → 后续 attempt 可见；版本不匹配拒绝静默套用
-- 单元测试与 `offline_feedback` 示例
+- Runtime/Agent 注入：`Applied` → SystemMessage section `cayw-plannotator-feedback`
+- 持久化：Core `plannotator_feedback_recorded` control event；RPC `plannotator.submit` / `list`；WebUI 暴露 `session.plan` + 上述 RPC
+- 单元测试、Runtime 集成测试与 `offline_feedback` 示例
 - 本源记录与 crate README
 
 ## 明确未交付（后续切片）
 
 - 浏览器批注 UI、计划 diff 高亮、Ask AI / Inbox
 - Pi 扩展安装与 `/plannotator-*` 命令
-- TUI / WebUI 渲染接线与 Core 持久账本
+- 完整 TUI 批注编辑器（本切片仅挂现有 `session.plan` / RPC 入口）
 - 对 F04 `cayw-codeintel` 的硬依赖（本切片内嵌兼容形状的 `FileVersionBinding`）
 
 ## 验收口径（本切片）

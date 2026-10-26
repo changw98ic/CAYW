@@ -5,13 +5,14 @@
 //! then inject into a **subsequent** Agent attempt. Version mismatch refuses
 //! silent apply — stale annotations never rewrite onto new content.
 //!
-//! First cut (F08 / SLICE I):
-//! - `FeedbackStore` (process-local) records `StructuredFeedback`
+//! First cut (F08 / SLICE I) + audit remediation:
+//! - `FeedbackStore` records `StructuredFeedback` (process-local; Runtime may
+//!   mirror into the Core session event log)
 //! - `apply_feedback_for_attempt` checks live file versions before injection
+//! - `inject` folds [`ApplyOutcome::Applied`] into Agent SystemMessage sections
 //! - decisions: `Approve` / `DenyWithFeedback` / `ApproveWithNotes`
 //!
-//! Browser Plannotator UI, Pi extension install, TUI/WebUI render wiring, and
-//! durable Core ledger persistence are out of scope for this slice.
+//! Browser Plannotator UI and Pi extension install remain out of scope.
 //!
 //! Design reference (not a code transplant):
 //! [backnotprop/plannotator](https://github.com/backnotprop/plannotator) /
@@ -20,11 +21,15 @@
 #![forbid(unsafe_code)]
 
 mod apply;
+mod inject;
 mod store;
 mod types;
 
 pub use apply::{
     ApplyContext, ApplyOutcome, LiveFileVersion, applied_payloads, apply_feedback_for_attempt,
+};
+pub use inject::{
+    FEEDBACK_SECTION_KEY, applied_feedback_section, collect_applied_section, feedback_section_json,
 };
 pub use store::{FeedbackDraft, FeedbackStore};
 pub use types::*;

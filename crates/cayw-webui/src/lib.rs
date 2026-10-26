@@ -35,6 +35,9 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "approval.decide",
     "session.fork",
     "capabilities.list",
+    "session.plan",
+    "plannotator.submit",
+    "plannotator.list",
 ];
 
 /// Resource budgets apply independently from the IPC transport's own budgets.

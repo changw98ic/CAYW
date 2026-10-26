@@ -7,12 +7,15 @@ CAYW 批注 / 计划审阅反馈（F08 首刀，SLICE I）：在计划、Markdow
 ## 首刀范围
 
 - `FeedbackStore`：进程内记录 `StructuredFeedback`
-- `apply_feedback_for_attempt`：按 live 文件版本核对后注入
+- `apply_feedback_for_attempt`：按 live 文件版本核对后产出 Applied / Reject
+- `inject`：`Applied` → Agent SystemMessage section `cayw-plannotator-feedback`
+- Runtime 接线：`plannotator.submit` / `plannotator.list`；下次 `session.prompt` 注入
+- 持久化：Core session control event `plannotator_feedback_recorded`（协作账本同路径）
 - 决策：`Approve` / `DenyWithFeedback` / `ApproveWithNotes`
 - 目标种类：`Plan` / `Markdown` / `Diff` / `LocalPage`
 - 协议版本：`PLANNOTATOR_PROTOCOL_VERSION = 1`
 
-本切片**不**交付：浏览器 Plannotator UI、Pi 扩展安装、TUI/WebUI 渲染接线、Core 持久账本。
+本切片**不**交付：浏览器 Plannotator UI、Pi 扩展安装、完整 TUI 批注编辑器。
 
 ## 快速使用
 

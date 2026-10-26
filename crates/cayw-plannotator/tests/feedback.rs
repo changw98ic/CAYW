@@ -249,3 +249,108 @@ fn markdown_diff_local_page_kinds_roundtrip() {
         assert_eq!(fb.visible_from_attempt, 1);
     }
 }
+
+#[test]
+fn applied_outcomes_produce_injectable_system_section() {
+    let mut store = FeedbackStore::new();
+    let fb = store
+        .submit(FeedbackDraft {
+            session_id: "sess-1".into(),
+            target: target("t-plan", "plans/login.md", 2, "sha-v2"),
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![comment("c1", "fix the handler")],
+            summary: Some("revise".into()),
+            created_at_ms: 2_000,
+            current_attempt: 1,
+        })
+        .expect("submit");
+    let mut live = BTreeMap::new();
+    live.insert(
+        "plans/login.md".into(),
+        LiveFileVersion {
+            version: 2,
+            content_sha256: "sha-v2".into(),
+        },
+    );
+    let outcomes = apply_feedback_for_attempt(
+        &store,
+        &ApplyContext {
+            session_id: "sess-1".into(),
+            attempt: 2,
+            live_files: live,
+        },
+    )
+    .expect("apply");
+    let (key, body) = applied_feedback_section(&outcomes)
+        .expect("section")
+        .expect("must inject Applied payload");
+    assert_eq!(key, FEEDBACK_SECTION_KEY);
+    let parsed: Vec<AgentFeedbackPayload> = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].feedback_id, fb.feedback_id);
+    assert_eq!(parsed[0].decision, FeedbackDecision::DenyWithFeedback);
+}
+
+#[test]
+fn rejected_outcomes_do_not_inject() {
+    let mut store = FeedbackStore::new();
+    store
+        .submit(FeedbackDraft {
+            session_id: "sess-1".into(),
+            target: target("t-plan", "plans/login.md", 2, "sha-v2"),
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![comment("c1", "stale")],
+            summary: None,
+            created_at_ms: 2_000,
+            current_attempt: 1,
+        })
+        .expect("submit");
+    let mut live = BTreeMap::new();
+    live.insert(
+        "plans/login.md".into(),
+        LiveFileVersion {
+            version: 3,
+            content_sha256: "sha-v3".into(),
+        },
+    );
+    let outcomes = apply_feedback_for_attempt(
+        &store,
+        &ApplyContext {
+            session_id: "sess-1".into(),
+            attempt: 2,
+            live_files: live,
+        },
+    )
+    .expect("apply");
+    assert!(applied_feedback_section(&outcomes).expect("ok").is_none());
+}
+
+#[test]
+fn restore_is_idempotent_and_advances_ids() {
+    let mut store = FeedbackStore::new();
+    let fb = store
+        .submit(FeedbackDraft {
+            session_id: "sess-1".into(),
+            target: target("t-plan", "plans/login.md", 1, "sha"),
+            decision: FeedbackDecision::Approve,
+            comments: vec![],
+            summary: None,
+            created_at_ms: 1,
+            current_attempt: 0,
+        })
+        .expect("submit");
+    store.restore(fb.clone());
+    assert_eq!(store.len(), 1);
+    let again = store
+        .submit(FeedbackDraft {
+            session_id: "sess-1".into(),
+            target: target("t-plan-2", "plans/b.md", 1, "sha2"),
+            decision: FeedbackDecision::Approve,
+            comments: vec![],
+            summary: None,
+            created_at_ms: 2,
+            current_attempt: 0,
+        })
+        .expect("submit");
+    assert_ne!(again.feedback_id, fb.feedback_id);
+}

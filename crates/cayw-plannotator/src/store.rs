@@ -78,6 +78,24 @@ impl FeedbackStore {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
+
+    /// Rehydrate one previously recorded feedback (Core event replay / import).
+    ///
+    /// Skips draft validation; callers must supply already-accepted records.
+    /// Idempotent on `feedback_id`.
+    pub fn restore(&mut self, feedback: StructuredFeedback) {
+        if self.items.iter().any(|item| item.feedback_id == feedback.feedback_id) {
+            return;
+        }
+        if let Some(n) = feedback
+            .feedback_id
+            .strip_prefix("fb-")
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            self.next_id = self.next_id.max(n);
+        }
+        self.items.push(feedback);
+    }
 }
 
 fn validate_draft(draft: &FeedbackDraft) -> Result<(), PlannotatorError> {
