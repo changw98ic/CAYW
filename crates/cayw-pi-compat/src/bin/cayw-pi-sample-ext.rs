@@ -4,10 +4,10 @@
 //! via `PiCompatHost::install_sample_extension` / `install_external` when the
 //! executable is present on disk. Not an npm Pi ExtensionAPI package.
 
+use cayw_pi_compat::PiSampleExtension;
 use cayw_plugins::{
     ExternalMessage, ExternalResult, HostMessage, PLUGIN_PROTOCOL_VERSION, PluginManifest,
 };
-use cayw_pi_compat::PiSampleExtension;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
@@ -48,10 +48,7 @@ fn handle_call(method: &str, arguments: Value) -> ExternalResult {
             outcome_unknown: false,
         };
     }
-    let note = arguments
-        .get("note")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let note = arguments.get("note").and_then(|v| v.as_str()).unwrap_or("");
     ExternalResult::Ok {
         data: json!({
             "pong": true,

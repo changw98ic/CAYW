@@ -100,14 +100,15 @@ impl CompatMatrix {
             package: sample.clone(),
             surface: SurfaceId::new(SurfaceFamily::Tools, "registerTool"),
             level: CompatibilityLevel::Partial,
-            detail: "Maps to PluginRegistry::load_external when the sample binary is present on disk.".into(),
+            detail: "Homemade CAYW-protocol sample via load_external (not Pi ExtensionAPI).".into(),
             cayw_seam: Some("cayw_plugins::PluginRegistry::load_external".into()),
         });
         self.insert(CompatRow {
             package: sample.clone(),
             surface: SurfaceId::new(SurfaceFamily::Tools, "invoke"),
             level: CompatibilityLevel::Partial,
-            detail: "Maps to PluginRegistry::call for pi_sample.ping via external JSON protocol.".into(),
+            detail: "Homemade sample pi_sample.ping via external JSON protocol (not Pi ABI)."
+                .into(),
             cayw_seam: Some("cayw_plugins::PluginRegistry::call".into()),
         });
         self.insert(CompatRow {
@@ -146,17 +147,66 @@ impl CompatMatrix {
             cayw_seam: None,
         });
 
-        // Documented real upstream package: unmodified npm load is unavailable.
+        // Primary acceptance: unmodified npm Pi hello.ts via Node ExtensionAPI adapter.
         let real = PiPackageId::new(PINNED_PI_CODING_AGENT, PINNED_PI_CODING_AGENT_VERSION);
-        for family in SurfaceFamily::ALL {
-            self.insert(CompatRow {
-                package: real.clone(),
-                surface: SurfaceId::new(family, "*"),
-                level: CompatibilityLevel::Unavailable,
-                detail: "Unmodified npm ExtensionAPI packages are not loaded by this Rust first cut; design reference only (pi2dsh).".into(),
-                cayw_seam: None,
-            });
-        }
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Tools, "registerTool"),
+            level: CompatibilityLevel::Partial,
+            detail: "Unmodified examples/extensions/hello.ts loaded via npm/pi-npm-bridge.mjs ExtensionAPI stub + load_external.".into(),
+            cayw_seam: Some("cayw_plugins::PluginRegistry::load_external + pi-npm-bridge".into()),
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Tools, "invoke"),
+            level: CompatibilityLevel::Partial,
+            detail: "hello tool execute() from unmodified npm extension; adapter returns Pi AgentToolResult as CAYW JSON.".into(),
+            cayw_seam: Some("cayw_plugins::PluginRegistry::call + pi-npm-bridge".into()),
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Lifecycle, "install"),
+            level: CompatibilityLevel::Partial,
+            detail: "Node >=22.19 + npm ci deps required; missing pieces record unavailable."
+                .into(),
+            cayw_seam: Some("PiCompatHost::install_npm_hello_extension".into()),
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Lifecycle, "unload"),
+            level: CompatibilityLevel::Partial,
+            detail: "Maps to PluginRegistry::unload (kills Node adapter child).".into(),
+            cayw_seam: Some("cayw_plugins::PluginRegistry::unload".into()),
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Commands, "registerCommand"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Bridge stubs registerCommand; not invoked as a CAYW capability in this cut."
+                .into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Events, "on"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Bridge stubs pi.on; event bus not wired to CAYW.".into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Session, "sessionManager"),
+            level: CompatibilityLevel::Unavailable,
+            detail: "Pi SessionManager not exposed; CAYW Session remains authoritative.".into(),
+            cayw_seam: None,
+        });
+        self.insert(CompatRow {
+            package: real.clone(),
+            surface: SurfaceId::new(SurfaceFamily::Interaction, "ui.select"),
+            level: CompatibilityLevel::Incompatible,
+            detail: "Bridge UI stubs are non-interactive; no Pi UIContext bridge.".into(),
+            cayw_seam: None,
+        });
     }
 
     fn row_key(package: &PiPackageId, surface: &SurfaceId) -> String {

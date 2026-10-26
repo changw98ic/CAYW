@@ -1,30 +1,27 @@
-# F15 / SLICE S 验收说明（2026-10-25，补丁 2026-10-26）
+# F15 / SLICE S 验收说明（Pi 兼容宿主）
 
-## 范围
+日期：2026-10-25（npm ExtensionAPI 路径补强：2026-10-26）
 
-Issue [#33](https://github.com/changw98ic/CAYW/issues/33) F15 首刀：可选 Pi→CAYW 兼容宿主与版本/兼容矩阵。
-
-分支：`feat/f15-pi-compat-host`（基于 `dev`）。
-
-时区：America/New_York。
-
-## 本机命令
+## 命令
 
 ```sh
+cd crates/cayw-pi-compat/npm && npm ci --omit=dev
 cargo test -p cayw-pi-compat --locked
 cargo clippy -p cayw-pi-compat --all-targets --locked -- -D warnings
 cargo run -p cayw-pi-compat --example offline_pi_compat --locked
 ```
 
-## 结果
+需要 **Node.js ≥ 22.19**（可用 `CAYW_PI_NODE` 指定二进制）。
 
-- 单元/集成测试覆盖：宿主关闭拒绝；`cayw-pi-fixture@0.1.0` 装→调→卸（`load_native`）；
-  **`cayw-pi-sample-ext@0.1.0` 从磁盘装→调→卸（`load_external`）**；缺失可执行文件记 **unavailable**；
-  `interaction.ui.select` 记 **incompatible**；钉扎 npm 包行 **unavailable**；
-  `Cancelled` 保持已知终态（非 OutcomeUnknown）；矩阵 Markdown 含 fixture、sample 与 ABI 钉扎。
-- 示例打印协议版本、fixture/sample 调用结果与矩阵表。
-- 默认路径无外网、无 npm install；样例为 CAYW external JSON 协议子进程，非 npm ExtensionAPI。
+## 主验收
 
-## 不做声明
+| 测试 | 断言 |
+| --- | --- |
+| `npm_hello_extension_install_call_unload` | 装载未修改 `hello.ts`，调用 `hello`，响应含 `pi_extension_api`、`protocol=pi-ExtensionAPI`、`extension_path` 以 `hello.ts` 结尾、`Hello, CAYW!` |
+| `acceptance_requires_pi_extension_api_markers` | Rust sample 无 Pi 标记；npm 路径必须成功且带标记（禁止仅用 sample 关闭项） |
 
-本记录不证明 F15 全范围完成，也不证明未修改的 npm Pi 插件可在 CAYW 上直接运行，或 Host/Bridge/WebUI 已默认启用该可选宿主。commands/session/events/UI 映射仍为说明级。
+## 诚实缺口
+
+- commands / session / events 仍 unavailable；interaction incompatible
+- 适配器 UI/exec/session 为 stub
+- 未声明「全插件兼容」或 F15 全范围完成

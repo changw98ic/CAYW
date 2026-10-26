@@ -8,13 +8,14 @@
 //!
 //! Install paths:
 //! - [`PiFixturePlugin`] (`cayw-pi-fixture@0.1.0`) via `load_native` — CI / offline smoke
-//! - [`PiSampleExtension`] (`cayw-pi-sample-ext@0.1.0`) via `load_external` — disk
-//!   subprocess sample when the binary is present
+//! - [`PiSampleExtension`] (`cayw-pi-sample-ext@0.1.0`) via `load_external` — homemade
+//!   CAYW-protocol Rust subprocess (legacy / protocol smoke; **not** Pi ExtensionAPI)
+//! - [`PiNpmHelloExtension`] (`@earendil-works/pi-coding-agent@0.84.1` `hello.ts`) via
+//!   Node adapter + `load_external` — **primary acceptance**: real unmodified npm Pi
+//!   extension speaking Pi ExtensionAPI; adapter translates on the CAYW side only
 //!
-//! Unmodified npm Pi ExtensionAPI packages remain **unavailable** (no Node/ABI
-//! bridge in this slice). Commands / session / events / UI maps are description-
-//! grade only. Refusals are always explicit (`incompatible` / `unavailable`),
-//! never silent success.
+//! Commands / session / events / UI maps remain description-grade. Refusals are
+//! always explicit (`incompatible` / `unavailable`), never silent success.
 //!
 //! Design reference (not a code transplant):
 //! [weijiafu14/pi2dsh](https://github.com/weijiafu14/pi2dsh) compat-layer shape.
@@ -26,6 +27,7 @@ mod fixture;
 mod host;
 mod mapping;
 mod matrix;
+mod npm_ext;
 mod sample;
 mod types;
 
@@ -34,5 +36,6 @@ pub use fixture::PiFixturePlugin;
 pub use host::PiCompatHost;
 pub use mapping::{FAMILY_MAPPINGS, FamilyMapping, mapping_for};
 pub use matrix::{CompatMatrix, CompatRow};
+pub use npm_ext::PiNpmHelloExtension;
 pub use sample::PiSampleExtension;
 pub use types::*;

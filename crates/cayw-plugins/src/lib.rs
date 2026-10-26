@@ -149,9 +149,11 @@ impl Drop for CancelOnDrop {
 }
 
 pub(crate) fn valid_name(value: &str) -> bool {
+    // Allow npm scoped package names (`@scope/name`) so F15 can load real Pi
+    // packages under their published identity without renaming.
     !value.is_empty()
         && value.len() <= 128
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@' | b'/'))
 }

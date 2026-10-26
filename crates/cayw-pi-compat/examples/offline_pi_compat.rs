@@ -1,4 +1,4 @@
-//! Offline F15 smoke: fixture + optional sample-from-disk; print matrix.
+//! F15 smoke: fixture + sample + primary npm Pi hello.ts; print matrix.
 
 use cayw_ai::CancellationToken;
 use cayw_pi_compat::*;
@@ -52,7 +52,6 @@ async fn main() {
     host.unload(&package).expect("unload fixture");
     println!("unloaded {}", package.key());
 
-    // Real path beyond fixture: sample extension from disk when the bin is built.
     if let Some(exe) = sample_exe() {
         let sample = PiSampleExtension::package_id();
         match host
@@ -61,7 +60,7 @@ async fn main() {
         {
             Ok(desc) => {
                 println!(
-                    "sample installed {}@{} from {}",
+                    "sample installed {}@{} from {} (homemade CAYW protocol; not Pi ABI)",
                     desc.manifest.name,
                     desc.manifest.version,
                     exe.display()
@@ -81,10 +80,35 @@ async fn main() {
             Err(err) => println!("sample path refused (explicit): {err}"),
         }
     } else {
-        println!("sample binary not found; skipped (fixture path only this run)");
+        println!("sample binary not found; skipped");
     }
 
-    // Explicit refusal path
+    // Primary acceptance: unmodified npm Pi hello.ts
+    let npm = PiNpmHelloExtension::package_id();
+    match host
+        .install_npm_hello_extension(CancellationToken::new())
+        .await
+    {
+        Ok(desc) => {
+            println!(
+                "npm Pi hello installed {}@{} (unmodified ExtensionAPI)",
+                desc.manifest.name, desc.manifest.version
+            );
+            let value = host
+                .call_tool(
+                    &npm,
+                    PiNpmHelloExtension::TOOL,
+                    json!({"name": "offline"}),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("call npm hello");
+            println!("npm hello call result: {value}");
+            host.unload(&npm).expect("unload npm hello");
+        }
+        Err(err) => println!("npm Pi hello refused (explicit; need Node>=22.19 + npm ci): {err}"),
+    }
+
     let refuse = host.probe_surface(
         &package,
         SurfaceId::new(SurfaceFamily::Interaction, "ui.select"),

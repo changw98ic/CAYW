@@ -1,13 +1,13 @@
 use crate::error::PiCompatError;
 use crate::fixture::PiFixturePlugin;
-use crate::sample::PiSampleExtension;
 use crate::matrix::CompatMatrix;
+use crate::npm_ext::PiNpmHelloExtension;
+use crate::sample::PiSampleExtension;
 use crate::types::*;
 use cayw_ai::CancellationToken;
-use cayw_plugins::{
-    ExternalConfig, PluginContext, PluginDescription, PluginError, PluginRegistry,
-};
+use cayw_plugins::{ExternalConfig, PluginContext, PluginDescription, PluginError, PluginRegistry};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,10 +19,12 @@ use std::time::Duration;
 /// checks consult the [`CompatMatrix`]; refused surfaces are recorded as
 /// incompatible / unavailable — never silent success.
 ///
-/// Two install paths:
+/// Install paths:
 /// - [`Self::install_fixture`] — in-process Rust [`PiFixturePlugin`] via `load_native` (CI).
 /// - [`Self::install_sample_extension`] / [`Self::install_external`] — disk subprocess
-///   via `load_external` (real extension path beyond the fixture).
+///   via `load_external` (homemade CAYW-protocol sample; not Pi ExtensionAPI).
+/// - [`Self::install_npm_hello_extension`] — **primary acceptance**: unmodified npm Pi
+///   `hello.ts` via Node Pi↔CAYW adapter + `load_external`.
 pub struct PiCompatHost {
     enabled: bool,
     registry: PluginRegistry,
@@ -92,10 +94,10 @@ impl PiCompatHost {
 
     /// Install a disk/subprocess extension via `PluginRegistry::load_external`.
     ///
-    /// This is the real path beyond the in-process fixture. The executable must
-    /// already exist; missing paths refuse with [`PiCompatError::Unavailable`]
-    /// (never silent success). Unmodified npm Pi ExtensionAPI packages are still
-    /// out of scope — use a CAYW external-protocol speaker (see sample ext).
+    /// Used by both the homemade sample binary and the Node Pi ExtensionAPI
+    /// adapter (`install_npm_hello_extension`). The executable must already
+    /// exist; missing paths refuse with [`PiCompatError::Unavailable`]
+    /// (never silent success).
     pub async fn install_external(
         &self,
         config: ExternalConfig,
@@ -165,11 +167,88 @@ impl PiCompatHost {
         cancel: CancellationToken,
     ) -> Result<PluginDescription, PiCompatError> {
         let executable = absolute_existing_or_path(executable.as_ref());
-        let config = ExternalConfig::new(
-            executable,
-            vec![],
-            PiSampleExtension::expected_manifest(),
+        let config =
+            ExternalConfig::new(executable, vec![], PiSampleExtension::expected_manifest());
+        self.install_external(config, cancel).await
+    }
+
+    /// Primary acceptance path: load the unmodified npm Pi `hello.ts` extension.
+    ///
+    /// Spawns Node running `npm/pi-npm-bridge.mjs`, which implements a minimal
+    /// Pi `ExtensionAPI`, loads
+    /// `@earendil-works/pi-coding-agent@0.84.1` `examples/extensions/hello.ts`
+    /// **without modifying it**, and translates registerTool/execute to the CAYW
+    /// external JSON protocol. Missing Node ≥22.19, npm deps, or the extension
+    /// file refuse with [`PiCompatError::Unavailable`] (never silent success).
+    pub async fn install_npm_hello_extension(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<PluginDescription, PiCompatError> {
+        self.ensure_enabled()?;
+        let package = PiNpmHelloExtension::package_id();
+        let surface = SurfaceId::new(SurfaceFamily::Lifecycle, "install");
+
+        if let Err(detail) = PiNpmHelloExtension::ensure_npm_deps() {
+            let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+            matrix.record_unavailable(package.clone(), surface, detail.clone());
+            return Err(PiCompatError::Unavailable(detail));
+        }
+
+        let Some(node) = PiNpmHelloExtension::resolve_node() else {
+            let detail = "Node >= 22.19 required for Pi 0.84.1 ExtensionAPI host (set CAYW_PI_NODE or install node22)".to_string();
+            let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+            matrix.record_unavailable(package.clone(), surface, detail.clone());
+            return Err(PiCompatError::Unavailable(detail));
+        };
+
+        let bridge = PiNpmHelloExtension::bridge_script();
+        let extension = PiNpmHelloExtension::extension_path();
+        if !bridge.is_file() || !extension.is_file() {
+            let detail = format!(
+                "npm bridge or extension missing: bridge={} extension={}",
+                bridge.display(),
+                extension.display()
+            );
+            let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
+            matrix.record_unavailable(package.clone(), surface, detail.clone());
+            return Err(PiCompatError::Unavailable(detail));
+        }
+
+        let node = absolute_existing_or_path(&node);
+        let bridge = absolute_existing_or_path(&bridge);
+        let extension = absolute_existing_or_path(&extension);
+        let npm_dir = absolute_existing_or_path(&PiNpmHelloExtension::npm_dir());
+
+        let mut environment = BTreeMap::new();
+        // ExternalConfig clears the environment; pass a minimal PATH so Node can start.
+        let path_value = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        environment.insert("PATH".into(), path_value);
+        if let Ok(home) = std::env::var("HOME") {
+            environment.insert("HOME".into(), home);
+        }
+        environment.insert(
+            "LANG".into(),
+            std::env::var("LANG").unwrap_or_else(|_| "C.UTF-8".into()),
         );
+
+        let mut config = ExternalConfig::new(
+            node,
+            vec![
+                bridge.display().to_string(),
+                "--extension".into(),
+                extension.display().to_string(),
+                "--package-name".into(),
+                PiNpmHelloExtension::PACKAGE_NAME.into(),
+                "--package-version".into(),
+                PiNpmHelloExtension::PACKAGE_VERSION.into(),
+            ],
+            PiNpmHelloExtension::expected_manifest(),
+        );
+        config.environment = environment;
+        config.working_directory = Some(npm_dir);
+        // jiti + first TS load can exceed the default 10s on cold CI disks.
+        config.handshake_timeout = Duration::from_secs(60);
+
         self.install_external(config, cancel).await
     }
 
@@ -212,12 +291,7 @@ impl PiCompatHost {
             .registry
             .describe(&package.name)
             .map_err(|_| PiCompatError::NotLoaded(package.key()))?;
-        if !desc
-            .manifest
-            .capabilities
-            .iter()
-            .any(|c| c.name == tool)
-        {
+        if !desc.manifest.capabilities.iter().any(|c| c.name == tool) {
             return Err(PiCompatError::Failed(format!(
                 "capability `{tool}` not in loaded manifest for {}",
                 package.key()
@@ -226,7 +300,13 @@ impl PiCompatHost {
 
         match self
             .registry
-            .call(&package.name, tool, arguments, cancel, Duration::from_secs(5))
+            .call(
+                &package.name,
+                tool,
+                arguments,
+                cancel,
+                Duration::from_secs(5),
+            )
             .await
         {
             Ok(value) => Ok(value),
