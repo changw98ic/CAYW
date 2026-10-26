@@ -162,4 +162,33 @@ mod tests {
         assert_eq!(store.task_device("task-9").as_deref(), Some("device-1"));
         assert!(store.session_device("missing").is_none());
     }
+
+    /// Same bind points the Gateway RPC path uses (session.create / task.enqueue);
+    /// reopen must restore the original Session ownership for route/resolve.
+    #[test]
+    fn reopen_restores_original_session_ownership_for_route() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ownership.json");
+        {
+            let store = OwnershipStore::open(&path).unwrap();
+            // session.create → bind_session; task.enqueue inherits session device
+            store.bind_session("sess-original", "device-alpha").unwrap();
+            store.bind_task("task-child", "device-alpha").unwrap();
+            assert_eq!(
+                store.session_device("sess-original").as_deref(),
+                Some("device-alpha")
+            );
+        }
+        // Gateway process restart: new OwnershipStore::open is the restore path.
+        let restored = OwnershipStore::open(&path).unwrap();
+        assert_eq!(
+            restored.session_device("sess-original").as_deref(),
+            Some("device-alpha"),
+            "route/resolve must see the original Session ownership after reopen"
+        );
+        assert_eq!(
+            restored.task_device("task-child").as_deref(),
+            Some("device-alpha")
+        );
+    }
 }

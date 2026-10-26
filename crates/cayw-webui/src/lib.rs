@@ -151,6 +151,9 @@ struct Gateway {
     in_flight: Semaphore,
     prompts: Semaphore,
     cancel: CancellationToken,
+    /// Durable Session/Task → device maps (F13). Present when served via
+    /// [`serve_with_ownership`]; create/bind writes and route/restore reads it.
+    ownership: Option<Arc<OwnershipStore>>,
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
@@ -180,6 +183,39 @@ pub async fn serve_with_limits(
     ipc_client: IpcEndpoint,
     web_token: impl Into<String>,
     limits: GatewayLimits,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    serve_inner(listener, ipc_client, web_token, limits, None, cancel).await
+}
+
+/// Same as [`serve_with_limits`], with a durable [`OwnershipStore`] injected into
+/// the live Gateway so create/bind persists Session/Task → device affinity and
+/// route/restore queries it after a gateway restart (F13).
+pub async fn serve_with_ownership(
+    listener: TcpListener,
+    ipc_client: IpcEndpoint,
+    web_token: impl Into<String>,
+    limits: GatewayLimits,
+    ownership: Arc<OwnershipStore>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    serve_inner(
+        listener,
+        ipc_client,
+        web_token,
+        limits,
+        Some(ownership),
+        cancel,
+    )
+    .await
+}
+
+async fn serve_inner(
+    listener: TcpListener,
+    ipc_client: IpcEndpoint,
+    web_token: impl Into<String>,
+    limits: GatewayLimits,
+    ownership: Option<Arc<OwnershipStore>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     let address = listener.local_addr()?;
@@ -214,6 +250,7 @@ pub async fn serve_with_limits(
         prompts: Semaphore::new(limits.max_prompt_in_flight),
         limits,
         cancel: cancel.clone(),
+        ownership,
     });
     let app = Router::new()
         .route("/", get(index))
@@ -228,23 +265,6 @@ pub async fn serve_with_limits(
     axum::serve(listener, app)
         .with_graceful_shutdown(cancel.cancelled_owned())
         .await
-}
-
-/// Same as [`serve_with_limits`], retaining a durable [`OwnershipStore`] for the
-/// gateway lifetime so callers that share the `Arc` can bind Session/Task → device
-/// while the process runs (F13). RPC-side affinity lookups remain a follow-up.
-pub async fn serve_with_ownership(
-    listener: TcpListener,
-    ipc_client: IpcEndpoint,
-    web_token: impl Into<String>,
-    limits: GatewayLimits,
-    ownership: Arc<OwnershipStore>,
-    cancel: CancellationToken,
-) -> io::Result<()> {
-    // Hold the store open for this serve; Gateway does not read it until affinity
-    // wiring lands. Callers keep their own Arc clone for bind/lookup.
-    let _ownership = ownership;
-    serve_with_limits(listener, ipc_client, web_token, limits, cancel).await
 }
 
 /// One policy for IPC and web credentials. The host must generate independent
@@ -458,6 +478,11 @@ async fn rpc(
     } else {
         state.limits.request_timeout
     };
+    // Consult durable affinity on every session/task route so a restarted
+    // gateway restores the original device binding (F13 / DeviceChannelHub maps).
+    let owned_device = resolve_owned_device(&state, &request.method, &request.params);
+    let method = request.method.clone();
+    let params = request.params.clone();
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
         result = state.ipc.connect(budget) => match result {
@@ -470,20 +495,89 @@ async fn rpc(
     tokio::select! {
         biased;
         _ = state.cancel.cancelled() => shutting_down(side_effecting(&request.method)),
-        result = timeout(budget, client.request(&request.method, request.params)) => match result {
+        result = timeout(budget, client.request(&method, params.clone())) => match result {
             Ok(Ok(result)) => {
                 // Successful RPC data is a protocol value, never diagnostic
                 // text. Reject an accidental credential disclosure as a whole
                 // rather than rewriting keys, ids, statuses or user content.
                 if contains_credential(&result, &state) {
-                    error_response(StatusCode::BAD_GATEWAY, "credential_in_result", "Runtime result contained a gateway credential and was withheld; inspect session events before taking further action", side_effecting(&request.method))
+                    error_response(StatusCode::BAD_GATEWAY, "credential_in_result", "Runtime result contained a gateway credential and was withheld; inspect session events before taking further action", side_effecting(&method))
                 } else {
+                    persist_ownership_bind(
+                        &state,
+                        &method,
+                        &params,
+                        &result,
+                        owned_device.as_deref(),
+                    );
                     Json(json!({"result":result})).into_response()
                 }
             },
             Ok(Err(error)) => upstream_error(&state, error),
             Err(_) => error_response(StatusCode::GATEWAY_TIMEOUT, "request_timeout", "Runtime request timed out; check session events before taking further action", side_effecting(&request.method)),
         }
+    }
+}
+
+/// Restore Session/Task → device affinity from the durable store (the maps
+/// `DeviceChannelHub` kept only in memory on feat/tui-webui).
+fn resolve_owned_device(state: &Gateway, method: &str, params: &Value) -> Option<String> {
+    let ownership = state.ownership.as_ref()?;
+    if let Some(sid) = params.get("session_id").and_then(Value::as_str)
+        && let Some(device) = ownership.session_device(sid)
+    {
+        return Some(device);
+    }
+    if let Some(tid) = params.get("task_id").and_then(Value::as_str)
+        && let Some(device) = ownership.task_device(tid)
+    {
+        return Some(device);
+    }
+    let _ = method;
+    None
+}
+
+fn request_device_id(state: &Gateway, params: &Value, restored: Option<&str>) -> String {
+    if let Some(device) = params.get("device_id").and_then(Value::as_str)
+        && !device.is_empty()
+    {
+        return device.to_owned();
+    }
+    if let Some(device) = restored
+        && !device.is_empty()
+    {
+        return device.to_owned();
+    }
+    if let Some(sid) = params.get("session_id").and_then(Value::as_str)
+        && let Some(ownership) = state.ownership.as_ref()
+        && let Some(device) = ownership.session_device(sid)
+    {
+        return device;
+    }
+    "local".to_owned()
+}
+
+/// Persist affinity after create/fork/enqueue — same bind points as the
+/// in-memory `DeviceChannelHub` on feat/tui-webui.
+fn persist_ownership_bind(
+    state: &Gateway,
+    method: &str,
+    params: &Value,
+    result: &Value,
+    restored: Option<&str>,
+) {
+    let Some(ownership) = state.ownership.as_ref() else {
+        return;
+    };
+    let device_id = request_device_id(state, params, restored);
+    if matches!(method, "session.create" | "session.fork")
+        && let Some(sid) = result.get("id").and_then(Value::as_str)
+    {
+        let _ = ownership.bind_session(sid, &device_id);
+    } else if method == "task.enqueue"
+        && let Some(tid) = result.get("id").and_then(Value::as_str)
+    {
+        let _ = ownership.bind_task(tid, &device_id);
     }
 }
 

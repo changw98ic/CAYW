@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig};
-use cayw_webui::{GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, serve_with_limits};
+use cayw_webui::{
+    GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, OwnershipStore, serve_with_limits,
+    serve_with_ownership,
+};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde_json::{Value, json};
 use std::{
@@ -11,6 +14,7 @@ use std::{
     },
     time::Duration,
 };
+use tempfile::tempdir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -96,6 +100,14 @@ impl RpcHandler for RuntimeFixture {
                 "tool_outcome_unknown",
                 "inspect durable tool record",
             )),
+            "session.create" | "session.fork"
+                if params.get("id").and_then(Value::as_str).is_some() =>
+            {
+                Ok(json!({"id": params["id"], "state": "idle"}))
+            }
+            "task.enqueue" if params.get("id").and_then(Value::as_str).is_some() => {
+                Ok(json!({"id": params["id"], "state": "queued"}))
+            }
             "session.get" if params["session_id"] == "slow" => {
                 tokio::time::sleep(Duration::from_secs(20)).await;
                 Ok(json!({}))
@@ -115,6 +127,14 @@ struct Fixture {
 }
 impl Fixture {
     async fn start(limits: GatewayLimits) -> Self {
+        Self::start_inner(limits, None).await
+    }
+
+    async fn start_with_ownership(limits: GatewayLimits, ownership: Arc<OwnershipStore>) -> Self {
+        Self::start_inner(limits, Some(ownership)).await
+    }
+
+    async fn start_inner(limits: GatewayLimits, ownership: Option<Arc<OwnershipStore>>) -> Self {
         let stop = CancellationToken::new();
         let runtime = Arc::new(RuntimeFixture::default());
         let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -130,13 +150,24 @@ impl Fixture {
         let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let web_task = tokio::spawn(serve_with_limits(
-            listener,
-            ipc,
-            WEB_TOKEN,
-            limits,
-            stop.clone(),
-        ));
+        let web_task = if let Some(store) = ownership.clone() {
+            tokio::spawn(serve_with_ownership(
+                listener,
+                ipc,
+                WEB_TOKEN,
+                limits,
+                store,
+                stop.clone(),
+            ))
+        } else {
+            tokio::spawn(serve_with_limits(
+                listener,
+                ipc,
+                WEB_TOKEN,
+                limits,
+                stop.clone(),
+            ))
+        };
         Self {
             addr,
             http: HttpClient::builder()
@@ -781,4 +812,74 @@ async fn slow_request_bodies_cannot_hold_all_admission_slots() {
     )
     .await;
     fixture.close().await;
+}
+
+#[tokio::test]
+async fn serve_with_ownership_binds_session_and_reopen_restores_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    let fixture = Fixture::start_with_ownership(GatewayLimits::default(), store.clone()).await;
+
+    let created = envelope(
+        fixture
+            .rpc(
+                "session.create",
+                json!({"id":"sess-original","device_id":"device-alpha"}),
+            )
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(created["result"]["id"], "sess-original");
+    assert_eq!(
+        store.session_device("sess-original").as_deref(),
+        Some("device-alpha")
+    );
+
+    // Route consults the store (session.get with session_id).
+    let _ = envelope(
+        fixture
+            .rpc("session.get", json!({"session_id":"sess-original"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+
+    let enqueued = envelope(
+        fixture
+            .rpc(
+                "task.enqueue",
+                json!({"id":"task-child","session_id":"sess-original"}),
+            )
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(enqueued["result"]["id"], "task-child");
+    assert_eq!(
+        store.task_device("task-child").as_deref(),
+        Some("device-alpha"),
+        "task bind inherits restored Session device"
+    );
+
+    fixture.close().await;
+
+    // Gateway restart: reopen the same durable file.
+    let restored = OwnershipStore::open(&path).unwrap();
+    assert_eq!(
+        restored.session_device("sess-original").as_deref(),
+        Some("device-alpha"),
+        "reopen must restore original Session ownership"
+    );
+    assert_eq!(
+        restored.task_device("task-child").as_deref(),
+        Some("device-alpha")
+    );
 }
