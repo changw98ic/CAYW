@@ -4,6 +4,7 @@
 //! isolation, Q3 `agent.run` child identity, Q4 process cleanup + settled
 //! capability result reopen (unix), Q6 MCP resources list/read via CodeMode
 //! + reopen, and Q6 real MCP stdio process start/stop/cleanup (unix).
+//!
 //! Tip-tree multi-capability combo (session+child+process+MCP stdio) exercises
 //! the strongest same-tree path without merging #37–#54. ContentStore reopen
 //! remains macOS-gated (#18 / Linux O_PATH).
@@ -528,17 +529,16 @@ async fn result_release_not_registered_on_tip() {
         .events(&session, 0, 1000)
         .unwrap()
         .into_iter()
-        .any(|record| match record.event {
-            CoreEvent::CapabilitySettled { call }
-                if call.name == "result.release"
-                    && matches!(
-                        &call.outcome,
-                        Some(cayw_core::CapabilityOutcome::Completed { .. })
-                    ) =>
-            {
-                true
-            }
-            _ => false,
+        .any(|record| {
+            matches!(
+                record.event,
+                CoreEvent::CapabilitySettled { call }
+                    if call.name == "result.release"
+                        && matches!(
+                            &call.outcome,
+                            Some(cayw_core::CapabilityOutcome::Completed { .. })
+                        )
+            )
         });
     assert!(
         !settled_release,
@@ -1173,14 +1173,13 @@ async fn tip_tree_session_child_process_and_mcp_stdio_combo() {
         rt.events(&session, 0, 1000)
             .unwrap()
             .into_iter()
-            .any(|record| match record.event {
-                Ev::CapabilitySettled { call }
-                    if call.name == "test.run"
-                        && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. })) =>
-                {
-                    true
-                }
-                _ => false,
+            .any(|record| {
+                matches!(
+                    record.event,
+                    Ev::CapabilitySettled { call }
+                        if call.name == "test.run"
+                            && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. }))
+                )
             }),
         "tip combo: test.run settled"
     );
@@ -1191,14 +1190,13 @@ async fn tip_tree_session_child_process_and_mcp_stdio_combo() {
         rt.events(&session, 0, 1000)
             .unwrap()
             .into_iter()
-            .any(|record| match record.event {
-                Ev::CapabilitySettled { call }
-                    if call.name == "mcp.call"
-                        && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. })) =>
-                {
-                    true
-                }
-                _ => false,
+            .any(|record| {
+                matches!(
+                    record.event,
+                    Ev::CapabilitySettled { call }
+                        if call.name == "mcp.call"
+                            && matches!(&call.outcome, Some(CapabilityOutcome::Completed { .. }))
+                )
             }),
         "tip combo: mcp.call settled"
     );
@@ -1234,9 +1232,11 @@ async fn tip_tree_session_child_process_and_mcp_stdio_combo() {
         rt.events(&session, 0, 1000)
             .unwrap()
             .into_iter()
-            .any(|record| match record.event {
-                Ev::CapabilitySettled { call } if call.name == "mcp.call" => true,
-                _ => false,
+            .any(|record| {
+                matches!(
+                    record.event,
+                    Ev::CapabilitySettled { call } if call.name == "mcp.call"
+                )
             }),
         "tip combo: mcp.call settlement survives reopen"
     );
