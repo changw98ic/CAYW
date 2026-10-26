@@ -660,7 +660,17 @@ fn apply_trace_node(
                 node_id,
                 input,
                 state_before,
-            } => apply_started(project, event, &node_id, input, state_before)?,
+                context_before,
+                seed,
+            } => apply_started(
+                project,
+                event,
+                &node_id,
+                input,
+                state_before,
+                context_before,
+                seed,
+            )?,
             NodeTrace::Completed {
                 node_id,
                 result,
@@ -754,6 +764,8 @@ fn apply_started(
     node_id: &str,
     input: Value,
     state_before: Value,
+    context_before: Value,
+    seed: Option<Value>,
 ) -> Result<(), Error> {
     if project.revisions.is_empty() {
         add_gap(
@@ -847,6 +859,8 @@ fn apply_started(
         status: Status::Running,
         input,
         state_before,
+        context_before,
+        seed,
         output: None,
         state_after: None,
         branch: None,
@@ -1121,6 +1135,7 @@ fn observed_eval_mut(project: &mut Project, at_ms: u64) -> &mut Evaluation {
                 gaps: Vec::new(),
                 elapsed_ms: 0.0,
                 saved_at_ms: at_ms,
+                executed_nodes: Vec::new(),
             });
             project.evaluations.len() - 1
         }
@@ -1313,6 +1328,9 @@ mod tests {
                     node_id: "a".into(),
                     input: plan().input,
                     state_before: json!({"visited": 0}),
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -1341,6 +1359,9 @@ mod tests {
                     node_id: "b".into(),
                     input: json!({"value":2}),
                     state_before: json!({"visited":1}),
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -1415,6 +1436,9 @@ mod tests {
                     node_id: "a".into(),
                     input: plan().input,
                     state_before: json!({"visited": 0}),
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
             host(
@@ -1540,6 +1564,9 @@ mod tests {
                     node_id: "a".into(),
                     input: plan().input,
                     state_before: plan().initial_state,
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -1646,6 +1673,9 @@ mod tests {
                         node_id: "a".into(),
                         input: plan().input,
                         state_before: plan().initial_state,
+
+                        context_before: Value::Null,
+                        seed: None,
                     }),
                 ),
             )
@@ -1712,6 +1742,9 @@ mod tests {
                     node_id: "b".into(),
                     input: plan().input,
                     state_before: plan().initial_state,
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -2206,6 +2239,9 @@ mod tests {
                     node_id: "a".into(),
                     input: plan().input,
                     state_before: plan().initial_state,
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -2260,6 +2296,9 @@ mod tests {
                     node_id: "a".into(),
                     input: plan().input,
                     state_before: plan().initial_state,
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -2325,6 +2364,9 @@ mod tests {
                     node_id: "a".into(),
                     input: plan().input,
                     state_before: plan().initial_state,
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )
@@ -2350,6 +2392,9 @@ mod tests {
                     node_id: "b".into(),
                     input: json!({"value":2}),
                     state_before: json!({"visited":1}),
+
+                    context_before: Value::Null,
+                    seed: None,
                 }),
             ),
         )

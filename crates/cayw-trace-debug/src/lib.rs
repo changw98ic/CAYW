@@ -103,6 +103,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 });
                 changed = true;
             }
@@ -328,11 +329,11 @@ impl TraceStore {
             .expect("validated project");
         let parent = project.version();
         let version = parent + 1;
-        // Replay always starts at this revision's entry and recomputes every node,
-        // so a changed upstream source is not a reason to reject the edit. The
-        // base is only evidence that the edited node was on the captured path.
-        // A missing node there is a gap; it is not permission to borrow an older
-        // branch's input.
+        // Node saves use mode=recompute: reuse upstream steps without re-running
+        // their bodies; the VM seeds at the edited node from the captured shared
+        // seed (context + table identity). Undo uses full-entry replay.
+        // The base proves the edited node was on a captured path; a missing node
+        // is a gap, not permission to borrow an older branch's input.
         let base = if changed_node.is_some() {
             project
                 .evaluations
@@ -355,12 +356,17 @@ impl TraceStore {
             reason: reason.into(),
         });
         self.commit(document)?;
+        let local_mode = if changed_node.is_some() {
+            "recompute"
+        } else {
+            "replay"
+        };
         let result =
             if runtime_status == Status::OutcomeUnknown || runtime_status == Status::Running {
                 Evaluation {
                     id: uuid::Uuid::new_v4().to_string(),
                     version,
-                    mode: "replay".into(),
+                    mode: local_mode.into(),
                     status: Status::Blocked,
                     steps: vec![],
                     output: None,
@@ -369,17 +375,18 @@ impl TraceStore {
                         message: if runtime_status == Status::Running {
                             "原始执行仍在运行；输入和前置状态尚未完整捕获".into()
                         } else {
-                            "原始执行存在未知效果，不能自动重放".into()
+                            "原始执行存在未知效果，不能自动局部重算".into()
                         },
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 }
             } else if let Some(error) = &project_trace_error {
                 Evaluation {
                     id: uuid::Uuid::new_v4().to_string(),
                     version,
-                    mode: "replay".into(),
+                    mode: local_mode.into(),
                     status: Status::Blocked,
                     steps: vec![],
                     output: None,
@@ -389,6 +396,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 }
             } else {
                 match engine::evaluate(
@@ -405,7 +413,7 @@ impl TraceStore {
                     Err(error) => Evaluation {
                         id: uuid::Uuid::new_v4().to_string(),
                         version,
-                        mode: "replay".into(),
+                        mode: local_mode.into(),
                         status: Status::Blocked,
                         steps: vec![],
                         output: None,
@@ -415,6 +423,7 @@ impl TraceStore {
                         }],
                         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                         saved_at_ms: now_ms(),
+                        executed_nodes: Vec::new(),
                     },
                 }
             };

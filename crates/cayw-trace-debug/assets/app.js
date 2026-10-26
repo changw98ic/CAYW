@@ -15,11 +15,13 @@
   };
   var MODE_LABELS = {
     observed: '原始记录（observed）',
-    replay: '本地重放（replay）'
+    replay: '本地重放（replay）',
+    recompute: '局部重算（recompute）'
   };
   var MODE_DETAILS = {
     observed: '原始记录（observed）：数据来自一次实际 Runtime 执行。',
-    replay: '本地重放（replay）：只用本轮捕获的 Host 响应在本地重新求值。'
+    replay: '本地重放（replay）：从入口整图本地重放，只用捕获的 Host 响应。',
+    recompute: '局部重算（recompute）：从修改节点起局部重算受影响下游；上游步骤复用且不重跑，只用捕获的 Host 响应，不跑整项目构建。'
   };
 
   var activeControllers = new Set();
@@ -131,7 +133,7 @@
   }
 
   function modeBadge(mode) {
-    var kind = mode === 'observed' ? 'mode-observed' : mode === 'replay' ? 'mode-replay' : 'badge-none';
+    var kind = mode === 'observed' ? 'mode-observed' : mode === 'replay' ? 'mode-replay' : mode === 'recompute' ? 'mode-recompute' : 'badge-none';
     var node = badge(modeLabel(mode), kind);
     node.title = MODE_DETAILS[mode] || '';
     return node;
@@ -819,7 +821,7 @@
   function renderControls() {
     var evaluation = currentEvaluation();
     var modeNode = ui['evaluation-mode'];
-    modeNode.className = 'badge ' + (evaluation && evaluation.mode === 'observed' ? 'mode-observed' : evaluation && evaluation.mode === 'replay' ? 'mode-replay' : 'badge-none');
+    modeNode.className = 'badge ' + (evaluation && evaluation.mode === 'observed' ? 'mode-observed' : evaluation && evaluation.mode === 'replay' ? 'mode-replay' : evaluation && evaluation.mode === 'recompute' ? 'mode-recompute' : 'badge-none');
     modeNode.textContent = evaluation ? modeLabel(evaluation.mode) : '—';
     modeNode.title = evaluation && MODE_DETAILS[evaluation.mode] ? MODE_DETAILS[evaluation.mode] : '';
 
@@ -975,8 +977,11 @@
     if (evaluation && evaluation.mode === 'observed') {
       return { label: '已捕获', kind: 'mode-observed', detail: '该步骤来自原始 Runtime 执行记录。' };
     }
+    if (evaluation && evaluation.mode === 'recompute') {
+      return { label: '局部重算', kind: 'mode-recompute', detail: '该步骤由局部重算得到，只使用捕获到的 Host 响应。' };
+    }
     if (evaluation && evaluation.mode === 'replay') {
-      return { label: '本地计算', kind: 'mode-replay', detail: '该步骤由本地重放计算，只使用捕获到的 Host 响应。' };
+      return { label: '本地重放', kind: 'mode-replay', detail: '该步骤由入口整图本地重放计算，只使用捕获到的 Host 响应。' };
     }
     return { label: '方式未知', kind: 'badge-none', detail: '这一轮没有标注步骤来源。' };
   }
@@ -2219,9 +2224,9 @@
     var evaluation = currentEvaluation();
     if (evaluation) {
       var modeCard = el('article', 'fact-item is-session');
-      modeCard.append(el('h3', null, evaluation.mode === 'replay' ? '本地重放' : evaluation.mode === 'observed' ? '原始记录' : '运行方式未知'));
+      modeCard.append(el('h3', null, evaluation.mode === 'recompute' ? '局部重算' : evaluation.mode === 'replay' ? '本地重放' : evaluation.mode === 'observed' ? '原始记录' : '运行方式未知'));
       modeCard.append(el('p', null, MODE_DETAILS[evaluation.mode] || '这一轮没有标注运行方式。'));
-      modeCard.append(el('p', 'fact-meta', '重放只使用捕获到的 Host 响应；缺失的分支或响应会显示为缺口，不会静默成功。'));
+      modeCard.append(el('p', 'fact-meta', '本地重放与局部重算都只使用捕获到的 Host 响应；缺失的分支或响应会显示为缺口，不会静默成功。'));
       cards.push(modeCard);
     }
     var gaps = (evaluation && Array.isArray(evaluation.gaps) ? evaluation.gaps : []).slice();
