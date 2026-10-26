@@ -26,6 +26,10 @@ impl SymbolGraphLinker {
         &self.bridge
     }
 
+    pub fn shared_bridge(&self) -> Arc<SymbolVersionBridge> {
+        Arc::clone(&self.bridge)
+    }
+
     /// Resolve hangs for every node whose `implementation` points at an indexed path.
     ///
     /// Missing paths / symbols are skipped (no hang), never invented. Returns a

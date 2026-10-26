@@ -3,10 +3,14 @@
 //! These tests exercise the listener, header policy, body bound and graceful
 //! shutdown. They use an empty [`TraceStore`] and never start a Runtime task.
 
+use cayw_codeintel::{SymbolInput, SymbolVersionBridge, content_sha256};
+use cayw_core::{AttemptLease, CoreEvent, EventRecord, ExecutionRecord, ExecutionState};
 use cayw_trace_debug::{
-    Document, Error, GraphPlan, Node, Project, Revision, Status, TraceStore, server::serve,
+    Document, Edge, Error, GraphPlan, Node, NodeTrace, Project, Revision, Status, TraceEnvelope,
+    TraceStore, server::serve,
 };
-use std::{net::SocketAddr, time::Duration};
+use serde_json::json;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -423,4 +427,181 @@ async fn long_poll_returns_immediately_on_shutdown() {
         .await
         .expect("server did not stop after cancellation");
     assert!(matches!(&result, Ok(Ok(()))), "server failed: {result:?}");
+}
+
+#[tokio::test]
+async fn ingest_symbol_hangs_surface_through_http_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let bridge = Arc::new(SymbolVersionBridge::new());
+    let digest = content_sha256(b"fn input() {}\nfn condition() {}\n");
+    bridge
+        .publish_file(
+            "examples/demo.rs",
+            &digest,
+            "rust",
+            vec![
+                SymbolInput {
+                    name: "input".into(),
+                    kind: "function".into(),
+                    byte_start: 0,
+                    byte_end: 12,
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    parent_index: None,
+                },
+                SymbolInput {
+                    name: "condition".into(),
+                    kind: "function".into(),
+                    byte_start: 14,
+                    byte_end: 30,
+                    start_line: Some(2),
+                    end_line: Some(2),
+                    parent_index: None,
+                },
+            ],
+        )
+        .unwrap();
+
+    let plan = GraphPlan {
+        id: "demo".into(),
+        label: "F16 http".into(),
+        entry: "input".into(),
+        nodes: vec![
+            Node {
+                id: "input".into(),
+                label: "读取输入".into(),
+                module: "io".into(),
+                source: "return {output=input,state=state}".into(),
+                params: json!({}),
+                input_pointer: String::new(),
+                implementation: "examples/demo.rs::input".into(),
+            },
+            Node {
+                id: "condition".into(),
+                label: "条件".into(),
+                module: "logic".into(),
+                source: "error('bad')".into(),
+                params: json!({}),
+                input_pointer: String::new(),
+                implementation: "examples/demo.rs::condition".into(),
+            },
+            Node {
+                id: "luau_only".into(),
+                label: "纯 Luau".into(),
+                module: "logic".into(),
+                source: "return {output=1,state=state}".into(),
+                params: json!({}),
+                input_pointer: String::new(),
+                implementation: "luau".into(),
+            },
+        ],
+        edges: vec![
+            Edge {
+                from: "input".into(),
+                to: "condition".into(),
+                branch: None,
+            },
+            Edge {
+                from: "condition".into(),
+                to: "luau_only".into(),
+                branch: None,
+            },
+        ],
+        input: json!({"value": 10}),
+        initial_state: json!({}),
+        context: json!({}),
+    };
+    let source_hash = {
+        use sha2::{Digest, Sha256};
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                cayw_trace_debug::engine::script_for_plan(&plan)
+                    .unwrap()
+                    .as_bytes()
+            )
+        )
+    };
+    let lease = AttemptLease {
+        session_id: "session".into(),
+        attempt_id: "attempt".into(),
+        worker_id: "worker".into(),
+        fence: 1,
+    };
+    let event = |cursor, event| EventRecord {
+        protocol_version: 3,
+        session_id: "session".into(),
+        cursor,
+        timestamp: cayw_trace_debug::now_ms(),
+        attempt: Some(lease.clone()),
+        event,
+    };
+
+    let store =
+        TraceStore::open_with_bridge(directory.path().join("trace.json"), Arc::clone(&bridge))
+            .unwrap();
+    let envelope = TraceEnvelope {
+        schema: cayw_trace_debug::TRACE_SCHEMA.into(),
+        trace: NodeTrace::Manifest { plan },
+    };
+    store
+        .ingest(&[
+            event(
+                1,
+                CoreEvent::ExecutionStarted {
+                    execution: ExecutionRecord {
+                        execution_id: "exec".into(),
+                        parent_call_id: "tool".into(),
+                        task_id: "task".into(),
+                        source_hash: source_hash.clone(),
+                        lease: lease.clone(),
+                        state: ExecutionState::Running,
+                        terminal: None,
+                    },
+                },
+            ),
+            event(
+                2,
+                CoreEvent::Host {
+                    kind: "trace_node".into(),
+                    data: json!({
+                        "execution_id": "exec",
+                        "task_id": "task",
+                        "source_hash": source_hash,
+                        "parent_call_id": "tool",
+                        "entry": {
+                            "cursor": 1,
+                            "output": {"type": "json", "value": envelope}
+                        }
+                    }),
+                },
+            ),
+        ])
+        .unwrap();
+
+    let running = start_store(directory, store, TOKEN.to_string()).await;
+    let response = client()
+        .get(url(running.address, "/api/state"))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let document: Document = response.json().await.unwrap();
+    let hangs = &document.projects["exec"].symbol_hangs;
+    assert_eq!(
+        hangs.len(),
+        2,
+        "HTTP state must carry ingest-linked hangs for UI"
+    );
+    assert_eq!(hangs["input"].file.path, "examples/demo.rs");
+    assert_eq!(hangs["input"].file.version, 1);
+    assert_eq!(hangs["input"].symbol.as_ref().unwrap().name, "input");
+    assert_eq!(
+        hangs["condition"].symbol.as_ref().unwrap().name,
+        "condition"
+    );
+    assert!(!hangs.contains_key("luau_only"));
+
+    running.shutdown().await;
 }

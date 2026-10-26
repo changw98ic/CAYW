@@ -20,6 +20,9 @@ cargo clippy -p cayw-trace-debug --all-targets --locked --no-deps -- -D warnings
 | 错误摘要跳转证据 | `error_summary_deep_links_hang_and_evidence_cursor` |
 | 未发布路径不虚构挂载 | `unpublished_path_does_not_invent_hang` |
 | 非工程实现不挂载 | `luau` / `local` 由 `parse_implementation` 忽略 |
+| ingest 经 linker 填充 `symbol_hangs` 并持久化 | `ingest_populates_symbol_hangs_via_linker_and_persists` |
+| 桥接版本 bump 后 refresh 更新挂载 | `bridge_version_change_updates_hangs_through_refresh` |
+| ingest → HTTP `/api/state` → UI 数据 | `ingest_symbol_hangs_surface_through_http_state` |
 
 ## 非目标
 

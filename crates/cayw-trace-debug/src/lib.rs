@@ -9,6 +9,7 @@ pub use symbol_graph::{SymbolGraphLinker, parse_implementation};
 pub use types::*;
 
 use cayw_ai::CancellationToken;
+use cayw_codeintel::SymbolVersionBridge;
 use cayw_core::EventRecord;
 use std::{
     fs::{File, OpenOptions},
@@ -37,11 +38,25 @@ pub struct TraceStore {
     path: PathBuf,
     document: Mutex<Document>,
     edits: tokio::sync::Mutex<()>,
+    /// Shared F04 bridge used to hang declared nodes onto engineering versions.
+    linker: SymbolGraphLinker,
     _lock: File,
 }
 
 impl TraceStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
+        Self::open_with_bridge(path, Arc::new(SymbolVersionBridge::new()))
+    }
+
+    /// Open a store wired to a Host/Runtime-shared [`SymbolVersionBridge`].
+    ///
+    /// Ingest and revise populate [`Project::symbol_hangs`] through
+    /// [`SymbolGraphLinker`]; call [`Self::refresh_symbol_hangs`] after the
+    /// bridge publishes a new file version so HTTP state / UI see the bump.
+    pub fn open_with_bridge(
+        path: impl AsRef<Path>,
+        bridge: Arc<SymbolVersionBridge>,
+    ) -> Result<Arc<Self>, Error> {
         let path = path.as_ref().to_path_buf();
         let parent = path
             .parent()
@@ -80,6 +95,7 @@ impl TraceStore {
             path,
             document: Mutex::new(document),
             edits: tokio::sync::Mutex::new(()),
+            linker: SymbolGraphLinker::new(bridge),
             _lock: lock,
         });
         // A lost plugin process cannot resume a partially evaluated Lua stack.
@@ -120,6 +136,43 @@ impl TraceStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub fn bridge(&self) -> Arc<SymbolVersionBridge> {
+        self.linker.shared_bridge()
+    }
+
+    pub fn linker(&self) -> &SymbolGraphLinker {
+        &self.linker
+    }
+
+    /// Re-resolve hangs for every project from the current bridge catalog.
+    ///
+    /// Persists and advances `sequence` only when at least one project's hangs
+    /// change (for example after `publish_file` bumps a content version).
+    pub fn refresh_symbol_hangs(&self) -> Result<(), Error> {
+        let mut current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = current.clone();
+        let mut changed = false;
+        for project in next.projects.values_mut() {
+            let before = project.symbol_hangs.clone();
+            link_project(project, &self.linker)?;
+            if project.symbol_hangs != before {
+                changed = true;
+            }
+        }
+        if changed {
+            next.sequence = next
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| Error::Invalid("追踪序号耗尽".into()))?;
+            self.persist(&next)?;
+            *current = next;
+        }
+        Ok(())
     }
 
     fn persist(&self, document: &Document) -> Result<(), Error> {
@@ -223,6 +276,9 @@ impl TraceStore {
                 return Err(Error::Invalid(
                     "本文件达到 256 次执行上限，请新建追踪文件".into(),
                 ));
+            }
+            for project in next.projects.values_mut() {
+                link_project(project, &self.linker)?;
             }
             next.sequence += 1;
             self.persist(&next)?;
@@ -356,6 +412,7 @@ impl TraceStore {
             created_at_ms: now_ms(),
             reason: reason.into(),
         });
+        link_project(project, &self.linker)?;
         self.commit(document)?;
         let result =
             if runtime_status == Status::OutcomeUnknown || runtime_status == Status::Running {
@@ -444,6 +501,17 @@ impl TraceStore {
         *current = next;
         Ok(current.clone())
     }
+}
+
+/// Populate [`Project::symbol_hangs`] from the project's latest plan via the
+/// shared linker. Empty when there is no plan yet or no indexed path matches.
+fn link_project(project: &mut Project, linker: &SymbolGraphLinker) -> Result<(), Error> {
+    let Some(revision) = project.revisions.last() else {
+        project.symbol_hangs.clear();
+        return Ok(());
+    };
+    project.symbol_hangs = linker.hang_plan(&revision.plan).map_err(Error::Invalid)?;
+    Ok(())
 }
 
 fn check_revision(project: &Project, expected: u64) -> Result<(), Error> {

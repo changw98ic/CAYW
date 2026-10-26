@@ -1,8 +1,10 @@
 //! F16 / SLICE E 烟测：节点显示文件+符号+版本；错误摘要回链证据。
 
 use cayw_codeintel::{SymbolInput, SymbolVersionBridge, content_sha256};
+use cayw_core::{AttemptLease, CoreEvent, EventRecord, ExecutionRecord, ExecutionState};
 use cayw_trace_debug::{
-    ErrorEvidenceLink, GraphPlan, Node, NodeSymbolHang, Status, Step, SymbolGraphLinker,
+    Edge, ErrorEvidenceLink, GraphPlan, Node, NodeSymbolHang, NodeTrace, Status, Step,
+    SymbolGraphLinker, TraceEnvelope, TraceStore,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -57,7 +59,18 @@ fn demo_plan() -> GraphPlan {
                 implementation: "luau".into(),
             },
         ],
-        edges: vec![],
+        edges: vec![
+            Edge {
+                from: "input".into(),
+                to: "condition".into(),
+                branch: None,
+            },
+            Edge {
+                from: "condition".into(),
+                to: "luau_only".into(),
+                branch: None,
+            },
+        ],
         input: json!({"value": 10}),
         initial_state: json!({}),
         context: json!({}),
@@ -178,5 +191,178 @@ fn unpublished_path_does_not_invent_hang() {
     assert!(
         hangs.is_empty(),
         "no hang without published engineering file"
+    );
+}
+
+fn source_hash_for(plan: &GraphPlan) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(
+            cayw_trace_debug::engine::script_for_plan(plan)
+                .unwrap()
+                .as_bytes()
+        )
+    )
+}
+
+fn lease() -> AttemptLease {
+    AttemptLease {
+        session_id: "session".into(),
+        attempt_id: "attempt".into(),
+        worker_id: "worker".into(),
+        fence: 1,
+    }
+}
+
+fn event(cursor: u64, event: CoreEvent) -> EventRecord {
+    EventRecord {
+        protocol_version: 3,
+        session_id: "session".into(),
+        cursor,
+        timestamp: cayw_trace_debug::now_ms(),
+        attempt: Some(lease()),
+        event,
+    }
+}
+
+fn ingest_manifest(store: &TraceStore, plan: GraphPlan) {
+    let source_hash = source_hash_for(&plan);
+    let execution = ExecutionRecord {
+        execution_id: "exec".into(),
+        parent_call_id: "tool".into(),
+        task_id: "task".into(),
+        source_hash: source_hash.clone(),
+        lease: lease(),
+        state: ExecutionState::Running,
+        terminal: None,
+    };
+    let envelope = TraceEnvelope {
+        schema: cayw_trace_debug::TRACE_SCHEMA.into(),
+        trace: NodeTrace::Manifest { plan },
+    };
+    let trace = event(
+        2,
+        CoreEvent::Host {
+            kind: "trace_node".into(),
+            data: json!({
+                "execution_id": "exec",
+                "task_id": "task",
+                "source_hash": source_hash,
+                "parent_call_id": "tool",
+                "entry": {
+                    "cursor": 1,
+                    "output": {"type": "json", "value": envelope}
+                }
+            }),
+        },
+    );
+    store
+        .ingest(&[event(1, CoreEvent::ExecutionStarted { execution }), trace])
+        .unwrap();
+}
+
+#[test]
+fn ingest_populates_symbol_hangs_via_linker_and_persists() {
+    let directory = tempfile::tempdir().unwrap();
+    let bridge = Arc::new(SymbolVersionBridge::new());
+    let digest = sha(b"fn input() {}\nfn condition() {}\n");
+    bridge
+        .publish_file(
+            "examples/demo.rs",
+            &digest,
+            "rust",
+            vec![
+                symbol("input", "function", 0, 12),
+                symbol("condition", "function", 14, 30),
+            ],
+        )
+        .unwrap();
+
+    let path = directory.path().join("trace.json");
+    let store = TraceStore::open_with_bridge(&path, Arc::clone(&bridge)).unwrap();
+    ingest_manifest(&store, demo_plan());
+
+    let project = store.snapshot().projects.get("exec").cloned().unwrap();
+    assert_eq!(project.symbol_hangs.len(), 2);
+    assert_eq!(
+        project.symbol_hangs["input"].file.version, 1,
+        "ingest must hang through linker, not leave empty map"
+    );
+    assert_eq!(
+        project.symbol_hangs["condition"]
+            .symbol
+            .as_ref()
+            .unwrap()
+            .name,
+        "condition"
+    );
+    assert!(!project.symbol_hangs.contains_key("luau_only"));
+
+    // Persistence: reopen without the bridge still carries the hung snapshot.
+    drop(store);
+    let reopened = TraceStore::open(&path).unwrap();
+    let again = reopened.snapshot();
+    let project = again.projects.get("exec").unwrap();
+    assert_eq!(project.symbol_hangs.len(), 2);
+    assert_eq!(project.symbol_hangs["input"].file.content_sha256, digest);
+}
+
+#[test]
+fn bridge_version_change_updates_hangs_through_refresh() {
+    let directory = tempfile::tempdir().unwrap();
+    let bridge = Arc::new(SymbolVersionBridge::new());
+    let digest_v1 = sha(b"fn input() {}\n");
+    bridge
+        .publish_file(
+            "examples/demo.rs",
+            &digest_v1,
+            "rust",
+            vec![symbol("input", "function", 0, 12)],
+        )
+        .unwrap();
+
+    let store =
+        TraceStore::open_with_bridge(directory.path().join("trace.json"), Arc::clone(&bridge))
+            .unwrap();
+    ingest_manifest(&store, demo_plan());
+    assert_eq!(
+        store.snapshot().projects["exec"].symbol_hangs["input"]
+            .file
+            .version,
+        1
+    );
+
+    let digest_v2 = sha(b"fn input() { /* changed */ }\n");
+    let published = bridge
+        .publish_file(
+            "examples/demo.rs",
+            &digest_v2,
+            "rust",
+            vec![
+                symbol("input", "function", 0, 28),
+                symbol("condition", "function", 30, 50),
+            ],
+        )
+        .unwrap();
+    assert_eq!(published.version, 2);
+
+    let before_seq = store.snapshot().sequence;
+    store.refresh_symbol_hangs().unwrap();
+    let after = store.snapshot();
+    assert!(
+        after.sequence > before_seq,
+        "refresh must advance sequence for HTTP watchers"
+    );
+    let hang = &after.projects["exec"].symbol_hangs["input"];
+    assert_eq!(hang.file.version, 2);
+    assert_eq!(hang.file.content_sha256, digest_v2);
+    assert_eq!(
+        after.projects["exec"].symbol_hangs["condition"]
+            .symbol
+            .as_ref()
+            .unwrap()
+            .name,
+        "condition"
     );
 }
