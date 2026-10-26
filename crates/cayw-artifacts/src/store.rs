@@ -72,6 +72,15 @@ impl ArtifactStore {
                 "update requires title and/or body".into(),
             ));
         }
+        // Validate proposed fields before touching the stored record so a later
+        // failure (bad body / version overflow) cannot leave a mutated title.
+        let new_title = match &req.title {
+            Some(title) => Some(validate_title(title).map_err(ArtifactError::Invalid)?),
+            None => None,
+        };
+        if let Some(body) = &req.body {
+            validate_body(body).map_err(ArtifactError::Invalid)?;
+        }
 
         let mut guard = self.inner.lock().expect("artifact store lock");
         let existing = guard
@@ -94,17 +103,17 @@ impl ArtifactStore {
                 actual: existing.content_version,
             });
         }
-        if let Some(title) = req.title {
-            existing.title = validate_title(&title).map_err(ArtifactError::Invalid)?;
-        }
-        if let Some(body) = req.body {
-            validate_body(&body).map_err(ArtifactError::Invalid)?;
-            existing.body = body;
-        }
-        existing.content_version = existing
+        let next_version = existing
             .content_version
             .checked_add(1)
             .ok_or_else(|| ArtifactError::Invalid("content_version overflow".into()))?;
+        if let Some(title) = new_title {
+            existing.title = title;
+        }
+        if let Some(body) = req.body {
+            existing.body = body;
+        }
+        existing.content_version = next_version;
         existing.updated_at_ms = req.at_ms;
         Ok(existing.clone())
     }
@@ -180,6 +189,44 @@ pub type SharedArtifactStore = Arc<ArtifactStore>;
 mod tests {
     use super::*;
     use crate::types::ArtifactKind;
+
+    #[test]
+    fn failed_update_does_not_mutate_title() {
+        let store = ArtifactStore::new();
+        store
+            .put(PutArtifactRequest {
+                artifact_id: "card-1".into(),
+                session_id: "sess-a".into(),
+                kind: ArtifactKind::HtmlCard,
+                title: "Original".into(),
+                body: "<p>hello</p>".into(),
+                at_ms: 100,
+                result_handle: None,
+            })
+            .unwrap();
+        let err = store
+            .update(UpdateArtifactRequest {
+                artifact_id: "card-1".into(),
+                session_id: "sess-a".into(),
+                title: Some("Would-Be-New".into()),
+                body: Some("".into()),
+                at_ms: 200,
+                expected_content_version: Some(1),
+            })
+            .expect_err("empty body must fail the update");
+        assert!(
+            matches!(err, ArtifactError::Invalid(ref msg) if msg.contains("body")),
+            "expected body validation error, got {err:?}"
+        );
+        let got = store.get("card-1").unwrap();
+        assert_eq!(
+            got.title, "Original",
+            "failed update must not leave a mutated title"
+        );
+        assert_eq!(got.body, "<p>hello</p>");
+        assert_eq!(got.content_version, 1);
+        assert_eq!(got.updated_at_ms, 100);
+    }
 
     #[test]
     fn put_preview_and_versioned_update() {

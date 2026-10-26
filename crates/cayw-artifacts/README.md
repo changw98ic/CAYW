@@ -13,6 +13,7 @@ CAYW HTML 产物展示与宿主动作协议（F09 + F19 首刀，SLICE J+K）。
 - `preview` 返回渲染投影 `ArtifactPreview`（`html` + `content_type`），不是存储行 `ArtifactRecord`
 - 动作：`FollowUpTask` / `InvokeTool`（走 host 桥）/ `UpdateState` / `ReadOnly`
 - 归属：跨 Session 拒绝；版本不匹配拒绝；桥错误 → Rejected
+- 更新：失败的 update 不先改 title；动作可 Accepted→Applied/Rejected/Cancelled；产品 Runtime 侧有统一审计与取消
 - 恢复：`RecoveryBundle` 内存导出/恢复；磁盘路径 `{root}/artifacts/recovery.json`
 - 协议版本：`ARTIFACT_PROTOCOL_VERSION = 1`
 

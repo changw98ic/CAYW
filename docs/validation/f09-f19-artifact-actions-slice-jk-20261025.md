@@ -23,3 +23,10 @@ cargo run -p cayw-artifacts --example offline_artifacts --locked
 ## 不做声明
 
 本记录不证明 F09/F19 全范围完成，也不证明 WebUI 外壳已接；证明的是协议层桥被真实调用、产品默认消费者为 RuntimeHostDispatch（非 Recording-only），以及磁盘恢复路径可用。
+
+## Audit remediation (2026-10-26)
+
+- `ArtifactStore::update` validates title/body/version bump before mutating; failed updates leave title untouched (`failed_update_does_not_mutate_title`).
+- Runtime exposes `list_artifact_actions` / `get_artifact_action` / `cancel_artifact_action`; dispatches append `artifact.action.*` rows to the Runtime audit journal.
+- Follow-up cancel path: `cancel_artifact_action` cancels the queued Runtime task and marks `ActionStatus::Cancelled`.
+- WebUI chrome still out of scope on this branch (no artifact panel hooks on `feat/f09-f19-artifact-actions`).

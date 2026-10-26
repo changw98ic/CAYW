@@ -40,9 +40,9 @@ pub use audit::{AuditRecord, GrantRecord};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
 pub use cayw_artifacts::{
-    ActionIntent, ActionKind, ActionOutcome, ActionRequest, ActionStatus, ArtifactKind,
-    ArtifactPreview, ArtifactRecord, HostActionDispatch, PutArtifactRequest, RecoveryBundle,
-    UpdateArtifactRequest,
+    ActionIntent, ActionKind, ActionOutcome, ActionRecord, ActionRequest, ActionStatus,
+    ArtifactKind, ArtifactPreview, ArtifactRecord, HostActionDispatch, PutArtifactRequest,
+    RecoveryBundle, UpdateArtifactRequest,
 };
 pub use cayw_requests::TaskIntent;
 pub use children::LocalAgents;

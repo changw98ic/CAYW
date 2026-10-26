@@ -235,3 +235,75 @@ fn recovery_round_trip_keeps_runtime_dispatch() {
         "loaded recovery must keep RuntimeHostDispatch as product path"
     );
 }
+
+#[test]
+fn follow_up_action_cancel_cancels_queued_task_and_audits() {
+    let (_dir, rt) = open(vec![]);
+    let session = rt.create(Some("cancel".into())).unwrap().id;
+    put_card(&rt, &session, "card-cancel", "<button>go</button>");
+
+    let outcome = rt
+        .dispatch_artifact_action(ActionRequest {
+            action_id: "act-cancel".into(),
+            artifact_id: "card-cancel".into(),
+            session_id: session.clone(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::FollowUpTask {
+                prompt: "work from card".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 20,
+        })
+        .unwrap();
+    assert_eq!(outcome.record.status, ActionStatus::Applied);
+    let task_id = rt.tasks(&session).unwrap()[0].id.clone();
+
+    let cancelled = rt.cancel_artifact_action(&session, "act-cancel").unwrap();
+    assert_eq!(cancelled.record.status, ActionStatus::Cancelled);
+
+    let task = rt.task(&task_id).unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+
+    let listed = rt.list_artifact_actions(&session).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].status, ActionStatus::Cancelled);
+
+    let audit = rt.audit(&session, 0, 100).unwrap();
+    let kinds: Vec<_> = audit.iter().map(|e| e.kind.as_str()).collect();
+    assert!(
+        kinds.iter().any(|k| *k == "artifact.action.applied"),
+        "expected applied audit row, got {kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| *k == "artifact.action.cancelled"),
+        "expected cancelled audit row, got {kinds:?}"
+    );
+}
+
+#[test]
+fn rejected_action_still_writes_audit_trail() {
+    let (_dir, rt) = open(vec![]);
+    let session = rt.create(None).unwrap().id;
+    put_card(&rt, &session, "card-rej", "<button>x</button>");
+    let outcome = rt
+        .dispatch_artifact_action(ActionRequest {
+            action_id: "act-rej".into(),
+            artifact_id: "card-rej".into(),
+            session_id: session.clone(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::InvokeTool {
+                tool: "fs.read".into(),
+                args_json: "{\"path\":\"missing.txt\"}".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(outcome.record.status, ActionStatus::Rejected);
+    let audit = rt.audit(&session, 0, 100).unwrap();
+    assert!(
+        audit.iter().any(|e| e.kind == "artifact.action.rejected"
+            && e.data.get("action_id").and_then(|v| v.as_str()) == Some("act-rej")),
+        "rejected dispatch must appear in unified Runtime audit"
+    );
+}

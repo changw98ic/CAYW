@@ -67,8 +67,9 @@ impl ActionProtocol {
 
     /// Accept or reject an action. Never grants new Host capabilities.
     ///
-    /// `FollowUpTask` / `InvokeTool` invoke [`HostActionDispatch`] and record
-    /// `Applied` on success or `Rejected` when the bridge returns an error.
+    /// Records `Accepted` before calling the host bridge so cancel/audit can
+    /// observe in-flight work. `FollowUpTask` / `InvokeTool` then settle to
+    /// `Applied`, `Rejected`, or `Cancelled`.
     pub fn dispatch(&self, req: ActionRequest) -> Result<ActionOutcome, ArtifactError> {
         validate_id("action_id", &req.action_id).map_err(ArtifactError::Invalid)?;
         validate_id("artifact_id", &req.artifact_id).map_err(ArtifactError::Invalid)?;
@@ -115,13 +116,51 @@ impl ActionProtocol {
             return Ok(ActionOutcome { record });
         }
 
-        // Drop the lock before calling the host bridge (may block / call out).
+        // Mark Accepted before the bridge so cancel can target in-flight work.
+        let accepted = ActionRecord {
+            action_id: req.action_id.clone(),
+            artifact_id: req.artifact_id.clone(),
+            session_id: req.session_id.clone(),
+            kind: req.kind,
+            intent: req.intent.clone(),
+            status: ActionStatus::Accepted,
+            requested_at_ms: req.requested_at_ms,
+            recorded_at_ms,
+            rejection_reason: None,
+            outcome_json: None,
+        };
+        guard.actions.insert(accepted.action_id.clone(), accepted);
         drop(guard);
+
         let applied = apply_intent(&req, self.dispatch.as_ref(), &self.inner)?;
+        // If cancel won the race before/during the bridge, best-effort tear down
+        // any flight the bridge registered after the cancel mark.
+        {
+            let cancelled_already = {
+                let guard = self.inner.lock().expect("action lock");
+                guard
+                    .actions
+                    .get(&req.action_id)
+                    .is_some_and(|r| r.status == ActionStatus::Cancelled)
+            };
+            if cancelled_already {
+                let _ = self.dispatch.cancel_action(&req.action_id);
+                let guard = self.inner.lock().expect("action lock");
+                if let Some(existing) = guard.actions.get(&req.action_id) {
+                    return Ok(ActionOutcome {
+                        record: existing.clone(),
+                    });
+                }
+            }
+        }
         let mut guard = self.inner.lock().expect("action lock");
-        // Re-check duplicate in case of concurrent dispatch with same id.
-        if guard.actions.contains_key(&req.action_id) {
-            return Err(ArtifactError::DuplicateAction(req.action_id));
+        // A concurrent cancel may have already settled this action.
+        if let Some(existing) = guard.actions.get(&req.action_id)
+            && existing.status == ActionStatus::Cancelled
+        {
+            return Ok(ActionOutcome {
+                record: existing.clone(),
+            });
         }
         let record = match applied {
             IntentApply::Applied { outcome_json } => ActionRecord {
@@ -137,11 +176,77 @@ impl ActionProtocol {
                 outcome_json: Some(outcome_json),
             },
             IntentApply::Rejected { reason } => rejected_record(&req, recorded_at_ms, reason),
+            IntentApply::Cancelled { reason } => cancelled_record(&req, recorded_at_ms, reason),
         };
         guard
             .actions
             .insert(record.action_id.clone(), record.clone());
         Ok(ActionOutcome { record })
+    }
+
+    /// Cancel an in-flight (or follow-up-queued) artifact action.
+    ///
+    /// Signals the host bridge (`HostActionDispatch::cancel_action`) and marks
+    /// the action `Cancelled` when a live flight was interrupted. Idempotent
+    /// for already-cancelled records.
+    pub fn cancel(&self, action_id: &str) -> Result<ActionOutcome, ArtifactError> {
+        validate_id("action_id", action_id).map_err(ArtifactError::Invalid)?;
+        let snapshot = {
+            let guard = self.inner.lock().expect("action lock");
+            guard
+                .actions
+                .get(action_id)
+                .cloned()
+                .ok_or_else(|| ArtifactError::NotFound(action_id.to_owned()))?
+        };
+        if snapshot.status == ActionStatus::Cancelled {
+            return Ok(ActionOutcome { record: snapshot });
+        }
+        if matches!(snapshot.status, ActionStatus::Rejected) {
+            return Err(ArtifactError::Invalid(format!(
+                "action {action_id} is already rejected and cannot be cancelled"
+            )));
+        }
+        // Applied follow-ups remain cancellable (queued/running Runtime task).
+        // Applied UpdateState / ReadOnly / completed tools are not.
+        if snapshot.status == ActionStatus::Applied
+            && !matches!(snapshot.intent, ActionIntent::FollowUpTask { .. })
+        {
+            return Err(ArtifactError::Invalid(format!(
+                "action {action_id} already settled and cannot be cancelled"
+            )));
+        }
+
+        let signalled = self
+            .dispatch
+            .cancel_action(action_id)
+            .map_err(|reason| ArtifactError::Invalid(format!("cancel_action: {reason}")))?;
+
+        let mut guard = self.inner.lock().expect("action lock");
+        let existing = guard
+            .actions
+            .get_mut(action_id)
+            .ok_or_else(|| ArtifactError::NotFound(action_id.to_owned()))?;
+        if existing.status == ActionStatus::Cancelled {
+            return Ok(ActionOutcome {
+                record: existing.clone(),
+            });
+        }
+        if !signalled && existing.status == ActionStatus::Applied {
+            // Follow-up may have already finished; treat as not cancelled.
+            return Err(ArtifactError::Invalid(format!(
+                "action {action_id} has no cancellable in-flight host/runtime work"
+            )));
+        }
+        existing.status = ActionStatus::Cancelled;
+        existing.rejection_reason = Some(if signalled {
+            "cancelled".into()
+        } else {
+            "cancelled_before_bridge_settled".into()
+        });
+        Ok(ActionOutcome {
+            record: existing.clone(),
+        })
     }
 
     pub fn get_action(&self, action_id: &str) -> Result<ActionRecord, ArtifactError> {
@@ -231,6 +336,34 @@ fn rejected_record(req: &ActionRequest, recorded_at_ms: u64, reason: String) -> 
     }
 }
 
+fn cancelled_record(req: &ActionRequest, recorded_at_ms: u64, reason: String) -> ActionRecord {
+    ActionRecord {
+        action_id: req.action_id.clone(),
+        artifact_id: req.artifact_id.clone(),
+        session_id: req.session_id.clone(),
+        kind: req.kind,
+        intent: req.intent.clone(),
+        status: ActionStatus::Cancelled,
+        requested_at_ms: req.requested_at_ms,
+        recorded_at_ms,
+        rejection_reason: Some(reason),
+        outcome_json: None,
+    }
+}
+
+fn classify_bridge_err(prefix: &str, reason: String) -> IntentApply {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("cancel") {
+        IntentApply::Cancelled {
+            reason: format!("{prefix}: {reason}"),
+        }
+    } else {
+        IntentApply::Rejected {
+            reason: format!("{prefix}: {reason}"),
+        }
+    }
+}
+
 fn validate_intent(intent: &ActionIntent) -> Result<(), ArtifactError> {
     match intent {
         ActionIntent::FollowUpTask { prompt } => {
@@ -275,6 +408,7 @@ fn validate_intent(intent: &ActionIntent) -> Result<(), ArtifactError> {
 enum IntentApply {
     Applied { outcome_json: String },
     Rejected { reason: String },
+    Cancelled { reason: String },
 }
 
 fn apply_intent(
@@ -293,9 +427,7 @@ fn apply_intent(
                 Ok(result) => Ok(IntentApply::Applied {
                     outcome_json: result.outcome_json,
                 }),
-                Err(reason) => Ok(IntentApply::Rejected {
-                    reason: format!("host_dispatch_follow_up: {reason}"),
-                }),
+                Err(reason) => Ok(classify_bridge_err("host_dispatch_follow_up", reason)),
             }
         }
         ActionIntent::InvokeTool { tool, args_json } => {
@@ -309,9 +441,7 @@ fn apply_intent(
                 Ok(result) => Ok(IntentApply::Applied {
                     outcome_json: result.outcome_json,
                 }),
-                Err(reason) => Ok(IntentApply::Rejected {
-                    reason: format!("host_dispatch_invoke_tool: {reason}"),
-                }),
+                Err(reason) => Ok(classify_bridge_err("host_dispatch_invoke_tool", reason)),
             }
         }
         ActionIntent::UpdateState { key, value_json } => {

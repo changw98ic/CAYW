@@ -48,6 +48,13 @@ pub struct HostDispatchResult {
 pub trait HostActionDispatch: Send + Sync {
     fn follow_up_task(&self, req: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String>;
     fn invoke_tool(&self, req: ToolDispatch<'_>) -> Result<HostDispatchResult, String>;
+    /// Cancel an in-flight Host/Runtime handoff for `action_id`.
+    ///
+    /// Returns `Ok(true)` when a live flight was signalled (tool cancel token
+    /// fired and/or a follow-up Runtime task was cancelled). Default: no-op.
+    fn cancel_action(&self, _action_id: &str) -> Result<bool, String> {
+        Ok(false)
+    }
     /// Downcast support for product-path assertions (Recording vs Runtime).
     fn as_any(&self) -> &dyn std::any::Any;
 }

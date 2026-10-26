@@ -6,20 +6,24 @@
 //! - `InvokeTool` → authorized [`cayw_host::Host::call`] against
 //!   [`RuntimeConfig::permissions`] (exact scope; never a new capability grant)
 
-use crate::{Inner, Runtime, RuntimeError, ScopedPermission, lock, permissions::canonical_scope};
+use crate::{
+    CancelTarget, Inner, Runtime, RuntimeError, ScopedPermission, lock,
+    permissions::canonical_scope,
+};
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_artifacts::{
-    ActionOutcome, ActionProtocol, ActionRequest, ArtifactError, ArtifactPreview, ArtifactRecord,
-    ArtifactStore, ArtifactWorkspace, FollowUpDispatch, HostActionDispatch, HostDispatchResult,
-    PutArtifactRequest, RecoveryBundle, SharedHostDispatch, ToolDispatch, UpdateArtifactRequest,
-    load_recovery,
+    ActionOutcome, ActionProtocol, ActionRecord, ActionRequest, ActionStatus, ArtifactError,
+    ArtifactPreview, ArtifactRecord, ArtifactStore, ArtifactWorkspace, FollowUpDispatch,
+    HostActionDispatch, HostDispatchResult, PutArtifactRequest, RecoveryBundle, SharedHostDispatch,
+    ToolDispatch, UpdateArtifactRequest, load_recovery,
 };
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, PermissionGate};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::{
-    Arc, Weak,
+    Arc, Mutex, Weak,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -29,14 +33,24 @@ pub(crate) struct ArtifactState {
     pub workspace: ArtifactWorkspace,
 }
 
+/// In-flight Host/Runtime work spawned from an artifact action.
+enum ArtifactFlight {
+    Tool { cancel: CancellationToken },
+    FollowUp { target: CancelTarget },
+}
+
 /// Real HostActionDispatch: follow-ups become Runtime tasks; tools hit Host.
 pub struct RuntimeHostDispatch {
     inner: Weak<Inner>,
+    flights: Mutex<BTreeMap<String, ArtifactFlight>>,
 }
 
 impl RuntimeHostDispatch {
     pub(crate) fn new(inner: Weak<Inner>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            flights: Mutex::new(BTreeMap::new()),
+        }
     }
 
     fn runtime(&self) -> Result<Runtime, String> {
@@ -45,6 +59,14 @@ impl RuntimeHostDispatch {
             .upgrade()
             .ok_or_else(|| "runtime closed".to_string())?;
         Ok(Runtime { inner })
+    }
+
+    fn register_flight(&self, action_id: &str, flight: ArtifactFlight) {
+        lock(&self.flights).insert(action_id.to_owned(), flight);
+    }
+
+    fn take_flight(&self, action_id: &str) -> Option<ArtifactFlight> {
+        lock(&self.flights).remove(action_id)
     }
 }
 
@@ -59,6 +81,13 @@ impl HostActionDispatch for RuntimeHostDispatch {
         let task = runtime
             .enqueue(req.session_id, req.prompt)
             .map_err(|error| error.to_string())?;
+        let target = task.cancel_target();
+        self.register_flight(
+            req.action_id,
+            ArtifactFlight::FollowUp {
+                target: target.clone(),
+            },
+        );
         Ok(HostDispatchResult {
             outcome_json: json!({
                 "kind": "follow_up_task_dispatched",
@@ -68,6 +97,7 @@ impl HostActionDispatch for RuntimeHostDispatch {
                 "prompt": req.prompt,
                 "task_id": task.id,
                 "task_state": task.state,
+                "cancel_target": target,
             })
             .to_string(),
         })
@@ -94,8 +124,16 @@ impl HostActionDispatch for RuntimeHostDispatch {
         }
         let host = artifact_tool_host(&runtime.inner, permissions)?;
         let tool = req.tool.to_owned();
-        let result =
-            block_on_host(async move { host.call(&tool, args, CancellationToken::new()).await })?;
+        let cancel = CancellationToken::new();
+        self.register_flight(
+            req.action_id,
+            ArtifactFlight::Tool {
+                cancel: cancel.clone(),
+            },
+        );
+        let result = block_on_host(async move { host.call(&tool, args, cancel).await });
+        self.take_flight(req.action_id);
+        let result = result?;
         Ok(HostDispatchResult {
             outcome_json: json!({
                 "kind": "tool_invoked",
@@ -108,6 +146,22 @@ impl HostActionDispatch for RuntimeHostDispatch {
             })
             .to_string(),
         })
+    }
+
+    fn cancel_action(&self, action_id: &str) -> Result<bool, String> {
+        let Some(flight) = self.take_flight(action_id) else {
+            return Ok(false);
+        };
+        match flight {
+            ArtifactFlight::Tool { cancel } => {
+                cancel.cancel();
+                Ok(true)
+            }
+            ArtifactFlight::FollowUp { target } => {
+                let runtime = self.runtime()?;
+                runtime.cancel(&target).map_err(|error| error.to_string())
+            }
+        }
     }
 }
 
@@ -212,6 +266,45 @@ fn map_artifact(error: ArtifactError) -> RuntimeError {
     RuntimeError::InvalidInput(error.to_string())
 }
 
+fn record_artifact_audit(
+    runtime: &Runtime,
+    session_id: &str,
+    record: &ActionRecord,
+) -> Result<(), RuntimeError> {
+    let kind = match record.status {
+        ActionStatus::Accepted => "artifact.action.accepted",
+        ActionStatus::Applied => "artifact.action.applied",
+        ActionStatus::Rejected => "artifact.action.rejected",
+        ActionStatus::Cancelled => "artifact.action.cancelled",
+    };
+    let task_id = record
+        .outcome_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+    runtime.inner.journal.record(
+        session_id,
+        task_id.as_deref(),
+        kind,
+        json!({
+            "action_id": record.action_id,
+            "artifact_id": record.artifact_id,
+            "status": record.status,
+            "kind": record.kind,
+            "intent": record.intent,
+            "rejection_reason": record.rejection_reason,
+            "outcome_json": record.outcome_json,
+            "requested_at_ms": record.requested_at_ms,
+            "recorded_at_ms": record.recorded_at_ms,
+        }),
+    )
+}
+
 impl Runtime {
     /// Session-owned HTML artifact store (F09). Product path uses
     /// [`RuntimeHostDispatch`], not Recording.
@@ -271,16 +364,65 @@ impl Runtime {
     }
 
     /// Dispatch a card/form/chart action through the real Runtime/Host consumer.
+    ///
+    /// Also appends a unified `artifact.action.*` row to the Runtime audit journal
+    /// so WebUI/SDK consumers can page the same trail as other Runtime events.
     pub fn dispatch_artifact_action(
         &self,
         request: ActionRequest,
     ) -> Result<ActionOutcome, RuntimeError> {
         self.get(&request.session_id)?;
-        lock(&self.inner.artifacts)
+        let session_id = request.session_id.clone();
+        let outcome = lock(&self.inner.artifacts)
             .workspace
             .actions
             .dispatch(request)
+            .map_err(map_artifact)?;
+        record_artifact_audit(self, &session_id, &outcome.record)?;
+        Ok(outcome)
+    }
+
+    /// Audit trail of artifact actions for a Session (protocol records).
+    pub fn list_artifact_actions(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ActionRecord>, RuntimeError> {
+        self.get(session_id)?;
+        lock(&self.inner.artifacts)
+            .workspace
+            .actions
+            .list_actions_for_session(session_id)
             .map_err(map_artifact)
+    }
+
+    pub fn get_artifact_action(&self, action_id: &str) -> Result<ActionRecord, RuntimeError> {
+        lock(&self.inner.artifacts)
+            .workspace
+            .actions
+            .get_action(action_id)
+            .map_err(map_artifact)
+    }
+
+    /// Cancel in-flight Host tool work or a follow-up Runtime task spawned from
+    /// an artifact action. Records `artifact.action.cancelled` in the audit journal.
+    pub fn cancel_artifact_action(
+        &self,
+        session_id: &str,
+        action_id: &str,
+    ) -> Result<ActionOutcome, RuntimeError> {
+        self.get(session_id)?;
+        let outcome = lock(&self.inner.artifacts)
+            .workspace
+            .actions
+            .cancel(action_id)
+            .map_err(map_artifact)?;
+        if outcome.record.session_id != session_id {
+            return Err(RuntimeError::InvalidInput(format!(
+                "artifact action {action_id} does not belong to session {session_id}"
+            )));
+        }
+        record_artifact_audit(self, session_id, &outcome.record)?;
+        Ok(outcome)
     }
 
     /// Persist artifacts + actions under `{workspace}/artifacts/recovery.json`.

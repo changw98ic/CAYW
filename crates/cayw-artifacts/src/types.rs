@@ -136,9 +136,12 @@ pub struct ActionRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionStatus {
+    /// Recorded before the host/runtime bridge returns (in-flight).
     Accepted,
     Rejected,
     Applied,
+    /// Cancelled while in-flight or after a follow-up task was queued.
+    Cancelled,
 }
 
 /// Durable record of a dispatched action (accepted or rejected).

@@ -270,7 +270,7 @@ Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。�
 
 ## Trace Debug：实时节点图与本地重新求值
 
-F09/F19 首刀的 HTML 产物与宿主动作协议见 [`cayw-artifacts`](../crates/cayw-artifacts/README.md)：通用 HTML 卡片/图表/独立预览按 Session 存放，并可落到 `{root}/artifacts/recovery.json`；`preview` 返回渲染投影；产品路径由 `cayw-runtime::RuntimeHostDispatch` 消费（FollowUp → `Runtime::enqueue`，InvokeTool → 已授权 `Host::call`）；Recording 仅测试/离线双；跨 Session 拒绝，状态可快照恢复。WebUI 外壳未接。不替代专用调试/编辑页，不把 F09/F19 全范围标完成。
+F09/F19 首刀的 HTML 产物与宿主动作协议见 [`cayw-artifacts`](../crates/cayw-artifacts/README.md)：通用 HTML 卡片/图表/独立预览按 Session 存放，并可落到 `{root}/artifacts/recovery.json`；`preview` 返回渲染投影；产品路径由 `cayw-runtime::RuntimeHostDispatch` 消费（FollowUp → `Runtime::enqueue`，InvokeTool → 已授权 `Host::call`）；Recording 仅测试/离线双；跨 Session 拒绝，状态可快照恢复。Runtime 侧已暴露动作审计/取消；WebUI 外壳未接。不替代专用调试/编辑页，不把 F09/F19 全范围标完成。
 
 
 `cayw-trace-debug` 是可独立启停的本机插件应用。它经认证 IPC 按 Session 游标消费事件，维护自己的追踪文件和网页，不直接读写 Core 或 Cells 数据库。Runtime 和普通无界面任务不依赖该包；没有安装插件时仍可正常执行。该接入不依赖 #30 的页面编辑器，也不要求启用其他 plugin feature。
