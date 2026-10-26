@@ -366,3 +366,78 @@ fn bridge_version_change_updates_hangs_through_refresh() {
         "condition"
     );
 }
+
+#[test]
+fn default_open_with_workspace_sources_feeds_bridge_on_ingest() {
+    // Product path: TraceStore::open / open_with_workspace — no manual publish_file.
+    let workspace = tempfile::tempdir().unwrap();
+    let examples = workspace.path().join("examples");
+    std::fs::create_dir_all(&examples).unwrap();
+    let source = b"pub fn input() {}
+pub fn condition(x: i32) -> bool { x > 0 }
+";
+    std::fs::write(examples.join("demo.rs"), source).unwrap();
+
+    let store_path = workspace.path().join("trace.json");
+    let store = TraceStore::open_with_workspace(&store_path, workspace.path()).unwrap();
+    assert!(
+        store.workspace_root().is_some(),
+        "default product open must attach a workspace producer root"
+    );
+    assert!(
+        store
+            .bridge()
+            .file_version("examples/demo.rs")
+            .unwrap()
+            .is_none(),
+        "bridge starts empty until ingest feeds the producer"
+    );
+
+    ingest_manifest(&store, demo_plan());
+
+    let file = store
+        .bridge()
+        .file_version("examples/demo.rs")
+        .unwrap()
+        .expect("ingest must publish workspace source into the bridge");
+    assert_eq!(file.version, 1);
+    assert_eq!(file.content_sha256, sha(source));
+
+    let symbols = store.bridge().symbols_for("examples/demo.rs").unwrap();
+    assert!(
+        symbols.iter().any(|s| s.id.name == "input"),
+        "producer must index real symbols, not leave an empty publish: {symbols:?}"
+    );
+    assert!(symbols.iter().any(|s| s.id.name == "condition"));
+
+    let project = store.snapshot().projects.get("exec").cloned().unwrap();
+    assert!(
+        !project.symbol_hangs.is_empty(),
+        "default-start ingest must yield non-empty symbol hangs when workspace has sources"
+    );
+    assert_eq!(project.symbol_hangs["input"].file.version, 1);
+    assert_eq!(
+        project.symbol_hangs["condition"]
+            .symbol
+            .as_ref()
+            .unwrap()
+            .name,
+        "condition"
+    );
+    assert!(!project.symbol_hangs.contains_key("luau_only"));
+}
+
+#[test]
+fn default_open_without_matching_workspace_file_still_skips_hang() {
+    let workspace = tempfile::tempdir().unwrap();
+    // No examples/demo.rs on disk.
+    let store =
+        TraceStore::open_with_workspace(workspace.path().join("trace.json"), workspace.path())
+            .unwrap();
+    ingest_manifest(&store, demo_plan());
+    let project = store.snapshot().projects.get("exec").cloned().unwrap();
+    assert!(
+        project.symbol_hangs.is_empty(),
+        "missing workspace files must not invent hangs"
+    );
+}

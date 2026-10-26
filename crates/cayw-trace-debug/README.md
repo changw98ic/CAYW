@@ -6,7 +6,7 @@ Trace Debug 是独立、可选的本机调试插件。它通过认证 IPC 读取
 
 ## F16 符号挂载（SLICE E）
 
-节点可通过 `implementation` 挂到宿主 [`cayw-codeintel`](../cayw-codeintel/README.md) 已发布的工程文件/符号/内容版本（例如 `examples/demo.rs::condition`）。通过 `TraceStore::open_with_bridge` 注入共享桥接后，`ingest` / 内容修订会经 `SymbolGraphLinker` 写入并持久化 `Project::symbol_hangs`，供 `/api/state` 与网页节点详情渲染；桥接 `publish_file` 版本变化后调用 `refresh_symbol_hangs`。失败步骤的错误摘要携带同一挂载与 `evidence_cursor`，并可写入带回链的 diagnostics。非路径实现（如 `luau`）不挂载；未在桥接中发布的路径不会虚构关联。详见 `docs/sources/f16-symbol-graph-link.md`。
+节点可通过 `implementation` 挂到宿主 [`cayw-codeintel`](../cayw-codeintel/README.md) 已发布的工程文件/符号/内容版本（例如 `examples/demo.rs::condition`）。默认 `TraceStore::open` / `open_with_workspace`（或 CLI `--workspace` / `CAYW_WORKSPACE`）会挂上工程根；`ingest` / 内容修订先经 codeintel 生产者把工程文件写入桥，再经 `SymbolGraphLinker` 写入并持久化 `Project::symbol_hangs`；也可 `open_with_bridge` 注入共享桥接，供 `/api/state` 与网页节点详情渲染；桥接 `publish_file` 版本变化后调用 `refresh_symbol_hangs`。失败步骤的错误摘要携带同一挂载与 `evidence_cursor`，并可写入带回链的 diagnostics。非路径实现（如 `luau`）不挂载；未在桥接中发布的路径不会虚构关联。详见 `docs/sources/f16-symbol-graph-link.md`。
 
 
 ## 启动

@@ -10,7 +10,7 @@ Shared **file / symbol version bridge** for CAYW Agent、编辑器与 Trace（F0
 - **diagnostics** 必须携带版本化 `SourceLocation`，错误路径可回链源码证据
 - Agent / 编辑器 / Trace 通过同一桥接对象拿到一致的 file/symbol 版本
 
-本 crate **不**解析源码、不重复建设 `code.outline`、不把 CodeGraph / 依赖图塞进 Core，也不启动语言服务器进程。
+可用宿主 `code.outline` 快照，也可用 [`publish_bytes`] / [`publish_under_workspace`] 从工程文件做**轻量** Rust outline（非完整 `syn` / `code.outline` 复刻）。不把 CodeGraph / 依赖图塞进 Core，也不启动语言服务器进程。
 
 ## 非本切片
 
@@ -25,6 +25,9 @@ Shared **file / symbol version bridge** for CAYW Agent、编辑器与 Trace（F0
 use cayw_codeintel::*;
 
 let bridge = SymbolVersionBridge::new();
+// Prefer workspace producer when you have file bytes / a project root:
+let file = publish_bytes(&bridge, "src/lib.rs", src_bytes, "rust")?;
+// Or host-supplied outline snapshot:
 let file = bridge.publish_file(
     "src/lib.rs",
     &content_sha256_hex,

@@ -2,13 +2,16 @@
 //!
 //! Uses the shared [`cayw_codeintel::SymbolVersionBridge`]. Does **not** invent
 //! architecture graphs for undeclared programs; only resolves nodes whose
-//! `implementation` names a path already published into the bridge.
+//! `implementation` names a path published into the bridge (either by a host
+//! snapshot or by the workspace producer wired on default Trace startup).
 
 use crate::types::{ErrorEvidenceLink, GraphPlan, Node, NodeSymbolHang, Status, Step};
 use cayw_codeintel::{
     CodeIntelError, DefinitionQuery, DiagnosticInput, DiagnosticSeverity, SymbolVersionBridge,
+    language_for_path, publish_under_workspace,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Linker that attaches versioned file/symbol anchors to declared Trace nodes.
@@ -132,6 +135,47 @@ impl SymbolGraphLinker {
         }
         Ok(links)
     }
+}
+
+/// Publish plan `implementation` paths from an open workspace into the bridge.
+///
+/// Used on the default Trace product path so ingest/mount does not depend on a
+/// pre-filled empty bridge. Missing files are skipped (no hang invented).
+/// Returns how many paths were newly published or refreshed.
+pub fn feed_plan_from_workspace(
+    bridge: &SymbolVersionBridge,
+    plan: &GraphPlan,
+    workspace: &Path,
+) -> Result<usize, String> {
+    let mut seen = BTreeSet::new();
+    let mut published = 0usize;
+    for node in &plan.nodes {
+        let Some((path, _)) = parse_implementation(&node.implementation) else {
+            continue;
+        };
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        // Already indexed: keep host/manual snapshot; do not overwrite on every ingest.
+        match bridge.file_version(&path) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(err) => return Err(map_codeintel(err)),
+        }
+        let abs = workspace.join(&path);
+        if !abs.is_file() {
+            continue;
+        }
+        let language = language_for_path(&path);
+        match publish_under_workspace(bridge, workspace, &path, language) {
+            Ok(_) => published += 1,
+            Err(err) => {
+                // Unreadable / non-UTF-8 Rust: skip; hang stays absent.
+                let _ = err;
+            }
+        }
+    }
+    Ok(published)
 }
 
 /// Parse `implementation` into `(path, optional symbol name)`.

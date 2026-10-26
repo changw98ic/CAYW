@@ -3,7 +3,7 @@ use std::{env, net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc, tim
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "Trace Debug 本机插件\n\n运行：cayw-trace-debug --store PATH --session SESSION_ID [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n环境变量：CAYW_IPC_ADDR、CAYW_IPC_TOKEN、CAYW_TRACE_WEB_TOKEN。\n网页令牌须与 IPC 令牌不同，均至少32位不含空白的ASCII字符。令牌仅从环境读取，打开网页后手动输入网页令牌。\n--session 可重复，分别保存连续游标。只观察事件；节点保存只在本地重放，不创建Runtime任务，不重复业务写入。\n追踪文件含运行输入、源码与结果，仅保存本机。Ctrl+C 停止插件。\n";
+const HELP: &str = "Trace Debug 本机插件\n\n运行：cayw-trace-debug --store PATH --session SESSION_ID [--workspace DIR] [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n环境变量：CAYW_IPC_ADDR、CAYW_IPC_TOKEN、CAYW_TRACE_WEB_TOKEN、CAYW_WORKSPACE。\n网页令牌须与 IPC 令牌不同，均至少32位不含空白的ASCII字符。令牌仅从环境读取，打开网页后手动输入网页令牌。\n--workspace（或 CAYW_WORKSPACE）为工程根；默认当前目录。ingest 时从该根读取 implementation 路径并经 codeintel 生产者写入符号桥。\n--session 可重复，分别保存连续游标。只观察事件；节点保存只在本地重放，不创建Runtime任务，不重复业务写入。\n追踪文件含运行输入、源码与结果，仅保存本机。Ctrl+C 停止插件。\n";
 
 struct Config {
     ipc: SocketAddr,
@@ -11,6 +11,7 @@ struct Config {
     ipc_token: String,
     web_token: String,
     store: PathBuf,
+    workspace: PathBuf,
     sessions: Vec<String>,
 }
 impl Config {
@@ -19,6 +20,7 @@ impl Config {
         let mut ipc = env::var("CAYW_IPC_ADDR").ok();
         let mut web = "127.0.0.1:0".to_owned();
         let mut store = None;
+        let mut workspace = env::var_os("CAYW_WORKSPACE").map(PathBuf::from);
         let mut sessions = vec![];
         while let Some(name) = args.next() {
             let value = args
@@ -26,6 +28,7 @@ impl Config {
                 .ok_or_else(|| Error::Invalid("参数缺少值，使用 --help 查看用法".into()))?;
             match name.as_str() {
                 "--store" => store = Some(PathBuf::from(value)),
+                "--workspace" => workspace = Some(PathBuf::from(value)),
                 "--session" if !value.is_empty() && value.len() <= 128 => sessions.push(value),
                 "--ipc-addr" => ipc = Some(value),
                 "--web-addr" => web = value,
@@ -68,6 +71,10 @@ impl Config {
             ipc_token,
             web_token,
             store: store.ok_or_else(|| Error::Invalid("缺少 --store".into()))?,
+            workspace: workspace
+                .filter(|p| !p.as_os_str().is_empty())
+                .or_else(|| env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from(".")),
             sessions,
         })
     }
@@ -189,7 +196,7 @@ pub(crate) async fn observe(
 
 async fn run() -> Result<(), Error> {
     let config = Config::parse()?;
-    let store = TraceStore::open(config.store)?;
+    let store = TraceStore::open_with_workspace(config.store, config.workspace)?;
     let listener = TcpListener::bind(config.web).await?;
     let address = listener.local_addr()?;
     let cancel = CancellationToken::new();

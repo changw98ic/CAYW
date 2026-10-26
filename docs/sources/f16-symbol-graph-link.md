@@ -25,7 +25,7 @@
 
 - `NodeSymbolHang` / `ErrorEvidenceLink`：节点挂载文件版本、可选 `SymbolId`/`SourceLocation`，失败步骤回链证据游标与 diagnostics
 - `SymbolGraphLinker`：从节点 `implementation`（`path::symbol` / `path#symbol` / 纯路径）解析并查询 F04 桥接；非路径实现（如 `luau`）不挂载
-- `TraceStore::open_with_bridge`：注入共享 `SymbolVersionBridge`；`ingest` / `revise` 经 linker 写入 `Project::symbol_hangs` 并随 Document 持久化；`refresh_symbol_hangs` 在桥接版本变化后更新
+- `TraceStore::open` / `open_with_workspace`：默认产品入口创建桥并挂上工程根；`ingest` / `revise` 先经 codeintel 生产者（`publish_under_workspace` / 轻量 Rust outline）把 `implementation` 路径写入桥，再经 linker 写入 `Project::symbol_hangs` 并持久化；`open_with_bridge` 仍供 Host 注入共享桥；`refresh_symbol_hangs` 在桥接版本变化后更新
 - 烟测：`tests/symbol_graph.rs`（含 ingest 路径）、`tests/http.rs::ingest_symbol_hangs_surface_through_http_state`
 - 验收笔记：`docs/validation/issue-33-f16-symbol-graph.md`
 
