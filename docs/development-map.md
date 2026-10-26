@@ -6,7 +6,7 @@
 
 2026-10-24 的 [macOS 无界面主线最终组合验收](validation/macos-headless-mainline-final.md) 汇总 #2、#3、#4、#5、#6、#7、#8、#9、#10、#11、#18 共 11 项：同一测试源码上的 22 步离线回归、14 步正式 VerifyTool 检查，以及各项原证据的重新核对。该记录保留构建来源完整性 pending、#18 原 19 步及其他历史场景未在本次树重跑等限制；各项旧验收只证明各自源码，不据此更新远端 Issue 状态。
 
-2026-10-25 起 [#33](https://github.com/changw98ic/CAYW/issues/33) **F20 组合验收（SLICE Q）**骨架见 [f20-combo-acceptance-slice-q-20261025.md](validation/f20-combo-acceptance-slice-q-20261025.md)：底座烟测覆盖同 Session SQLite 重开、跨 Session 隔离与同场 `agent.run`（ContentStore 重开限 macOS）；结果释放/后台归属/MCP 同场封口仍等 A/P/F14，不把 F20 标完成。
+2026-10-26 起 [#33](https://github.com/changw98ic/CAYW/issues/33) **F20 组合验收（SLICE Q）**见 [f20-combo-acceptance-slice-q-20261025.md](validation/f20-combo-acceptance-slice-q-20261025.md)：tip 已跑 Q1–Q3、Q4 进程清理+结果重开、Q6 MCP 资源同 Session 重开；Q5/`result.release`/F14 懒起/Q7/Q8 仍 pending；`f20_combo_complete` 在有缺口时恒 false，不把 F20 标完成。
 
 ## 从哪里开始
 
