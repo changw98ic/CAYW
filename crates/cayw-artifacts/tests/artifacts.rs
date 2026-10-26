@@ -225,6 +225,9 @@ fn host_dispatch_error_rejects_action() {
         fn invoke_tool(&self, _req: ToolDispatch<'_>) -> Result<HostDispatchResult, String> {
             Err("host denied".into())
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     let ws = ArtifactWorkspace::with_dispatch(Arc::new(FailingDispatch));

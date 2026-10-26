@@ -10,15 +10,16 @@ Issue [#33](https://github.com/changw98ic/CAYW/issues/33) F09 HTML 产物 + F19 
 
 ```sh
 cargo test -p cayw-artifacts --locked
-cargo clippy -p cayw-artifacts --all-targets --locked -- -D warnings
+cargo test -p cayw-runtime --test artifact_dispatch --locked
+cargo clippy -p cayw-artifacts -p cayw-runtime --all-targets --locked -- -D warnings
 cargo run -p cayw-artifacts --example offline_artifacts --locked
 ```
 
 ## 结果
 
-- 单元/集成覆盖：`ArtifactPreview` 渲染投影、内存与 `{root}/artifacts/recovery.json` 磁盘恢复、只读/状态动作、同 Session follow-up/tool **实调** `HostActionDispatch`、桥错误 Rejected、跨 Session / 版本不匹配拒绝且不调桥、外 Session 更新拒绝。
+- 单元/集成覆盖：`ArtifactPreview` 渲染投影、内存与 `{root}/artifacts/recovery.json` 磁盘恢复、只读/状态动作、Recording 桥实调、**RuntimeHostDispatch** 产品路径（follow-up → Runtime 任务队列；InvokeTool → 真实 Host::call）、桥错误 Rejected、跨 Session / 版本不匹配拒绝且不调桥、外 Session 更新拒绝。
 - 示例打印 preview `content_type`、follow-up/tool Applied 与 bridge call 计数、跨 Session Rejected，以及磁盘恢复后产物/动作数量；无网络、无 Provider、无真实模型请求。
 
 ## 不做声明
 
-本记录不证明 F09/F19 全范围完成，也不证明 WebUI 外壳或生产 Runtime adapter 已合入主路径；证明的是协议层桥被真实调用，以及磁盘恢复路径可用。
+本记录不证明 F09/F19 全范围完成，也不证明 WebUI 外壳已接；证明的是协议层桥被真实调用、产品默认消费者为 RuntimeHostDispatch（非 Recording-only），以及磁盘恢复路径可用。

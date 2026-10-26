@@ -659,6 +659,7 @@ dependencies = [
  "base64 0.22.1",
  "cayw-agent",
  "cayw-ai",
+ "cayw-artifacts",
  "cayw-bridge",
  "cayw-cells",
  "cayw-codemode",

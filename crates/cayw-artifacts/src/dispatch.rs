@@ -48,6 +48,8 @@ pub struct HostDispatchResult {
 pub trait HostActionDispatch: Send + Sync {
     fn follow_up_task(&self, req: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String>;
     fn invoke_tool(&self, req: ToolDispatch<'_>) -> Result<HostDispatchResult, String>;
+    /// Downcast support for product-path assertions (Recording vs Runtime).
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// One recorded bridge call (test / offline proof).
@@ -92,6 +94,10 @@ impl RecordingHostDispatch {
 }
 
 impl HostActionDispatch for RecordingHostDispatch {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn follow_up_task(&self, req: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String> {
         self.calls
             .lock()

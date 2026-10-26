@@ -23,7 +23,8 @@
 
 - `ArtifactStore`：按 Session 的 HTML/图表/预览存放、更新、列表与快照恢复
 - `preview` → `ArtifactPreview` 渲染投影（`html` + `content_type`），不是存储 `ArtifactRecord`
-- `ActionProtocol` + `HostActionDispatch`：按钮/表单/图表动作 → `FollowUpTask` / `InvokeTool` 实际调用宿主桥（Runtime/Host 由消费方实现；测试用 `RecordingHostDispatch`）/ `UpdateState` / `ReadOnly`
+- `ActionProtocol` + `HostActionDispatch`：按钮/表单/图表动作 → `FollowUpTask` / `InvokeTool` 实际调用宿主桥 / `UpdateState` / `ReadOnly`
+- 产品默认消费者：`cayw-runtime::RuntimeHostDispatch`（`FollowUpTask` → `Runtime::enqueue`；`InvokeTool` → 已授权 `Host::call`）；`RecordingHostDispatch` 仅测试/离线双
 - 跨 Session 拒绝；`content_version` 钉扎；桥错误 → Rejected；动作与 UI 状态快照恢复
 - 磁盘恢复：`{root}/artifacts/recovery.json`（不经 ContentStore；`result_handle` 仍为不透明引用）
 - 可选 `result_handle` 字段对齐 F01 句柄引用（本切片不解析 ContentStore）
@@ -32,7 +33,6 @@
 ## 明确未交付（后续切片）
 
 - WebUI / TUI 外壳接线（渲染投影已具备；页面壳未接）
-- 生产侧 Runtime/Host 的具体 adapter（桥接口与 Recording 实调已交付）
 - HTML 沙箱 / CSP 执行策略
 - 将 Trace Debug / visual-editor 专用页自动登记为通用产物
 - Cells `result_omitted` 自动进产物（依赖 F01 更深接线）
@@ -40,4 +40,4 @@
 
 ## 验收口径（本切片）
 
-本地 `cargo test -p cayw-artifacts` 证明：工具产出 HTML 的 `ArtifactPreview` 可渲染投影；同 Session follow-up/tool 真正打到 `HostActionDispatch`；跨 Session 与版本不匹配拒绝且不调桥；`{root}/artifacts/recovery.json` 磁盘往返后仍按 Session 可见；刷新后动作状态仍在。不把本切片标为 F09/F19 全范围完成。
+本地 `cargo test -p cayw-artifacts` 与 `cargo test -p cayw-runtime --test artifact_dispatch` 证明：工具产出 HTML 的 `ArtifactPreview` 可渲染投影；同 Session follow-up 进入 Runtime 任务队列；InvokeTool 走已授权 Host::call；跨 Session 与版本不匹配拒绝且不调桥；`{root}/artifacts/recovery.json` 磁盘往返后仍按 Session 可见且保持 RuntimeHostDispatch。不把本切片标为 F09/F19 全范围完成（缺 WebUI 外壳）。

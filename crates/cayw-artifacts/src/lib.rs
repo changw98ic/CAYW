@@ -20,6 +20,9 @@
 //! - action dispatch with Session ownership, version pins, and host bridge
 //! - action + UI-state snapshot restore (memory + `{root}/artifacts/recovery.json`)
 //!
+//! Product Runtime consumer: `cayw_runtime::RuntimeHostDispatch` (enqueue +
+//! authorized `Host::call`). Recording remains the offline/test double.
+//!
 //! Out of scope: WebUI/TUI chrome wiring, HTML sandboxing, equating Trace /
 //! visual-editor pages with generic artifact display, ContentStore resolution
 //! of `result_handle`.

@@ -16,7 +16,7 @@ CAYW HTML 产物展示与宿主动作协议（F09 + F19 首刀，SLICE J+K）。
 - 恢复：`RecoveryBundle` 内存导出/恢复；磁盘路径 `{root}/artifacts/recovery.json`
 - 协议版本：`ARTIFACT_PROTOCOL_VERSION = 1`
 
-**不在本切片**：WebUI/TUI 外壳接线、HTML 沙箱、把 Trace / visual-editor 专用页冒充通用产物展示、解析 ContentStore 上的 `result_handle`、将 F09/F19 全范围标完成。
+**不在本切片**：WebUI/TUI 外壳接线、HTML 沙箱、把 Trace / visual-editor 专用页冒充通用产物展示、解析 ContentStore 上的 `result_handle`、将 F09/F19 全范围标完成。生产 Runtime 消费者见 `cayw-runtime::RuntimeHostDispatch`。
 
 ## 快速使用
 
@@ -51,7 +51,7 @@ let outcome = ws.actions.dispatch(ActionRequest {
 assert_eq!(outcome.record.status, ActionStatus::Applied);
 ```
 
-生产接线：实现 `HostActionDispatch`，`follow_up_task` 走同 Session 的 Agent/Runtime follow-up；`invoke_tool` 走已授权的 `Host::call` / Runtime request-tool 路径（与现有 ExternalHost / request tools 相同入口）。
+生产接线：`cayw-runtime` 默认注入 `RuntimeHostDispatch`——`follow_up_task` → `Runtime::enqueue`；`invoke_tool` → 对照 `RuntimeConfig.permissions` 的已授权 `Host::call`。`RecordingHostDispatch` 仅用于本 crate 测试与 offline 示例。
 
 ## 来源与边界
 

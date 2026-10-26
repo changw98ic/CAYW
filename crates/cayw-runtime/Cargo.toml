@@ -20,6 +20,7 @@ async-stream.workspace = true
 base64 = "0.22.1"
 cayw-ai.workspace = true
 cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
+cayw-artifacts = { path = "../cayw-artifacts", version = "0.1.0" }
 cayw-core = { path = "../cayw-core", version = "0.1.0" }
 cayw-cells = { path = "../cayw-cells", version = "0.1.0" }
 cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
