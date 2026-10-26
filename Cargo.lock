@@ -547,8 +547,10 @@ dependencies = [
  "cap-std 4.0.3",
  "cayw-ai",
  "cayw-codemode",
+ "cayw-content",
  "cayw-data",
  "cayw-device",
+ "cayw-output-filter",
  "cayw-workspace",
  "futures",
  "serde",
@@ -568,6 +570,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-output-filter"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

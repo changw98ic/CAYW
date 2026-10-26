@@ -51,8 +51,24 @@ impl cayw_host::ExternalHost for CatalogOnly {
     }
 }
 
-pub(crate) fn effective_host_config(config: &RuntimeConfig) -> cayw_host::HostConfig {
+pub(crate) fn effective_host_config(
+    config: &RuntimeConfig,
+    content: Option<std::sync::Arc<cayw_content::ContentStore>>,
+) -> cayw_host::HostConfig {
     let mut host = config.host.clone();
+    // Prefer the Runtime-opened ContentStore so F02 filtered originals share
+    // the same Device store as content.* (and later F01 result handles).
+    // Enable default reducing filters only when that store is present; without
+    // it, leave output_filter unset (or honor an explicit Some and fail closed
+    // if reduction would discard the only copy).
+    if let Some(store) = content {
+        host.content_store = Some(std::sync::Arc::new(
+            cayw_host::ContentFilteredOriginalStore::new(store),
+        ));
+        if host.output_filter.is_none() {
+            host.output_filter = Some(cayw_host::FilterOptions::default());
+        }
+    }
     if config.bridge.is_some() {
         host.external = Some(Arc::new(CatalogOnly));
     }

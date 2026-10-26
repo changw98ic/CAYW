@@ -462,7 +462,10 @@ async fn concurrent_calls_and_json_depth_are_bounded_before_execution() {
 #[tokio::test]
 async fn cancelled_before_admission_and_timeouts_do_not_replay() {
     let registry = registry(Limits {
-        operation_timeout: Duration::from_millis(20),
+        // Barrier below waits for admission; once entered the handler blocks on
+        // release so tens of ms is enough for the unknown-outcome deadline.
+        // Do not widen this as a flake shield — the entered select is the fix.
+        operation_timeout: Duration::from_millis(50),
         ..Limits::default()
     });
     let state = Arc::new(State::default());
@@ -485,7 +488,17 @@ async fn cancelled_before_admission_and_timeouts_do_not_replay() {
             .outcome_unknown
     );
     assert_eq!(state.calls.load(Ordering::Relaxed), 0);
-    assert!(call(&bridge).await.unwrap_err().outcome_unknown);
+    // Poll the call while waiting for admission so current_thread runtimes cannot
+    // stall the handler; once entered, biased select has marked the effect unknown.
+    let mut pending = Box::pin(call(&bridge));
+    tokio::select! {
+        result = &mut pending => {
+            assert!(result.unwrap_err().outcome_unknown);
+        }
+        _ = state.entered.notified() => {
+            assert!(pending.await.unwrap_err().outcome_unknown);
+        }
+    }
     assert_eq!(state.calls.load(Ordering::Relaxed), 1);
     assert!(
         state

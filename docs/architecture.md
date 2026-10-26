@@ -40,6 +40,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-runtime` / `cayw-ipc` | 公开 Rust 入口、调度与生命周期协调；本地传输 | 复用同一 Runtime 分派，不另建 IPC 专用执行器 |
 | `cayw-codemode` / `cayw-cells` | Luau 编排、分段 cell、输出、会话值、执行记录与共享读协调 | 通过宿主能力接口调用 Rust，不自带环境文件/进程/网络权限 |
 | `cayw-host` / `cayw-workspace` / `cayw-data` | 授权、审计和预算后分派文件、检索、数据、Git 与配置好的进程能力 | Workspace/Data 执行器本身不是模型权限边界，不能另作旁路暴露 |
+| `cayw-output-filter` | 可选确定性命令输出过滤（错误/关键变化/摘要）与完整原文双入口；同任务开/关对比记录 | 设计参考 RTK rtk-oss 过滤形状，非代码移植；不把输出压缩率当作任务总收益；Host `process_value` 经 `HostConfig::output_filter` 接线；减量时外置原文至 ContentStore 并返回 handle；见 [F02 来源](sources/f02-output-filter.md) |
 | `cayw-device` | 进程树归属、交互进程、停止确认、资源记账和准入底座 | 本地执行不依赖远程 Server；进程组不是安全沙箱 |
 | `cayw-requests` | 长尾能力申请、可信评估、精确任务授权与撤销 | 申请本身不执行、不自授权；仍经过原 Host/Device |
 | `cayw-bridge` | 宿主已有 MCP/Skills/搜索能力的目录、来源快照和调用桥接 | 不在 Core 再创建连接或 loader |
