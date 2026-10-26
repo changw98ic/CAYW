@@ -145,6 +145,11 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
+    /// Web search / fetch / extract (`web.*`).
+    /// `None` (the default) omits them from the ordinary Host catalog.
+    /// When set, DuckDuckGo HTML search (no API key) + live HTTP fetch are available;
+    /// content refs live in the process-local store held by the constructed service.
+    pub web_access: Option<cayw_web_access::WebAccessOptions>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
 impl Default for HostConfig {
@@ -166,6 +171,7 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
+            web_access: None,
             external: None,
         }
     }
@@ -259,6 +265,7 @@ pub(crate) enum Executor {
     Terminal,
     Data,
     Workspace,
+    WebAccess,
     External,
 }
 
@@ -292,6 +299,7 @@ pub struct Host {
     safety: Arc<Safety>,
     runner: Arc<cayw_device::ProcessRunner>,
     terminal: Option<Arc<terminal::TerminalManager>>,
+    web_access: Option<Arc<cayw_web_access::WebAccess>>,
     external: Option<Arc<dyn ExternalHost>>,
 }
 impl Host {
@@ -355,6 +363,14 @@ impl Host {
             .transpose()?
             .map(Arc::new);
         let external = config.external.clone();
+        let web_access = match &config.web_access {
+            Some(opts) => {
+                Some(Arc::new(opts.build().map_err(|e| {
+                    failure(cayw_web_access::host_error_message(&e))
+                })?))
+            }
+            None => None,
+        };
         Ok(Self {
             root: Arc::new(root),
             gate,
@@ -366,6 +382,7 @@ impl Host {
             safety: Arc::default(),
             runner: Arc::new(runner),
             terminal,
+            web_access,
             external,
         })
     }
@@ -444,6 +461,7 @@ impl Host {
             safety: self.safety.clone(),
             runner: self.runner.clone(),
             terminal: self.terminal.clone(),
+            web_access: self.web_access.clone(),
             external: self.external.clone(),
         })
     }
@@ -686,6 +704,18 @@ impl Host {
                 workspace
                     .execute_until(name, &args, cancel.clone(), workspace_deadline)
                     .await
+            }
+            Executor::WebAccess => {
+                let access = self
+                    .web_access
+                    .as_ref()
+                    .ok_or_else(|| failure("web-access capabilities are disabled"))?;
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "web-access capability cancelled")),
+                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "web-access capability deadline reached")),
+                    result = access.call(name, args) => result.map_err(|e| failure(cayw_web_access::host_error_message(&e))),
+                }
             }
             Executor::External => {
                 let external = service

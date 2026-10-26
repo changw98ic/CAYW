@@ -549,6 +549,7 @@ dependencies = [
  "cayw-codemode",
  "cayw-data",
  "cayw-device",
+ "cayw-web-access",
  "cayw-workspace",
  "futures",
  "serde",
@@ -778,6 +779,21 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-web-access"
+version = "0.1.0"
+dependencies = [
+ "cayw-ai",
+ "html5gum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
 ]
 
 [[package]]
