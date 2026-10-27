@@ -373,6 +373,7 @@ impl Fixture {
             framework: Some("react".to_owned()),
             node: node_program(),
             companion: script,
+            codeintel: None,
         };
         let handle = start(config).await.expect("framework editor starts");
         let client = reqwest::Client::builder()

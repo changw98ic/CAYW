@@ -12,6 +12,95 @@ const safeCursor = value => Number.isSafeInteger(value) && value >= 0;
 const array = value => Array.isArray(value) ? value : [];
 const recordText = value => clip(JSON.stringify(value, null, 2) ?? '', MAX_RECORD);
 
+function localServiceUrl(baseUrl) {
+  let url;
+  try { url = new URL(baseUrl); } catch { throw new Error('请填写服务启动时输出的完整本机地址。'); }
+  const local = url.hostname === 'localhost' || url.hostname === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+  if (!local || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error('服务地址必须是本机 HTTP 地址，不能包含令牌、查询参数或片段。');
+  }
+  return url.toString();
+}
+
+export function buildVisualEditorLaunchUrl({ baseUrl } = {}) {
+  return localServiceUrl(baseUrl);
+}
+
+export function buildTraceDebugLaunchUrl({ baseUrl } = {}) {
+  return localServiceUrl(baseUrl);
+}
+
+export function formatContextOverview(stats) {
+  if (!stats) return { tokensText: '无用量数据', hitRateText: '0.0%', costText: '未知', composition: [], ledgerSettled: 0, ledgerReserved: 0, ledgerRemaining: 0, budgetUnknown: false, requestCount: 0, turnCount: 0, evolution: [] };
+  const tokens = stats.tokens || {};
+  const cache = stats.cache || {};
+  const cost = stats.cost || {};
+  const hitRate = typeof cache.hit_rate === 'number' ? (cache.hit_rate * 100).toFixed(1) + '%' : '0.0%';
+  const costText = `${cost.status || 'unknown'}${cost.amount ? ` (${cost.amount} ${cost.currency || 'USD'})` : ''}`;
+  const tokensText = `总计: ${tokens.total_tokens || 0} (输入: ${tokens.input || 0}, 输出: ${tokens.output || 0}, 缓存读: ${tokens.cache_read || 0}, 缓存写: ${tokens.cache_write || 0}, 推理: ${tokens.reasoning || 0})`;
+  return {
+    tokensText,
+    hitRateText: hitRate,
+    costText,
+    composition: array(stats.composition),
+    ledgerSettled: stats.ledger_settled_tokens || 0,
+    ledgerReserved: stats.ledger_reserved_tokens || 0,
+    ledgerRemaining: stats.ledger_remaining_tokens || 0,
+    budgetUnknown: Boolean(stats.budget_unknown),
+    requestCount: stats.request_count || 0,
+    turnCount: stats.turn_count || 0,
+    evolution: array(stats.evolution),
+  };
+}
+
+export function formatRunInspectorSteps(steps) {
+  return array(steps).map(s => ({
+    stepId: s.step_id || '',
+    turn: s.turn || 1,
+    ordinal: s.ordinal || 0,
+    tool: s.tool || 'model',
+    outcome: s.outcome || 'success',
+    elapsedMs: s.elapsed_ms || 0,
+    startedAtMs: s.started_at_ms || 0,
+    errorSummary: s.error_summary || null,
+  }));
+}
+
+export function formatFleetMembers(members) {
+  return array(members).map(m => ({
+    childTaskId: m.child_task_id || '',
+    childSessionId: m.child_session_id || '',
+    parentTaskId: m.parent_task_id || '',
+    label: m.label || 'subagent',
+    depth: m.depth || 1,
+    mode: m.mode || 'foreground',
+    detached: Boolean(m.detached),
+    state: m.state || 'running',
+    error: m.error || null,
+  }));
+}
+
+export function validatePlanFeedback(plan, draft) {
+  if (!plan || !plan.task_id) {
+    throw new Error('当前会话尚未生成计划，无法提交批注');
+  }
+  if (!draft?.decision) {
+    throw new Error('必须选择批注决定 (decision)');
+  }
+  if (!Number.isSafeInteger(plan.version) || plan.version < 1 || !/^[0-9a-f]{64}$/.test(plan.content_sha256 || '')) {
+    throw new Error('计划缺少有效的版本和内容摘要，请重新读取计划。');
+  }
+  return {
+    session_id: draft.session_id,
+    expected_task_id: plan.task_id,
+    expected_version: plan.version,
+    expected_content_sha256: plan.content_sha256,
+    decision: draft.decision,
+    summary: draft.summary || '批注审查意见',
+    comments: draft.comments || [],
+  };
+}
+
 export function messageText(message) {
   if (!object(message)) return clip(message);
   const warning = message.outcome_unknown ? '工具结果待核对；需要由宿主核对真实副作用。' : message.is_error ? '工具执行失败。' : '';
@@ -102,7 +191,7 @@ export function beginWrite(view, key, method, params = {}) {
   // Queue and Core fences differ. A cancellation can use a Core terminal proof
   // only when the original Task's Worker and Attempt match that Core lease.
   const lease = method === 'session.prompt' ? null : method === 'session.cancel'
-    ? observedLease?.worker_id === params.worker_id && observedLease?.attempt_id === params.attempt_id ? observedLease : null
+    ? (observedLease && (!params.worker_id || observedLease.worker_id === params.worker_id) && (!params.attempt_id || observedLease.attempt_id === params.attempt_id) ? observedLease : null)
     : observedLease;
   const target = method === 'session.cancel' && sameLease(lease, view.activeAttempt?.lease) ? view.activeAttempt : null;
   // Stop can be clicked before any attempt is visible. Remember the local
@@ -328,11 +417,14 @@ function boot() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
     'login-panel', 'login-form', 'login-error', 'login-button', 'web-token', 'workspace', 'logout', 'connection-status',
-    'create-form', 'session-label', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
+    'create-form', 'session-label', 'session-device', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork', 'refresh-capabilities', 'capability-content',
+    'panel-sidebar', 'panel-sidebar-status', 'panel-sidebar-guide', 'panel-sidebar-open', 'refresh-panels',
+    'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
+    'wb-tasks', 'wb-usage', 'wb-artifacts', 'wb-plannotator', 'wb-editor', 'wb-trace',
   ].map(id => [id, $(id)]));
   let token = '';
   let loginGeneration = 0;
@@ -397,6 +489,724 @@ function boot() {
     }
   }
 
+
+  let panelCatalog = null;
+  let openedPanels = [];
+  const panelSessionId = () => selected || 'webui-local';
+
+  async function panelsApi(method, params = {}) {
+    const controller = new AbortController();
+    controllers.add(controller);
+    const requestToken = token;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch('/api/panels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
+        body: JSON.stringify({ method, params }),
+        signal: controller.signal,
+        cache: 'no-store',
+        credentials: 'omit',
+      });
+      let payload;
+      try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '面板接口返回了无效 JSON。', false, response.status); }
+      if (!response.ok || payload?.error) {
+        const detail = payload?.error;
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '网页访问令牌无效或已失效，请重新连接。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
+      }
+      if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '面板响应缺少 result。', false, response.status);
+      return payload.result;
+    } catch (error) {
+      if (error.name === 'AbortError') throw new RpcError('transport_unknown', '面板请求连接已中断或超时。', false);
+      if (error instanceof TypeError) throw new RpcError('transport_unknown', '无法连接本机面板接口。', false);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      controllers.delete(controller);
+    }
+  }
+
+  function renderPanelGuide(target, entries, zone) {
+    target.replaceChildren();
+    for (const panel of array(entries)) {
+      const button = el('button', 'secondary', panel.title || panel.id);
+      button.type = 'button';
+      button.dataset.panelId = panel.id;
+      button.title = panel.description || panel.id;
+      button.addEventListener('click', () => openRegisteredPanel(panel.id, zone));
+      target.append(button);
+    }
+  }
+
+  function renderOpenedPanels() {
+    const sidebarOpen = ui['panel-sidebar-open'];
+    const bottomOpen = ui['panel-bottom-open'];
+    sidebarOpen.replaceChildren();
+    bottomOpen.replaceChildren();
+    for (const opened of openedPanels) {
+      const card = el('div', 'panel-card');
+      card.dataset.active = opened.active ? 'true' : 'false';
+      card.append(el('strong', '', opened.title || opened.panel_id));
+      card.append(el('span', 'small muted', `${opened.panel_id}${opened.path ? ` · ${opened.path}` : ''}`));
+      const actions = el('div', 'actions');
+      const activate = el('button', 'quiet', '激活');
+      activate.type = 'button';
+      activate.addEventListener('click', () => activateOpenedPanel(opened.instance_id));
+      const close = el('button', 'quiet', '关闭');
+      close.type = 'button';
+      close.addEventListener('click', () => closeOpenedPanel(opened.instance_id));
+      actions.append(activate, close);
+      if (opened.panel_id === 'files') {
+        const reveal = el('button', 'quiet', '揭示路径');
+        reveal.type = 'button';
+        reveal.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'editor', opened.path || 'README.md'));
+        actions.append(reveal);
+      }
+      if (opened.panel_id === 'terminal-bottom') {
+        const focus = el('button', 'quiet', '聚焦终端');
+        focus.type = 'button';
+        focus.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'terminal'));
+        actions.append(focus);
+      }
+      card.append(actions);
+      if (opened.active) {
+        renderActivePanelContent(card, opened);
+      }
+      if (opened.zone === 'bottom') bottomOpen.append(card);
+      else sidebarOpen.append(card);
+    }
+    ui['panel-bottom'].hidden = !(array(panelCatalog?.bottom).length || openedPanels.some(item => item.zone === 'bottom'));
+    ui['panel-bottom-status'].textContent = openedPanels.filter(item => item.zone === 'bottom').length ? `${openedPanels.filter(item => item.zone === 'bottom').length} 个已打开` : '可从目录打开底部面板';
+  }
+
+  function renderActivePanelContent(container, opened) {
+    if (!opened.active) return;
+    const body = el('div', 'panel-body');
+    const panelId = opened.panel_id;
+
+    if (panelId === 'editor') {
+      const cfgCard = el('div', 'item-card');
+      cfgCard.append(el('strong', '', '可视化编辑器服务配置'));
+
+      const addrId = `ed-addr-${opened.instance_id}`;
+      const addrLabel = el('label', 'small', '本地服务地址');
+      addrLabel.htmlFor = addrId;
+      const addrInput = el('input');
+      addrInput.id = addrId;
+      addrInput.type = 'text';
+      addrInput.placeholder = '粘贴编辑器启动时输出的 editor_url';
+      addrInput.value = opened.editor_addr || '';
+
+      const pathId = `ed-path-${opened.instance_id}`;
+      const pathLabel = el('label', 'small', '宿主记录的文件路径');
+      pathLabel.htmlFor = pathId;
+      const pathInput = el('input');
+      pathInput.id = pathId;
+      pathInput.type = 'text';
+      pathInput.placeholder = 'index.html';
+      pathInput.value = opened.path || 'index.html';
+
+      const actionsRow = el('div', 'control-row');
+      const openBtn = el('button', 'primary', '新窗口打开编辑器服务');
+      openBtn.type = 'button';
+      openBtn.addEventListener('click', () => {
+        try {
+          const url = buildVisualEditorLaunchUrl({ baseUrl: addrInput.value.trim() });
+          window.open(url, '_blank', 'noopener,noreferrer');
+        } catch (error) { handleError(error); }
+      });
+
+      const updatePathBtn = el('button', 'secondary', '更新宿主记录');
+      updatePathBtn.type = 'button';
+      updatePathBtn.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'editor', pathInput.value.trim()));
+
+      actionsRow.append(openBtn, updatePathBtn);
+      const notice = el('p', 'small muted', '在新窗口中输入 CAYW_EDITOR_TOKEN 登录。编辑项目和页面由编辑器启动参数确定；这里的文件路径只更新宿主记录。主网页令牌和 IPC 凭据不会传给编辑器。');
+      cfgCard.append(addrLabel, addrInput, pathLabel, pathInput, actionsRow, notice);
+      body.append(cfgCard);
+    } else if (panelId === 'trace') {
+      const cfgCard = el('div', 'item-card');
+      cfgCard.append(el('strong', '', 'Trace Debug 外部调试服务'));
+
+      const addrId = `trace-addr-${opened.instance_id}`;
+      const addrLabel = el('label', 'small', '本地 Trace Debug 服务地址');
+      addrLabel.htmlFor = addrId;
+      const addrInput = el('input');
+      addrInput.id = addrId;
+      addrInput.type = 'text';
+      addrInput.placeholder = '粘贴 Trace 启动时输出的 web_url';
+      addrInput.value = opened.trace_addr || '';
+
+      const actionsRow = el('div', 'control-row');
+      const openBtn = el('button', 'primary', '新窗口打开 Trace Debug');
+      openBtn.type = 'button';
+      openBtn.addEventListener('click', () => {
+        try {
+          const url = buildTraceDebugLaunchUrl({ baseUrl: addrInput.value.trim() });
+          window.open(url, '_blank', 'noopener,noreferrer');
+        } catch (error) { handleError(error); }
+      });
+      actionsRow.append(openBtn);
+      const notice = el('p', 'small muted', '在新窗口中输入 CAYW_TRACE_WEB_TOKEN 登录。采集的会话由 Trace 启动参数确定。主网页令牌和 IPC 凭据不会传给 Trace 页面。');
+      cfgCard.append(addrLabel, addrInput, actionsRow, notice);
+
+      const inspectCard = el('div', 'item-card');
+      const inspectH = el('div', 'control-row');
+      inspectH.append(el('strong', '', '会话执行透视与重放追踪 (session.run_inspector)'));
+      const refreshBtn = el('button', 'secondary', '刷新执行步骤');
+      refreshBtn.type = 'button';
+      inspectH.append(refreshBtn);
+
+      const inspectContent = el('div', 'item-list');
+      inspectContent.textContent = '点击刷新读取会话执行步骤与恢复时间线…';
+
+      const loadInspect = async () => {
+        try {
+          inspectContent.textContent = '正在读取执行透视…';
+          const res = await rpc('session.run_inspector', { session_id: panelSessionId(), after: 0, limit: 100 });
+          inspectContent.replaceChildren();
+
+          const metaP = el('p', 'small muted', `扫描事件: ${res?.events_scanned ?? 0} / 总事件: ${res?.events_total ?? 0}${res?.has_more ? ' (存在更多)' : ''} · 协议版本: ${res?.protocol_version ?? 2}`);
+          inspectContent.append(metaP);
+
+          const steps = array(res?.snapshot?.steps);
+          if (!steps.length) {
+            inspectContent.append(el('p', 'small muted', '当前会话暂无执行步骤记录。'));
+          } else {
+            const stepsTable = el('div', 'item-list');
+            for (const step of steps) {
+              const sc = el('div', 'item-card');
+              const sh = el('div', 'control-row');
+              sh.append(el('strong', '', `[轮次 ${step.turn} · 序 ${step.ordinal}] ${step.tool || 'model'}`));
+              const badge = el('span', `badge ${step.outcome || ''}`, step.outcome || 'unknown');
+              sh.append(badge);
+              sh.append(el('span', 'small muted', `${step.elapsed_ms || 0}ms`));
+              sc.append(sh);
+              if (step.error_summary) {
+                sc.append(el('p', 'small error', `错误: ${step.error_summary}`));
+              }
+              if (step.params_digest) {
+                sc.append(el('p', 'small muted', `参数指纹: ${clip(step.params_digest, 40)}`));
+              }
+              stepsTable.append(sc);
+            }
+            inspectContent.append(stepsTable);
+          }
+
+          const paths = array(res?.timeline?.paths);
+          if (paths.length) {
+            const pathCard = el('div', 'item-card');
+            pathCard.append(el('strong', '', `恢复重试路径 (${paths.length} 条)`));
+            for (const p of paths) {
+              pathCard.append(el('p', 'small', `[${p.kind}] 步骤 ${p.failed_step_id} ➔ ${p.recovered_step_id || '未恢复'}`));
+            }
+            inspectContent.append(pathCard);
+          }
+        } catch (err) {
+          inspectContent.textContent = '读取执行透视失败：' + (err.message || String(err));
+        }
+      };
+
+      refreshBtn.addEventListener('click', loadInspect);
+      inspectCard.append(inspectH, inspectContent);
+      body.append(cfgCard, inspectCard);
+    } else if (panelId === 'artifacts') {
+      const topActions = el('div', 'control-row');
+      const refreshBtn = el('button', 'secondary', '刷新产物');
+      refreshBtn.type = 'button';
+      const saveRecoveryBtn = el('button', 'quiet', '保存快照');
+      saveRecoveryBtn.type = 'button';
+      const loadRecoveryBtn = el('button', 'quiet', '恢复快照');
+      loadRecoveryBtn.type = 'button';
+      topActions.append(refreshBtn, saveRecoveryBtn, loadRecoveryBtn);
+
+      const statusP = el('p', 'small muted', '');
+      const artContainer = el('div', 'item-list');
+      artContainer.textContent = '正在读取会话产物…';
+
+      saveRecoveryBtn.addEventListener('click', async () => {
+        try {
+          statusP.textContent = '正在保存产物快照…';
+          const res = await rpc('artifacts.recovery_save', {});
+          statusP.textContent = `产物快照已保存到磁盘恢复点 (版本 ${res?.version ?? 1})。`;
+        } catch (err) {
+          statusP.textContent = '保存快照失败：' + (err.message || String(err));
+        }
+      });
+
+      loadRecoveryBtn.addEventListener('click', async () => {
+        try {
+          statusP.textContent = '正在从磁盘恢复产物快照…';
+          await rpc('artifacts.recovery_load', {});
+          statusP.textContent = '产物快照恢复完成。';
+          await loadArts();
+        } catch (err) {
+          statusP.textContent = '恢复快照失败：' + (err.message || String(err));
+        }
+      });
+
+      const loadArts = async () => {
+        try {
+          const list = await rpc('artifacts.list', { session_id: panelSessionId() });
+          artContainer.replaceChildren();
+          if (!array(list).length) {
+            artContainer.textContent = '当前会话暂无生成产物。';
+            return;
+          }
+          for (const item of list) {
+            const itemCard = el('div', 'item-card');
+            const header = el('div', 'control-row');
+            header.append(el('strong', '', item.title || item.artifact_id));
+            header.append(el('span', 'badge', item.kind || 'card'));
+            header.append(el('span', 'small muted', `v${item.content_version || 1}`));
+
+            const previewBox = el('div', 'artifact-preview-box');
+            previewBox.textContent = clip(item.body || '', 500);
+
+            const previewRow = el('div', 'control-row');
+            const previewBtn = el('button', 'quiet', '获取渲染投影');
+            previewBtn.type = 'button';
+            const previewResult = el('div', 'small muted');
+            previewBtn.addEventListener('click', async () => {
+              try {
+                previewResult.textContent = '正在生成投影…';
+                const p = await rpc('artifacts.preview', { artifact_id: item.artifact_id });
+                previewResult.textContent = `类型: ${p?.content_type || 'text/html'}, 字符数: ${(p?.html || '').length}`;
+              } catch (err) {
+                previewResult.textContent = '生成投影失败：' + (err.message || String(err));
+              }
+            });
+            previewRow.append(previewBtn, previewResult);
+
+            const actionRow = el('div', 'control-row');
+            const promptId = `art-prompt-${item.artifact_id}`;
+            const promptLabel = el('label', 'small', '后续指令');
+            promptLabel.htmlFor = promptId;
+            const promptInput = el('input');
+            promptInput.id = promptId;
+            promptInput.type = 'text';
+            promptInput.placeholder = '输入后续任务动作指令';
+            promptInput.value = `根据产物“${item.title}”继续执行后续任务`;
+
+            const actionBtn = el('button', 'secondary', '转发动作到 Runtime');
+            actionBtn.type = 'button';
+            actionBtn.addEventListener('click', async () => {
+              statusP.textContent = '正在转发动作到 Runtime…';
+              try {
+                const actionRes = await rpc('artifacts.action', {
+                  session_id: panelSessionId(),
+                  artifact_id: item.artifact_id,
+                  action_id: `action-${Date.now()}`,
+                  kind: 'button',
+                  intent: { type: 'follow_up_task', prompt: promptInput.value.trim() },
+                  expected_content_version: item.content_version,
+                  requested_at_ms: Date.now(),
+                });
+                statusP.textContent = `动作已转发！状态：${actionRes?.record?.status || 'applied'}`;
+              } catch (err) {
+                statusP.textContent = '动作转发失败：' + (err.message || String(err));
+              }
+            });
+            actionRow.append(promptLabel, promptInput, actionBtn);
+            itemCard.append(header, previewBox, previewRow, actionRow);
+            artContainer.append(itemCard);
+          }
+        } catch (err) {
+          artContainer.textContent = '读取产物失败：' + (err.message || String(err));
+        }
+      };
+
+      refreshBtn.addEventListener('click', loadArts);
+      loadArts();
+      body.append(topActions, statusP, artContainer);
+    } else if (panelId === 'plannotator') {
+      const planInfoCard = el('div', 'item-card');
+      planInfoCard.append(el('strong', '', '权威共享计划状态 (session.plan)'));
+      const reviewedSessionId = panelSessionId();
+      const planFactP = el('p', 'small muted', '正在读取共享版本事实…');
+      const planSteps = el('div', 'item-list');
+      const reloadPlanBtn = el('button', 'secondary', '重新读取计划并清空意见');
+      reloadPlanBtn.type = 'button';
+      planInfoCard.append(planFactP, planSteps, reloadPlanBtn);
+
+      const form = el('form', 'item-card');
+      form.append(el('strong', '', '提交版本绑定批注'));
+
+      const decisionId = `plann-dec-${opened.instance_id}`;
+      const decisionLabel = el('label', 'small', '决策类型');
+      decisionLabel.htmlFor = decisionId;
+      const decisionSelect = el('select');
+      decisionSelect.id = decisionId;
+      for (const [val, label] of [
+        ['approve', '批准继续 (approve)'],
+        ['deny_with_feedback', '拒绝并反馈 (deny_with_feedback)'],
+        ['approve_with_notes', '带意见批准 (approve_with_notes)']
+      ]) {
+        const opt = el('option', '', label);
+        opt.value = val;
+        decisionSelect.append(opt);
+      }
+      decisionSelect.value = 'approve';
+
+      const summaryId = `plann-sum-${opened.instance_id}`;
+      const summaryLabel = el('label', 'small', '批注摘要');
+      summaryLabel.htmlFor = summaryId;
+      const summaryInput = el('input');
+      summaryInput.id = summaryId;
+      summaryInput.placeholder = '批注摘要 (如 架构设计确认)';
+      summaryInput.value = '计划审查确认';
+
+      const feedbackId = `plann-fb-${opened.instance_id}`;
+      const feedbackLabel = el('label', 'small', '审查意见');
+      feedbackLabel.htmlFor = feedbackId;
+      const feedbackInput = el('textarea');
+      feedbackInput.id = feedbackId;
+      feedbackInput.placeholder = '输入针对该计划版本的审查反馈意见…';
+      feedbackInput.rows = 2;
+      feedbackInput.value = '审查通过，允许继续执行';
+
+      const submitBtn = el('button', '', '提交版本绑定批注');
+      submitBtn.type = 'submit';
+      submitBtn.disabled = true;
+      const submitStatus = el('p', 'small muted', '');
+
+      form.append(
+        decisionLabel, decisionSelect,
+        summaryLabel, summaryInput,
+        feedbackLabel, feedbackInput,
+        submitBtn, submitStatus
+      );
+
+      let currentPlan = null;
+      const loadPlanAndFeedback = async () => {
+        try {
+          const plan = await rpc('session.plan', { session_id: reviewedSessionId });
+          currentPlan = plan;
+          planSteps.replaceChildren();
+          if (currentPlan && currentPlan.task_id) {
+            validatePlanFeedback(currentPlan, { session_id: reviewedSessionId, decision: 'approve' });
+            planFactP.textContent = `关联任务: ${currentPlan.task_id} · 共享版本: v${currentPlan.version} · 内容摘要: ${currentPlan.content_sha256}`;
+            for (const step of array(currentPlan.steps)) {
+              planSteps.append(el('p', 'small', `[${step.status}] ${step.text}`));
+            }
+            submitBtn.disabled = false;
+          } else {
+            planFactP.textContent = '当前会话暂无排队或执行中的计划（需在会话中生成计划后方可绑定版本批注）。';
+            submitBtn.disabled = true;
+          }
+        } catch (err) {
+          planFactP.textContent = '读取计划状态失败：' + (err.message || String(err));
+          submitBtn.disabled = true;
+        }
+        await loadFeedback();
+      };
+
+      reloadPlanBtn.addEventListener('click', async () => {
+        currentPlan = null;
+        submitBtn.disabled = true;
+        decisionSelect.value = 'approve';
+        summaryInput.value = '';
+        feedbackInput.value = '';
+        submitStatus.textContent = '意见已清空，请审阅重新读取的计划。';
+        await loadPlanAndFeedback();
+      });
+
+      form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (submitBtn.disabled || !currentPlan) return;
+        submitBtn.disabled = true;
+        submitStatus.textContent = '正在提交批注…';
+        try {
+          const payload = validatePlanFeedback(currentPlan, {
+            session_id: reviewedSessionId,
+            decision: decisionSelect.value,
+            summary: summaryInput.value.trim() || '计划审查批注',
+            comments: [{
+              comment_id: `c-${Date.now()}`,
+              body: feedbackInput.value.trim() || '审查意见',
+              created_at_ms: Date.now(),
+            }],
+          });
+          payload.actor = 'webui-user';
+          const res = await rpc('plannotator.submit', payload);
+          submitStatus.textContent = `批注已提交！ID: ${res?.feedback_id || 'ok'}，已绑定版本 v${res?.target?.file?.version || currentPlan.version}。后续执行会再次核对计划版本。`;
+          await loadFeedback();
+        } catch (err) {
+          submitStatus.textContent = '提交批注失败：' + (err.message || String(err)) + '。意见已保留；重新审阅前不会自动改绑版本。';
+        }
+      });
+
+      const listContainer = el('div', 'item-list');
+      const loadFeedback = async () => {
+        try {
+          const items = await rpc('plannotator.list', { session_id: reviewedSessionId });
+          listContainer.replaceChildren();
+          if (!array(items).length) {
+            listContainer.textContent = '当前会话暂无批注记录。';
+            return;
+          }
+          for (const fb of items) {
+            const card = el('div', 'item-card');
+            const h = el('div', 'control-row');
+            h.append(el('strong', '', fb.target?.target_id || fb.target || 'target'));
+            h.append(el('span', `badge ${fb.decision || ''}`, fb.decision || 'apply'));
+            const verInfo = fb.target?.file ? `${fb.target.file.path} (v${fb.target.file.version})` : '';
+            card.append(h, el('p', 'small', fb.summary || ''), el('span', 'small muted', verInfo));
+            listContainer.append(card);
+          }
+        } catch (err) {
+          listContainer.textContent = '读取批注失败：' + (err.message || String(err));
+        }
+      };
+
+      loadPlanAndFeedback();
+      body.append(planInfoCard, form, el('label', 'small', '已保存批注记录'), listContainer);
+    } else if (panelId === 'tasks') {
+      const refreshBtn = el('button', 'secondary', '刷新任务与子 Agent Fleet');
+      refreshBtn.type = 'button';
+      const statusP = el('p', 'small muted', '');
+      const contentBox = el('div', 'item-list');
+      contentBox.textContent = '正在读取任务队列与子 Agent…';
+
+      const loadTasksAndFleet = async () => {
+        try {
+          contentBox.textContent = '正在读取数据…';
+          let tasks = [];
+          try { tasks = await rpc('session.tasks', { session_id: panelSessionId() }); } catch { tasks = []; }
+          let plan = null;
+          try { plan = await rpc('session.plan', { session_id: panelSessionId() }); } catch { plan = null; }
+          let fleet = null;
+          try { fleet = await rpc('runtime.fleet', { parent_session_id: panelSessionId() }); } catch { fleet = null; }
+
+          contentBox.replaceChildren();
+
+          if (plan?.steps && Array.isArray(plan.steps)) {
+            const planBox = el('div', 'item-card');
+            planBox.append(el('strong', '', `当前计划 (v${plan.version || 1}) · 任务: ${plan.task_id || 'unknown'}`));
+            for (const step of plan.steps) {
+              const stepP = el('p', 'small', `[${step.status || 'pending'}] ${step.text || step.id}`);
+              planBox.append(stepP);
+            }
+            contentBox.append(planBox);
+          }
+
+          const taskItems = array(tasks);
+          const tasksCard = el('div', 'item-card');
+          tasksCard.append(el('strong', '', `会话任务队列 (${taskItems.length})`));
+          if (!taskItems.length) {
+            tasksCard.append(el('p', 'small muted', '当前会话暂无排队任务。'));
+          } else {
+            for (const t of taskItems) {
+              const tRow = el('div', 'control-row');
+              tRow.append(el('strong', '', t.id || 'task'));
+              tRow.append(el('span', 'badge', t.state || 'queued'));
+              tRow.append(el('span', 'small muted', clip(t.input?.text || '', 60)));
+              tasksCard.append(tRow);
+            }
+          }
+          contentBox.append(tasksCard);
+
+          const members = array(fleet?.members);
+          const fleetCard = el('div', 'item-card');
+          fleetCard.append(el('strong', '', `子 Agent 舰队管理 (FleetView · ${members.length} 个实例)`));
+          if (!members.length) {
+            fleetCard.append(el('p', 'small muted', '当前会话暂无派生的子 Agent。'));
+          } else {
+            for (const m of members) {
+              const mCard = el('div', 'item-card');
+              const mh = el('div', 'control-row');
+              mh.append(el('strong', '', m.label || m.child_task_id));
+              mh.append(el('span', `badge ${m.state || ''}`, m.state || 'running'));
+              mh.append(el('span', 'small muted', `深度: ${m.depth} · 模式: ${m.mode || 'foreground'}${m.detached ? ' (分离)' : ''}`));
+              mCard.append(mh);
+
+              if (m.error) {
+                mCard.append(el('p', 'small error', `错误: ${m.error}`));
+              }
+
+              if (m.state === 'running' || m.state === 'Running') {
+                const ctrlRow = el('div', 'control-row');
+                const stopBtn = el('button', 'secondary', '停止子 Agent');
+                stopBtn.type = 'button';
+                stopBtn.addEventListener('click', async () => {
+                  statusP.textContent = `正在停止子任务 ${m.child_task_id}…`;
+                  try {
+                    await rpc('runtime.fleet.stop', { child_task_id: m.child_task_id });
+                    statusP.textContent = `子任务 ${m.child_task_id} 已发送停止信号。`;
+                    await loadTasksAndFleet();
+                  } catch (err) {
+                    statusP.textContent = '停止子任务失败：' + (err.message || String(err));
+                  }
+                });
+
+                const steerInput = el('input');
+                steerInput.type = 'text';
+                steerInput.placeholder = '输入引导指令 (steer)…';
+                const steerBtn = el('button', 'quiet', '发送引导');
+                steerBtn.type = 'button';
+                steerBtn.addEventListener('click', async () => {
+                  const text = steerInput.value.trim();
+                  if (!text) return;
+                  statusP.textContent = '正在向子任务发送引导指令…';
+                  try {
+                    await rpc('runtime.fleet.steer', { child_task_id: m.child_task_id, text });
+                    statusP.textContent = '已向子任务发送引导指令。';
+                    steerInput.value = '';
+                  } catch (err) {
+                    statusP.textContent = '发送引导失败：' + (err.message || String(err));
+                  }
+                });
+
+                ctrlRow.append(stopBtn, steerInput, steerBtn);
+                mCard.append(ctrlRow);
+              }
+
+              fleetCard.append(mCard);
+            }
+          }
+          contentBox.append(fleetCard);
+        } catch (err) {
+          contentBox.textContent = '读取任务与 Fleet 失败：' + (err.message || String(err));
+        }
+      };
+
+      refreshBtn.addEventListener('click', loadTasksAndFleet);
+      loadTasksAndFleet();
+      body.append(refreshBtn, statusP, contentBox);
+    } else if (panelId === 'usage') {
+      const usageBtn = el('button', 'secondary', '刷新用量与上下文');
+      usageBtn.type = 'button';
+      const usageOutput = el('div', 'item-card');
+      usageOutput.textContent = '正在读取会话统计…';
+
+      const loadUsage = async () => {
+        try {
+          const stats = await rpc('session.context_overview', { session_id: panelSessionId() });
+          usageOutput.replaceChildren();
+
+          const tokens = stats.tokens || {};
+          const cost = stats.cost || {};
+          const cache = stats.cache || {};
+
+          const pTokens = el('p', 'small', `Tokens 总量: ${tokens.total_tokens || 0} (输入: ${tokens.input || 0}, 输出: ${tokens.output || 0}, 推理: ${tokens.reasoning || 0})`);
+          const pCache = el('p', 'small', `缓存读取: ${cache.cache_read || tokens.cache_read || 0}, 缓存写入: ${cache.cache_write || tokens.cache_write || 0}, 命中率: ${cache.hit_rate != null ? (cache.hit_rate * 100).toFixed(1) + '%' : '0.0%'}`);
+          const pLedger = el('p', 'small', `账本结算: ${stats.ledger_settled_tokens || 0}, 预留: ${stats.ledger_reserved_tokens || 0}, 剩余: ${stats.ledger_remaining_tokens || 0}${stats.budget_unknown ? ' [预算未知]' : ''}`);
+          const pCost = el('p', 'small', `费用结算状态: ${cost.status || 'unknown'}${cost.amount ? ` (${cost.amount} ${cost.currency || 'USD'})` : ''}`);
+          const pRounds = el('p', 'small', `请求次数: ${stats.request_count || 0}, 对话轮次: ${stats.turn_count || 0}`);
+
+          usageOutput.append(pTokens, pCache, pLedger, pCost, pRounds);
+
+          const comp = array(stats.composition);
+          if (comp.length) {
+            const compCard = el('div', 'item-card');
+            compCard.append(el('strong', '', 'Token 构成分析'));
+            for (const c of comp) {
+              compCard.append(el('p', 'small', `${c.kind}: ${c.tokens}`));
+            }
+            usageOutput.append(compCard);
+          }
+
+          const evo = array(stats.evolution);
+          if (evo.length) {
+            const evoCard = el('div', 'item-card');
+            evoCard.append(el('strong', '', `上下文演变过程 (${evo.length} 轮)`));
+            for (const step of evo) {
+              evoCard.append(el('p', 'small muted', `[轮次 ${step.turn}] 输入: ${step.input_tokens || 0}, 输出: ${step.output_tokens || 0}, 增量: ${step.delta_tokens || 0}`));
+            }
+            usageOutput.append(evoCard);
+          }
+        } catch (err) {
+          usageOutput.textContent = '读取用量失败：' + (err.message || String(err));
+        }
+      };
+
+      usageBtn.addEventListener('click', loadUsage);
+      loadUsage();
+      body.append(usageBtn, usageOutput);
+    }
+
+    container.append(body);
+  }
+
+  async function refreshPanels() {
+    if (!token) return;
+    const login = loginGeneration;
+    ui['panel-sidebar-status'].textContent = '正在读取面板目录…';
+    try {
+      const catalog = await panelsApi('panels.catalog');
+      if (login !== loginGeneration) return;
+      panelCatalog = catalog;
+      renderPanelGuide(ui['panel-sidebar-guide'], catalog?.sidebar, 'sidebar');
+      renderPanelGuide(ui['panel-bottom-guide'], catalog?.bottom, 'bottom');
+      const ids = array(catalog?.sidebar).map(panel => panel.id).concat(array(catalog?.bottom).map(panel => panel.id));
+      ui['panel-sidebar-status'].textContent = ids.length ? `已注册 ${[...new Set(ids)].length} 个面板` : '暂无已注册面板';
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login !== loginGeneration) return;
+      ui['panel-sidebar-status'].textContent = errorText(error);
+      if (error.auth) disconnect(error.message);
+    }
+  }
+
+  async function openRegisteredPanel(panelId, zone) {
+    const login = loginGeneration;
+    report(null);
+    try {
+      const params = { session_id: panelSessionId(), panel_id: panelId, zone, activate: true };
+      if (panelId === 'files') params.path = 'README.md';
+      await panelsApi('panels.open', params);
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
+  async function activateOpenedPanel(instanceId) {
+    const login = loginGeneration;
+    try {
+      await panelsApi('panels.activate', { session_id: panelSessionId(), instance_id: instanceId });
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
+  async function closeOpenedPanel(instanceId) {
+    const login = loginGeneration;
+    try {
+      await panelsApi('panels.close', { session_id: panelSessionId(), instance_id: instanceId });
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
+  async function interactOpenedPanel(instanceId, kind, path) {
+    const login = loginGeneration;
+    try {
+      const params = { session_id: panelSessionId(), instance_id: instanceId, kind };
+      if (path) params.path = path;
+      await panelsApi('panels.interact', params);
+      if (login !== loginGeneration) return;
+      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
+      if (login !== loginGeneration) return;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    }
+  }
+
   function disconnect(reason = '') {
     loginGeneration++;
     selectionGeneration++;
@@ -427,6 +1237,14 @@ function boot() {
     ui['session-picker'].open = true;
     ui['prompt'].value = '';
     ui['fork-dialog'].close();
+    panelCatalog = null;
+    openedPanels = [];
+    ui['panel-sidebar-guide'].replaceChildren();
+    ui['panel-sidebar-open'].replaceChildren();
+    ui['panel-bottom-guide'].replaceChildren();
+    ui['panel-bottom-open'].replaceChildren();
+    ui['panel-sidebar-status'].textContent = '连接后显示已注册侧栏面板。';
+    ui['panel-bottom'].hidden = true;
     ui['web-token'].focus();
   }
 
@@ -832,6 +1650,7 @@ function boot() {
       ui['connection-status'].textContent = '已连接本机';
       report(null);
       renderView();
+      await refreshPanels();
       await refreshSessions();
       if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
       else ui['session-label'].focus();
@@ -846,6 +1665,7 @@ function boot() {
 
   ui['logout'].addEventListener('click', () => disconnect());
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
+  ui['refresh-panels'].addEventListener('click', refreshPanels);
   ui['create-form'].addEventListener('submit', async event => {
     event.preventDefault();
     if (ui['create-button'].disabled || !ui['session-label'].value.trim()) return;
@@ -854,11 +1674,15 @@ function boot() {
     ui['create-button'].textContent = '创建中…';
     report(null);
     try {
-      const snapshot = await rpc('session.create', { label: ui['session-label'].value.trim() });
+      const params = { label: ui['session-label'].value.trim() };
+      const deviceVal = ui['session-device']?.value?.trim();
+      if (deviceVal) params.device_id = deviceVal;
+      const snapshot = await rpc('session.create', params);
       if (login !== loginGeneration) return;
       const view = applySnapshot(createView(snapshot.id), snapshot, true);
       rememberView(view);
       ui['session-label'].value = '';
+      if (ui['session-device']) ui['session-device'].value = '';
       updateSessionSummary(snapshot);
       await selectSession(snapshot.id);
     } catch (error) {
@@ -995,6 +1819,25 @@ function boot() {
       }
     } finally { ui['refresh-capabilities'].disabled = false; }
   });
+
+  const setupWbButton = (btnId, panelId, zone = 'sidebar') => {
+    const button = ui[btnId];
+    if (!button) return;
+    button.addEventListener('click', async () => {
+      const existing = openedPanels.find(p => p.panel_id === panelId);
+      if (existing) {
+        await activateOpenedPanel(existing.instance_id);
+      } else {
+        await openRegisteredPanel(panelId, zone);
+      }
+    });
+  };
+  setupWbButton('wb-tasks', 'tasks', 'sidebar');
+  setupWbButton('wb-usage', 'usage', 'sidebar');
+  setupWbButton('wb-artifacts', 'artifacts', 'sidebar');
+  setupWbButton('wb-plannotator', 'plannotator', 'sidebar');
+  setupWbButton('wb-editor', 'editor', 'sidebar');
+  setupWbButton('wb-trace', 'trace', 'sidebar');
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && token && selected) schedulePoll(0);

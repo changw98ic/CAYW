@@ -82,6 +82,91 @@ fn public_configuration_maps_fixed_profiles_budgets_and_exact_permissions_withou
 }
 
 #[test]
+fn runtime_service_permissions_use_the_dispatch_catalog_and_strict_arguments() {
+    let root = tempfile::tempdir().unwrap();
+    let permissions = json!([
+        {"capability":"plan.update","arguments":{"expected_version":0,"steps":[
+            {"id":"review","text":"Review the integrated change","status":"in_progress"}
+        ]}},
+        {"capability":"user.ask","arguments":{"question":"Which file needs review?"}},
+        {"capability":"cells.store","arguments":{"key":"review","value":{"ready":true},"expected_version":0}},
+        {"capability":"cells.load","arguments":{"key":"review"}}
+    ]);
+    let path = root.path().join("config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"permissions":permissions})).unwrap(),
+    )
+    .unwrap();
+    let config = HeadlessConfig::load(&path)
+        .unwrap()
+        .into_runtime_config()
+        .unwrap();
+    let runtime = cayw_runtime::Runtime::open(
+        root.path().join("sessions.db"),
+        root.path(),
+        std::sync::Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        cayw_ai::Model::new("fixture", "configuration"),
+        config.clone(),
+    )
+    .unwrap();
+    let catalog = runtime.capabilities().unwrap();
+    for (configured, permission) in config
+        .permissions
+        .iter()
+        .zip(permissions.as_array().unwrap())
+    {
+        assert_eq!(
+            configured.capability,
+            permission["capability"].as_str().unwrap()
+        );
+        assert_eq!(
+            configured.scope,
+            ScopedPermission::exact(
+                permission["capability"].as_str().unwrap(),
+                permission["arguments"].clone()
+            )
+            .scope
+        );
+        let definition = catalog
+            .iter()
+            .find(|entry| entry.name == configured.capability)
+            .unwrap();
+        cayw_ai::ArgumentValidator::new(&definition.parameters)
+            .unwrap()
+            .validate(&permission["arguments"])
+            .unwrap();
+    }
+    assert_eq!(config.permissions.len(), 4);
+    assert!(runtime.list().unwrap().is_empty());
+
+    for (capability, arguments) in [
+        (
+            "plan.update",
+            json!({"expected_version":0,"steps":[],"extra":true}),
+        ),
+        (
+            "plan.update",
+            json!({"expected_version":0,"steps":[{"id":"bad","text":"Bad state","status":"done"}]}),
+        ),
+        ("cells.load", json!({"key":"review","extra":true})),
+        (
+            "agent.run",
+            json!({"prompt":"Local agents remain disabled"}),
+        ),
+    ] {
+        let input = json!({"permissions":[{"capability":capability,"arguments":arguments}]});
+        assert!(
+            serde_json::from_value::<HeadlessConfig>(input)
+                .unwrap()
+                .into_runtime_config()
+                .is_err(),
+            "invalid or unavailable {capability} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn omitted_settings_keep_runtime_defaults_and_grant_no_permissions() {
     let defaults = RuntimeConfig::default();
     for (input, tokens) in [
@@ -102,6 +187,176 @@ fn omitted_settings_keep_runtime_defaults_and_grant_no_permissions() {
         assert!(config.host.profiles.is_empty());
         assert!(config.permissions.is_empty());
     }
+}
+
+#[test]
+fn headless_config_loads_optional_web_access_and_vision_options() {
+    let input = json!({
+        "web_access": {
+            "search": "fixture",
+            "limits": {
+                "max_body_bytes": 1048576,
+                "max_extract_chars": 50000,
+                "default_search_limit": 3,
+                "max_search_limit": 10
+            }
+        },
+        "vision": {
+            "input_bytes": 4194304,
+            "output_bytes": 4194304,
+            "max_image_bytes": 8388608
+        }
+    });
+    let headless = serde_json::from_value::<HeadlessConfig>(input).unwrap();
+    assert!(headless.web_access().is_some());
+    assert!(headless.vision().is_some());
+
+    let config = headless.into_runtime_config().unwrap();
+    assert!(config.host.web_access.is_some());
+    let web_opts = config.host.web_access.as_ref().unwrap();
+    assert_eq!(web_opts.search, cayw_web_access::SearchBackend::Fixture);
+    assert_eq!(web_opts.limits.max_body_bytes, 1048576);
+
+    assert!(config.host.vision.is_some());
+    let vision_limits = config.host.vision.unwrap();
+    assert_eq!(vision_limits.max_image_bytes, 8388608);
+}
+
+#[cfg(feature = "pi-compat")]
+#[tokio::test]
+async fn configured_pi_host_is_visible_through_the_running_ipc_server() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_options(
+        root.path(),
+        json!({"pi_compat":{"enabled":true,"fixture":true}}),
+        "unused-offline-provider",
+        &["--offline"],
+    )
+    .await;
+    assert_eq!(server.ready["configuration"]["pi_compat_enabled"], true);
+    assert_eq!(server.ready["configuration"]["pi_installed"], 1);
+    let capabilities = server
+        .client
+        .request("capabilities.list", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        capabilities
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|definition| { definition["name"] == "pi_fixture.echo" })
+    );
+    server.stop().await;
+}
+
+#[cfg(feature = "pi-compat")]
+#[tokio::test]
+async fn cli_pi_flag_enables_external_catalog_before_permission_validation() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_options(
+        root.path(),
+        json!({"permissions":[{"capability":"mcp.call","arguments":{
+            "server":"cayw-pi-fixture","tool":"pi_fixture.echo","arguments":{"text":"flag"}
+        }}]}),
+        "unused-offline-provider",
+        &["--offline", "--pi-compat"],
+    )
+    .await;
+    assert_eq!(server.ready["configuration"]["pi_compat_enabled"], true);
+    assert_eq!(server.ready["configuration"]["pi_installed"], 1);
+    assert_eq!(server.ready["configuration"]["exact_permission_count"], 1);
+    server.stop().await;
+}
+
+#[cfg(feature = "pi-compat")]
+#[tokio::test]
+async fn configured_npm_pi_extension_runs_through_authenticated_ipc_and_host() {
+    let root = tempfile::tempdir().unwrap();
+    let (base, provider) = provider_with_script(
+        true,
+        "local result = cayw.call('mcp.call',{server='@earendil-works/pi-coding-agent',tool='hello',arguments={name='CAYW'}}); yield_control(); return result",
+    )
+    .await;
+    let server = Server::start(
+        root.path(),
+        json!({
+            "pi_compat":{"enabled":true,"npm_hello":true},
+            "permissions":[{"capability":"mcp.call","arguments":{
+                "server":"@earendil-works/pi-coding-agent",
+                "tool":"hello","arguments":{"name":"CAYW"}
+            }}]
+        }),
+        &base,
+    )
+    .await;
+    assert_eq!(server.ready["configuration"]["pi_installed"], 1);
+    let id = server.session().await;
+    let view = tokio::time::timeout(WATCHDOG, prompt(&server, &id).await)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(view["state"], "idle");
+    let requests = tokio::time::timeout(WATCHDOG, provider)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        requests.len() >= 3,
+        "the explicit yield requires a wait turn"
+    );
+    let first_page = cell_page(&requests[1]);
+    assert_eq!(first_page.status, cayw_cells::CellStatus::Yielded);
+    assert!(first_page.vm_alive);
+    let final_page = cell_page(requests.last().unwrap());
+    assert_eq!(final_page.cell_id, first_page.cell_id);
+    assert_eq!(final_page.status, cayw_cells::CellStatus::Completed);
+    assert!(!final_page.vm_alive);
+    assert!(!final_page.has_more);
+    assert!(
+        requests.last().unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["role"] == "tool"
+                    && message.to_string().contains("Hello, CAYW!")
+                    && message.to_string().contains("pi_extension_api")
+            })
+    );
+    let events = server
+        .client
+        .request(
+            "session.events",
+            json!({"session_id":id,"after":0,"limit":1000}),
+        )
+        .await
+        .unwrap();
+    let events = events.as_array().unwrap();
+    let started: Vec<_> = events
+        .iter()
+        .filter(|row| {
+            row["event"]["type"] == "capability_started"
+                && row["event"]["call"]["name"] == "mcp.call"
+        })
+        .collect();
+    assert_eq!(started.len(), 1, "waiting must not replay the Host call");
+    let started = started[0];
+    let settled = events
+        .iter()
+        .find(|row| {
+            row["event"]["type"] == "capability_settled"
+                && row["event"]["call"]["key"] == started["event"]["call"]["key"]
+        })
+        .expect("the same Host call has a durable terminal");
+    assert_eq!(settled["event"]["call"]["outcome"]["type"], "completed");
+    assert!(
+        settled["event"]["call"]["outcome"]
+            .to_string()
+            .contains("Hello, CAYW!")
+    );
+    server.stop().await;
 }
 
 struct Server {
@@ -141,8 +396,15 @@ impl Server {
         )
         .await
         .expect("server readiness deadline")
-        .unwrap()
-        .expect("server readiness line");
+        .unwrap();
+        let Some(ready) = ready else {
+            let output = child.wait_with_output().await.unwrap();
+            panic!(
+                "server exited before readiness: {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
         let ready: Value = serde_json::from_str(&ready).unwrap();
         let client = Client::connect(ready["listening"].as_str().unwrap().parse().unwrap(), TOKEN)
             .await
@@ -192,6 +454,10 @@ fn command(root: &Path, _base: &str) -> tokio::process::Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(feature = "pi-compat")]
+    if let Some(node) = cayw_pi_compat::PiNpmHelloExtension::resolve_node() {
+        command.env("CAYW_PI_NODE", node);
+    }
     command
 }
 async fn read_request(socket: &mut TcpStream) -> Value {
@@ -245,22 +511,69 @@ async fn response(socket: &mut TcpStream, delta: Value, reason: &str, reported: 
     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
 }
 async fn provider(reported: bool) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
+    provider_with_script(reported, "return cayw.call('test.run',{profile='tree'})").await
+}
+
+fn cell_page(request: &Value) -> cayw_cells::CellPage {
+    let message = request["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .expect("the model request ends with the original tool result");
+    assert_eq!(message["role"], "tool");
+    let pages: Vec<cayw_cells::CellPage> = message["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|part| serde_json::from_str(part["text"].as_str().unwrap()).unwrap())
+        .collect();
+    let page = pages.first().expect("execute_code returned a page");
+    assert!(pages.iter().all(|other| {
+        serde_json::to_value(other).unwrap() == serde_json::to_value(page).unwrap()
+    }));
+    page.clone()
+}
+
+async fn provider_with_script(
+    reported: bool,
+    script: &str,
+) -> (String, tokio::task::JoinHandle<Vec<Value>>) {
+    let script = script.to_owned();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let mut requests = vec![];
         let (mut socket, _) = listener.accept().await.unwrap();
         requests.push(read_request(&mut socket).await);
-        response(&mut socket, json!({"tool_calls":[{"index":0,"id":"config-call","type":"function","function":{"name":"execute_code","arguments":json!({"action":"exec","script":"return cayw.call('test.run',{profile='tree'})","yield_time_ms":30000,"max_output_tokens":32768}).to_string()}}]}), "tool_calls", reported).await;
-        let (mut socket, _) = listener.accept().await.unwrap();
-        requests.push(read_request(&mut socket).await);
-        response(
-            &mut socket,
-            json!({"content":"The profile result was consumed."}),
-            "stop",
-            reported,
-        )
-        .await;
+        response(&mut socket, json!({"tool_calls":[{"index":0,"id":"config-call","type":"function","function":{"name":"execute_code","arguments":json!({"action":"exec","script":script,"yield_time_ms":30000,"max_output_tokens":32768}).to_string()}}]}), "tool_calls", reported).await;
+        let mut previous: Option<cayw_cells::CellPage> = None;
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            let page = cell_page(&request);
+            if let Some(previous) = &previous {
+                assert_eq!(page.cell_id, previous.cell_id);
+                assert_eq!(page.cursor, previous.next_cursor);
+            }
+            let complete = page.status.is_terminal() && !page.vm_alive && !page.has_more;
+            requests.push(request);
+            if complete {
+                response(
+                    &mut socket,
+                    json!({"content":"The profile result was consumed."}),
+                    "stop",
+                    reported,
+                )
+                .await;
+                break;
+            }
+            assert!(
+                page.required_budget.is_none(),
+                "the fixture output fits its page budget"
+            );
+            response(&mut socket, json!({"tool_calls":[{"index":0,"id":format!("config-wait-{}", requests.len()),"type":"function","function":{"name":"execute_code","arguments":json!({"action":"wait","cell_id":page.cell_id,"cursor":page.next_cursor,"yield_time_ms":30000,"max_output_tokens":32768}).to_string()}}]}), "tool_calls", reported).await;
+            previous = Some(page);
+        }
         requests
     });
     (base, task)

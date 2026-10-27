@@ -93,6 +93,18 @@ fn page_limit() -> usize {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RunInspector {
+    session_id: String,
+    /// Exclusive Core cursor to start from (same meaning as `session.events`).
+    #[serde(default)]
+    after: u64,
+    /// Max Core events to fold. Omit to scan the full remaining log (paged
+    /// internally past the first 1000). Explicit `null` is also "all remaining".
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Approval {
     session_id: String,
     approval_id: String,
@@ -163,6 +175,25 @@ struct Scheduled {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ArtifactQuery {
+    artifact_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactActionQuery {
+    action_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelArtifactActionQuery {
+    session_id: String,
+    action_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ResourceTask {
     session_id: String,
     text: String,
@@ -179,6 +210,54 @@ struct Scheduler {
     after: Option<String>,
     #[serde(default = "page_limit")]
     limit: usize,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Fleet {
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default = "page_limit")]
+    limit: usize,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetStop {
+    child_task_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FleetSteer {
+    child_task_id: String,
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackgroundTaskId {
+    id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackgroundList {
+    session_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackgroundLogs {
+    id: String,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default = "page_limit")]
+    limit: usize,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackgroundRecover {
+    id: String,
+    status: crate::BackgroundStatus,
+    #[serde(default)]
+    error: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -279,6 +358,42 @@ impl RpcHandler for Runtime {
                 let p: Scheduler = parse(params)?;
                 encode(self.scheduler_page(p.after.as_deref(), p.limit)?)
             }
+            "runtime.fleet" => {
+                let p: Fleet = parse(params)?;
+                encode(self.fleet(p.parent_session_id.as_deref(), p.after.as_deref(), p.limit)?)
+            }
+            "runtime.fleet.stop" => {
+                let p: FleetStop = parse(params)?;
+                encode(self.fleet_stop(&p.child_task_id)?)
+            }
+            "runtime.fleet.steer" => {
+                let p: FleetSteer = parse(params)?;
+                encode(self.fleet_steer(&p.child_task_id, &p.text)?)
+            }
+            "runtime.background.list" => {
+                let p: BackgroundList = parse(params)?;
+                encode(self.background_list_session(&p.session_id)?)
+            }
+            "runtime.background.inspect" => {
+                let p: BackgroundTaskId = parse(params)?;
+                encode(self.background_inspect(&p.id)?)
+            }
+            "runtime.background.logs" => {
+                let p: BackgroundLogs = parse(params)?;
+                encode(self.background_logs(&p.id, p.offset, p.limit)?)
+            }
+            "runtime.background.kill" => {
+                let p: BackgroundTaskId = parse(params)?;
+                encode(self.background_kill(&p.id)?)
+            }
+            "runtime.background.result" => {
+                let p: BackgroundTaskId = parse(params)?;
+                encode(self.background_result(&p.id)?)
+            }
+            "runtime.background.recover" => {
+                let p: BackgroundRecover = parse(params)?;
+                encode(self.background_recover(&p.id, p.status, p.error.as_deref())?)
+            }
             "task.enqueue_scheduled" => {
                 let p: Scheduled = parse(params)?;
                 encode(self.enqueue_scheduled(
@@ -320,9 +435,17 @@ impl RpcHandler for Runtime {
                     .await?,
                 )
             }
+            "session.run_inspector" => {
+                let p: RunInspector = parse(params)?;
+                encode(self.run_inspector_page(&p.session_id, p.after, p.limit)?)
+            }
             "session.audit" => {
                 let p: Events = parse(params)?;
                 encode(self.audit(&p.session_id, p.after, p.limit)?)
+            }
+            "session.context_overview" => {
+                let p: Session = parse(params)?;
+                encode(self.session_context_overview(&p.session_id)?)
             }
             "session.grants" => {
                 let p: Session = parse(params)?;
@@ -385,6 +508,17 @@ impl RpcHandler for Runtime {
             "session.plan" => {
                 let p: Session = parse(params)?;
                 encode(self.plan(&p.session_id)?)
+            }
+            "plannotator.submit" => {
+                let mut p: crate::PlanFeedbackInput = parse(params)?;
+                if p.actor.trim().is_empty() {
+                    p.actor = "rpc-user".into();
+                }
+                encode(self.submit_plan_feedback(p)?)
+            }
+            "plannotator.list" => {
+                let p: Session = parse(params)?;
+                encode(self.plannotator_feedback(&p.session_id)?)
             }
             "question.answer" => {
                 let p: AnswerQuestion = parse(params)?;
@@ -468,6 +602,47 @@ impl RpcHandler for Runtime {
                 let p: Task = parse(params)?;
                 self.close_request_task(&p.task_id)?;
                 Ok(json!({"closed":true}))
+            }
+            "artifacts.put" => {
+                let p: crate::PutArtifactRequest = parse(params)?;
+                encode(self.put_artifact(p)?)
+            }
+            "artifacts.update" => {
+                let p: crate::UpdateArtifactRequest = parse(params)?;
+                encode(self.update_artifact(p)?)
+            }
+            "artifacts.preview" => {
+                let p: ArtifactQuery = parse(params)?;
+                encode(self.preview_artifact(&p.artifact_id)?)
+            }
+            "artifacts.list" => {
+                let p: Session = parse(params)?;
+                encode(self.list_artifacts(&p.session_id)?)
+            }
+            "artifacts.action" => {
+                let p: crate::ActionRequest = parse(params)?;
+                encode(self.dispatch_artifact_action(p)?)
+            }
+            "artifacts.action_list" => {
+                let p: Session = parse(params)?;
+                encode(self.list_artifact_actions(&p.session_id)?)
+            }
+            "artifacts.action_get" => {
+                let p: ArtifactActionQuery = parse(params)?;
+                encode(self.get_artifact_action(&p.action_id)?)
+            }
+            "artifacts.action_cancel" => {
+                let p: CancelArtifactActionQuery = parse(params)?;
+                encode(self.cancel_artifact_action(&p.session_id, &p.action_id)?)
+            }
+            "artifacts.recovery_save" => {
+                let _: Empty = parse(params)?;
+                encode(self.save_artifact_recovery()?)
+            }
+            "artifacts.recovery_load" => {
+                let _: Empty = parse(params)?;
+                self.load_artifact_recovery()?;
+                Ok(json!({"loaded":true}))
             }
             _ => Err(RpcError::new(
                 "method_not_found",

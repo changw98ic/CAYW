@@ -42,6 +42,13 @@ impl ReadSource for Source<'_> {
     }
     async fn capture(&mut self, cancel: CancellationToken) -> Result<Value, CapabilityError> {
         self.scope.check_authority(&cancel)?;
+        #[cfg(feature = "fault-injection")]
+        cayw_ai::faults::hit(
+            "runtime.shared_read.capture",
+            serde_json::json!({
+                "lease": self.scope.context.lease, "key": self.scope.key,
+            }),
+        );
         let captured = self.ticket.capture().await?;
         self.scope.check_authority(&cancel)?;
         Ok(captured.value().clone())
@@ -163,7 +170,20 @@ pub(crate) async fn call(
     } else {
         None
     };
+    let result = result.map_err(|mut error| {
+        error.message = crate::cells::bounded(&error.message);
+        error
+    });
     scope.settle(&result)?;
+    let presentation = match &result {
+        Ok(value) => crate::results::maybe_externalize(scope, value.clone()).await,
+        Err(error) => Err(error.clone()),
+    };
+    let storage_error = presentation
+        .as_ref()
+        .err()
+        .filter(|error| error.outcome_unknown && result.is_ok())
+        .map(|error| error.message.clone());
     Ok(BackendResponse::owned(
         result,
         dependencies,
@@ -172,15 +192,18 @@ pub(crate) async fn call(
             ticket: Some(ticket),
             candidate,
             rejection,
+            storage_error,
             acknowledged: false,
         }),
-    ))
+    )
+    .with_presentation(presentation))
 }
 pub(crate) struct Completion {
     scope: Arc<CallScope>,
     ticket: Option<FrozenReadTicket>,
     candidate: Option<ReadCandidate>,
     rejection: Option<String>,
+    storage_error: Option<String>,
     acknowledged: bool,
 }
 impl Completion {
@@ -190,14 +213,27 @@ impl Completion {
             ticket: None,
             candidate: None,
             rejection: None,
+            storage_error: None,
             acknowledged: false,
         }
+    }
+    pub(crate) fn with_storage_error(mut self, error: Option<String>) -> Self {
+        self.storage_error = error;
+        self
     }
 }
 impl BackendCompletion for Completion {
     fn acknowledge(mut self: Box<Self>) {
+        if let Some(error) = &self.storage_error {
+            self.scope
+                .context
+                .inner
+                .reads
+                .freeze(&self.scope.context.lease.session_id);
+            self.scope.context.persistence_failed(error);
+        }
         if let Some(candidate) = self.candidate.take() {
-            if let Some(reason) = &self.rejection {
+            if let Some(reason) = self.storage_error.as_ref().or(self.rejection.as_ref()) {
                 candidate.reject(reason);
             } else {
                 candidate.acknowledge();

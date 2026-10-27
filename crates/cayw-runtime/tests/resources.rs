@@ -85,6 +85,7 @@ fn manifest() -> Manifest {
             description: "Fixture manual".into(),
             mime_type: MIME.into(),
         }],
+        prompts: Vec::new(),
         search: false,
     }
 }

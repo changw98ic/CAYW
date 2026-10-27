@@ -1,11 +1,17 @@
-//! Bounded graph planning and local replay.
+//! Bounded graph planning, full-entry replay, and local recompute.
 //!
 //! `script_for_plan` produces the complete Luau program used by a real Runtime
-//! execution. `evaluate` runs that same program once, from the revision's entry,
-//! so shared input, state and context references are rebuilt by re-executing
-//! every preceding node. Every replay step is recomputed. Host calls are answered
-//! only from the original captured records, matched to the node the runner has
-//! just started, by exact name, arguments and call order.
+//! execution (always from the plan entry). `evaluate` has two local paths that
+//! never call Host for real work:
+//! - **replay** (`changed_node` is `None`, e.g. undo): run from the entry with
+//!   the revision's input/state/context; every step is recomputed.
+//! - **recompute** (node save): skip upstream node bodies, seed the VM at the
+//!   edited node from the captured shared-table `seed` (context + identity),
+//!   attach upstream steps as `reused`, and run only the edited node and its
+//!   downstream. `executed_nodes` lists bodies that actually ran.
+//!
+//! Host calls are answered only from the original captured records, matched to
+//! the node the runner has just started, by exact name, arguments and call order.
 
 use crate::types::{
     Evaluation, Gap, GraphPlan, Node, NodeResult, NodeTrace, RecordedCall, Status, Step,
@@ -371,8 +377,56 @@ fn write_luau(out: &mut String, value: &Value) {
 
 /// The complete Luau program for the real Runtime execution. Each `started`
 /// trace records the incoming value *before* `input_pointer` mapping so a later
-/// replay can re-map it after the pointer changes.
+/// local run can re-map it after the pointer changes, plus a shared-table `seed`
+/// so local recompute can restore context mutations and object identity without
+/// re-executing upstream bodies.
 pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
+    script_from(
+        plan,
+        &plan.entry,
+        SeedSpec::Values {
+            incoming: &plan.input,
+            state: &plan.initial_state,
+            context: &plan.context,
+        },
+        "complete graph execution",
+    )
+}
+
+/// Local recompute script: starts at `start_node` with a captured shared seed.
+/// Upstream node functions are not invoked. Callers must supply a seed for
+/// non-entry starts; plain JSON Values are only used for entry-node edits.
+fn script_for_local_recompute(
+    plan: &GraphPlan,
+    start_node: &str,
+    seed: SeedSpec<'_>,
+) -> Result<String, crate::Error> {
+    if !plan.nodes.iter().any(|node| node.id == start_node) {
+        return Err(invalid(format!(
+            "local recompute start node {start_node:?} is not in the plan"
+        )));
+    }
+    script_from(plan, start_node, seed, "local recompute from edited node")
+}
+
+enum SeedSpec<'a> {
+    /// Plain JSON snapshots (no shared identity). Only for entry-node edits,
+    /// where there is no upstream shared-table identity to restore.
+    Values {
+        incoming: &'a Value,
+        state: &'a Value,
+        context: &'a Value,
+    },
+    /// Shared-table seed captured at the edited node's original start.
+    Shared(&'a Value),
+}
+
+fn script_from(
+    plan: &GraphPlan,
+    start_node: &str,
+    seed: SeedSpec<'_>,
+    banner: &str,
+) -> Result<String, crate::Error> {
     validate_plan(plan)?;
     for node in &plan.nodes {
         validate_node_source(&node.source)?;
@@ -384,11 +438,11 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
     .map_err(|error| invalid(format!("plan manifest cannot be encoded: {error}")))?;
 
     let mut script = String::new();
-    script.push_str(
-        "-- cayw-trace-debug: complete graph execution\n\
+    script.push_str(&format!(
+        "-- cayw-trace-debug: {banner}\n\
          -- The sandbox exposes no clock, so completed.elapsed_ms is 0 here;\n\
-         -- the capture layer derives node duration from event timestamps.\n",
-    );
+         -- the capture layer derives node duration from event timestamps.\n"
+    ));
     // Compile node functions before declaring any runner locals. A node cannot
     // name or replace the runner's emitter, graph, validator or program counter.
     script.push_str("local __build_nodes = function(cayw, _G)\nreturn {\n");
@@ -440,6 +494,69 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
     );
 
     script.push_str(&node_api_script());
+    // Seed encode/decode: preserve Luau table identity across JSON so local
+    // recompute can skip upstream bodies without losing context mutations or
+    // shared input/state/context references.
+    script.push_str(
+        "local function __is_array(value)\n\
+         if type(value) ~= \"table\" then return false end\n\
+         local ok, mt = pcall(getmetatable, value)\n\
+         if not ok or mt == nil then return false end\n\
+         local probe = cayw.array({})\n\
+         local ok2, pmt = pcall(getmetatable, probe)\n\
+         return ok2 and mt == pmt\n\
+         end\n\
+         local function __encode_seed(input, state, context)\n\
+         local seen = {}\n\
+         local tables = {}\n\
+         local next_id = 0\n\
+         local function walk(value)\n\
+           if value == nil or value == cayw.null then return cayw.null end\n\
+           local ty = type(value)\n\
+           if ty ~= \"table\" then return value end\n\
+           local existing = seen[value]\n\
+           if existing ~= nil then return {[\"$ref\"] = existing} end\n\
+           next_id = next_id + 1\n\
+           local id = tostring(next_id)\n\
+           seen[value] = id\n\
+           if __is_array(value) then\n\
+             local items = {}\n\
+             for i, item in ipairs(value) do items[i] = walk(item) end\n\
+             tables[id] = {[\"$array\"] = true, [\"$items\"] = cayw.array(items)}\n\
+           else\n\
+             local fields = {}\n\
+             for key, item in pairs(value) do fields[key] = walk(item) end\n\
+             tables[id] = fields\n\
+           end\n\
+           return {[\"$ref\"] = id}\n\
+         end\n\
+         return {tables = tables, roots = {input = walk(input), state = walk(state), context = walk(context)}}\n\
+         end\n\
+         local function __decode_seed(seed)\n\
+         local tables = seed.tables\n\
+         local cache = {}\n\
+         local function resolve(node)\n\
+           if node == nil or node == cayw.null then return cayw.null end\n\
+           if type(node) ~= \"table\" then return node end\n\
+           local ref = node[\"$ref\"]\n\
+           if ref == nil then return node end\n\
+           if cache[ref] ~= nil then return cache[ref] end\n\
+           local enc = tables[ref]\n\
+           if enc == nil then error(\"seed is missing table \" .. tostring(ref)) end\n\
+           if enc[\"$array\"] == true then\n\
+             local items = {}\n\
+             cache[ref] = items\n\
+             for i, item in ipairs(enc[\"$items\"]) do items[i] = resolve(item) end\n\
+             return cayw.array(items)\n\
+           end\n\
+           local obj = {}\n\
+           cache[ref] = obj\n\
+           for key, item in pairs(enc) do obj[key] = resolve(item) end\n\
+           return obj\n\
+         end\n\
+         return resolve(seed.roots.input), resolve(seed.roots.state), resolve(seed.roots.context)\n\
+         end\n",
+    );
     script.push_str(
         "local __nodes = __build_nodes(__node_api, __node_globals)\n__build_nodes = nil\n",
     );
@@ -497,14 +614,28 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
         }
     }
 
-    script.push_str("local __incoming = ");
-    script.push_str(&luau_literal(&plan.input)?);
-    script.push_str("\nlocal __state = ");
-    script.push_str(&luau_literal(&plan.initial_state)?);
-    script.push_str("\nlocal __context = ");
-    script.push_str(&luau_literal(&plan.context)?);
-    script.push_str("\nlocal __current = ");
-    push_luau_string(&mut script, &plan.entry);
+    match seed {
+        SeedSpec::Values {
+            incoming,
+            state,
+            context,
+        } => {
+            script.push_str("local __incoming = ");
+            script.push_str(&luau_literal(incoming)?);
+            script.push_str("\nlocal __state = ");
+            script.push_str(&luau_literal(state)?);
+            script.push_str("\nlocal __context = ");
+            script.push_str(&luau_literal(context)?);
+            script.push('\n');
+        }
+        SeedSpec::Shared(seed_value) => {
+            script.push_str("local __incoming, __state, __context = __decode_seed(");
+            script.push_str(&luau_literal(seed_value)?);
+            script.push_str(")\n");
+        }
+    }
+    script.push_str("local __current = ");
+    push_luau_string(&mut script, start_node);
     script.push('\n');
 
     script.push_str(
@@ -527,7 +658,7 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
     );
     script.push_str(TRACE_SCHEMA);
     script.push_str(
-        "\", trace = {kind = \"started\", node_id = __current, input = __incoming, state_before = __state}})\n\
+        "\", trace = {kind = \"started\", node_id = __current, input = __incoming, state_before = __state, context_before = __context, seed = __encode_seed(__incoming, __state, __context)}})\n\
            local __pointer = __pointers[__current]\n\
            local __mapped = __incoming\n\
            if __pointer ~= nil then __mapped = __resolve(__incoming, __pointer) end\n\
@@ -811,22 +942,126 @@ fn edit_point_gap(plan: &GraphPlan, base: Option<&Evaluation>, changed_node: &st
     })
 }
 
+/// Copy completed steps before `changed_node` and mark them reused. Incomplete
+/// upstream steps are a gap: local recompute must not invent their outputs.
+fn reused_prefix(base: &Evaluation, changed_node: &str) -> Result<Vec<Step>, Gap> {
+    let Some(index) = base
+        .steps
+        .iter()
+        .position(|step| step.node_id == changed_node)
+    else {
+        return Ok(Vec::new());
+    };
+    for step in &base.steps[..index] {
+        if step.status != Status::Completed || step.output.is_none() || step.state_after.is_none() {
+            return Err(Gap {
+                node_id: Some(step.node_id.clone()),
+                message: format!(
+                    "cannot reuse upstream node {:?}: it did not complete with output and state",
+                    step.node_id
+                ),
+            });
+        }
+    }
+    Ok(base.steps[..index]
+        .iter()
+        .map(|step| {
+            let mut reused = step.clone();
+            reused.reused = true;
+            reused
+        })
+        .collect())
+}
+
+/// Upstream reused steps plus the VM seed for the edited node.
+///
+/// Non-entry local recompute **requires** the captured shared `seed` (context +
+/// identity). Older captures without a seed are rejected with an explicit gap —
+/// never silently started from JSON / `context_before` / plan.context, which can
+/// drop shared Luau table identity and compute wrong results. Entry-node edits
+/// still use the revision's plan input/state/context (no upstream identity).
+fn local_start(
+    plan: &GraphPlan,
+    base: Option<&Evaluation>,
+    changed_node: &str,
+) -> Result<(Vec<Step>, SeedSpecOwned), Gap> {
+    if changed_node == plan.entry {
+        return Ok((
+            Vec::new(),
+            SeedSpecOwned::Values {
+                incoming: plan.input.clone(),
+                state: plan.initial_state.clone(),
+                context: plan.context.clone(),
+            },
+        ));
+    }
+    let Some(base) = base else {
+        return Err(Gap {
+            node_id: Some(changed_node.into()),
+            message: "no captured input or state exists for the edited node".into(),
+        });
+    };
+    let Some(step) = base.steps.iter().find(|step| step.node_id == changed_node) else {
+        return Err(Gap {
+            node_id: Some(changed_node.into()),
+            message: "the captured evaluation never reached the edited node".into(),
+        });
+    };
+    let prefix = reused_prefix(base, changed_node)?;
+    let Some(seed) = step.seed.as_ref() else {
+        return Err(Gap {
+            node_id: Some(changed_node.into()),
+            message: "cannot safely locally recompute without a captured shared seed; this historical capture predates seed recording — re-run the graph (full replay) or capture a new observed run before node-save recompute"
+                .into(),
+        });
+    };
+    Ok((prefix, SeedSpecOwned::Shared(seed.clone())))
+}
+
+enum SeedSpecOwned {
+    Values {
+        incoming: Value,
+        state: Value,
+        context: Value,
+    },
+    Shared(Value),
+}
+
+impl SeedSpecOwned {
+    fn as_spec(&self) -> SeedSpec<'_> {
+        match self {
+            Self::Values {
+                incoming,
+                state,
+                context,
+            } => SeedSpec::Values {
+                incoming,
+                state,
+                context,
+            },
+            Self::Shared(seed) => SeedSpec::Shared(seed),
+        }
+    }
+}
+
 fn blocked_evaluation(
     plan: &GraphPlan,
     version: u64,
     started: Instant,
     gaps: Vec<Gap>,
+    mode: &str,
 ) -> Evaluation {
     Evaluation {
-        id: format!("replay:{}:{}", plan.id, version),
+        id: format!("{mode}:{}:{}", plan.id, version),
         version,
-        mode: "replay".into(),
+        mode: mode.into(),
         status: Status::Blocked,
         steps: Vec::new(),
         output: None,
         gaps,
         elapsed_ms: elapsed_ms(started),
         saved_at_ms: now_ms(),
+        executed_nodes: Vec::new(),
     }
 }
 
@@ -843,6 +1078,8 @@ fn step_from_trace(
         node_id,
         input,
         state_before,
+        context_before,
+        seed,
     } = started_trace
     else {
         return Err("replay completed a node that has no started trace".into());
@@ -852,6 +1089,8 @@ fn step_from_trace(
         status,
         input: input.clone(),
         state_before: state_before.clone(),
+        context_before: context_before.clone(),
+        seed: seed.clone(),
         output: completed.map(|result| result.output.clone()),
         state_after: completed.map(|result| result.state.clone()),
         branch: completed.and_then(|result| result.branch.clone()),
@@ -863,13 +1102,19 @@ fn step_from_trace(
     })
 }
 
-/// Replays `plan` by running `script_for_plan` once from the entry. Every node
-/// on the path is recomputed, including nodes before the edit, so shared table
-/// references in input, state and context are rebuilt. Host calls are answered
-/// only by the captured response for the node the runner has started, with the
-/// exact name, arguments and call order. Missing captures, unknown outcomes and
-/// an uncaptured branch produce `blocked` with explicit gaps. An error output
-/// is not reported as a completed round.
+/// Local evaluation of `plan`.
+///
+/// - `changed_node == None` → **replay**: run from the entry with the revision's
+///   input/state/context; every step is recomputed (`reused = false`).
+/// - `changed_node == Some(id)` → **recompute**: attach completed upstream steps
+///   from `base` as `reused = true`, seed the VM at the edited node from its
+///   captured shared `seed`, and execute only that node and its downstream.
+///   Missing seed on a non-entry edit is blocked (no silent JSON fallback).
+///   Upstream bodies are not re-run; see `executed_nodes`. Host answers come
+///   only from captures. Never runs cargo/tsc/full builds.
+///
+/// Missing captures, unknown outcomes and an uncaptured branch produce `blocked`
+/// with explicit gaps. An error output is not reported as a completed round.
 pub async fn evaluate(
     plan: &GraphPlan,
     base: Option<&Evaluation>,
@@ -880,32 +1125,55 @@ pub async fn evaluate(
 ) -> Result<Evaluation, crate::Error> {
     validate_plan(plan)?;
     let started = Instant::now();
+    let mode = if changed_node.is_some() {
+        "recompute"
+    } else {
+        "replay"
+    };
     if let Some(changed) = changed_node
         && let Some(gap) = edit_point_gap(plan, base, changed)
     {
-        return Ok(blocked_evaluation(plan, version, started, vec![gap]));
+        return Ok(blocked_evaluation(plan, version, started, vec![gap], mode));
     }
+
+    let (mut steps, script) = if let Some(changed) = changed_node {
+        match local_start(plan, base, changed) {
+            Ok((prefix, seed)) => {
+                let script = script_for_local_recompute(plan, changed, seed.as_spec())?;
+                (prefix, script)
+            }
+            Err(gap) => {
+                return Ok(blocked_evaluation(plan, version, started, vec![gap], mode));
+            }
+        }
+    } else {
+        (Vec::new(), script_for_plan(plan)?)
+    };
+    // Local recompute starts at the edit: every VM-started node is fresh.
+    let record_steps = true;
+    let mut executed_nodes = Vec::new();
+
     if cancel.is_cancelled() {
         return Ok(blocked_evaluation(
             plan,
             version,
             started,
             vec![Gap {
-                node_id: Some(plan.entry.clone()),
-                message: "replay cancelled before this node started".into(),
+                node_id: Some(changed_node.unwrap_or(plan.entry.as_str()).to_owned()),
+                message: format!("{mode} cancelled before this node started"),
             }],
+            mode,
         ));
     }
 
-    let script = script_for_plan(plan)?;
     let host = Arc::new(ReplayHost::new(calls));
     let observer = Arc::new(TraceObserver {
         host: host.clone(),
         events: Mutex::new(Vec::new()),
     });
-    let mode = CodeMode::new(host.clone(), replay_limits(calls.len()))
-        .map_err(|error| invalid(format!("replay could not start its bounded VM: {error}")))?;
-    let execution = mode
+    let code_mode = CodeMode::new(host.clone(), replay_limits(calls.len()))
+        .map_err(|error| invalid(format!("{mode} could not start its bounded VM: {error}")))?;
+    let execution = code_mode
         .execute_with_services(&script, cancel, observer.clone())
         .await;
     let traces = observer
@@ -914,7 +1182,6 @@ pub async fn evaluate(
         .expect("replay trace poisoned")
         .clone();
 
-    let mut steps = Vec::new();
     let mut gaps = Vec::new();
     let mut pending: Option<(NodeTrace, Instant, u64)> = None;
     let mut status = Status::Completed;
@@ -934,7 +1201,9 @@ pub async fn evaluate(
                 if pending.is_some() {
                     gaps.push(Gap {
                         node_id: None,
-                        message: "replay started a node before the previous node completed".into(),
+                        message: format!(
+                            "{mode} started a node before the previous node completed"
+                        ),
                     });
                     status = Status::Failed;
                     stopped = true;
@@ -948,7 +1217,7 @@ pub async fn evaluate(
                 let Some((started_trace, node_started, started_at_ms)) = pending.take() else {
                     gaps.push(Gap {
                         node_id: Some(node_id.clone()),
-                        message: "replay completed a node that has not started".into(),
+                        message: format!("{mode} completed a node that has not started"),
                     });
                     status = Status::Failed;
                     stopped = true;
@@ -962,7 +1231,7 @@ pub async fn evaluate(
                     gaps.push(Gap {
                         node_id: Some(node_id.clone()),
                         message: format!(
-                            "replay completed {node_id:?} while {started_id:?} was still running"
+                            "{mode} completed {node_id:?} while {started_id:?} was still running"
                         ),
                     });
                     status = Status::Failed;
@@ -971,27 +1240,30 @@ pub async fn evaluate(
                 }
                 let elapsed = observed_at.duration_since(node_started).as_secs_f64() * 1000.0;
                 let leftover = host.leftover(node_id);
-                steps.push(
-                    step_from_trace(
-                        &started_trace,
-                        Some(result),
-                        Status::Completed,
-                        None,
-                        started_at_ms,
-                        elapsed,
-                        *evidence,
-                    )
-                    .map_err(invalid)?,
-                );
                 if leftover > 0 {
                     gaps.push(Gap {
                         node_id: Some(node_id.clone()),
                         message: format!(
-                            "replay made fewer Host calls than captured; {leftover} captured response(s) were not used"
+                            "{mode} made fewer Host calls than captured; {leftover} captured response(s) were not used"
                         ),
                     });
                 }
-                output = Some(result.output.clone());
+                executed_nodes.push(node_id.clone());
+                if record_steps {
+                    steps.push(
+                        step_from_trace(
+                            &started_trace,
+                            Some(result),
+                            Status::Completed,
+                            None,
+                            started_at_ms,
+                            elapsed,
+                            *evidence,
+                        )
+                        .map_err(invalid)?,
+                    );
+                    output = Some(result.output.clone());
+                }
             }
         }
     }
@@ -1006,8 +1278,9 @@ pub async fn evaluate(
                     };
                     gaps.push(Gap {
                         node_id,
-                        message: "replay finished without a completed trace for the started node"
-                            .into(),
+                        message: format!(
+                            "{mode} finished without a completed trace for the started node"
+                        ),
                     });
                     status = Status::Failed;
                 }
@@ -1015,7 +1288,7 @@ pub async fn evaluate(
             Err(error) => {
                 let evidence = host.evidence();
                 let failure = if let Some(reason) = host.blocked() {
-                    // A missing or mismatched capture is a replay gap. No call was
+                    // A missing or mismatched capture is a local gap. No call was
                     // dispatched, so it must not be reported as an unknown effect.
                     RunFailure {
                         status: Status::Blocked,
@@ -1032,6 +1305,7 @@ pub async fn evaluate(
                         _ => plan.entry.clone(),
                     };
                     let message = format!("node {node_id:?}: {}", failure.message);
+                    executed_nodes.push(node_id.clone());
                     steps.push(
                         step_from_trace(
                             &started_trace,
@@ -1062,17 +1336,20 @@ pub async fn evaluate(
         }
     }
 
+    // A failed/blocked recompute still keeps reused upstream steps so the UI can
+    // show what was preserved versus what stopped at the edit point.
     let final_output = (status == Status::Completed).then_some(output).flatten();
     Ok(Evaluation {
-        id: format!("replay:{}:{}", plan.id, version),
+        id: format!("{mode}:{}:{}", plan.id, version),
         version,
-        mode: "replay".into(),
+        mode: mode.into(),
         status,
         steps,
         output: final_output,
         gaps,
         elapsed_ms: elapsed_ms(started),
         saved_at_ms: now_ms(),
+        executed_nodes,
     })
 }
 

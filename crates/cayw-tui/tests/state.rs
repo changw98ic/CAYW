@@ -1,4 +1,4 @@
-use cayw_tui::{App, Command, Decision, Editor, Focus, SessionView, sanitize};
+use cayw_tui::{App, Command, Decision, Editor, Focus, SessionView, ViewTab, sanitize};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Value, json};
 
@@ -461,4 +461,55 @@ fn rpc_commands_encode_shared_contract_for_create_prompt_approval_and_confirmed_
     }
     assert!(Command::Reconnect.rpc().is_none());
     assert!(Command::Quit.rpc().is_none());
+}
+
+#[test]
+fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_unknown_outputs() {
+    let mut app = app("idle");
+    app.apply_events(
+        "s1",
+        json!([
+            {"cursor": 1, "event": {"type": "attempt_started", "lease": {}}},
+            {"cursor": 2, "event": {"type": "tool_started", "call_id": "call-unknown"}}
+        ]),
+    )
+    .unwrap();
+    let mut snap = snapshot("needs_reconciliation", 2);
+    snap["messages"] = json!([
+        {
+            "role": "toolResult",
+            "tool_call_id": "call-unknown",
+            "tool_name": "execute_code",
+            "outcome_unknown": true,
+            "content": [],
+            "structured_content": {
+                "status": "completed",
+                "outcome_unknown": true,
+                "outputs": [
+                    {"output": {"type": "json", "value": {"path": "secret.txt", "content": "unverified content"}}}
+                ]
+            }
+        }
+    ]);
+    snap["unresolved_calls"] =
+        json!([{"call": {"id": "call-unknown", "name": "fs.write"}, "state": "outcome_unknown"}]);
+    app.upsert_snapshot(snap, false).unwrap();
+    let session = app.selected().unwrap();
+    assert_eq!(session.logs.len(), 2);
+    assert_eq!(session.files.len(), 1);
+    assert_eq!(session.files[0].status, "outcome_unknown");
+    assert!(!session.files[0].preview.contains("unverified content"));
+    assert!(session.diffs.is_empty());
+
+    app.focus = Focus::History;
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .is_empty()
+    );
+    assert_eq!(app.view, ViewTab::Files);
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+            .is_empty()
+    );
+    assert_eq!(app.view, ViewTab::Chat);
 }

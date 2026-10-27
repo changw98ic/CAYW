@@ -39,6 +39,9 @@ fn node(id: &str, source: &str) -> Node {
     }
 }
 
+/// Node-save `recompute` and undo `replay` must both preserve upstream context
+/// mutations and shared Luau table identity. Recompute seeds at the edited node
+/// from the captured shared seed and does not re-execute upstream bodies.
 async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointer: &str) {
     let mut b = node("b", b);
     b.input_pointer = pointer.into();
@@ -121,6 +124,7 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
     let captured = store.snapshot();
     let observed = captured.projects["execution"].evaluations[0].clone();
     assert_eq!(observed.status, Status::Completed);
+    assert_eq!(observed.mode, "observed");
     assert_eq!(observed.output, Some(json!(9)));
     assert_eq!(captured.projects["execution"].trace_error, None);
 
@@ -143,9 +147,21 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
         let project = &document.projects["execution"];
         let result = project.latest().unwrap();
         assert_eq!(result.status, Status::Completed, "{result:?}");
+        assert_eq!(result.mode, "recompute", "{result:?}");
+        assert!(result.id.starts_with("recompute:"), "{result:?}");
+        assert!(
+            result.steps[0].reused && !result.steps[1].reused,
+            "upstream reused; edited node recomputed: {result:?}"
+        );
+        assert_eq!(
+            result.executed_nodes,
+            vec!["b".to_owned()],
+            "upstream body must not re-run on node-save recompute: {result:?}"
+        );
         assert_eq!(result.output, Some(json!(expected)), "{result:?}");
         assert!(result.gaps.is_empty(), "{result:?}");
         assert_eq!(project.evaluations[0], observed);
+        assert_eq!(result.version, version + 1);
     }
     let document = store
         .undo(
@@ -161,7 +177,22 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
     let project = &document.projects["execution"];
     let result = project.latest().unwrap();
     assert_eq!(result.status, Status::Completed, "{result:?}");
-    assert_eq!(result.output, Some(json!(9)), "{result:?}");
+    assert_eq!(result.mode, "replay", "{result:?}");
+    assert!(result.id.starts_with("replay:"), "{result:?}");
+    assert!(
+        result.steps.iter().all(|step| !step.reused),
+        "undo full-entry replay recomputes every step: {result:?}"
+    );
+    assert_eq!(
+        result.executed_nodes,
+        vec!["a".to_owned(), "b".to_owned()],
+        "undo replay re-executes the full entry path: {result:?}"
+    );
+    assert_eq!(
+        result.output,
+        Some(json!(9)),
+        "undo full-entry replay keeps shared identity: {result:?}"
+    );
     assert!(result.gaps.is_empty(), "{result:?}");
     assert_eq!(project.evaluations[0], observed);
     assert_eq!(document.events, captured.events);

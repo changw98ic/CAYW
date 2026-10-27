@@ -309,4 +309,23 @@ impl AuditDb {
             serde_json::json!({"reason":reason}),
         )
     }
+    /// The latest exact decision controls automatic result reads. Task cleanup
+    /// also marks grants revoked, but only an explicit revoke has grant_revoked
+    /// evidence. A later approval replaces an earlier denial or revocation.
+    pub(crate) fn blocks_session_result_read(
+        &self,
+        session: &str,
+        capability: &str,
+        scope: &str,
+    ) -> Result<bool, RuntimeError> {
+        let db = lock(&self.connection);
+        let decision = db.query_row(
+            "SELECT g.state, EXISTS(SELECT 1 FROM runtime_audit a WHERE a.session=g.session AND a.kind='grant_revoked' AND json_extract(a.payload,'$.grant_id')=g.id) FROM runtime_grants g WHERE g.session=?1 AND g.capability=?2 AND g.scope=?3 ORDER BY g.rowid DESC LIMIT 1",
+            params![session, capability, scope],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+        ).optional()?;
+        Ok(decision.is_some_and(|(state, explicitly_revoked)| {
+            state == "denied" || state == "preparing" || explicitly_revoked
+        }))
+    }
 }

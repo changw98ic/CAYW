@@ -25,9 +25,33 @@ pub struct HeadlessConfig {
     scheduler: Scheduler,
     resources: crate::ResourcePolicy,
     content: Option<crate::ContentConfig>,
+    pub output_filter: Option<cayw_host::FilterOptions>,
+    background: Option<crate::BackgroundConfig>,
     profiles: BTreeMap<String, ProcessProfile>,
     permissions: Vec<Permission>,
     requests: Option<Requests>,
+    /// Absolute path to an external `mcpServers` JSON file (Claude Desktop / Cursor style).
+    /// Only absolute-path local stdio entries are installed into the Runtime Bridge.
+    mcp_servers_file: Option<PathBuf>,
+    /// Optional web search / fetch / extract options.
+    web_access: Option<cayw_web_access::WebAccessOptions>,
+    /// Optional vision capabilities limits.
+    vision: Option<cayw_vision::Limits>,
+    /// Optional Pi extension compatibility host options.
+    pi_compat: Option<PiCompatConfig>,
+}
+
+/// Configuration for the optional Pi extension compatibility host (`cayw-pi-compat`).
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PiCompatConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub fixture: bool,
+    #[serde(default)]
+    pub sample_extension: Option<PathBuf>,
+    #[serde(default)]
+    pub npm_hello: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -47,6 +71,8 @@ struct Budgets {
     max_run_time_ms: Option<u64>,
     max_capability_calls: Option<usize>,
     max_capability_bytes: Option<usize>,
+    /// Soft Host/tool result auto-externalize threshold; see RuntimeConfig.
+    auto_externalize_threshold_bytes: Option<usize>,
     host_wait_ms: Option<u64>,
     host_call_timeout_ms: Option<u64>,
 }
@@ -146,12 +172,51 @@ impl HeadlessConfig {
         if let Some(model) = &config.model {
             model.validate()?;
         }
+        if let Some(path) = &config.mcp_servers_file
+            && (!path.is_absolute() || !path.is_file())
+        {
+            return Err(invalid(
+                "mcp_servers_file must be an absolute existing regular file",
+            ));
+        }
         Ok(config)
     }
 
     /// Explicit model selection, without reading credentials or making a request.
     pub fn model(&self) -> Option<&ProviderConfig> {
         self.model.as_ref()
+    }
+
+    /// External MCP servers config file for the product import → prepare → Registry path.
+    pub fn mcp_servers_file(&self) -> Option<&Path> {
+        self.mcp_servers_file.as_deref()
+    }
+
+    /// Optional web-access options.
+    pub fn web_access(&self) -> Option<&cayw_web_access::WebAccessOptions> {
+        self.web_access.as_ref()
+    }
+
+    /// Optional vision limits.
+    pub fn vision(&self) -> Option<&cayw_vision::Limits> {
+        self.vision.as_ref()
+    }
+
+    /// Optional Pi extension compatibility options.
+    pub fn pi_compat(&self) -> Option<&PiCompatConfig> {
+        self.pi_compat.as_ref()
+    }
+
+    /// Optional background task configuration.
+    pub fn background(&self) -> Option<&crate::BackgroundConfig> {
+        self.background.as_ref()
+    }
+
+    /// Enable the optional Pi host before validating its capability permissions.
+    pub fn enable_pi_compat(&mut self) {
+        self.pi_compat
+            .get_or_insert_with(PiCompatConfig::default)
+            .enabled = true;
     }
 
     /// Validate the existing runtime/Host contract without starting a model or
@@ -163,8 +228,18 @@ impl HeadlessConfig {
         let mut config = RuntimeConfig {
             resources: self.resources,
             content: self.content,
+            background: self.background,
             ..RuntimeConfig::default()
         };
+        if let Some(bg) = &config.background {
+            bg.validate()
+                .map_err(|_| invalid("has invalid background config"))?;
+        }
+        if let Some(filter) = self.output_filter {
+            config.host.output_filter = Some(filter);
+        }
+        config.host.web_access = self.web_access;
+        config.host.vision = self.vision;
         if let Some(value) = self.scheduler.max_concurrent_runs {
             config.max_concurrent_runs = value;
         }
@@ -192,6 +267,9 @@ impl HeadlessConfig {
         }
         if let Some(value) = budgets.max_capability_bytes {
             config.max_capability_bytes = value;
+        }
+        if let Some(value) = budgets.auto_externalize_threshold_bytes {
+            config.auto_externalize_threshold_bytes = value;
         }
         if let Some(value) = budgets.host_wait_ms {
             config.codemode.host_wait = Duration::from_millis(value);
@@ -235,10 +313,13 @@ impl HeadlessConfig {
             .map_err(|_| invalid("has invalid runtime budgets"))?;
         // The catalog scope cannot authorize or execute. Host::new performs the
         // same profile/path validation used when opening the actual workspace.
-        let host = crate::cells::catalog_host(Path::new("/"), config.host.clone())
+        let mut catalog_config = config.host.clone();
+        if self.mcp_servers_file.is_some() || self.pi_compat.as_ref().is_some_and(|pi| pi.enabled) {
+            catalog_config.external = Some(std::sync::Arc::new(crate::bridge::CatalogOnly));
+        }
+        let host = crate::cells::catalog_host(Path::new("/"), catalog_config)
             .map_err(|_| invalid("has an invalid process profile or Host budget"))?;
-        let mut definitions = cayw_codemode::CapabilityHost::capabilities(&host);
-        definitions.extend(crate::content::definitions(config.content.as_ref()));
+        let definitions = crate::requests::operation_definitions_for_config(&config, &host);
         for permission in self.permissions {
             if !permission.arguments.is_object() {
                 return Err(invalid("permission arguments must be an object"));

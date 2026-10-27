@@ -11,8 +11,10 @@ members = [
     "crates/cayw-runtime",
     "crates/cayw-providers",
     "crates/cayw-plugins",
+    "crates/cayw-panel",
     "crates/cayw-remote",
     "crates/cayw-content",
+    "crates/cayw-context",
     "crates/cayw-tui",
     "crates/cayw-webui",
     "crates/cayw-data",
@@ -24,6 +26,14 @@ members = [
     "crates/cayw-requests",
     "crates/cayw-visual-editor",
     "crates/cayw-trace-debug",
+    "crates/cayw-codeintel",
+    "crates/cayw-run-inspector",
+    "crates/cayw-plannotator",
+    "crates/cayw-artifacts",
+    "crates/cayw-output-filter",
+    "crates/cayw-web-access",
+    "crates/cayw-vision",
+    "crates/cayw-pi-compat",
 ]
 
 [workspace.package]
@@ -35,6 +45,17 @@ repository = "https://github.com/changw98ic/CAYW"
 
 [workspace.dependencies]
 cayw-ai = { path = "crates/cayw-ai", version = "0.1.0" }
+cayw-codeintel = { path = "crates/cayw-codeintel", version = "0.1.0" }
+cayw-context = { path = "crates/cayw-context", version = "0.1.0" }
+cayw-run-inspector = { path = "crates/cayw-run-inspector", version = "0.1.0" }
+cayw-panel = { path = "crates/cayw-panel", version = "0.1.0" }
+cayw-plannotator = { path = "crates/cayw-plannotator", version = "0.1.0" }
+cayw-artifacts = { path = "crates/cayw-artifacts", version = "0.1.0" }
+cayw-output-filter = { path = "crates/cayw-output-filter", version = "0.1.0" }
+cayw-plugins = { path = "crates/cayw-plugins", version = "0.1.0" }
+cayw-web-access = { path = "crates/cayw-web-access", version = "0.1.0" }
+cayw-vision = { path = "crates/cayw-vision", version = "0.1.0" }
+cayw-pi-compat = { path = "crates/cayw-pi-compat", version = "0.1.0" }
 async-trait = "0.1"
 async-stream = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "tokio"] }

@@ -11,6 +11,47 @@ use std::{
 
 const STATE_LIMIT: u64 = 32 * 1024 * 1024;
 
+#[cfg(feature = "fault-injection")]
+thread_local! {
+    static STATE_SYNC_FAILURE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Fault tests may fail only the current thread's state-directory sync, from
+/// inside its `content_state_renamed` checkpoint. No later write is affected.
+#[cfg(feature = "fault-injection")]
+pub fn fail_current_state_directory_sync() -> bool {
+    STATE_SYNC_FAILURE.with(|failure| {
+        if failure.get().is_none() {
+            return false;
+        }
+        failure.set(Some(true));
+        true
+    })
+}
+
+fn state_directory_sync(root: &Dir, changed: Option<&Record>) -> Result<()> {
+    #[cfg(feature = "fault-injection")]
+    {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                STATE_SYNC_FAILURE.with(|failure| failure.set(None));
+            }
+        }
+        let _reset = Reset;
+        STATE_SYNC_FAILURE.with(|failure| failure.set(Some(false)));
+        content_checkpoint("content_state_renamed", changed);
+        if STATE_SYNC_FAILURE.with(|failure| failure.get() == Some(true)) {
+            return Err(Error::Io(std::io::Error::other(
+                "injected state directory sync failure after replacement",
+            )));
+        }
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    content_checkpoint("content_state_renamed", changed);
+    sync_dir(root)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum KeyState {
     Active,
@@ -51,10 +92,23 @@ impl State {
     }
 }
 
+struct TransactionLock {
+    file: File,
+}
+
+impl Drop for TransactionLock {
+    fn drop(&mut self) {
+        // A concurrent fork can inherit this open file description until exec.
+        // Closing only our descriptor would leave the completed transaction's
+        // lock held by that child. Each guard unlocks only its own acquired lock.
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
 pub(crate) struct LockedDirs<'a> {
     pub root: &'a Dir,
     pub objects: Dir,
-    _lock: File,
+    _lock: TransactionLock,
 }
 
 /// All cooperating processes serialize reads and writes through a separate lock handle.
@@ -142,6 +196,7 @@ impl ContentStore {
         let store = self;
         let limits = store.limits;
         let mut lock = store.lock()?;
+        let file = &mut lock.file;
         match store.root.symlink_metadata("objects") {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
             Ok(_) => return Err(Error::UnsafePath),
@@ -152,7 +207,7 @@ impl ContentStore {
             Err(e) => return Err(e.into()),
         }
         let mut initialized = Vec::new();
-        (&mut lock).take(64).read_to_end(&mut initialized)?;
+        Read::by_ref(file).take(64).read_to_end(&mut initialized)?;
         if !initialized.is_empty() && initialized != b"cayw-content-initialized-v1\n" {
             return Err(Error::Integrity);
         }
@@ -184,8 +239,8 @@ impl ContentStore {
             Err(e) => return Err(e),
         }
         if initialized.is_empty() {
-            lock.write_all(b"cayw-content-initialized-v1\n")?;
-            lock.sync_all()?;
+            file.write_all(b"cayw-content-initialized-v1\n")?;
+            file.sync_all()?;
             sync_dir(&store.root)?;
         }
         drop(lock);
@@ -235,6 +290,31 @@ impl ContentStore {
         self.transaction_inner(nonblocking, |state, dirs| {
             state.check_expected(name, expected)?;
             self.put_locked(state, dirs, name, bytes, None)
+        })
+    }
+
+    /// Confirm exact inspected records (including absence) under the transaction
+    /// lock and sync the current authority directory. This never puts content or
+    /// changes a revision; the host first inspects the actual stored state.
+    pub fn confirm_observed(&self, expected: &[(Id, Option<Record>)]) -> Result<()> {
+        self.transaction_inner(true, |state, dirs| {
+            for (name, expected) in expected {
+                if state.records.get(name) != expected.as_ref() {
+                    return Err(Error::Conflict {
+                        expected: expected
+                            .as_ref()
+                            .map_or(ExpectedRevision::Absent, Record::expected),
+                        actual: state
+                            .records
+                            .get(name)
+                            .map_or(ExpectedRevision::Absent, Record::expected),
+                    });
+                }
+                if let Some(record) = expected {
+                    self.read_content(dirs, record)?;
+                }
+            }
+            sync_dir(dirs.root)
         })
     }
 
@@ -291,10 +371,10 @@ impl ContentStore {
         let mut state = self.parse_state(&read_file(&self.root, "state.json", STATE_LIMIT)?)?;
         f(&mut state, &dirs)
     }
-    fn lock(&self) -> Result<File> {
+    fn lock(&self) -> Result<TransactionLock> {
         self.lock_inner(false)
     }
-    fn lock_inner(&self, nonblocking: bool) -> Result<File> {
+    fn lock_inner(&self, nonblocking: bool) -> Result<TransactionLock> {
         let mut opts = OpenOptions::new();
         opts.read(true).write(true).follow(FollowSymlinks::No);
         private_file_mode(&mut opts);
@@ -337,7 +417,7 @@ impl ContentStore {
         } else {
             fs2::FileExt::lock_exclusive(&lock)?;
         }
-        Ok(lock)
+        Ok(TransactionLock { file: lock })
     }
     fn parse_state(&self, bytes: &[u8]) -> Result<State> {
         self.parse_state_with(bytes, false)
@@ -417,8 +497,7 @@ impl ContentStore {
         write_stage(&self.root, ".state-stage", &bytes)?;
         content_checkpoint("content_state_staged", changed);
         self.root.rename(".state-stage", &self.root, "state.json")?;
-        content_checkpoint("content_state_renamed", changed);
-        sync_dir(&self.root).map_err(|e| match e {
+        state_directory_sync(&self.root, changed).map_err(|e| match e {
             Error::Io(io) => Error::CommitOutcomeUnknown(io),
             other => other,
         })?;

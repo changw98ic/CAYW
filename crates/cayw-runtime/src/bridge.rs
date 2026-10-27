@@ -30,13 +30,15 @@ pub(crate) fn is_external(name: &str) -> bool {
             | "mcp.call"
             | "mcp.resources.list"
             | "mcp.resources.read"
+            | "mcp.prompts.list"
+            | "mcp.prompts.get"
             | "skills.list"
             | "skills.read"
             | "search.query"
     )
 }
 
-struct CatalogOnly;
+pub(crate) struct CatalogOnly;
 #[async_trait]
 impl cayw_host::ExternalHost for CatalogOnly {
     async fn call(
@@ -51,8 +53,11 @@ impl cayw_host::ExternalHost for CatalogOnly {
     }
 }
 
-pub(crate) fn effective_host_config(config: &RuntimeConfig) -> cayw_host::HostConfig {
+pub fn effective_host_config(config: &RuntimeConfig) -> cayw_host::HostConfig {
     let mut host = config.host.clone();
+    if config.content.is_none() {
+        host.output_filter = None;
+    }
     if config.bridge.is_some() {
         host.external = Some(Arc::new(CatalogOnly));
     }
@@ -171,26 +176,32 @@ pub(crate) fn scoped_host(
     let gate = Arc::new(crate::permissions::Gate {
         scope: scope.clone(),
     });
-    let Some(origin) = &scope.bridge_origin else {
-        return base
-            .scoped(gate, scope.clone())
-            .map(|host| host.with_process_observer(scope.clone()));
+    let host = if let Some(origin) = &scope.bridge_origin {
+        let bridge = scope
+            .context
+            .inner
+            .config
+            .bridge
+            .as_ref()
+            .expect("origin requires Bridge");
+        let journal = Arc::new(Journal {
+            scope: scope.clone(),
+            origin: origin.clone(),
+            state: Mutex::default(),
+        });
+        let external = bridge.scoped(&scope.name, origin.context()?, journal)?;
+        base.scoped_external(gate, scope.clone(), external)?
+            .with_process_observer(scope.clone())
+    } else {
+        base.scoped(gate, scope.clone())?
+            .with_process_observer(scope.clone())
     };
-    let bridge = scope
-        .context
-        .inner
-        .config
-        .bridge
-        .as_ref()
-        .expect("origin requires Bridge");
-    let journal = Arc::new(Journal {
-        scope: scope.clone(),
-        origin: origin.clone(),
-        state: Mutex::default(),
-    });
-    let external = bridge.scoped(&scope.name, origin.context()?, journal)?;
-    base.scoped_external(gate, scope.clone(), external)
-        .map(|host| host.with_process_observer(scope.clone()))
+    let host = if let Some(content) = scope.context.inner.content.as_ref() {
+        host.with_session_content(content.clone(), scope.context.lease.session_id.clone())
+    } else {
+        host
+    };
+    Ok(host)
 }
 
 #[derive(Default)]

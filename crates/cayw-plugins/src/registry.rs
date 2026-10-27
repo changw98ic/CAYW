@@ -220,6 +220,37 @@ impl PluginRegistry {
         })
     }
 
+    /// Remove only the registry instance captured by this description. An old
+    /// source must never shut down a newly installed plugin with the same name.
+    pub fn unload_exact(
+        &self,
+        expected: &PluginDescription,
+    ) -> Result<PluginDescription, PluginError> {
+        let entry = {
+            let mut state = self.state.lock().expect("plugin registry poisoned");
+            let entry = state
+                .entries
+                .get(&expected.manifest.name)
+                .ok_or_else(|| PluginError::NotFound(expected.manifest.name.clone()))?;
+            if self.registry_id != expected.registry_id
+                || entry.generation != expected.generation
+                || entry.manifest != expected.manifest
+            {
+                return Err(PluginError::Unavailable(
+                    "loaded plugin identity changed".into(),
+                ));
+            }
+            let entry = state
+                .entries
+                .remove(&expected.manifest.name)
+                .expect("checked plugin entry");
+            entry.cancel.cancel();
+            entry
+        };
+        entry.plugin.shutdown();
+        Ok(expected.clone())
+    }
+
     /// Call whichever instance is registered under this name at first poll.
     /// Callers bound to a description must use `call_exact` instead.
     pub async fn call(

@@ -422,6 +422,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-artifacts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-bridge"
 version = "0.1.0"
 dependencies = [
@@ -461,6 +471,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-codeintel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-codemode"
 version = "0.1.0"
 dependencies = [
@@ -491,6 +511,15 @@ dependencies = [
  "tempfile",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "cayw-context"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -543,12 +572,18 @@ name = "cayw-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "cap-fs-ext 4.0.3",
  "cap-std 4.0.3",
  "cayw-ai",
+ "cayw-codeintel",
  "cayw-codemode",
+ "cayw-content",
  "cayw-data",
  "cayw-device",
+ "cayw-output-filter",
+ "cayw-vision",
+ "cayw-web-access",
  "cayw-workspace",
  "futures",
  "serde",
@@ -568,6 +603,51 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-output-filter"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "cayw-panel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "cayw-pi-compat"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cayw-ai",
+ "cayw-bridge",
+ "cayw-codemode",
+ "cayw-plugins",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "cayw-plannotator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -641,6 +721,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-run-inspector"
+version = "0.1.0"
+dependencies = [
+ "cayw-agent",
+ "cayw-ai",
+ "cayw-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-runtime"
 version = "0.1.0"
 dependencies = [
@@ -649,23 +742,31 @@ dependencies = [
  "base64 0.22.1",
  "cayw-agent",
  "cayw-ai",
+ "cayw-artifacts",
  "cayw-bridge",
  "cayw-cells",
  "cayw-codemode",
  "cayw-content",
+ "cayw-context",
  "cayw-core",
  "cayw-host",
  "cayw-ipc",
+ "cayw-pi-compat",
+ "cayw-plannotator",
  "cayw-plugins",
  "cayw-providers",
  "cayw-remote",
  "cayw-requests",
+ "cayw-run-inspector",
  "cayw-sources",
+ "cayw-vision",
+ "cayw-web-access",
  "futures",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -699,9 +800,11 @@ dependencies = [
  "cayw-agent",
  "cayw-ai",
  "cayw-cells",
+ "cayw-codeintel",
  "cayw-codemode",
  "cayw-core",
  "cayw-ipc",
+ "cayw-run-inspector",
  "cayw-runtime",
  "futures",
  "reqwest",
@@ -758,6 +861,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-vision"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cayw-ai",
+ "cayw-codemode",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "cayw-visual-editor"
 version = "0.1.0"
 dependencies = [
@@ -766,6 +884,7 @@ dependencies = [
  "cap-fs-ext 4.0.3",
  "cap-std 4.0.3",
  "cayw-ai",
+ "cayw-codeintel",
  "cayw-codemode",
  "cayw-host",
  "html5gum",
@@ -781,15 +900,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-web-access"
+version = "0.1.0"
+dependencies = [
+ "cayw-ai",
+ "html5gum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "cayw-webui"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
  "cayw-ipc",
+ "cayw-panel",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

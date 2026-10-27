@@ -99,6 +99,8 @@ fn initialized(path: &std::path::Path) -> std::sync::Arc<TraceStore> {
             node_id: "input".into(),
             input: json!({"value":4}),
             state_before: json!({"count":0}),
+            context_before: json!(null),
+            seed: None,
         },
     };
     let done = TraceEnvelope {

@@ -22,3 +22,7 @@ cargo +1.95.0 clippy -p cayw-codemode --all-targets --locked -- -D warnings
 `tests/regressions.rs` exercises dispatch after expensive argument preparation, bounded error messages and budget exhaustion. Its deep-value test launches the test executable as independent child processes and constructs 10,000-level arrays and objects through the public `CapabilityHost` API. It also checks rejection with an invalid sibling and with a tiny budget, and verifies that the returned audit can be copied, serialized and dropped safely. These are offline fixtures. macOS is the first-release platform. Results apply only to the macOS architecture and scenarios actually recorded.
 
 The runtime cannot preempt synchronous Rust work inside an uncooperative host, recover a host's own panic, or undo a host side effect. The host must honor cancellation and reconcile unknown effects before retrying.
+
+## Large tool results (F01/F03)
+
+When Runtime enables local `ContentStore` (#18), CodeMode scripts can call the host tools `result.store` / `result.get` / `result.batch_get` / `result.search` / `result.release` through `cayw.call`. Bodies live in the same Device content library as `content.read`/`content.put`; handles are session- or task-scoped. This is not a second executor — it extends the existing Host/CodeMode capability catalog. See `docs/validation/issue-33-f01-f03-result-handles.md`.

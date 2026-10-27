@@ -17,6 +17,10 @@ impl Runtime {
     pub fn list_plugins(&self) -> Vec<PluginDescription> {
         self.inner.registry.list()
     }
+    /// Access the shared PluginRegistry (e.g. for external compatibility hosts like PiCompatHost).
+    pub fn plugin_registry(&self) -> Arc<cayw_plugins::PluginRegistry> {
+        self.inner.registry.clone()
+    }
     pub async fn load_external(
         &self,
         config: cayw_plugins::ExternalConfig,

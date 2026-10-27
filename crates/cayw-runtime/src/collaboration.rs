@@ -135,6 +135,7 @@ pub struct PlanView {
     pub attempt_id: String,
     pub version: u64,
     pub previous_version: u64,
+    pub content_sha256: String,
     pub source: String,
     pub steps: Vec<PlanStep>,
     pub updated_at: u64,
@@ -622,7 +623,7 @@ fn validate_request(request: &str) -> Result<(), RuntimeError> {
         .map_err(RuntimeError::InvalidInput)
 }
 
-fn read_log(inner: &Inner, session: &str) -> Result<Vec<EventRecord>, RuntimeError> {
+pub(crate) fn read_log(inner: &Inner, session: &str) -> Result<Vec<EventRecord>, RuntimeError> {
     let snapshot = inner.store.snapshot(session)?;
     let mut cursor = 0u64;
     let mut events = Vec::new();
@@ -984,16 +985,21 @@ impl Runtime {
             Some(task_id) => latest_plan(&events, &task_id)?,
             None => latest_any_plan(&events)?,
         };
-        Ok(stored.map(|stored| PlanView {
-            session_id: session.into(),
-            task_id: stored.update.task_id,
-            attempt_id: stored.update.attempt_id,
-            version: stored.update.version,
-            previous_version: stored.update.previous_version,
-            source: stored.update.source,
-            steps: stored.update.steps,
-            updated_at: stored.timestamp,
-            cursor: stored.cursor,
-        }))
+        stored
+            .map(|stored| {
+                Ok(PlanView {
+                    session_id: session.into(),
+                    task_id: stored.update.task_id,
+                    attempt_id: stored.update.attempt_id,
+                    version: stored.update.version,
+                    previous_version: stored.update.previous_version,
+                    content_sha256: crate::plannotator::plan_content_sha(&stored.update.steps)?,
+                    source: stored.update.source,
+                    steps: stored.update.steps,
+                    updated_at: stored.timestamp,
+                    cursor: stored.cursor,
+                })
+            })
+            .transpose()
     }
 }

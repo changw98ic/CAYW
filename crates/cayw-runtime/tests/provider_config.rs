@@ -294,3 +294,31 @@ async fn host_selected_deployments_accept_prefix_host_and_port() {
         assert!(config.into_runtime_config().is_ok());
     }
 }
+
+#[test]
+fn headless_config_loads_optional_web_access_and_vision() {
+    let raw = json!({
+        "web_access": {
+            "search": "fixture",
+            "limits": {
+                "max_search_limit": 5,
+                "max_body_bytes": 1048576,
+                "max_extract_chars": 50000
+            }
+        },
+        "vision": {
+            "input_bytes": 4194304,
+            "output_bytes": 4194304,
+            "max_image_bytes": 8388608
+        }
+    });
+    let config = load(raw).expect("load headless with web and vision");
+    assert!(config.web_access().is_some());
+    assert!(config.vision().is_some());
+
+    let runtime_config = config
+        .into_runtime_config()
+        .expect("convert to runtime config");
+    assert!(runtime_config.host.web_access.is_some());
+    assert!(runtime_config.host.vision.is_some());
+}

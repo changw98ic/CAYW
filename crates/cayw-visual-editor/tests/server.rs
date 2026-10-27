@@ -70,6 +70,7 @@ impl Fixture {
             framework: None,
             node: "node".into(),
             companion: cayw_visual_editor::default_companion(),
+            codeintel: None,
         };
         let handle = start(config).await.expect("editor starts");
         let client = reqwest::Client::builder()
@@ -943,6 +944,7 @@ async fn nested_uppercase_page_redirects_the_root_alias() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await
     .expect("uppercase nested page starts");
@@ -1006,6 +1008,7 @@ async fn state_directory_alias_is_refused_before_creating_inside_the_project() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await;
     assert!(
@@ -1033,6 +1036,7 @@ async fn state_directory_inside_the_project_is_refused() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await;
     assert!(error.is_err());
@@ -1054,6 +1058,7 @@ async fn retained_unknown_outcome_refuses_startup() {
         framework: None,
         node: "node".into(),
         companion: cayw_visual_editor::default_companion(),
+        codeintel: None,
     })
     .await;
     assert!(
@@ -1112,4 +1117,93 @@ async fn cli_prints_only_the_two_urls_and_serves_health() {
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn save_publishes_to_codeintel_bridge_and_preserves_write_outcome() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let state = tempfile::tempdir().expect("state tempdir");
+    let outside = write_fixture(project.path());
+    let bridge = cayw_codeintel::SymbolVersionBridge::new();
+    let config = EditorConfig {
+        project_root: project.path().to_path_buf(),
+        page: "index.html".to_owned(),
+        state_dir: state.path().to_path_buf(),
+        editor_addr: "127.0.0.1:0".parse().expect("editor address"),
+        preview_addr: "127.0.0.1:0".parse().expect("preview address"),
+        token: TOKEN.to_owned(),
+        framework: None,
+        node: "node".into(),
+        companion: cayw_visual_editor::default_companion(),
+        codeintel: Some(bridge.clone()),
+    };
+    let handle = start(config).await.expect("editor starts");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    let fixture = Fixture {
+        project,
+        _outside: outside,
+        state,
+        handle,
+        client,
+    };
+
+    // Initially, no version is published in the shared bridge for index.html.
+    assert!(bridge.file_version("index.html").unwrap().is_none());
+
+    // Make an edit and save.
+    let document = fixture.document().await;
+    let original_sha = document["snapshot"]["sha256"]
+        .as_str()
+        .expect("sha")
+        .to_owned();
+    let heading = node_id(find_node(&document, "h1")).to_owned();
+    fixture
+        .operate(json!({"kind": "text", "id": heading, "text": "Bridge published heading 1"}))
+        .await;
+
+    let (status, saved) = fixture
+        .post("/api/save", json!({"expected_sha256": original_sha}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert!(!saved["dirty"].as_bool().expect("dirty"));
+
+    // Verify bridge has updated version and sha.
+    let fv1 = bridge
+        .file_version("index.html")
+        .unwrap()
+        .expect("file version after save 1");
+    assert_eq!(fv1.version, 1);
+    let disk_source = fixture.source();
+    assert!(disk_source.contains("Bridge published heading 1"));
+    let expected_sha1 = cayw_codeintel::content_sha256(disk_source.as_bytes());
+    assert_eq!(fv1.content_sha256, expected_sha1);
+
+    // Second edit and save: monotonic version increment.
+    let document2 = fixture.document().await;
+    let sha2 = document2["snapshot"]["sha256"]
+        .as_str()
+        .expect("sha")
+        .to_owned();
+    let heading2 = node_id(find_node(&document2, "h1")).to_owned();
+    fixture
+        .operate(json!({"kind": "text", "id": heading2, "text": "Bridge published heading 2"}))
+        .await;
+
+    let (status, saved2) = fixture
+        .post("/api/save", json!({"expected_sha256": sha2}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved2}");
+
+    let fv2 = bridge
+        .file_version("index.html")
+        .unwrap()
+        .expect("file version after save 2");
+    assert_eq!(fv2.version, 2);
+    let disk_source2 = fixture.source();
+    assert!(disk_source2.contains("Bridge published heading 2"));
+    let expected_sha2 = cayw_codeintel::content_sha256(disk_source2.as_bytes());
+    assert_eq!(fv2.content_sha256, expected_sha2);
 }

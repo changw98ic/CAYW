@@ -11,6 +11,7 @@ import os
 import platform
 from pathlib import Path
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -57,6 +58,7 @@ def wait_for(predicate, stage):
             captures[stage] = latest
             return latest
         time.sleep(0.05)
+    captures[stage + "_timeout"] = latest
     raise AssertionError(f"{stage} timed out:\n{latest}")
 
 def keys(*values):
@@ -79,6 +81,13 @@ def rpc(method, params):
             return response["result"]
         call("h", "hello", {"token":environment["CAYW_IPC_TOKEN"]})
         return call("smoke-check", method, params)
+
+
+def model_records(events):
+    return [record["event"]["data"] for record in events
+            if record["event"].get("type") == "host"
+            and record["event"].get("kind") == "model_request"]
+
 
 try:
     assert fixture.stdout is not None
@@ -110,6 +119,36 @@ try:
     wait_for(lambda screen: "fs.write" in screen and "Approval " in screen, "tool_and_approval")
     keys("M-o")
     wait_for(lambda screen: "fixture completed" in screen and "Message · Enter send" in screen, "approved_and_completed")
+    completed_sessions = rpc("session.list", {})
+    completed = next(session for session in completed_sessions if session["label"] == "Terminal fixture")
+    report["completed_model_records"] = model_records(rpc("session.events", {"session_id":completed["id"], "after":0, "limit":1000}))
+    report["completed_context_overview"] = rpc("session.context_overview", {"session_id":completed["id"]})
+    completed_records = report["completed_model_records"]
+    finished = [record for record in completed_records if record["record"] == "finished"]
+    assert len(finished) >= 2
+    assert all(record["terminal"] == "completed" and record["settled_tokens"] == 4 for record in finished)
+    assert not any(record["record"] == "rejected" for record in completed_records)
+    done = [record["observation"] for record in completed_records
+            if record["record"] == "observed" and record["observation"]["event"] == "done"]
+    assert len(done) == len(finished)
+    assert all(record["usage_status"] == "reported" and record["usage"]["input"] == 2
+               and record["usage"]["output"] == 2 and record["usage"]["total_tokens"] == 4 for record in done)
+    overview = report["completed_context_overview"]
+    assert overview["budget_unknown"] is False and overview["ledger_reserved_tokens"] == 0
+    assert overview["request_count"] == len(finished) and overview["ledger_settled_tokens"] == 4 * len(finished)
+    assert overview["cost"]["status"] == "unknown"
+    keys("M-4")
+    wait_for(lambda screen: "Logs (" in screen and "capability_settled · fs.write · fixture-output.txt" in screen, "logs_view")
+    keys("M-2")
+    wait_for(lambda screen: "Files (1)" in screen and "fixture-output.txt" in screen and "offline terminal verification" in screen, "files_view")
+    keys("M-3")
+    wait_for(lambda screen: "Diff (1)" in screen and "+++ b/fixture-output.txt" in screen and "+offline terminal verification" in screen, "diff_view")
+    keys("M-1")
+    wait_for(lambda screen: "Chat" in screen and "fixture completed" in screen, "chat_view_restored")
+    keys("F1")
+    wait_for(lambda screen: "Help & Shortcuts" in screen, "help_dialog")
+    keys("Escape")
+    wait_for(lambda screen: "Help & Shortcuts" not in screen and "fixture completed" in screen, "help_closed")
     text("kept draft")
     keys("C-r")
     wait_for(lambda screen: "kept draft" in screen and "Sessions refreshed." in screen, "reconnected_with_draft")
@@ -134,6 +173,9 @@ try:
     report["terminal_events"] = rpc("session.events", {"session_id":active["id"], "after":0, "limit":1000})
     report["tasks"] = rpc("session.tasks", {"session_id":active["id"]})
     assert len(report["tasks"]) == 2
+    assert sorted(task["state"] for task in report["tasks"]) == ["cancelled", "completed"]
+    report["final_model_records"] = model_records(report["terminal_events"])
+    report["final_context_overview"] = rpc("session.context_overview", {"session_id":active["id"]})
     output_file = Path(fixture_info["workspace"]) / "fixture-output.txt"
     report["actual_tool_output"] = output_file.read_text()
     assert report["actual_tool_output"] == "offline terminal verification"
@@ -143,12 +185,18 @@ try:
     report["result"] = "passed"
     print(json.dumps({"result":"passed","stages":list(captures),"evidence":str(output_dir / "panes.json")}))
 finally:
-    if captures:
-        (output_dir / "panes.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
-    tmux("kill-server", check=False)
-    fixture.terminate()
+    cleanup = subprocess.run(["tmux", "-L", socket_name, "kill-server"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+    remaining = subprocess.run(["tmux", "-L", socket_name, "list-sessions"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+    fixture.send_signal(signal.SIGINT)
     try:
         fixture.wait(timeout=3)
     except subprocess.TimeoutExpired:
         fixture.kill()
         fixture.wait(timeout=3)
+    report["cleanup"] = {"tmux_socket":socket_name, "kill_server_exit_code":cleanup.returncode,
+                         "remaining_sessions_exit_code":remaining.returncode,
+                         "fixture_pid":fixture.pid, "fixture_exit_code":fixture.returncode,
+                         "complete":remaining.returncode != 0 and fixture.poll() is not None}
+    report["source_sha256_after"] = {str(path.relative_to(source_root)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(source_files)}
+    report["source_unchanged_during_run"] = report["source_sha256"] == report["source_sha256_after"]
+    (output_dir / "panes.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))

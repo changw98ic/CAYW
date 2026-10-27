@@ -15,11 +15,13 @@
   };
   var MODE_LABELS = {
     observed: '原始记录（observed）',
-    replay: '本地重放（replay）'
+    replay: '本地重放（replay）',
+    recompute: '局部重算（recompute）'
   };
   var MODE_DETAILS = {
     observed: '原始记录（observed）：数据来自一次实际 Runtime 执行。',
-    replay: '本地重放（replay）：只用本轮捕获的 Host 响应在本地重新求值。'
+    replay: '本地重放（replay）：从入口整图本地重放，只用捕获的 Host 响应。',
+    recompute: '局部重算（recompute）：从修改节点起局部重算受影响下游；上游步骤复用且不重跑，只用捕获的 Host 响应，不跑整项目构建。'
   };
 
   var activeControllers = new Set();
@@ -131,7 +133,7 @@
   }
 
   function modeBadge(mode) {
-    var kind = mode === 'observed' ? 'mode-observed' : mode === 'replay' ? 'mode-replay' : 'badge-none';
+    var kind = mode === 'observed' ? 'mode-observed' : mode === 'replay' ? 'mode-replay' : mode === 'recompute' ? 'mode-recompute' : 'badge-none';
     var node = badge(modeLabel(mode), kind);
     node.title = MODE_DETAILS[mode] || '';
     return node;
@@ -167,6 +169,25 @@
       return clip(String(value), limit || 480);
     }
   }
+
+
+  function hangFor(project, nodeId) {
+    if (!project || !project.symbol_hangs || !nodeId) return null;
+    return project.symbol_hangs[nodeId] || null;
+  }
+
+  function formatHang(hang) {
+    if (!hang || !hang.file) return null;
+    var parts = [hang.file.path + ' @v' + hang.file.version];
+    if (hang.symbol && hang.symbol.name) {
+      parts.push(hang.symbol.kind ? (hang.symbol.kind + ' ' + hang.symbol.name) : hang.symbol.name);
+    }
+    if (hang.file.content_sha256) {
+      parts.push('sha256:' + String(hang.file.content_sha256).slice(0, 12) + '…');
+    }
+    return parts.join(' · ');
+  }
+
 
   function formatClock(ms) {
     if (typeof ms !== 'number' || !isFinite(ms) || ms <= 0) return '—';
@@ -819,7 +840,7 @@
   function renderControls() {
     var evaluation = currentEvaluation();
     var modeNode = ui['evaluation-mode'];
-    modeNode.className = 'badge ' + (evaluation && evaluation.mode === 'observed' ? 'mode-observed' : evaluation && evaluation.mode === 'replay' ? 'mode-replay' : 'badge-none');
+    modeNode.className = 'badge ' + (evaluation && evaluation.mode === 'observed' ? 'mode-observed' : evaluation && evaluation.mode === 'replay' ? 'mode-replay' : evaluation && evaluation.mode === 'recompute' ? 'mode-recompute' : 'badge-none');
     modeNode.textContent = evaluation ? modeLabel(evaluation.mode) : '—';
     modeNode.title = evaluation && MODE_DETAILS[evaluation.mode] ? MODE_DETAILS[evaluation.mode] : '';
 
@@ -907,6 +928,13 @@
       card.append(el('h3', null, '节点 ' + item.node + (nodeLabels.has(item.node) ? ' · ' + nodeLabels.get(item.node) : '')));
       card.append(el('p', 'fact-meta', '状态：' + statusLabel(item.status) + ' · 耗时：' + formatMs(item.elapsed) + ' · 证据游标：' + (item.evidence === null || item.evidence === undefined ? '无' : item.evidence)));
       card.append(el('p', 'fact-error', clip(String(item.message).split('\n')[0], 300)));
+      var errHang = hangFor(project, item.node);
+      if (errHang) {
+        card.append(el('p', 'fact-meta', '工程挂载：' + (formatHang(errHang) || '—')));
+        if (errHang.location) {
+          card.append(el('p', 'fact-meta', '证据位置：' + errHang.file.path + ' bytes [' + errHang.location.byte_start + ',' + errHang.location.byte_end + ') @v' + errHang.location.file_version));
+        }
+      }
       card.append(el('p', 'fact-meta', '关键输入：' + summaryJson(item.input, 520)));
       card.append(el('p', 'fact-meta', '前置状态：' + summaryJson(item.state, 420)));
       if (item.branch !== null && item.branch !== undefined) {
@@ -975,8 +1003,11 @@
     if (evaluation && evaluation.mode === 'observed') {
       return { label: '已捕获', kind: 'mode-observed', detail: '该步骤来自原始 Runtime 执行记录。' };
     }
+    if (evaluation && evaluation.mode === 'recompute') {
+      return { label: '局部重算', kind: 'mode-recompute', detail: '该步骤由局部重算得到，只使用捕获到的 Host 响应。' };
+    }
     if (evaluation && evaluation.mode === 'replay') {
-      return { label: '本地计算', kind: 'mode-replay', detail: '该步骤由本地重放计算，只使用捕获到的 Host 响应。' };
+      return { label: '本地重放', kind: 'mode-replay', detail: '该步骤由入口整图本地重放计算，只使用捕获到的 Host 响应。' };
     }
     return { label: '方式未知', kind: 'badge-none', detail: '这一轮没有标注步骤来源。' };
   }
@@ -1728,6 +1759,20 @@
     else factRow(facts, '证据游标', '无');
     factRow(facts, '复用', step ? (step.reused ? '是（复用上轮结果）' : '否') : '—');
     factRow(facts, '实现', node.implementation || '—');
+    var hang = hangFor(project, node.id);
+    if (hang) {
+      factRow(facts, '工程挂载', formatHang(hang) || '—');
+      if (hang.symbol && hang.symbol.wire) {
+        factRow(facts, '符号标识', hang.symbol.wire);
+      } else if (hang.symbol) {
+        factRow(facts, '符号', (hang.symbol.kind || '') + ' ' + (hang.symbol.name || ''));
+      }
+      if (hang.location) {
+        factRow(facts, '源码位置', hang.file.path + ' [' + hang.location.byte_start + ',' + hang.location.byte_end + ') @v' + hang.location.file_version);
+      }
+    } else {
+      factRow(facts, '工程挂载', '未挂载（无索引路径或非工程实现）');
+    }
     factRow(facts, '模块', node.module || '未命名');
     factRow(facts, '输入指针', node.input_pointer ? node.input_pointer : '（完整输入）');
 
@@ -2219,9 +2264,9 @@
     var evaluation = currentEvaluation();
     if (evaluation) {
       var modeCard = el('article', 'fact-item is-session');
-      modeCard.append(el('h3', null, evaluation.mode === 'replay' ? '本地重放' : evaluation.mode === 'observed' ? '原始记录' : '运行方式未知'));
+      modeCard.append(el('h3', null, evaluation.mode === 'recompute' ? '局部重算' : evaluation.mode === 'replay' ? '本地重放' : evaluation.mode === 'observed' ? '原始记录' : '运行方式未知'));
       modeCard.append(el('p', null, MODE_DETAILS[evaluation.mode] || '这一轮没有标注运行方式。'));
-      modeCard.append(el('p', 'fact-meta', '重放只使用捕获到的 Host 响应；缺失的分支或响应会显示为缺口，不会静默成功。'));
+      modeCard.append(el('p', 'fact-meta', '本地重放与局部重算都只使用捕获到的 Host 响应；缺失的分支或响应会显示为缺口，不会静默成功。'));
       cards.push(modeCard);
     }
     var gaps = (evaluation && Array.isArray(evaluation.gaps) ? evaluation.gaps : []).slice();

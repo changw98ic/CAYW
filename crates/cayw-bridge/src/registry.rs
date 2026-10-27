@@ -23,6 +23,7 @@ struct Metadata {
     skills: BTreeMap<String, SkillSpec>,
     /// Explicit manifest metadata keyed by the opaque resource URI.
     resources: BTreeMap<String, ResourceSpec>,
+    prompts: BTreeMap<String, PromptSpec>,
     search: bool,
     bytes: usize,
 }
@@ -87,6 +88,7 @@ impl Registry {
             limits.max_tools_per_source,
             limits.max_skills_per_source,
             limits.max_resources_per_source,
+            limits.max_prompts_per_source,
             limits.max_metadata_bytes,
             limits.max_all_metadata_bytes,
             limits.max_argument_bytes,
@@ -249,7 +251,7 @@ impl Registry {
         identity: SourceIdentity,
         manifest: Manifest,
     ) -> Result<Metadata, CapabilityError> {
-        if !name(&identity.id)
+        if !source_name(&identity.id)
             || identity.version.is_empty()
             || identity.version.len() > 256
             || identity.origin.is_empty()
@@ -259,6 +261,7 @@ impl Registry {
             || manifest.tools.len() > self.0.limits.max_tools_per_source
             || manifest.skills.len() > self.0.limits.max_skills_per_source
             || manifest.resources.len() > self.0.limits.max_resources_per_source
+            || manifest.prompts.len() > self.0.limits.max_prompts_per_source
         {
             return Err(failure("invalid source identity or manifest count"));
         }
@@ -319,6 +322,18 @@ impl Registry {
                 return Err(failure("invalid or duplicate resource metadata"));
             }
         }
+        let mut prompts = BTreeMap::new();
+        for spec in manifest.prompts {
+            if let Some(schema) = &spec.arguments_schema {
+                value_size(schema, self.0.limits.max_metadata_bytes)?;
+            }
+            if !name(&spec.name)
+                || spec.description.len() > 8192
+                || prompts.insert(spec.name.clone(), spec).is_some()
+            {
+                return Err(failure("invalid or duplicate prompt metadata"));
+            }
+        }
         Ok(Metadata {
             provenance: Provenance {
                 registry_incarnation: self.0.incarnation.clone(),
@@ -329,6 +344,7 @@ impl Registry {
             tools,
             skills,
             resources,
+            prompts,
             search: manifest.search,
             bytes,
         })
@@ -566,7 +582,18 @@ impl Registry {
                     }
                     Ok(value)
                 }
-                Operation::Invoke | Operation::ReadSkill | Operation::Search | Operation::ReadResource => {
+                Operation::ListPrompts => {
+                    let mut value = json!({"prompts":[]});
+                    for prompt in capture.metadata.prompts.values().filter(|prompt| visible(Visibility::PromptName, &prompt.name)) {
+                        value["prompts"].as_array_mut().expect("prompt list").push(json!({
+                            "name":prompt.name, "description":prompt.description,
+                            "arguments_schema":prompt.arguments_schema, "source":capture.metadata.provenance
+                        }));
+                        value_size(&value, self.0.limits.max_result_bytes)?;
+                    }
+                    Ok(value)
+                }
+                Operation::Invoke | Operation::ReadSkill | Operation::Search | Operation::ReadResource | Operation::GetPrompt => {
                     let source_operation = match operation {
                         Operation::Invoke => {
                             let tool = capture.metadata.tools.get(target).ok_or_else(|| failure("tool unavailable"))?;
@@ -595,6 +622,18 @@ impl Registry {
                                 || !visible(Visibility::ResourceContent, target)
                             { return Err(failure("resource content access denied")); }
                             SourceOperation::ReadResource { uri: resource.uri.clone() }
+                        }
+                        Operation::GetPrompt => {
+                            if !capture.metadata.prompts.contains_key(target)
+                                || !visible(Visibility::PromptName, target)
+                                || !visible(Visibility::PromptContent, target)
+                            {
+                                return Err(failure("prompt access denied"));
+                            }
+                            SourceOperation::GetPrompt {
+                                name: target.into(),
+                                arguments: arguments.clone(),
+                            }
                         }
                         _ => unreachable!(),
                     };

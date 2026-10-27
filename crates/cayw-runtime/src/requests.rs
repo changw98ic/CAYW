@@ -91,11 +91,23 @@ pub(crate) fn definitions(inner: &Inner) -> Vec<ToolDefinition> {
 /// advertised catalog and the task request binding, or a policy could name an
 /// operation that execution cannot resolve (or bind a weaker schema).
 pub(crate) fn operation_definitions(inner: &Inner, host: &cayw_host::Host) -> Vec<ToolDefinition> {
+    operation_definitions_for_config(&inner.config, host)
+}
+
+pub(crate) fn operation_definitions_for_config(
+    config: &crate::RuntimeConfig,
+    host: &cayw_host::Host,
+) -> Vec<ToolDefinition> {
     let mut definitions = host.capabilities();
     definitions.extend(crate::values::definitions());
     definitions.extend(crate::collaboration::definitions());
-    definitions.extend(crate::children::definitions(inner));
-    definitions.extend(crate::content::definitions(inner.config.content.as_ref()));
+    definitions.extend(crate::children::definitions(config));
+    definitions.extend(crate::content::definitions(config.content.as_ref()));
+    definitions.extend(crate::background::definitions(
+        config.background.as_ref(),
+        &config.host.profiles,
+    ));
+    definitions.extend(crate::results::definitions(config.content.as_ref()));
     definitions
 }
 fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {
@@ -141,6 +153,11 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
     let identity = json!({
         "base_policy": base_policy,
         "local_agents": local_agents,
+        "background": inner.config.background.as_ref().map(|c| json!({
+            "max_tasks": c.max_tasks,
+            "max_log_bytes": c.max_log_bytes,
+            "max_retained_finished": c.max_retained_finished,
+        })),
         "cells": {
             "max_cells": cells.max_cells,
             "max_running": cells.max_running,

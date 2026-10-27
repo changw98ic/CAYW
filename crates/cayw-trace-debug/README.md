@@ -4,6 +4,11 @@ Trace Debug 是独立、可选的本机调试插件。它通过认证 IPC 读取
 
 普通 Runtime 不依赖此包。关闭插件不会取消原任务。插件不直接打开 Core 或 Cells 数据库，也不持有业务任务写入接口。
 
+## F16 符号挂载（SLICE E）
+
+节点可通过 `implementation` 挂到宿主 [`cayw-codeintel`](../cayw-codeintel/README.md) 已发布的工程文件/符号/内容版本（例如 `examples/demo.rs::condition`）。默认 `TraceStore::open` / `open_with_workspace`（或 CLI `--workspace` / `CAYW_WORKSPACE`）会挂上工程根；`ingest` / 内容修订先经 codeintel 生产者把工程文件写入桥，再经 `SymbolGraphLinker` 写入并持久化 `Project::symbol_hangs`；也可 `open_with_bridge` 注入共享桥接，供 `/api/state` 与网页节点详情渲染；桥接 `publish_file` 版本变化后调用 `refresh_symbol_hangs`。失败步骤的错误摘要携带同一挂载与 `evidence_cursor`，并可写入带回链的 diagnostics。非路径实现（如 `luau`）不挂载；未在桥接中发布的路径不会虚构关联。详见 `docs/sources/f16-symbol-graph-link.md`。
+
+
 ## 启动
 
 在仓库根目录构建一次：
@@ -102,9 +107,9 @@ return {
 
 ## 保存、对比与边界
 
-保存会先持久化新内容版本，再在插件内复用 `cayw-codemode::CodeMode` 求值。每轮从该版本的输入、初始状态和上下文出发，在同一次 Luau 运行中重新计算整条路径。这样会保留上游对上下文的修改，以及输入、状态和上下文共享同一对象的关系。前置节点也会重新计算，步骤不标为复用；外部调用仍只读取准确匹配的捕获响应。输入映射、参数和条件都参与本轮计算。保存路径不会启动 Cargo、类型检查、构建或全量测试。
+保存会先持久化新内容版本，再在插件内复用 `cayw-codemode::CodeMode` 求值。**节点保存**走局部重算（`recompute`）：上游已完成步骤标为 `reused` 且不重跑其函数体；VM 从编辑节点用捕获的共享 seed（context + 表身份）起算，并更新受影响下游。**撤销**等无修改点路径走入口整图本地重放（`replay`），步骤不标复用。外部调用仍只读取准确匹配的捕获响应。输入映射、参数和条件都参与本轮计算。保存路径不会启动 Cargo、类型检查、构建或全量测试。
 
-每次结果明确标记：`observed` 是原始 Runtime 记录；`replay` 是本地重新计算。后者没有真实 Host 执行句柄。外部能力只能返回原始捕获且名称、参数、顺序一致的响应。缺少响应时停止并显示具体缺口。原运行未结束或存在未知业务效果时，不自动重放。
+每次结果明确标记：`observed` 是原始 Runtime 记录；`replay` 是从入口的本地整图重放；`recompute` 是节点保存后的局部重算（上游不重跑，seed 恢复 context/共享身份）。后两者都没有真实 Host 执行句柄。外部能力只能返回原始捕获且名称、参数、顺序一致的响应。缺少响应时停止并显示具体缺口。原运行未结束或存在未知业务效果时，不自动重算。
 
 原始事件时间戳用于近似显示真实节点和调用耗时。本地计算使用单调时钟计时。网页更新还受到事件传输和长轮询周期影响，不能把服务端投影耗时当成浏览器呈现耗时。
 

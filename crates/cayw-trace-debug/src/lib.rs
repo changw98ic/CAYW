@@ -2,13 +2,17 @@
 pub mod capture;
 pub mod engine;
 pub mod server;
+pub mod symbol_graph;
 pub mod types;
 
+pub use symbol_graph::{SymbolGraphLinker, feed_plan_from_workspace, parse_implementation};
 pub use types::*;
 
 use cayw_ai::CancellationToken;
+use cayw_codeintel::SymbolVersionBridge;
 use cayw_core::EventRecord;
 use std::{
+    env,
     fs::{File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -35,11 +39,59 @@ pub struct TraceStore {
     path: PathBuf,
     document: Mutex<Document>,
     edits: tokio::sync::Mutex<()>,
+    /// Shared F04 bridge used to hang declared nodes onto engineering versions.
+    linker: SymbolGraphLinker,
+    /// Open project / workspace root. When set, ingest/revise feed the bridge
+    /// via the codeintel producer before hanging symbols (default product path),
+    /// refreshing already-indexed paths when on-disk content digest changes.
+    workspace_root: Option<PathBuf>,
     _lock: File,
 }
 
 impl TraceStore {
+    /// Default product entry: empty bridge + workspace producer root.
+    ///
+    /// Workspace resolution order: `CAYW_WORKSPACE`, else process current dir.
+    /// Ingest/revise then publish plan `implementation` paths from that root
+    /// into the bridge before hanging (no manual `publish_file` required).
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
+        Self::open_with_workspace(path, default_workspace_root())
+    }
+
+    /// Open with an explicit project/workspace root for the symbol producer.
+    pub fn open_with_workspace(
+        path: impl AsRef<Path>,
+        workspace: impl AsRef<Path>,
+    ) -> Result<Arc<Self>, Error> {
+        Self::open_with_bridge_and_workspace(
+            path,
+            Arc::new(SymbolVersionBridge::new()),
+            Some(workspace.as_ref().to_path_buf()),
+        )
+    }
+
+    /// Open a store wired to a Host/Runtime-shared [`SymbolVersionBridge`].
+    ///
+    /// Does not attach a workspace producer (caller feeds the bridge). Prefer
+    /// [`Self::open`] / [`Self::open_with_workspace`] for the default product path.
+    pub fn open_with_bridge(
+        path: impl AsRef<Path>,
+        bridge: Arc<SymbolVersionBridge>,
+    ) -> Result<Arc<Self>, Error> {
+        Self::open_with_bridge_and_workspace(path, bridge, None)
+    }
+
+    /// Open with both a shared bridge and an optional workspace producer root.
+    ///
+    /// Ingest and revise populate [`Project::symbol_hangs`] through
+    /// [`SymbolGraphLinker`] after feeding (or digest-refreshing) plan paths from
+    /// `workspace_root`; call [`Self::refresh_symbol_hangs`] after an external
+    /// bridge publish or workspace edit so HTTP state / UI see the bump.
+    pub fn open_with_bridge_and_workspace(
+        path: impl AsRef<Path>,
+        bridge: Arc<SymbolVersionBridge>,
+        workspace_root: Option<PathBuf>,
+    ) -> Result<Arc<Self>, Error> {
         let path = path.as_ref().to_path_buf();
         let parent = path
             .parent()
@@ -78,6 +130,8 @@ impl TraceStore {
             path,
             document: Mutex::new(document),
             edits: tokio::sync::Mutex::new(()),
+            linker: SymbolGraphLinker::new(bridge),
+            workspace_root,
             _lock: lock,
         });
         // A lost plugin process cannot resume a partially evaluated Lua stack.
@@ -103,6 +157,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 });
                 changed = true;
             }
@@ -118,6 +173,48 @@ impl TraceStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub fn bridge(&self) -> Arc<SymbolVersionBridge> {
+        self.linker.shared_bridge()
+    }
+
+    pub fn linker(&self) -> &SymbolGraphLinker {
+        &self.linker
+    }
+
+    /// Project root used by the default symbol producer, if any.
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
+    }
+
+    /// Re-resolve hangs for every project from the current bridge catalog.
+    ///
+    /// Persists and advances `sequence` only when at least one project's hangs
+    /// change (for example after `publish_file` bumps a content version).
+    pub fn refresh_symbol_hangs(&self) -> Result<(), Error> {
+        let mut current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = current.clone();
+        let mut changed = false;
+        for project in next.projects.values_mut() {
+            let before = project.symbol_hangs.clone();
+            link_project(project, &self.linker, self.workspace_root.as_deref())?;
+            if project.symbol_hangs != before {
+                changed = true;
+            }
+        }
+        if changed {
+            next.sequence = next
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| Error::Invalid("追踪序号耗尽".into()))?;
+            self.persist(&next)?;
+            *current = next;
+        }
+        Ok(())
     }
 
     fn persist(&self, document: &Document) -> Result<(), Error> {
@@ -221,6 +318,9 @@ impl TraceStore {
                 return Err(Error::Invalid(
                     "本文件达到 256 次执行上限，请新建追踪文件".into(),
                 ));
+            }
+            for project in next.projects.values_mut() {
+                link_project(project, &self.linker, self.workspace_root.as_deref())?;
             }
             next.sequence += 1;
             self.persist(&next)?;
@@ -328,11 +428,11 @@ impl TraceStore {
             .expect("validated project");
         let parent = project.version();
         let version = parent + 1;
-        // Replay always starts at this revision's entry and recomputes every node,
-        // so a changed upstream source is not a reason to reject the edit. The
-        // base is only evidence that the edited node was on the captured path.
-        // A missing node there is a gap; it is not permission to borrow an older
-        // branch's input.
+        // Node saves use mode=recompute: reuse upstream steps without re-running
+        // their bodies; the VM seeds at the edited node from the captured shared
+        // seed (context + table identity). Undo uses full-entry replay.
+        // The base proves the edited node was on a captured path; a missing node
+        // is a gap, not permission to borrow an older branch's input.
         let base = if changed_node.is_some() {
             project
                 .evaluations
@@ -354,13 +454,19 @@ impl TraceStore {
             created_at_ms: now_ms(),
             reason: reason.into(),
         });
+        link_project(project, &self.linker, self.workspace_root.as_deref())?;
         self.commit(document)?;
+        let local_mode = if changed_node.is_some() {
+            "recompute"
+        } else {
+            "replay"
+        };
         let result =
             if runtime_status == Status::OutcomeUnknown || runtime_status == Status::Running {
                 Evaluation {
                     id: uuid::Uuid::new_v4().to_string(),
                     version,
-                    mode: "replay".into(),
+                    mode: local_mode.into(),
                     status: Status::Blocked,
                     steps: vec![],
                     output: None,
@@ -369,17 +475,18 @@ impl TraceStore {
                         message: if runtime_status == Status::Running {
                             "原始执行仍在运行；输入和前置状态尚未完整捕获".into()
                         } else {
-                            "原始执行存在未知效果，不能自动重放".into()
+                            "原始执行存在未知效果，不能自动局部重算".into()
                         },
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 }
             } else if let Some(error) = &project_trace_error {
                 Evaluation {
                     id: uuid::Uuid::new_v4().to_string(),
                     version,
-                    mode: "replay".into(),
+                    mode: local_mode.into(),
                     status: Status::Blocked,
                     steps: vec![],
                     output: None,
@@ -389,6 +496,7 @@ impl TraceStore {
                     }],
                     elapsed_ms: 0.0,
                     saved_at_ms: now_ms(),
+                    executed_nodes: Vec::new(),
                 }
             } else {
                 match engine::evaluate(
@@ -405,7 +513,7 @@ impl TraceStore {
                     Err(error) => Evaluation {
                         id: uuid::Uuid::new_v4().to_string(),
                         version,
-                        mode: "replay".into(),
+                        mode: local_mode.into(),
                         status: Status::Blocked,
                         steps: vec![],
                         output: None,
@@ -415,6 +523,7 @@ impl TraceStore {
                         }],
                         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                         saved_at_ms: now_ms(),
+                        executed_nodes: Vec::new(),
                     },
                 }
             };
@@ -442,6 +551,36 @@ impl TraceStore {
         *current = next;
         Ok(current.clone())
     }
+}
+
+/// Populate [`Project::symbol_hangs`] from the project's latest plan via the
+/// shared linker. Empty when there is no plan yet or no indexed path matches.
+///
+/// When `workspace` is set, plan paths are published (and re-published on
+/// content-digest change) through the codeintel workspace producer before hanging.
+fn link_project(
+    project: &mut Project,
+    linker: &SymbolGraphLinker,
+    workspace: Option<&Path>,
+) -> Result<(), Error> {
+    let Some(revision) = project.revisions.last() else {
+        project.symbol_hangs.clear();
+        return Ok(());
+    };
+    if let Some(root) = workspace {
+        let _ = feed_plan_from_workspace(linker.bridge(), &revision.plan, root)
+            .map_err(Error::Invalid)?;
+    }
+    project.symbol_hangs = linker.hang_plan(&revision.plan).map_err(Error::Invalid)?;
+    Ok(())
+}
+
+fn default_workspace_root() -> PathBuf {
+    env::var_os("CAYW_WORKSPACE")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn check_revision(project: &Project, expected: u64) -> Result<(), Error> {

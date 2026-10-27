@@ -430,6 +430,15 @@ textarea:focus {
   border-color: var(--unknown);
 }
 
+.mode-recompute {
+  color: var(--unknown);
+}
+
+.badge.mode-recompute {
+  background: var(--unknown-bg);
+  border-color: var(--unknown);
+}
+
 .facts {
   display: grid;
   grid-template-columns: minmax(96px, 132px) minmax(0, 1fr);

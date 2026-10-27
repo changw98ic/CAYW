@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig};
-use cayw_webui::{GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, serve_with_limits};
+use cayw_webui::{
+    DeviceRouter, GatewayLimits, IpcEndpoint, MAX_REQUEST_BYTES, OwnershipStore, serve_with_limits,
+    serve_with_ownership,
+};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde_json::{Value, json};
 use std::{
@@ -11,6 +14,7 @@ use std::{
     },
     time::Duration,
 };
+use tempfile::tempdir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -96,6 +100,14 @@ impl RpcHandler for RuntimeFixture {
                 "tool_outcome_unknown",
                 "inspect durable tool record",
             )),
+            "session.create" | "session.fork"
+                if params.get("id").and_then(Value::as_str).is_some() =>
+            {
+                Ok(json!({"id": params["id"], "state": "idle"}))
+            }
+            "task.enqueue" if params.get("id").and_then(Value::as_str).is_some() => {
+                Ok(json!({"id": params["id"], "state": "queued"}))
+            }
             "session.get" if params["session_id"] == "slow" => {
                 tokio::time::sleep(Duration::from_secs(20)).await;
                 Ok(json!({}))
@@ -115,6 +127,55 @@ struct Fixture {
 }
 impl Fixture {
     async fn start(limits: GatewayLimits) -> Self {
+        Self::start_inner(limits, None).await
+    }
+
+    /// Ownership + DeviceRouter that registers `device_id` against the fixture IPC
+    /// so Session/Task routes actually select that endpoint (same process in tests).
+    async fn start_with_ownership_device(
+        limits: GatewayLimits,
+        ownership: Arc<OwnershipStore>,
+        device_id: &str,
+    ) -> Self {
+        let stop = CancellationToken::new();
+        let runtime = Arc::new(RuntimeFixture::default());
+        let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ipc_addr = ipc_listener.local_addr().unwrap();
+        let mut ipc_config = ServerConfig::new(IPC_TOKEN);
+        ipc_config.request_timeout = Duration::from_secs(20);
+        let ipc_task = tokio::spawn(cayw_ipc::serve(
+            ipc_listener,
+            runtime.clone(),
+            ipc_config,
+            stop.clone(),
+        ));
+        let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
+        let devices = Arc::new(DeviceRouter::new(ipc.clone()));
+        devices.register(device_id, ipc.clone()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let web_task = tokio::spawn(serve_with_ownership(
+            listener,
+            devices,
+            WEB_TOKEN,
+            limits,
+            ownership,
+            stop.clone(),
+        ));
+        Self {
+            addr,
+            http: HttpClient::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            runtime,
+            stop,
+            tasks: vec![ipc_task, web_task],
+        }
+    }
+
+    async fn start_inner(limits: GatewayLimits, ownership: Option<Arc<OwnershipStore>>) -> Self {
         let stop = CancellationToken::new();
         let runtime = Arc::new(RuntimeFixture::default());
         let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -130,13 +191,25 @@ impl Fixture {
         let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let web_task = tokio::spawn(serve_with_limits(
-            listener,
-            ipc,
-            WEB_TOKEN,
-            limits,
-            stop.clone(),
-        ));
+        let web_task = if let Some(store) = ownership.clone() {
+            let devices = Arc::new(DeviceRouter::new(ipc));
+            tokio::spawn(serve_with_ownership(
+                listener,
+                devices,
+                WEB_TOKEN,
+                limits,
+                store,
+                stop.clone(),
+            ))
+        } else {
+            tokio::spawn(serve_with_limits(
+                listener,
+                ipc,
+                WEB_TOKEN,
+                limits,
+                stop.clone(),
+            ))
+        };
         Self {
             addr,
             http: HttpClient::builder()
@@ -780,5 +853,712 @@ async fn slow_request_bodies_cannot_hold_all_admission_slots() {
         StatusCode::OK,
     )
     .await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn observability_methods_are_allowed_and_forwarded() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let overview = envelope(
+        fixture
+            .rpc("session.context_overview", json!({"session_id":"s1"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        overview["result"],
+        json!({"method":"session.context_overview","params":{"session_id":"s1"}})
+    );
+    let inspector = envelope(
+        fixture
+            .rpc(
+                "session.run_inspector",
+                json!({"session_id":"s1","after":0,"limit":50}),
+            )
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        inspector["result"],
+        json!({"method":"session.run_inspector","params":{"session_id":"s1","after":0,"limit":50}})
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn registered_panels_are_reachable_from_webui_product_entry() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let html = fixture
+        .http
+        .get(format!("http://{}/", fixture.addr))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        html.contains("id=\"panel-sidebar\""),
+        "product HTML must expose the sidebar panel surface"
+    );
+    assert!(
+        html.contains("id=\"panel-bottom\""),
+        "product HTML must expose the bottom panel surface"
+    );
+    let script = fixture
+        .http
+        .get(format!("http://{}/app.js", fixture.addr))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        script.contains("/api/panels"),
+        "shipped UI must call the panel workbench API"
+    );
+    assert!(!html.contains(WEB_TOKEN) && !script.contains(WEB_TOKEN));
+
+    let catalog = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({"method":"panels.catalog","params":{}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let result = catalog.get("result").unwrap();
+    let sidebar: Vec<&str> = result["sidebar"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|panel| panel["id"].as_str().unwrap())
+        .collect();
+    let bottom: Vec<&str> = result["bottom"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|panel| panel["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        sidebar.contains(&"files"),
+        "official files panel must appear in sidebar guide"
+    );
+    assert!(
+        sidebar.contains(&"vendor:demo"),
+        "third-party sample panel must appear in sidebar guide"
+    );
+    assert!(
+        bottom.contains(&"terminal-bottom"),
+        "terminal panel must appear in bottom guide"
+    );
+
+    let opened = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.open",
+                "params":{
+                    "session_id":"webui-local",
+                    "panel_id":"files",
+                    "zone":"sidebar",
+                    "path":"README.md",
+                    "activate":true
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(opened["result"]["panel_id"], "files");
+    assert_eq!(opened["result"]["path"], "README.md");
+    let instance_id = opened["result"]["instance_id"].as_str().unwrap().to_owned();
+
+    let revealed = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.interact",
+                "params":{
+                    "session_id":"webui-local",
+                    "instance_id":instance_id,
+                    "kind":"editor",
+                    "path":"src/lib.rs"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(revealed["result"]["path"], "src/lib.rs");
+
+    let terminal = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.open",
+                "params":{
+                    "session_id":"webui-local",
+                    "panel_id":"terminal-bottom",
+                    "activate":true
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let terminal_id = terminal["result"]["instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let focused = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({
+                "method":"panels.interact",
+                "params":{
+                    "session_id":"webui-local",
+                    "instance_id":terminal_id,
+                    "kind":"terminal"
+                }
+            }))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(focused["result"]["panel_id"], "terminal-bottom");
+    assert_eq!(focused["result"]["active"], true);
+
+    let listed = envelope(
+        fixture
+            .http
+            .post(format!("http://{}/api/panels", fixture.addr))
+            .bearer_auth(WEB_TOKEN)
+            .json(&json!({"method":"panels.list_open","params":{"session_id":"webui-local"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let open_ids: Vec<&str> = listed["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|panel| panel["panel_id"].as_str().unwrap())
+        .collect();
+    assert!(open_ids.contains(&"files"));
+    assert!(open_ids.contains(&"terminal-bottom"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn serve_with_ownership_binds_session_and_reopen_restores_it() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    // Register device-alpha against the fixture IPC so route selection is real.
+    let fixture = Fixture::start_with_ownership_device(
+        GatewayLimits::default(),
+        store.clone(),
+        "device-alpha",
+    )
+    .await;
+
+    let created = envelope(
+        fixture
+            .rpc(
+                "session.create",
+                json!({"id":"sess-original","device_id":"device-alpha"}),
+            )
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(created["result"]["id"], "sess-original");
+    assert_eq!(
+        store.session_device("sess-original").as_deref(),
+        Some("device-alpha")
+    );
+
+    // Route consults the store (session.get with session_id).
+    let _ = envelope(
+        fixture
+            .rpc("session.get", json!({"session_id":"sess-original"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+
+    let enqueued = envelope(
+        fixture
+            .rpc(
+                "task.enqueue",
+                json!({"id":"task-child","session_id":"sess-original"}),
+            )
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(enqueued["result"]["id"], "task-child");
+    assert_eq!(
+        store.task_device("task-child").as_deref(),
+        Some("device-alpha"),
+        "task bind inherits restored Session device"
+    );
+
+    fixture.close().await;
+
+    // Gateway restart: reopen the same durable file.
+    let restored = OwnershipStore::open(&path).unwrap();
+    assert_eq!(
+        restored.session_device("sess-original").as_deref(),
+        Some("device-alpha"),
+        "reopen must restore original Session ownership"
+    );
+    assert_eq!(
+        restored.task_device("task-child").as_deref(),
+        Some("device-alpha")
+    );
+}
+
+#[tokio::test]
+async fn ownership_persistence_failure_reports_unknown_after_runtime_acceptance() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    let fixture = Fixture::start_with_ownership_device(
+        GatewayLimits::default(),
+        store.clone(),
+        "device-alpha",
+    )
+    .await;
+    // An existing directory prevents replacing the ownership file after the
+    // actual IPC handler has accepted creation. No private /tmp script is used.
+    std::fs::create_dir(&path).unwrap();
+    let response = fixture
+        .rpc(
+            "session.create",
+            json!({
+                "id":"accepted-without-durable-owner", "device_id":"device-alpha"
+            }),
+        )
+        .send()
+        .await
+        .unwrap();
+    let body = envelope(response, StatusCode::BAD_GATEWAY).await;
+    assert_eq!(body["error"]["code"], "ownership_persist_outcome_unknown");
+    assert_eq!(body["error"]["outcome_unknown"], true);
+    assert!(body.get("result").is_none());
+    assert_eq!(
+        store
+            .session_device("accepted-without-durable-owner")
+            .as_deref(),
+        Some("device-alpha")
+    );
+    fixture.close().await;
+}
+
+const ALPHA_IPC_TOKEN: &str = "aabbccddeeff00112233445566778899";
+
+/// Distinct Runtime markers so the test can prove which IPC endpoint was used.
+struct MarkerRuntime {
+    marker: &'static str,
+}
+
+#[async_trait]
+impl RpcHandler for MarkerRuntime {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        _cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        assert!(
+            params.get("device_id").is_none(),
+            "gateway must consume routing metadata before Runtime dispatch"
+        );
+        match method {
+            "session.create" | "session.fork"
+                if params.get("id").and_then(Value::as_str).is_some() =>
+            {
+                Ok(json!({
+                    "id": params["id"],
+                    "state": "idle",
+                    "runtime_marker": self.marker,
+                }))
+            }
+            "session.get" => Ok(json!({
+                "id": params.get("session_id").cloned().unwrap_or(json!("")),
+                "state": "idle",
+                "runtime_marker": self.marker,
+            })),
+            "task.enqueue" if params.get("id").and_then(Value::as_str).is_some() => Ok(json!({
+                "id": params["id"],
+                "state": "queued",
+                "runtime_marker": self.marker,
+            })),
+            "runtime.health" => Ok(json!({
+                "status": "ok",
+                "runtime_marker": self.marker,
+            })),
+            _ => Ok(json!({
+                "method": method,
+                "params": params,
+                "runtime_marker": self.marker,
+            })),
+        }
+    }
+}
+
+async fn serve_marker_ipc(
+    marker: &'static str,
+    token: &str,
+    stop: CancellationToken,
+) -> (SocketAddr, JoinHandle<std::io::Result<()>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut config = ServerConfig::new(token);
+    config.request_timeout = Duration::from_secs(20);
+    let task = tokio::spawn(cayw_ipc::serve(
+        listener,
+        Arc::new(MarkerRuntime { marker }),
+        config,
+        stop,
+    ));
+    (addr, task)
+}
+
+/// Restore + route: OwnershipStore device id must select the registered device
+/// IPC, not the fixed default `state.ipc` connect target.
+#[tokio::test]
+async fn ownership_restore_routes_rpc_to_registered_device_endpoint() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    {
+        let store = OwnershipStore::open(&path).unwrap();
+        store.bind_session("sess-original", "device-alpha").unwrap();
+        store.bind_task("task-child", "device-alpha").unwrap();
+    }
+
+    let stop = CancellationToken::new();
+    let (default_addr, default_task) =
+        serve_marker_ipc("default-runtime", IPC_TOKEN, stop.clone()).await;
+    let (alpha_addr, alpha_task) =
+        serve_marker_ipc("alpha-runtime", ALPHA_IPC_TOKEN, stop.clone()).await;
+
+    let devices = Arc::new(DeviceRouter::new(
+        IpcEndpoint::new(default_addr, IPC_TOKEN).unwrap(),
+    ));
+    devices
+        .register(
+            "device-alpha",
+            IpcEndpoint::new(alpha_addr, ALPHA_IPC_TOKEN).unwrap(),
+        )
+        .unwrap();
+
+    // Gateway "restart": reopen the durable store and inject the same router.
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    assert_eq!(
+        store.session_device("sess-original").as_deref(),
+        Some("device-alpha")
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_ownership(
+        listener,
+        devices.clone(),
+        WEB_TOKEN,
+        GatewayLimits::default(),
+        store.clone(),
+        stop.clone(),
+    ));
+
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let created = envelope(http.post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.create","params":{"id":"sess-on-alpha","device_id":"device-alpha"}}))
+        .send().await.unwrap(), StatusCode::OK).await;
+    assert_eq!(
+        created["result"]["runtime_marker"], "alpha-runtime",
+        "creation must execute on the selected device"
+    );
+    assert_eq!(
+        store.session_device("sess-on-alpha").as_deref(),
+        Some("device-alpha")
+    );
+
+    let forked = envelope(http.post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.fork","params":{"id":"fork-on-alpha","session_id":"sess-original","device_id":"device-alpha"}}))
+        .send().await.unwrap(), StatusCode::OK).await;
+    assert_eq!(forked["result"]["runtime_marker"], "alpha-runtime");
+    assert_eq!(
+        store.session_device("fork-on-alpha").as_deref(),
+        Some("device-alpha")
+    );
+
+    let cross_device = envelope(http.post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.fork","params":{"id":"wrong-fork","session_id":"sess-original","device_id":"local"}}))
+        .send().await.unwrap(), StatusCode::BAD_REQUEST).await;
+    assert_eq!(cross_device["error"]["code"], "invalid_params");
+    assert!(store.session_device("wrong-fork").is_none());
+
+    let missing_device = envelope(http.post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.create","params":{"id":"wrong-create","device_id":"device-missing"}}))
+        .send().await.unwrap(), StatusCode::BAD_GATEWAY).await;
+    assert_eq!(missing_device["error"]["code"], "unknown_device");
+    assert!(store.session_device("wrong-create").is_none());
+
+    let routed = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.get","params":{"session_id":"sess-original"}}))
+        .send()
+        .await
+        .unwrap();
+    let body = envelope(routed, StatusCode::OK).await;
+    assert_eq!(
+        body["result"]["runtime_marker"], "alpha-runtime",
+        "restored ownership must connect to the registered device IPC, not default"
+    );
+
+    let task_routed = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"task.get","params":{"task_id":"task-child"}}))
+        .send()
+        .await
+        .unwrap();
+    let task_body = envelope(task_routed, StatusCode::OK).await;
+    assert_eq!(
+        task_body["result"]["runtime_marker"], "alpha-runtime",
+        "task ownership must also select the device endpoint"
+    );
+
+    // No store entry → fallback to default IPC only.
+    let fallback = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"runtime.health","params":{}}))
+        .send()
+        .await
+        .unwrap();
+    let fallback_body = envelope(fallback, StatusCode::OK).await;
+    assert_eq!(
+        fallback_body["result"]["runtime_marker"], "default-runtime",
+        "fallback to default IPC only when OwnershipStore has no entry"
+    );
+
+    stop.cancel();
+    for task in [web_task, default_task, alpha_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown")
+            .unwrap()
+            .unwrap();
+    }
+}
+
+/// Owned non-local device without a registered endpoint must not silently use default.
+#[tokio::test]
+async fn owned_unregistered_device_does_not_fall_back_to_default_ipc() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ownership.json");
+    let store = Arc::new(OwnershipStore::open(&path).unwrap());
+    store.bind_session("sess-orphan", "device-missing").unwrap();
+
+    let stop = CancellationToken::new();
+    let (default_addr, default_task) =
+        serve_marker_ipc("default-runtime", IPC_TOKEN, stop.clone()).await;
+    let devices = Arc::new(DeviceRouter::new(
+        IpcEndpoint::new(default_addr, IPC_TOKEN).unwrap(),
+    ));
+    // Intentionally do not register device-missing.
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_addr = listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_ownership(
+        listener,
+        devices,
+        WEB_TOKEN,
+        GatewayLimits::default(),
+        store.clone(),
+        stop.clone(),
+    ));
+
+    let http = HttpClient::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let response = http
+        .post(format!("http://{web_addr}/api/rpc"))
+        .bearer_auth(WEB_TOKEN)
+        .json(&json!({"method":"session.get","params":{"session_id":"sess-orphan"}}))
+        .send()
+        .await
+        .unwrap();
+    let body = envelope(response, StatusCode::BAD_GATEWAY).await;
+    assert_eq!(body["error"]["code"], "unknown_device");
+    assert!(
+        body["result"].is_null() || body.get("result").is_none(),
+        "must not return default-runtime result for an unregistered owned device"
+    );
+
+    stop.cancel();
+    for task in [web_task, default_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown")
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn background_and_fleet_methods_pass_gateway_allowlist() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    for method in [
+        "runtime.background.list",
+        "runtime.background.inspect",
+        "runtime.background.logs",
+        "runtime.background.kill",
+        "runtime.background.result",
+        "runtime.background.recover",
+        "runtime.fleet",
+        "runtime.fleet.stop",
+        "runtime.fleet.steer",
+    ] {
+        let response = fixture
+            .rpc(method, json!({"id":"test"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "method {method} should be allowed by gateway"
+        );
+        let body = envelope(response, StatusCode::OK).await;
+        assert_eq!(body["result"]["method"], method);
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn unified_artifacts_and_observability_rpc_allowlist_enforced() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+
+    // Pruned legacy aliases and old namespace methods must be rejected
+    for method in [
+        "artifact.list",
+        "artifact.action",
+        "artifacts.action_dispatch",
+        "artifacts.actions_list",
+    ] {
+        let result = envelope(
+            fixture.rpc(method, json!({})).send().await.unwrap(),
+            StatusCode::FORBIDDEN,
+        )
+        .await;
+        assert_eq!(
+            result["error"]["code"], "method_not_allowed",
+            "legacy method {method} must be forbidden"
+        );
+    }
+
+    // Canonical 10 artifacts.* methods must be permitted through the gateway
+    for method in [
+        "artifacts.put",
+        "artifacts.update",
+        "artifacts.preview",
+        "artifacts.list",
+        "artifacts.action",
+        "artifacts.action_list",
+        "artifacts.action_get",
+        "artifacts.action_cancel",
+        "artifacts.recovery_save",
+        "artifacts.recovery_load",
+    ] {
+        let result = envelope(
+            fixture
+                .rpc(method, json!({"test": true}))
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(
+            result["result"]["method"], method,
+            "canonical method {method} must be allowed"
+        );
+    }
+
+    // Observability and plannotator methods must be permitted through the gateway
+    for method in [
+        "session.context_overview",
+        "session.run_inspector",
+        "session.plan",
+        "plannotator.submit",
+        "plannotator.list",
+    ] {
+        let result = envelope(
+            fixture
+                .rpc(method, json!({"test": true}))
+                .send()
+                .await
+                .unwrap(),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(
+            result["result"]["method"], method,
+            "observability/plannotator method {method} must be allowed"
+        );
+    }
+
     fixture.close().await;
 }

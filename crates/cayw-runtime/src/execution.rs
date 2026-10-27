@@ -299,26 +299,34 @@ impl AgentTool for DurableTool {
                             .ok()
                         })
                         .flatten();
-                    snapshot.unresolved_capabilities.iter().any(|call| {
-                        let unknown = matches!(
-                            call.outcome,
-                            Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
-                        );
-                        // Only a verified canonical dispatch can make an
-                        // unfinished child the sole owner of its uncertainty.
-                        // Consumer presence alone conveys no execution fact.
-                        let bridge_child =
-                            dispatches.as_ref().is_some_and(|log| log.tracks_call(call));
-                        call.lease == self.context.lease
-                            && call.task_id == self.context.task.id
-                            && (call.parent_call_id == parent_call_id
-                                || waited_execution.as_deref()
-                                    == Some(call.key.execution_id.as_str()))
-                            && ((!recording_failed && unknown)
-                                || bridge_child
-                                    && (unknown
-                                        || call.stage == cayw_core::CapabilityStage::Started))
-                    })
+                    let storage_unknown = crate::results::owns_storage_uncertainty(
+                        &self.context,
+                        &snapshot,
+                        &parent_call_id,
+                        waited_execution.as_deref(),
+                    )
+                    .unwrap_or(false);
+                    storage_unknown
+                        || snapshot.unresolved_capabilities.iter().any(|call| {
+                            let unknown = matches!(
+                                call.outcome,
+                                Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
+                            );
+                            // Only a verified canonical dispatch can make an
+                            // unfinished child the sole owner of its uncertainty.
+                            // Consumer presence alone conveys no execution fact.
+                            let bridge_child =
+                                dispatches.as_ref().is_some_and(|log| log.tracks_call(call));
+                            call.lease == self.context.lease
+                                && call.task_id == self.context.task.id
+                                && (call.parent_call_id == parent_call_id
+                                    || waited_execution.as_deref()
+                                        == Some(call.key.execution_id.as_str()))
+                                && ((!recording_failed && unknown)
+                                    || bridge_child
+                                        && (unknown
+                                            || call.stage == cayw_core::CapabilityStage::Started))
+                        })
                 });
             result.outcome_unknown = !child_unknown;
         }
@@ -965,6 +973,10 @@ async fn execute_with_cells(
         )),
         inner.model.clone(),
     );
+    // FleetView intervention: steer/stop need the live Agent control.
+    inner
+        .fleet
+        .attach_control(&context.lease.session_id, agent.control());
     let mut messages = Runtime {
         inner: inner.clone(),
     }
@@ -1034,9 +1046,15 @@ async fn execute_with_cells(
             sections: [("cayw-runtime-codemode".into(), Some(INSTRUCTION.into()))].into(),
             ..Default::default()
         });
-        let result = agent
-            .prompt_messages(vec![instruction, input.message()])
-            .await?;
+        // F08: fold Applied plannotator feedback into the next Agent attempt.
+        let _ = crate::plannotator::refresh_plan_live_files(inner, &context.lease.session_id);
+        let mut prompt = vec![instruction];
+        prompt.extend(crate::plannotator::feedback_messages_for_attempt(
+            inner,
+            &context.lease.session_id,
+        )?);
+        prompt.push(input.message());
+        let result = agent.prompt_messages(prompt).await?;
         // The Agent reports hook rejections as failed model turns. Restore the
         // completion decision the hook actually made.
         if let Some(error) = lock(&rejection).take() {
@@ -1062,7 +1080,7 @@ async fn execute_with_cells(
         context.check(&context.cancel)?;
         completion.check()
     };
-    supervise_run(
+    let result = supervise_run(
         run,
         &context.cancel,
         tokio::time::Instant::from_std(context.scope.deadline()),
@@ -1072,7 +1090,9 @@ async fn execute_with_cells(
             agent.control().abort();
         },
     )
-    .await
+    .await;
+    inner.fleet.clear_control(&context.lease.session_id);
+    result
 }
 
 async fn supervise_run<F, C, CF, A>(

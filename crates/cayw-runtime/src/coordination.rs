@@ -23,6 +23,19 @@ thread_local! {
     static OPEN_POLICY: RefCell<Option<(PathBuf, Weak<File>)>> = const { RefCell::new(None) };
 }
 
+pub(crate) struct BackgroundLock {
+    file: File,
+}
+
+impl Drop for BackgroundLock {
+    fn drop(&mut self) {
+        // A concurrent fork can keep the open file description alive until exec.
+        // The last owner must release its own lock before closing the descriptor.
+        let _ = self.file.unlock();
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Coordination {
     path: PathBuf,
     amendment_path: PathBuf,
@@ -89,6 +102,33 @@ impl Coordination {
             Err(error) => Err(RuntimeError::Workspace(format!(
                 "runtime task lock: {error}"
             ))),
+        }
+    }
+    /// Held by the background task worker while active.
+    /// Other instances check this lock before assuming an orphan state.
+    pub(crate) fn background(&self, id: &str) -> Result<BackgroundLock, RuntimeError> {
+        let mut path = self.path.as_os_str().to_owned();
+        path.push(format!(".background-{id}"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(PathBuf::from(path))
+            .map_err(|e| RuntimeError::Workspace(format!("runtime background lock: {e}")))?;
+        match file.try_lock() {
+            Ok(()) => Ok(BackgroundLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(RuntimeError::Busy),
+            Err(error) => Err(RuntimeError::Workspace(format!(
+                "runtime background lock: {error}"
+            ))),
+        }
+    }
+    pub(crate) fn try_background(&self, id: &str) -> Result<Option<BackgroundLock>, RuntimeError> {
+        match self.background(id) {
+            Ok(file) => Ok(Some(file)),
+            Err(RuntimeError::Busy) => Ok(None),
+            Err(error) => Err(error),
         }
     }
     pub(crate) fn enter(&self) -> Result<File, RuntimeError> {
@@ -255,5 +295,61 @@ impl PolicyGuard<'_> {
 impl Drop for PolicyGuard<'_> {
     fn drop(&mut self) {
         let _ = self.release();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        os::unix::{net::UnixStream, process::CommandExt},
+        process::Command,
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn released_background_lock_is_not_retained_by_fork_before_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("sessions.db");
+        File::create(&database).unwrap();
+        let coordination = Coordination::new(&database).unwrap();
+        let id = "inherited-lock";
+        let owner = Arc::new(coordination.background(id).unwrap());
+        let last_owner = owner.clone();
+        let (mut parent, mut child) = UnixStream::pair().unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let spawn = thread::spawn(move || {
+            let mut command = Command::new("/usr/bin/true");
+            // Only socket I/O on pre-opened descriptors runs after fork. The
+            // handshake holds the child before exec while the parent drops its
+            // last owner; no timing or child exit is used to release the lock.
+            unsafe {
+                command.pre_exec(move || {
+                    child.write_all(&[1])?;
+                    child.read_exact(&mut [0])?;
+                    Ok(())
+                });
+            }
+            command.spawn().and_then(|mut child| child.wait())
+        });
+        parent.read_exact(&mut [0]).unwrap();
+        drop(owner);
+        let held = coordination.try_background(id);
+        drop(last_owner);
+        let released = coordination.try_background(id);
+        // Always release and reap the original child before asserting results.
+        let signal = parent.write_all(&[1]);
+        let exit = spawn.join().unwrap();
+        signal.unwrap();
+        assert!(exit.unwrap().success());
+        assert!(held.unwrap().is_none(), "a live owner lost its lock");
+        assert!(
+            released.unwrap().is_some(),
+            "the child retained a finished owner's lock before exec"
+        );
     }
 }

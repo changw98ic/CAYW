@@ -11,6 +11,7 @@ description = "Headless runtime integrating durable sessions, bounded Luau tools
 default = []
 fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection", "cayw-content/fault-injection"]
 plugins = ["dep:cayw-plugins"]
+pi-compat = ["plugins", "dep:cayw-pi-compat"]
 strongflow = ["plugins", "cayw-plugins/strongflow"]
 remote = ["dep:cayw-remote"]
 
@@ -20,29 +21,38 @@ async-stream.workspace = true
 base64 = "0.22.1"
 cayw-ai.workspace = true
 cayw-agent = { path = "../cayw-agent", version = "0.1.0" }
+cayw-artifacts = { path = "../cayw-artifacts", version = "0.1.0" }
 cayw-core = { path = "../cayw-core", version = "0.1.0" }
 cayw-cells = { path = "../cayw-cells", version = "0.1.0" }
 cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 cayw-content = { path = "../cayw-content", version = "0.1.0", default-features = false }
+cayw-context = { path = "../cayw-context", version = "0.1.0" }
 cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }
 cayw-providers = { path = "../cayw-providers", version = "0.1.0" }
+cayw-plannotator = { path = "../cayw-plannotator", version = "0.1.0" }
 cayw-requests = { path = "../cayw-requests", version = "0.1.0" }
+cayw-run-inspector = { path = "../cayw-run-inspector", version = "0.1.0" }
+cayw-sources = { path = "../cayw-sources", version = "0.1.0" }
+cayw-web-access.workspace = true
+cayw-vision.workspace = true
 cayw-plugins = { path = "../cayw-plugins", version = "0.1.0", default-features = false, optional = true }
+cayw-pi-compat = { workspace = true, optional = true }
 cayw-remote = { path = "../cayw-remote", version = "0.1.0", optional = true }
 futures.workspace = true
 reqwest.workspace = true
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10.9"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal", "io-util", "process"] }
 tokio-util.workspace = true
 uuid = { version = "=1.27.0", features = ["v4"] }
 
 [dev-dependencies]
-cayw-sources = { path = "../cayw-sources", version = "0.1.0" }
+cayw-pi-compat = { path = "../cayw-pi-compat", version = "0.1.0" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 
@@ -61,6 +71,14 @@ name = "cayw-runtime-process-fixture"
 path = "tests/fixtures/process.rs"
 test = false
 doc = false
+
+[[test]]
+name = "pi_compat_runtime"
+required-features = ["pi-compat"]
+
+[[test]]
+name = "pi_mcp_combo"
+required-features = ["pi-compat"]
 
 [[bin]]
 name = "cayw-runtime-recovery-fixture"

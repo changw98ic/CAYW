@@ -13,6 +13,7 @@
 
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
+use cayw_codeintel::SymbolVersionBridge;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{Host, HostConfig, PermissionGate};
 use serde::Deserialize;
@@ -117,12 +118,24 @@ impl FrameworkProject {
     /// that normalization. Crate-visible because [`Companion`] stays
     /// crate-private; external tests exercise this path through
     /// [`crate::start`].
+    #[allow(dead_code)]
     pub(crate) async fn open(
         root: &Path,
         page: &str,
         state_dir: &Path,
         framework: &str,
         companion: Arc<Companion>,
+    ) -> Result<Self, ProjectError> {
+        Self::open_with_codeintel(root, page, state_dir, framework, companion, None).await
+    }
+
+    pub(crate) async fn open_with_codeintel(
+        root: &Path,
+        page: &str,
+        state_dir: &Path,
+        framework: &str,
+        companion: Arc<Companion>,
+        codeintel: Option<SymbolVersionBridge>,
     ) -> Result<Self, ProjectError> {
         // `crate::start` is the one place that canonicalizes the project root
         // and resolves a state directory outside that tree. This function is
@@ -152,12 +165,13 @@ impl FrameworkProject {
         let gate = Arc::new(FrameworkGate {
             paths: paths.iter().cloned().collect(),
         });
-        let host = Host::new(root, gate, audit.clone(), host_config()).map_err(|error| {
-            ProjectError::new(
-                "host_unavailable",
-                format!("could not open the host: {error}"),
-            )
-        })?;
+        let host =
+            Host::new(root, gate, audit.clone(), host_config(codeintel)).map_err(|error| {
+                ProjectError::new(
+                    "host_unavailable",
+                    format!("could not open the host: {error}"),
+                )
+            })?;
 
         let mut baseline = BTreeMap::new();
         let mut draft = BTreeMap::new();
@@ -704,6 +718,10 @@ impl PermissionGate for FrameworkGate {
                 }
                 Ok(())
             }
+            "codeintel.refresh"
+            | "codeintel.definitions"
+            | "codeintel.file_version"
+            | "codeintel.symbols" => Ok(()),
             _ => Err(CapabilityError::new(
                 "the visual editor has only source read and write access",
             )),
@@ -716,7 +734,7 @@ impl PermissionGate for FrameworkGate {
 /// apply per operation rather than accumulating until the editor restarts.
 /// A 16 MiB project needs at most 32 MiB of raw arguments and results for one
 /// full read or save; JSON escaping keeps the worst case well below this cap.
-fn host_config() -> HostConfig {
+fn host_config(codeintel: Option<SymbolVersionBridge>) -> HostConfig {
     HostConfig {
         max_argument_bytes: 32 * 1024 * 1024,
         max_result_bytes: 32 * 1024 * 1024,
@@ -727,6 +745,7 @@ fn host_config() -> HostConfig {
         call_timeout: Duration::from_secs(60),
         data: None,
         workspace: None,
+        codeintel,
         ..HostConfig::default()
     }
 }
@@ -1759,7 +1778,7 @@ mod tests {
         std::fs::write(project.path().join("a.tsx"), "<div/>").expect("source");
         let state = tempfile::tempdir().expect("state");
         let audit = Arc::new(DurableAudit::open(state.path()).expect("audit"));
-        let mut config = host_config();
+        let mut config = host_config(None);
         config.max_calls = 2;
         config.max_total_bytes = 4096;
         let paths = || ["a.tsx".to_owned()].into_iter();

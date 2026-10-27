@@ -48,6 +48,9 @@ impl SourceHandle for Handle {
             self.state.release.notified().await;
         }
         let value = match &request.operation {
+            SourceOperation::GetPrompt { .. } => {
+                return Err(cayw_codemode::CapabilityError::new("unexpected"));
+            }
             SourceOperation::ReadResource { uri } => self
                 .state
                 .reply
@@ -382,6 +385,7 @@ async fn resource_read_uses_source_operation_dispatch_record_and_original_policy
     assert_eq!(result["request"]["target"], URI);
     assert_eq!(result["source"]["source"]["id"], "source");
     match state.observed.lock().unwrap().as_ref().unwrap() {
+        SourceOperation::GetPrompt { .. } => panic!("unexpected"),
         SourceOperation::ReadResource { uri } => assert_eq!(uri, URI),
         other => panic!("unexpected source operation {other:?}"),
     }

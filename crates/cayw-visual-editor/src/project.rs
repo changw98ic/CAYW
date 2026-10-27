@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
+use cayw_codeintel::SymbolVersionBridge;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{Host, HostConfig, PermissionGate};
 use html5gum::{DefaultEmitter, Token, Tokenizer};
@@ -297,6 +298,16 @@ impl Project {
     /// `state_dir` must be outside the project tree. It holds the durable call
     /// ledger. A retained unknown outcome refuses the open.
     pub async fn open(root: &Path, page: &str, state_dir: &Path) -> Result<Self, ProjectError> {
+        Self::open_with_codeintel(root, page, state_dir, None).await
+    }
+
+    /// Opens an existing page with an optional shared codeintel bridge.
+    pub async fn open_with_codeintel(
+        root: &Path,
+        page: &str,
+        state_dir: &Path,
+        codeintel: Option<SymbolVersionBridge>,
+    ) -> Result<Self, ProjectError> {
         let page = normalize_page(page)?;
         let root = root.canonicalize().map_err(|error| {
             ProjectError::new("invalid_project", format!("project root: {error}"))
@@ -337,12 +348,13 @@ impl Project {
         }
         let audit = Arc::new(DurableAudit::open(&state_dir).map_err(audit_error)?);
         let gate = Arc::new(PageGate { page: page.clone() });
-        let host = Host::new(&root, gate, audit.clone(), host_config()).map_err(|error| {
-            ProjectError::new(
-                "host_unavailable",
-                format!("could not open the host: {error}"),
-            )
-        })?;
+        let host =
+            Host::new(&root, gate, audit.clone(), host_config(codeintel)).map_err(|error| {
+                ProjectError::new(
+                    "host_unavailable",
+                    format!("could not open the host: {error}"),
+                )
+            })?;
         let (source, sha256) = read_page(&host, &page).await?;
         if source.len() > MAX_PAGE_BYTES {
             return Err(ProjectError::new(
@@ -645,6 +657,10 @@ impl PermissionGate for PageGate {
                 }
                 Ok(())
             }
+            "codeintel.refresh"
+            | "codeintel.definitions"
+            | "codeintel.file_version"
+            | "codeintel.symbols" => Ok(()),
             _ => Err(CapabilityError::new(
                 "the visual editor has only page read and write access",
             )),
@@ -652,7 +668,7 @@ impl PermissionGate for PageGate {
     }
 }
 
-fn host_config() -> HostConfig {
+fn host_config(codeintel: Option<SymbolVersionBridge>) -> HostConfig {
     HostConfig {
         max_argument_bytes: 32 * 1024 * 1024,
         max_result_bytes: 32 * 1024 * 1024,
@@ -663,6 +679,7 @@ fn host_config() -> HostConfig {
         call_timeout: Duration::from_secs(60),
         data: None,
         workspace: None,
+        codeintel,
         ..HostConfig::default()
     }
 }

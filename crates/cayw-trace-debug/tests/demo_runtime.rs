@@ -360,7 +360,7 @@ async fn demo_runs_real_host_graph_and_switches_branches() -> TestResult {
         .and_then(|project| project.latest())
         .expect("the high edit produced no replay evaluation");
     assert_eq!(high_replay.version, 2);
-    assert_eq!(high_replay.mode, "replay");
+    assert_eq!(high_replay.mode, "recompute");
     assert_eq!(high_replay.status, Status::Completed);
     assert_eq!(
         high_replay
@@ -371,12 +371,12 @@ async fn demo_runs_real_host_graph_and_switches_branches() -> TestResult {
         ["input", "condition", "high", "result"]
     );
     assert!(
-        high_replay.steps.iter().all(|step| !step.reused),
-        "the graph must recompute in one VM to preserve shared node data"
+        high_replay.steps[0].reused,
+        "nodes before the edit are reused from the captured run"
     );
     assert!(
-        !high_replay.steps[1].reused,
-        "the edited node was not replayed"
+        high_replay.steps[1..].iter().all(|step| !step.reused),
+        "the edited node and affected downstream are recomputed"
     );
     assert_eq!(high_replay.steps[1].branch.as_deref(), Some("high"));
     let high_replay_output = high_replay
@@ -690,7 +690,7 @@ async fn node_waits_for_real_read_approval_and_replay_uses_its_captured_response
         )
         .await?;
     let evaluation = replay.projects[&id].latest().unwrap();
-    assert_eq!(evaluation.mode, "replay");
+    assert_eq!(evaluation.mode, "recompute");
     assert_eq!(evaluation.steps[0].status, Status::Completed);
     assert_eq!(evaluation.steps[0].output.as_ref().unwrap()["value"], 7);
     assert_eq!(evaluation.steps[1].status, Status::Failed);

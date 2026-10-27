@@ -43,6 +43,30 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
     .unwrap();
 }
 
+/// Wait until a fixture marker has parseable content.
+///
+/// `fs::write` truncates/creates before writing bytes, so existence alone can
+/// observe an empty file. Same readiness rule as `process::pid` / interactive
+/// `marker`: the sync point is a successful parse, not path existence.
+async fn parsed_marker<T>(directory: &std::path::Path, name: &str) -> T
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Debug,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = fs::read_to_string(directory.join(name))
+                && let Ok(value) = text.trim().parse::<T>()
+            {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("fixture marker {name} never became parseable"))
+}
+
 // A group-only cleanup check would falsely mark a previously observed child
 // stopped after that child creates a new session. It must keep the reservation
 // and omit that stop record until the same OS incarnation really stops.
@@ -101,11 +125,7 @@ async fn an_observed_descendant_that_leaves_the_group_is_never_falsely_recorded_
                     .await
             })
         };
-        wait_until(|| directory.join("waiting.pid").exists()).await;
-        let pid: u32 = fs::read_to_string(directory.join("waiting.pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        let pid: u32 = parsed_marker(&directory, "waiting.pid").await;
         wait_until(|| {
             observations
                 .0
@@ -119,10 +139,12 @@ async fn an_observed_descendant_that_leaves_the_group_is_never_falsely_recorded_
         wait_until(|| directory.join("escaped.pid").exists()).await;
         let escaped = cayw_device::ProcessIdentity::observe(pid).unwrap();
         cancel.cancel();
-        let leader = fs::read_to_string(directory.join("root.pid")).unwrap();
+        let leader = parsed_marker::<u32>(&directory, "root.pid")
+            .await
+            .to_string();
         wait_until(|| {
             let status = std::process::Command::new("/bin/ps")
-                .args(["-o", "stat=", "-p", leader.trim()])
+                .args(["-o", "stat=", "-p", leader.as_str()])
                 .output()
                 .unwrap();
             !status.status.success()
@@ -283,12 +305,7 @@ async fn a_leader_that_changes_its_own_process_group_is_still_reaped() {
                     .await
             })
         };
-        wait_until(|| directory.join("root.pid").exists()).await;
-        let leader: u32 = fs::read_to_string(directory.join("root.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        let leader: u32 = parsed_marker(&directory, "root.pid").await;
         wait_until(|| {
             observations
                 .0
@@ -302,17 +319,10 @@ async fn a_leader_that_changes_its_own_process_group_is_still_reaped() {
         assert_eq!(original.pid, leader);
         assert_eq!(original.process_group, leader);
         fs::write(directory.join("regroup-now"), "start record confirmed").unwrap();
-        wait_until(|| directory.join("regroup.rc").exists()).await;
-        let helper: u32 = fs::read_to_string(directory.join("helper.pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let rc: i32 = fs::read_to_string(directory.join("regroup.rc"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // regroup.rc is written after setpgid; wait for its integer, not mere
+        // existence (truncate-before-write can briefly leave an empty file).
+        let helper: u32 = parsed_marker(&directory, "helper.pid").await;
+        let rc: i32 = parsed_marker(&directory, "regroup.rc").await;
         let helper_identity = cayw_device::ProcessIdentity::observe(helper).unwrap();
         assert_eq!(helper_identity.process_group, helper);
         assert!(incarnation_is_running(helper_identity).unwrap());
@@ -995,10 +1005,7 @@ async fn pty_mode_uses_a_controlling_terminal_and_the_same_managed_cleanup() {
     }
     let exit = process.control.wait().await.unwrap();
     runner.drain().await.unwrap();
-    let pid: i32 = fs::read_to_string(directory.join("root.pid"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let pid: i32 = parsed_marker(&directory, "root.pid").await;
     fs::remove_dir_all(&directory).unwrap();
     let output = String::from_utf8(bytes).unwrap();
     assert!(

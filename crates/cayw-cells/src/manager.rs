@@ -329,9 +329,22 @@ impl CellManager {
         if request.cursor > run.record.lock().expect("cell lock poisoned").outputs.len() as u64 {
             return Err(CellError::Invalid("cursor exceeds published output".into()));
         }
-        if request.continue_execution && !cancel.is_cancelled() {
+        // After an explicit continuation, pre-existing outputs must not satisfy
+        // this wait. Resume from yield_control, then require new progress (new
+        // output, another yield, or VM teardown). Otherwise a cursor behind the
+        // current tip returns immediately while the VM is still Running — the
+        // model can finalize early and hit "cell still requires wait".
+        let progress_after = if request.continue_execution && !cancel.is_cancelled() {
+            let baseline = {
+                let record = run.record.lock().expect("cell lock poisoned");
+                (record.status == CellStatus::Yielded && run.live.load(Ordering::Acquire))
+                    .then_some(record.outputs.len() as u64)
+            };
             run.resume()?;
-        }
+            baseline
+        } else {
+            None
+        };
         let mut guard = InvocationGuard {
             run: run.clone(),
             armed: true,
@@ -341,9 +354,13 @@ impl CellManager {
         loop {
             let ready = {
                 let record = run.record.lock().expect("cell lock poisoned");
-                record.outputs.len() as u64 > request.cursor
-                    || record.status == CellStatus::Yielded
-                    || !run.live.load(Ordering::Acquire)
+                let outputs = record.outputs.len() as u64;
+                let yielded = record.status == CellStatus::Yielded;
+                let dead = !run.live.load(Ordering::Acquire);
+                match progress_after {
+                    Some(baseline) => outputs > baseline || yielded || dead,
+                    None => outputs > request.cursor || yielded || dead,
+                }
             };
             let publishing_terminal = run
                 .record

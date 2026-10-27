@@ -1,3 +1,4 @@
+use cayw_codeintel::{FileVersion, SourceLocation, SymbolId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -66,6 +67,14 @@ pub struct Step {
     pub status: Status,
     pub input: Value,
     pub state_before: Value,
+    /// Context table as of node start. Default null on older captures.
+    #[serde(default)]
+    pub context_before: Value,
+    /// Shared-table seed for local recompute (`tables` + `roots` with `$ref`).
+    /// Absent on older captures that only stored JSON snapshots; those cannot
+    /// safely use node-save local recompute (explicit gap, not silent fallback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<Value>,
     pub output: Option<Value>,
     pub state_after: Option<Value>,
     pub branch: Option<String>,
@@ -86,7 +95,7 @@ pub struct Gap {
 pub struct Evaluation {
     pub id: String,
     pub version: u64,
-    /// observed = actual Runtime; replay = local Luau with captured responses only.
+    /// observed = actual Runtime; replay = full-entry local Luau; recompute = from edited node.
     pub mode: String,
     pub status: Status,
     pub steps: Vec<Step>,
@@ -94,6 +103,10 @@ pub struct Evaluation {
     pub gaps: Vec<Gap>,
     pub elapsed_ms: f64,
     pub saved_at_ms: u64,
+    /// Node ids whose Luau bodies ran in this evaluation's VM.
+    /// Reused upstream steps are omitted: they were not re-executed.
+    #[serde(default)]
+    pub executed_nodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +148,9 @@ pub struct Project {
     pub active_node: Option<String>,
     pub trace_error: Option<String>,
     pub runtime_status: Status,
+    /// F16：节点 → 工程文件/符号/内容版本挂载（仅声明路径；非任意程序自动构图）。
+    #[serde(default)]
+    pub symbol_hangs: BTreeMap<String, NodeSymbolHang>,
 }
 
 impl Project {
@@ -210,6 +226,10 @@ pub enum NodeTrace {
         node_id: String,
         input: Value,
         state_before: Value,
+        #[serde(default)]
+        context_before: Value,
+        #[serde(default)]
+        seed: Option<Value>,
     },
     Completed {
         node_id: String,
@@ -223,6 +243,32 @@ pub enum NodeTrace {
 pub struct TraceEnvelope {
     pub schema: String,
     pub trace: NodeTrace,
+}
+
+/// Trace 节点在工程上的挂载：文件版本 + 可选符号与源码位置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeSymbolHang {
+    pub node_id: String,
+    pub file: FileVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<SymbolId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
+/// 失败步骤的错误摘要，回链节点挂载与 Runtime 证据游标。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorEvidenceLink {
+    pub node_id: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hang: Option<NodeSymbolHang>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_id: Option<String>,
 }
 
 pub fn now_ms() -> u64 {

@@ -13,6 +13,7 @@ pub trait BackendCompletion: Send + Sync {
 
 pub struct BackendResponse {
     result: Option<Result<Value, CapabilityError>>,
+    presentation: Option<Result<Value, CapabilityError>>,
     dependencies: Option<DependencySnapshot>,
     completion: Option<Box<dyn BackendCompletion>>,
 }
@@ -20,6 +21,7 @@ impl BackendResponse {
     pub fn new(result: Result<Value, CapabilityError>) -> Self {
         Self {
             result: Some(result),
+            presentation: None,
             dependencies: None,
             completion: None,
         }
@@ -31,6 +33,7 @@ impl BackendResponse {
     ) -> Self {
         Self {
             result: Some(result),
+            presentation: None,
             dependencies,
             completion: Some(completion),
         }
@@ -43,9 +46,20 @@ impl BackendResponse {
     pub fn dependencies(&self) -> Option<&DependencySnapshot> {
         self.dependencies.as_ref()
     }
+    /// Preserve the original terminal for the journal while delivering a separate
+    /// display value (or display/storage error) only after that terminal commits.
+    pub fn with_presentation(mut self, result: Result<Value, CapabilityError>) -> Self {
+        if let Some(Ok(value)) = self.presentation.replace(result) {
+            discard_json(value);
+        }
+        self
+    }
     pub fn acknowledge(mut self) -> Result<Value, CapabilityError> {
         if let Some(completion) = self.completion.take() {
             completion.acknowledge();
+        }
+        if let Some(result) = self.presentation.take() {
+            return result;
         }
         self.result.take().expect("response acknowledged once")
     }
@@ -53,6 +67,9 @@ impl BackendResponse {
 impl Drop for BackendResponse {
     fn drop(&mut self) {
         if let Some(Ok(value)) = self.result.take() {
+            discard_json(value);
+        }
+        if let Some(Ok(value)) = self.presentation.take() {
             discard_json(value);
         }
     }

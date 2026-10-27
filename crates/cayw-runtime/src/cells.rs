@@ -545,12 +545,18 @@ impl CellBackend for Backend {
             Ok(()) if crate::content::is_tool(name) => {
                 crate::content::invoke(&scope, &self.base, arguments, cancel).await
             }
+            Ok(()) if crate::background::is_tool(name) => {
+                crate::background::invoke(&scope, &self.base, arguments, cancel).await
+            }
+            Ok(()) if crate::results::is_tool(name) => {
+                crate::results::invoke(&scope, &self.base, arguments, cancel).await
+            }
             Ok(())
                 if crate::children::is_capability(name)
                     && self.context.inner.config.local_agents.is_some() =>
             {
                 match crate::bridge::scoped_host(&self.base, &scope) {
-                    Ok(host) => crate::children::call(host, &scope, arguments, cancel).await,
+                    Ok(host) => crate::children::call(host, &scope, name, arguments, cancel).await,
                     Err(error) => Err(error),
                 }
             }
@@ -565,10 +571,7 @@ impl CellBackend for Backend {
                 )
                 .await
                 {
-                    Ok(response) => {
-                        scope.settle(response.result())?;
-                        Ok(response)
-                    }
+                    Ok(response) => Ok(response),
                     Err(error) => {
                         let result = Err(error);
                         scope.settle(&result)?;
@@ -603,16 +606,31 @@ impl CellBackend for Backend {
         };
         // Core requires a nonempty bounded error. Return that same canonical
         // error to Cells, including refusals before Host audit start.
-        let result = result.map_err(|mut error| {
+        // Settle original host execution result first so display/externalization
+        // failure cannot erase an already committed Host success.
+        let host_result = result.map_err(|mut error| {
             error.message = bounded(&error.message);
             error
         });
-        scope.settle(&result)?;
+        scope.settle(&host_result)?;
+        let presentation = match &host_result {
+            Ok(value) => crate::results::maybe_externalize(&scope, value.clone()).await,
+            Err(error) => Err(error.clone()),
+        };
+        let storage_error = presentation
+            .as_ref()
+            .err()
+            .filter(|error| error.outcome_unknown && host_result.is_ok())
+            .map(|error| error.message.clone());
         Ok(cayw_cells::BackendResponse::owned(
-            result,
+            host_result,
             None,
-            Box::new(crate::shared_read::Completion::ordinary(scope.clone())),
-        ))
+            Box::new(
+                crate::shared_read::Completion::ordinary(scope.clone())
+                    .with_storage_error(storage_error),
+            ),
+        )
+        .with_presentation(presentation))
     }
     fn output(
         &self,

@@ -1,6 +1,11 @@
 //! Optional loopback browser gateway. The runtime owns every session, event,
 //! tool invocation and approval decision. This gateway never retries an RPC.
 
+mod ownership;
+mod workbench;
+
+pub use ownership::OwnershipStore;
+
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -11,11 +16,13 @@ use axum::{
     routing::{get, post},
 };
 use cayw_ipc::{Client, ClientConfig, ClientError};
+use cayw_panel::{OpenPanelRequest, PanelZone};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fmt, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
 use tokio_util::sync::CancellationToken;
+use workbench::{Workbench, panel_error_response};
 
 /// Requests are bounded before JSON parsing or IPC dispatch.
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
@@ -23,6 +30,16 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "runtime.health",
+    "runtime.resources",
+    "runtime.fleet",
+    "runtime.fleet.stop",
+    "runtime.fleet.steer",
+    "runtime.background.list",
+    "runtime.background.inspect",
+    "runtime.background.logs",
+    "runtime.background.kill",
+    "runtime.background.result",
+    "runtime.background.recover",
     "session.create",
     "session.list",
     "session.get",
@@ -31,10 +48,26 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "task.enqueue",
     "task.resume",
     "task.get",
+    "session.tasks",
     "session.cancel",
     "approval.decide",
     "session.fork",
     "capabilities.list",
+    "session.plan",
+    "plannotator.submit",
+    "plannotator.list",
+    "artifacts.put",
+    "artifacts.update",
+    "artifacts.preview",
+    "artifacts.list",
+    "artifacts.action",
+    "artifacts.action_list",
+    "artifacts.action_get",
+    "artifacts.action_cancel",
+    "artifacts.recovery_save",
+    "artifacts.recovery_load",
+    "session.context_overview",
+    "session.run_inspector",
 ];
 
 /// Resource budgets apply independently from the IPC transport's own budgets.
@@ -97,6 +130,7 @@ impl GatewayLimits {
 /// Explicit host credentials stay exclusively on the gateway. Each HTTP call
 /// gets its own IPC connection, so a dropped prompt cannot cancel event reads.
 /// Opening a connection never repeats a previous call.
+#[derive(Clone)]
 pub struct IpcEndpoint {
     address: SocketAddr,
     token: String,
@@ -137,8 +171,94 @@ impl fmt::Debug for IpcEndpoint {
     }
 }
 
+/// Live `device_id` → IPC connect targets.
+///
+/// [`OwnershipStore`] restores which device owns a Session/Task after a gateway
+/// restart; this router turns that device id into the IPC endpoint used for the
+/// RPC. Fallback to the default/local endpoint happens **only** when the store
+/// has no entry (or the bound id is empty/`local`). A non-local owned device
+/// that is not registered is an error — never a silent fallback to default.
+pub struct DeviceRouter {
+    default: IpcEndpoint,
+    by_device: std::sync::Mutex<std::collections::BTreeMap<String, IpcEndpoint>>,
+}
+
+impl DeviceRouter {
+    pub fn new(default: IpcEndpoint) -> Self {
+        Self {
+            default,
+            by_device: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// Register (or replace) the IPC endpoint for `device_id`.
+    pub fn register(&self, device_id: &str, endpoint: IpcEndpoint) -> io::Result<()> {
+        if device_id.is_empty()
+            || device_id == "local"
+            || device_id.len() > 256
+            || device_id
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid device id for endpoint registration",
+            ));
+        }
+        self.by_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device_id.to_owned(), endpoint);
+        Ok(())
+    }
+
+    /// Choose the IPC endpoint for an OwnershipStore-resolved device id.
+    ///
+    /// - `None` / `""` / `"local"` → default (local) endpoint
+    /// - registered non-local device → that device's endpoint
+    /// - owned but unregistered non-local device → `Err("unknown_device")`
+    ///   (never a silent fallback to default)
+    pub fn endpoint_for(&self, owned_device: Option<&str>) -> Result<IpcEndpoint, &'static str> {
+        match owned_device.map(str::trim).filter(|s| !s.is_empty()) {
+            None | Some("local") => Ok(self.default.clone()),
+            Some(device_id) => self
+                .by_device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(device_id)
+                .cloned()
+                .ok_or("unknown_device"),
+        }
+    }
+
+    fn contains_ipc_token(&self, text: &str) -> bool {
+        if text.contains(&self.default.token) {
+            return true;
+        }
+        self.by_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|ep| text.contains(&ep.token))
+    }
+
+    fn redact_ipc_tokens(&self, text: &str) -> String {
+        let mut out = text.replace(&self.default.token, "[redacted]");
+        for ep in self
+            .by_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            out = out.replace(&ep.token, "[redacted]");
+        }
+        out
+    }
+}
+
 struct Gateway {
-    ipc: IpcEndpoint,
+    /// Default local IPC plus any registered device endpoints (F13 routing).
+    devices: Arc<DeviceRouter>,
     web_token: String,
     authorities: Vec<String>,
     limits: GatewayLimits,
@@ -147,6 +267,10 @@ struct Gateway {
     in_flight: Semaphore,
     prompts: Semaphore,
     cancel: CancellationToken,
+    workbench: Arc<Workbench>,
+    /// Durable Session/Task → device maps (F13). Present when served via
+    /// [`serve_with_ownership`]; create/bind writes and route/restore reads it.
+    ownership: Option<Arc<OwnershipStore>>,
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
@@ -178,6 +302,50 @@ pub async fn serve_with_limits(
     limits: GatewayLimits,
     cancel: CancellationToken,
 ) -> io::Result<()> {
+    serve_inner(
+        listener,
+        Arc::new(DeviceRouter::new(ipc_client)),
+        web_token,
+        limits,
+        None,
+        cancel,
+    )
+    .await
+}
+
+/// Same as [`serve_with_limits`], with a durable [`OwnershipStore`] injected into
+/// the live Gateway so create/bind persists Session/Task → device affinity and
+/// RPC connect selection restores that device after a gateway restart (F13).
+///
+/// Pass a shared [`DeviceRouter`] so callers can [`DeviceRouter::register`]
+/// non-local device IPC endpoints; OwnershipStore device ids select among them.
+pub async fn serve_with_ownership(
+    listener: TcpListener,
+    devices: Arc<DeviceRouter>,
+    web_token: impl Into<String>,
+    limits: GatewayLimits,
+    ownership: Arc<OwnershipStore>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    serve_inner(
+        listener,
+        devices,
+        web_token,
+        limits,
+        Some(ownership),
+        cancel,
+    )
+    .await
+}
+
+async fn serve_inner(
+    listener: TcpListener,
+    devices: Arc<DeviceRouter>,
+    web_token: impl Into<String>,
+    limits: GatewayLimits,
+    ownership: Option<Arc<OwnershipStore>>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
     let address = listener.local_addr()?;
     if !address.ip().is_loopback() {
         return Err(io::Error::new(
@@ -192,15 +360,21 @@ pub async fn serve_with_limits(
             "Web token must contain 32..4096 ASCII bytes without whitespace",
         ));
     }
-    if web_token == ipc_client.token {
+    if web_token == devices.default.token {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Web and IPC access tokens must differ",
         ));
     }
     limits.validate()?;
+    let workbench = Arc::new(Workbench::with_builtin_panels().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("failed to seed WebUI panel workbench: {error}"),
+        )
+    })?);
     let state = Arc::new(Gateway {
-        ipc: ipc_client,
+        devices,
         web_token,
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
@@ -210,12 +384,15 @@ pub async fn serve_with_limits(
         prompts: Semaphore::new(limits.max_prompt_in_flight),
         limits,
         cancel: cancel.clone(),
+        workbench,
+        ownership,
     });
     let app = Router::new()
         .route("/", get(index))
         .route("/app.js", get(script))
         .route("/styles.css", get(styles))
         .route("/api/rpc", post(rpc))
+        .route("/api/panels", post(panels))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
@@ -297,7 +474,7 @@ async fn guarded_request(state: &Gateway, request: Request, next: Next) -> Respo
             false,
         );
     }
-    if request.uri().path() != "/api/rpc" {
+    if request.uri().path() != "/api/rpc" && request.uri().path() != "/api/panels" {
         return next.run(request).await;
     }
     if !authorized(request.headers(), &state.web_token) {
@@ -437,9 +614,44 @@ async fn rpc(
     } else {
         state.limits.request_timeout
     };
+    // OwnershipStore restores Session/Task → device; DeviceRouter turns that
+    // into the IPC endpoint. Fallback to default only when the store has no entry
+    // (or the bound id is local/empty) — never when a non-local owner is missing.
+    let restored_device = resolve_owned_device(&state, &request.method, &request.params);
+    let owned_device = match route_device(&state, &request.method, &request.params, restored_device)
+    {
+        Ok(device) => device,
+        Err((status, body)) => {
+            return (
+                StatusCode::from_u16(status).expect("valid status"),
+                Json(body),
+            )
+                .into_response();
+        }
+    };
+    let endpoint = match state.devices.endpoint_for(owned_device.as_deref()) {
+        Ok(endpoint) => endpoint,
+        Err(code) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                code,
+                "Owned device has no registered IPC endpoint; register the device or clear ownership",
+                false,
+            );
+        }
+    };
+    let method = request.method.clone();
+    let params = request.params.clone();
+    let mut runtime_params = params.clone();
+    if matches!(method.as_str(), "session.create" | "session.fork") {
+        runtime_params
+            .as_object_mut()
+            .expect("validated object")
+            .remove("device_id");
+    }
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
-        result = state.ipc.connect(budget) => match result {
+        result = endpoint.connect(budget) => match result {
             Ok(client) => client,
             Err(error) => return upstream_error(&state, error),
         }
@@ -449,21 +661,119 @@ async fn rpc(
     tokio::select! {
         biased;
         _ = state.cancel.cancelled() => shutting_down(side_effecting(&request.method)),
-        result = timeout(budget, client.request(&request.method, request.params)) => match result {
+        result = timeout(budget, client.request(&method, runtime_params)) => match result {
             Ok(Ok(result)) => {
                 // Successful RPC data is a protocol value, never diagnostic
                 // text. Reject an accidental credential disclosure as a whole
                 // rather than rewriting keys, ids, statuses or user content.
                 if contains_credential(&result, &state) {
-                    error_response(StatusCode::BAD_GATEWAY, "credential_in_result", "Runtime result contained a gateway credential and was withheld; inspect session events before taking further action", side_effecting(&request.method))
+                    error_response(StatusCode::BAD_GATEWAY, "credential_in_result", "Runtime result contained a gateway credential and was withheld; inspect session events before taking further action", side_effecting(&method))
                 } else {
-                    Json(json!({"result":result})).into_response()
+                    match persist_ownership_bind(
+                        &state,
+                        &method,
+                        &result,
+                        owned_device.as_deref(),
+                    ) {
+                        Ok(()) => Json(json!({"result":result})).into_response(),
+                        Err(_) => error_response(StatusCode::BAD_GATEWAY, "ownership_persist_outcome_unknown", "Runtime accepted the request but its device ownership could not be saved; inspect the owning device before retrying", true),
+                    }
                 }
             },
             Ok(Err(error)) => upstream_error(&state, error),
             Err(_) => error_response(StatusCode::GATEWAY_TIMEOUT, "request_timeout", "Runtime request timed out; check session events before taking further action", side_effecting(&request.method)),
         }
     }
+}
+
+/// Restore Session/Task → device affinity from the durable store (the maps
+/// `DeviceChannelHub` kept only in memory on feat/tui-webui).
+fn resolve_owned_device(state: &Gateway, method: &str, params: &Value) -> Option<String> {
+    let ownership = state.ownership.as_ref()?;
+    if let Some(sid) = params.get("session_id").and_then(Value::as_str)
+        && let Some(device) = ownership.session_device(sid)
+    {
+        return Some(device);
+    }
+    if let Some(tid) = params.get("task_id").and_then(Value::as_str)
+        && let Some(device) = ownership.task_device(tid)
+    {
+        return Some(device);
+    }
+    let _ = method;
+    None
+}
+
+fn route_device(
+    state: &Gateway,
+    method: &str,
+    params: &Value,
+    restored: Option<String>,
+) -> Result<Option<String>, (u16, Value)> {
+    if !params
+        .as_object()
+        .expect("validated object")
+        .contains_key("device_id")
+    {
+        return Ok(restored);
+    }
+    if !matches!(method, "session.create" | "session.fork") {
+        return Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":"device_id is only supported for gateway session.create/session.fork routing","outcome_unknown":false}}),
+        ));
+    }
+    let requested = required_string(params, "device_id")?;
+    if requested.len() > 256
+        || requested
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":"invalid device_id","outcome_unknown":false}}),
+        ));
+    }
+    if state.ownership.is_none() && requested != "local" {
+        return Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":"device routing requires a persistent ownership store","outcome_unknown":false}}),
+        ));
+    }
+    if method == "session.fork" && requested != restored.as_deref().unwrap_or("local") {
+        return Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":"this fork API operates on the source device and does not migrate sessions across devices","outcome_unknown":false}}),
+        ));
+    }
+    Ok(Some(requested))
+}
+
+/// Persist affinity after create/fork/enqueue — same bind points as the
+/// in-memory `DeviceChannelHub` on feat/tui-webui.
+fn persist_ownership_bind(
+    state: &Gateway,
+    method: &str,
+    result: &Value,
+    restored: Option<&str>,
+) -> io::Result<()> {
+    let Some(ownership) = state.ownership.as_ref() else {
+        return Ok(());
+    };
+    let device_id = restored.unwrap_or("local");
+    if matches!(method, "session.create" | "session.fork") {
+        let sid = result.get("id").and_then(Value::as_str).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "session receipt missing id")
+        })?;
+        ownership.bind_session(sid, device_id)?;
+    } else if method == "task.enqueue" {
+        let tid = result
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "task receipt missing id"))?;
+        ownership.bind_task(tid, device_id)?;
+    }
+    Ok(())
 }
 
 fn side_effecting(method: &str) -> bool {
@@ -476,16 +786,20 @@ fn side_effecting(method: &str) -> bool {
             | "session.cancel"
             | "approval.decide"
             | "session.fork"
+            | "runtime.fleet.stop"
+            | "runtime.fleet.steer"
     )
 }
 
 fn redact(text: &str, state: &Gateway) -> String {
-    text.replace(&state.ipc.token, "[redacted]")
+    state
+        .devices
+        .redact_ipc_tokens(text)
         .replace(&state.web_token, "[redacted]")
 }
 
 fn contains_token(text: &str, state: &Gateway) -> bool {
-    text.contains(&state.ipc.token) || text.contains(&state.web_token)
+    state.devices.contains_ipc_token(text) || text.contains(&state.web_token)
 }
 
 fn contains_credential(value: &Value, state: &Gateway) -> bool {
@@ -534,6 +848,163 @@ fn error_response(
         .into_response()
 }
 
+const PANEL_METHODS: &[&str] = &[
+    "panels.catalog",
+    "panels.open",
+    "panels.activate",
+    "panels.close",
+    "panels.list_open",
+    "panels.interact",
+];
+
+async fn panels(
+    State(state): State<Arc<Gateway>>,
+    payload: Result<Json<BrowserRequest>, JsonRejection>,
+) -> Response {
+    let request = match payload {
+        Ok(Json(request)) => request,
+        Err(rejection) => {
+            let status = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return error_response(
+                status,
+                "invalid_json",
+                "Expected a bounded JSON object with method and params",
+                false,
+            );
+        }
+    };
+    if !PANEL_METHODS.contains(&request.method.as_str()) {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "method_not_allowed",
+            "This method is not part of the panel workbench contract",
+            false,
+        );
+    }
+    if !request.params.is_object() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_params",
+            "params must be a JSON object",
+            false,
+        );
+    }
+    match dispatch_panels(&state, &request.method, request.params) {
+        Ok(result) => Json(json!({"result": result})).into_response(),
+        Err((status, body)) => (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(body),
+        )
+            .into_response(),
+    }
+}
+
+fn dispatch_panels(state: &Gateway, method: &str, params: Value) -> Result<Value, (u16, Value)> {
+    let workbench = &state.workbench;
+    match method {
+        "panels.catalog" => {
+            Ok(serde_json::to_value(workbench.catalog()).expect("catalog serializes"))
+        }
+        "panels.open" => {
+            let session_id = required_string(&params, "session_id")?;
+            let panel_id = required_string(&params, "panel_id")?;
+            let zone = optional_zone(&params)?;
+            let path = optional_string(&params, "path")?;
+            let activate = params
+                .get("activate")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let opened = workbench
+                .open(
+                    &session_id,
+                    OpenPanelRequest {
+                        panel_id,
+                        zone,
+                        path,
+                        activate,
+                    },
+                )
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.activate" => {
+            let session_id = required_string(&params, "session_id")?;
+            let instance_id = required_string(&params, "instance_id")?;
+            let opened = workbench
+                .activate(&session_id, &instance_id)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.close" => {
+            let session_id = required_string(&params, "session_id")?;
+            let instance_id = required_string(&params, "instance_id")?;
+            let opened = workbench
+                .close(&session_id, &instance_id)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.list_open" => {
+            let session_id = required_string(&params, "session_id")?;
+            let zone = optional_zone(&params)?;
+            let opened = workbench
+                .list_open(&session_id, zone)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        "panels.interact" => {
+            let session_id = required_string(&params, "session_id")?;
+            let instance_id = required_string(&params, "instance_id")?;
+            let kind = required_string(&params, "kind")?;
+            let path = optional_string(&params, "path")?;
+            let opened = workbench
+                .interact(&session_id, &instance_id, &kind, path)
+                .map_err(panel_error_response)?;
+            Ok(serde_json::to_value(opened).expect("opened serializes"))
+        }
+        _ => Err((
+            403,
+            json!({"error":{"code":"method_not_allowed","message":"This method is not part of the panel workbench contract","outcome_unknown":false}}),
+        )),
+    }
+}
+
+fn required_string(params: &Value, key: &str) -> Result<String, (u16, Value)> {
+    match params.get(key).and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => Ok(value.to_owned()),
+        _ => Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":format!("params.{key} must be a non-empty string"),"outcome_unknown":false}}),
+        )),
+    }
+}
+
+fn optional_string(params: &Value, key: &str) -> Result<Option<String>, (u16, Value)> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
+        Some(_) => Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":format!("params.{key} must be a string when set"),"outcome_unknown":false}}),
+        )),
+    }
+}
+
+fn optional_zone(params: &Value) -> Result<Option<PanelZone>, (u16, Value)> {
+    match params.get("zone") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value == "sidebar" => Ok(Some(PanelZone::Sidebar)),
+        Some(Value::String(value)) if value == "bottom" => Ok(Some(PanelZone::Bottom)),
+        Some(_) => Err((
+            400,
+            json!({"error":{"code":"invalid_params","message":"params.zone must be sidebar or bottom","outcome_unknown":false}}),
+        )),
+    }
+}
+
 async fn not_found() -> Response {
     error_response(
         StatusCode::NOT_FOUND,
@@ -571,4 +1042,30 @@ async fn styles() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/styles.css"),
     )
+}
+
+#[cfg(test)]
+mod device_router_tests {
+    use super::*;
+
+    fn ep(port: u16, token: &str) -> IpcEndpoint {
+        IpcEndpoint::new(format!("127.0.0.1:{port}").parse().unwrap(), token).unwrap()
+    }
+
+    #[test]
+    fn endpoint_for_falls_back_only_without_store_entry() {
+        let router = DeviceRouter::new(ep(4100, "fedcba9876543210fedcba9876543210"));
+        router
+            .register("device-alpha", ep(4101, "aabbccddeeff00112233445566778899"))
+            .unwrap();
+
+        assert!(router.endpoint_for(None).is_ok());
+        assert!(router.endpoint_for(Some("local")).is_ok());
+        assert!(router.endpoint_for(Some("")).is_ok());
+        assert!(router.endpoint_for(Some("device-alpha")).is_ok());
+        assert_eq!(
+            router.endpoint_for(Some("device-missing")).unwrap_err(),
+            "unknown_device"
+        );
+    }
 }

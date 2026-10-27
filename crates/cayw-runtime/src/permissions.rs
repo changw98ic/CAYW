@@ -226,6 +226,17 @@ impl Gate {
         {
             return self.accept(decision, None, &cancel);
         }
+        if !inner
+            .journal
+            .blocks_session_result_read(&context.lease.session_id, name, &scope)?
+            && crate::results::is_session_result_read(inner, &context.lease.session_id, name, args)
+        {
+            self.scope.authorize(Authorization {
+                proof: self.scope.proof("session-results".into(), None),
+                grant: None,
+            })?;
+            return context.check(&cancel);
+        }
         let request = inner.store.request_approval(
             &context.lease,
             ApprovalInput {

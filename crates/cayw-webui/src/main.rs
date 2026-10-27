@@ -1,15 +1,18 @@
-use cayw_webui::IpcEndpoint;
-use std::{collections::HashMap, env, net::SocketAddr, process::ExitCode};
+use cayw_webui::{DeviceRouter, IpcEndpoint, OwnershipStore};
+use std::{
+    collections::HashMap, env, net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供网关使用\n  CAYW_WEB_TOKEN  独立的网页访问令牌，打开网页后手动输入\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n\n只接受 loopback 地址；令牌不支持 URL 或命令行参数。两枚令牌必须独立随机生成，至少包含 128 bit 随机数据（例如 16 个随机字节编码为 32 位十六进制）；统一接受 32..4096 个不含空白或控制字符的 ASCII 字节，长度校验不代替随机生成。Ctrl+C 停止网关。\n";
+const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT] [--ownership PATH]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供网关使用\n  CAYW_WEB_TOKEN  独立的网页访问令牌，打开网页后手动输入\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_OWNERSHIP_PATH  持久所有权存储路径，默认 ownership.json\n\n只接受 loopback 地址；令牌不支持 URL 或命令行参数。两枚令牌必须独立随机生成，至少包含 128 bit 随机数据（例如 16 个随机字节编码为 32 位十六进制）；统一接受 32..4096 个不含空白或控制字符的 ASCII 字节，长度校验不代替随机生成。Ctrl+C 停止网关。\n";
 
 struct Config {
     ipc_addr: SocketAddr,
     web_addr: SocketAddr,
     ipc_token: String,
     web_token: String,
+    ownership_path: PathBuf,
 }
 
 impl Config {
@@ -22,6 +25,7 @@ impl Config {
             let name = match argument.as_str() {
                 "--ipc-addr" => "CAYW_IPC_ADDR",
                 "--web-addr" => "CAYW_WEB_ADDR",
+                "--ownership" | "--ownership-path" => "CAYW_OWNERSHIP_PATH",
                 _ => return Err("不支持的参数；使用 --help 查看运行方式".to_owned()),
             };
             values.insert(name.to_owned(), args.next().ok_or("地址参数缺少值")?);
@@ -42,6 +46,12 @@ impl Config {
         };
         let ipc_addr = address("CAYW_IPC_ADDR", None)?;
         let web_addr = address("CAYW_WEB_ADDR", Some("127.0.0.1:0"))?;
+        let ownership_path = PathBuf::from(
+            values
+                .get("CAYW_OWNERSHIP_PATH")
+                .map(String::as_str)
+                .unwrap_or("ownership.json"),
+        );
         let mut token = |name: &str| -> Result<String, String> {
             let value = values.remove(name).ok_or_else(|| format!("缺少 {name}"))?;
             if !cayw_webui::valid_token(&value) {
@@ -61,6 +71,7 @@ impl Config {
             web_addr,
             ipc_token,
             web_token,
+            ownership_path,
         })
     }
 }
@@ -90,6 +101,9 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     )?;
     let client = IpcEndpoint::new(config.ipc_addr, config.ipc_token)
         .map_err(|_| "本机 IPC 地址或令牌无效".to_owned())?;
+    let devices = Arc::new(DeviceRouter::new(client));
+    let ownership = OwnershipStore::open(&config.ownership_path)
+        .map_err(|e| format!("无法打开持久所有权存储: {e}"))?;
     let listener = TcpListener::bind(config.web_addr)
         .await
         .map_err(|_| "无法监听本机网页地址".to_owned())?;
@@ -105,9 +119,16 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         signal_cancel.cancel();
         result
     });
-    let result = cayw_webui::serve(listener, client, config.web_token, cancel)
-        .await
-        .map_err(|_| "本机 HTTP 服务停止并返回错误".to_owned());
+    let result = cayw_webui::serve_with_ownership(
+        listener,
+        devices,
+        config.web_token,
+        cayw_webui::GatewayLimits::default(),
+        Arc::new(ownership),
+        cancel,
+    )
+    .await
+    .map_err(|_| "本机 HTTP 服务停止并返回错误".to_owned());
     signal.abort();
     result
 }

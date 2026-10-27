@@ -15,6 +15,7 @@ pub mod project;
 pub use audit::DurableAudit;
 pub use project::{NODE_ATTRIBUTE, Project, ProjectError, Snapshot, SourceFile, SourceNode};
 
+use cayw_codeintel::SymbolVersionBridge;
 use companion::Companion;
 use framework::FrameworkProject;
 
@@ -71,6 +72,8 @@ pub struct EditorConfig {
     pub framework: Option<String>,
     pub node: PathBuf,
     pub companion: PathBuf,
+    /// Shared F04 symbol/version bridge (same instance as Host/Trace when wired).
+    pub codeintel: Option<SymbolVersionBridge>,
 }
 
 impl std::fmt::Debug for EditorConfig {
@@ -85,6 +88,7 @@ impl std::fmt::Debug for EditorConfig {
             .field("framework", &self.framework)
             .field("node", &self.node)
             .field("companion", &self.companion)
+            .field("codeintel", &self.codeintel.is_some())
             .field("token", &"<redacted>")
             .finish()
     }
@@ -227,12 +231,13 @@ pub async fn start(config: EditorConfig) -> Result<EditorHandle, EditorError> {
         }
         let companion =
             Arc::new(Companion::spawn(&config.node, &config.companion, &state_dir).await?);
-        let project = FrameworkProject::open(
+        let project = FrameworkProject::open_with_codeintel(
             &root,
             &config.page,
             &state_dir,
             framework,
             companion.clone(),
+            config.codeintel.clone(),
         )
         .await?;
         let snapshot = project.snapshot().await?;
@@ -318,7 +323,9 @@ pub async fn start(config: EditorConfig) -> Result<EditorHandle, EditorError> {
             normal_preview_origin,
         )
     } else {
-        let project = Project::open(&root, &config.page, &state_dir).await?;
+        let project =
+            Project::open_with_codeintel(&root, &config.page, &state_dir, config.codeintel.clone())
+                .await?;
         let snapshot = project.snapshot().await?;
         let listener = TcpListener::bind(config.preview_addr).await?;
         let addr = listener.local_addr()?;
@@ -366,6 +373,7 @@ pub async fn start(config: EditorConfig) -> Result<EditorHandle, EditorError> {
         backend_unknown: AtomicBool::new(false),
         assets,
         csp: editor_csp(&preview_origin),
+        codeintel: config.codeintel,
     });
     tasks.push(tokio::spawn(serve(
         editor_listener,
@@ -513,9 +521,32 @@ struct ServerState {
     backend_unknown: AtomicBool,
     assets: UiAssets,
     csp: HeaderValue,
+    codeintel: Option<SymbolVersionBridge>,
 }
 
 impl ServerState {
+    fn publish_codeintel(&self, bridge: &SymbolVersionBridge, snapshot: &Snapshot) {
+        if snapshot.files.is_empty() {
+            let language = cayw_codeintel::language_for_path(&snapshot.path);
+            let _ = cayw_codeintel::publish_bytes(
+                bridge,
+                &snapshot.path,
+                snapshot.source.as_bytes(),
+                language,
+            );
+        } else {
+            for file in &snapshot.files {
+                let language = cayw_codeintel::language_for_path(&file.path);
+                let _ = cayw_codeintel::publish_bytes(
+                    bridge,
+                    &file.path,
+                    file.source.as_bytes(),
+                    language,
+                );
+            }
+        }
+    }
+
     fn is_unknown(&self) -> bool {
         self.backend_unknown.load(Ordering::Acquire) || self.audit.unknown()
     }
@@ -792,6 +823,9 @@ async fn save(State(state): State<Arc<ServerState>>, headers: HeaderMap, body: B
             // settlement failed, otherwise the cached digest and draft would
             // lag behind the source that is already on disk.
             state.publish(snapshot.clone());
+            if let Some(bridge) = &state.codeintel {
+                state.publish_codeintel(bridge, &snapshot);
+            }
             if let Err(error) = settlement {
                 state.note_unknown(&request, &format!("save audit settlement failed: {error}"));
                 return api_error(

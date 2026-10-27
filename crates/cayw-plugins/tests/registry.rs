@@ -71,6 +71,55 @@ impl Plugin for Native {
 }
 
 #[tokio::test]
+async fn unload_exact_never_removes_a_replacement_or_foreign_instance() {
+    let registry = PluginRegistry::new();
+    let original = registry
+        .load_native(
+            Arc::new(Native::new("fixture", "fixture.echo", false)),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    registry.unload_exact(&original).unwrap();
+    let replacement = registry
+        .load_native(
+            Arc::new(Native::new("fixture", "fixture.echo", false)),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    assert!(matches!(
+        registry.unload_exact(&original),
+        Err(PluginError::Unavailable(_))
+    ));
+    let foreign = PluginRegistry::new();
+    let foreign_description = foreign
+        .load_native(
+            Arc::new(Native::new("fixture", "fixture.echo", false)),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    assert!(matches!(
+        registry.unload_exact(&foreign_description),
+        Err(PluginError::Unavailable(_))
+    ));
+    assert_eq!(registry.describe("fixture").unwrap(), replacement);
+    assert_eq!(
+        registry
+            .call_exact(
+                &replacement,
+                "fixture.echo",
+                json!({"n":2}),
+                CancellationToken::new(),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap(),
+        json!({"n":2})
+    );
+    registry.unload_exact(&replacement).unwrap();
+    assert!(registry.list().is_empty());
+}
+
+#[tokio::test]
 async fn registry_denies_missing_grants_and_permissions_before_invocation() {
     for (capabilities, permissions) in [(vec![], vec![]), (vec!["fixture.echo".into()], vec![])] {
         let registry = PluginRegistry::new();

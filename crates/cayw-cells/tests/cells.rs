@@ -246,6 +246,60 @@ async fn yield_is_owned_and_resumed_only_by_explicit_wait() {
 }
 
 #[tokio::test]
+async fn continue_wait_with_stale_cursor_waits_for_resumed_progress() {
+    let (_dir, _journal, host, cells) = setup();
+    let first = cells
+        .exec_fixture(
+            exec("text('before'); yield_control(); cayw.call('block', {})"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut page = first;
+    while page.status != CellStatus::Yielded {
+        page = cells
+            .wait(wait(&page, false), CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    assert!(
+        page.next_cursor > 0,
+        "yield page must already publish output"
+    );
+    let wait_stale = cells.wait(
+        WaitRequest {
+            cell_id: page.cell_id.clone(),
+            cursor: 0,
+            yield_time_ms: 10_000,
+            max_output_tokens: 128 * 1024,
+            continue_execution: true,
+        },
+        CancellationToken::new(),
+    );
+    tokio::pin!(wait_stale);
+    // Poll the continue-wait so resume runs, then observe the blocked host call.
+    tokio::select! {
+        biased;
+        result = &mut wait_stale => panic!("stale-cursor continue returned before host entered: {result:?}"),
+        _ = wait_entered(&host) => {}
+    }
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    // The resumed Host call is blocked until release; observe Pending without
+    // depending on how long this machine takes to schedule the task.
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(wait_stale.as_mut().poll(cx).is_pending())
+        })
+        .await
+    );
+    host.release.add_permits(1);
+    let done = wait_stale.await.unwrap();
+    assert!(done.status.is_terminal());
+    assert!(!done.vm_alive);
+    cells.close().await;
+}
+
+#[tokio::test]
 async fn timed_exec_returns_without_cancelling_and_wait_does_not_repeat_host_call() {
     let (_dir, _journal, host, cells) = setup();
     let page = cells

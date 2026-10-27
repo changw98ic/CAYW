@@ -1,19 +1,24 @@
 //! Headless runtime with one durable session history and explicit host authority.
+mod artifacts;
 mod audit;
-mod bridge;
+mod background;
+pub mod bridge;
 mod cancellation;
 mod cells;
 mod children;
 mod collaboration;
 mod completion;
 mod content;
+mod context_overview;
 mod coordination;
 mod execution;
 pub mod fixture;
+mod fleet;
 mod input;
-mod launch;
+pub mod launch;
 mod model_requests;
 mod permissions;
+mod plannotator;
 #[cfg(feature = "plugins")]
 mod plugins;
 #[cfg(all(test, target_os = "macos"))]
@@ -28,34 +33,55 @@ mod remote;
 mod request_recovery;
 mod requests;
 mod resources;
+mod results;
 mod rpc;
 mod scheduler;
 mod session;
 mod shared_read;
 mod values;
 
+pub use artifacts::RuntimeHostDispatch;
 pub use audit::{AuditRecord, GrantRecord};
+pub use background::{
+    BackgroundCleanupInspection, BackgroundConfig, BackgroundLogPage, BackgroundStatus,
+    BackgroundTaskView,
+};
 pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
+pub use cayw_artifacts::{
+    ActionIntent, ActionKind, ActionOutcome, ActionRecord, ActionRequest, ActionStatus,
+    ArtifactKind, ArtifactPreview, ArtifactRecord, HostActionDispatch, PutArtifactRequest,
+    RecoveryBundle, UpdateArtifactRequest,
+};
+pub use cayw_context::{CostStatus, SessionLedgerSnapshot, SessionOverview};
+pub use cayw_plannotator::{FeedbackDecision, FeedbackDraft, LiveFileVersion, StructuredFeedback};
 pub use cayw_requests::TaskIntent;
 pub use children::LocalAgents;
 pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
 };
 pub use content::{ContentConfig, ContentScope, ContentView};
+pub use context_overview::session_ledger_snapshot_from_model_requests;
+pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
-pub use launch::HeadlessConfig;
+pub use launch::{HeadlessConfig, PiCompatConfig};
 pub use model_requests::{
     ModelCostStatus, ModelRequestIdentity, ModelRequestLedger, ModelRequestObservation,
     ModelRequestRecord, ModelRequestTerminal, ModelReservationPolicy, ModelUsageObservation,
 };
 pub use permissions::{ApprovalChoice, ScopedPermission};
+pub use plannotator::PlanFeedbackInput;
 pub use processes::{ProcessCleanupInspection, ProcessCleanupProcess};
 pub use provider::{ConfiguredProvider, ProviderApi, ProviderConfig, ProviderService};
 pub use queue::{TaskPriority, TaskRecord, TaskState};
 pub use requests::RequestPolicy;
 pub use resources::{
     ResourceCapability, ResourcePolicy, ResourceUsage, ResourceView, TaskResources,
+};
+pub use results::{
+    ResultHandleView, ResultPage, ResultScope, ResultSnippet, ResultStorageContent,
+    ResultStorageIdentity, ResultStorageInspection, ResultStorageObservation, ResultStoragePending,
+    ResultStorageState,
 };
 pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
@@ -128,6 +154,8 @@ pub struct RuntimeConfig {
     pub resources: ResourcePolicy,
     /// Optional Device-authoritative text outside the model's workspace.
     pub content: Option<ContentConfig>,
+    /// Optional persistent background commands (F13).
+    pub background: Option<BackgroundConfig>,
     pub max_prompt_bytes: usize,
     pub max_history_bytes: usize,
     pub max_event_bytes: usize,
@@ -137,6 +165,10 @@ pub struct RuntimeConfig {
     pub max_queue_time: Duration,
     pub max_capability_calls: usize,
     pub max_capability_bytes: usize,
+    /// Soft UTF-8 JSON size (bytes) above which Host/tool results are stored in
+    /// ContentStore and replaced with a result handle stub for the model.
+    /// Requires `content`. `0` disables. Default: 32 KiB.
+    pub auto_externalize_threshold_bytes: usize,
     pub grant_lifetime: Duration,
     pub codemode: cayw_codemode::Limits,
     pub cells: cayw_cells::CellLimits,
@@ -156,6 +188,9 @@ pub struct RuntimeConfig {
     pub request_limits: cayw_requests::RequestConfig,
     /// Trusted host policy for original-effect receipts. Absence denies reconciliation.
     pub reconciliation_verifier: Option<Arc<dyn cayw_core::ReconciliationVerifier>>,
+    /// Optional externally supplied shared plugin registry.
+    #[cfg(feature = "plugins")]
+    pub plugin_registry: Option<Arc<cayw_plugins::PluginRegistry>>,
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -165,6 +200,7 @@ impl Default for RuntimeConfig {
             fairness_after_dispatches: 8,
             resources: ResourcePolicy::default(),
             content: None,
+            background: None,
             max_prompt_bytes: 256 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
             max_event_bytes: 2 * 1024 * 1024,
@@ -174,6 +210,8 @@ impl Default for RuntimeConfig {
             max_queue_time: Duration::from_secs(60),
             max_capability_calls: 128,
             max_capability_bytes: 8 * 1024 * 1024,
+            auto_externalize_threshold_bytes:
+                crate::results::DEFAULT_AUTO_EXTERNALIZE_THRESHOLD_BYTES,
             grant_lifetime: Duration::from_secs(300),
             codemode: Default::default(),
             cells: Default::default(),
@@ -184,6 +222,8 @@ impl Default for RuntimeConfig {
             request_policy: None,
             request_limits: Default::default(),
             reconciliation_verifier: None,
+            #[cfg(feature = "plugins")]
+            plugin_registry: None,
         }
     }
 }
@@ -194,6 +234,12 @@ impl RuntimeConfig {
         self.resources.validate()?;
         if let Some(content) = &self.content {
             content.validate()?;
+        }
+        background::validate(self.background.as_ref())?;
+        if self.auto_externalize_threshold_bytes > 1024 * 1024 {
+            return Err(RuntimeError::InvalidInput(
+                "auto_externalize_threshold_bytes must be at most 1 MiB".into(),
+            ));
         }
         if self.max_concurrent_runs == 0
             || self.max_concurrent_runs > 1024
@@ -247,15 +293,19 @@ pub(crate) struct Inner {
     process_journal: processes::ProcessJournal,
     processes: Mutex<BTreeMap<String, Arc<cayw_host::Host>>>,
     content: Option<Arc<cayw_content::ContentStore>>,
+    background: Option<Arc<background::BackgroundRegistry>>,
     root: PathBuf,
     host_root: cayw_host::Host,
     provider: Arc<dyn Provider>,
     model: Model,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
+    fleet: fleet::FleetRegistry,
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
+    plannotator: Mutex<plannotator::PlannotatorState>,
+    artifacts: Mutex<artifacts::ArtifactState>,
     #[cfg(feature = "plugins")]
     registry: Arc<cayw_plugins::PluginRegistry>,
 }
@@ -298,7 +348,6 @@ impl Runtime {
                 "workspace must be a directory".into(),
             ));
         }
-        let host_root = cells::catalog_host(&root, bridge::effective_host_config(&config))?;
         let store = SessionStore::open(store_path.as_ref())?;
         let store = Arc::new(match &config.reconciliation_verifier {
             Some(verifier) => store.with_reconciliation_verifier(verifier.clone()),
@@ -333,7 +382,26 @@ impl Runtime {
             config.fairness_after_dispatches,
             &config.resources,
         )?;
+        // Open ContentStore before Host so F02 can externalize filtered originals
+        // into the same Device store Runtime already holds for content.*.
         let content = content::open(store_path.as_ref(), &root, config.content.as_ref())?;
+        let background = match &config.background {
+            Some(cfg) => {
+                let host_cfg = bridge::effective_host_config(&config);
+                let runner = Arc::new(
+                    cayw_host::runner(&host_cfg)
+                        .map_err(|e| RuntimeError::Workspace(e.to_string()))?,
+                );
+                Some(Arc::new(background::BackgroundRegistry::open_with_runner(
+                    store_path.as_ref(),
+                    cfg,
+                    runner,
+                    coordination.clone(),
+                )?))
+            }
+            None => None,
+        };
+        let host_root = cells::catalog_host(&root, bridge::effective_host_config(&config))?;
         // RequestStore owns its authority fence and database as one unit. It
         // must not mistake the pre-existing Core database for a new authority.
         let requests = Arc::new(request_recovery::open_requests(
@@ -370,19 +438,30 @@ impl Runtime {
                 process_journal,
                 processes: Mutex::new(BTreeMap::new()),
                 content,
+                background,
                 root,
                 host_root,
                 provider,
                 model,
-                config,
                 active: Mutex::new(BTreeMap::new()),
+                fleet: fleet::FleetRegistry::default(),
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
+                plannotator: Mutex::new(plannotator::PlannotatorState::default()),
+                // Placeholder; replaced immediately after Arc construction with Weak dispatch.
+                artifacts: Mutex::new(artifacts::ArtifactState {
+                    workspace: cayw_artifacts::ArtifactWorkspace::new(),
+                }),
                 #[cfg(feature = "plugins")]
-                registry: Arc::new(cayw_plugins::PluginRegistry::new()),
+                registry: config
+                    .plugin_registry
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(cayw_plugins::PluginRegistry::new())),
+                config,
             }),
         };
+        *crate::lock(&rt.inner.artifacts) = artifacts::new_state(Arc::downgrade(&rt.inner));
         rt.capabilities()?; // Validate actual injected Host configuration before serving.
         Ok(rt)
     }
@@ -433,6 +512,97 @@ impl Runtime {
     ) -> Result<Vec<EventRecord>, RuntimeError> {
         self.get(id)?;
         Ok(self.inner.store.events(id, after, limit)?)
+    }
+    /// Fold durable session events into a run-inspector view (F06).
+    ///
+    /// Pages the Core event log from `after` (same authority as [`Self::events`])
+    /// until `limit` events are scanned or the session cursor is reached.
+    /// When `limit` is `None`, at most 200,000 events are included via internal
+    /// `MAX_EVENT_PAGE` paging.
+    ///
+    /// The response always carries `events_total` / `has_more` / `next_after`;
+    /// callers use these cursors to continue through longer histories.
+    pub fn run_inspector(
+        &self,
+        id: &str,
+    ) -> Result<cayw_run_inspector::RunInspectorView, RuntimeError> {
+        self.run_inspector_page(id, 0, None)
+    }
+
+    /// Windowed run-inspector read. See [`Self::run_inspector`].
+    ///
+    /// `limit` caps how many Core events are folded into this response. Values
+    /// above [`cayw_core::MAX_EVENT_PAGE`] are allowed; the store is still read
+    /// in `MAX_EVENT_PAGE` chunks. `None` selects the 200,000-event response cap;
+    /// continue with `has_more` and `next_after` when more events remain.
+    pub fn run_inspector_page(
+        &self,
+        id: &str,
+        after: u64,
+        limit: Option<usize>,
+    ) -> Result<cayw_run_inspector::RunInspectorView, RuntimeError> {
+        let view = self.get(id)?;
+        let events_total = view.cursor;
+        if after > events_total {
+            return Err(RuntimeError::Core(cayw_core::CoreError::FutureCursor {
+                after,
+                current: events_total,
+            }));
+        }
+        if matches!(limit, Some(0)) {
+            return Err(RuntimeError::InvalidInput(
+                "run inspector limit must be at least 1 when set".into(),
+            ));
+        }
+        // Bound a single response so a runaway client cannot ask for unbounded
+        // materialization in one RPC; full history requires cursor continuation.
+        const MAX_INSPECTOR_EVENTS: usize = 200_000;
+        if let Some(limit) = limit
+            && limit > MAX_INSPECTOR_EVENTS
+        {
+            return Err(RuntimeError::InvalidInput(format!(
+                "run inspector limit may not exceed {MAX_INSPECTOR_EVENTS}"
+            )));
+        }
+        let mut records = Vec::new();
+        let mut cursor = after;
+        let remaining_cap = limit.unwrap_or(MAX_INSPECTOR_EVENTS);
+        while cursor < events_total && records.len() < remaining_cap {
+            let want = (events_total - cursor)
+                .min(cayw_core::MAX_EVENT_PAGE as u64)
+                .min((remaining_cap - records.len()) as u64) as usize;
+            if want == 0 {
+                break;
+            }
+            let page = self.inner.store.events(id, cursor, want)?;
+            if page.is_empty() {
+                break;
+            }
+            let next = page.last().map_or(cursor, |record| record.cursor);
+            if next <= cursor {
+                break;
+            }
+            cursor = next;
+            records.extend(page);
+        }
+        let events_scanned = records.len() as u64;
+        let next_after = records.last().map(|record| record.cursor).unwrap_or(after);
+        // None still has the response cap; longer histories use next_after.
+        // Signal remaining events whenever this response stops before the cursor.
+        let has_more = next_after < events_total;
+        Ok(cayw_run_inspector::inspect_runtime_events_page(
+            id,
+            Some(view.label),
+            None,
+            &records,
+            cayw_run_inspector::RunInspectorPage {
+                events_total,
+                after,
+                events_scanned,
+                has_more,
+                next_after,
+            },
+        ))
     }
     pub async fn wait_events(
         &self,
@@ -503,6 +673,10 @@ impl Runtime {
             ));
         }
         let _coordinate = self.inner.coordination.enter()?;
+        let snapshot = self.inner.store.snapshot(id)?;
+        if results::has_pending_storage(self, id, snapshot.cursor)? {
+            return Err(RuntimeError::NeedsReconciliation);
+        }
         if self.tasks(id)?.iter().any(|t| {
             matches!(
                 t.state,

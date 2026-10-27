@@ -13,12 +13,12 @@
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Request, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
@@ -28,6 +28,7 @@ use crate::{
     Error, TraceStore,
     types::{Document, Edit, Undo},
 };
+use cayw_codeintel::{DefinitionQuery, SymbolVersionBridge};
 
 /// Requests are rejected before JSON parsing or store access at this size.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -42,6 +43,8 @@ struct Server {
     web_token: String,
     authorities: Vec<String>,
     cancel: CancellationToken,
+    /// Same F04 bridge instance Host/editor hold when the app wires one.
+    codeintel: Option<SymbolVersionBridge>,
 }
 
 /// Serve the trace debug interface on an already-bound loopback listener.
@@ -54,6 +57,17 @@ pub async fn serve(
     store: Arc<TraceStore>,
     web_token: String,
     cancel: CancellationToken,
+) -> Result<(), Error> {
+    serve_with_codeintel(listener, store, web_token, cancel, None).await
+}
+
+/// Same as [`serve`], sharing one F04 [`SymbolVersionBridge`] with Host/editor.
+pub async fn serve_with_codeintel(
+    listener: TcpListener,
+    store: Arc<TraceStore>,
+    web_token: String,
+    cancel: CancellationToken,
+    codeintel: Option<SymbolVersionBridge>,
 ) -> Result<(), Error> {
     let address = listener.local_addr().map_err(|error| {
         Error::Invalid(format!("cannot read trace debug listener address: {error}"))
@@ -73,6 +87,7 @@ pub async fn serve(
         web_token,
         authorities: authorities(address),
         cancel: cancel.clone(),
+        codeintel,
     });
     let app = Router::new()
         .route("/", get(index))
@@ -80,6 +95,15 @@ pub async fn serve(
         .route("/styles.css", get(styles))
         .route("/favicon.svg", get(favicon))
         .route("/api/state", get(state_route))
+        .route(
+            "/api/codeintel/definitions",
+            post(codeintel_definitions_route),
+        )
+        .route(
+            "/api/codeintel/file-version",
+            post(codeintel_file_version_route),
+        )
+        .route("/api/run-inspector", get(run_inspector_route))
         .route("/api/projects/{project_id}/edit", post(edit_route))
         .route("/api/projects/{project_id}/undo", post(undo_route))
         .fallback(not_found)
@@ -114,7 +138,8 @@ fn one_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     Some(value)
 }
 
-fn same_origin(headers: &HeaderMap, state: &Server) -> bool {
+fn same_origin(request: &Request, state: &Server) -> bool {
+    let headers = request.headers();
     let Some(host) = one_header(headers, "host") else {
         return false;
     };
@@ -126,11 +151,19 @@ fn same_origin(headers: &HeaderMap, state: &Server) -> bool {
     {
         return false;
     }
+    let site = one_header(headers, "sec-fetch-site");
+    // A user opening this login page from another local port makes a same-site
+    // document navigation. This exception never admits API or asset requests.
+    let login_navigation = request.method() == Method::GET
+        && request.uri().path() == "/"
+        && request.uri().query().is_none()
+        && site == Some("same-site")
+        && one_header(headers, "sec-fetch-mode") == Some("navigate")
+        && one_header(headers, "sec-fetch-dest") == Some("document")
+        && one_header(headers, "sec-fetch-user") == Some("?1");
     if headers.contains_key("sec-fetch-site")
-        && !matches!(
-            one_header(headers, "sec-fetch-site"),
-            Some("same-origin" | "none")
-        )
+        && !matches!(site, Some("same-origin" | "none"))
+        && !login_navigation
     {
         return false;
     }
@@ -157,7 +190,7 @@ async fn guard(State(state): State<Arc<Server>>, request: Request, next: Next) -
 }
 
 async fn guarded_request(state: &Server, request: Request, next: Next) -> Response {
-    if !same_origin(request.headers(), state) {
+    if !same_origin(&request, state) {
         return error_response(
             StatusCode::FORBIDDEN,
             "forbidden",
@@ -178,9 +211,11 @@ async fn guarded_request(state: &Server, request: Request, next: Next) -> Respon
             .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         return response;
     }
-    // The state endpoint uses `after`; every other API call carries its input
-    // in the body. Credentials never belong in a URL.
-    if request.uri().path() != "/api/state" && request.uri().query().is_some() {
+    // The state and run-inspector endpoints accept query paging (`after` / `limit`);
+    // every other API call carries its input in the body. Credentials never belong in a URL.
+    if !matches!(request.uri().path(), "/api/state" | "/api/run-inspector")
+        && request.uri().query().is_some()
+    {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request",
@@ -275,6 +310,151 @@ async fn wait_for_change(state: &Server, after: u64) -> Option<Document> {
             _ = tokio::time::sleep(POLL_INTERVAL.min(remaining)) => {}
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeintelDefinitionsBody {
+    name: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    file_version: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeintelPathBody {
+    path: String,
+}
+
+async fn codeintel_definitions_route(
+    State(state): State<Arc<Server>>,
+    payload: Result<Json<CodeintelDefinitionsBody>, JsonRejection>,
+) -> Response {
+    let Some(bridge) = state.codeintel.as_ref() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "codeintel bridge not attached",
+        );
+    };
+    let body = match decode_body(payload) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    match bridge.definitions(DefinitionQuery {
+        name: body.name,
+        path: body.path,
+        kind: body.kind,
+        file_version: body.file_version,
+    }) {
+        Ok(definitions) => Json(json!({
+            "protocol_version": cayw_codeintel::CODEINTEL_PROTOCOL_VERSION,
+            "definitions": definitions,
+        }))
+        .into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &error.to_string(),
+        ),
+    }
+}
+
+async fn codeintel_file_version_route(
+    State(state): State<Arc<Server>>,
+    payload: Result<Json<CodeintelPathBody>, JsonRejection>,
+) -> Response {
+    let Some(bridge) = state.codeintel.as_ref() else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "codeintel bridge not attached",
+        );
+    };
+    let body = match decode_body(payload) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    match bridge.file_version(&body.path) {
+        Ok(file) => Json(json!({
+            "protocol_version": cayw_codeintel::CODEINTEL_PROTOCOL_VERSION,
+            "file": file,
+        }))
+        .into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            &error.to_string(),
+        ),
+    }
+}
+
+/// Optional `after` (exclusive offset into the ingested event list) and `limit`
+/// for `GET /api/run-inspector`. Unknown keys fail closed.
+fn query_run_inspector(query: Option<&str>) -> Result<(u64, Option<usize>), ()> {
+    let Some(query) = query else {
+        return Ok((0, None));
+    };
+    let mut after = None;
+    let mut limit = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').ok_or(())?;
+        match key {
+            "after" if after.is_none() => {
+                after = Some(value.parse::<u64>().map_err(|_| ())?);
+            }
+            "limit" if limit.is_none() => {
+                let parsed = value.parse::<usize>().map_err(|_| ())?;
+                if parsed == 0 {
+                    return Err(());
+                }
+                limit = Some(parsed);
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok((after.unwrap_or(0), limit))
+}
+
+/// Fold ingested Runtime events into run-inspector timelines (F06 product entry).
+///
+/// Supports `?after=&limit=` over the ingested event list so long captures are
+/// not silently truncated. The response always reports page metadata.
+async fn run_inspector_route(State(state): State<Arc<Server>>, uri: Uri) -> Response {
+    let (after, limit) = match query_run_inspector(uri.query()) {
+        Ok(page) => page,
+        Err(()) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Accepted query parameters are non-negative `after` and positive `limit`",
+            );
+        }
+    };
+    let document = state.store.snapshot();
+    let events_total = document.events.len() as u64;
+    let start = after.min(events_total) as usize;
+    let end = match limit {
+        Some(limit) => start.saturating_add(limit).min(document.events.len()),
+        None => document.events.len(),
+    };
+    let page = &document.events[start..end];
+    let timelines = cayw_run_inspector::timelines_from_runtime_events(page);
+    let next_after = end as u64;
+    Json(json!({
+        "protocol_version": cayw_run_inspector::RUN_INSPECTOR_PROTOCOL_VERSION,
+        "timelines": timelines,
+        "events_total": events_total,
+        "after": start as u64,
+        "events_scanned": (end - start) as u64,
+        "has_more": end < document.events.len(),
+        "next_after": next_after,
+    }))
+    .into_response()
 }
 
 async fn edit_route(

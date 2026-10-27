@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_bridge::{
-    Manifest, ResourceSpec, SourceHandle, SourceOperation, SourceReply, SourceRequest, ToolSpec,
+    Manifest, PromptSpec, ResourceSpec, SourceHandle, SourceOperation, SourceReply, SourceRequest,
+    ToolSpec,
 };
 use cayw_codemode::CapabilityError;
 use serde::{Deserialize, Serialize};
@@ -394,7 +395,7 @@ impl StdioSource {
                 })
                 .collect::<Result<Vec<_>, CapabilityError>>()?;
             let resources = client
-                .request("resources/list", json!({}), cancel, false)
+                .request("resources/list", json!({}), cancel.clone(), false)
                 .await?;
             if server_info != self::server_info(&resources)?
                 || resources.get("nextCursor").is_some()
@@ -419,10 +420,45 @@ impl StdioSource {
                     })
                 })
                 .collect::<Result<Vec<_>, CapabilityError>>()?;
+            let prompts = client
+                .request("prompts/list", json!({}), cancel, false)
+                .await?;
+            if server_info != self::server_info(&prompts)?
+                || prompts.get("nextCursor").is_some()
+                || prompts
+                    .get("resultType")
+                    .is_some_and(|value| value != "complete")
+            {
+                return Err(failure(
+                    "stdio server identity changed or prompt pagination unsupported",
+                ));
+            }
+            let prompts = prompts["prompts"]
+                .as_array()
+                .filter(|prompts| prompts.len() <= 128)
+                .ok_or_else(|| failure("stdio prompt catalog missing or too large"))?
+                .iter()
+                .map(|prompt| {
+                    Ok(PromptSpec {
+                        name: text(prompt, "name")?,
+                        description: optional_text(prompt, "description")?,
+                        arguments_schema: prompt.get("argumentsSchema").cloned().or_else(|| {
+                            prompt.get("arguments").and_then(|value| {
+                                if value.is_object() || value.is_array() {
+                                    Some(value.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        }),
+                    })
+                })
+                .collect::<Result<Vec<_>, CapabilityError>>()?;
             Ok((
                 Manifest {
                     tools,
                     resources,
+                    prompts,
                     ..Manifest::default()
                 },
                 server_info,
@@ -499,6 +535,11 @@ impl SourceHandle for StdioHandle {
                 true,
             ),
             SourceOperation::ReadResource { uri } => ("resources/read", json!({"uri":uri}), false),
+            SourceOperation::GetPrompt { name, arguments } => (
+                "prompts/get",
+                json!({"name":name,"arguments":arguments}),
+                false,
+            ),
             _ => return Err(failure("stdio source operation unavailable")),
         };
         let result = self.client.request(method, params, cancel, effect).await?;
@@ -512,7 +553,20 @@ impl SourceHandle for StdioHandle {
                 "stdio result server identity changed; reconnect explicitly",
             ));
         }
-        let value = if effect {
+        let value = if matches!(request.operation, SourceOperation::GetPrompt { .. }) {
+            if !result
+                .get("description")
+                .is_none_or(|value| value.is_string())
+                || !result["messages"].is_array()
+            {
+                return Err(failure("stdio prompt result requires description/messages"));
+            }
+            let mut value = result;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("_meta");
+            }
+            value
+        } else if effect {
             if result
                 .get("isError")
                 .is_some_and(|value| !value.is_boolean())
@@ -688,6 +742,7 @@ async fn run(
                             else {state.observations_omitted=state.observations_omitted.saturating_add(1);}
                             if method=="tools/call" {state.tool_calls+=1;}
                             if method=="resources/read" {state.resource_reads+=1;}
+                            // prompts/list and prompts/get appear in methods only
                         });
                         shared.event("sent",Some(id),Some(method));
                     }

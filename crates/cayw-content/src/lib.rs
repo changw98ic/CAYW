@@ -5,6 +5,8 @@
 mod local;
 mod types;
 pub use local::ContentStore;
+#[cfg(feature = "fault-injection")]
+pub use local::fail_current_state_directory_sync;
 pub use types::*;
 
 #[cfg(feature = "encryption")]
