@@ -1111,7 +1111,7 @@ function boot() {
             const evoCard = el('div', 'item-card');
             evoCard.append(el('strong', '', `上下文演变过程 (${evo.length} 轮)`));
             for (const step of evo) {
-              evoCard.append(el('p', 'small muted', `[轮次 ${step.turn}] 输入: ${step.input_tokens || 0}, 输出: ${step.output_tokens || 0}, 增量: ${step.delta_tokens || 0}`));
+              evoCard.append(el('p', 'small muted', `[轮次 ${step.turn}] 输入: ${step.usage?.input || 0}, 输出: ${step.usage?.output || 0}, 增量: ${step.usage?.total_tokens || 0}`));
             }
             usageOutput.append(evoCard);
           }

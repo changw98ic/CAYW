@@ -521,7 +521,7 @@ test('workbench_dom: usage panel displays session.context_overview tokens, cache
     ledger_reserved_tokens: 500,
     ledger_remaining_tokens: 46500,
     budget_unknown: false,
-    cost: { status: 'settled', amount: '0.042', currency: 'USD' },
+    cost: { status: 'unknown' },
     cache: { cache_read: 500, cache_write: 200, hit_rate: 0.714 },
     composition: [
       { kind: 'input', tokens: 2000 },
@@ -529,8 +529,42 @@ test('workbench_dom: usage panel displays session.context_overview tokens, cache
       { kind: 'cache_read', tokens: 500 }
     ],
     evolution: [
-      { turn: 1, input_tokens: 800, output_tokens: 400, delta_tokens: 1200 },
-      { turn: 2, input_tokens: 1200, output_tokens: 600, delta_tokens: 1800 }
+      {
+        request_id: 'req-turn-1',
+        session_id: 's1',
+        task_id: 'task-1',
+        turn: 1,
+        provider: 'test-provider',
+        model: 'test-model',
+        terminal: 'completed',
+        usage_status: 'reported',
+        usage: {
+          input: 800,
+          output: 400,
+          cache_read: 0,
+          cache_write: 0,
+          reasoning: 0,
+          total_tokens: 1200,
+        },
+      },
+      {
+        request_id: 'req-turn-2',
+        session_id: 's1',
+        task_id: 'task-1',
+        turn: 2,
+        provider: 'test-provider',
+        model: 'test-model',
+        terminal: 'completed',
+        usage_status: 'reported',
+        usage: {
+          input: 1200,
+          output: 600,
+          cache_read: 500,
+          cache_write: 200,
+          reasoning: 300,
+          total_tokens: 2300,
+        },
+      },
     ]
   };
 
@@ -566,11 +600,13 @@ test('workbench_dom: usage panel displays session.context_overview tokens, cache
   await app.waitTick();
 
   const text = sidebar.textContent;
-  assert.ok(text.includes('3500'), 'total tokens rendered');
+  assert.ok(text.includes('Tokens 总量: 3500 (输入: 2000, 输出: 1000, 推理: 300)'), 'total tokens card rendered without distortion');
   assert.ok(text.includes('71.4%'), 'cache hit rate rendered');
-  assert.ok(text.includes('0.042 USD'), 'settled cost amount rendered');
+  assert.ok(text.includes('费用结算状态: unknown'), 'unpriced usage stays unknown');
   assert.ok(text.includes('Token 构成分析'), 'composition breakdown rendered');
-  assert.ok(text.includes('上下文演变过程'), 'evolution breakdown rendered');
+  assert.ok(text.includes('上下文演变过程 (2 轮)'), 'evolution breakdown rendered');
+  assert.ok(text.includes('[轮次 1] 输入: 800, 输出: 400, 增量: 1200'), 'turn 1 accurate non-zero usage rendered');
+  assert.ok(text.includes('[轮次 2] 输入: 1200, 输出: 600, 增量: 2300'), 'turn 2 accurate differing non-zero usage rendered');
 });
 
 test('workbench_dom: tasks panel displays plan, queue, and subagent fleet with stop and steer controls', async t => {

@@ -653,7 +653,7 @@ async fn rpc(
         _ = state.cancel.cancelled() => return shutting_down(false),
         result = endpoint.connect(budget) => match result {
             Ok(client) => client,
-            Err(error) => return upstream_error(&state, error),
+            Err(error) => return upstream_error(&state, error, false),
         }
     };
     // The outer deadline drops this connection's request guard; no other HTTP
@@ -680,7 +680,7 @@ async fn rpc(
                     }
                 }
             },
-            Ok(Err(error)) => upstream_error(&state, error),
+            Ok(Err(error)) => upstream_error(&state, error, side_effecting(&request.method)),
             Err(_) => error_response(StatusCode::GATEWAY_TIMEOUT, "request_timeout", "Runtime request timed out; check session events before taking further action", side_effecting(&request.method)),
         }
     }
@@ -788,6 +788,15 @@ fn side_effecting(method: &str) -> bool {
             | "session.fork"
             | "runtime.fleet.stop"
             | "runtime.fleet.steer"
+            | "runtime.background.kill"
+            | "runtime.background.recover"
+            | "plannotator.submit"
+            | "artifacts.put"
+            | "artifacts.update"
+            | "artifacts.action"
+            | "artifacts.action_cancel"
+            | "artifacts.recovery_save"
+            | "artifacts.recovery_load"
     )
 }
 
@@ -813,7 +822,24 @@ fn contains_credential(value: &Value, state: &Gateway) -> bool {
     }
 }
 
-fn upstream_error(state: &Gateway, error: ClientError) -> Response {
+fn upstream_outcome_unknown(error: &ClientError, side_effecting: bool) -> bool {
+    let transport_failure = matches!(
+        error.code.as_str(),
+        "connection_lost"
+            | "connection_closed"
+            | "request_dropped"
+            | "request_timeout"
+            | "cancel_failed"
+            | "write_failed"
+            | "protocol_error"
+    );
+    // IPC distinguishes rejection before admission from an admitted call whose
+    // receipt was lost. Preserve that distinction even when codes are shared.
+    error.outcome_unknown && (!transport_failure || side_effecting)
+}
+
+fn upstream_error(state: &Gateway, error: ClientError, side_effecting: bool) -> Response {
+    let outcome_unknown = upstream_outcome_unknown(&error, side_effecting);
     error_response(
         StatusCode::BAD_GATEWAY,
         if contains_token(&error.code, state) {
@@ -822,7 +848,7 @@ fn upstream_error(state: &Gateway, error: ClientError) -> Response {
             &error.code
         },
         &redact(&error.message, state),
-        error.outcome_unknown,
+        outcome_unknown,
     )
 }
 
@@ -1042,6 +1068,55 @@ async fn styles() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("../assets/styles.css"),
     )
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn admission_failures_do_not_become_unknown_for_writes() {
+        for code in ["connection_closed", "protocol_error", "invalid_params"] {
+            let error = ClientError {
+                code: code.into(),
+                message: "request was not sent".into(),
+                outcome_unknown: false,
+            };
+            assert!(!upstream_outcome_unknown(&error, true), "{code}");
+        }
+    }
+
+    #[test]
+    fn lost_receipts_follow_the_method_effect_classification() {
+        for code in [
+            "connection_lost",
+            "connection_closed",
+            "request_dropped",
+            "request_timeout",
+            "cancel_failed",
+            "write_failed",
+            "protocol_error",
+        ] {
+            let error = ClientError {
+                code: code.into(),
+                message: "admitted request lost its receipt".into(),
+                outcome_unknown: true,
+            };
+            assert!(upstream_outcome_unknown(&error, true), "{code}");
+            assert!(!upstream_outcome_unknown(&error, false), "{code}");
+        }
+    }
+
+    #[test]
+    fn runtime_reported_unknown_is_preserved_for_reads_and_writes() {
+        let error = ClientError {
+            code: "tool_outcome_unknown".into(),
+            message: "inspect the original execution".into(),
+            outcome_unknown: true,
+        };
+        assert!(upstream_outcome_unknown(&error, true));
+        assert!(upstream_outcome_unknown(&error, false));
+    }
 }
 
 #[cfg(test)]

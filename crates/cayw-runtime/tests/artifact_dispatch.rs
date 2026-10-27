@@ -477,3 +477,307 @@ async fn runtime_create_and_fork_reject_gateway_device_metadata() {
     assert_eq!(error.code, "invalid_params");
     assert_eq!(rt.list().unwrap().len(), 1);
 }
+
+struct ControlledHost {
+    started_tx: std::sync::mpsc::Sender<()>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    release: CancellationToken,
+}
+
+struct DispatchGuard {
+    handle: Option<
+        std::thread::JoinHandle<Result<cayw_runtime::ActionOutcome, cayw_runtime::RuntimeError>>,
+    >,
+    token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    release: CancellationToken,
+}
+
+impl DispatchGuard {
+    fn finish(mut self) -> cayw_runtime::ActionOutcome {
+        self.release.cancel();
+        self.handle
+            .take()
+            .unwrap()
+            .join()
+            .expect("dispatch thread should not panic")
+            .expect("dispatch_artifact_action must return outcome")
+    }
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.lock().unwrap().as_ref() {
+            token.cancel();
+        }
+        self.release.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct CancelGuard {
+    token: CancellationToken,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if self.token.is_cancelled() {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl cayw_host::ExternalHost for ControlledHost {
+    async fn call(
+        &self,
+        _capability: &str,
+        _arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, cayw_codemode::CapabilityError> {
+        let _guard = CancelGuard {
+            token: cancel.clone(),
+            cancelled: self.cancelled.clone(),
+        };
+        *self.token.lock().unwrap() = Some(cancel.clone());
+        let _ = self.started_tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            cancel.cancelled().await;
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.release.cancelled().await;
+            Err(cayw_codemode::CapabilityError::new("cancelled"))
+        })
+        .await
+        .expect("test must cancel and release the controlled host")
+    }
+}
+
+fn open_with_external(
+    permissions: Vec<ScopedPermission>,
+    external: Arc<dyn cayw_host::ExternalHost>,
+) -> (tempfile::TempDir, Runtime) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let rt = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(IdleProvider),
+        Model::new("fixture", "artifact-dispatch"),
+        RuntimeConfig {
+            permissions,
+            host: cayw_host::HostConfig {
+                external: Some(external),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    (dir, rt)
+}
+
+#[test]
+fn controlled_host_tool_cancellation_and_unrelated_artifact_operations() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let cancelled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let token_holder = Arc::new(std::sync::Mutex::new(None));
+    let release = CancellationToken::new();
+    let host = Arc::new(ControlledHost {
+        started_tx,
+        cancelled: cancelled_flag.clone(),
+        token: token_holder.clone(),
+        release: release.clone(),
+    });
+    let (_dir, rt) = open_with_external(
+        vec![ScopedPermission::exact(
+            "search.query",
+            json!({"query": "wait-for-cancel"}),
+        )],
+        host,
+    );
+    let session = rt.create(Some("cancel-test".into())).unwrap().id;
+    put_card(&rt, &session, "card-tool", "<form></form>");
+
+    let rt_clone = rt.clone();
+    let session_clone = session.clone();
+    let dispatch_handle = std::thread::spawn(move || {
+        rt_clone.dispatch_artifact_action(ActionRequest {
+            action_id: "act-long".into(),
+            artifact_id: "card-tool".into(),
+            session_id: session_clone,
+            kind: ActionKind::FormSubmit,
+            intent: ActionIntent::InvokeTool {
+                tool: "search.query".into(),
+                args_json: "{\"query\":\"wait-for-cancel\"}".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 10,
+        })
+    });
+    let dispatch = DispatchGuard {
+        handle: Some(dispatch_handle),
+        token: token_holder.clone(),
+        release,
+    };
+
+    // 1. Wait for deterministic handshake confirming Host operation started:
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("controlled host tool must start within timeout");
+
+    // 2. While the tool is running, unrelated artifact operations must NOT be blocked:
+    let put_res = rt.put_artifact(PutArtifactRequest {
+        artifact_id: "card-unrelated".into(),
+        session_id: session.clone(),
+        kind: ArtifactKind::HtmlCard,
+        title: "Unrelated".into(),
+        body: "<p>unrelated</p>".into(),
+        at_ms: 20,
+        result_handle: None,
+    });
+    assert!(put_res.is_ok(), "put_artifact on unrelated artifact failed");
+    let preview_res = rt
+        .preview_artifact("card-unrelated")
+        .expect("preview_artifact must succeed without blocking");
+    assert_eq!(preview_res.html, "<p>unrelated</p>");
+    let list_res = rt
+        .list_artifacts(&session)
+        .expect("list_artifacts must succeed without blocking");
+    assert_eq!(list_res.len(), 2);
+
+    // 3. Cancel the in-flight artifact action directly on the main thread:
+    let cancel_outcome = rt
+        .cancel_artifact_action(&session, "act-long")
+        .expect("cancel_artifact_action must succeed without blocking on in-flight tool execution");
+    assert_eq!(cancel_outcome.record.status, ActionStatus::Cancelled);
+
+    // 4. Verify dispatch finished with Cancelled status:
+    let dispatch_result = dispatch.finish();
+    assert_eq!(dispatch_result.record.status, ActionStatus::Cancelled);
+
+    // 5. Verify the tool received cancellation on its CancellationToken:
+    assert!(
+        cancelled_flag.load(std::sync::atomic::Ordering::SeqCst),
+        "CancellationToken must have been signalled before tool finished"
+    );
+    assert!(
+        token_holder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|t| t.is_cancelled()),
+        "the tool CancellationToken must be in cancelled state"
+    );
+
+    // 6. Verify audit records:
+    let audit = rt.audit(&session, 0, 100).unwrap();
+    let kinds: Vec<_> = audit.iter().map(|e| e.kind.as_str()).collect();
+    assert!(
+        kinds.contains(&"artifact.action.cancelled"),
+        "audit must contain artifact.action.cancelled, got {kinds:?}"
+    );
+}
+
+#[test]
+fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_semantics() {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let cancelled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let token_holder = Arc::new(std::sync::Mutex::new(None));
+    let release = CancellationToken::new();
+    let host = Arc::new(ControlledHost {
+        started_tx,
+        cancelled: cancelled_flag.clone(),
+        token: token_holder.clone(),
+        release: release.clone(),
+    });
+    let (_dir, rt) = open_with_external(
+        vec![ScopedPermission::exact(
+            "search.query",
+            json!({"query": "wait-for-cancel"}),
+        )],
+        host,
+    );
+    let session = rt.create(Some("interleave-recovery".into())).unwrap().id;
+    put_card(&rt, &session, "card-tool", "<form></form>");
+
+    // Save baseline recovery on disk before dispatching action:
+    let _ = rt.save_artifact_recovery().unwrap();
+
+    let rt_clone = rt.clone();
+    let session_clone = session.clone();
+    let dispatch_handle = std::thread::spawn(move || {
+        rt_clone.dispatch_artifact_action(ActionRequest {
+            action_id: "act-recovering".into(),
+            artifact_id: "card-tool".into(),
+            session_id: session_clone,
+            kind: ActionKind::FormSubmit,
+            intent: ActionIntent::InvokeTool {
+                tool: "search.query".into(),
+                args_json: "{\"query\":\"wait-for-cancel\"}".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 10,
+        })
+    });
+    let dispatch = DispatchGuard {
+        handle: Some(dispatch_handle),
+        token: token_holder.clone(),
+        release,
+    };
+
+    // 1. Wait for deterministic handshake confirming Host operation started:
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("controlled host tool must start within timeout");
+
+    // A snapshot keeps the accepted identity for restart inspection.
+    let live = rt.get_artifact_action("act-recovering").unwrap();
+    assert_eq!(live.status, ActionStatus::Accepted);
+    assert_eq!(
+        rt.export_artifact_recovery().actions.actions,
+        vec![live.clone()]
+    );
+
+    // Restore a baseline that predates this dispatch.
+    rt.load_artifact_recovery()
+        .expect("recovery reload must succeed");
+    assert_eq!(rt.get_artifact_action("act-recovering").unwrap(), live);
+
+    // A conflicting snapshot cannot replace the identity of the live dispatch.
+    let mut conflicting = rt.export_artifact_recovery();
+    let mut older_record = live.clone();
+    older_record.status = ActionStatus::Applied;
+    older_record.session_id = "older-session".into();
+    conflicting.actions.actions = vec![older_record];
+    rt.restore_artifact_recovery(conflicting.clone()).unwrap();
+    assert_eq!(rt.get_artifact_action("act-recovering").unwrap(), live);
+
+    // 3. Cancel the in-flight artifact action:
+    let cancel_outcome = rt
+        .cancel_artifact_action(&session, "act-recovering")
+        .expect("cancel_artifact_action must reach in-flight flight even after recovery reload");
+    assert_eq!(cancel_outcome.record.status, ActionStatus::Cancelled);
+
+    // 4. Verify dispatch finished with Cancelled status:
+    let dispatch_result = dispatch.finish();
+    assert_eq!(dispatch_result.record.status, ActionStatus::Cancelled);
+
+    // 5. Verify the tool received cancellation on its CancellationToken:
+    assert!(
+        cancelled_flag.load(std::sync::atomic::Ordering::SeqCst),
+        "CancellationToken must be cancelled"
+    );
+
+    // 6. Verify audit trail:
+    let audit = rt.audit(&session, 0, 100).unwrap();
+    let kinds: Vec<_> = audit.iter().map(|e| e.kind.as_str()).collect();
+    assert!(
+        kinds.contains(&"artifact.action.cancelled"),
+        "audit must contain artifact.action.cancelled, got {kinds:?}"
+    );
+}

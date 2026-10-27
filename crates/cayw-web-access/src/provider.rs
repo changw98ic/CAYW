@@ -267,32 +267,20 @@ impl HttpTransport for ReqwestTransport {
                     .with_url(url)
                     .with_provider("reqwest")
             })?;
-            let status = response.status().as_u16();
             let final_url = response.url().to_string();
             let mime_type = response
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_string);
-            let body = response.bytes().await.map_err(|e| {
-                WebAccessError::new(FailureClass::Offline, format!("failed to read body: {e}"))
-                    .with_url(url)
-                    .with_provider("reqwest")
-            })?;
-            if body.len() > max_bytes {
-                return Err(WebAccessError::new(
-                    FailureClass::BodyTooLarge,
-                    format!("body {} exceeds max_bytes {max_bytes}", body.len()),
-                )
-                .with_url(url)
-                .with_status(status));
-            }
+            let (status, body) =
+                read_bounded_body(response, max_bytes, Some(url), "reqwest").await?;
             if !(200..300).contains(&status) {
                 return Err(WebAccessError::new(
                     FailureClass::HttpStatus,
                     format!("HTTP status {status}"),
                 )
-                .with_url(final_url.clone())
+                .with_url(final_url)
                 .with_status(status)
                 .with_provider("reqwest"));
             }
@@ -300,8 +288,75 @@ impl HttpTransport for ReqwestTransport {
                 status,
                 final_url,
                 mime_type,
-                body: body.to_vec(),
+                body,
             })
         })
     }
+}
+
+/// Reads an HTTP response body with streaming byte accumulation bounded by `max_bytes`.
+///
+/// Terminating early when the accumulated byte count exceeds `max_bytes` ensures that
+/// neither chunked streams without Content-Length nor responses with missing/forged
+/// lengths cause unbounded memory allocations or wait indefinitely for full body completion.
+pub(crate) async fn read_bounded_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    url: Option<&str>,
+    provider: &str,
+) -> Result<(u16, Vec<u8>), WebAccessError> {
+    let status = response.status().as_u16();
+
+    // Fast-path: check declared Content-Length header, but never rely on it alone.
+    if let Some(content_length) = response.content_length()
+        && content_length > max_bytes as u64
+    {
+        let mut err = WebAccessError::new(
+            FailureClass::BodyTooLarge,
+            format!("body {content_length} exceeds max_bytes {max_bytes}"),
+        )
+        .with_provider(provider)
+        .with_status(status);
+        if let Some(u) = url {
+            err = err.with_url(u);
+        }
+        return Err(err);
+    }
+
+    let mut accumulated: usize = 0;
+    let mut body = Vec::new();
+
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        let class = if e.is_timeout() {
+            FailureClass::Timeout
+        } else {
+            FailureClass::Offline
+        };
+        let mut err = WebAccessError::new(class, format!("failed to read body: {e}"))
+            .with_provider(provider)
+            .with_status(status);
+        if let Some(u) = url {
+            err = err.with_url(u);
+        }
+        err
+    })? {
+        accumulated = accumulated.saturating_add(chunk.len());
+        if accumulated > max_bytes {
+            // Drop response immediately to terminate the underlying transport
+            drop(response);
+            let mut err = WebAccessError::new(
+                FailureClass::BodyTooLarge,
+                format!("body {accumulated} exceeds max_bytes {max_bytes}"),
+            )
+            .with_provider(provider)
+            .with_status(status);
+            if let Some(u) = url {
+                err = err.with_url(u);
+            }
+            return Err(err);
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok((status, body))
 }

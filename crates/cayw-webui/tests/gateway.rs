@@ -30,6 +30,8 @@ struct RuntimeFixture {
     prompt_started: Semaphore,
     prompt_release: Semaphore,
     prompt_cancelled: AtomicBool,
+    artifact_started: Semaphore,
+    ipc_cancel: CancellationToken,
 }
 
 impl Default for RuntimeFixture {
@@ -38,6 +40,8 @@ impl Default for RuntimeFixture {
             prompt_started: Semaphore::new(0),
             prompt_release: Semaphore::new(0),
             prompt_cancelled: AtomicBool::new(false),
+            artifact_started: Semaphore::new(0),
+            ipc_cancel: CancellationToken::new(),
         }
     }
 }
@@ -108,9 +112,19 @@ impl RpcHandler for RuntimeFixture {
             "task.enqueue" if params.get("id").and_then(Value::as_str).is_some() => {
                 Ok(json!({"id": params["id"], "state": "queued"}))
             }
-            "session.get" if params["session_id"] == "slow" => {
-                tokio::time::sleep(Duration::from_secs(20)).await;
-                Ok(json!({}))
+            _ if params.get("drop_connection").and_then(Value::as_bool) == Some(true) => {
+                self.artifact_started.add_permits(1);
+                self.ipc_cancel.cancel();
+                cancel.cancelled().await;
+                Err(RpcError::new("cancelled", "fixture connection closed"))
+            }
+            _ if params.get("slow").and_then(Value::as_bool) == Some(true)
+                || params.get("artifact_id").and_then(Value::as_str) == Some("slow")
+                || params.get("session_id").and_then(Value::as_str) == Some("slow") =>
+            {
+                self.artifact_started.add_permits(1);
+                cancel.cancelled().await;
+                Err(RpcError::new("cancelled", "fixture request cancelled"))
             }
             "session.get" => Ok(json!({"id":"s1","state":"idle","cursor":0,"messages":[]})),
             _ => Ok(json!({"method":method,"params":params})),
@@ -143,11 +157,22 @@ impl Fixture {
         let ipc_addr = ipc_listener.local_addr().unwrap();
         let mut ipc_config = ServerConfig::new(IPC_TOKEN);
         ipc_config.request_timeout = Duration::from_secs(20);
+        let ipc_stop = stop.child_token();
+        let ipc_cancel = runtime.ipc_cancel.clone();
+        let watcher_stop = ipc_stop.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = ipc_cancel.cancelled() => {
+                    watcher_stop.cancel();
+                }
+                _ = watcher_stop.cancelled() => {}
+            }
+        });
         let ipc_task = tokio::spawn(cayw_ipc::serve(
             ipc_listener,
             runtime.clone(),
             ipc_config,
-            stop.clone(),
+            ipc_stop,
         ));
         let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
         let devices = Arc::new(DeviceRouter::new(ipc.clone()));
@@ -182,11 +207,22 @@ impl Fixture {
         let ipc_addr = ipc_listener.local_addr().unwrap();
         let mut ipc_config = ServerConfig::new(IPC_TOKEN);
         ipc_config.request_timeout = Duration::from_secs(20);
+        let ipc_stop = stop.child_token();
+        let ipc_cancel = runtime.ipc_cancel.clone();
+        let watcher_stop = ipc_stop.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = ipc_cancel.cancelled() => {
+                    watcher_stop.cancel();
+                }
+                _ = watcher_stop.cancelled() => {}
+            }
+        });
         let ipc_task = tokio::spawn(cayw_ipc::serve(
             ipc_listener,
             runtime.clone(),
             ipc_config,
-            stop.clone(),
+            ipc_stop,
         ));
         let ipc = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -228,14 +264,43 @@ impl Fixture {
             .bearer_auth(WEB_TOKEN)
             .json(&json!({"method":method,"params":params}))
     }
-    async fn close(self) {
+    async fn dispatched_artifact_rpc(
+        &self,
+        method: &str,
+        params: Value,
+        expected: StatusCode,
+    ) -> Value {
+        let (started, response) = tokio::join!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                self.runtime.artifact_started.acquire()
+            ),
+            self.rpc(method, params).send(),
+        );
+        started
+            .expect("fixture must observe the dispatched request")
+            .unwrap()
+            .forget();
+        envelope(response.unwrap(), expected).await
+    }
+
+    async fn close(mut self) {
         self.stop.cancel();
-        for task in self.tasks {
+        for task in self.tasks.drain(..) {
             tokio::time::timeout(Duration::from_secs(5), task)
                 .await
                 .expect("gateway must stop")
                 .unwrap()
                 .unwrap();
+        }
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        for task in &self.tasks {
+            task.abort();
         }
     }
 }
@@ -824,6 +889,218 @@ async fn ordinary_rpc_timeout_keeps_its_outcome_known_and_future_calls_work() {
         StatusCode::OK,
     )
     .await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn artifact_mutation_timeout_reports_outcome_unknown_while_read_only_timeout_is_known() {
+    let fixture = Fixture::start(GatewayLimits {
+        request_timeout: Duration::from_secs(1),
+        ..Default::default()
+    })
+    .await;
+    let put_value = fixture
+        .dispatched_artifact_rpc(
+            "artifacts.put",
+            json!({
+                "artifact_id": "slow",
+                "session_id": "s1",
+                "kind": "html_card",
+                "title": "Test",
+                "body": "<div>test</div>",
+                "at_ms": 1
+            }),
+            StatusCode::GATEWAY_TIMEOUT,
+        )
+        .await;
+    assert_eq!(put_value["error"]["code"], "request_timeout");
+    assert_eq!(
+        put_value["error"]["outcome_unknown"], true,
+        "dispatched artifact mutation timeout must report outcome_unknown=true"
+    );
+
+    let preview_value = fixture
+        .dispatched_artifact_rpc(
+            "artifacts.preview",
+            json!({"session_id": "s1", "artifact_id": "slow"}),
+            StatusCode::GATEWAY_TIMEOUT,
+        )
+        .await;
+    assert_eq!(preview_value["error"]["code"], "request_timeout");
+    assert_eq!(
+        preview_value["error"]["outcome_unknown"], false,
+        "read-only artifact query timeout must report outcome_unknown=false"
+    );
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn all_artifact_mutations_and_reads_timeout_classification() {
+    let fixture = Fixture::start(GatewayLimits {
+        request_timeout: Duration::from_secs(1),
+        ..Default::default()
+    })
+    .await;
+
+    let write_methods = [
+        "artifacts.put",
+        "artifacts.update",
+        "artifacts.action",
+        "artifacts.action_cancel",
+        "artifacts.recovery_save",
+        "artifacts.recovery_load",
+    ];
+    for method in write_methods {
+        let value = fixture
+            .dispatched_artifact_rpc(method, json!({"slow": true}), StatusCode::GATEWAY_TIMEOUT)
+            .await;
+        assert_eq!(
+            value["error"]["code"], "request_timeout",
+            "method {method} should time out"
+        );
+        assert_eq!(
+            value["error"]["outcome_unknown"], true,
+            "dispatched artifact mutation {method} timeout must report outcome_unknown=true"
+        );
+    }
+
+    let read_methods = [
+        "artifacts.preview",
+        "artifacts.list",
+        "artifacts.action_list",
+        "artifacts.action_get",
+    ];
+    for method in read_methods {
+        let value = fixture
+            .dispatched_artifact_rpc(method, json!({"slow": true}), StatusCode::GATEWAY_TIMEOUT)
+            .await;
+        assert_eq!(
+            value["error"]["code"], "request_timeout",
+            "method {method} should time out"
+        );
+        assert_eq!(
+            value["error"]["outcome_unknown"], false,
+            "read-only artifact query {method} timeout must report outcome_unknown=false"
+        );
+    }
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn artifact_mutation_dispatched_and_disconnected_reports_outcome_unknown_while_read_only_is_known()
+ {
+    let write_fixture = Fixture::start(GatewayLimits::default()).await;
+    let write_value = write_fixture
+        .dispatched_artifact_rpc(
+            "artifacts.put",
+            json!({"drop_connection": true}),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+    assert_eq!(write_value["error"]["code"], "connection_lost");
+    assert_eq!(
+        write_value["error"]["outcome_unknown"], true,
+        "dispatched write request with lost connection must report outcome_unknown=true"
+    );
+    write_fixture.close().await;
+
+    let read_fixture = Fixture::start(GatewayLimits::default()).await;
+    let read_value = read_fixture
+        .dispatched_artifact_rpc(
+            "artifacts.preview",
+            json!({"drop_connection": true}),
+            StatusCode::BAD_GATEWAY,
+        )
+        .await;
+    assert_eq!(read_value["error"]["code"], "connection_lost");
+    assert_eq!(
+        read_value["error"]["outcome_unknown"], false,
+        "dispatched read-only request with lost connection must report outcome_unknown=false"
+    );
+    read_fixture.close().await;
+}
+
+#[tokio::test]
+async fn background_and_feedback_writes_keep_lost_receipts_unknown() {
+    let fixture = Fixture::start(GatewayLimits {
+        request_timeout: Duration::from_secs(1),
+        ..Default::default()
+    })
+    .await;
+    for method in [
+        "runtime.background.kill",
+        "runtime.background.recover",
+        "plannotator.submit",
+    ] {
+        let value = fixture
+            .dispatched_artifact_rpc(method, json!({"slow": true}), StatusCode::GATEWAY_TIMEOUT)
+            .await;
+        assert_eq!(value["error"]["code"], "request_timeout", "{method}");
+        assert_eq!(value["error"]["outcome_unknown"], true, "{method}");
+
+        let disconnected = Fixture::start(GatewayLimits::default()).await;
+        let value = disconnected
+            .dispatched_artifact_rpc(
+                method,
+                json!({"drop_connection": true}),
+                StatusCode::BAD_GATEWAY,
+            )
+            .await;
+        assert_eq!(value["error"]["code"], "connection_lost", "{method}");
+        assert_eq!(value["error"]["outcome_unknown"], true, "{method}");
+        disconnected.close().await;
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn undispatched_requests_keep_outcome_known() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+
+    // Invalid JSON body -> 400 invalid_json -> outcome_unknown: false
+    let mut stream = TcpStream::connect(fixture.addr).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /api/rpc HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {WEB_TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\nnot valid json",
+                fixture.addr
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    assert!(response.contains("\"outcome_unknown\":false"));
+
+    // Invalid params -> 400 invalid_params -> outcome_unknown: false
+    let invalid_params = envelope(
+        fixture
+            .rpc("artifacts.put", json!("not an object"))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(invalid_params["error"]["code"], "invalid_params");
+    assert_eq!(invalid_params["error"]["outcome_unknown"], false);
+
+    // Method not allowed -> 403 method_not_allowed -> outcome_unknown: false
+    let forbidden_method = envelope(
+        fixture
+            .rpc("nonexistent.method", json!({}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_eq!(forbidden_method["error"]["code"], "method_not_allowed");
+    assert_eq!(forbidden_method["error"]["outcome_unknown"], false);
+
     fixture.close().await;
 }
 

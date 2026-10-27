@@ -64,8 +64,40 @@ test('formatContextOverview handles missing or full stats correctly', () => {
       { kind: 'output', tokens: 300 },
     ],
     evolution: [
-      { turn: 1, ordinal: 0, delta_tokens: 800, cumulative_tokens: 800 },
-      { turn: 2, ordinal: 0, delta_tokens: 700, cumulative_tokens: 1500 },
+      {
+        request_id: 'req-turn-1',
+        session_id: 's1',
+        task_id: 'task-1',
+        turn: 1,
+        provider: 'test-provider',
+        model: 'test-model',
+        usage_status: 'reported',
+        usage: {
+          input: 800,
+          output: 400,
+          cache_read: 0,
+          cache_write: 0,
+          reasoning: 0,
+          total_tokens: 1200,
+        },
+      },
+      {
+        request_id: 'req-turn-2',
+        session_id: 's1',
+        task_id: 'task-1',
+        turn: 2,
+        provider: 'test-provider',
+        model: 'test-model',
+        usage_status: 'reported',
+        usage: {
+          input: 1200,
+          output: 600,
+          cache_read: 0,
+          cache_write: 0,
+          reasoning: 0,
+          total_tokens: 1800,
+        },
+      },
     ],
   });
 

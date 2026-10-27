@@ -38,6 +38,25 @@ struct ActionInner {
     actions: BTreeMap<String, ActionRecord>,
     /// Per-artifact UI state map written by `UpdateState` intents.
     state: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(skip)]
+    in_flight: BTreeMap<String, usize>,
+}
+
+struct InFlightAction<'a> {
+    inner: &'a Mutex<ActionInner>,
+    action_id: String,
+}
+
+impl Drop for InFlightAction<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.inner.lock().expect("action lock");
+        if let Some(active) = guard.in_flight.get_mut(&self.action_id) {
+            *active -= 1;
+            if *active == 0 {
+                guard.in_flight.remove(&self.action_id);
+            }
+        }
+    }
 }
 
 /// Portable action + UI-state snapshot for recovery.
@@ -130,7 +149,12 @@ impl ActionProtocol {
             outcome_json: None,
         };
         guard.actions.insert(accepted.action_id.clone(), accepted);
+        *guard.in_flight.entry(req.action_id.clone()).or_default() += 1;
         drop(guard);
+        let _in_flight = InFlightAction {
+            inner: &self.inner,
+            action_id: req.action_id.clone(),
+        };
 
         let applied = apply_intent(&req, self.dispatch.as_ref(), &self.inner)?;
         // If cancel won the race before/during the bridge, best-effort tear down
@@ -154,9 +178,9 @@ impl ActionProtocol {
             }
         }
         let mut guard = self.inner.lock().expect("action lock");
-        // A concurrent cancel may have already settled this action.
+        // A concurrent cancel or restore may have already settled this action.
         if let Some(existing) = guard.actions.get(&req.action_id)
-            && existing.status == ActionStatus::Cancelled
+            && existing.status != ActionStatus::Accepted
         {
             return Ok(ActionOutcome {
                 record: existing.clone(),
@@ -190,14 +214,45 @@ impl ActionProtocol {
     /// the action `Cancelled` when a live flight was interrupted. Idempotent
     /// for already-cancelled records.
     pub fn cancel(&self, action_id: &str) -> Result<ActionOutcome, ArtifactError> {
+        self.cancel_owned(action_id, None)
+    }
+
+    /// Check Session ownership and pin the original record before calling the bridge.
+    pub fn cancel_for_session(
+        &self,
+        session_id: &str,
+        action_id: &str,
+    ) -> Result<ActionOutcome, ArtifactError> {
+        validate_id("session_id", session_id).map_err(ArtifactError::Invalid)?;
+        self.cancel_owned(action_id, Some(session_id))
+    }
+
+    fn cancel_owned(
+        &self,
+        action_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<ActionOutcome, ArtifactError> {
         validate_id("action_id", action_id).map_err(ArtifactError::Invalid)?;
         let snapshot = {
-            let guard = self.inner.lock().expect("action lock");
-            guard
+            let mut guard = self.inner.lock().expect("action lock");
+            let snapshot = guard
                 .actions
                 .get(action_id)
                 .cloned()
-                .ok_or_else(|| ArtifactError::NotFound(action_id.to_owned()))?
+                .ok_or_else(|| ArtifactError::NotFound(action_id.to_owned()))?;
+            if let Some(session_id) = session_id
+                && snapshot.session_id != session_id
+            {
+                return Err(ArtifactError::Invalid(format!(
+                    "action {action_id} does not belong to session {session_id}"
+                )));
+            }
+            *guard.in_flight.entry(action_id.to_owned()).or_default() += 1;
+            snapshot
+        };
+        let _in_flight = InFlightAction {
+            inner: &self.inner,
+            action_id: action_id.to_owned(),
         };
         if snapshot.status == ActionStatus::Cancelled {
             return Ok(ActionOutcome { record: snapshot });
@@ -315,6 +370,13 @@ impl ActionProtocol {
             }
         }
         let mut guard = self.inner.lock().expect("action lock");
+        // A snapshot cannot replace a record while its original dispatch or a
+        // cancellation call is still running across the host bridge.
+        for id in guard.in_flight.keys() {
+            if let Some(existing) = guard.actions.get(id) {
+                actions.insert(id.clone(), existing.clone());
+            }
+        }
         guard.actions = actions;
         guard.state = snapshot.state;
         Ok(())
@@ -466,5 +528,227 @@ fn apply_intent(
                 outcome_json: payload.to_string(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ArtifactKind, HostDispatchResult, PutArtifactRequest};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::{thread, time::Duration};
+
+    struct HeldCancel {
+        started: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    struct HeldDispatch {
+        started: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        cancelled: AtomicBool,
+        cancellation: Option<HeldCancel>,
+    }
+
+    impl HostActionDispatch for HeldDispatch {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn follow_up_task(&self, _: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String> {
+            unreachable!()
+        }
+
+        fn invoke_tool(&self, _: ToolDispatch<'_>) -> Result<HostDispatchResult, String> {
+            self.started.send(()).map_err(|error| error.to_string())?;
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .map_err(|error| error.to_string())?;
+            Ok(HostDispatchResult {
+                outcome_json: "{}".into(),
+            })
+        }
+
+        fn cancel_action(&self, _: &str) -> Result<bool, String> {
+            self.cancelled.store(true, Ordering::SeqCst);
+            if let Some(held) = &self.cancellation {
+                held.started.send(()).map_err(|error| error.to_string())?;
+                held.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(true)
+        }
+    }
+
+    struct DispatchGuard {
+        release: mpsc::Sender<()>,
+        handle: Option<thread::JoinHandle<Result<ActionOutcome, ArtifactError>>>,
+    }
+
+    impl DispatchGuard {
+        fn finish(mut self) -> ActionOutcome {
+            self.release.send(()).unwrap();
+            self.handle.take().unwrap().join().unwrap().unwrap()
+        }
+    }
+
+    impl Drop for DispatchGuard {
+        fn drop(&mut self) {
+            let _ = self.release.send(());
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    #[test]
+    fn restore_preserves_original_dispatch_through_cancellation_until_bridge_returns() {
+        let store = Arc::new(ArtifactStore::new());
+        store
+            .put(PutArtifactRequest {
+                artifact_id: "card".into(),
+                session_id: "session".into(),
+                kind: ArtifactKind::HtmlCard,
+                title: "Card".into(),
+                body: "<p>Card</p>".into(),
+                at_ms: 1,
+                result_handle: None,
+            })
+            .unwrap();
+        let (started, ready) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let bridge = Arc::new(HeldDispatch {
+            started,
+            release: Mutex::new(held),
+            cancelled: AtomicBool::new(false),
+            cancellation: None,
+        });
+        let actions = Arc::new(ActionProtocol::new(store, bridge.clone()));
+        let running = actions.clone();
+        let handle = thread::spawn(move || {
+            running.dispatch(ActionRequest {
+                action_id: "action".into(),
+                artifact_id: "card".into(),
+                session_id: "session".into(),
+                kind: crate::ActionKind::FormSubmit,
+                intent: ActionIntent::InvokeTool {
+                    tool: "search.query".into(),
+                    args_json: "{}".into(),
+                },
+                expected_content_version: Some(1),
+                requested_at_ms: 2,
+            })
+        });
+        let dispatch = DispatchGuard {
+            release,
+            handle: Some(handle),
+        };
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let original = actions.get_action("action").unwrap();
+        assert_eq!(original.status, ActionStatus::Accepted);
+        let mut conflict = actions.export_snapshot();
+        assert_eq!(conflict.actions, vec![original.clone()]);
+        conflict.actions[0].session_id = "older-session".into();
+        conflict.actions[0].status = ActionStatus::Applied;
+
+        actions.restore_snapshot(conflict.clone()).unwrap();
+        assert_eq!(actions.get_action("action").unwrap(), original);
+        let cancelled = actions.cancel("action").unwrap().record;
+        assert!(bridge.cancelled.load(Ordering::SeqCst));
+        assert_eq!(cancelled.status, ActionStatus::Cancelled);
+
+        actions.restore_snapshot(conflict.clone()).unwrap();
+        assert_eq!(actions.get_action("action").unwrap(), cancelled);
+        assert_eq!(dispatch.finish().record, cancelled);
+
+        // Once the original dispatch has returned, normal replacement applies.
+        actions.restore_snapshot(conflict.clone()).unwrap();
+        assert_eq!(actions.export_snapshot(), conflict);
+    }
+
+    #[test]
+    fn restore_preserves_record_until_cancellation_bridge_returns() {
+        let store = Arc::new(ArtifactStore::new());
+        store
+            .put(PutArtifactRequest {
+                artifact_id: "card".into(),
+                session_id: "session".into(),
+                kind: ArtifactKind::HtmlCard,
+                title: "Card".into(),
+                body: "<p>Card</p>".into(),
+                at_ms: 1,
+                result_handle: None,
+            })
+            .unwrap();
+        let (started, ready) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let (cancel_started, cancel_ready) = mpsc::channel();
+        let (cancel_release, cancel_held) = mpsc::channel();
+        let bridge = Arc::new(HeldDispatch {
+            started,
+            release: Mutex::new(held),
+            cancelled: AtomicBool::new(false),
+            cancellation: Some(HeldCancel {
+                started: cancel_started,
+                release: Mutex::new(cancel_held),
+            }),
+        });
+        let actions = Arc::new(ActionProtocol::new(store, bridge.clone()));
+        let running = actions.clone();
+        let handle = thread::spawn(move || {
+            running.dispatch(ActionRequest {
+                action_id: "action".into(),
+                artifact_id: "card".into(),
+                session_id: "session".into(),
+                kind: crate::ActionKind::FormSubmit,
+                intent: ActionIntent::InvokeTool {
+                    tool: "search.query".into(),
+                    args_json: "{}".into(),
+                },
+                expected_content_version: Some(1),
+                requested_at_ms: 2,
+            })
+        });
+        let dispatch = DispatchGuard {
+            release,
+            handle: Some(handle),
+        };
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(
+            actions
+                .cancel_for_session("other-session", "action")
+                .is_err()
+        );
+        assert!(!bridge.cancelled.load(Ordering::SeqCst));
+
+        let cancelling = actions.clone();
+        let handle = thread::spawn(move || cancelling.cancel_for_session("session", "action"));
+        let cancellation = DispatchGuard {
+            release: cancel_release,
+            handle: Some(handle),
+        };
+        cancel_ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(dispatch.finish().record.status, ActionStatus::Applied);
+
+        // Only the cancellation call remains active across the bridge now.
+        let original = actions.get_action("action").unwrap();
+        let mut conflict = actions.export_snapshot();
+        conflict.actions[0].session_id = "replacement-session".into();
+        actions.restore_snapshot(conflict.clone()).unwrap();
+        assert_eq!(actions.get_action("action").unwrap(), original);
+        let cancelled = cancellation.finish().record;
+        assert_eq!(cancelled.session_id, "session");
+        assert_eq!(cancelled.status, ActionStatus::Cancelled);
+
+        actions.restore_snapshot(conflict.clone()).unwrap();
+        assert_eq!(actions.export_snapshot(), conflict);
     }
 }

@@ -20,6 +20,7 @@ pub struct BraveSearch {
     client: reqwest::Client,
     api_key: String,
     max_fetch_bytes: usize,
+    endpoint: String,
 }
 
 impl BraveSearch {
@@ -39,6 +40,7 @@ impl BraveSearch {
             client,
             api_key: api_key.into(),
             max_fetch_bytes: 2 * 1024 * 1024,
+            endpoint: ENDPOINT.to_string(),
         })
     }
 
@@ -62,7 +64,7 @@ impl SearchProvider for BraveSearch {
         limit: u32,
     ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>> {
         Box::pin(async move {
-            let mut url = url::Url::parse(ENDPOINT).map_err(|e| {
+            let mut url = url::Url::parse(&self.endpoint).map_err(|e| {
                 WebAccessError::new(FailureClass::InvalidUrl, format!("brave endpoint: {e}"))
                     .with_provider(PROVIDER)
             })?;
@@ -80,19 +82,9 @@ impl SearchProvider for BraveSearch {
                     WebAccessError::new(FailureClass::Offline, format!("brave GET failed: {e}"))
                         .with_provider(PROVIDER)
                 })?;
-            let status = response.status().as_u16();
-            let body = response.bytes().await.map_err(|e| {
-                WebAccessError::new(FailureClass::Offline, format!("brave body: {e}"))
-                    .with_provider(PROVIDER)
-            })?;
-            if body.len() > self.max_fetch_bytes {
-                return Err(WebAccessError::new(
-                    FailureClass::BodyTooLarge,
-                    format!("brave body {} exceeds max", body.len()),
-                )
-                .with_provider(PROVIDER)
-                .with_status(status));
-            }
+            let (status, body) =
+                crate::provider::read_bounded_body(response, self.max_fetch_bytes, None, PROVIDER)
+                    .await?;
             if !(200..300).contains(&status) {
                 return Err(WebAccessError::new(
                     FailureClass::HttpStatus,
@@ -181,5 +173,140 @@ impl SearchProvider for BraveOrFallback {
             }
             self.fallback.search(query, limit).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    struct ServerGuard {
+        release_tx: Option<mpsc::Sender<()>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl ServerGuard {
+        fn new(release_tx: mpsc::Sender<()>, handle: thread::JoinHandle<()>) -> Self {
+            Self {
+                release_tx: Some(release_tx),
+                handle: Some(handle),
+            }
+        }
+
+        fn release_and_join(mut self) {
+            if let Some(tx) = self.release_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("server thread panicked");
+            }
+        }
+    }
+
+    impl Drop for ServerGuard {
+        fn drop(&mut self) {
+            drop(self.release_tx.take());
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+        let mut buf = [0u8; 4096];
+        let mut n = 0;
+        while n < buf.len() {
+            let read_bytes = stream.read(&mut buf[n..])?;
+            if read_bytes == 0 {
+                break;
+            }
+            n += read_bytes;
+            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn brave_search_chunked_exceeding_max_terminates_early() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let port = listener.local_addr().unwrap().port();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let server_handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection");
+            read_http_request(&mut stream).expect("read request");
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+                .expect("write headers");
+            stream.flush().expect("flush headers");
+
+            let chunk1 = vec![b' '; 800];
+            stream
+                .write_all(format!("{:x}\r\n", chunk1.len()).as_bytes())
+                .unwrap();
+            stream.write_all(&chunk1).unwrap();
+            stream.write_all(b"\r\n").unwrap();
+
+            let chunk2 = vec![b' '; 800];
+            stream
+                .write_all(format!("{:x}\r\n", chunk2.len()).as_bytes())
+                .unwrap();
+            stream.write_all(&chunk2).unwrap();
+            stream.write_all(b"\r\n").unwrap();
+            stream.flush().unwrap();
+
+            // Do not send terminal chunk or close connection until the client
+            // has confirmed it aborted early upon exceeding limit.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        });
+
+        let guard = ServerGuard::new(release_tx, server_handle);
+
+        let mut brave = BraveSearch::new("dummy-key").expect("brave search");
+        brave.endpoint = format!("http://127.0.0.1:{port}/res/v1/web/search");
+        brave.max_fetch_bytes = 1000;
+
+        let res = tokio::time::timeout(Duration::from_secs(10), brave.search("rust", 5))
+            .await
+            .expect("watchdog timeout: client should not wait for server EOF")
+            .expect_err("must fail with BodyTooLarge");
+
+        assert_eq!(res.diagnostic.class, FailureClass::BodyTooLarge);
+        assert_eq!(res.diagnostic.provider.as_deref(), Some("brave"));
+
+        guard.release_and_join();
+    }
+
+    #[test]
+    fn parse_brave_json_extracts_hits() {
+        let json_body = br#"{
+            "web": {
+                "results": [
+                    {
+                        "title": "Rust Programming Language",
+                        "url": "https://www.rust-lang.org/",
+                        "description": "A language empowering everyone to build reliable and efficient software."
+                    },
+                    {
+                        "title": "Invalid Non-HTTP",
+                        "url": "ftp://example.com/file",
+                        "description": "Ignored non-http url"
+                    }
+                ]
+            }
+        }"#;
+        let hits = parse_brave_json(json_body, 10).expect("parse hits");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title.as_deref(), Some("Rust Programming Language"));
+        assert_eq!(hits[0].url, "https://www.rust-lang.org/");
+        assert_eq!(hits[0].rank, 1);
     }
 }

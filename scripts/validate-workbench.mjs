@@ -174,8 +174,11 @@ try {
         ? {tool_calls: [{index: 0, id: `workbench-call-${providerRequests}`, type: 'function', function: {name: 'execute_code', arguments: JSON.stringify(argumentsValue)}}]}
         : {content: 'The fixed local model consumed the real Runtime result.'};
       const chunk = (value, reason) => JSON.stringify({id: 'workbench-response', model: 'workbench-local-fixed', choices: [{index: 0, delta: value, finish_reason: reason}]});
+      const usage = providerRequests === 1
+        ? {prompt_tokens: 12, completion_tokens: 7, total_tokens: 19}
+        : {prompt_tokens: 17, completion_tokens: 11, total_tokens: 28};
       response.writeHead(200, {'Content-Type': 'text/event-stream'});
-      response.end(`data: ${chunk(delta, null)}\n\ndata: ${chunk({}, argumentsValue ? 'tool_calls' : 'stop')}\n\ndata: ${JSON.stringify({choices: [], usage: {prompt_tokens: 12, completion_tokens: 7, total_tokens: 19}})}\n\ndata: [DONE]\n\n`);
+      response.end(`data: ${chunk(delta, null)}\n\ndata: ${chunk({}, argumentsValue ? 'tool_calls' : 'stop')}\n\ndata: ${JSON.stringify({choices: [], usage})}\n\ndata: [DONE]\n\n`);
     } catch (error) {
       (summary.fixed_model_errors ||= []).push(redact(error.stack || error.message));
       response.writeHead(500);
@@ -283,13 +286,23 @@ try {
   await panel().getByText('[completed] Inspect real workspace', {exact: true}).waitFor();
   await screenshot(page, 'tasks-real-runtime');
   await page.locator('#wb-usage').click();
-  await panel().getByText(/Tokens 总量: 38/).waitFor();
+  await panel().getByText(/Tokens 总量: 47/).waitFor();
   const overview = await rpc('session.context_overview', {session_id: session});
-  assert.equal(overview.tokens.total_tokens, 38);
-  assert.equal(overview.cost.status, 'unknown');
   await record('context-overview', overview);
+  assert.equal(overview.tokens.total_tokens, 47);
+  assert.equal(overview.cost.status, 'unknown');
+  assert.deepEqual(overview.evolution.map(turn => ({turn: turn.turn, input: turn.usage.input, output: turn.usage.output, total_tokens: turn.usage.total_tokens})), [
+    {turn: 1, input: 12, output: 7, total_tokens: 19},
+    {turn: 2, input: 17, output: 11, total_tokens: 28},
+  ]);
+  const firstTurn = panel().getByText('[轮次 1] 输入: 12, 输出: 7, 增量: 19', {exact: true});
+  const secondTurn = panel().getByText('[轮次 2] 输入: 17, 输出: 11, 增量: 28', {exact: true});
+  await firstTurn.waitFor();
+  await secondTurn.waitFor();
+  await panel().getByText('费用结算状态: unknown', {exact: true}).waitFor();
+  await record('context-evolution-visible', {turns: [await firstTurn.innerText(), await secondTurn.innerText()], total_tokens: 47, cost_status: 'unknown'});
   await screenshot(page, 'usage-real-runtime');
-  checks('Task and usage panels read actual Runtime records; unpriced usage stays unknown');
+  checks('Task and usage panels read actual Runtime records; each turn shows its reported usage and unpriced cost stays unknown');
   await rpc('artifacts.put', {artifact_id: 'acceptance-card', session_id: session, kind: 'html_card', title: 'Stored by real Runtime', body: '<p>Real Runtime artifact</p>', at_ms: Date.now()});
   await page.locator('#wb-artifacts').click();
   await panel().getByText('Stored by real Runtime', {exact: true}).waitFor();

@@ -327,11 +327,7 @@ impl Runtime {
         request: PutArtifactRequest,
     ) -> Result<ArtifactRecord, RuntimeError> {
         self.get(&request.session_id)?;
-        lock(&self.inner.artifacts)
-            .workspace
-            .store
-            .put(request)
-            .map_err(map_artifact)
+        self.artifact_store().put(request).map_err(map_artifact)
     }
 
     pub fn update_artifact(
@@ -339,26 +335,18 @@ impl Runtime {
         request: UpdateArtifactRequest,
     ) -> Result<ArtifactRecord, RuntimeError> {
         self.get(&request.session_id)?;
-        lock(&self.inner.artifacts)
-            .workspace
-            .store
-            .update(request)
-            .map_err(map_artifact)
+        self.artifact_store().update(request).map_err(map_artifact)
     }
 
     pub fn preview_artifact(&self, artifact_id: &str) -> Result<ArtifactPreview, RuntimeError> {
-        lock(&self.inner.artifacts)
-            .workspace
-            .store
+        self.artifact_store()
             .preview(artifact_id)
             .map_err(map_artifact)
     }
 
     pub fn list_artifacts(&self, session_id: &str) -> Result<Vec<ArtifactRecord>, RuntimeError> {
         self.get(session_id)?;
-        lock(&self.inner.artifacts)
-            .workspace
-            .store
+        self.artifact_store()
             .list_by_session(session_id)
             .map_err(map_artifact)
     }
@@ -373,11 +361,8 @@ impl Runtime {
     ) -> Result<ActionOutcome, RuntimeError> {
         self.get(&request.session_id)?;
         let session_id = request.session_id.clone();
-        let outcome = lock(&self.inner.artifacts)
-            .workspace
-            .actions
-            .dispatch(request)
-            .map_err(map_artifact)?;
+        let actions = self.artifact_actions();
+        let outcome = actions.dispatch(request).map_err(map_artifact)?;
         record_artifact_audit(self, &session_id, &outcome.record)?;
         Ok(outcome)
     }
@@ -388,17 +373,13 @@ impl Runtime {
         session_id: &str,
     ) -> Result<Vec<ActionRecord>, RuntimeError> {
         self.get(session_id)?;
-        lock(&self.inner.artifacts)
-            .workspace
-            .actions
+        self.artifact_actions()
             .list_actions_for_session(session_id)
             .map_err(map_artifact)
     }
 
     pub fn get_artifact_action(&self, action_id: &str) -> Result<ActionRecord, RuntimeError> {
-        lock(&self.inner.artifacts)
-            .workspace
-            .actions
+        self.artifact_actions()
             .get_action(action_id)
             .map_err(map_artifact)
     }
@@ -411,23 +392,10 @@ impl Runtime {
         action_id: &str,
     ) -> Result<ActionOutcome, RuntimeError> {
         self.get(session_id)?;
-        let state = lock(&self.inner.artifacts);
-        let record = state
-            .workspace
-            .actions
-            .get_action(action_id)
+        let actions = self.artifact_actions();
+        let outcome = actions
+            .cancel_for_session(session_id, action_id)
             .map_err(map_artifact)?;
-        if record.session_id != session_id {
-            return Err(RuntimeError::InvalidInput(format!(
-                "artifact action {action_id} does not belong to session {session_id}"
-            )));
-        }
-        let outcome = state
-            .workspace
-            .actions
-            .cancel(action_id)
-            .map_err(map_artifact)?;
-        drop(state);
         record_artifact_audit(self, session_id, &outcome.record)?;
         Ok(outcome)
     }
