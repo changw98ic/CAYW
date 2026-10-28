@@ -81,6 +81,13 @@ pub trait AuditSink: Send + Sync {
 /// established, return `CapabilityError::unknown` and retain reconciliation data.
 #[async_trait]
 pub trait ExternalHost: Send + Sync {
+    /// Trusted orchestration services may delegate every workspace operation to
+    /// another Host call. They do not hold the workspace fence or execution lane
+    /// while awaiting those calls; authorization, audit and budgets still apply.
+    fn delegates_workspace_calls(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         capability: &str,
@@ -1367,19 +1374,20 @@ impl Host {
             .ok_or_else(|| self.diagnostic(failure("invalid deadline")))?;
         // Ordinary calls retain ordered permission/audit admission. Frozen reads
         // never need this lane to settle or acknowledge their original ticket.
-        let lane = tokio::select! { biased;
+        let mut lane = Some(tokio::select! { biased;
             _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
             _ = tokio::time::sleep_until(deadline.into()) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
             guard = self.execution.lock() => guard,
-        };
+        });
         let mut call = self
             .admit_owned(capability, arguments, cancel, service.is_some(), deadline)
             .await?;
         let name = capability.definition.name.as_str();
-        let mutation = if service.is_some()
+        let delegated = service.is_some_and(ExternalHost::delegates_workspace_calls);
+        let may_mutate = service.is_some()
             || catalog::may_mutate(name)
-            || matches!(capability.executor, Executor::External)
-        {
+            || matches!(capability.executor, Executor::External);
+        let mutation = if may_mutate && !delegated {
             match self
                 .mutation(
                     name,
@@ -1398,6 +1406,9 @@ impl Host {
         } else {
             None
         };
+        if delegated {
+            drop(lane.take());
+        }
         let result = match self.check(&call.child, call.deadline) {
             Ok(()) => {
                 self.execute(
@@ -1418,7 +1429,7 @@ impl Host {
             ))),
             None => result,
         };
-        let result = call.settle(result, mutation.is_some()).await;
+        let result = call.settle(result, may_mutate).await;
         if !result.as_ref().is_err_and(|error| error.outcome_unknown)
             && let Some(mutation) = mutation
         {

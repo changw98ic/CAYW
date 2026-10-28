@@ -157,6 +157,68 @@ impl CellLimits {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityKind {
+    MaxCells,
+    MaxRunning,
+    OutputItems,
+    OutputBytes,
+    ItemBytes,
+    JsonBytes,
+    MediaBytes,
+    StoreKeys,
+    StoreBytes,
+    JsonDepth,
+    HostCalls,
+    HostSettlements,
+}
+
+impl std::fmt::Display for CapacityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxCells => write!(f, "max_cells"),
+            Self::MaxRunning => write!(f, "max_running"),
+            Self::OutputItems => write!(f, "output_items"),
+            Self::OutputBytes => write!(f, "output_bytes"),
+            Self::ItemBytes => write!(f, "item_bytes"),
+            Self::JsonBytes => write!(f, "json_bytes"),
+            Self::MediaBytes => write!(f, "media_bytes"),
+            Self::StoreKeys => write!(f, "store_keys"),
+            Self::StoreBytes => write!(f, "store_bytes"),
+            Self::JsonDepth => write!(f, "json_depth"),
+            Self::HostCalls => write!(f, "host_calls"),
+            Self::HostSettlements => write!(f, "host_settlements"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapacityExhausted {
+    pub kind: CapacityKind,
+    pub cell_id: Option<CellId>,
+    pub status: Option<CellStatus>,
+    pub current: usize,
+    pub limit: usize,
+}
+
+impl std::fmt::Display for CapacityExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: current={}, limit={}",
+            self.kind, self.current, self.limit
+        )?;
+        if let Some(cell_id) = &self.cell_id {
+            write!(f, ", cell_id={cell_id}")?;
+        }
+        if let Some(status) = self.status {
+            write!(f, ", status={status:?}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CellError {
     #[error("invalid request: {0}")]
@@ -167,8 +229,8 @@ pub enum CellError {
     Closed,
     #[error("cell exited")]
     Exited,
-    #[error("cell capacity exhausted")]
-    Capacity,
+    #[error("cell capacity exhausted: {0}")]
+    Capacity(CapacityExhausted),
     #[error("cell state requires evidence before more execution")]
     Frozen,
     #[error("session value version does not match")]
@@ -177,12 +239,27 @@ pub enum CellError {
     Journal(String),
 }
 impl CellError {
+    pub fn capacity(
+        kind: CapacityKind,
+        cell_id: Option<CellId>,
+        status: Option<CellStatus>,
+        current: usize,
+        limit: usize,
+    ) -> Self {
+        Self::Capacity(CapacityExhausted {
+            kind,
+            cell_id,
+            status,
+            current,
+            limit,
+        })
+    }
     pub(crate) fn capability_error(self) -> CapabilityError {
         let message = self.to_string();
         match self {
             Self::Closed => CapabilityError::stopped(CapabilityStop::Cancelled, message),
             Self::Exited => CapabilityError::stopped(CapabilityStop::Exited, message),
-            Self::Capacity => CapabilityError::stopped(CapabilityStop::Budget, message),
+            Self::Capacity(_) => CapabilityError::stopped(CapabilityStop::Budget, message),
             Self::Frozen | Self::Journal(_) => CapabilityError::unknown(message),
             Self::Invalid(_) | Self::NotFound | Self::Conflict => CapabilityError::new(message),
         }
@@ -319,7 +396,13 @@ fn media(data: &str, limit: usize) -> Result<(), CellError> {
         return Err(CellError::Invalid("empty media".into()));
     }
     if data.len() > limit.saturating_add(2) / 3 * 4 {
-        return Err(CellError::Capacity);
+        return Err(CellError::capacity(
+            CapacityKind::MediaBytes,
+            None,
+            None,
+            data.len(),
+            limit,
+        ));
     }
     let bytes = STANDARD
         .decode(data)
@@ -328,7 +411,13 @@ fn media(data: &str, limit: usize) -> Result<(), CellError> {
         return Err(CellError::Invalid("invalid base64 media".into()));
     }
     if bytes.len() > limit {
-        return Err(CellError::Capacity);
+        return Err(CellError::capacity(
+            CapacityKind::MediaBytes,
+            None,
+            None,
+            bytes.len(),
+            limit,
+        ));
     }
     Ok(())
 }
@@ -526,6 +615,16 @@ pub struct HostSettlementEvidence {
 }
 
 pub(crate) fn validate_json(value: &Value, depth: usize, bytes: usize) -> Result<(), CellError> {
+    validate_json_with(value, depth, bytes, None, None)
+}
+
+pub(crate) fn validate_json_with(
+    value: &Value,
+    depth: usize,
+    bytes: usize,
+    cell_id: Option<&str>,
+    status: Option<CellStatus>,
+) -> Result<(), CellError> {
     fn visit(value: &Value, remaining: usize) -> bool {
         if remaining == 0 {
             return false;
@@ -552,17 +651,27 @@ pub(crate) fn validate_json(value: &Value, depth: usize, bytes: usize) -> Result
             Ok(())
         }
     }
-    if !visit(value, depth)
-        || serde_json::to_writer(
-            Counter {
-                size: 0,
-                limit: bytes,
-            },
-            value,
-        )
-        .is_err()
-    {
-        return Err(CellError::Capacity);
+    if !visit(value, depth) {
+        return Err(CellError::capacity(
+            CapacityKind::JsonDepth,
+            cell_id.map(str::to_owned),
+            status,
+            depth + 1,
+            depth,
+        ));
+    }
+    let mut counter = Counter {
+        size: 0,
+        limit: bytes,
+    };
+    if serde_json::to_writer(&mut counter, value).is_err() {
+        return Err(CellError::capacity(
+            CapacityKind::ItemBytes,
+            cell_id.map(str::to_owned),
+            status,
+            counter.size,
+            bytes,
+        ));
     }
     Ok(())
 }

@@ -398,6 +398,17 @@ impl SessionStore {
                  WHEN EXISTS (SELECT 1 FROM core_events WHERE session_id=NEW.session_id AND cursor=NEW.cursor)
                  BEGIN SELECT RAISE(ABORT, 'core events are append-only'); END;"
             )?;
+            // Every load verifies wait registrations. Index just those events so
+            // streaming updates do not reparse all previous message snapshots.
+            transaction.execute_batch(
+                "CREATE INDEX IF NOT EXISTS core_execution_wait_log ON core_events(session_id, cursor)
+                 WHERE json_extract(record, '$.event.type')='execution_wait_registered';
+                 CREATE INDEX IF NOT EXISTS core_events_by_type ON core_events(
+                     session_id, json_extract(record, '$.event.type'), cursor);
+                 CREATE INDEX IF NOT EXISTS core_host_events_by_kind ON core_events(
+                     session_id, json_extract(record, '$.event.kind'), cursor)
+                 WHERE json_extract(record, '$.event.type')='host';"
+            )?;
             transaction.commit()?;
         }
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -638,6 +649,81 @@ impl SessionStore {
             return Err(CoreError::CorruptStore(
                 "The event log has missing entries".into(),
             ));
+        }
+        transaction.commit()?;
+        Ok(records)
+    }
+
+    /// Read selected durable events without decoding unrelated message snapshots.
+    /// Cursors remain those of the original log and need not be consecutive.
+    pub fn events_by_kind(
+        &self,
+        session_id: &str,
+        after: u64,
+        limit: usize,
+        event_type: &str,
+        host_kind: Option<&str>,
+    ) -> Result<Vec<EventRecord>, CoreError> {
+        if limit == 0 || limit > MAX_EVENT_PAGE {
+            return Err(CoreError::InvalidLimit {
+                limit,
+                max: MAX_EVENT_PAGE,
+            });
+        }
+        if event_type.is_empty() || (host_kind.is_some() && event_type != "host") {
+            return Err(CoreError::InvalidInput("Invalid event selection".into()));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction()?;
+        let session = load(&transaction, session_id)?;
+        if after > session.cursor {
+            return Err(CoreError::FutureCursor {
+                after,
+                current: session.cursor,
+            });
+        }
+        // Check the complete prefix through its covering primary-key index.
+        // This retains gap detection without reading unrelated event payloads.
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM core_events WHERE session_id=?1 AND cursor<=?2",
+            params![session_id, session.cursor as i64],
+            |row| row.get(0),
+        )?;
+        if count != session.cursor as i64 {
+            return Err(CoreError::CorruptStore(
+                "The event log has missing entries".into(),
+            ));
+        }
+        let (sql, kind) = match host_kind {
+            Some(kind) => (HOST_EVENTS_BY_KIND, kind),
+            None => (EVENTS_BY_TYPE, event_type),
+        };
+        let mut records = Vec::new();
+        {
+            let mut query = transaction.prepare(sql)?;
+            let mut rows = query.query(params![session_id, kind, after as i64, limit as i64])?;
+            let mut previous = after;
+            while let Some(row) = rows.next()? {
+                let cursor: i64 = row.get(0)?;
+                let json: String = row.get(1)?;
+                let record = checked_input(serde_json::from_str::<EventRecord>(&json)?)?;
+                if record.protocol_version != PROTOCOL_VERSION
+                    || record.session_id != session_id
+                    || cursor <= 0
+                    || record.cursor != cursor as u64
+                    || record.cursor <= previous
+                    || record.cursor > session.cursor
+                {
+                    return Err(CoreError::CorruptStore(
+                        "Selected event envelope or cursor is inconsistent".into(),
+                    ));
+                }
+                previous = record.cursor;
+                records.push(record);
+            }
         }
         transaction.commit()?;
         Ok(records)
@@ -1276,6 +1362,14 @@ impl SessionStore {
         Ok((result, record))
     }
 }
+
+const EVENTS_BY_TYPE: &str = "SELECT cursor, record FROM core_events
+    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3
+    ORDER BY cursor LIMIT ?4";
+const HOST_EVENTS_BY_KIND: &str = "SELECT cursor, record FROM core_events
+    WHERE session_id=?1 AND json_extract(record, '$.event.type')='host'
+    AND json_extract(record, '$.event.kind')=?2 AND cursor>?3
+    ORDER BY cursor LIMIT ?4";
 
 fn recorded_events(
     connection: &Connection,
@@ -2002,6 +2096,156 @@ fn validate_paired_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_events_use_indexes_and_preserve_the_original_log() {
+        let directory =
+            std::env::temp_dir().join(format!("cayw-selected-events-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.db");
+        let store = SessionStore::open(&path).unwrap();
+        let session = store.create_session("selected event fixture").unwrap();
+        let lease = store.begin_attempt(&session.id, "worker").unwrap();
+        for event in [
+            AgentEvent::AgentStart,
+            AgentEvent::TurnStart,
+            AgentEvent::MessageStart {
+                message: Message::Assistant(AssistantMessage::new(&cayw_ai::Model::new(
+                    "fixture", "stream",
+                ))),
+            },
+        ] {
+            store.append_agent_event(&lease, &event).unwrap();
+        }
+        let first = store
+            .append_host_event(&lease, "ledger_fixture", serde_json::json!({"entry": 1}))
+            .unwrap();
+        let mut message = AssistantMessage::new(&cayw_ai::Model::new("fixture", "stream"));
+        for fragment in 0..512 {
+            message.content = vec![Content::text("x".repeat(fragment * 8 + 1))];
+            store
+                .append_agent_event(
+                    &lease,
+                    &AgentEvent::MessageUpdate {
+                        message: message.clone(),
+                        event: Box::new(cayw_ai::AssistantEvent::TextDelta {
+                            index: 0,
+                            delta: "x".into(),
+                            partial: message.clone(),
+                        }),
+                    },
+                )
+                .unwrap();
+        }
+        let peer = SessionStore::open(&path).unwrap();
+        let second = peer
+            .append_host_event(&lease, "ledger_fixture", serde_json::json!({"entry": 2}))
+            .unwrap();
+        peer.append_host_event(&lease, "other_fixture", serde_json::json!({"entry": 3}))
+            .unwrap();
+        let original = store.events(&session.id, 0, 1000).unwrap();
+        assert_eq!(original.iter().filter(|record| matches!(record.event, CoreEvent::Agent { ref event } if matches!(event.as_ref(), AgentEvent::MessageUpdate { .. }))).count(), 512);
+        assert_eq!(
+            store
+                .events_by_kind(&session.id, 0, 1, "host", Some("ledger_fixture"))
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&first)
+        );
+        assert_eq!(
+            store
+                .events_by_kind(&session.id, first.cursor, 1, "host", Some("ledger_fixture"))
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&second)
+        );
+        assert!(
+            store
+                .events_by_kind(
+                    &session.id,
+                    second.cursor,
+                    1,
+                    "host",
+                    Some("ledger_fixture")
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .events_by_kind(&session.id, 0, 1000, "agent", None)
+                .unwrap()
+                .len(),
+            515
+        );
+        assert!(matches!(
+            store.events_by_kind(&session.id, u64::MAX, 1, "host", Some("ledger_fixture")),
+            Err(CoreError::FutureCursor { .. })
+        ));
+        {
+            let connection = store.connection.lock().unwrap();
+            for (sql, kind, index) in [
+                (EVENTS_BY_TYPE, "session_forked", "core_events_by_type"),
+                (
+                    HOST_EVENTS_BY_KIND,
+                    "ledger_fixture",
+                    "core_host_events_by_kind",
+                ),
+            ] {
+                let mut statement = connection
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap();
+                let plan = statement
+                    .query_map(params![session.id, kind, 0_i64, 1000_i64], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert!(plan.iter().any(|step| step.contains(index)), "{plan:?}");
+                assert!(
+                    !plan
+                        .iter()
+                        .any(|step| step.contains("SCAN") || step.contains("TEMP B-TREE")),
+                    "{plan:?}"
+                );
+            }
+        }
+        drop(peer);
+        drop(store);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP INDEX core_events_by_type; DROP INDEX core_host_events_by_kind;")
+            .unwrap();
+        drop(connection);
+        let reopened = SessionStore::open(&path).unwrap();
+        assert_eq!(reopened.events(&session.id, 0, 1000).unwrap(), original);
+        assert_eq!(
+            reopened
+                .events_by_kind(&session.id, 0, 1000, "host", Some("ledger_fixture"))
+                .unwrap(),
+            [first, second]
+        );
+        // The selected reader must still refuse a damaged prefix, including a
+        // missing unrelated message. Only this synthetic database loses guards.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER core_events_no_delete")
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM core_events WHERE session_id=?1 AND cursor=?2",
+                params![session.id, original[10].cursor as i64],
+            )
+            .unwrap();
+        assert!(matches!(
+            reopened.events_by_kind(&session.id, 0, 1000, "host", Some("ledger_fixture")),
+            Err(CoreError::CorruptStore(_))
+        ));
+        drop(connection);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn counter_exhaustion_cannot_wrap_or_cross_sqlite_integer_range() {

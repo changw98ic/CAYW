@@ -202,7 +202,13 @@ impl Bridge {
         self.run
             .update(|record| {
                 if record.calls.len() >= 4096 {
-                    return Err(CellError::Capacity);
+                    return Err(CellError::capacity(
+                        CapacityKind::HostCalls,
+                        Some(record.cell_id.clone()),
+                        Some(record.status),
+                        record.calls.len(),
+                        4096,
+                    ));
                 }
                 sequence = record.calls.len() as u64 + 1;
                 record.calls.push(CapabilityIntent {

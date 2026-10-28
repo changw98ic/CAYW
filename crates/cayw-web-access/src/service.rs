@@ -112,9 +112,13 @@ impl WebAccess {
         let limit = limit
             .unwrap_or(self.limits.default_search_limit)
             .clamp(1, self.limits.max_search_limit);
-        let hits = self.search.search(q, limit).await?;
-        let truncated = hits.len() as u32 >= limit;
-        let citations = hits
+        let mut response = self.search.search(q, limit).await?;
+        let truncated = response.hits.len() as u32 >= limit;
+        if response.hits.len() as u32 > limit {
+            response.hits.truncate(limit as usize);
+        }
+        let citations = response
+            .hits
             .iter()
             .map(|h| Citation {
                 url: h.url.clone(),
@@ -127,9 +131,11 @@ impl WebAccess {
         Ok(SearchResult {
             query: q.to_string(),
             provider: self.search.name().to_string(),
-            hits,
+            hits: response.hits,
             citations,
             truncated,
+            empty_reason: response.empty_reason,
+            evidence: response.evidence,
         })
     }
 

@@ -1,0 +1,58 @@
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":"assistant","content":"","reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":"","reasoning_content":"Let","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":"","reasoning_content":" me discover tools","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":"","reasoning_content":".","tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":"","reasoning_content":null,"tool_calls":[{"index":0,"id":"call-tool-001","type":"function","function":{"name":"execute_code","arguments":""}}]}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":""},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":""},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":""},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":""},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":""},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":null,"logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":""},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null,"role":null,"tool_calls":[{"function":{"name":null,"arguments":"{\"action\": \"exec\", \"script\": \"return {tools = ALL_TOOLS, matches = tool_search(\\\"test.run\\\", 10)}\", \"yield_time_ms\": 0, \"max_output_tokens\": 4096}"},"index":0,"type":null}]},"finish_reason":null,"index":0,"logprobs":null}],"created":1793153573,"id":"chatcmpl-fixture-req001","model":"fixture-model","object":"chat.completion.chunk","usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[{"index":0,"finish_reason":"tool_calls","logprobs":null,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null}}],"usage":null}
+
+data: {"id":"chatcmpl-fixture-req001","object":"chat.completion.chunk","created":1793153573,"model":"fixture-model","choices":[],"usage":{"prompt_tokens":1156,"completion_tokens":117,"total_tokens":1273,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":null},"completion_tokens_details":{"reasoning_tokens":5},"cost":0,"opencode":{"billing_source":"go","list_cost":0.0004872,"allowance":0.0003654,"tokens":{"input":1156,"output":117,"reasoning":5,"cache_read":0,"cache_write_5m":0,"cache_write_1h":0}}}}
+
+data: [DONE]
+

@@ -1,0 +1,13 @@
+{
+  "source": "/private/tmp/cayw-f01-f20-repair-20261028/comp12-recovery-live-04/provider-raw/request-001/response.sse",
+  "source_sha256": "e371d4d68a5791e87b7b66535fb54e246f666ceea8087491a210f1eff0f14e5f",
+  "fixture_sha256": "b9e9d662deaf41ec0ba3d59d4cdadc2b4911c7fc106c2d8f496e7a45f101bf48",
+  "source_bytes": 928411,
+  "fixture_bytes": 927693,
+  "frames": 3623,
+  "argument_fragments": 1954,
+  "argument_bytes": 7938,
+  "sanitization": "Mask text, reasoning, response identities and tool argument string values; retain JSON keys, escape sequences, tool name, per-fragment UTF-8 byte lengths, finish markers and usage. Captured script is never executed.",
+  "model_api_requests": 0,
+  "source_unchanged": true
+}

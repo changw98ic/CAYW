@@ -2,6 +2,7 @@ use crate::{bounds::*, model::*};
 use cayw_ai::{ArgumentValidator, CancellationToken};
 use cayw_codemode::CapabilityError;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
@@ -793,10 +794,16 @@ impl Registry {
                 Ok(()) => journal.done = true,
                 Err(error) => {
                     self.journal_failed(&error.message);
-                    let _ = journal.fallback();
+                    let fallback_err = journal.fallback().err().map(|e| e.message);
+                    let formatted = format_terminal_write_failure(
+                        &error.message,
+                        fallback_err.as_deref(),
+                        &journal.record,
+                        &outcome,
+                    );
                     result = Err(interrupted(
                         journal.state == DispatchDropState::Unknown,
-                        "dispatch journal terminal write failed; reconciliation required",
+                        &formatted,
                     ));
                 }
             }
@@ -973,5 +980,314 @@ impl Drop for Reservation {
         if self.effect_pending {
             source.unknown = true;
         }
+    }
+}
+
+fn sanitize_text(text: &str, max_len: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max_len));
+    for ch in text.chars() {
+        let ch = if ch.is_control() && ch != '\n' && ch != '\t' {
+            ' '
+        } else {
+            ch
+        };
+        if ch.len_utf8() > max_len.saturating_sub(out.len()) {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn is_sensitive_key(lower: &str) -> bool {
+    lower.contains("key")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("auth")
+        || lower.contains("credential")
+        || lower.contains("bearer")
+        || lower.contains("cookie")
+        || lower.contains("private")
+}
+
+fn is_sensitive_content(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("bearer ")
+        || lower.contains("private key")
+        || lower.contains("access_token")
+        || lower.contains("api_key")
+        || lower.contains("secret_key")
+}
+
+/// Bounded preview with best-effort redaction of known keys and text prefixes.
+/// The digest associates it with the full response; it does not authenticate the
+/// response or guarantee removal of credentials embedded in arbitrary text.
+fn bounded_structured_summary(value: &Value, depth: usize) -> Value {
+    if depth >= 3 {
+        return Value::String("[depth_exceeded]".into());
+    }
+    match value {
+        Value::Object(map) => {
+            let mut summary = serde_json::Map::new();
+            for (index, (k, v)) in map.iter().take(8).enumerate() {
+                let key = sanitize_text(k, 64);
+                let lower = key.to_ascii_lowercase();
+                if k.len() > 64 || key != *k {
+                    // Keep truncated or sanitized names outside the source-key namespace.
+                    let mut suffix = index;
+                    let mut label = format!("[field preview{suffix}]");
+                    while map.contains_key(&label) || summary.contains_key(&label) {
+                        suffix += 1;
+                        label = format!("[field preview{suffix}]");
+                    }
+                    summary.insert(label, json!({"key_prefix": key, "value": "[omitted]"}));
+                } else if is_sensitive_key(&lower) {
+                    summary.insert(key, Value::String("[redacted]".into()));
+                } else {
+                    summary.insert(key, bounded_structured_summary(v, depth + 1));
+                }
+            }
+            if map.len() > 8 {
+                let mut index = 0;
+                let mut label = "[more keys]".to_owned();
+                while map.contains_key(&label) || summary.contains_key(&label) {
+                    index += 1;
+                    label = format!("[more keys {index}]");
+                }
+                summary.insert(
+                    label,
+                    Value::String(format!("+{} more keys", map.len() - 8)),
+                );
+            }
+            Value::Object(summary)
+        }
+        Value::Array(list) => {
+            let mut items: Vec<Value> = list
+                .iter()
+                .take(8)
+                .map(|v| bounded_structured_summary(v, depth + 1))
+                .collect();
+            if list.len() > 8 {
+                items.push(Value::String(format!("+{} more items", list.len() - 8)));
+            }
+            Value::Array(items)
+        }
+        Value::String(s) => {
+            let preview = sanitize_text(s, 64);
+            if is_sensitive_content(&preview) {
+                Value::String("[redacted]".into())
+            } else {
+                Value::String(preview)
+            }
+        }
+        Value::Number(n) => Value::Number(n.clone()),
+        Value::Bool(b) => Value::Bool(*b),
+        Value::Null => Value::Null,
+    }
+}
+
+fn response_digest(value: &Value) -> String {
+    struct Writer(Sha256);
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    // Successful responses already passed value_size's byte and depth checks.
+    let mut writer = Writer(Sha256::new());
+    if serde_json::to_writer(&mut writer, value).is_err() {
+        return "unavailable".into();
+    }
+    format!("{:x}", writer.0.finalize())
+}
+
+fn format_terminal_write_failure(
+    underlying_error: &str,
+    fallback_error: Option<&str>,
+    record: &DispatchRecord,
+    outcome: &DispatchOutcome,
+) -> String {
+    let sanitized_error = sanitize_text(underlying_error, 256);
+    let sanitized_identity = format!(
+        "target={}, source={}, request_id={}, seq={}",
+        sanitize_text(&record.key.target, 128),
+        sanitize_text(&record.key.source.source.id, 128),
+        record.key.id,
+        record.context.sequence,
+    );
+    let response_summary = match outcome {
+        DispatchOutcome::Succeeded { value } => {
+            let inner = value.get("value").unwrap_or(value);
+            let hash = response_digest(inner);
+            let summary = bounded_structured_summary(inner, 0);
+            let summary_str = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".into());
+            format!(
+                "succeeded: sha256={}; {}",
+                hash,
+                sanitize_text(&summary_str, 256)
+            )
+        }
+        DispatchOutcome::Failed { message } => {
+            let hash = content_sha256(message);
+            format!(
+                "failed: sha256={}; message={}",
+                hash,
+                sanitize_text(message, 256)
+            )
+        }
+        DispatchOutcome::Unknown { message } => {
+            let hash = content_sha256(message);
+            format!(
+                "unknown: sha256={}; message={}",
+                hash,
+                sanitize_text(message, 256)
+            )
+        }
+        DispatchOutcome::NotExecuted { message } => {
+            let hash = content_sha256(message);
+            format!(
+                "not_executed: sha256={}; message={}",
+                hash,
+                sanitize_text(message, 256)
+            )
+        }
+    };
+    if let Some(fb_err) = fallback_error {
+        let sanitized_fb = sanitize_text(fb_err, 256);
+        format!(
+            "dispatch journal terminal write failed; reconciliation required: underlying_error={sanitized_error}; fallback_error={sanitized_fb}; call_identity=({sanitized_identity}); response_summary={response_summary}"
+        )
+    } else {
+        format!(
+            "dispatch journal terminal write failed; reconciliation required: underlying_error={sanitized_error}; call_identity=({sanitized_identity}); response_summary={response_summary}"
+        )
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_text_never_exceeds_its_utf8_byte_limit() {
+        for text in ["中🚀文", "a\u{0085}中\0🚀", "plain text"] {
+            for limit in 0..=text.len() + 1 {
+                let preview = sanitize_text(text, limit);
+                assert!(preview.len() <= limit);
+                assert!(
+                    !preview
+                        .chars()
+                        .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+                );
+            }
+        }
+        assert_eq!(sanitize_text("中🚀", 6), "中");
+        assert_eq!(sanitize_text("\u{0085}中", 4), " 中");
+    }
+
+    #[test]
+    fn diagnostic_long_keys_do_not_replace_source_keys_or_each_other() {
+        let prefix = "中".repeat(30);
+        let value = json!({
+            "[field preview0]": true,
+            "[field preview1]": false,
+            format!("{prefix}a"): "first",
+            format!("{prefix}b"): "second",
+        });
+        let summary = bounded_structured_summary(&value, 0);
+        let object = summary.as_object().unwrap();
+        assert_eq!(object.len(), 4);
+        assert_eq!(object["[field preview0]"], true);
+        assert_eq!(object["[field preview1]"], false);
+        let previews: Vec<_> = object.values().filter_map(Value::as_object).collect();
+        assert_eq!(previews.len(), 2);
+        for preview in previews {
+            assert!(preview["key_prefix"].as_str().unwrap().len() <= 64);
+            assert_eq!(preview["value"], "[omitted]");
+        }
+    }
+
+    #[test]
+    fn diagnostic_preview_bounds_depth_items_and_string_work() {
+        let value = json!({
+            "nested": {"nested": {"omitted": "value"}},
+            "items": (0..20).collect::<Vec<_>>(),
+            "long": "中".repeat(100_000),
+            "authorization": "fixture credential",
+            "text": "Bearer fixture credential",
+        });
+        value_size(&value, 1024 * 1024).unwrap();
+        let summary = bounded_structured_summary(&value, 0);
+        assert_eq!(summary["nested"]["nested"]["omitted"], "[depth_exceeded]");
+        assert_eq!(summary["items"].as_array().unwrap().len(), 9);
+        assert!(summary["long"].as_str().unwrap().len() <= 64);
+        assert_eq!(summary["authorization"], "[redacted]");
+        assert_eq!(summary["text"], "[redacted]");
+    }
+
+    #[test]
+    fn diagnostic_streamed_digest_matches_full_response_serialization() {
+        let value = json!({"number": 42, "text": "中文🚀\n", "array": [true, null]});
+        value_size(&value, 1024).unwrap();
+        assert_eq!(
+            response_digest(&value),
+            content_sha256(&serde_json::to_string(&value).unwrap())
+        );
+    }
+
+    #[test]
+    fn diagnostic_failure_retains_chain_identity_and_digest_within_text_budget() {
+        let record = DispatchRecord {
+            context: InvocationContext {
+                session_id: "session".into(),
+                task_id: "task".into(),
+                attempt_id: "attempt".into(),
+                execution_id: "execution".into(),
+                sequence: u64::MAX,
+            },
+            capability: "mcp.invoke".into(),
+            key: RequestKey {
+                id: u64::MAX,
+                source: Provenance {
+                    registry_incarnation: "registry".into(),
+                    source: SourceIdentity {
+                        id: "s".repeat(128),
+                        version: "1".into(),
+                        origin: "fixture:diagnostic".into(),
+                    },
+                    generation: 1,
+                    manifest_sha256: "0".repeat(64),
+                },
+                operation: Operation::Invoke,
+                target: "t".repeat(128),
+            },
+            arguments: json!({}),
+            arguments_sha256: content_sha256("{}"),
+        };
+        let response = json!({"result": "中🚀".repeat(1000)});
+        value_size(&response, 16 * 1024).unwrap();
+        let hash = response_digest(&response);
+        let outcome = DispatchOutcome::Succeeded {
+            value: json!({"value": response}),
+        };
+        let diagnostic = format_terminal_write_failure(
+            &"底层".repeat(1000),
+            Some(&"回退🚀".repeat(1000)),
+            &record,
+            &outcome,
+        );
+        assert!(diagnostic.len() < 2048);
+        assert!(diagnostic.contains("underlying_error=底层"));
+        assert!(diagnostic.contains("fallback_error=回退"));
+        assert!(diagnostic.contains(&format!("target={}", record.key.target)));
+        assert!(diagnostic.contains(&format!("source={}", record.key.source.source.id)));
+        assert!(diagnostic.contains(&format!("request_id={}, seq={}", u64::MAX, u64::MAX)));
+        assert!(diagnostic.contains(&format!("sha256={hash}")));
     }
 }

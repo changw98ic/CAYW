@@ -891,6 +891,10 @@ impl ChildService {
 
 #[async_trait]
 impl ExternalHost for ChildService {
+    fn delegates_workspace_calls(&self) -> bool {
+        true
+    }
+
     async fn call(
         &self,
         name: &str,

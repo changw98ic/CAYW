@@ -218,3 +218,167 @@ fn pdf_scope_is_literal_only_not_full_engine() {
         .expect_err("no literals");
     assert_eq!(err.diagnostic().class, FailureClass::ExtractFailed);
 }
+
+#[tokio::test]
+async fn ddg_search_distinguishes_empty_and_evidence() {
+    let quoted_noresults_path =
+        std::path::Path::new("/tmp/cayw-f01-f20-repair-20261028/search-ddg-quoted-noresults.html");
+    let noresults_html = if quoted_noresults_path.exists() {
+        std::fs::read_to_string(quoted_noresults_path).expect("read real quoted noresults")
+    } else {
+        r#"<div class="result result--no-result"><div class="no-results__message"><h1>No results found</h1></div></div>"#.to_string()
+    };
+
+    let normal_path =
+        std::path::Path::new("/tmp/cayw-f01-f20-repair-20261028/search-ddg-response.html");
+    let normal_html = if normal_path.exists() {
+        std::fs::read_to_string(normal_path).expect("read real search response")
+    } else {
+        r#"<div class="result"><a class="result__a" href="https://example.com/rust">Rust</a></div>"#
+            .to_string()
+    };
+
+    let challenge_html = r#"<html><body><h1>Unfortunately, bots use DuckDuckGo too</h1><p>Please complete the challenge</p></body></html>"#;
+    let structural_drift_html = r#"<html><head><title>Search Results</title></head><body><div class="new_layout">Nothing to see here</div></body></html>"#;
+
+    let search_url_normal = {
+        let mut u = url::Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        u.query_pairs_mut().append_pair("q", "Rust ownership");
+        u.to_string()
+    };
+    let search_url_empty = {
+        let mut u = url::Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        u.query_pairs_mut()
+            .append_pair("q", "\"xqz97b81nmv02498712398471923847\"");
+        u.to_string()
+    };
+    let search_url_challenge = {
+        let mut u = url::Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        u.query_pairs_mut().append_pair("q", "bot trigger");
+        u.to_string()
+    };
+    let search_url_drift = {
+        let mut u = url::Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        u.query_pairs_mut().append_pair("q", "drift layout");
+        u.to_string()
+    };
+
+    let transport = FixtureTransport::new()
+        .insert_html(&search_url_normal, normal_html)
+        .insert_html(&search_url_empty, noresults_html)
+        .insert_html(&search_url_challenge, challenge_html)
+        .insert_html(&search_url_drift, structural_drift_html);
+
+    let search = DuckDuckGoHtmlSearch::new(std::sync::Arc::new(transport.clone()));
+    let access = WebAccess::new(
+        std::sync::Arc::new(transport),
+        std::sync::Arc::new(search),
+        ContentStore::new(),
+        Limits::default(),
+    );
+
+    // 1. 正常 (Normal)
+    let res_normal = access.search("Rust ownership", Some(5)).await.unwrap();
+    assert!(!res_normal.hits.is_empty());
+    assert_eq!(res_normal.empty_reason, None);
+    assert_eq!(res_normal.evidence, None);
+
+    // 2. 真空 (True Empty)
+    let res_empty = access
+        .search("\"xqz97b81nmv02498712398471923847\"", Some(5))
+        .await
+        .unwrap();
+    assert!(res_empty.hits.is_empty());
+    assert_eq!(res_empty.empty_reason, Some(SearchEmptyReason::TrueEmpty));
+    let ev = res_empty.evidence.expect("evidence present for true empty");
+    assert_eq!(ev.http_status, Some(200));
+    assert!(
+        ev.source_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("No results found")
+    );
+    assert!(ev.response_snippet.is_some());
+
+    // 3. 挑战 (Challenge)
+    let res_challenge = access.search("bot trigger", Some(5)).await.unwrap();
+    assert!(res_challenge.hits.is_empty());
+    assert_eq!(
+        res_challenge.empty_reason,
+        Some(SearchEmptyReason::Challenge)
+    );
+    let ev = res_challenge.evidence.expect("evidence for challenge");
+    assert!(
+        ev.source_summary
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("bots use duckduckgo")
+    );
+
+    // 4. 结构变更 (Structural Mismatch)
+    let res_drift = access.search("drift layout", Some(5)).await.unwrap();
+    assert!(res_drift.hits.is_empty());
+    assert_eq!(
+        res_drift.empty_reason,
+        Some(SearchEmptyReason::StructuralMismatch)
+    );
+    let ev = res_drift
+        .evidence
+        .expect("evidence for structural mismatch");
+    assert!(
+        ev.source_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("Search Results")
+    );
+
+    // Missing response text leaves the empty reason unattributed.
+    let search_fixture = FixtureSearch::new();
+    let access_fixture = WebAccess::new(
+        std::sync::Arc::new(FixtureTransport::new()),
+        std::sync::Arc::new(search_fixture),
+        ContentStore::new(),
+        Limits::default(),
+    );
+    let res_unattributed = access_fixture
+        .search("missing in fixture", Some(5))
+        .await
+        .unwrap();
+    assert!(res_unattributed.hits.is_empty());
+    assert_eq!(
+        res_unattributed.empty_reason,
+        Some(SearchEmptyReason::Unattributed)
+    );
+    assert!(
+        res_unattributed
+            .evidence
+            .unwrap()
+            .response_snippet
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn ddg_search_body_too_large_fails_fast() {
+    let search_url = {
+        let mut u = url::Url::parse("https://html.duckduckgo.com/html/").unwrap();
+        u.query_pairs_mut().append_pair("q", "giant payload");
+        u.to_string()
+    };
+    let giant_html = "x".repeat(3000);
+    let transport = FixtureTransport::new().insert_html(&search_url, giant_html);
+    let search = DuckDuckGoHtmlSearch::new(std::sync::Arc::new(transport.clone()))
+        .with_max_fetch_bytes(1000);
+    let access = WebAccess::new(
+        std::sync::Arc::new(transport),
+        std::sync::Arc::new(search),
+        ContentStore::new(),
+        Limits::default(),
+    );
+    let err = access
+        .search("giant payload", Some(5))
+        .await
+        .expect_err("must exceed body limit");
+    assert_eq!(err.diagnostic().class, FailureClass::BodyTooLarge);
+}

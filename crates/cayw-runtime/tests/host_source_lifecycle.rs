@@ -6,7 +6,10 @@ use cayw_bridge::{
     Visibility,
 };
 use cayw_codemode::CapabilityError;
-use cayw_core::{CapabilityCallRecord, CapabilityOutcome, CoreEvent, SessionState};
+use cayw_core::{
+    CapabilityCallRecord, CapabilityOutcome, CapabilityReconciliation, CoreEvent,
+    ReconciliationOrigin, ReconciliationRequest, ReconciliationVerifier, SessionState,
+};
 use cayw_ipc::{Client, ServerConfig, serve};
 use cayw_runtime::{ApprovalChoice, BridgeDispatchEvent, Runtime, RuntimeConfig, ScopedPermission};
 use cayw_sources::{StdioConfig, StdioControl, StdioSource};
@@ -156,6 +159,20 @@ async fn prepared(root: &Path) -> StdioSource {
     file.sync_all().unwrap();
     source
 }
+struct LifecycleReconciliationVerifier;
+impl ReconciliationVerifier for LifecycleReconciliationVerifier {
+    fn verify(&self, request: &ReconciliationRequest) -> Result<(), String> {
+        match request {
+            ReconciliationRequest::Capability { reconciliation } => {
+                if reconciliation.actor.is_empty() || reconciliation.evidence.is_empty() {
+                    return Err("actor and evidence required".into());
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
 fn settings(registry: &Registry) -> RuntimeConfig {
     RuntimeConfig {
         bridge: Some(registry.consumer()),
@@ -170,6 +187,7 @@ fn settings(registry: &Registry) -> RuntimeConfig {
                 json!({"server":"local","tool":"add","arguments":{"a":17,"b":25}}),
             ),
         ],
+        reconciliation_verifier: Some(Arc::new(LifecycleReconciliationVerifier)),
         ..Default::default()
     }
 }
@@ -682,4 +700,251 @@ async fn actual_service_error_is_bound_to_original_call_and_host_deadline_retain
         closed(&control).await;
         case.save("cleanup", &control.snapshot());
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_stdio_mcp_disconnect_before_response_retains_unknown_and_reconciles_without_replay()
+{
+    let case = Case::new("lifecycle-stdio-disconnect-before-response");
+    let mut source_config =
+        StdioConfig::new(env!("CARGO_BIN_EXE_cayw-runtime-mcp-fixture"), &case.root);
+    // CAYW_MCP_FIXTURE_FAULT="tool-exit" causes the stdio server process to exit immediately on tools/call,
+    // simulating abrupt crash/disconnection before any response is transmitted.
+    source_config
+        .environment
+        .insert("CAYW_MCP_FIXTURE_FAULT".into(), "tool-exit".into());
+    case.save("stdio-config", &source_configuration(&source_config));
+    let source = StdioSource::connect(source_config, CancellationToken::new())
+        .await
+        .unwrap();
+    let control = source.control();
+    let (manifest, handle) = source.into_parts();
+    let registry = Registry::new(Limits::default(), Arc::new(Policy)).unwrap();
+    let original_prov = registry.register(identity("2"), manifest, handle).unwrap();
+    let config = settings(&registry);
+    let model = Arc::new(Fixed::new(ADD));
+    let rt = case.open(config.clone(), model.clone());
+    let id = rt.create(None).unwrap().id;
+
+    // Run prompt. Stdio child will crash on tools/call before responding.
+    let _ = tokio::time::timeout(
+        WATCHDOG,
+        rt.prompt(&id, "call-crash", CancellationToken::new()),
+    )
+    .await
+    .unwrap();
+
+    // 1. Session must halt defensively with NeedsReconciliation, retaining unknown.
+    let session = rt.get(&id).unwrap();
+    assert_eq!(session.state, SessionState::NeedsReconciliation);
+    assert_eq!(session.unresolved_capabilities.len(), 1);
+    let unresolved = &session.unresolved_capabilities[0];
+    assert!(matches!(
+        &unresolved.outcome,
+        Some(CapabilityOutcome::OutcomeUnknown { error }) if error.contains("stdio transport ended; no replay")
+    ));
+
+    // 2. Dispatch journal in core must retain unknown terminal and call identity.
+    let dispatches = records(&rt, &id);
+    assert!(!dispatches.is_empty());
+    let last = dispatches.last().unwrap();
+    assert!(matches!(
+        last.outcome,
+        Some(DispatchOutcome::Unknown { .. })
+    ));
+    assert_eq!(last.record.context.session_id, id);
+    assert_eq!(last.record.key.target, "add");
+    assert_eq!(last.record.key.source, original_prov);
+
+    // 3. Child process cleanup: the child process must be reaped.
+    registry.disconnect("local").unwrap();
+    closed(&control).await;
+    assert!(control.snapshot().reaped);
+
+    // 4. Independent reopen must preserve NeedsReconciliation and reject new work without replay.
+    drop(rt);
+    let reopened = case.open(config.clone(), model.clone());
+    assert_eq!(
+        reopened.get(&id).unwrap().state,
+        SessionState::NeedsReconciliation
+    );
+    assert_eq!(
+        reopened.recover(&id).unwrap().state,
+        SessionState::NeedsReconciliation
+    );
+    assert!(
+        reopened
+            .enqueue(&id, "must not replay old unknown")
+            .is_err()
+    );
+    assert_eq!(control.snapshot().tool_calls, 1);
+
+    // 5. Reconcile capability and verify session recovers to Idle without repeating side effects.
+    let target_unresolved = reopened
+        .get(&id)
+        .unwrap()
+        .unresolved_capabilities
+        .pop()
+        .unwrap();
+    let reconciliation = CapabilityReconciliation {
+        key: target_unresolved.key.clone(),
+        expected: Box::new(ReconciliationOrigin::from(&target_unresolved)),
+        actor: "reconciliation-operator".into(),
+        evidence: "operator verified child crashed before completing side effect".into(),
+        outcome: CapabilityOutcome::NotExecuted {
+            reason: "child crashed before execution".into(),
+        },
+        external_provenance: target_unresolved.external_provenance.clone(),
+    };
+    let reconciled_view = reopened.reconcile_capability(&id, reconciliation).unwrap();
+    assert_eq!(reconciled_view.state, SessionState::Idle);
+    assert!(reconciled_view.unresolved_capabilities.is_empty());
+
+    // Tool calls count on original process must still be 1 (no second invocation / no replay).
+    assert_eq!(control.snapshot().tool_calls, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_stdio_mcp_terminal_persistence_failure_retains_chain_identity_response_and_reconciles()
+ {
+    let case = Case::new("lifecycle-stdio-terminal-persistence-failure");
+    let source = prepared(&case.root).await;
+    let control = source.control();
+    let (manifest, handle) = source.into_parts();
+    let registry = Registry::new(Limits::default(), Arc::new(Policy)).unwrap();
+    let original_prov = registry.register(identity("2"), manifest, handle).unwrap();
+    let config = settings(&registry);
+    let model = Arc::new(Fixed::new(ADD));
+    let rt = case.open(config.clone(), model.clone());
+    let id = rt.create(None).unwrap().id;
+
+    // Inject fault: simulate SQLite commitment failure ONLY for runtime_bridge_settled when outcome is Succeeded.
+    // (DispatchOutcome::Succeeded serializes with "state": "succeeded", whereas fallback dropped() has "state": "unknown").
+    // This allows prepare and fallback dropped() to succeed while settled() fails in a controlled synthetic harness.
+    // Note: Historical reg_15 observed an unknown terminal write without an underlying SQLite error, so this synthetic
+    // test verifies the durability and error-chain invariants under simulated terminal commitment failure.
+    let connection = rusqlite::Connection::open(case.root.join("session.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_terminal_settle BEFORE INSERT ON core_events \
+         WHEN json_extract(NEW.record,'$.event.type')='host' \
+         AND json_extract(NEW.record,'$.event.kind')='runtime_bridge_settled' \
+         AND json_extract(NEW.record,'$.event.data.outcome.state')='succeeded' \
+         BEGIN SELECT RAISE(ABORT,'injected sqlite disk failure during terminal write'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    // Prompt runs: Luau calls mcp.call add. The real stdio MCP executes and returns {"sum": 42, ...}.
+    // Then settled() fails to commit, fallback dropped() writes cursor with outcome_unknown,
+    // and registry returns the enhanced error preserving error chain, call identity, and response summary.
+    let _ = tokio::time::timeout(
+        WATCHDOG,
+        rt.prompt(
+            &id,
+            "call-add-persistence-failure",
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    // 1. Session must halt defensively with NeedsReconciliation.
+    let session = rt.get(&id).unwrap();
+    assert_eq!(session.state, SessionState::NeedsReconciliation);
+    assert_eq!(session.unresolved_capabilities.len(), 1);
+
+    // 2. Check capability_settled outcome: it must retain error chain, call identity, response summary, and unknown state.
+    let unresolved = &session.unresolved_capabilities[0];
+    match &unresolved.outcome {
+        Some(CapabilityOutcome::OutcomeUnknown { error }) => {
+            assert!(
+                error
+                    .starts_with("dispatch journal terminal write failed; reconciliation required"),
+                "error message was: {error}"
+            );
+            assert!(
+                error.contains("underlying_error="),
+                "error message was: {error}"
+            );
+            assert!(
+                error.contains("injected sqlite disk failure during terminal write"),
+                "error message was: {error}"
+            );
+            assert!(
+                error.contains("call_identity="),
+                "error message was: {error}"
+            );
+            assert!(error.contains("target=add"), "error message was: {error}");
+            assert!(error.contains("source=local"), "error message was: {error}");
+            assert!(
+                error.contains("response_summary="),
+                "error message was: {error}"
+            );
+            assert!(error.contains("succeeded:"), "error message was: {error}");
+            assert!(error.contains("sha256="), "error message was: {error}");
+            assert!(error.contains("sum"), "error message was: {error}");
+            assert!(error.contains("42"), "error message was: {error}");
+        }
+        other => panic!("expected OutcomeUnknown, got: {other:?}"),
+    }
+
+    // 3. Dispatch journal in core has runtime_bridge_settled with unknown outcome (written by fallback).
+    let dispatches = records(&rt, &id);
+    let last = dispatches.last().unwrap();
+    assert!(matches!(
+        last.outcome,
+        Some(DispatchOutcome::Unknown { .. })
+    ));
+    assert_eq!(last.record.key.target, "add");
+    assert_eq!(last.record.key.source, original_prov);
+
+    // 4. Source cleanup.
+    registry.disconnect("local").unwrap();
+    closed(&control).await;
+    assert!(control.snapshot().reaped);
+
+    // 5. Independent reopen must preserve NeedsReconciliation and reject uncoordinated replay.
+    drop(rt);
+    let reopened = case.open(config.clone(), model.clone());
+    assert_eq!(
+        reopened.get(&id).unwrap().state,
+        SessionState::NeedsReconciliation
+    );
+    assert_eq!(
+        reopened.recover(&id).unwrap().state,
+        SessionState::NeedsReconciliation
+    );
+    assert!(reopened.enqueue(&id, "cannot replay").is_err());
+    assert_eq!(control.snapshot().tool_calls, 1);
+
+    // 6. Explicit reconciliation removes the trigger and settles the capability cleanly.
+    let connection = rusqlite::Connection::open(case.root.join("session.db")).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER fail_terminal_settle;")
+        .unwrap();
+    drop(connection);
+
+    let target_unresolved = reopened
+        .get(&id)
+        .unwrap()
+        .unresolved_capabilities
+        .pop()
+        .unwrap();
+    let reconciliation = CapabilityReconciliation {
+        key: target_unresolved.key.clone(),
+        expected: Box::new(ReconciliationOrigin::from(&target_unresolved)),
+        actor: "reconciliation-operator".into(),
+        evidence: "operator verified stdio execution succeeded and confirmed sum=42".into(),
+        outcome: CapabilityOutcome::Completed {
+            result: json!({"sum": 42}),
+        },
+        external_provenance: target_unresolved.external_provenance.clone(),
+    };
+    let reconciled_view = reopened.reconcile_capability(&id, reconciliation).unwrap();
+    assert_eq!(reconciled_view.state, SessionState::Idle);
+    assert!(reconciled_view.unresolved_capabilities.is_empty());
+
+    // Tool calls count must strictly remain 1 (no duplicate side effect / no replay).
+    assert_eq!(control.snapshot().tool_calls, 1);
 }

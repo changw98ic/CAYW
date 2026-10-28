@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::error::WebAccessError;
 use crate::provider::{BoxFuture, HttpTransport, SearchProvider};
-use crate::types::{FailureClass, SearchHit};
+use crate::types::{FailureClass, SearchEmptyReason, SearchEvidence, SearchHit, SearchResponse};
 
 const PROVIDER: &str = "duckduckgo_html";
 const ENDPOINT: &str = "https://html.duckduckgo.com/html/";
@@ -53,7 +53,7 @@ impl SearchProvider for DuckDuckGoHtmlSearch {
         &'a self,
         query: &'a str,
         limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>> {
+    ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>> {
         Box::pin(async move {
             let url = Self::search_url(query)?;
             let raw = self
@@ -68,23 +68,229 @@ impl SearchProvider for DuckDuckGoHtmlSearch {
                     err
                 })?;
             let html = String::from_utf8_lossy(&raw.body);
-            let mut hits = parse_duckduckgo_html(&html);
-            if hits.len() as u32 > limit {
-                hits.truncate(limit as usize);
+            let mut response = parse_duckduckgo_response(Some(&html), Some(raw.status));
+            if response.hits.len() as u32 > limit {
+                response.hits.truncate(limit as usize);
             }
-            for (i, hit) in hits.iter_mut().enumerate() {
+            for (i, hit) in response.hits.iter_mut().enumerate() {
                 hit.rank = (i as u32) + 1;
             }
-            Ok(hits)
+            Ok(response)
         })
     }
+}
+
+/// Canonical entry point: parse DuckDuckGo HTML results page into a [`SearchResponse`].
+///
+/// Distinguishes normal hits, explicit no-results pages, challenges, and markup drift.
+/// Missing response text leaves the empty result unattributed.
+pub fn parse_duckduckgo_html(html: &str) -> SearchResponse {
+    parse_duckduckgo_response(Some(html), Some(200))
+}
+
+/// Parse DuckDuckGo response with optional status and body into a structured [`SearchResponse`].
+pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> SearchResponse {
+    let status_code = status.unwrap_or(200);
+
+    // If HTTP status is an explicit error (non-2xx)
+    if !(200..300).contains(&status_code) {
+        let (reason, summary, snippet) = match html {
+            Some(body) if !body.trim().is_empty() => {
+                let lower = body.to_lowercase();
+                if is_ddg_challenge(&lower) {
+                    (
+                        SearchEmptyReason::Challenge,
+                        extract_challenge_summary(body),
+                        Some(prefix_at_char_boundary(body, 1024).to_string()),
+                    )
+                } else {
+                    (
+                        SearchEmptyReason::HttpError,
+                        Some(format!("HTTP status {status_code}")),
+                        Some(prefix_at_char_boundary(body, 1024).to_string()),
+                    )
+                }
+            }
+            _ => (
+                SearchEmptyReason::HttpError,
+                Some(format!("HTTP status {status_code}")),
+                None,
+            ),
+        };
+        return SearchResponse::empty(
+            reason,
+            Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: summary,
+                response_snippet: snippet,
+            }),
+        );
+    }
+
+    // HTTP 200 path: check whether HTTP original text exists
+    let Some(raw_html) = html else {
+        return SearchResponse::empty(
+            SearchEmptyReason::Unattributed,
+            Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: Some(
+                    "missing HTTP response body; cannot attribute empty result".into(),
+                ),
+                response_snippet: None,
+            }),
+        );
+    };
+
+    if raw_html.trim().is_empty() {
+        return SearchResponse::empty(
+            SearchEmptyReason::Unattributed,
+            Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: Some(
+                    "empty HTTP response body; cannot attribute empty result".into(),
+                ),
+                response_snippet: None,
+            }),
+        );
+    }
+
+    // Parse result anchors (`result__a`)
+    let hits = extract_ddg_hits(raw_html);
+    if !hits.is_empty() {
+        return SearchResponse::new(hits);
+    }
+
+    // Hits are empty: classify into 真空 / 挑战 / 结构失配
+    let lower = raw_html.to_lowercase();
+    let response_snippet = Some(prefix_at_char_boundary(raw_html, 1024).to_string());
+
+    if is_ddg_challenge(&lower) {
+        let summary = extract_challenge_summary(raw_html);
+        SearchResponse::empty(
+            SearchEmptyReason::Challenge,
+            Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: summary,
+                response_snippet,
+            }),
+        )
+    } else if is_ddg_true_empty(&lower) {
+        let summary = extract_no_results_summary(raw_html);
+        SearchResponse::empty(
+            SearchEmptyReason::TrueEmpty,
+            Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: summary,
+                response_snippet,
+            }),
+        )
+    } else {
+        let summary = extract_structural_mismatch_summary(raw_html);
+        SearchResponse::empty(
+            SearchEmptyReason::StructuralMismatch,
+            Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: summary,
+                response_snippet,
+            }),
+        )
+    }
+}
+
+fn is_ddg_true_empty(lower: &str) -> bool {
+    lower.contains("result--no-result")
+        || lower.contains("no-results__message")
+        || lower.contains("no-results__container")
+}
+
+fn is_ddg_challenge(lower: &str) -> bool {
+    lower.contains("bots use duckduckgo")
+        || lower.contains("bots@duckduckgo.com")
+        || lower.contains("unusual traffic")
+        || lower.contains("ddg-captcha")
+        || lower.contains("cf-turnstile")
+        || lower.contains("cf-challenge")
+        || lower.contains("challenge-form")
+        || lower.contains("cf-browser-verification")
+        || lower.contains("please verify you are a human")
+        || lower.contains("verify that you are a human")
+        || lower.contains("verify you are not a robot")
+        || lower.contains("security check")
+        || lower.contains("access denied")
+        || lower.contains("automated requests")
+        || (lower.contains("captcha")
+            && (lower.contains("challenge") || lower.contains("robot") || lower.contains("human")))
+}
+
+fn extract_no_results_summary(html: &str) -> Option<String> {
+    let clean_text = decode_basic_entities(&strip_tags(html));
+    let lower = clean_text.to_ascii_lowercase();
+    for marker in [
+        "no results found",
+        "not found any results",
+        "no search results",
+        "未找到结果",
+        "没有找到任何结果",
+    ] {
+        if let Some(pos) = lower.find(marker) {
+            let start = clean_text.floor_char_boundary(pos.saturating_sub(30));
+            let end = clean_text.floor_char_boundary(pos.saturating_add(270).min(clean_text.len()));
+            let snippet = clean_text[start..end].trim();
+            if !snippet.is_empty() {
+                return Some(prefix_at_char_boundary(snippet, 300).to_string());
+            }
+        }
+    }
+    Some("No results found".to_string())
+}
+
+fn extract_challenge_summary(html: &str) -> Option<String> {
+    let clean_text = decode_basic_entities(&strip_tags(html));
+    let lower = clean_text.to_ascii_lowercase();
+    for marker in [
+        "bots use duckduckgo",
+        "unusual traffic",
+        "verify you are not a robot",
+        "verify you are a human",
+        "ddg-captcha",
+        "access denied",
+        "security check",
+        "challenge",
+    ] {
+        if let Some(pos) = lower.find(marker) {
+            let start = clean_text.floor_char_boundary(pos.saturating_sub(40));
+            let end = clean_text.floor_char_boundary(pos.saturating_add(260).min(clean_text.len()));
+            let snippet = clean_text[start..end].trim();
+            if !snippet.is_empty() {
+                return Some(prefix_at_char_boundary(snippet, 300).to_string());
+            }
+        }
+    }
+    Some("DuckDuckGo challenge / bot check detected".to_string())
+}
+
+fn extract_structural_mismatch_summary(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    if let Some(pos) = lower.find("<title>") {
+        let after = &html[pos + 7..];
+        if let Some(end) = after.to_ascii_lowercase().find("</title>") {
+            let title = decode_basic_entities(strip_tags(&after[..end]).trim());
+            if !title.is_empty() {
+                return Some(format!(
+                    "structural mismatch: page title {:?}, no results markup found",
+                    prefix_at_char_boundary(&title, 100)
+                ));
+            }
+        }
+    }
+    Some("structural mismatch: unexpected page layout without search result anchors".to_string())
 }
 
 /// Parse DuckDuckGo HTML result anchors (`result__a`) into hits.
 ///
 /// Resolves `uddg=` redirect targets when present. Intentionally small and
 /// tolerant — DDG markup drifts; empty results are a soft miss, not a panic.
-pub fn parse_duckduckgo_html(html: &str) -> Vec<SearchHit> {
+pub fn extract_ddg_hits(html: &str) -> Vec<SearchHit> {
     let mut hits: Vec<SearchHit> = Vec::new();
     let mut rest = html;
     while let Some(idx) = rest.find("result__a") {
@@ -386,5 +592,161 @@ mod tests {
     fn nearby_snippet_accepts_result_idx_past_end() {
         assert_eq!(nearby_snippet("short", 999), None);
         assert_eq!(nearby_snippet("", 0), None);
+    }
+
+    #[test]
+    fn ddg_challenge_takes_priority_over_no_results_markup() {
+        let html = r#"<div class="no-results__message">No results found</div>
+            <form id="challenge-form">Verify you are a human</form>"#;
+        let response = parse_duckduckgo_html(html);
+        assert_eq!(response.empty_reason, Some(SearchEmptyReason::Challenge));
+    }
+
+    #[test]
+    fn ddg_plain_no_results_text_does_not_prove_an_empty_search() {
+        let response = parse_duckduckgo_html("<p>A guide about no search results</p>");
+        assert_eq!(
+            response.empty_reason,
+            Some(SearchEmptyReason::StructuralMismatch)
+        );
+    }
+
+    #[test]
+    fn ddg_diagnostic_offsets_preserve_unicode_boundaries() {
+        let prefix = "İ".repeat(32);
+        let challenge =
+            format!("{prefix}<p>Verify you are a human</p><form id=\"challenge-form\"></form>");
+        let response = parse_duckduckgo_html(&challenge);
+        assert_eq!(response.empty_reason, Some(SearchEmptyReason::Challenge));
+        assert!(
+            response
+                .evidence
+                .unwrap()
+                .source_summary
+                .unwrap()
+                .contains("Verify")
+        );
+
+        let empty = format!("{prefix}<div class=\"no-results__message\">No results found</div>");
+        let response = parse_duckduckgo_html(&empty);
+        assert_eq!(response.empty_reason, Some(SearchEmptyReason::TrueEmpty));
+        assert!(
+            response
+                .evidence
+                .unwrap()
+                .source_summary
+                .unwrap()
+                .contains("No results found")
+        );
+
+        let drift = format!("{prefix}<TITLE>İ Search Results</TITLE>");
+        let response = parse_duckduckgo_html(&drift);
+        assert_eq!(
+            response.empty_reason,
+            Some(SearchEmptyReason::StructuralMismatch)
+        );
+        assert!(
+            response
+                .evidence
+                .unwrap()
+                .source_summary
+                .unwrap()
+                .contains("İ Search Results")
+        );
+    }
+
+    #[test]
+    fn ddg_classifies_true_empty_inline_fixture() {
+        let html = r#"<!doctype html><html><body>
+        <div class="result result--no-result">
+            <div class="no-results__message">
+                <h1>No results found for <strong>"unmatched_query_string"</strong></h1>
+                <p>Suggestions: Check spelling</p>
+            </div>
+        </div></body></html>"#;
+        let resp = parse_duckduckgo_html(html);
+        assert!(resp.hits.is_empty());
+        assert_eq!(resp.empty_reason, Some(SearchEmptyReason::TrueEmpty));
+        let ev = resp.evidence.unwrap();
+        assert!(ev.source_summary.unwrap().contains("No results found"));
+        assert!(ev.response_snippet.unwrap().contains("no-results__message"));
+    }
+
+    #[test]
+    fn ddg_classifies_challenge() {
+        let html = r#"<!doctype html><html><body>
+        <h1>Unfortunately, bots use DuckDuckGo too</h1>
+        <p>Please complete the following challenge to verify you are a human</p>
+        <div class="challenge-form"></div>
+        </body></html>"#;
+        let resp = parse_duckduckgo_html(html);
+        assert!(resp.hits.is_empty());
+        assert_eq!(resp.empty_reason, Some(SearchEmptyReason::Challenge));
+        let ev = resp.evidence.unwrap();
+        assert!(
+            ev.source_summary
+                .unwrap()
+                .to_lowercase()
+                .contains("bots use duckduckgo")
+        );
+    }
+
+    #[test]
+    fn ddg_classifies_structural_mismatch() {
+        let html = r#"<!doctype html><html><head><title>DuckDuckGo Drifted Layout</title></head>
+        <body><div class="unknown_feed">Some unexpected content without results</div></body></html>"#;
+        let resp = parse_duckduckgo_html(html);
+        assert!(resp.hits.is_empty());
+        assert_eq!(
+            resp.empty_reason,
+            Some(SearchEmptyReason::StructuralMismatch)
+        );
+        let ev = resp.evidence.unwrap();
+        assert!(
+            ev.source_summary
+                .unwrap()
+                .contains("DuckDuckGo Drifted Layout")
+        );
+    }
+
+    #[test]
+    fn ddg_without_http_response_text_cannot_attribute() {
+        let resp_none = parse_duckduckgo_response(None, Some(200));
+        assert!(resp_none.hits.is_empty());
+        assert_eq!(
+            resp_none.empty_reason,
+            Some(SearchEmptyReason::Unattributed)
+        );
+        assert!(
+            resp_none
+                .evidence
+                .as_ref()
+                .unwrap()
+                .response_snippet
+                .is_none()
+        );
+
+        let resp_empty = parse_duckduckgo_response(Some("   "), Some(200));
+        assert!(resp_empty.hits.is_empty());
+        assert_eq!(
+            resp_empty.empty_reason,
+            Some(SearchEmptyReason::Unattributed)
+        );
+        assert!(
+            resp_empty
+                .evidence
+                .as_ref()
+                .unwrap()
+                .response_snippet
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ddg_classifies_http_status_error() {
+        let resp = parse_duckduckgo_response(Some("Internal Server Error"), Some(500));
+        assert!(resp.hits.is_empty());
+        assert_eq!(resp.empty_reason, Some(SearchEmptyReason::HttpError));
+        assert_eq!(resp.evidence.as_ref().unwrap().http_status, Some(500));
     }
 }

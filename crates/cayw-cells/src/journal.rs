@@ -138,7 +138,13 @@ impl SqliteJournal {
             |row| row.get(0),
         )?;
         if count >= limits.max_cells as i64 {
-            return Err(CellError::Capacity);
+            return Err(CellError::capacity(
+                CapacityKind::MaxCells,
+                Some(record.cell_id.clone()),
+                Some(record.status),
+                count as usize,
+                limits.max_cells,
+            ));
         }
         tx.execute(
             "INSERT INTO cells_v1(id,session,task,revision,body) VALUES(?1,?2,?3,?4,?5)",
@@ -197,7 +203,13 @@ impl SqliteJournal {
             .map(|row| Ok(serde_json::from_str::<CellRecord>(&row?)?))
             .collect::<Result<Vec<_>, CellError>>()?;
         if records.len() > limits.max_cells {
-            return Err(CellError::Capacity);
+            return Err(CellError::capacity(
+                CapacityKind::MaxCells,
+                None,
+                None,
+                records.len(),
+                limits.max_cells,
+            ));
         }
         Ok(records)
     }
@@ -238,7 +250,13 @@ impl SqliteJournal {
             .collect::<Result<Vec<_>, CellError>>()?
         };
         if records.len() > limits.max_cells {
-            return Err(CellError::Capacity);
+            return Err(CellError::capacity(
+                CapacityKind::MaxCells,
+                None,
+                None,
+                records.len(),
+                limits.max_cells,
+            ));
         }
         for record in &mut records {
             if matches!(record.status, CellStatus::Running | CellStatus::Yielded)
@@ -334,22 +352,69 @@ impl SqliteJournal {
             [session],
             |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize)),
         )?;
-        if (old.is_none() && keys >= limits.store_keys)
-            || bytes.saturating_sub(old_bytes).saturating_add(body.len()) > limits.store_bytes
-        {
-            return Err(CellError::Capacity);
+        if old.is_none() && keys >= limits.store_keys {
+            return Err(CellError::capacity(
+                CapacityKind::StoreKeys,
+                None,
+                None,
+                keys,
+                limits.store_keys,
+            ));
+        }
+        let next_bytes = bytes.saturating_sub(old_bytes).saturating_add(body.len());
+        if next_bytes > limits.store_bytes {
+            return Err(CellError::capacity(
+                CapacityKind::StoreBytes,
+                None,
+                None,
+                next_bytes,
+                limits.store_bytes,
+            ));
         }
         let version = version
             .checked_add(1)
             .filter(|v| *v <= i64::MAX as u64)
-            .ok_or(CellError::Capacity)?;
-        tx.execute("INSERT INTO cells_values_v1(session,key,version,body,bytes) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session,key) DO UPDATE SET version=excluded.version,body=excluded.body,bytes=excluded.bytes", params![session,key,sql_u64(version)?,body,i64::try_from(body.len()).map_err(|_| CellError::Capacity)?])?;
+            .ok_or_else(|| {
+                CellError::capacity(
+                    CapacityKind::StoreBytes,
+                    None,
+                    None,
+                    usize::MAX,
+                    i64::MAX as usize,
+                )
+            })?;
+        tx.execute(
+            "INSERT INTO cells_values_v1(session,key,version,body,bytes) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(session,key) DO UPDATE SET version=excluded.version,body=excluded.body,bytes=excluded.bytes",
+            params![
+                session,
+                key,
+                sql_u64(version)?,
+                body,
+                i64::try_from(body.len()).map_err(|_| {
+                    CellError::capacity(
+                        CapacityKind::StoreBytes,
+                        None,
+                        None,
+                        body.len(),
+                        i64::MAX as usize,
+                    )
+                })?
+            ],
+        )?;
         tx.commit()?;
         Ok(StoreSnapshot { version, value })
     }
 }
 fn sql_u64(value: u64) -> Result<i64, CellError> {
-    i64::try_from(value).map_err(|_| CellError::Capacity)
+    i64::try_from(value).map_err(|_| {
+        CellError::capacity(
+            CapacityKind::MaxCells,
+            None,
+            None,
+            usize::MAX,
+            i64::MAX as usize,
+        )
+    })
 }
 fn frozen(connection: &Connection, session: &str) -> Result<bool, CellError> {
     Ok(connection.query_row(

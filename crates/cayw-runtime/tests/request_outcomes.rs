@@ -72,6 +72,7 @@ impl Provider for Scripts {
         let message = if page.as_ref().is_some_and(|page| {
             page.outcome_unknown
                 || page.status == CellStatus::Cancelled
+                || page.vm_alive
                 || !page.status.is_terminal()
                 || page.has_more
         }) || executed == self.scripts.len()
@@ -108,6 +109,64 @@ impl Provider for Scripts {
             if let Some(pause) = pause { pause.acquire_owned().await.unwrap().forget(); }
             yield AssistantEvent::Done { message };
         })
+    }
+}
+
+#[tokio::test]
+async fn fixed_provider_waits_for_a_terminal_cell_until_its_vm_is_stopped() {
+    let provider = Scripts {
+        scripts: vec![],
+        pause: None,
+        calls: AtomicUsize::new(0),
+        claim: false,
+    };
+    for status in [CellStatus::Completed, CellStatus::Failed] {
+        let mut page = CellPage {
+            cell_id: "terminal-cell".into(),
+            status,
+            vm_alive: true,
+            cursor: 3,
+            next_cursor: 3,
+            outputs: vec![],
+            has_more: false,
+            required_budget: None,
+            outcome_unknown: false,
+            error: None,
+            stop: None,
+        };
+        for vm_alive in [true, false] {
+            page.vm_alive = vm_alive;
+            let request = ModelRequest {
+                model: Model::new("fixture", "request-outcomes"),
+                messages: vec![Message::ToolResult(cayw_ai::ToolResultMessage {
+                    tool_call_id: "original-call".into(),
+                    tool_name: "execute_code".into(),
+                    content: vec![],
+                    details: None,
+                    structured_content: Some(serde_json::to_value(&page).unwrap()),
+                    usage: None,
+                    is_error: status == CellStatus::Failed,
+                    outcome_unknown: false,
+                    timestamp: 0,
+                    duration_ms: None,
+                })],
+                options: Default::default(),
+            };
+            let events: Vec<_> =
+                futures::StreamExt::collect(provider.stream(request, CancellationToken::new()))
+                    .await;
+            let message = events.last().unwrap().message();
+            if vm_alive {
+                let calls = message.tool_calls();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].arguments["action"], "wait");
+                assert_eq!(calls[0].arguments["cell_id"], "terminal-cell");
+                assert_eq!(calls[0].arguments["cursor"], 3);
+            } else {
+                assert!(message.tool_calls().is_empty());
+                assert_eq!(message.stop_reason, StopReason::Stop);
+            }
+        }
     }
 }
 

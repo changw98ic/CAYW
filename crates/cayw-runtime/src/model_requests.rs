@@ -1,12 +1,11 @@
 //! Durable model accounting. No tokenizer or price is assumed. A request holds
-//! the budget lineage's entire remainder from reservation until either a
-//! successful, fully reported terminal commits or a cancellation is durably
-//! recorded before the dispatch marker. Only such a provably undispatched
-//! request releases its own hold; dispatched, failed, truncated and
-//! crash-uncertain requests keep theirs. This permits only one unsettled
-//! request in a session tree; neither a new task, child, fork nor reopen resets
-//! consumption or unknown holds. The effective cap is the trusted host's
-//! current configuration; historical records keep their original limits.
+//! the budget lineage's entire remainder until a complete reported terminal
+//! commits, including a known model failure, or a cancellation is durably
+//! recorded before dispatch. A failed task can have known token consumption;
+//! cancellation, missing or invalid usage, and crash uncertainty retain the hold.
+//! Only one unsettled request can run in a session tree. A new task, child, fork
+//! or reopen never resets consumption or unknown holds. The effective cap is
+//! the trusted host's current configuration; records keep their original limits.
 use crate::{Inner, Runtime, RuntimeError, execution::RunContext};
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, ModelRequest, Provider,
@@ -25,6 +24,7 @@ use std::{
 };
 
 const KIND: &str = "model_request";
+const RECONCILIATION_KIND: &str = "model_request_reconciliation";
 const MAX_REQUESTS: usize = 4096;
 const MAX_OBSERVATIONS: usize = 65_536;
 const MAX_LEDGER_EVENTS: usize = 262_144;
@@ -76,6 +76,73 @@ pub struct ModelRequestIdentity {
     pub model: String,
 }
 
+/// Exact original accounting facts. Reconciliation never rewrites these cursors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRequestOrigin {
+    pub identity: ModelRequestIdentity,
+    pub reservation_tokens: u64,
+    pub reservation_cursor: Option<u64>,
+    pub started_cursor: Option<u64>,
+    pub terminal: Option<ModelRequestTerminal>,
+    pub terminal_cursor: Option<u64>,
+    pub last_cursor: u64,
+}
+
+impl From<&ModelRequestRecord> for ModelRequestOrigin {
+    fn from(record: &ModelRequestRecord) -> Self {
+        Self {
+            identity: record.identity.clone(),
+            reservation_tokens: record.reservation_tokens,
+            reservation_cursor: record.reservation_cursor,
+            started_cursor: record.started_cursor,
+            terminal: record.terminal,
+            terminal_cursor: record.terminal_cursor,
+            last_cursor: record.last_cursor,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelRequestReconciledOutcome {
+    /// The trusted host proved this exact request never reached the service.
+    /// This does not assert a monetary price or authorize another model call.
+    NotDispatched { reason: String },
+    /// A trusted complete response capture proves this request's final usage.
+    /// The report is separate evidence, not a replacement for the original
+    /// failed, cancelled or interrupted execution or permission to replay it.
+    ReportedUsage { report: ModelUsageObservation },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRequestReconciliation {
+    pub expected: ModelRequestOrigin,
+    pub actor: String,
+    pub evidence: String,
+    pub outcome: ModelRequestReconciledOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRequestReconciliationRecord {
+    pub cursor: u64,
+    pub reconciliation: ModelRequestReconciliation,
+}
+
+/// Trusted host code must authorize the actor and verify evidence for the exact
+/// original request. For ReportedUsage it must bind the complete response capture,
+/// request/response identities, original Agent event prefix and protocol counters
+/// to the supplied final report, including for cancellation or Drop. Local zero
+/// defaults, an incomplete capture or actor/evidence text alone prove nothing.
+/// No default verifier is installed. Implementations run synchronously under the
+/// lifecycle fence and must not call Runtime lifecycle methods or wait for an
+/// active execution.
+pub trait ModelRequestReconciliationVerifier: Send + Sync {
+    fn verify(&self, request: &ModelRequestReconciliation) -> Result<(), String>;
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelUsageObservation {
@@ -117,6 +184,8 @@ pub struct ModelRequestRecord {
     pub settled_tokens: Option<u64>,
     pub outstanding_reservation_tokens: u64,
     pub observations: Vec<ModelRequestObservation>,
+    /// A separate host decision; original terminal and observation cursors stay intact.
+    pub reconciliation: Option<ModelRequestReconciliationRecord>,
     pub rejection: Option<String>,
     pub cost_status: ModelCostStatus,
     pub cost_amount: Option<String>,
@@ -215,6 +284,7 @@ fn initial(
         settled_tokens: None,
         outstanding_reservation_tokens: tokens,
         observations: vec![],
+        reconciliation: None,
         rejection: None,
         cost_status: ModelCostStatus::Unknown,
         cost_amount: None,
@@ -287,6 +357,7 @@ fn apply(
             let record = records.get_mut(id).ok_or_else(corrupt)?;
             validate_identity(&record.identity, event)?;
             if record.terminal.is_some()
+                || record.reconciliation.is_some()
                 || record.reservation_cursor != Some(reservation_cursor)
                 || record.last_cursor != previous_cursor
             {
@@ -354,14 +425,7 @@ fn apply(
                                 return Err(corrupt());
                             }
                             let last = record.observations.last().ok_or_else(corrupt)?;
-                            if terminal != ModelRequestTerminal::Completed
-                                || last.observation.event != "done"
-                                || last.observation.usage_status != UsageStatus::Reported
-                                || !matches!(
-                                    last.observation.stop_reason,
-                                    StopReason::Stop | StopReason::Length | StopReason::ToolUse
-                                )
-                                || checked_tokens(&last.observation.usage) != Some(tokens)
+                            if terminal_tokens(terminal, &last.observation) != Some(tokens)
                                 || tokens > record.reservation_tokens
                             {
                                 return Err(corrupt());
@@ -416,6 +480,44 @@ impl Projection {
     }
 }
 
+fn lineage_links(store: &SessionStore) -> Result<BTreeMap<String, String>, RuntimeError> {
+    let sessions = store.list_sessions()?;
+    let mut links = BTreeMap::new();
+    for snapshot in &sessions {
+        for (event_type, host_kind) in [
+            ("session_forked", None),
+            ("host", Some("agent_child_linked")),
+        ] {
+            visit_selected(store, snapshot, event_type, host_kind, |event| {
+                let parent = match &event.event {
+                    CoreEvent::SessionForked {
+                        source_session_id, ..
+                    } => Some(source_session_id.as_str()),
+                    CoreEvent::Host { kind, data } if kind == "agent_child_linked" => Some(
+                        data.get("decision").unwrap_or(data)["parent_session"]
+                            .as_str()
+                            .ok_or_else(corrupt)?,
+                    ),
+                    _ => None,
+                };
+                if let Some(parent) = parent
+                    && links.insert(snapshot.id.clone(), parent.into()).is_some()
+                {
+                    return Err(corrupt());
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok(links)
+}
+
+pub(crate) fn lineage_root(store: &SessionStore, session: &str) -> Result<String, RuntimeError> {
+    store.snapshot(session)?;
+    let links = lineage_links(store)?;
+    lineage(session, &links)
+}
+
 /// Discover child/fork links before selecting records. Unrelated roots do not
 /// share request/event capacity, and their request payloads are not projected.
 fn project(
@@ -425,28 +527,7 @@ fn project(
 ) -> Result<Projection, RuntimeError> {
     store.snapshot(session)?;
     let sessions = store.list_sessions()?;
-    let mut links = BTreeMap::new();
-    for snapshot in &sessions {
-        visit(store, snapshot, |event| {
-            let parent = match &event.event {
-                CoreEvent::SessionForked {
-                    source_session_id, ..
-                } => Some(source_session_id.as_str()),
-                CoreEvent::Host { kind, data } if kind == "agent_child_linked" => Some(
-                    data.get("decision").unwrap_or(data)["parent_session"]
-                        .as_str()
-                        .ok_or_else(corrupt)?,
-                ),
-                _ => None,
-            };
-            if let Some(parent) = parent
-                && links.insert(snapshot.id.clone(), parent.into()).is_some()
-            {
-                return Err(corrupt());
-            }
-            Ok(())
-        })?;
-    }
+    let links = lineage_links(store)?;
     let root = lineage(session, &links)?;
     let mut records = BTreeMap::new();
     let mut ledger_events = 0;
@@ -454,7 +535,7 @@ fn project(
         if lineage(&snapshot.id, &links)? != root {
             continue;
         }
-        visit(store, snapshot, |event| {
+        visit_selected(store, snapshot, "host", Some(KIND), |event| {
             if let CoreEvent::Host { kind, data } = &event.event
                 && kind == KIND
             {
@@ -471,9 +552,34 @@ fn project(
             Ok(())
         })?;
     }
+    // Host decisions use an idle control event, not the original attempt lease.
+    // Project all original facts first so decisions can only bind their final,
+    // unchanged request cursor. Decisions never become ordinary Finished rows.
+    for snapshot in &sessions {
+        if lineage(&snapshot.id, &links)? != root {
+            continue;
+        }
+        visit_selected(
+            store,
+            snapshot,
+            "host",
+            Some(RECONCILIATION_KIND),
+            |event| {
+                ledger_events += 1;
+                if ledger_events > MAX_LEDGER_EVENTS {
+                    return Err(corrupt());
+                }
+                apply_reconciliation(store, &mut records, event)
+            },
+        )?;
+    }
     let pending_terminals = records
         .values()
-        .filter(|record| record.reservation_cursor.is_some() && record.terminal.is_none())
+        .filter(|record| {
+            record.reservation_cursor.is_some()
+                && record.terminal.is_none()
+                && record.reconciliation.is_none()
+        })
         .count();
     let mut requests = Vec::new();
     // The effective cap is the current trusted host configuration for this
@@ -540,6 +646,30 @@ fn project(
     })
 }
 
+fn visit_selected(
+    store: &SessionStore,
+    snapshot: &cayw_core::SessionSnapshot,
+    event_type: &str,
+    host_kind: Option<&str>,
+    mut accept: impl FnMut(&EventRecord) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    let mut cursor = 0;
+    while cursor < snapshot.cursor {
+        let page = store.events_by_kind(&snapshot.id, cursor, 1000, event_type, host_kind)?;
+        if page.is_empty() {
+            break;
+        }
+        for event in page {
+            if event.cursor > snapshot.cursor {
+                return Ok(());
+            }
+            cursor = event.cursor;
+            accept(&event)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn visit(
     store: &SessionStore,
     snapshot: &cayw_core::SessionSnapshot,
@@ -570,20 +700,646 @@ fn read(
     Ok(project(store, session, configured_limit)?.ledger)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconciliationDecision {
+    actor: String,
+    decision: ModelRequestReconciliation,
+}
+
+fn validate_reconciliation(input: &ModelRequestReconciliation) -> Result<(), RuntimeError> {
+    if [(&input.actor, 256), (&input.evidence, 64 * 1024)]
+        .into_iter()
+        .any(|(text, limit)| text.trim().is_empty() || text.len() > limit)
+    {
+        return Err(RuntimeError::InvalidInput(
+            "model request reconciliation requires bounded actor and evidence".into(),
+        ));
+    }
+    match &input.outcome {
+        ModelRequestReconciledOutcome::NotDispatched { reason }
+            if reason.trim().is_empty() || reason.len() > 4096 =>
+        {
+            Err(RuntimeError::InvalidInput(
+                "model request non-dispatch requires a bounded reason".into(),
+            ))
+        }
+        ModelRequestReconciledOutcome::ReportedUsage { report } => validate_report(report),
+        _ => Ok(()),
+    }
+}
+
+fn invalid_report() -> RuntimeError {
+    RuntimeError::InvalidInput(
+        "model request reported usage must be complete, consistent and match its original response and limits".into(),
+    )
+}
+
+fn valid_response_label(value: &Option<String>) -> bool {
+    value.as_ref().is_some_and(|text| {
+        !text.trim().is_empty()
+            && text.len() <= MAX_LABEL_BYTES
+            && !text.chars().any(char::is_control)
+    })
+}
+
+/// The report retains the same nested counter shape as provider observations.
+/// Only bounded nonnegative counters are accepted; price and opaque data belong
+/// in the trusted evidence, not in this accounting decision.
+fn valid_report_fields(fields: &BTreeMap<String, Value>) -> bool {
+    fields.len() <= FIELDS.len() + 2
+        && fields.iter().all(|(key, value)| {
+            let details: &[&str] = match key.as_str() {
+                "prompt_tokens_details" => &[
+                    "cached_tokens",
+                    "cache_write_tokens",
+                    "audio_tokens",
+                    "cache_creation_input_tokens",
+                ],
+                "input_tokens_details" => &["cached_tokens", "cache_write_tokens", "audio_tokens"],
+                "completion_tokens_details" | "output_tokens_details" => &[
+                    "reasoning_tokens",
+                    "accepted_prediction_tokens",
+                    "rejected_prediction_tokens",
+                    "audio_tokens",
+                ],
+                _ => return FIELDS.contains(&key.as_str()) && value.as_u64().is_some(),
+            };
+            value.as_object().is_some_and(|object| {
+                object.len() <= details.len()
+                    && object.iter().all(|(key, value)| {
+                        details.contains(&key.as_str())
+                            && value.as_u64().is_some()
+                            // The Chat adapter retains this counter but does not
+                            // use it as an alias for cache_write_tokens.
+                            && (key != "cache_creation_input_tokens"
+                                || value.as_u64() == Some(0))
+                    })
+            })
+        })
+}
+
+fn report_counter(fields: &BTreeMap<String, Value>, key: &str) -> Option<u64> {
+    fields.get(key)?.as_u64()
+}
+
+fn report_detail(fields: &BTreeMap<String, Value>, object: &str, key: &str) -> u64 {
+    fields
+        .get(object)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// Normalize the supported protocol counters with checked arithmetic. The
+/// trusted verifier must additionally prove that these are the exact final
+/// counters from the complete capture, rather than a local default or estimate.
+fn reported_counters(fields: &BTreeMap<String, Value>) -> Option<Usage> {
+    let mut usage = Usage::default();
+    let chat = fields.contains_key("prompt_tokens") || fields.contains_key("completion_tokens");
+    let tokens = fields.contains_key("input_tokens") || fields.contains_key("output_tokens");
+    let gemini =
+        fields.contains_key("promptTokenCount") || fields.contains_key("candidatesTokenCount");
+    if usize::from(chat) + usize::from(tokens) + usize::from(gemini) != 1 {
+        return None;
+    }
+    let allowed: &[&str] = if chat {
+        &[
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "prompt_tokens_details",
+            "completion_tokens_details",
+        ]
+    } else if gemini {
+        &[
+            "promptTokenCount",
+            "candidatesTokenCount",
+            "cachedContentTokenCount",
+            "thoughtsTokenCount",
+            "toolUsePromptTokenCount",
+            "totalTokenCount",
+        ]
+    } else {
+        &[
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "input_tokens_details",
+            "output_tokens_details",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ]
+    };
+    if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return None;
+    }
+    if chat {
+        let prompt = report_counter(fields, "prompt_tokens")?;
+        usage.output = report_counter(fields, "completion_tokens")?;
+        usage.cache_read = report_detail(fields, "prompt_tokens_details", "cached_tokens");
+        usage.cache_write = report_detail(fields, "prompt_tokens_details", "cache_write_tokens");
+        usage.reasoning = report_detail(fields, "completion_tokens_details", "reasoning_tokens");
+        usage.input = prompt
+            .checked_sub(usage.cache_read)?
+            .checked_sub(usage.cache_write)?;
+    } else if gemini {
+        let prompt = report_counter(fields, "promptTokenCount")?;
+        usage.cache_read = report_counter(fields, "cachedContentTokenCount").unwrap_or(0);
+        usage.reasoning = report_counter(fields, "thoughtsTokenCount").unwrap_or(0);
+        usage.input = prompt
+            .checked_sub(usage.cache_read)?
+            .checked_add(report_counter(fields, "toolUsePromptTokenCount").unwrap_or(0))?;
+        usage.output =
+            report_counter(fields, "candidatesTokenCount")?.checked_add(usage.reasoning)?;
+    } else {
+        usage.input = report_counter(fields, "input_tokens")?;
+        usage.output = report_counter(fields, "output_tokens")?;
+        if fields.contains_key("cache_read_input_tokens")
+            || fields.contains_key("cache_creation_input_tokens")
+        {
+            if fields.contains_key("input_tokens_details")
+                || fields.contains_key("output_tokens_details")
+            {
+                return None;
+            }
+            usage.cache_read = report_counter(fields, "cache_read_input_tokens").unwrap_or(0);
+            usage.cache_write = report_counter(fields, "cache_creation_input_tokens").unwrap_or(0);
+        } else {
+            usage.cache_read = report_detail(fields, "input_tokens_details", "cached_tokens");
+            usage.cache_write = report_detail(fields, "input_tokens_details", "cache_write_tokens");
+            usage.reasoning = report_detail(fields, "output_tokens_details", "reasoning_tokens");
+            usage.input = usage
+                .input
+                .checked_sub(usage.cache_read)?
+                .checked_sub(usage.cache_write)?;
+        }
+    }
+    usage.total_tokens = usage
+        .input
+        .checked_add(usage.output)?
+        .checked_add(usage.cache_read)?
+        .checked_add(usage.cache_write)?;
+    if usage.reasoning > usage.output
+        || report_counter(fields, "total_tokens").is_some_and(|total| total != usage.total_tokens)
+        || report_counter(fields, "totalTokenCount")
+            .is_some_and(|total| total != usage.total_tokens)
+    {
+        return None;
+    }
+    Some(usage)
+}
+
+fn validate_report(report: &ModelUsageObservation) -> Result<(), RuntimeError> {
+    let terminal = matches!(
+        (report.event.as_str(), report.stop_reason),
+        (
+            "done",
+            StopReason::Stop | StopReason::Length | StopReason::ToolUse
+        ) | ("error", StopReason::Error)
+    );
+    if !terminal
+        || report.usage_status != UsageStatus::Reported
+        || report.metadata_redacted
+        || !valid_response_label(&report.response_id)
+        || !valid_response_label(&report.response_model)
+        || checked_tokens(&report.usage).is_none()
+        || !valid_report_fields(&report.usage_fields)
+        || reported_counters(&report.usage_fields).as_ref() != Some(&report.usage)
+    {
+        return Err(invalid_report());
+    }
+    Ok(())
+}
+
+fn no_dispatch_observation(observation: &ModelUsageObservation) -> bool {
+    matches!(observation.event.as_str(), "start" | "error")
+        && observation.usage_status == UsageStatus::Unknown
+        && observation.usage == Usage::default()
+        && observation.usage_fields.is_empty()
+        && observation.response_id.is_none()
+        && observation.response_model.is_none()
+        && !observation.metadata_redacted
+        && matches!(
+            observation.stop_reason,
+            StopReason::Pending | StopReason::Error | StopReason::Aborted
+        )
+}
+
+fn unreconciled_hold(record: &ModelRequestRecord) -> Result<(), RuntimeError> {
+    if record.reconciliation.is_some()
+        || record.settled_tokens.is_some()
+        || record.reservation_cursor.is_none()
+        || record.reservation_tokens == 0
+        || record.outstanding_reservation_tokens != record.reservation_tokens
+        || matches!(
+            record.terminal,
+            Some(
+                ModelRequestTerminal::Completed
+                    | ModelRequestTerminal::CancelledBeforeDispatch
+                    | ModelRequestTerminal::Rejected
+            )
+        )
+        // These old pre-dispatch cancellation facts already project as settled.
+        || (record.terminal == Some(ModelRequestTerminal::Cancelled)
+            && record.started_cursor.is_none()
+            && record.observations.is_empty())
+    {
+        return Err(RuntimeError::InvalidInput(
+            "model request reconciliation contradicts its original settlement or reservation"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn no_dispatch_message(message: &AssistantMessage) -> bool {
+    message.content.is_empty()
+        && message.provider_metadata.is_empty()
+        && message.usage_status == UsageStatus::Unknown
+        && message.usage == Usage::default()
+        && message.usage_fields.is_empty()
+        && message.response_id.is_none()
+        && message.response_model.is_none()
+        && matches!(
+            message.stop_reason,
+            StopReason::Pending | StopReason::Error | StopReason::Aborted
+        )
+}
+
+/// Accounting observations deliberately omit content. Check the original Agent
+/// events too, through this request's MessageEnd and before the next model turn.
+fn verify_no_response(
+    store: &SessionStore,
+    record: &ModelRequestRecord,
+) -> Result<(), RuntimeError> {
+    let snapshot = store.snapshot(&record.identity.lease.session_id)?;
+    let mut next_request = false;
+    visit_selected(store, &snapshot, "agent", None, |event| {
+        if next_request
+            || event.cursor <= record.reservation_cursor.ok_or_else(corrupt)?
+            || event.attempt.as_ref() != Some(&record.identity.lease)
+        {
+            return Ok(());
+        }
+        let CoreEvent::Agent { event } = &event.event else {
+            return Ok(());
+        };
+        use cayw_agent::AgentEvent;
+        let message = match event.as_ref() {
+            AgentEvent::MessageStart {
+                message: cayw_ai::Message::Assistant(_),
+            } => {
+                next_request = true;
+                None
+            }
+            AgentEvent::MessageUpdate { message, .. }
+            | AgentEvent::TurnEnd { message, .. }
+            | AgentEvent::MessageEnd {
+                message: cayw_ai::Message::Assistant(message),
+            } => Some(message),
+            _ => None,
+        };
+        if message.is_some_and(|message| !no_dispatch_message(message)) {
+            return Err(RuntimeError::InvalidInput(
+                "model request non-dispatch contradicts its original Agent response".into(),
+            ));
+        }
+        Ok(())
+    })
+}
+
+fn usage_prefix(previous: &Usage, report: &Usage) -> bool {
+    let input = |usage: &Usage| {
+        usage
+            .input
+            .checked_add(usage.cache_read)?
+            .checked_add(usage.cache_write)
+    };
+    input(previous)
+        .zip(input(report))
+        .is_some_and(|(previous, report)| previous <= report)
+        && previous.output <= report.output
+        && previous.cache_read <= report.cache_read
+        && previous.cache_write <= report.cache_write
+        && previous.reasoning <= report.reasoning
+        && previous.total_tokens <= report.total_tokens
+}
+
+fn counter_prefix(previous: &Value, report: Option<&Value>) -> bool {
+    match previous {
+        Value::Null => true,
+        Value::Number(number) => number
+            .as_u64()
+            .zip(report.and_then(Value::as_u64))
+            .is_some_and(|(previous, report)| previous <= report),
+        Value::Object(previous) => report.and_then(Value::as_object).is_some_and(|report| {
+            previous
+                .iter()
+                .all(|(key, value)| counter_prefix(value, report.get(key)))
+        }),
+        _ => false,
+    }
+}
+
+fn verify_reported_observation(
+    previous: &ModelUsageObservation,
+    report: &ModelUsageObservation,
+) -> Result<(), RuntimeError> {
+    if previous.metadata_redacted
+        || previous.usage_status == UsageStatus::Invalid
+        || (previous.usage_status == UsageStatus::Reported
+            && checked_tokens(&previous.usage).is_none())
+        || previous
+            .response_id
+            .as_ref()
+            .is_some_and(|id| Some(id) != report.response_id.as_ref())
+        || previous
+            .response_model
+            .as_ref()
+            .is_some_and(|model| Some(model) != report.response_model.as_ref())
+        || (matches!(
+            previous.stop_reason,
+            StopReason::Stop | StopReason::Length | StopReason::ToolUse
+        ) && previous.stop_reason != report.stop_reason)
+        || !usage_prefix(&previous.usage, &report.usage)
+        || previous
+            .usage_fields
+            .iter()
+            .any(|(key, value)| !counter_prefix(value, report.usage_fields.get(key)))
+    {
+        return Err(invalid_report());
+    }
+    Ok(())
+}
+
+fn verify_reported_response(
+    store: &SessionStore,
+    record: &ModelRequestRecord,
+    report: &ModelUsageObservation,
+) -> Result<(), RuntimeError> {
+    let snapshot = store.snapshot(&record.identity.lease.session_id)?;
+    let mut next_request = false;
+    visit_selected(store, &snapshot, "agent", None, |event| {
+        if next_request
+            || event.cursor <= record.reservation_cursor.ok_or_else(corrupt)?
+            || event.attempt.as_ref() != Some(&record.identity.lease)
+        {
+            return Ok(());
+        }
+        let CoreEvent::Agent { event } = &event.event else {
+            return Ok(());
+        };
+        use cayw_agent::AgentEvent;
+        let message = match event.as_ref() {
+            AgentEvent::MessageStart {
+                message: cayw_ai::Message::Assistant(_),
+            } => {
+                next_request = true;
+                return Ok(());
+            }
+            AgentEvent::MessageUpdate { message, event } => {
+                if message != event.message() {
+                    return Err(invalid_report());
+                }
+                message
+            }
+            AgentEvent::TurnEnd { message, .. }
+            | AgentEvent::MessageEnd {
+                message: cayw_ai::Message::Assistant(message),
+            } => message,
+            _ => return Ok(()),
+        };
+        if message.provider != record.identity.provider || message.model != record.identity.model {
+            return Err(invalid_report());
+        }
+        verify_reported_observation(&message_observation("usage_update", message), report)
+    })
+}
+
+fn reconciliation_tokens(
+    store: &SessionStore,
+    record: &ModelRequestRecord,
+    outcome: &ModelRequestReconciledOutcome,
+) -> Result<u64, RuntimeError> {
+    unreconciled_hold(record)?;
+    match outcome {
+        ModelRequestReconciledOutcome::NotDispatched { .. } => {
+            if record
+                .observations
+                .iter()
+                .any(|entry| !no_dispatch_observation(&entry.observation))
+            {
+                return Err(RuntimeError::InvalidInput(
+                    "model request non-dispatch contradicts its original usage or response observations".into(),
+                ));
+            }
+            verify_no_response(store, record)?;
+            Ok(0)
+        }
+        ModelRequestReconciledOutcome::ReportedUsage { report } => {
+            validate_report(report)?;
+            let tokens = checked_tokens(&report.usage).ok_or_else(invalid_report)?;
+            if record.started_cursor.is_none()
+                || tokens > record.reservation_tokens
+                || tokens > record.token_limit
+                || record
+                    .output_max_tokens
+                    .is_none_or(|limit| report.usage.output > limit)
+            {
+                return Err(invalid_report());
+            }
+            for entry in &record.observations {
+                verify_reported_observation(&entry.observation, report)?;
+            }
+            verify_reported_response(store, record, report)?;
+            Ok(tokens)
+        }
+    }
+}
+
+fn apply_reconciliation(
+    store: &SessionStore,
+    records: &mut BTreeMap<String, ModelRequestRecord>,
+    event: &EventRecord,
+) -> Result<(), RuntimeError> {
+    let CoreEvent::Host { kind, data } = &event.event else {
+        return Err(corrupt());
+    };
+    let decision: ReconciliationDecision =
+        serde_json::from_value(data.clone()).map_err(|_| corrupt())?;
+    let input = decision.decision;
+    let record = records
+        .get_mut(&input.expected.identity.request_id)
+        .ok_or_else(corrupt)?;
+    if kind != RECONCILIATION_KIND
+        || decision.actor != input.actor
+        || event.attempt.is_some()
+        || event.session_id != record.identity.lease.session_id
+        || event.cursor <= record.last_cursor
+        || input.expected != ModelRequestOrigin::from(&*record)
+    {
+        return Err(corrupt());
+    }
+    validate_reconciliation(&input).map_err(|_| corrupt())?;
+    let tokens = reconciliation_tokens(store, record, &input.outcome).map_err(|_| corrupt())?;
+    record.settled_tokens = Some(tokens);
+    record.outstanding_reservation_tokens = 0;
+    record.reconciliation = Some(ModelRequestReconciliationRecord {
+        cursor: event.cursor,
+        reconciliation: input,
+    });
+    Ok(())
+}
+
 impl Runtime {
-    /// Read-only ledger for the complete persistent session budget lineage.
-    /// Missing prices stay unknown even when reported tokens have settled.
-    pub fn model_requests(&self, session: &str) -> Result<ModelRequestLedger, RuntimeError> {
+    /// Append a trusted decision for one stopped, unsettled model request.
+    /// This releases only that request's token hold. It never resumes a task,
+    /// replaces original history, clears other unknowns or reports a price.
+    pub async fn reconcile_model_request(
+        &self,
+        input: ModelRequestReconciliation,
+    ) -> Result<ModelRequestReconciliationRecord, RuntimeError> {
+        validate_reconciliation(&input)?;
+        let session = &input.expected.identity.lease.session_id;
+        let budget = {
+            let _coordinate = self.inner.coordination.enter()?;
+            lineage_root(&self.inner.store, session)?
+        };
+        let _budget = self
+            .inner
+            .budget_lock(&budget)
+            .try_lock_owned()
+            .map_err(|_| RuntimeError::Busy)?;
         let _coordinate = self.inner.coordination.enter()?;
-        let limit = self.inner.config.local_agents.as_ref().map_or(
+        if lineage_root(&self.inner.store, session)? != budget
+            || input.expected.identity.budget_session_id != budget
+        {
+            return Err(RuntimeError::InvalidInput(
+                "model request reconciliation changed its budget identity".into(),
+            ));
+        }
+        let projection = project(&self.inner.store, session, self.model_token_limit())?;
+        let record = projection
+            .ledger
+            .requests
+            .iter()
+            .find(|record| record.identity.request_id == input.expected.identity.request_id)
+            .ok_or_else(|| RuntimeError::InvalidInput("original model request is absent".into()))?;
+        if input.expected != ModelRequestOrigin::from(record) {
+            return Err(RuntimeError::InvalidInput(
+                "model request reconciliation changed its original identity or cursors".into(),
+            ));
+        }
+        if let Some(existing) = &record.reconciliation {
+            return if existing.reconciliation == input {
+                Ok(existing.clone())
+            } else {
+                Err(RuntimeError::InvalidInput(
+                    "model request already has a different reconciliation".into(),
+                ))
+            };
+        }
+        unreconciled_hold(record)?;
+        let _owners = self.stopped_model_budget(&budget)?;
+        let snapshot = self.inner.store.snapshot(session)?;
+        let task = self.inner.queue.get(&record.identity.task_id)?;
+        if task.session_id != *session
+            || task.attempt_id.as_deref() != Some(&record.identity.lease.attempt_id)
+            || task.worker_id.as_deref() != Some(&record.identity.lease.worker_id)
+        {
+            return Err(RuntimeError::InvalidInput(
+                "model request reconciliation differs from its original Task".into(),
+            ));
+        }
+        reconciliation_tokens(&self.inner.store, record, &input.outcome)?;
+        if !projection.room_with_limit(1, MAX_LEDGER_EVENTS) {
+            return Err(RuntimeError::Budget("model accounting event capacity"));
+        }
+        let verifier = self
+            .inner
+            .config
+            .model_request_reconciliation_verifier
+            .as_ref()
+            .ok_or_else(|| {
+                RuntimeError::InvalidInput(
+                    "model request reconciliation requires a trusted host verifier".into(),
+                )
+            })?;
+        let data = serde_json::to_value(&input)?;
+        if serde_json::to_vec(&json!({"actor": input.actor, "decision": data}))?.len()
+            > self.inner.config.max_event_bytes
+        {
+            return Err(RuntimeError::Budget("model accounting event byte"));
+        }
+        verifier.verify(&input).map_err(|_| {
+            RuntimeError::InvalidInput(
+                "trusted host verifier rejected model request reconciliation".into(),
+            )
+        })?;
+        let event = self.inner.store.append_control_event(
+            session,
+            snapshot.cursor,
+            None,
+            &input.actor,
+            RECONCILIATION_KIND,
+            data,
+        )?;
+        self.inner.changed.notify_waiters();
+        Ok(ModelRequestReconciliationRecord {
+            cursor: event.cursor,
+            reconciliation: input,
+        })
+    }
+
+    /// Keep every execution owner in this budget tree stopped until the decision
+    /// commits. Queue records and file locks cover independent Runtime instances.
+    fn stopped_model_budget(&self, budget: &str) -> Result<Vec<std::fs::File>, RuntimeError> {
+        let links = lineage_links(&self.inner.store)?;
+        let mut owners = Vec::new();
+        for snapshot in self.inner.store.list_sessions()? {
+            if lineage(&snapshot.id, &links)? != budget {
+                continue;
+            }
+            if snapshot.attempt.is_some()
+                || crate::lock(&self.inner.active).contains_key(&snapshot.id)
+            {
+                return Err(RuntimeError::Busy);
+            }
+            for task in self.inner.queue.list(&snapshot.id)? {
+                if task.holds_slot
+                    || matches!(
+                        task.state,
+                        crate::TaskState::Running
+                            | crate::TaskState::WaitingApproval
+                            | crate::TaskState::Draining
+                    )
+                    || (task.state == crate::TaskState::Queued && task.worker_id.is_some())
+                {
+                    return Err(RuntimeError::Busy);
+                }
+                owners.push(self.inner.coordination.task(&task.id)?);
+            }
+        }
+        Ok(owners)
+    }
+
+    fn model_token_limit(&self) -> u64 {
+        self.inner.config.local_agents.as_ref().map_or(
             self.inner.config.max_total_tokens,
             |agents| {
                 agents
                     .shared_total_tokens
                     .min(self.inner.config.max_total_tokens)
             },
-        );
-        read(&self.inner.store, session, limit)
+        )
+    }
+
+    /// Read-only ledger for the complete persistent session budget lineage.
+    /// Missing prices stay unknown even when reported tokens have settled.
+    pub fn model_requests(&self, session: &str) -> Result<ModelRequestLedger, RuntimeError> {
+        let _coordinate = self.inner.coordination.enter()?;
+        read(&self.inner.store, session, self.model_token_limit())
     }
 }
 
@@ -604,6 +1360,30 @@ fn checked_tokens(usage: &Usage) -> Option<u64> {
         .checked_add(usage.cache_read)?
         .checked_add(usage.cache_write)?;
     (total == usage.total_tokens && usage.reasoning <= usage.output).then_some(total)
+}
+
+fn terminal_tokens(
+    terminal: ModelRequestTerminal,
+    observation: &ModelUsageObservation,
+) -> Option<u64> {
+    let terminal_matches = match terminal {
+        ModelRequestTerminal::Completed => {
+            observation.event == "done"
+                && matches!(
+                    observation.stop_reason,
+                    StopReason::Stop | StopReason::Length | StopReason::ToolUse
+                )
+        }
+        ModelRequestTerminal::Failed => {
+            observation.event == "error" && observation.stop_reason == StopReason::Error
+        }
+        _ => false,
+    };
+    if terminal_matches && observation.usage_status == UsageStatus::Reported {
+        checked_tokens(&observation.usage)
+    } else {
+        None
+    }
 }
 
 fn label(text: &str) -> (String, bool) {
@@ -669,7 +1449,25 @@ fn counter_value(value: &Value, depth: usize, redacted: &mut bool) -> Value {
 }
 
 fn observation(event: &AssistantEvent) -> ModelUsageObservation {
-    let message = event.message();
+    let name = match event {
+        AssistantEvent::Start { .. } => "start",
+        AssistantEvent::TextStart { .. } => "text_start",
+        AssistantEvent::TextDelta { .. } => "text_delta",
+        AssistantEvent::TextEnd { .. } => "text_end",
+        AssistantEvent::ThinkingStart { .. } => "thinking_start",
+        AssistantEvent::ThinkingDelta { .. } => "thinking_delta",
+        AssistantEvent::ThinkingEnd { .. } => "thinking_end",
+        AssistantEvent::ToolCallStart { .. } => "tool_call_start",
+        AssistantEvent::ToolCallDelta { .. } => "tool_call_delta",
+        AssistantEvent::ToolCallEnd { .. } => "tool_call_end",
+        AssistantEvent::UsageUpdate { .. } => "usage_update",
+        AssistantEvent::Done { .. } => "done",
+        AssistantEvent::Error { .. } => "error",
+    };
+    message_observation(name, event.message())
+}
+
+fn message_observation(event: &str, message: &AssistantMessage) -> ModelUsageObservation {
     let mut metadata_redacted = false;
     let mut usage_fields = BTreeMap::new();
     for (key, value) in &message.usage_fields {
@@ -688,24 +1486,8 @@ fn observation(event: &AssistantEvent) -> ModelUsageObservation {
     };
     let response_id = response_label(&message.response_id);
     let response_model = response_label(&message.response_model);
-    let event = match event {
-        AssistantEvent::Start { .. } => "start",
-        AssistantEvent::TextStart { .. } => "text_start",
-        AssistantEvent::TextDelta { .. } => "text_delta",
-        AssistantEvent::TextEnd { .. } => "text_end",
-        AssistantEvent::ThinkingStart { .. } => "thinking_start",
-        AssistantEvent::ThinkingDelta { .. } => "thinking_delta",
-        AssistantEvent::ThinkingEnd { .. } => "thinking_end",
-        AssistantEvent::ToolCallStart { .. } => "tool_call_start",
-        AssistantEvent::ToolCallDelta { .. } => "tool_call_delta",
-        AssistantEvent::ToolCallEnd { .. } => "tool_call_end",
-        AssistantEvent::UsageUpdate { .. } => "usage_update",
-        AssistantEvent::Done { .. } => "done",
-        AssistantEvent::Error { .. } => "error",
-    }
-    .into();
     ModelUsageObservation {
-        event,
+        event: event.into(),
         usage_status: message.usage_status,
         usage: message.usage.clone(),
         usage_fields,
@@ -742,10 +1524,68 @@ struct RequestGuard {
     recording_failed: bool,
     last_received: Option<ModelUsageObservation>,
     last_persisted: Option<ModelUsageObservation>,
+    _permit: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl RequestGuard {
-    fn reserve(
+    async fn reserve(
+        context: Arc<RunContext>,
+        request: &mut ModelRequest,
+        id: String,
+        turn: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Self, RuntimeError> {
+        context.check(&context.cancel)?;
+        if context.cancel.is_cancelled() || cancel.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if context
+            .inner
+            .queue
+            .model_cancelled(&context.task, &context.lease)?
+        {
+            return Err(RuntimeError::Cancelled);
+        }
+        let budget_session_id = lineage_root(&context.inner.store, &context.lease.session_id)?;
+        let budget_lock = context.inner.budget_lock(&budget_session_id);
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
+            _ = context.cancel.cancelled() => return Err(RuntimeError::Cancelled),
+            permit = budget_lock.lock_owned() => permit,
+        };
+        context.check(&context.cancel)?;
+        if context.cancel.is_cancelled() || cancel.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if context
+            .inner
+            .queue
+            .model_cancelled(&context.task, &context.lease)?
+        {
+            return Err(RuntimeError::Cancelled);
+        }
+        Self::reserve_with_permit(context, request, id, turn, MAX_LEDGER_EVENTS, permit)
+    }
+
+    #[cfg(test)]
+    fn reserve_with_limit(
+        context: Arc<RunContext>,
+        request: &mut ModelRequest,
+        id: String,
+        turn: u64,
+        event_limit: usize,
+    ) -> Result<Self, RuntimeError> {
+        let budget_session_id = lineage_root(&context.inner.store, &context.lease.session_id)?;
+        let budget_lock = context.inner.budget_lock(&budget_session_id);
+        let permit = budget_lock
+            .try_lock_owned()
+            .map_err(|_| RuntimeError::Busy)?;
+        Self::reserve_with_permit(context, request, id, turn, event_limit, permit)
+    }
+
+    #[cfg(test)]
+    fn reserve_test(
         context: Arc<RunContext>,
         request: &mut ModelRequest,
         id: String,
@@ -753,12 +1593,14 @@ impl RequestGuard {
     ) -> Result<Self, RuntimeError> {
         Self::reserve_with_limit(context, request, id, turn, MAX_LEDGER_EVENTS)
     }
-    fn reserve_with_limit(
+
+    fn reserve_with_permit(
         context: Arc<RunContext>,
         request: &mut ModelRequest,
         id: String,
         turn: u64,
         event_limit: usize,
+        permit: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Self, RuntimeError> {
         context.check(&context.cancel)?;
         let _coordinate = context.inner.coordination.enter()?;
@@ -838,6 +1680,10 @@ impl RequestGuard {
         if !has_request_room {
             return Err(RuntimeError::Budget("model accounting event capacity"));
         }
+        request.messages = Runtime {
+            inner: context.inner.clone(),
+        }
+        .model_input_messages(&context.lease.session_id, &request.messages)?;
         request.options.max_tokens = Some(
             request
                 .options
@@ -875,6 +1721,7 @@ impl RequestGuard {
             recording_failed: false,
             last_received: None,
             last_persisted: None,
+            _permit: Some(permit),
         })
     }
     fn record(&mut self, mut entry: Entry) -> Result<Option<u64>, RuntimeError> {
@@ -1041,6 +1888,7 @@ impl RequestGuard {
             );
             debug_assert!(tokens <= self.tokens);
         }
+        self._permit.take();
         Ok(())
     }
 }
@@ -1074,6 +1922,7 @@ impl Drop for RequestGuard {
                 self.context.model_recording_failed();
             }
         }
+        self._permit.take();
     }
 }
 
@@ -1099,11 +1948,22 @@ impl Provider for AccountedProvider {
                     return;
                 }
             };
-            let mut guard=match RequestGuard::reserve(context.clone(),&mut request,id,turn) {
-                Ok(guard)=>guard,
-                Err(error)=>{
-                    if !matches!(error,RuntimeError::Budget(_)|RuntimeError::Cancelled|RuntimeError::InvalidInput(_)) { context.model_recording_failed(); }
-                    yield error_message(&partial,"model request was refused before provider invocation; inspect its persistent ledger and budget");
+            let mut guard = match RequestGuard::reserve(context.clone(), &mut request, id, turn, &cancel).await {
+                Ok(guard) => guard,
+                Err(error) => {
+                    if !matches!(error, RuntimeError::Budget(_) | RuntimeError::Cancelled | RuntimeError::InvalidInput(_)) {
+                        context.model_recording_failed();
+                    }
+                    if matches!(error, RuntimeError::Cancelled) {
+                        yield AssistantEvent::Error {
+                            message: partial.failure(
+                                StopReason::Aborted,
+                                "model request cancelled before admission",
+                            ),
+                        };
+                    } else {
+                        yield error_message(&partial, "model request was refused before provider invocation; inspect its persistent ledger and budget");
+                    }
                     return;
                 }
             };
@@ -1167,7 +2027,7 @@ impl Provider for AccountedProvider {
                     let message=event.message();
                     let successful=matches!(event,AssistantEvent::Done{..}) && matches!(message.stop_reason,StopReason::Stop|StopReason::Length|StopReason::ToolUse) && !cancel.is_cancelled() && !context.cancel.is_cancelled();
                     let terminal=if successful {ModelRequestTerminal::Completed} else if message.stop_reason==StopReason::Aborted||cancel.is_cancelled()||context.cancel.is_cancelled() {ModelRequestTerminal::Cancelled} else {ModelRequestTerminal::Failed};
-                    let settlement=if successful && message.usage_status==UsageStatus::Reported {checked_tokens(&message.usage)} else {None};
+                    let settlement = guard.last_received.as_ref().and_then(|last| terminal_tokens(terminal, last));
                     if guard.finish(terminal,settlement).is_err() {
                         context.model_recording_failed();
                         let _ = guard.finish(ModelRequestTerminal::RecordingFailed,None);
@@ -1264,10 +2124,110 @@ mod tests {
     }
 
     #[test]
+    fn dropped_request_needs_a_trusted_complete_report_before_its_hold_can_settle() {
+        struct CompleteCapture;
+        impl ModelRequestReconciliationVerifier for CompleteCapture {
+            fn verify(&self, input: &ModelRequestReconciliation) -> Result<(), String> {
+                if input.evidence == "complete synthetic capture" {
+                    Ok(())
+                } else {
+                    Err("capture is incomplete".into())
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, mut request) = context(temp.path());
+        let mut guard = RequestGuard::reserve_test(
+            context.clone(),
+            &mut request,
+            uuid::Uuid::new_v4().to_string(),
+            1,
+        )
+        .unwrap();
+        guard.start().unwrap();
+        let mut message = AssistantMessage::new(&request.model);
+        message.response_id = Some("drop-response".into());
+        message.response_model = Some("drop-model".into());
+        guard.observe(&delta(&message)).unwrap();
+        drop(guard);
+        let session = &context.lease.session_id;
+        let original = runtime.model_requests(session).unwrap().requests[0].clone();
+        assert_eq!(original.terminal, Some(ModelRequestTerminal::Dropped));
+        runtime
+            .inner
+            .queue
+            .finish(
+                &context.task,
+                crate::queue::TaskTerminal::Failed,
+                Some("synthetic dropped execution".into()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        runtime.store().finish_attempt(&context.lease).unwrap();
+        let peer = Runtime::open(
+            temp.path().join("session.db"),
+            temp.path().join("workspace"),
+            Arc::new(UnreachableProvider),
+            request.model.clone(),
+            RuntimeConfig {
+                max_total_tokens: 1000,
+                model_request_reconciliation_verifier: Some(Arc::new(CompleteCapture)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let report = ModelUsageObservation {
+            event: "done".into(),
+            usage_status: UsageStatus::Reported,
+            usage: Usage {
+                input: 4,
+                output: 2,
+                total_tokens: 6,
+                ..Default::default()
+            },
+            usage_fields: BTreeMap::from([
+                ("input_tokens".into(), json!(4)),
+                ("output_tokens".into(), json!(2)),
+            ]),
+            response_id: message.response_id,
+            response_model: message.response_model,
+            stop_reason: StopReason::Stop,
+            metadata_redacted: false,
+        };
+        let mut input = ModelRequestReconciliation {
+            expected: ModelRequestOrigin::from(&original),
+            actor: "fixture-host".into(),
+            evidence: "incomplete synthetic capture".into(),
+            outcome: ModelRequestReconciledOutcome::ReportedUsage { report },
+        };
+        assert!(futures::executor::block_on(peer.reconcile_model_request(input.clone())).is_err());
+        assert_eq!(peer.model_requests(session).unwrap().requests[0], original);
+        input.evidence = "complete synthetic capture".into();
+        let before = runtime.store().snapshot(session).unwrap();
+        let task = runtime.task(&context.task.id).unwrap();
+        let result = futures::executor::block_on(peer.reconcile_model_request(input)).unwrap();
+        let after = runtime.model_requests(session).unwrap();
+        let mut expected = original;
+        expected.settled_tokens = Some(6);
+        expected.outstanding_reservation_tokens = 0;
+        expected.reconciliation = Some(result.clone());
+        assert_eq!(after.requests, vec![expected]);
+        assert_eq!(after.settled_tokens, 6);
+        assert_eq!(after.reserved_tokens, 0);
+        assert_eq!(runtime.task(&context.task.id).unwrap(), task);
+        let mut expected_snapshot = before;
+        expected_snapshot.cursor = result.cursor;
+        assert_eq!(
+            runtime.store().snapshot(session).unwrap(),
+            expected_snapshot
+        );
+    }
+
+    #[test]
     fn consecutive_equal_observations_keep_every_metadata_change_and_return() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1344,7 +2304,7 @@ mod tests {
     fn equal_terminal_observations_are_never_coalesced() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1391,7 +2351,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1437,7 +2397,7 @@ mod tests {
     fn equal_observation_rejects_a_recovered_core_lease() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1469,7 +2429,7 @@ mod tests {
     fn equal_observations_still_consume_the_received_observation_limit() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1513,7 +2473,7 @@ mod tests {
     fn recording_failure_cannot_be_hidden_by_an_equal_previous_observation() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1567,7 +2527,7 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let (runtime, context, mut request) = context(temp.path());
-            let mut guard = RequestGuard::reserve(
+            let mut guard = RequestGuard::reserve_test(
                 context.clone(),
                 &mut request,
                 uuid::Uuid::new_v4().to_string(),
@@ -1595,7 +2555,7 @@ mod tests {
         let (runtime, context, mut request) = context(temp.path());
         let id = uuid::Uuid::new_v4().to_string();
         let mut guard =
-            RequestGuard::reserve(context.clone(), &mut request, id.clone(), 1).unwrap();
+            RequestGuard::reserve_test(context.clone(), &mut request, id.clone(), 1).unwrap();
         guard.start().unwrap();
         runtime.store().recover(&context.lease.session_id).unwrap();
         let recovered = runtime.store().snapshot(&context.lease.session_id).unwrap();
@@ -1634,7 +2594,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1785,7 +2745,7 @@ mod tests {
     fn release_is_refused_after_the_dispatch_marker() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -1869,7 +2829,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
         let session = context.lease.session_id.clone();
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),
@@ -2046,7 +3006,7 @@ mod tests {
     fn an_existing_tool_unknown_survives_a_model_recording_error() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve(
+        let mut guard = RequestGuard::reserve_test(
             context.clone(),
             &mut request,
             uuid::Uuid::new_v4().to_string(),

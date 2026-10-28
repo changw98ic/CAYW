@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::error::WebAccessError;
 use crate::provider::{BoxFuture, SearchProvider};
-use crate::types::{FailureClass, SearchHit};
+use crate::types::{FailureClass, SearchEmptyReason, SearchEvidence, SearchHit, SearchResponse};
 
 const PROVIDER: &str = "brave";
 const ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
@@ -62,7 +62,7 @@ impl SearchProvider for BraveSearch {
         &'a self,
         query: &'a str,
         limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>> {
+    ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>> {
         Box::pin(async move {
             let mut url = url::Url::parse(&self.endpoint).map_err(|e| {
                 WebAccessError::new(FailureClass::InvalidUrl, format!("brave endpoint: {e}"))
@@ -93,7 +93,21 @@ impl SearchProvider for BraveSearch {
                 .with_provider(PROVIDER)
                 .with_status(status));
             }
-            parse_brave_json(&body, limit)
+            let hits = parse_brave_json(&body, limit)?;
+            if hits.is_empty() {
+                let snippet = String::from_utf8_lossy(&body);
+                let bounded_snippet = snippet.chars().take(1024).collect::<String>();
+                Ok(SearchResponse::empty(
+                    SearchEmptyReason::TrueEmpty,
+                    Some(SearchEvidence {
+                        http_status: Some(status),
+                        source_summary: Some("brave search produced no results".into()),
+                        response_snippet: Some(bounded_snippet),
+                    }),
+                ))
+            } else {
+                Ok(SearchResponse::new(hits))
+            }
         })
     }
 }
@@ -162,11 +176,11 @@ impl SearchProvider for BraveOrFallback {
         &'a self,
         query: &'a str,
         limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>> {
+    ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>> {
         Box::pin(async move {
             if let Some(brave) = &self.brave {
                 match brave.search(query, limit).await {
-                    Ok(hits) if !hits.is_empty() => return Ok(hits),
+                    Ok(resp) if !resp.hits.is_empty() => return Ok(resp),
                     Ok(_) => { /* empty → fallback */ }
                     Err(_) => { /* soft-fallback to DDG/fixture */ }
                 }

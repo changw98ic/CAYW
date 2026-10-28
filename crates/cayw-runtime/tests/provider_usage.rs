@@ -402,7 +402,7 @@ async fn usage_only_reported_then_cancel_keeps_known_values_and_the_full_reserva
 }
 
 #[tokio::test]
-async fn http_failure_and_truncation_keep_reservations_even_with_reported_usage() {
+async fn failed_http_usage_settles_only_complete_reported_counts() {
     for truncated in [false, true] {
         let (temp, runtime, provider, listener) = setup(1000).await;
         let session = runtime.create(None).unwrap();
@@ -417,8 +417,9 @@ async fn http_failure_and_truncation_keep_reservations_even_with_reported_usage(
         prompt(&runtime, &session.id, "model failure").await;
         server.await.unwrap();
         let ledger = runtime.model_requests(&session.id).unwrap();
-        assert_eq!(ledger.reserved_tokens, 1000);
-        assert_eq!(ledger.settled_tokens, 0);
+        assert_eq!(ledger.reserved_tokens, if truncated { 0 } else { 1000 });
+        assert_eq!(ledger.settled_tokens, if truncated { 18 } else { 0 });
+        assert_eq!(ledger.budget_unknown, !truncated);
         assert_eq!(
             ledger.requests[0].terminal,
             Some(ModelRequestTerminal::Failed)
@@ -443,8 +444,14 @@ async fn http_failure_and_truncation_keep_reservations_even_with_reported_usage(
         drop(runtime);
         let reopened = open(temp.path(), provider.clone(), 1000);
         assert_eq!(reopened.model_requests(&session.id).unwrap(), ledger);
-        prompt(&reopened, &session.id, "do not retry the original request").await;
+        if !truncated {
+            prompt(&reopened, &session.id, "do not retry the original request").await;
+        }
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reopened.tasks(&session.id).unwrap()[0].state,
+            TaskState::Failed
+        );
     }
 }
 

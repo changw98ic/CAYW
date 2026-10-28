@@ -37,7 +37,10 @@ mod types;
 pub use brave::{BRAVE_API_KEY_ENV, BraveOrFallback, BraveSearch};
 pub use catalog::definitions;
 pub use content::{ContentSink, ContentStore};
-pub use ddg::{DuckDuckGoHtmlSearch, parse_duckduckgo_html, resolve_ddg_href};
+pub use ddg::{
+    DuckDuckGoHtmlSearch, extract_ddg_hits, parse_duckduckgo_html, parse_duckduckgo_response,
+    resolve_ddg_href,
+};
 pub use error::WebAccessError;
 pub use extract::{extract_auto, extract_html, extract_pdf};
 pub use host::{SearchBackend, WebAccessOptions, host_error_message};

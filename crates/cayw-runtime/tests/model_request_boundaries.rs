@@ -71,6 +71,121 @@ impl Provider for Fixed {
         }]))
     }
 }
+struct FailedThenDone {
+    calls: AtomicUsize,
+    status: UsageStatus,
+    invalid_total: bool,
+}
+impl Provider for FailedThenDone {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let mut message = answer(&request, true);
+        let event = if first {
+            message.usage_status = self.status;
+            if self.invalid_total {
+                message.usage.total_tokens += 1;
+            }
+            AssistantEvent::Error {
+                message: message.failure(StopReason::Error, "fixed protocol failure"),
+            }
+        } else {
+            AssistantEvent::Done { message }
+        };
+        Box::pin(futures::stream::iter([event]))
+    }
+}
+
+#[tokio::test]
+async fn reported_error_usage_settles_without_completing_or_replaying_the_failed_task() {
+    let root = root();
+    let provider = Arc::new(FailedThenDone {
+        calls: AtomicUsize::new(0),
+        status: UsageStatus::Reported,
+        invalid_total: false,
+    });
+    let rt = open(root.path(), provider.clone());
+    let id = rt.create(None).unwrap().id;
+    prompt(&rt, &id).await;
+    let failed = rt.tasks(&id).unwrap().pop().unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("fixed protocol failure")
+    );
+    let ledger = rt.model_requests(&id).unwrap();
+    assert_eq!(ledger.settled_tokens, 8);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert!(!ledger.budget_unknown);
+    assert_eq!(
+        ledger.requests[0].terminal,
+        Some(ModelRequestTerminal::Failed)
+    );
+    assert_eq!(ledger.requests[0].settled_tokens, Some(8));
+    assert_eq!(
+        ledger.requests[0]
+            .observations
+            .last()
+            .unwrap()
+            .observation
+            .event,
+        "error"
+    );
+    unknown_money(&ledger);
+    drop(rt);
+    let reopened = open(root.path(), provider.clone());
+    assert_eq!(reopened.model_requests(&id).unwrap(), ledger);
+    assert_eq!(reopened.task(&failed.id).unwrap().state, TaskState::Failed);
+    prompt(&reopened, &id).await;
+    let after = reopened.model_requests(&id).unwrap();
+    assert_eq!(after.settled_tokens, 16);
+    assert_eq!(after.reserved_tokens, 0);
+    assert!(!after.budget_unknown);
+    assert_eq!(after.requests.len(), 2);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(reopened.task(&failed.id).unwrap().state, TaskState::Failed);
+    assert!(
+        reopened
+            .tasks(&id)
+            .unwrap()
+            .iter()
+            .any(|task| task.state == TaskState::Completed)
+    );
+}
+
+#[tokio::test]
+async fn error_with_missing_partial_or_invalid_usage_retains_its_hold_after_reopen() {
+    for (status, invalid_total) in [
+        (UsageStatus::Unknown, false),
+        (UsageStatus::Partial, false),
+        (UsageStatus::Invalid, false),
+        (UsageStatus::Reported, true),
+    ] {
+        let root = root();
+        let provider = Arc::new(FailedThenDone {
+            calls: AtomicUsize::new(0),
+            status,
+            invalid_total,
+        });
+        let rt = open(root.path(), provider.clone());
+        let id = rt.create(None).unwrap().id;
+        prompt(&rt, &id).await;
+        assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Failed);
+        let ledger = rt.model_requests(&id).unwrap();
+        assert_eq!(ledger.settled_tokens, 0);
+        assert_eq!(ledger.reserved_tokens, 1000);
+        assert!(ledger.budget_unknown);
+        drop(rt);
+        let reopened = open(root.path(), provider.clone());
+        assert_eq!(reopened.model_requests(&id).unwrap(), ledger);
+        prompt(&reopened, &id).await;
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reopened.model_requests(&id).unwrap().reserved_tokens, 1000);
+    }
+}
+
 fn unknown_money(ledger: &ModelRequestLedger) {
     assert_eq!(ledger.cost_status, ModelCostStatus::Unknown);
     assert!(ledger.cost_amount.is_none() && ledger.cost_currency.is_none());

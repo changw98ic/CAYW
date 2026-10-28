@@ -42,6 +42,7 @@ trait AuditSink {
     fn dropped(&self, call_id: &str) -> Result<(), cayw_codemode::CapabilityError>;
 }
 trait ExternalHost {
+    fn delegates_workspace_calls(&self) -> bool { false }
     async fn call(&self, capability: &str, arguments: serde_json::Value,
         cancel: cayw_ai::CancellationToken)
         -> Result<serde_json::Value, cayw_codemode::CapabilityError>;
@@ -50,7 +51,7 @@ trait ExternalHost {
 
 All three traits require `Send + Sync`. `started` returns an application-generated unique audit ID only after a durable commit. `settled` persists the full confirmed result or unknown status. `dropped` synchronously persists unknown status when execution or settlement is interrupted. A crash can leave a durable running record; the application must treat it as unknown during recovery. A partial audit write must return an unknown error.
 
-Ordinary calls wait on a cancellable execution queue, then use the common admission path: schema and argument limits, cumulative budget reservation, permission, durable start, execution, result limits and durable settlement. Frozen read tickets use that same admission path without the ordinary execution lane, so a writer waiting on read leases cannot block their settlement or acknowledgment. Cancellation and the original deadline are checked before permission and execution and during fence waits. Permissions receive the exact validated arguments without default insertion or coercion. No advertised capability is automatically authorized.
+Ordinary calls wait on a cancellable execution queue, then use the common admission path: schema and argument limits, cumulative budget reservation, permission, durable start, execution, result limits and durable settlement. Frozen read tickets use that same admission path without the ordinary execution lane, so a writer waiting on read leases cannot block their settlement or acknowledgment. A trusted injected orchestration service can declare `delegates_workspace_calls() == true` only when every workspace operation goes through another Host call. Its admission remains ordered, but execution releases the lane and does not acquire the workspace mutation fence while awaiting those calls. Each nested call performs its own admission and holds any required mutation fence. The outer service still treats an unretainable response or failed audit settlement as unknown. Other external services retain the ordinary lane and fence. Cancellation and the original deadline are checked before permission and execution and during fence waits. Permissions receive the exact validated arguments without default insertion or coercion. No advertised capability is automatically authorized.
 
 A failed start prevents execution. A failed settlement or an interrupted call permanently marks that host instance as unknown. The same is true when permission or an external operation returns an unknown outcome. `Host::outcome_unknown()` and `Host::audit_failure()` expose this state, including a synchronous drop callback failure or panic. Creating a new host is not reconciliation: the application must first resolve durable running/unknown records. There is deliberately no reset method.
 

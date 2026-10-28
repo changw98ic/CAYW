@@ -20,6 +20,7 @@ const MAX_FRAGMENTS: usize = 4096;
 const MAX_TOOL_CALLS: usize = 128;
 const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_WORK: usize = 64 * 1024 * 1024;
+const TOOL_ARGUMENT_BATCH_BYTES: usize = 256;
 const DECODE_BATCH_BYTES: usize = 4096;
 
 #[derive(Debug, Error)]
@@ -135,81 +136,143 @@ impl Provider for OpenAiProvider {
                         let mut offset = 0;
                         while offset < bytes.len() {
                             if let Err(error) = checkpoint(&cancel).await {
-                                failure = Some(error.into()); break 'body;
+                                if failure.is_none() {
+                                    failure = Some(error.to_string());
+                                }
+                                break 'body;
                             }
                             // Count only bytes consumed before [DONE]. Never
                             // inspect a later frame just because it shares the
                             // same network chunk with the terminal frame.
                             let allowance = MAX_RESPONSE_BYTES.saturating_sub(received);
                             if allowance == 0 {
-                                failure = Some("Provider response exceeds the 64 MiB limit".into());
+                                if failure.is_none() {
+                                    failure = Some("Provider response exceeds the 64 MiB limit".into());
+                                }
                                 break 'body;
                             }
                             let end = bytes.len().min(offset + DECODE_BATCH_BYTES.min(allowance));
                             let (used, frame) = match decoder.push_frame(&bytes[offset..end], &cancel).await {
                                 Ok(decoded) => decoded,
-                                Err(error) => { failure = Some(error); break 'body; }
+                                Err(error) => {
+                                    if failure.is_none() {
+                                        failure = Some(error);
+                                    }
+                                    break 'body;
+                                }
                             };
                             offset += used;
                             received += used;
                             if let Some(frame) = frame {
                                 frames += 1;
                                 if frames > MAX_RESPONSE_FRAMES {
-                                    failure = Some("Provider response exceeds the frame limit".into());
+                                    if failure.is_none() {
+                                        failure = Some("Provider response exceeds the frame limit".into());
+                                    }
                                     break 'body;
                                 }
                                 if let Err(error) = checkpoint(&cancel).await {
-                                    failure = Some(error.into()); break 'body;
+                                    if failure.is_none() {
+                                        failure = Some(error.to_string());
+                                    }
+                                    break 'body;
                                 }
-                                let mut updates = state.accept(&frame, &cancel);
-                                while let Some(update) = updates.next().await {
-                                    match update {
-                                        Ok(update) => {
-                                            if cancel.is_cancelled() {
-                                                failure = Some("Request cancelled".into()); break 'body;
-                                            }
-                                            yield update;
+                                if failure.is_some() {
+                                    if let Err(error) = state.drain_frame(&frame, &cancel).await {
+                                        if failure.is_none() {
+                                            failure = Some(error);
                                         }
-                                        Err(error) => { failure = Some(error); break 'body; }
+                                        break 'body;
+                                    }
+                                } else {
+                                    let mut updates = state.accept(&frame, &cancel);
+                                    while let Some(update) = updates.next().await {
+                                        match update {
+                                            Ok(update) => {
+                                                if cancel.is_cancelled() {
+                                                    failure = Some("Request cancelled".into());
+                                                    break 'body;
+                                                }
+                                                yield update;
+                                            }
+                                            Err(error) => {
+                                                failure = Some(error);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    drop(updates);
+                                    if failure.is_some() && !state.finish_phase {
+                                        break 'body;
                                     }
                                 }
-                                drop(updates);
                                 if state.done { break 'body; }
                             }
                         }
                     }
                     Some(Err(error)) => {
-                        failure = Some(format!("Response stream failed: {}", error.without_url()));
+                        if failure.is_none() {
+                            failure = Some(format!("Response stream failed: {}", error.without_url()));
+                        }
                         break;
                     }
                     None => {
                         let frame = match decoder.finish(&cancel).await {
                             Ok(frame) => frame,
-                            Err(error) => { failure = Some(error); break; }
+                            Err(error) => {
+                                if failure.is_none() {
+                                    failure = Some(error);
+                                }
+                                break;
+                            }
                         };
                         if let Some(frame) = frame {
                             frames += 1;
                             if frames > MAX_RESPONSE_FRAMES {
-                                failure = Some("Provider response exceeds the frame limit".into());
+                                if failure.is_none() {
+                                    failure = Some("Provider response exceeds the frame limit".into());
+                                }
                                 break;
                             }
                             if let Err(error) = checkpoint(&cancel).await {
-                                failure = Some(error.into()); break;
+                                if failure.is_none() {
+                                    failure = Some(error.to_string());
+                                }
+                                break;
                             }
-                            let mut updates = state.accept(&frame, &cancel);
-                            while let Some(update) = updates.next().await {
-                                match update {
-                                    Ok(update) => {
-                                        if cancel.is_cancelled() {
-                                            failure = Some("Request cancelled".into()); break 'body;
-                                        }
-                                        yield update;
+                            if failure.is_some() {
+                                if let Err(error) = state.drain_frame(&frame, &cancel).await {
+                                    if failure.is_none() {
+                                        failure = Some(error);
                                     }
-                                    Err(error) => { failure = Some(error); break 'body; }
+                                    break;
+                                }
+                            } else {
+                                let mut updates = state.accept(&frame, &cancel);
+                                while let Some(update) = updates.next().await {
+                                    match update {
+                                        Ok(update) => {
+                                            if cancel.is_cancelled() {
+                                                failure = Some("Request cancelled".into());
+                                                break 'body;
+                                            }
+                                            yield update;
+                                        }
+                                        Err(error) => {
+                                            failure = Some(error);
+                                            break;
+                                        }
+                                    }
+                                }
+                                drop(updates);
+                                if failure.is_some() && !state.finish_phase {
+                                    break;
                                 }
                             }
                         }
-                        if !state.done { failure = Some("Response stream ended before [DONE]".into()); }
+                        if failure.is_none() && !state.done {
+                            failure = Some("Response stream ended before [DONE]".into());
+                        }
                         break;
                     }
                 }
@@ -429,6 +492,7 @@ fn input_content(content: &[Content], images: bool) -> Result<Vec<Value>, String
 struct PendingCall {
     content_index: usize,
     arguments: String,
+    emitted_bytes: usize,
     parsed_weight: usize,
 }
 
@@ -444,6 +508,7 @@ struct ResponseState {
     deferred_bytes: usize,
     fragments: usize,
     content_bytes: usize,
+    message_content_bytes: usize,
     retained_weight: usize,
     arguments_weight: usize,
     snapshot_work: usize,
@@ -453,6 +518,7 @@ struct ResponseState {
     text_index: Option<usize>,
     thinking_index: Option<usize>,
     finish: Option<StopReason>,
+    finish_phase: bool,
     done: bool,
 }
 
@@ -465,6 +531,7 @@ impl ResponseState {
             deferred_bytes: 0,
             fragments: 0,
             content_bytes: 0,
+            message_content_bytes: 0,
             retained_weight: std::mem::size_of::<AssistantMessage>()
                 .saturating_add(request.model.provider.len())
                 .saturating_add(request.model.id.len()),
@@ -476,8 +543,70 @@ impl ResponseState {
             text_index: None,
             thinking_index: None,
             finish: None,
+            finish_phase: false,
             done: false,
         }
+    }
+
+    async fn accept_header(
+        &mut self,
+        object: &Map<String, Value>,
+        cancel: &CancellationToken,
+    ) -> Result<bool, String> {
+        checkpoint(cancel).await?;
+        if object.get("error").is_some_and(|value| !value.is_null()) {
+            return Err("Provider returned a stream error".into());
+        }
+        if let Some(id) = optional_string(object, "id")? {
+            let weight = if self.message.response_id.is_none() {
+                id.len()
+            } else {
+                0
+            };
+            if self.retained_weight.saturating_add(weight) > MAX_RESPONSE_BYTES {
+                return Err("Provider response exceeds the byte limit".into());
+            }
+            self.retained_weight += weight;
+            stable_identity(&mut self.message.response_id, id, "id")?;
+        }
+        if let Some(model) = optional_string(object, "model")? {
+            let weight = if self.message.response_model.is_none() {
+                model.len()
+            } else {
+                0
+            };
+            if self.retained_weight.saturating_add(weight) > MAX_RESPONSE_BYTES {
+                return Err("Provider response exceeds the byte limit".into());
+            }
+            self.retained_weight += weight;
+            stable_identity(&mut self.message.response_model, model, "model")?;
+        }
+        if let Some(usage) = object.get("usage").filter(|value| !value.is_null()) {
+            let weight = value_weight(usage, cancel).await?;
+            if self.retained_weight.saturating_add(weight) > MAX_RESPONSE_BYTES {
+                return Err("Provider response exceeds the byte limit".into());
+            }
+            self.retained_weight += weight;
+            self.usage(usage)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn drain_frame(&mut self, data: &str, cancel: &CancellationToken) -> Result<(), String> {
+        checkpoint(cancel).await?;
+        if self.done {
+            return Err("Unexpected data after [DONE]".into());
+        }
+        if done_frame(data, cancel).await? {
+            self.done = true;
+            return Ok(());
+        }
+        let chunk = parse_response(data, cancel).await?;
+        let object = chunk.as_object().ok_or("Stream JSON must be an object")?;
+        self.accept_header(object, cancel).await?;
+        Ok(())
     }
 
     fn accept<'a>(
@@ -487,6 +616,7 @@ impl ResponseState {
     ) -> BoxStream<'a, Result<AssistantEvent, String>> {
         async_stream::try_stream! {
             checkpoint(cancel).await?;
+            self.finish_phase = false;
             if self.done { Err("Unexpected data after [DONE]")?; }
             if done_frame(data, cancel).await? {
                 if self.finish.is_none() { Err("Stream ended without finish_reason")?; }
@@ -494,22 +624,7 @@ impl ResponseState {
             } else {
                 let chunk = parse_response(data, cancel).await?;
                 let object = chunk.as_object().ok_or("Stream JSON must be an object")?;
-                if object.get("error").is_some_and(|value| !value.is_null()) {
-                    Err("Provider returned a stream error")?;
-                }
-                if let Some(id) = optional_string(object, "id")? {
-                    if self.message.response_id.is_none() { self.retained_weight += id.len(); }
-                    stable_identity(&mut self.message.response_id, id, "id")?;
-                }
-                if let Some(model) = optional_string(object, "model")? {
-                    if self.message.response_model.is_none() { self.retained_weight += model.len(); }
-                    stable_identity(&mut self.message.response_model, model, "model")?;
-                }
-                if let Some(usage) = object.get("usage").filter(|value| !value.is_null()) {
-                    // A conservative accumulated bound also covers retained raw
-                    // usage fields and their nested JSON allocation overhead.
-                    self.retained_weight += value_weight(usage, cancel).await?;
-                    self.usage(usage)?;
+                if self.accept_header(object, cancel).await? {
                     let partial = self.snapshot(0, cancel).await?;
                     yield AssistantEvent::UsageUpdate { partial };
                 }
@@ -559,6 +674,7 @@ impl ResponseState {
                         }
                     }
                     if let Some(reason) = optional_string(choice, "finish_reason")? {
+                        self.finish_phase = true;
                         let reason = match reason {
                             "stop" => StopReason::Stop,
                             "length" => StopReason::Length,
@@ -666,7 +782,7 @@ impl ResponseState {
         checkpoint(cancel).await?;
         let weight = self
             .retained_weight
-            .saturating_add(self.content_bytes)
+            .saturating_add(self.message_content_bytes)
             .saturating_add(self.arguments_weight)
             .saturating_add(extra_bytes);
         if weight > MAX_SNAPSHOT_WORK.saturating_sub(self.snapshot_work) {
@@ -706,6 +822,7 @@ impl ResponseState {
                 Content::Thinking { thinking, .. } => thinking.push_str(delta),
                 _ => unreachable!(),
             }
+            self.message_content_bytes = self.message_content_bytes.saturating_add(delta.len());
             let partial = self.snapshot(delta.len(), cancel).await?;
             yield if thinking {
                 AssistantEvent::ThinkingDelta { index, delta: delta.to_owned(), partial }
@@ -768,15 +885,21 @@ impl ResponseState {
                 let content_index = self.message.content.len();
                 self.message.content.push(Content::ToolCall(ToolCall::new("", "", json!({}))));
                 self.retained_weight += std::mem::size_of::<Content>();
-                PendingCall { content_index, arguments: String::new(), parsed_weight: 0 }
+                let parsed_weight = std::mem::size_of::<Value>() + 96;
+                self.arguments_weight = self.arguments_weight.saturating_add(parsed_weight);
+                PendingCall { content_index, arguments: String::new(), emitted_bytes: 0, parsed_weight }
             });
             let index = pending.content_index;
             let Content::ToolCall(call) = &mut self.message.content[index] else { unreachable!() };
             if let Some(id) = id {
                 if !call.id.is_empty() && call.id != id { Err("Tool call id changed during streaming")?; }
+                self.message_content_bytes = self.message_content_bytes.saturating_add(id.len().saturating_sub(call.id.len()));
                 call.id = id.to_owned();
             }
-            if let Some(name) = name { call.name.push_str(name); }
+            if let Some(name) = name {
+                self.message_content_bytes = self.message_content_bytes.saturating_add(name.len());
+                call.name.push_str(name);
+            }
             if is_new {
                 let partial = self.snapshot(0, cancel).await?;
                 yield AssistantEvent::ToolCallStart { index, partial };
@@ -785,11 +908,34 @@ impl ResponseState {
                 checkpoint(cancel).await?;
                 let pending = self.calls.get_mut(&source_index).expect("call exists");
                 pending.arguments.push_str(arguments);
-                self.replace_arguments(source_index, false, cancel).await?;
-                let partial = self.snapshot(arguments.len(), cancel).await?;
-                yield AssistantEvent::ToolCallDelta { index, delta: arguments.to_owned(), partial };
+                if pending.arguments.len().saturating_sub(pending.emitted_bytes) >= TOOL_ARGUMENT_BATCH_BYTES {
+                    yield self.argument_delta(source_index, cancel).await?;
+                }
             }
         }.boxed()
+    }
+
+    async fn argument_delta(
+        &mut self,
+        source_index: u64,
+        cancel: &CancellationToken,
+    ) -> Result<AssistantEvent, String> {
+        self.replace_arguments(source_index, false, cancel).await?;
+        let pending = self.calls.get(&source_index).expect("call exists");
+        let index = pending.content_index;
+        let emitted_bytes = pending.arguments.len();
+        let delta_len = emitted_bytes - pending.emitted_bytes;
+        // Pending wire arguments are not part of AssistantMessage. Batch small
+        // fragments so a retained thinking block is not cloned for each byte.
+        let partial = self.snapshot(delta_len, cancel).await?;
+        let pending = self.calls.get_mut(&source_index).expect("call exists");
+        let delta = pending.arguments[pending.emitted_bytes..].to_owned();
+        pending.emitted_bytes = emitted_bytes;
+        Ok(AssistantEvent::ToolCallDelta {
+            index,
+            delta,
+            partial,
+        })
     }
 
     async fn replace_arguments(
@@ -848,6 +994,10 @@ impl ResponseState {
             let indices = self.calls.keys().copied().collect::<Vec<_>>();
             for source_index in indices {
                 checkpoint(cancel).await?;
+                let pending = &self.calls[&source_index];
+                if pending.emitted_bytes < pending.arguments.len() {
+                    yield self.argument_delta(source_index, cancel).await?;
+                }
                 let pending = &self.calls[&source_index];
                 let Content::ToolCall(call) = &self.message.content[pending.content_index] else { unreachable!() };
                 if call.id.is_empty() { Err("Tool call is missing id")?; }

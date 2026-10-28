@@ -407,111 +407,131 @@ fn storage_log(
 ) -> Result<std::collections::BTreeMap<String, StorageEntry>, RuntimeError> {
     let mut entries = std::collections::BTreeMap::<String, StorageEntry>::new();
     let mut calls = std::collections::BTreeMap::new();
-    let mut cursor = 0;
-    while cursor < end {
-        let page = runtime.inner.store.events(
-            session,
-            cursor,
-            (end - cursor).min(cayw_core::MAX_EVENT_PAGE as u64) as usize,
-        )?;
-        if page.is_empty() {
-            return Err(storage_corrupt("result storage event prefix is incomplete"));
+    // Each query reads the current durable log through the same indexes used
+    // for model accounting. Merge by original cursor before applying facts so a
+    // later terminal can never authorize an earlier preparation.
+    let mut selected = Vec::new();
+    for (event_type, host_kind) in [
+        ("capability_settled", None),
+        ("host", Some(STORAGE_PREPARED)),
+        ("host", Some(STORAGE_TERMINAL)),
+        ("host", Some(STORAGE_RECONCILED)),
+    ] {
+        let mut after = 0;
+        while after < end {
+            let page = runtime.inner.store.events_by_kind(
+                session,
+                after,
+                cayw_core::MAX_EVENT_PAGE,
+                event_type,
+                host_kind,
+            )?;
+            if page.is_empty() {
+                break;
+            }
+            for event in page {
+                after = event.cursor;
+                if event.cursor > end {
+                    break;
+                }
+                selected.push(event);
+            }
         }
-        for event in page {
-            if event.session_id != session || event.cursor != cursor + 1 {
-                return Err(storage_corrupt("result storage event cursor differs"));
+    }
+    selected.sort_unstable_by_key(|event| event.cursor);
+    let mut cursor = 0;
+    for event in selected {
+        if event.session_id != session || event.cursor <= cursor {
+            return Err(storage_corrupt("result storage event cursor differs"));
+        }
+        cursor = event.cursor;
+        match event.event {
+            CoreEvent::CapabilitySettled { call } => {
+                calls.insert(call.key.clone(), call);
             }
-            cursor = event.cursor;
-            match event.event {
-                CoreEvent::CapabilitySettled { call } => {
-                    calls.insert(call.key.clone(), call);
+            CoreEvent::Host { kind, data } if kind == STORAGE_PREPARED => {
+                let identity: ResultStorageIdentity = serde_json::from_value(data)?;
+                let call = calls.get(&identity.key).ok_or_else(|| {
+                    storage_corrupt("result storage has no original successful call")
+                })?;
+                let Some(CapabilityOutcome::Completed { result }) = &call.outcome else {
+                    return Err(storage_corrupt(
+                        "result storage original call is not successful",
+                    ));
+                };
+                let bytes = serde_json::to_vec(result)?;
+                identity.keys()?;
+                if identity.lease.session_id != session
+                    || event.attempt.as_ref() != Some(&identity.lease)
+                    || call.lease != identity.lease
+                    || call.task_id != identity.task_id
+                    || identity.content_hash != ContentHash::of(&bytes).to_string()
+                    || identity.bytes != bytes.len() as u64
+                {
+                    return Err(storage_corrupt(
+                        "result storage differs from its original identity or content",
+                    ));
                 }
-                CoreEvent::Host { kind, data } if kind == STORAGE_PREPARED => {
-                    let identity: ResultStorageIdentity = serde_json::from_value(data)?;
-                    let call = calls.get(&identity.key).ok_or_else(|| {
-                        storage_corrupt("result storage has no original successful call")
-                    })?;
-                    let Some(CapabilityOutcome::Completed { result }) = &call.outcome else {
-                        return Err(storage_corrupt(
-                            "result storage original call is not successful",
-                        ));
-                    };
-                    let bytes = serde_json::to_vec(result)?;
-                    identity.keys()?;
-                    if identity.lease.session_id != session
-                        || event.attempt.as_ref() != Some(&identity.lease)
-                        || call.lease != identity.lease
-                        || call.task_id != identity.task_id
-                        || identity.content_hash != ContentHash::of(&bytes).to_string()
-                        || identity.bytes != bytes.len() as u64
-                    {
-                        return Err(storage_corrupt(
-                            "result storage differs from its original identity or content",
-                        ));
-                    }
-                    let handle = identity.handle.clone();
-                    if entries
-                        .insert(
-                            handle,
-                            StorageEntry {
-                                pending: ResultStoragePending {
-                                    identity,
-                                    state: ResultStorageState::Prepared,
-                                    error: None,
-                                },
-                                reconciled: false,
+                let handle = identity.handle.clone();
+                if entries
+                    .insert(
+                        handle,
+                        StorageEntry {
+                            pending: ResultStoragePending {
+                                identity,
+                                state: ResultStorageState::Prepared,
+                                error: None,
                             },
-                        )
-                        .is_some()
-                    {
-                        return Err(storage_corrupt("duplicate result storage preparation"));
-                    }
+                            reconciled: false,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(storage_corrupt("duplicate result storage preparation"));
                 }
-                CoreEvent::Host { kind, data } if kind == STORAGE_TERMINAL => {
-                    let terminal: ResultStoragePending = serde_json::from_value(data)?;
-                    let entry = entries.get_mut(&terminal.identity.handle).ok_or_else(|| {
-                        storage_corrupt("result storage terminal has no preparation")
-                    })?;
-                    if entry.pending.identity != terminal.identity
-                        || entry.pending.state != ResultStorageState::Prepared
-                        || entry.reconciled
-                        || event.attempt.as_ref() != Some(&terminal.identity.lease)
-                        || terminal.state == ResultStorageState::Prepared
-                        || (terminal.state == ResultStorageState::Stored)
-                            != terminal.error.is_none()
-                    {
-                        return Err(storage_corrupt(
-                            "result storage terminal changed its preparation",
-                        ));
-                    }
-                    entry.pending = terminal;
-                }
-                CoreEvent::Host { kind, data } if kind == STORAGE_RECONCILED => {
-                    let actor = data["actor"].as_str().unwrap_or_default();
-                    let decision: StorageDecision =
-                        serde_json::from_value(data["decision"].clone())?;
-                    let entry = entries.get_mut(&decision.identity.handle).ok_or_else(|| {
-                        storage_corrupt("result storage decision has no preparation")
-                    })?;
-                    if actor.is_empty()
-                        || decision.evidence.trim().is_empty()
-                        || entry.pending.identity != decision.identity
-                        || !entry.unresolved()
-                    {
-                        return Err(storage_corrupt(
-                            "result storage decision changed its original pending identity",
-                        ));
-                    }
-                    validate_storage_records(
-                        &decision.identity,
-                        decision.observation,
-                        decision.body.as_ref(),
-                        decision.metadata.as_ref(),
-                    )?;
-                    entry.reconciled = true;
-                }
-                _ => {}
             }
+            CoreEvent::Host { kind, data } if kind == STORAGE_TERMINAL => {
+                let terminal: ResultStoragePending = serde_json::from_value(data)?;
+                let entry = entries
+                    .get_mut(&terminal.identity.handle)
+                    .ok_or_else(|| storage_corrupt("result storage terminal has no preparation"))?;
+                if entry.pending.identity != terminal.identity
+                    || entry.pending.state != ResultStorageState::Prepared
+                    || entry.reconciled
+                    || event.attempt.as_ref() != Some(&terminal.identity.lease)
+                    || terminal.state == ResultStorageState::Prepared
+                    || (terminal.state == ResultStorageState::Stored) != terminal.error.is_none()
+                {
+                    return Err(storage_corrupt(
+                        "result storage terminal changed its preparation",
+                    ));
+                }
+                entry.pending = terminal;
+            }
+            CoreEvent::Host { kind, data } if kind == STORAGE_RECONCILED => {
+                let actor = data["actor"].as_str().unwrap_or_default();
+                let decision: StorageDecision = serde_json::from_value(data["decision"].clone())?;
+                let entry = entries
+                    .get_mut(&decision.identity.handle)
+                    .ok_or_else(|| storage_corrupt("result storage decision has no preparation"))?;
+                if actor.is_empty()
+                    || decision.evidence.trim().is_empty()
+                    || entry.pending.identity != decision.identity
+                    || !entry.unresolved()
+                {
+                    return Err(storage_corrupt(
+                        "result storage decision changed its original pending identity",
+                    ));
+                }
+                validate_storage_records(
+                    &decision.identity,
+                    decision.observation,
+                    decision.body.as_ref(),
+                    decision.metadata.as_ref(),
+                )?;
+                entry.reconciled = true;
+            }
+            _ => {}
         }
     }
     Ok(entries)
@@ -1549,6 +1569,161 @@ mod unit {
             ContentStore::open(root.path(), Id::new("device-a").unwrap(), Limits::default())
                 .unwrap();
         (root, store)
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn storage_log_merges_selected_facts_and_observes_peer_appends_without_content() {
+        use cayw_core::{CapabilityCallRecord, CapabilityStage, EventRecord};
+        use rusqlite::{Connection, params};
+
+        struct Unreachable;
+        impl cayw_ai::Provider for Unreachable {
+            fn stream(
+                &self,
+                _: cayw_ai::ModelRequest,
+                _: CancellationToken,
+            ) -> cayw_ai::AssistantStream {
+                panic!("storage projection fixture must not request a model");
+            }
+        }
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let path = temp.path().join("session.db");
+        let runtime = Runtime::open(
+            &path,
+            &workspace,
+            Arc::new(Unreachable),
+            cayw_ai::Model::new("fixture", "storage-log"),
+            crate::RuntimeConfig::default(),
+        )
+        .unwrap();
+        assert!(runtime.inner.content.is_none());
+        let session = runtime.create(None).unwrap().id;
+        let lease = runtime
+            .store()
+            .begin_attempt(&session, "fixture-worker")
+            .unwrap();
+        let result = json!({"text": "original successful Host result"});
+        let bytes = serde_json::to_vec(&result).unwrap();
+        let identity = ResultStorageIdentity {
+            lease: lease.clone(),
+            key: CapabilityCallKey {
+                execution_id: "fixture-execution".into(),
+                sequence: 0,
+            },
+            task_id: "fixture-task".into(),
+            device_id: "fixture-device".into(),
+            handle: "fixture-handle".into(),
+            content_hash: ContentHash::of(&bytes).to_string(),
+            bytes: bytes.len() as u64,
+        };
+        let call = CapabilityCallRecord {
+            key: identity.key.clone(),
+            name: "fs.read".into(),
+            arguments: json!({"path": "fixture.txt"}),
+            parent_call_id: "fixture-parent".into(),
+            task_id: identity.task_id.clone(),
+            source_hash: "fixture-source".into(),
+            lease: lease.clone(),
+            stage: CapabilityStage::Settled,
+            authorization: None,
+            outcome: Some(CapabilityOutcome::Completed { result }),
+            external_provenance: None,
+        };
+        // Synthetic durable input facts; no actual Host execution is claimed.
+        // Each insert and projection cursor commit together on a peer connection.
+        let append = |events: Vec<CoreEvent>| {
+            let mut peer = Connection::open(&path).unwrap();
+            let tx = peer.transaction().unwrap();
+            let raw: String = tx
+                .query_row(
+                    "SELECT projection FROM core_sessions WHERE id=?1",
+                    [&session],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut projection: Value = serde_json::from_str(&raw).unwrap();
+            let mut cursor = projection["cursor"].as_u64().unwrap();
+            for event in events {
+                cursor += 1;
+                let record = EventRecord {
+                    protocol_version: cayw_core::PROTOCOL_VERSION,
+                    session_id: session.clone(),
+                    cursor,
+                    timestamp: 1,
+                    attempt: Some(lease.clone()),
+                    event,
+                };
+                tx.execute(
+                    "INSERT INTO core_events(session_id,cursor,record) VALUES(?1,?2,?3)",
+                    params![
+                        session,
+                        cursor as i64,
+                        serde_json::to_string(&record).unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+            projection["cursor"] = json!(cursor);
+            tx.execute(
+                "UPDATE core_sessions SET projection=?2 WHERE id=?1",
+                params![session, serde_json::to_string(&projection).unwrap()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            cursor
+        };
+        let mut facts = vec![CoreEvent::CapabilitySettled { call }];
+        let model = cayw_ai::Model::new("fixture", "storage-log");
+        let mut partial = cayw_ai::AssistantMessage::new(&model);
+        partial
+            .content
+            .push(cayw_ai::Content::text("x".repeat(4096)));
+        for _ in 0..1024 {
+            facts.push(CoreEvent::Agent {
+                event: Box::new(cayw_agent::AgentEvent::MessageUpdate {
+                    message: partial.clone(),
+                    event: Box::new(cayw_ai::AssistantEvent::TextDelta {
+                        index: 0,
+                        delta: "x".into(),
+                        partial: partial.clone(),
+                    }),
+                }),
+            });
+        }
+        let before_prepare = append(facts);
+        assert!(!has_pending_storage(&runtime, &session, before_prepare).unwrap());
+        let prepared = append(vec![CoreEvent::Host {
+            kind: STORAGE_PREPARED.into(),
+            data: serde_json::to_value(&identity).unwrap(),
+        }]);
+        assert!(has_pending_storage(&runtime, &session, prepared).unwrap());
+        assert!(!has_pending_storage(&runtime, &session, before_prepare).unwrap());
+        let terminal = ResultStoragePending {
+            identity: identity.clone(),
+            state: ResultStorageState::Stored,
+            error: None,
+        };
+        let finished = append(vec![CoreEvent::Host {
+            kind: STORAGE_TERMINAL.into(),
+            data: serde_json::to_value(terminal).unwrap(),
+        }]);
+        assert!(!has_pending_storage(&runtime, &session, finished).unwrap());
+        assert!(has_pending_storage(&runtime, &session, prepared).unwrap());
+        let mut forged = identity;
+        forged.handle = "orphan-terminal".into();
+        let invalid = append(vec![CoreEvent::Host {
+            kind: STORAGE_TERMINAL.into(),
+            data: serde_json::to_value(ResultStoragePending {
+                identity: forged,
+                state: ResultStorageState::Stored,
+                error: None,
+            })
+            .unwrap(),
+        }]);
+        assert!(storage_log(&runtime, &session, invalid).is_err());
     }
 
     #[test]

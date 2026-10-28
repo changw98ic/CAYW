@@ -674,16 +674,40 @@ async fn known_source_failure_is_persisted_before_unresolved_record_is_removed()
 #[tokio::test]
 async fn terminal_write_failure_or_timeout_retains_unknown_before_return() {
     for fail in [true, false] {
-        let (_workspace, registry, calls, path) = setup(false, false, Duration::from_secs(2));
+        let (_workspace, registry, calls, path) = setup(false, false, Duration::from_millis(200));
         let mut journal = Journal::new(path);
         journal.fail_settle = fail;
         journal.block_settle = !fail;
         let journal = Arc::new(journal);
+        let err = invoke(&registry, journal.clone(), 1, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(err.outcome_unknown);
         assert!(
-            invoke(&registry, journal.clone(), 1, CancellationToken::new())
-                .await
-                .unwrap_err()
-                .outcome_unknown
+            err.message
+                .starts_with("dispatch journal terminal write failed; reconciliation required"),
+            "unexpected err: {err:?}"
+        );
+        assert!(
+            err.message.contains(if fail {
+                "underlying_error=journal settle failed"
+            } else {
+                "underlying_error=dispatch journal terminal deadline"
+            }),
+            "unexpected err: {err:?}"
+        );
+        assert!(
+            err.message
+                .contains("call_identity=(target=echo, source=source, request_id=1, seq=1)"),
+            "unexpected err: {err:?}"
+        );
+        assert!(
+            err.message.contains("response_summary=succeeded: sha256="),
+            "unexpected err: {err:?}"
+        );
+        assert!(
+            err.message.contains("\"executed\":true"),
+            "unexpected err: {err:?}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(

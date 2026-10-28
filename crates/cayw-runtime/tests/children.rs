@@ -7,7 +7,8 @@ use cayw_ai::{
 };
 use cayw_core::CoreEvent;
 use cayw_runtime::{
-    ApprovalChoice, LocalAgents, Runtime, RuntimeConfig, ScopedPermission, TaskState,
+    ApprovalChoice, LocalAgents, ModelRequestTerminal, Runtime, RuntimeConfig, ScopedPermission,
+    TaskState,
 };
 use futures::stream;
 use serde_json::{Value, json};
@@ -25,6 +26,8 @@ struct Fixture {
     /// call that cannot observe cancellation. The test releases it only after
     /// observing the parent's unconfirmed cleanup.
     stall: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    pause_parent: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    parent_active: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 impl Fixture {
     fn scripts(&self) -> usize {
@@ -68,9 +71,145 @@ impl Provider for Fixture {
             self.requests.lock().unwrap().push(request);
             return Box::pin(stream::iter([AssistantEvent::Done { message: response }]));
         }
+        if prompt == "hold stream" {
+            let receiver = self.pause_parent.lock().unwrap().take();
+            let sender = self.parent_active.lock().unwrap().take();
+            let mut response = AssistantMessage::new(&request.model);
+            response.content.push(Content::text("hold stream finished"));
+            response.stop_reason = StopReason::Stop;
+            response.usage = cayw_ai::Usage {
+                input: 4,
+                output: 4,
+                total_tokens: 8,
+                ..Default::default()
+            };
+            response.usage_status = cayw_ai::UsageStatus::Reported;
+            self.requests.lock().unwrap().push(request);
+            return Box::pin(async_stream::stream! {
+                if let Some(tx) = sender {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = receiver {
+                    let _ = rx.await;
+                }
+                yield AssistantEvent::Done { message: response };
+            });
+        }
+        if prompt == "spawn real yield0 child" {
+            let is_turn_1 = !request
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolResult(..)));
+            if is_turn_1 {
+                let mut response = AssistantMessage::new(&request.model);
+                response.usage = cayw_ai::Usage {
+                    input: 4,
+                    output: 4,
+                    total_tokens: 8,
+                    ..Default::default()
+                };
+                response.usage_status = cayw_ai::UsageStatus::Reported;
+                response
+                    .content
+                    .push(Content::ToolCall(cayw_ai::ToolCall::new(
+                        format!("fixture-{}", request.messages.len()),
+                        "execute_code",
+                        json!({
+                            "action": "exec",
+                            "script": "return cayw.call('agent.run', {prompt='child write and read', label='Child'})",
+                            "yield_time_ms": 0,
+                            "max_output_tokens": 4096,
+                        }),
+                    )));
+                response.stop_reason = StopReason::ToolUse;
+                self.requests.lock().unwrap().push(request);
+                return Box::pin(stream::iter([AssistantEvent::Done { message: response }]));
+            } else if self.pause_parent.lock().unwrap().is_some() {
+                let receiver = self.pause_parent.lock().unwrap().take();
+                let sender = self.parent_active.lock().unwrap().take();
+                let cell_id = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|m| match m {
+                        Message::ToolResult(res) => res
+                            .structured_content
+                            .as_ref()
+                            .and_then(|sc| sc.get("cell_id").and_then(Value::as_str))
+                            .map(ToString::to_string),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "cell_1".to_string());
+                let mut response = AssistantMessage::new(&request.model);
+                response.usage = cayw_ai::Usage {
+                    input: 4,
+                    output: 4,
+                    total_tokens: 8,
+                    ..Default::default()
+                };
+                response.usage_status = cayw_ai::UsageStatus::Reported;
+                response
+                    .content
+                    .push(Content::ToolCall(cayw_ai::ToolCall::new(
+                        format!("fixture-{}", request.messages.len()),
+                        "execute_code",
+                        json!({
+                            "action": "wait",
+                            "cell_id": cell_id,
+                            "cursor": 0,
+                            "yield_time_ms": 30000,
+                            "max_output_tokens": 4096,
+                        }),
+                    )));
+                response.stop_reason = StopReason::ToolUse;
+                self.requests.lock().unwrap().push(request);
+                return Box::pin(async_stream::stream! {
+                    if let Some(tx) = sender {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = receiver {
+                        let _ = rx.await;
+                    }
+                    yield AssistantEvent::Done { message: response };
+                });
+            } else {
+                let mut response = AssistantMessage::new(&request.model);
+                response.usage = cayw_ai::Usage {
+                    input: 4,
+                    output: 4,
+                    total_tokens: 8,
+                    ..Default::default()
+                };
+                response.usage_status = cayw_ai::UsageStatus::Reported;
+                response
+                    .content
+                    .push(Content::text("parent completed after child wait"));
+                response.stop_reason = StopReason::Stop;
+                self.requests.lock().unwrap().push(request);
+                return Box::pin(stream::iter([AssistantEvent::Done { message: response }]));
+            }
+        }
         let script = match prompt.as_str() {
             "spawn child" => "return cayw.call('agent.run', {prompt='child work', label='Child'})",
+            "spawn background concurrent" => {
+                "return cayw.call('agent.run', {prompt='bg child work', label='Bg', mode='background'})"
+            }
+            "parent follow up" => "return 'parent follow up done'",
+            "spawn child missing usage" => {
+                let mut response = cayw_runtime::fixture::script_response(
+                    &request,
+                    "return cayw.call('agent.run', {prompt='child work', label='Child'})",
+                    &format!("fixture-{}", request.messages.len()),
+                );
+                response.usage_status = cayw_ai::UsageStatus::Unknown;
+                response.usage.total_tokens = 0;
+                self.requests.lock().unwrap().push(request);
+                return Box::pin(stream::iter([AssistantEvent::Done { message: response }]));
+            }
             "child work" => "return 'child result'",
+            "child write and read" => {
+                "cayw.call('fs.write', {path='child-only.txt', content='child-yield0'})\nlocal read = cayw.call('fs.read', {path='child-only.txt'})\nreturn read.content"
+            }
             "spawn background child" => {
                 "return cayw.call('agent.run', {prompt='long child', label='Bg', mode='background'})"
             }
@@ -799,4 +938,505 @@ async fn background_still_respects_depth_and_appears_in_fleet_page() {
     assert!(empty.members.is_empty());
     assert!(runtime.fleet(None, None, 0).is_err());
     assert!(runtime.fleet(None, None, 1001).is_err());
+}
+
+#[tokio::test]
+async fn child_subagent_succeeds_and_shares_settled_budget_when_usage_reported() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"child work","label":"Child"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings);
+    let parent = runtime.create(Some("parent".into())).unwrap();
+    let result = run_prompt(&runtime, &parent.id, "spawn child")
+        .await
+        .unwrap();
+
+    let parent_task = parent_task(&runtime, &parent.id);
+    assert_eq!(parent_task.state, TaskState::Completed);
+    let child = child_session(&runtime, &parent.id).await;
+    let child_tasks = runtime.tasks(&child).unwrap();
+    assert_eq!(child_tasks.len(), 1);
+    assert_eq!(child_tasks[0].state, TaskState::Completed);
+
+    assert!(
+        result
+            .messages
+            .last()
+            .unwrap()
+            .text()
+            .contains("child result"),
+        "the parent received the child result"
+    );
+
+    // Verify shared accounting ledger: complete usage was recorded, reservation settled,
+    // and parent and child shared the persistent budget without exceeding limits.
+    let ledger = runtime.model_requests(&parent.id).unwrap();
+    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.settled_tokens, 32);
+    assert_eq!(ledger.remaining_tokens, 100_000 - 32);
+    assert_eq!(ledger.requests.len(), 4);
+    for req in &ledger.requests {
+        assert_eq!(req.terminal, Some(ModelRequestTerminal::Completed));
+        assert_eq!(req.settled_tokens, Some(8));
+        assert_eq!(req.outstanding_reservation_tokens, 0);
+    }
+}
+
+#[tokio::test]
+async fn child_subagent_is_blocked_by_unsettled_model_reservation_when_parent_usage_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"child work","label":"Child"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings);
+    let parent = runtime.create(Some("parent".into())).unwrap();
+    let _result = run_prompt(&runtime, &parent.id, "spawn child missing usage").await;
+
+    // The child model request should have failed or returned error because
+    // the parent reservation was unsettled.
+    let child = child_session(&runtime, &parent.id).await;
+    let child_tasks = runtime.tasks(&child).unwrap();
+    assert_eq!(child_tasks.len(), 1);
+    assert_ne!(child_tasks[0].state, TaskState::Completed);
+
+    // Verify that the child's model prompt "child work" was never dispatched to the provider.
+    let requests = provider.requests.lock().unwrap();
+    let child_model_dispatched = requests
+        .iter()
+        .any(|req| req.messages.iter().any(|msg| msg.text() == "child work"));
+    assert!(
+        !child_model_dispatched,
+        "child model request must be blocked before dispatch to the provider"
+    );
+    drop(requests);
+
+    // Verify the persistent shared ledger:
+    // Missing usage preserves unknown reservation; unknown tokens are NOT treated as 0;
+    // rejection reason is explicitly unsettled_model_reservation.
+    let ledger = runtime.model_requests(&parent.id).unwrap();
+    assert!(
+        ledger.budget_unknown,
+        "ledger must strictly retain budget_unknown=true"
+    );
+    assert!(
+        ledger.reserved_tokens > 0,
+        "unknown reservation tokens must be preserved, never zeroed"
+    );
+    assert_eq!(
+        ledger.settled_tokens, 0,
+        "unreported usage cannot settle tokens"
+    );
+
+    // The child session recorded an explicit rejection with unsettled_model_reservation.
+    let child_rejections: Vec<_> = ledger
+        .requests
+        .iter()
+        .filter(|req| req.identity.lease.session_id == child)
+        .collect();
+    assert!(
+        !child_rejections.is_empty(),
+        "child must have an accounting record in the shared ledger"
+    );
+    assert_eq!(
+        child_rejections[0].rejection.as_deref(),
+        Some("unsettled_model_reservation"),
+        "child request rejection reason must be unsettled_model_reservation"
+    );
+}
+
+#[tokio::test]
+async fn child_subagent_waits_for_concurrent_parent_turn_and_succeeds_under_synthetic_link() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"child work","label":"Child"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings);
+    let parent = runtime.create(Some("parent".into())).unwrap();
+
+    // Setup gate on parent request: parent stream holds budget_lock until unpaused
+    let (unpause_tx, unpause_rx) = tokio::sync::oneshot::channel();
+    let (active_tx, active_rx) = tokio::sync::oneshot::channel();
+    *provider.pause_parent.lock().unwrap() = Some(unpause_rx);
+    *provider.parent_active.lock().unwrap() = Some(active_tx);
+
+    // Parent task starts and enters "hold stream", holding the shared budget reservation and lock
+    let parent_rt = runtime.clone();
+    let parent_id = parent.id.clone();
+    let parent_task = tokio::spawn(async move {
+        parent_rt
+            .prompt(&parent_id, "hold stream", CancellationToken::new())
+            .await
+    });
+
+    // Confirm parent stream is actively in-flight holding the budget lock
+    active_rx.await.expect("parent stream never became active");
+
+    // Spawn child task while parent is still streaming; link it to parent's budget tree
+    // We create a linked child session via Core control event to simulate yield_time_ms=0 background subagent
+    let child = runtime.create(Some("child".into())).unwrap();
+    runtime
+        .store()
+        .append_control_event(
+            &child.id,
+            child.cursor,
+            None,
+            "runtime-local-agent",
+            "agent_child_linked",
+            json!({"parent_session": parent.id}),
+        )
+        .unwrap();
+
+    // Child attempts to run a model turn while parent is holding budget_lock;
+    // it must queue without being rejected with unsettled_model_reservation
+    let child_rt = runtime.clone();
+    let child_id = child.id.clone();
+    let child_task = tokio::spawn(async move {
+        child_rt
+            .prompt(&child_id, "child work", CancellationToken::new())
+            .await
+    });
+
+    // Let the child reach the reservation queue
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Release parent hold; parent settles usage and releases budget_lock, unblocking child
+    unpause_tx
+        .send(())
+        .expect("could not unpause parent stream");
+
+    let parent_res = tokio::time::timeout(WATCHDOG, parent_task)
+        .await
+        .expect("parent timed out")
+        .unwrap();
+    assert!(
+        parent_res.is_ok(),
+        "parent task should complete successfully"
+    );
+
+    let child_res = tokio::time::timeout(WATCHDOG, child_task)
+        .await
+        .expect("child timed out")
+        .unwrap();
+    assert!(
+        child_res.is_ok(),
+        "child task should complete successfully after parent settlement"
+    );
+
+    // Verify shared budget ledger: both parent and child succeeded and settled
+    let ledger = runtime.model_requests(&parent.id).unwrap();
+    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.settled_tokens, 24); // parent: 8, child: 16 (turn 1 + turn 2)
+    assert_eq!(ledger.remaining_tokens, 100_000 - 24);
+    for req in &ledger.requests {
+        assert_eq!(req.terminal, Some(ModelRequestTerminal::Completed));
+        assert!(req.settled_tokens.is_some());
+        assert_eq!(req.outstanding_reservation_tokens, 0);
+    }
+}
+
+#[tokio::test]
+async fn child_subagent_waiting_for_parent_turn_is_cancelled_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"child work","label":"Child"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings);
+    let parent = runtime.create(Some("parent".into())).unwrap();
+
+    // Link child session
+    let child = runtime.create(Some("child".into())).unwrap();
+    runtime
+        .store()
+        .append_control_event(
+            &child.id,
+            child.cursor,
+            None,
+            "runtime-local-agent",
+            "agent_child_linked",
+            json!({"parent_session": parent.id}),
+        )
+        .unwrap();
+
+    // Setup gate on parent request
+    let (unpause_tx, unpause_rx) = tokio::sync::oneshot::channel();
+    let (active_tx, active_rx) = tokio::sync::oneshot::channel();
+    *provider.pause_parent.lock().unwrap() = Some(unpause_rx);
+    *provider.parent_active.lock().unwrap() = Some(active_tx);
+
+    let parent_rt = runtime.clone();
+    let parent_id = parent.id.clone();
+    let parent_task = tokio::spawn(async move {
+        parent_rt
+            .prompt(&parent_id, "hold stream", CancellationToken::new())
+            .await
+    });
+
+    active_rx.await.expect("parent stream never became active");
+
+    // Child tries to reserve while parent holds budget_lock, but is cancelled while waiting
+    let child_cancel = CancellationToken::new();
+    let child_rt = runtime.clone();
+    let child_id = child.id.clone();
+    let child_cancel_clone = child_cancel.clone();
+    let child_task = tokio::spawn(async move {
+        child_rt
+            .prompt(&child_id, "child work", child_cancel_clone)
+            .await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Cancel the waiting child
+    child_cancel.cancel();
+
+    let child_res = tokio::time::timeout(WATCHDOG, child_task)
+        .await
+        .expect("child join timed out")
+        .unwrap();
+    let child_view = child_res.expect("prompt returns view with aborted message");
+    let last = child_view
+        .messages
+        .last()
+        .expect("must have assistant message");
+    match last {
+        Message::Assistant(msg) => {
+            assert_eq!(msg.stop_reason, cayw_ai::StopReason::Aborted);
+            assert_eq!(
+                msg.error_message.as_deref(),
+                Some("model request cancelled before admission")
+            );
+        }
+        other => panic!("expected assistant message, got {other:?}"),
+    }
+
+    // Unpause parent
+    unpause_tx
+        .send(())
+        .expect("could not unpause parent stream");
+
+    let parent_res = tokio::time::timeout(WATCHDOG, parent_task)
+        .await
+        .expect("parent timed out")
+        .unwrap();
+    assert!(
+        parent_res.is_ok(),
+        "parent task should complete successfully"
+    );
+
+    // Verify shared budget ledger:
+    // Child never created an unsettled reservation; parent settled its tokens;
+    // budget_unknown is false.
+    let ledger = runtime.model_requests(&parent.id).unwrap();
+    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.settled_tokens, 8);
+    assert_eq!(ledger.remaining_tokens, 100_000 - 8);
+    assert_eq!(ledger.requests.len(), 1);
+    assert_eq!(
+        ledger.requests[0].terminal,
+        Some(ModelRequestTerminal::Completed)
+    );
+}
+
+#[tokio::test]
+async fn child_subagent_waits_for_parent_turn_via_exec_yield_zero_tool_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let child_perms = vec![
+        ScopedPermission::exact(
+            "fs.write",
+            json!({"path":"child-only.txt","content":"child-yield0"}),
+        ),
+        ScopedPermission::exact("fs.read", json!({"path":"child-only.txt"})),
+    ];
+    let parent_perms = vec![ScopedPermission::exact(
+        "agent.run",
+        json!({"prompt":"child write and read","label":"Child"}),
+    )];
+    let settings = config(Some(local(child_perms)), parent_perms);
+    let runtime = runtime(&temp, provider.clone(), settings);
+    let parent = runtime.create(Some("parent".into())).unwrap();
+
+    // Setup gate on parent Turn 2 stream (which handles the ToolResult of yield_time_ms=0 exec)
+    let (unpause_tx, unpause_rx) = tokio::sync::oneshot::channel();
+    let (active_tx, active_rx) = tokio::sync::oneshot::channel();
+    *provider.pause_parent.lock().unwrap() = Some(unpause_rx);
+    *provider.parent_active.lock().unwrap() = Some(active_tx);
+
+    let parent_rt = runtime.clone();
+    let parent_id = parent.id.clone();
+    let parent_task =
+        tokio::spawn(
+            async move { run_prompt(&parent_rt, &parent_id, "spawn real yield0 child").await },
+        );
+
+    // 1. Confirm parent Turn 2 stream is actively in-flight holding the budget lock
+    active_rx.await.expect("parent stream never became active");
+
+    // 2. Observe the child session linked via real Core events from execute_code/agent.run
+    let child = child_session(&runtime, &parent.id).await;
+
+    // 3. Observe child task running in the background queue
+    tokio::time::timeout(WATCHDOG, async {
+        loop {
+            if runtime
+                .tasks(&child)
+                .is_ok_and(|tasks| tasks.iter().any(|t| t.state == TaskState::Running))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("child task did not enter running state");
+
+    // 4. Ledger observation: parent Turn 2 has an active, in-flight reservation
+    let ledger_before = runtime.model_requests(&parent.id).unwrap();
+    assert!(
+        ledger_before
+            .requests
+            .iter()
+            .any(|req| req.terminal.is_none() && req.outstanding_reservation_tokens > 0),
+        "parent Turn 2 must hold an in-flight reservation"
+    );
+
+    // 5. Provider observation: child request for 'child write and read' has NOT reached provider yet
+    // because it is queued on budget_lock
+    {
+        let requests = provider.requests.lock().unwrap();
+        let child_dispatched = requests.iter().any(|req| {
+            req.messages
+                .iter()
+                .any(|msg| msg.text() == "child write and read")
+        });
+        assert!(
+            !child_dispatched,
+            "child must be queued waiting on budget_lock before parent releases"
+        );
+    }
+
+    // 6. Release parent stream gate; parent Turn 2 settles and releases budget_lock
+    unpause_tx
+        .send(())
+        .expect("could not unpause parent stream");
+
+    // 7. Parent task completes
+    let parent_res = tokio::time::timeout(WATCHDOG, parent_task)
+        .await
+        .expect("parent timed out")
+        .unwrap();
+    assert!(
+        parent_res.is_ok(),
+        "parent task should complete successfully: {parent_res:?}"
+    );
+
+    // 8. Child task completes
+    let child_tasks = runtime.tasks(&child).unwrap();
+    assert_eq!(child_tasks.len(), 1);
+    assert_eq!(child_tasks[0].state, TaskState::Completed);
+
+    // 9. Verify actual workspace file write and content
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("workspace/child-only.txt")).unwrap(),
+        "child-yield0",
+        "child subagent must execute fs.write exactly once with expected content"
+    );
+
+    // 10. Verify durable Core events: fs.write settled exactly once
+    let child_events = runtime.events(&child, 0, 1000).unwrap();
+    let settled_writes: Vec<_> = child_events
+        .iter()
+        .filter_map(|r| {
+            let val = serde_json::to_value(r).unwrap();
+            let call = &val["event"]["call"];
+            if val["event"]["type"] == "capability_settled" && call["name"] == "fs.write" {
+                Some(call.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        settled_writes.len(),
+        1,
+        "fs.write must settle exactly once in durable Core events"
+    );
+    assert_eq!(settled_writes[0]["outcome"]["type"], "completed");
+
+    // 11. Verify Reopen: durable state survives and does NOT replay fs.write
+    drop(runtime);
+    let reopened_settings = config(Some(local(vec![])), vec![]);
+    let reopened = Runtime::open(
+        temp.path().join("sessions.db"),
+        temp.path().join("workspace"),
+        provider.clone(),
+        Model::new("fixture", "local-agents"),
+        reopened_settings,
+    )
+    .unwrap();
+
+    let reopened_events = reopened.events(&child, 0, 1000).unwrap();
+    let reopened_writes: Vec<_> = reopened_events
+        .iter()
+        .filter_map(|r| {
+            let val = serde_json::to_value(r).unwrap();
+            let call = &val["event"]["call"];
+            if val["event"]["type"] == "capability_settled" && call["name"] == "fs.write" {
+                Some(call.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        reopened_writes.len(),
+        1,
+        "reopened session must not replay fs.write"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("workspace/child-only.txt")).unwrap(),
+        "child-yield0"
+    );
+
+    // 12. Verify shared budget ledger: zero reserved tokens, requests completely settled
+    let ledger = reopened.model_requests(&parent.id).unwrap();
+    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert!(ledger.settled_tokens > 0);
+    for req in &ledger.requests {
+        assert_eq!(req.terminal, Some(ModelRequestTerminal::Completed));
+        assert!(req.settled_tokens.is_some());
+        assert_eq!(req.outstanding_reservation_tokens, 0);
+    }
+
+    let child_ledger = reopened.model_requests(&child).unwrap();
+    assert!(!child_ledger.budget_unknown);
+    assert_eq!(child_ledger.reserved_tokens, 0);
+    assert_eq!(child_ledger.settled_tokens, ledger.settled_tokens);
 }

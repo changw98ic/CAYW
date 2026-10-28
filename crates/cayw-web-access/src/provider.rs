@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::error::WebAccessError;
-use crate::types::{FailureClass, SearchHit};
+use crate::types::{FailureClass, SearchEmptyReason, SearchEvidence, SearchHit, SearchResponse};
 
 /// Async result alias used by provider futures.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -35,7 +35,7 @@ pub trait SearchProvider: Send + Sync {
         &'a self,
         query: &'a str,
         limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>>;
+    ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>>;
 }
 
 /// In-memory fixture transport: URL → canned body. Missing URLs fail as Offline.
@@ -175,7 +175,7 @@ impl SearchProvider for FixtureSearch {
         &'a self,
         query: &'a str,
         limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<SearchHit>, WebAccessError>> {
+    ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>> {
         Box::pin(async move {
             if self.offline {
                 return Err(
@@ -200,7 +200,19 @@ impl SearchProvider for FixtureSearch {
             if hits.len() as u32 > limit {
                 hits.truncate(limit as usize);
             }
-            Ok(hits)
+            if hits.is_empty() {
+                // Without HTTP original text, must not attribute to TrueEmpty/Challenge/StructuralMismatch.
+                Ok(SearchResponse::empty(
+                    SearchEmptyReason::Unattributed,
+                    Some(SearchEvidence {
+                        http_status: Some(200),
+                        source_summary: Some("fixture search miss without HTTP response".into()),
+                        response_snippet: None,
+                    }),
+                ))
+            } else {
+                Ok(SearchResponse::new(hits))
+            }
         })
     }
 }

@@ -67,7 +67,9 @@ pub use input::{ImageInput, TaskInput};
 pub use launch::{HeadlessConfig, PiCompatConfig};
 pub use model_requests::{
     ModelCostStatus, ModelRequestIdentity, ModelRequestLedger, ModelRequestObservation,
-    ModelRequestRecord, ModelRequestTerminal, ModelReservationPolicy, ModelUsageObservation,
+    ModelRequestOrigin, ModelRequestReconciledOutcome, ModelRequestReconciliation,
+    ModelRequestReconciliationRecord, ModelRequestReconciliationVerifier, ModelRequestRecord,
+    ModelRequestTerminal, ModelReservationPolicy, ModelUsageObservation,
 };
 pub use permissions::{ApprovalChoice, ScopedPermission};
 pub use plannotator::PlanFeedbackInput;
@@ -188,6 +190,9 @@ pub struct RuntimeConfig {
     pub request_limits: cayw_requests::RequestConfig,
     /// Trusted host policy for original-effect receipts. Absence denies reconciliation.
     pub reconciliation_verifier: Option<Arc<dyn cayw_core::ReconciliationVerifier>>,
+    /// Trusted host policy for exact model-request non-dispatch or complete
+    /// reported-usage evidence. Absence denies new reconciliation decisions.
+    pub model_request_reconciliation_verifier: Option<Arc<dyn ModelRequestReconciliationVerifier>>,
     /// Optional externally supplied shared plugin registry.
     #[cfg(feature = "plugins")]
     pub plugin_registry: Option<Arc<cayw_plugins::PluginRegistry>>,
@@ -222,6 +227,7 @@ impl Default for RuntimeConfig {
             request_policy: None,
             request_limits: Default::default(),
             reconciliation_verifier: None,
+            model_request_reconciliation_verifier: None,
             #[cfg(feature = "plugins")]
             plugin_registry: None,
         }
@@ -300,6 +306,7 @@ pub(crate) struct Inner {
     model: Model,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
+    budget_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     fleet: fleet::FleetRegistry,
     binding_cache: session::BindingCache,
     changed: Notify,
@@ -308,6 +315,16 @@ pub(crate) struct Inner {
     artifacts: Mutex<artifacts::ArtifactState>,
     #[cfg(feature = "plugins")]
     registry: Arc<cayw_plugins::PluginRegistry>,
+}
+
+impl Inner {
+    pub(crate) fn budget_lock(&self, budget_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = lock(&self.budget_locks);
+        locks
+            .entry(budget_session_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 #[derive(Clone)]
@@ -444,6 +461,7 @@ impl Runtime {
                 provider,
                 model,
                 active: Mutex::new(BTreeMap::new()),
+                budget_locks: Mutex::new(BTreeMap::new()),
                 fleet: fleet::FleetRegistry::default(),
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),

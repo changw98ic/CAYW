@@ -134,7 +134,7 @@ fn store_rejects_unchecked_values_without_process_abort() {
                     "deep-array" | "deep-object" | "deep-byte-limit" | "deep-unvisited-sibling"
                 ) {
                     assert!(
-                        matches!(result, Err(CellError::Capacity)),
+                        matches!(result, Err(CellError::Capacity(_))),
                         "{case}: {result:?}"
                     );
                 } else {
@@ -316,7 +316,7 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
                     assert_eq!(retried.reconciliation.len(), 1);
                 } else {
                     assert!(
-                        matches!(result, Err(CellError::Capacity)),
+                        matches!(result, Err(CellError::Capacity(_))),
                         "{case}: {result:?}"
                     );
                     assert_eq!(

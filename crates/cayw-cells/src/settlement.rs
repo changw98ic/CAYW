@@ -267,15 +267,30 @@ fn apply_input(
     if already_applied {
         return Ok((record, false));
     }
-    if record.host_settlements.len() >= record.calls.len().saturating_mul(2).saturating_add(8) {
-        return Err(CellError::Capacity);
+    let limit = record.calls.len().saturating_mul(2).saturating_add(8);
+    if record.host_settlements.len() >= limit {
+        return Err(CellError::capacity(
+            CapacityKind::HostSettlements,
+            Some(record.cell_id.clone()),
+            Some(record.status),
+            record.host_settlements.len(),
+            limit,
+        ));
     }
     record.host_settlements.push(HostSettlementEvidence {
         stopped: stopped.clone(),
         settlement: settlement.clone(),
     });
     let previous = record.revision;
-    record.revision = previous.checked_add(1).ok_or(CellError::Capacity)?;
+    record.revision = previous.checked_add(1).ok_or_else(|| {
+        CellError::capacity(
+            CapacityKind::HostSettlements,
+            Some(record.cell_id.clone()),
+            Some(record.status),
+            usize::MAX,
+            usize::MAX,
+        )
+    })?;
     Ok((record, true))
 }
 

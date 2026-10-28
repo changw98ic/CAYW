@@ -629,6 +629,338 @@ async fn injected_service_unretainable_response_is_unknown_and_charges_shared_by
     assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
 }
 
+struct DelegatingService {
+    host: Host,
+    calls: AtomicUsize,
+    large_response: bool,
+}
+#[async_trait]
+impl ExternalHost for DelegatingService {
+    fn delegates_workspace_calls(&self) -> bool {
+        true
+    }
+    async fn call(
+        &self,
+        _: &str,
+        _: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, CapabilityError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.host
+            .call(
+                "fs.write",
+                json!({"path":"delegated.txt","content":"written once"}),
+                cancel.clone(),
+            )
+            .await?;
+        let result = self
+            .host
+            .call("fs.read", json!({"path":"delegated.txt"}), cancel)
+            .await?;
+        if self.large_response {
+            Ok(json!({"value":"x".repeat(4096)}))
+        } else {
+            Ok(result)
+        }
+    }
+}
+
+#[tokio::test]
+async fn delegated_service_reenters_host_with_independent_authorization_and_audit() {
+    let root = Root::new();
+    let gate = Arc::new(Gate::default());
+    let audit = Arc::new(Audit::default());
+    let base = Host::new(&root.0, gate.clone(), audit.clone(), HostConfig::default()).unwrap();
+    let service = DelegatingService {
+        host: base.clone(),
+        calls: AtomicUsize::new(0),
+        large_response: false,
+    };
+    let value = tokio::time::timeout(
+        Duration::from_secs(10),
+        base.call_service(
+            &service_definition(),
+            json!({"id":1}),
+            CancellationToken::new(),
+            &service,
+        ),
+    )
+    .await
+    .expect("delegating service must not hold the lane or workspace fence")
+    .unwrap();
+    assert!(value.to_string().contains("written once"));
+    assert_eq!(
+        fs::read_to_string(root.0.join("delegated.txt")).unwrap(),
+        "written once"
+    );
+    assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gate.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *audit.0.lock().unwrap(),
+        [
+            "running",
+            "running",
+            "succeeded",
+            "running",
+            "succeeded",
+            "succeeded"
+        ]
+    );
+    assert!(
+        base.pending_mutation(CancellationToken::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delegated_service_cannot_bypass_nested_host_permission() {
+    let root = Root::new();
+    let base = parent(&root, HostConfig::default());
+    let denied_gate = Arc::new(Gate {
+        deny: true,
+        ..Default::default()
+    });
+    let service = DelegatingService {
+        host: base
+            .scoped(denied_gate.clone(), Arc::new(Audit::default()))
+            .unwrap(),
+        calls: AtomicUsize::new(0),
+        large_response: false,
+    };
+    let error = base
+        .call_service(
+            &service_definition(),
+            json!({"id":1}),
+            CancellationToken::new(),
+            &service,
+        )
+        .await
+        .unwrap_err();
+    assert!(!error.outcome_unknown);
+    assert_eq!(denied_gate.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    assert!(!root.0.join("delegated.txt").exists());
+}
+
+#[tokio::test]
+async fn delegated_service_unretainable_response_keeps_its_known_nested_effect_and_unknown() {
+    let root = Root::new();
+    let audit = Arc::new(Audit::default());
+    let base = Host::new(
+        &root.0,
+        Arc::new(Gate::default()),
+        audit.clone(),
+        HostConfig {
+            max_result_bytes: 512,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let service = DelegatingService {
+        host: base.clone(),
+        calls: AtomicUsize::new(0),
+        large_response: true,
+    };
+    let error = base
+        .call_service(
+            &service_definition(),
+            json!({"id":1}),
+            CancellationToken::new(),
+            &service,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.outcome_unknown);
+    assert!(base.outcome_unknown());
+    assert_eq!(
+        fs::read_to_string(root.0.join("delegated.txt")).unwrap(),
+        "written once"
+    );
+    assert_eq!(service.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(audit.0.lock().unwrap().last(), Some(&"unknown"));
+    assert!(
+        call(&base, "fs.write", json!({"path":"never","content":"bad"}))
+            .await
+            .unwrap_err()
+            .outcome_unknown
+    );
+    assert!(!root.0.join("never").exists());
+}
+
+struct PausedWriteAudit {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    events: Mutex<Vec<&'static str>>,
+}
+#[async_trait]
+impl AuditSink for PausedWriteAudit {
+    async fn started(&self, name: &str, arguments: &Value) -> Result<String, CapabilityError> {
+        assert_eq!(name, "fs.write");
+        assert_eq!(
+            arguments,
+            &json!({"path":"delegated-drop.txt","content":"written before drop"})
+        );
+        self.events.lock().unwrap().push("running");
+        Ok("nested-write".into())
+    }
+    async fn settled(
+        &self,
+        id: &str,
+        result: &Result<Value, CapabilityError>,
+    ) -> Result<(), CapabilityError> {
+        assert_eq!(id, "nested-write");
+        assert!(
+            result.is_ok(),
+            "the actual write must finish before pausing"
+        );
+        let release = self.release.lock().unwrap().take().unwrap();
+        self.entered
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .send(())
+            .unwrap();
+        // Host still owns this write's mutation fence until this callback returns.
+        release
+            .await
+            .map_err(|_| CapabilityError::unknown("write settlement release was dropped"))?;
+        self.events.lock().unwrap().push("succeeded");
+        Ok(())
+    }
+    fn dropped(&self, id: &str) -> Result<(), CapabilityError> {
+        assert_eq!(id, "nested-write");
+        self.events.lock().unwrap().push("dropped");
+        Ok(())
+    }
+}
+
+struct PausedDelegatingService {
+    host: Host,
+    nested_cancel: Mutex<Option<CancellationToken>>,
+}
+#[async_trait]
+impl ExternalHost for PausedDelegatingService {
+    fn delegates_workspace_calls(&self) -> bool {
+        true
+    }
+    async fn call(
+        &self,
+        _: &str,
+        _: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, CapabilityError> {
+        let nested_cancel = cancel.child_token();
+        *self.nested_cancel.lock().unwrap() = Some(nested_cancel.clone());
+        self.host
+            .call(
+                "fs.write",
+                json!({"path":"delegated-drop.txt","content":"written before drop"}),
+                nested_cancel,
+            )
+            .await
+    }
+}
+
+#[tokio::test]
+async fn delegated_service_drop_retains_the_unsettled_nested_write_identity_and_cancels_it() {
+    let root = Root::new();
+    let outer_audit = Arc::new(Audit::default());
+    let base = Host::new(
+        &root.0,
+        Arc::new(Gate::default()),
+        outer_audit.clone(),
+        HostConfig::default(),
+    )
+    .unwrap();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let nested_audit = Arc::new(PausedWriteAudit {
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(Some(release_rx)),
+        events: Mutex::new(Vec::new()),
+    });
+    let service = PausedDelegatingService {
+        host: base
+            .scoped(Arc::new(Gate::default()), nested_audit.clone())
+            .unwrap(),
+        nested_cancel: Mutex::new(None),
+    };
+    let definition = service_definition();
+    let caller_cancel = CancellationToken::new();
+    let mut run = Box::pin(base.call_service(
+        &definition,
+        json!({"id":1}),
+        caller_cancel.clone(),
+        &service,
+    ));
+    tokio::select! {
+        result = &mut run => panic!("delegated write returned before its audit release: {result:?}"),
+        entered = tokio::time::timeout(Duration::from_secs(10), entered_rx) => {
+            entered.expect("nested write did not reach audit settlement").unwrap();
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(root.0.join("delegated-drop.txt")).unwrap(),
+        "written before drop"
+    );
+    // The public inspection waits for the held fence. Read its durable snapshot
+    // while the explicit audit signal keeps the original writer paused.
+    let state: Value =
+        serde_json::from_slice(&fs::read(root.0.join(".cayw-host-read-state")).unwrap()).unwrap();
+    let original: cayw_host::PendingMutation =
+        serde_json::from_value(state["pending"].clone()).unwrap();
+    assert_eq!(original.audit_id, "nested-write");
+    assert_eq!(original.capability, "fs.write");
+    assert_eq!(original.workspace, base.workspace_identity().unwrap());
+    let nested_cancel = service.nested_cancel.lock().unwrap().clone().unwrap();
+    assert!(!nested_cancel.is_cancelled());
+    assert_eq!(*outer_audit.0.lock().unwrap(), ["running"]);
+    assert_eq!(*nested_audit.events.lock().unwrap(), ["running"]);
+    let mut pending = Box::pin(base.pending_mutation(CancellationToken::new()));
+    assert!(futures::poll!(&mut pending).is_pending());
+
+    drop(run);
+
+    assert!(base.outcome_unknown());
+    assert!(nested_cancel.is_cancelled());
+    assert!(!caller_cancel.is_cancelled());
+    assert!(
+        release_tx.send(()).is_err(),
+        "nested settlement was dropped"
+    );
+    assert_eq!(*outer_audit.0.lock().unwrap(), ["running", "dropped"]);
+    assert_eq!(*nested_audit.events.lock().unwrap(), ["running", "dropped"]);
+    // Dropping releases the lock, but cannot confirm the write's terminal or
+    // clear the original pending identity. The completed file effect survives.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .expect("dropped nested write kept its fence locked")
+            .unwrap(),
+        Some(original.clone())
+    );
+    assert_eq!(
+        fs::read_to_string(root.0.join("delegated-drop.txt")).unwrap(),
+        "written before drop"
+    );
+    assert!(
+        call(&base, "fs.write", json!({"path":"never","content":"bad"}))
+            .await
+            .unwrap_err()
+            .outcome_unknown
+    );
+    assert!(!root.0.join("never").exists());
+    assert_eq!(
+        base.pending_mutation(CancellationToken::new())
+            .await
+            .unwrap(),
+        Some(original)
+    );
+}
+
 struct PendingService(Mutex<Option<CancellationToken>>);
 #[async_trait]
 impl ExternalHost for PendingService {

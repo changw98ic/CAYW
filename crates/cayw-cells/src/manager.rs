@@ -189,11 +189,15 @@ impl CellManager {
             let session_vm_lock = self
                 .journal
                 .claim_session(&self.identity.session_id, false)?;
-            let permit = self
-                .capacity
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CellError::Capacity)?;
+            let permit = self.capacity.clone().try_acquire_owned().map_err(|_| {
+                CellError::capacity(
+                    CapacityKind::MaxRunning,
+                    None,
+                    None,
+                    self.limits.max_running,
+                    self.limits.max_running,
+                )
+            })?;
             let record = CellRecord {
                 cell_id: Uuid::new_v4().to_string(),
                 identity: self.identity.clone(),
@@ -707,10 +711,23 @@ impl Run {
         let bytes = output.validate(&self.limits)?;
         let mut entry = None;
         self.update(|record| {
-            if record.outputs.len() >= self.limits.output_items
-                || record.output_bytes.saturating_add(bytes) > self.limits.output_bytes
-            {
-                return Err(CellError::Capacity);
+            if record.outputs.len() >= self.limits.output_items {
+                return Err(CellError::capacity(
+                    CapacityKind::OutputItems,
+                    Some(record.cell_id.clone()),
+                    Some(record.status),
+                    record.outputs.len(),
+                    self.limits.output_items,
+                ));
+            }
+            if record.output_bytes.saturating_add(bytes) > self.limits.output_bytes {
+                return Err(CellError::capacity(
+                    CapacityKind::OutputBytes,
+                    Some(record.cell_id.clone()),
+                    Some(record.status),
+                    record.output_bytes.saturating_add(bytes),
+                    self.limits.output_bytes,
+                ));
             }
             let committed = OutputEntry {
                 cursor: record.outputs.len() as u64 + 1,
@@ -802,10 +819,18 @@ impl Run {
         if !self.exited.load(Ordering::Acquire)
             && error.is_none()
             && report.return_value != Value::Null
-            && let Err(fault) = self.emit(CellOutput::Json {
+            && let Err(mut fault) = self.emit(CellOutput::Json {
                 value: report.return_value,
             })
         {
+            if let CellError::Capacity(diag) = &mut fault {
+                if diag.cell_id.is_none() {
+                    diag.cell_id = Some(self.id());
+                }
+                if diag.status.is_none() {
+                    diag.status = Some(CellStatus::Running);
+                }
+            }
             let message = fault.to_string();
             let stop = fault.capability_error().stop;
             if let Err(fault) = self.update(|record| {

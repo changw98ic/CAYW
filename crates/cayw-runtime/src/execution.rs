@@ -1060,6 +1060,14 @@ async fn execute_with_cells(
         if let Some(error) = lock(&rejection).take() {
             return Err(error);
         }
+        // A terminating tool can make the Agent finish before the lifecycle
+        // check observes its known failure. Keep the same cause in either order.
+        if context.failed.load(Ordering::Acquire)
+            && !context.cancel.is_cancelled()
+            && !context.unknown.load(Ordering::Acquire)
+        {
+            context.check(&context.cancel)?;
+        }
         // A failed model turn is not a completion claim. Cancellation, budget
         // and uncertain effects settle through the worker and durable queue;
         // other model/provider failures stay visible in the session view. Do
@@ -1137,8 +1145,16 @@ where
                     if matches!(error, RuntimeError::Budget("time")) {
                         expired = true;
                         abort();
-                    } else {
+                    } else if matches!(error, RuntimeError::Cancelled) {
                         cancel.cancel();
+                    } else {
+                        // A known stop must keep its cause after the Agent has
+                        // joined. The user cancellation token is a separate fact.
+                        abort();
+                        return match run.await {
+                            Err(cleanup @ RuntimeError::RecoveryRequired { .. }) => Err(cleanup),
+                            _ => Err(error),
+                        };
                     }
                 }
                 // A slow persistent check must not queue catch-up work ahead of
@@ -1221,6 +1237,36 @@ mod tests {
         .unwrap();
         assert!(finished.is_cancelled());
         assert_eq!(checks.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn known_lifecycle_failure_joins_without_becoming_user_cancellation() {
+        for failure in [
+            RuntimeError::Budget("turn"),
+            RuntimeError::Worker("host call or total byte budget exhausted".into()),
+        ] {
+            let expected = failure.to_string();
+            let mut failure = Some(failure);
+            let cancel = CancellationToken::new();
+            let stopped = CancellationToken::new();
+            let joined = Cell::new(false);
+            let error = supervise_run(
+                async {
+                    stopped.cancelled().await;
+                    joined.set(true);
+                    Ok(())
+                },
+                &cancel,
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                || std::future::ready(Err(failure.take().unwrap())),
+                || stopped.cancel(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert!(joined.get());
+            assert!(!cancel.is_cancelled());
+        }
     }
 
     #[tokio::test(start_paused = true)]

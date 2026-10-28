@@ -722,7 +722,7 @@ async fn capacity_output_and_store_limits_are_enforced_without_cursor_overwrite(
     journal.store("session", "a", 0, json!(1), &limits).unwrap();
     assert!(matches!(
         journal.store("session", "b", 0, json!(1), &limits),
-        Err(CellError::Capacity)
+        Err(CellError::Capacity(ref diag)) if diag.kind == CapacityKind::StoreKeys
     ));
     let page = cells
         .exec_fixture(
@@ -738,7 +738,7 @@ async fn capacity_output_and_store_limits_are_enforced_without_cursor_overwrite(
         cells
             .exec_fixture(exec("text('overflow')"), CancellationToken::new())
             .await,
-        Err(CellError::Capacity)
+        Err(CellError::Capacity(ref diag)) if diag.kind == CapacityKind::MaxRunning
     ));
     let cancelled = cells.cancel(&page.cell_id).await.unwrap();
     assert_eq!(cancelled.status, CellStatus::Cancelled);
@@ -1209,6 +1209,149 @@ async fn restart_classifies_unstarted_interrupted_and_pending_across_tasks_witho
             .await,
         Err(CellError::Frozen)
     ));
+    cells.close().await;
+}
+
+#[tokio::test]
+async fn continuous_exec_wait_paginate_and_release_reclaims_runtime_capacity_without_dropping_history()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let host = Arc::new(Host::default());
+    let limits = CellLimits {
+        max_running: 1,
+        max_cells: 16,
+        output_items: 10,
+        ..CellLimits::default()
+    };
+    let session = "session-continuous";
+    let id = identity(session);
+    let reads = ReadCoordinator::new(vec![], limits.clone()).unwrap();
+    let cells = manager(
+        journal.clone(),
+        host.clone(),
+        reads,
+        limits.clone(),
+        session,
+    );
+
+    // Run 5 sequential execution rounds on a manager configured with max_running = 1.
+    // If runtime execution capacity (semaphore permit) leaked or was not reclaimed
+    // after termination, iteration 1..4 would immediately fail with MaxRunning.
+    let iterations = 5;
+    for i in 0..iterations {
+        let script = format!(
+            r#"
+            local key = 'ref_entry_{i}'
+            cayw.call('cells.store', {{ key = key, expected_version = 0, value = {{ index = {i}, text = 'payload' }} }})
+            text('output-item-1-for-{i}')
+            text('output-item-2-for-{i}')
+            text('output-item-3-for-{i}')
+            local loaded = cayw.call('cells.load', {{ key = key }})
+            cayw.call('cells.store', {{ key = key, expected_version = 1, value = cayw.null }})
+            return {{ round = {i}, loaded_index = loaded.index }}
+            "#
+        );
+
+        let initial_page = cells
+            .exec_fixture(
+                ExecRequest {
+                    script,
+                    yield_time_ms: 0,
+                    max_output_tokens: 1024,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        // Paginate output incrementally from cursor 0 using small token budget
+        let mut cursor = initial_page.next_cursor;
+        let mut collected_texts = Vec::new();
+        for item in &initial_page.outputs {
+            if let CellOutput::Text { text } = &item.output {
+                collected_texts.push(text.clone());
+            }
+        }
+        let mut current_page = initial_page;
+
+        while !current_page.status.is_terminal() || current_page.vm_alive {
+            let wait_req = WaitRequest {
+                cell_id: current_page.cell_id.clone(),
+                cursor,
+                yield_time_ms: 5000,
+                max_output_tokens: 1024,
+                continue_execution: false,
+            };
+            current_page = cells
+                .wait(wait_req, CancellationToken::new())
+                .await
+                .unwrap();
+            for item in &current_page.outputs {
+                if let CellOutput::Text { text } = &item.output {
+                    collected_texts.push(text.clone());
+                }
+            }
+            if current_page.next_cursor > cursor {
+                cursor = current_page.next_cursor;
+            }
+        }
+
+        let record = cells.record(&current_page.cell_id).unwrap();
+        assert_eq!(
+            current_page.status,
+            CellStatus::Completed,
+            "round {i} failed: {record:?}"
+        );
+        assert!(!current_page.vm_alive);
+        assert!(
+            collected_texts.contains(&format!("output-item-1-for-{i}")),
+            "round {i} text 1 missing"
+        );
+        assert!(
+            collected_texts.contains(&format!("output-item-2-for-{i}")),
+            "round {i} text 2 missing"
+        );
+        assert!(
+            collected_texts.contains(&format!("output-item-3-for-{i}")),
+            "round {i} text 3 missing"
+        );
+
+        // Replay full output via pagination from cursor 0
+        let replay_page = cells
+            .wait(
+                WaitRequest {
+                    cell_id: current_page.cell_id.clone(),
+                    cursor: 0,
+                    yield_time_ms: 0,
+                    max_output_tokens: 128 * 1024,
+                    continue_execution: false,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay_page.outputs.len(), 4); // 3 text outputs + 1 returned json output
+
+        // Verify the record is durable and succeeded
+        let record = cells.record(&current_page.cell_id).unwrap();
+        assert_eq!(record.status, CellStatus::Completed);
+    }
+
+    // Crucial check: distinguish runtime slot quota (max_running: 1) from persistent history (max_cells: 16).
+    // All 5 cell records must exist in full fidelity in the SQLite journal.
+    let records = journal.records(&id, &limits).unwrap();
+    assert_eq!(
+        records.len(),
+        iterations,
+        "Every execution must retain its complete persistent history; no records may be dropped to reclaim capacity"
+    );
+    for rec in &records {
+        assert_eq!(rec.status, CellStatus::Completed);
+        assert_eq!(rec.outputs.len(), 4); // 3 texts + 1 return value
+        assert_eq!(rec.calls.len(), 3); // 1 store + 1 load + 1 release store
+    }
+
     cells.close().await;
 }
 
