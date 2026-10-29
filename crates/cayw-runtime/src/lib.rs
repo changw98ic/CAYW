@@ -493,8 +493,18 @@ impl Runtime {
         rt.capabilities()?; // Validate actual injected Host configuration before serving.
         Ok(rt)
     }
+    /// Trusted host access to Core storage. Runtime recovery must use
+    /// [`Self::recover`] so original executor cleanup is checked first.
     pub fn store(&self) -> &SessionStore {
         &self.inner.store
+    }
+    /// Read one durable approval without exposing mutable Core operations.
+    pub fn approval(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+    ) -> Result<ApprovalRequest, RuntimeError> {
+        Ok(self.inner.store.approval(session_id, approval_id)?)
     }
     pub fn workspace(&self) -> &Path {
         &self.inner.root

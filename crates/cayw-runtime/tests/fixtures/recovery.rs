@@ -2,12 +2,13 @@
 use async_trait::async_trait;
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_codemode::CapabilityError;
-use cayw_host::ExternalHost;
+use cayw_host::{ExternalHost, ProcessIo, Profile, ProfileKind};
 use cayw_ipc::{Client, ClientConfig, RpcError, RpcHandler, ServerConfig};
 use cayw_runtime::{RequestPolicy, Runtime, RuntimeConfig, ScopedPermission};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -21,6 +22,10 @@ use std::{
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const WATCHDOG: Duration = Duration::from_secs(120);
 pub const SCRIPT: &str = "return cayw.call('search.query', {query='fixture'})";
+/// The process profile is configured but the leaf process is only launched
+/// after the Core start boundary. Killing at that boundary therefore proves the
+/// registered-but-never-launched process scope, not an observed OS process.
+pub const PROCESS_SCRIPT: &str = "return cayw.call('test.run', {profile='leaf'})";
 const RUN_BUDGET: Duration = Duration::from_secs(600);
 const TOKEN: &str = "offline-crash-matrix-authentication-token";
 
@@ -48,6 +53,9 @@ pub struct Context {
 
 pub fn arguments() -> Value {
     json!({"query":"fixture"})
+}
+pub fn process_arguments() -> Value {
+    json!({"profile":"leaf"})
 }
 pub fn read_json(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
@@ -130,7 +138,18 @@ fn install(root: &Path, checkpoint: &str, context: Arc<Context>) -> Result<()> {
 struct FixedProvider {
     root: PathBuf,
     role: String,
+    script: &'static str,
     calls: AtomicU64,
+}
+impl FixedProvider {
+    fn new(root: &Path, role: &str, script: &'static str) -> Self {
+        Self {
+            root: root.to_owned(),
+            role: role.into(),
+            script,
+            calls: AtomicU64::new(0),
+        }
+    }
 }
 impl Provider for FixedProvider {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
@@ -147,7 +166,7 @@ impl Provider for FixedProvider {
         }
         let message = cayw_runtime::fixture::script_response(
             &request,
-            SCRIPT,
+            self.script,
             &format!("crash-fixture-{index}"),
         );
         append(
@@ -251,27 +270,32 @@ impl ExternalHost for EffectService {
     }
 }
 
-pub fn open(root: &Path, role: &str, context: Arc<Context>) -> Result<Runtime> {
+fn base_config() -> RuntimeConfig {
     let mut config = RuntimeConfig {
-        permissions: vec![ScopedPermission::exact("search.query", arguments())],
         max_run_time: RUN_BUDGET,
         max_queue_time: RUN_BUDGET,
-        // Bind a real Requests authority without protecting the test service.
-        // The declared protected operation is never executed by this script.
-        request_policy: Some(RequestPolicy {
-            permission_policy_id: "crash-matrix-v1".into(),
-            operations: vec![cayw_requests::OperationScope::exact(
-                "read-fixture",
-                "fs.read",
-                json!({"path":"unused-crash-matrix.txt"}),
-                "workspace-policy",
-            )],
-        }),
         ..RuntimeConfig::default()
     };
     config.cells.max_yield_time = Duration::from_secs(300);
     config.codemode.timeout = RUN_BUDGET;
     config.host.call_timeout = RUN_BUDGET;
+    config
+}
+
+pub fn open(root: &Path, role: &str, context: Arc<Context>) -> Result<Runtime> {
+    let mut config = base_config();
+    config.permissions = vec![ScopedPermission::exact("search.query", arguments())];
+    // Bind a real Requests authority without protecting the test service.
+    // The declared protected operation is never executed by this script.
+    config.request_policy = Some(RequestPolicy {
+        permission_policy_id: "crash-matrix-v1".into(),
+        operations: vec![cayw_requests::OperationScope::exact(
+            "read-fixture",
+            "fs.read",
+            json!({"path":"unused-crash-matrix.txt"}),
+            "workspace-policy",
+        )],
+    });
     config.host.external = Some(Arc::new(EffectService {
         root: root.to_owned(),
         context,
@@ -279,13 +303,40 @@ pub fn open(root: &Path, role: &str, context: Arc<Context>) -> Result<Runtime> {
     Ok(Runtime::open(
         root.join("session.sqlite"),
         root.join("workspace"),
-        Arc::new(FixedProvider {
-            root: root.to_owned(),
-            role: role.into(),
-            calls: AtomicU64::new(0),
-        }),
+        Arc::new(FixedProvider::new(root, role, SCRIPT)),
         Model::new("offline-fixture", "recovery-matrix"),
         config,
+    )?)
+}
+
+/// The exact config a reopened connection and the trusted host must agree on.
+/// The leaf profile is a real executable; only `ProcessIo::Pipes` is used.
+pub fn process_config(root: &Path, program: &Path) -> RuntimeConfig {
+    let mut config = base_config();
+    config.permissions = vec![ScopedPermission::exact("test.run", process_arguments())];
+    config.host.profiles.insert(
+        "leaf".into(),
+        Profile {
+            kind: ProfileKind::Test,
+            program: program.to_owned(),
+            args: vec!["leaf".into(), root.to_string_lossy().into_owned()],
+            env: BTreeMap::new(),
+            timeout: Duration::from_secs(60),
+            max_output_bytes: 4096,
+            allow_filter: false,
+            io: ProcessIo::Pipes,
+        },
+    );
+    config
+}
+
+pub fn open_process(root: &Path, role: &str, program: &Path) -> Result<Runtime> {
+    Ok(Runtime::open(
+        root.join("session.sqlite"),
+        root.join("workspace"),
+        Arc::new(FixedProvider::new(root, role, PROCESS_SCRIPT)),
+        Model::new("offline-fixture", "process-recovery-matrix"),
+        process_config(root, program),
     )?)
 }
 
@@ -320,9 +371,9 @@ async fn run(mode: &str, root: &Path, checkpoint: &str) -> Result<()> {
     let identity: Identity = serde_json::from_value(read_json(&root.join("identity.json"))?)?;
     let context = Arc::new(Context::default());
     install(root, checkpoint, context.clone())?;
-    let runtime = open(root, "original", context)?;
     match mode {
         "sdk" => {
+            let runtime = open(root, "original", context)?;
             let result = runtime
                 .resume(&identity.task_id, CancellationToken::new())
                 .await?;
@@ -332,7 +383,19 @@ async fn run(mode: &str, root: &Path, checkpoint: &str) -> Result<()> {
             );
             write_json(&root.join("unexpected-completion.json"), &result)?;
         }
+        "process" => {
+            // The parent supplies the fixture executable because a Cargo bin
+            // target cannot read another target's CARGO_BIN_EXE variable.
+            let program = std::env::var_os("CAYW_PROCESS_FIXTURE")
+                .ok_or("process mode requires CAYW_PROCESS_FIXTURE")?;
+            let runtime = open_process(root, "original", Path::new(&program))?;
+            let result = runtime
+                .resume(&identity.task_id, CancellationToken::new())
+                .await?;
+            write_json(&root.join("unexpected-completion.json"), &result)?;
+        }
         "ipc" => {
+            let runtime = open(root, "original", context)?;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let address = listener.local_addr()?;
             write_json(
@@ -369,7 +432,7 @@ async fn run(mode: &str, root: &Path, checkpoint: &str) -> Result<()> {
             stop.cancel();
             server.await??;
         }
-        _ => return Err("expected sdk or ipc mode".into()),
+        _ => return Err("expected sdk, ipc or process mode".into()),
     }
     Err(format!("checkpoint {checkpoint} was not reached").into())
 }
@@ -377,7 +440,9 @@ async fn run(mode: &str, root: &Path, checkpoint: &str) -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() != 4 || args[0] != "run" {
-        return Err("usage: cayw-runtime-recovery-fixture run sdk|ipc root checkpoint".into());
+        return Err(
+            "usage: cayw-runtime-recovery-fixture run sdk|ipc|process root checkpoint".into(),
+        );
     }
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)

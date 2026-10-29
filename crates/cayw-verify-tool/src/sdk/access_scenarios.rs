@@ -173,9 +173,7 @@ fn snapshot(runtime: &Runtime, provider: &FixedProvider, root: &Path, id: &str) 
     let approvals = events
         .iter()
         .filter_map(|event| match &event.event {
-            CoreEvent::ApprovalRequested { approval } => {
-                Some(runtime.store().approval(id, &approval.id))
-            }
+            CoreEvent::ApprovalRequested { approval } => Some(runtime.approval(id, &approval.id)),
             _ => None,
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
