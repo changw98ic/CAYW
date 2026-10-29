@@ -197,6 +197,36 @@ async fn edits_reopen_undo_and_stale_saves_preserve_actual_results() {
     );
 }
 
+#[tokio::test]
+async fn invalid_edits_fail_before_advancing_the_saved_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trace.json");
+    let store = initialized(&path);
+    let before = store.snapshot();
+    let edit = Edit {
+        expected_version: 1,
+        node_id: "input".into(),
+        source: plan().nodes[0].source.clone(),
+        params: json!({"offset":1}),
+        // A non-empty pointer must start with '/'.
+        input_pointer: "value".into(),
+    };
+    let error = store
+        .edit("exec", edit, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Invalid(_)), "{error:?}");
+    let after = store.snapshot();
+    assert_eq!(after.sequence, before.sequence);
+    assert_eq!(after.projects["exec"].version(), 1);
+    assert_eq!(after.projects["exec"].evaluations.len(), 1);
+    drop(store);
+    let reopened = TraceStore::open(&path).unwrap();
+    let persisted = reopened.snapshot();
+    assert_eq!(persisted.projects["exec"].version(), 1);
+    assert_eq!(persisted.projects["exec"].evaluations.len(), 1);
+}
+
 #[test]
 fn cursor_gaps_never_advance_saved_position() {
     let dir = tempfile::tempdir().unwrap();

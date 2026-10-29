@@ -129,10 +129,10 @@ fn persist_feedback(
     session: &str,
     actor: &str,
     feedback: &StructuredFeedback,
-) -> Result<u64, RuntimeError> {
+) -> Result<(), RuntimeError> {
     let snapshot = inner.store.snapshot(session)?;
     let data = serde_json::to_value(feedback).map_err(RuntimeError::Json)?;
-    let record = inner
+    inner
         .store
         .append_control_event(
             session,
@@ -144,7 +144,7 @@ fn persist_feedback(
         )
         .map_err(RuntimeError::Core)?;
     inner.changed.notify_waiters();
-    Ok(record.cursor)
+    Ok(())
 }
 
 impl Runtime {
@@ -152,12 +152,28 @@ impl Runtime {
     ///
     /// Durability order: **disk (Core session log) first, then memory**. A
     /// failed persist must not leave an injectable record for the next Agent
-    /// turn — prepare validates/allocates, append to Core, only then commit
-    /// into the process-local store used by apply/inject.
+    /// turn — prepare validates/allocates, then append to Core. The next read
+    /// or Agent injection replays that log into the process-local store in
+    /// durable order.
     pub fn submit_plannotator_feedback(
         &self,
         draft: FeedbackDraft,
         actor: &str,
+    ) -> Result<StructuredFeedback, RuntimeError> {
+        self.submit_plannotator_feedback_with(draft, actor, || Ok(()))
+    }
+
+    /// Durable submit path shared with [`Self::submit_plannotator_feedback`].
+    ///
+    /// `between_hydrate_and_persist` runs after the hydrate snapshot and before
+    /// the durable append. Production always passes a no-op; the unit
+    /// regression uses it to place a peer event in that exact window without a
+    /// global hook or a second copy of this algorithm.
+    fn submit_plannotator_feedback_with(
+        &self,
+        draft: FeedbackDraft,
+        actor: &str,
+        between_hydrate_and_persist: impl FnOnce() -> Result<(), RuntimeError>,
     ) -> Result<StructuredFeedback, RuntimeError> {
         if actor.trim().is_empty() || actor.len() > 128 {
             return Err(RuntimeError::InvalidInput(
@@ -166,20 +182,15 @@ impl Runtime {
         }
         self.get(&draft.session_id)?;
         hydrate_session(&self.inner, &draft.session_id)?;
+        between_hydrate_and_persist()?;
         let feedback = FeedbackStore::prepare(draft)
             .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
-        // Durable write before memory commit so a failed API cannot leave
-        // injectable state for for_attempt / feedback_messages_for_attempt.
-        let new_cursor = persist_feedback(&self.inner, &feedback.session_id, actor, &feedback)?;
-        {
-            let mut state = lock(&self.inner.plannotator);
-            state.store.commit(feedback.clone());
-            state
-                .cursors
-                .entry(feedback.session_id.clone())
-                .and_modify(|c| *c = (*c).max(new_cursor))
-                .or_insert(new_cursor);
-        }
+        // Durable write before any memory update so a failed append cannot
+        // leave injectable state for for_attempt / feedback_messages_for_attempt.
+        persist_feedback(&self.inner, &feedback.session_id, actor, &feedback)?;
+        // Keep the consumed cursor unchanged. Reads and Agent injection replay
+        // the durable log before using the memory store, so a racing peer event
+        // is restored before our own record, in the same order as after reopen.
         Ok(feedback)
     }
 
@@ -393,9 +404,12 @@ fn latest_plan_any(events: &[cayw_core::EventRecord]) -> Result<Option<PlanSnap>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cayw_ai::Model;
     use cayw_plannotator::{
         AnnotationComment, AnnotationTarget, FEEDBACK_SECTION_KEY, FeedbackDecision,
     };
+    use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn section_key_is_stable() {
@@ -435,5 +449,185 @@ mod tests {
         let mut store = FeedbackStore::new();
         let fb = store.submit(draft).unwrap();
         assert_eq!(fb.visible_from_attempt, 2);
+    }
+
+    fn test_runtime(dir: &tempfile::TempDir) -> Runtime {
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        Runtime::open(
+            dir.path().join("session.db"),
+            workspace,
+            Arc::new(crate::fixture::OfflineProvider::default()),
+            Model::new("fixture", "plannotator"),
+            crate::RuntimeConfig::default(),
+        )
+        .unwrap()
+    }
+
+    fn feedback_draft(session: &str, body: &str) -> FeedbackDraft {
+        FeedbackDraft {
+            session_id: session.into(),
+            target: AnnotationTarget {
+                target_id: format!("target-{body}"),
+                kind: TargetKind::Markdown,
+                file: FileVersionBinding {
+                    path: "review.md".into(),
+                    version: 1,
+                    content_sha256: "a".repeat(64),
+                },
+                label: None,
+            },
+            decision: FeedbackDecision::ApproveWithNotes,
+            comments: vec![AnnotationComment {
+                comment_id: format!("comment-{body}"),
+                body: body.into(),
+                anchor: None,
+                created_at_ms: 1,
+            }],
+            summary: Some(body.into()),
+            created_at_ms: 1,
+            current_attempt: 0,
+        }
+    }
+
+    fn summaries(listed: &[StructuredFeedback]) -> Vec<&str> {
+        listed
+            .iter()
+            .map(|item| item.summary.as_deref().unwrap_or_default())
+            .collect()
+    }
+
+    /// RT02 regression: a peer feedback event written after our hydrate
+    /// snapshot and before our durable append must survive, and the in-memory
+    /// list must keep the durable log's order (`peer` then `own`). Committing
+    /// our own record before replaying the log produced `[own, peer]` in memory
+    /// while a reopen replayed `[peer, own]`.
+    #[tokio::test]
+    async fn submit_keeps_peer_feedback_that_races_between_hydrate_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&dir);
+        let peer = test_runtime(&dir);
+        let id = runtime.create(None).unwrap().id;
+        // Both runtimes mark the initial durable prefix as already consumed.
+        assert!(runtime.plannotator_feedback(&id).unwrap().is_empty());
+        assert!(peer.plannotator_feedback(&id).unwrap().is_empty());
+
+        let own = runtime
+            .submit_plannotator_feedback_with(
+                feedback_draft(&id, "own"),
+                "runtime-under-test",
+                || {
+                    peer.submit_plannotator_feedback(feedback_draft(&id, "peer"), "peer-runtime")
+                        .map(|_| ())
+                },
+            )
+            .unwrap();
+
+        let listed = runtime.plannotator_feedback(&id).unwrap();
+        assert_eq!(
+            listed.len(),
+            2,
+            "peer feedback recorded between hydrate and persist must not be skipped: {listed:?}"
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|item| item.feedback_id == own.feedback_id)
+        );
+        // Durable order: the peer append landed before our own.
+        assert_eq!(
+            summaries(&listed),
+            ["peer", "own"],
+            "in-memory order must follow the durable log: {listed:?}"
+        );
+        // Re-reading our own durable event during the next hydrate is
+        // idempotent; it must not duplicate or reorder the record.
+        assert_eq!(
+            summaries(&runtime.plannotator_feedback(&id).unwrap()),
+            ["peer", "own"]
+        );
+        // A fresh process replays the same durable order.
+        drop(peer);
+        drop(runtime);
+        let reopened = test_runtime(&dir);
+        assert_eq!(
+            summaries(&reopened.plannotator_feedback(&id).unwrap()),
+            ["peer", "own"],
+            "reopen must replay the same durable order"
+        );
+    }
+
+    /// The same interleaving when the durable log spans more than one Core
+    /// event page, so the submit hydrate loops instead of reading in one page.
+    #[tokio::test]
+    async fn hydrate_paginates_past_one_page_and_still_recovers_racing_peer_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(&dir);
+        let peer = test_runtime(&dir);
+        let id = runtime.create(None).unwrap().id;
+
+        // Fill the log past MAX_EVENT_PAGE with non-feedback host events. They
+        // advance the cursor but hydrate must skip them by kind.
+        {
+            let store = cayw_core::SessionStore::open(dir.path().join("session.db")).unwrap();
+            let mut cursor = store.snapshot(&id).unwrap().cursor;
+            for index in 0..=cayw_core::MAX_EVENT_PAGE {
+                cursor = store
+                    .append_control_event(
+                        &id,
+                        cursor,
+                        None,
+                        "padding",
+                        "test_padding",
+                        json!({ "index": index }),
+                    )
+                    .unwrap()
+                    .cursor;
+            }
+            assert!(cursor > cayw_core::MAX_EVENT_PAGE as u64);
+        }
+
+        runtime
+            .submit_plannotator_feedback_with(
+                feedback_draft(&id, "own"),
+                "runtime-under-test",
+                || {
+                    peer.submit_plannotator_feedback(feedback_draft(&id, "peer"), "peer-runtime")
+                        .map(|_| ())
+                },
+            )
+            .unwrap();
+
+        let listed = runtime.plannotator_feedback(&id).unwrap();
+        assert_eq!(
+            listed.len(),
+            2,
+            "multi-page hydrate must still recover the racing peer record: {listed:?}"
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|item| item.summary.as_deref() == Some("peer"))
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|item| item.summary.as_deref() == Some("own"))
+        );
+        // Durable order: the peer append landed before our own.
+        assert_eq!(
+            summaries(&listed),
+            ["peer", "own"],
+            "multi-page in-memory order must follow the durable log: {listed:?}"
+        );
+        // A fresh process replays the same durable order.
+        drop(peer);
+        drop(runtime);
+        let reopened = test_runtime(&dir);
+        assert_eq!(
+            summaries(&reopened.plannotator_feedback(&id).unwrap()),
+            ["peer", "own"],
+            "reopen must replay the multi-page durable order"
+        );
     }
 }

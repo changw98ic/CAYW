@@ -1169,6 +1169,23 @@ fn invalid_plans_never_render_a_script() {
 }
 
 #[tokio::test]
+async fn evaluate_rejects_an_invalid_plan_before_running_it() {
+    let plan = plan(
+        "a",
+        vec![node("a", "return {output = input, state = state}", "")],
+        vec![edge("a", "missing", None)],
+        json!({}),
+    );
+    let error = evaluate(&plan, None, None, &[], 1, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, cayw_trace_debug::Error::Invalid(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn local_recompute_reuses_upstream_and_marks_mode() {
     let base_plan = plan(
         "a",

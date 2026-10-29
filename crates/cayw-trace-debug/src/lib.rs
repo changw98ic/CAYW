@@ -376,7 +376,6 @@ impl TraceStore {
         node.source = edit.source;
         node.params = edit.params;
         node.input_pointer = edit.input_pointer;
-        engine::validate_plan(&plan)?;
         self.revise(
             document,
             project_id,
@@ -421,6 +420,12 @@ impl TraceStore {
         reason: &str,
         cancel: CancellationToken,
     ) -> Result<Document, Error> {
+        // Validate before appending the revision. A rejected plan must not
+        // advance the saved version or leave a partial evaluation behind, so
+        // this check runs before any document mutation. The evaluation below
+        // uses the internal no-revalidation path because this is the same
+        // immutable plan.
+        engine::validate_plan(&plan)?;
         let started = std::time::Instant::now();
         let project = document
             .projects
@@ -499,7 +504,7 @@ impl TraceStore {
                     executed_nodes: Vec::new(),
                 }
             } else {
-                match engine::evaluate(
+                match engine::evaluate_validated(
                     &plan,
                     base.as_ref(),
                     changed_node.as_deref(),

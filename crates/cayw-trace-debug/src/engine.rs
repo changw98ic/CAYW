@@ -1128,6 +1128,22 @@ pub async fn evaluate(
     cancel: CancellationToken,
 ) -> Result<Evaluation, crate::Error> {
     validate_plan(plan)?;
+    evaluate_validated(plan, base, changed_node, calls, version, cancel).await
+}
+
+/// Evaluation for callers that already validated `plan` at their own entry.
+///
+/// Structural validation stays at the public boundary so one call chain does
+/// not traverse the same immutable graph twice. Node-source validation,
+/// capture matching and unknown-outcome handling keep their own checks below.
+pub(crate) async fn evaluate_validated(
+    plan: &GraphPlan,
+    base: Option<&Evaluation>,
+    changed_node: Option<&str>,
+    calls: &[RecordedCall],
+    version: u64,
+    cancel: CancellationToken,
+) -> Result<Evaluation, crate::Error> {
     let started = Instant::now();
     let mode = if changed_node.is_some() {
         "recompute"

@@ -341,26 +341,19 @@ pub fn extract_ddg_hits(html: &str) -> Vec<SearchHit> {
             continue;
         };
 
-        // Extract title between the opening `>` and closing `</a>`.
+        // Extract title between the opening `>` and closing `</a>`. Match the
+        // closing tag and the next anchor case-insensitively (`</A>`, `<A ...>`),
+        // and never cross into a following anchor or split a UTF-8 scalar.
         let after_tag = &rest[tag_end + 1..];
-        let title = if let Some(end_a) = after_tag.find("</a>") {
-            let content = if let Some(next_a) = after_tag.to_ascii_lowercase().find("<a") {
-                if next_a < end_a {
-                    &after_tag[..next_a]
-                } else {
-                    &after_tag[..end_a]
-                }
-            } else {
-                &after_tag[..end_a]
-            };
-            strip_tags(content)
-        } else {
-            let limit = after_tag
-                .to_ascii_lowercase()
-                .find("<a")
-                .unwrap_or_else(|| after_tag.len().min(400));
-            strip_tags(&after_tag[..limit])
+        let close = find_ascii_ci(after_tag, "</a>");
+        let next_anchor = find_ascii_ci(after_tag, "<a");
+        let content = match (close, next_anchor) {
+            (Some(end_a), Some(next_a)) => &after_tag[..end_a.min(next_a)],
+            (Some(end_a), None) => &after_tag[..end_a],
+            (None, Some(next_a)) => &after_tag[..next_a],
+            (None, None) => prefix_at_char_boundary(after_tag, 400),
         };
+        let title = strip_tags(content);
 
         let url = resolve_ddg_href(&href);
         if url.starts_with("http://") || url.starts_with("https://") {
@@ -459,6 +452,23 @@ fn extract_attr(tag: &str, attr_name: &str) -> Option<String> {
 /// Cap `s` to at most `max_bytes` without splitting a UTF-8 scalar.
 fn prefix_at_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..s.floor_char_boundary(max_bytes.min(s.len()))]
+}
+
+/// Byte offset of the first ASCII-case-insensitive occurrence of `needle`.
+///
+/// `needle` must be ASCII, so any matched offset is a UTF-8 char boundary.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let needle = needle.as_bytes();
+    let hay = haystack.as_bytes();
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
 }
 
 fn nearby_snippet(full: &str, result_idx: usize) -> Option<String> {
@@ -874,5 +884,42 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].url, "https://example.com/single-quotes");
         assert_eq!(hits[0].title.as_deref(), Some("Single Quotes Title"));
+    }
+
+    #[test]
+    fn uppercase_closing_anchor_tag_is_recognized() {
+        let html = r#"<a class="result__a" href="https://example.com/upper">Upper Title</A>"#;
+        let hits = extract_ddg_hits(html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://example.com/upper");
+        assert_eq!(hits[0].title.as_deref(), Some("Upper Title"));
+    }
+
+    #[test]
+    fn unclosed_title_stops_at_next_uppercase_anchor() {
+        let html = r#"<a class="result__a" href="https://example.com/a">First Title
+            <A class="result__a" href="https://example.com/b">Second</A>"#;
+        let hits = extract_ddg_hits(html);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://example.com/a");
+        assert_eq!(hits[0].title.as_deref(), Some("First Title"));
+        assert_eq!(hits[1].url, "https://example.com/b");
+        assert_eq!(hits[1].title.as_deref(), Some("Second"));
+    }
+
+    #[test]
+    fn unclosed_multibyte_title_cap_does_not_panic_or_cross_scalar() {
+        // No `</a>` and no following anchor: the 400-byte fallback used to slice
+        // at a raw offset, panicking when it landed inside a 3-byte CJK scalar.
+        let long = "中".repeat(200); // 600 bytes; 400 is not a char boundary
+        assert!(!long.is_char_boundary(400));
+        let html = format!(r#"<a class="result__a" href="https://example.cn/long">{long}"#);
+        let hits = extract_ddg_hits(&html);
+        assert_eq!(hits.len(), 1);
+        let title = hits[0].title.as_deref().expect("title");
+        assert!(title.len() <= 400);
+        assert!(title.is_char_boundary(title.len()));
+        assert_eq!(title.len(), 399);
+        assert!(title.chars().all(|c| c == '中'));
     }
 }
