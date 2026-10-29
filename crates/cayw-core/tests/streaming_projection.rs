@@ -100,6 +100,55 @@ fn streamed_projection_keeps_history_and_observes_peer_recovery_and_damage() {
 }
 
 #[test]
+fn rotating_cached_sessions_observe_peer_writes_recovery_and_same_cursor_damage() {
+    let directory = Database::new();
+    let path = directory.0.join("session.db");
+    let store = SessionStore::open(&path).unwrap();
+    let first = store.create_session("first").unwrap();
+    let first_lease = store.begin_attempt(&first.id, "first-worker").unwrap();
+    let second = store.create_session("second").unwrap();
+    let second_lease = store.begin_attempt(&second.id, "second-worker").unwrap();
+    let first_before = store.snapshot(&first.id).unwrap();
+    let second_before = store.snapshot(&second.id).unwrap();
+    let peer = SessionStore::open(&path).unwrap();
+    let event = peer
+        .append_host_event(
+            &first_lease,
+            "peer_fixture",
+            serde_json::json!({"value": 1}),
+        )
+        .unwrap();
+    assert_eq!(store.snapshot(&second.id).unwrap(), second_before);
+    assert_eq!(
+        store.snapshot(&first.id).unwrap().cursor,
+        first_before.cursor + 1
+    );
+    assert_eq!(
+        store.events(&first.id, first_before.cursor, 100).unwrap(),
+        [event]
+    );
+    peer.recover(&first.id).unwrap();
+    assert!(matches!(
+        store.validate_lease(&first_lease),
+        Err(CoreError::StaleLease)
+    ));
+    store.validate_lease(&second_lease).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE core_sessions SET projection=json_set(projection, '$.id', 'wrong') WHERE id=?1",
+            [&second.id],
+        )
+        .unwrap();
+    assert!(store.snapshot(&second.id).is_err());
+    assert!(store.validate_lease(&second_lease).is_err());
+    assert_eq!(
+        store.snapshot(&first.id).unwrap(),
+        peer.snapshot(&first.id).unwrap()
+    );
+}
+
+#[test]
 fn rejected_stream_update_rolls_back_and_valid_updates_survive_reopen() {
     let directory = Database::new();
     let path = directory.0.join("session.db");
