@@ -1,0 +1,11 @@
+{
+  "diag-before/store.patch": "80fe5d7b2c261a30c59887ca3ed0df9e5a29e37970398821ba85f218e45be28a",
+  "diag-before/bench.patch": "c5d8142f59aa9f473573874ecb73744c1a16135ab311b42b6d72f37b178d059c",
+  "diag-before/source-identity.json": "ef55267ed36d3582dcf04193827aa78777c60a7f6ed7cd5b203da0fc0bdeb74a",
+  "diag-reuse/store.patch": "d70dc432b3744a5b57f010dfb86cb9387f6950726d979c1db42dd70abe7f9362",
+  "diag-reuse/bench.patch": "c5d8142f59aa9f473573874ecb73744c1a16135ab311b42b6d72f37b178d059c",
+  "diag-reuse/source-identity.json": "0d3998a0e4b44debaa044aad996a7f0b39f3126e34d86b6f8c8294cfd540468a",
+  "diag-bounded/store.patch": "bc6b2adcc986b3d30aaf530f29fa4728fe77c98528774bb2b96041507ecbd4c4",
+  "diag-bounded/bench.patch": "0b6fa9cb4c76aaf14636283a6e45b0bc538ef822278aa3eb1ebda495fdbf1cc6",
+  "diag-bounded/source-identity.json": "b97365558e69470031b69589e33e0d324fa4f76781d295167dbc3d728605f69c"
+}

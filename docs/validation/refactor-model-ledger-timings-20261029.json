@@ -1,0 +1,61 @@
+{
+  "source_path": ".local/refactor-20261029/pilot-e738dae",
+  "target_path": ".local/refactor-20261029/timing-target",
+  "build_jobs": 2,
+  "cargo_incremental": "0",
+  "scope": "Same source directory and target. Dependencies warm, Runtime package cleaned before each of three rebuilds. Not an empty-target cold build. Execution timings include Cargo and were measured once per variant.",
+  "production_prefix_unchanged": true,
+  "results": {
+    "before": {
+      "cold_package_rebuild_seconds": [
+        52.064505791990086,
+        51.645514416042715,
+        51.582997374935076
+      ],
+      "cold_package_rebuild_median_seconds": 51.645514416042715,
+      "unchanged_incremental_seconds": 0.5443727080710232,
+      "unit_seconds_including_cargo": 0.7576935419347137,
+      "integration_seconds_including_cargo": 9.628127375151962,
+      "serial_seconds_including_cargo": null
+    },
+    "dedup": {
+      "cold_package_rebuild_seconds": [
+        54.69688262511045,
+        51.494836084079,
+        51.48944183299318
+      ],
+      "cold_package_rebuild_median_seconds": 51.494836084079,
+      "unchanged_incremental_seconds": 0.49022812489420176,
+      "unit_seconds_including_cargo": 0.7381607089191675,
+      "integration_seconds_including_cargo": 9.546695332974195,
+      "serial_seconds_including_cargo": null
+    },
+    "merged": {
+      "cold_package_rebuild_seconds": [
+        49.76890604104847,
+        50.057328457944095,
+        50.14289183309302
+      ],
+      "cold_package_rebuild_median_seconds": 50.057328457944095,
+      "unchanged_incremental_seconds": 0.5012643330264837,
+      "unit_seconds_including_cargo": 0.7057220840360969,
+      "integration_seconds_including_cargo": 6.267569791991264,
+      "serial_seconds_including_cargo": 17.144448624923825
+    }
+  },
+  "baseline_head": "e738dae1af73bf0ad3fe15f729a4557a2d9f4d24",
+  "evidence": {
+    "comparison_json_sha256": "54e22b4452e55647102560e25eecfec702f86c1cf23b9c8d103fbe591ec1096c",
+    "behavior_map_sha256": "30545eea679838914f0c4ea32bebdb289d13bf367272b4e0de43673100a8a026",
+    "behavior_counts": {
+      "unit_tests_per_variant": 21,
+      "integration_tests_per_variant": 24
+    },
+    "integration_files_moved_without_body_changes": true,
+    "model_requests_test_module_numstat": {
+      "added": 72,
+      "deleted": 163,
+      "net_deleted": 91
+    }
+  }
+}

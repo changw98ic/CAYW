@@ -1,0 +1,148 @@
+--- product/crates/cayw-core/examples/refactor_persistence_bench.rs
++++ diagnostic/crates/cayw-core/examples/refactor_persistence_bench.rs
+@@ -156,6 +156,7 @@
+     sessions: usize,
+     db: Option<PathBuf>,
+     out: Option<PathBuf>,
++    diag_out: Option<PathBuf>,
+ }
+ 
+ fn main() -> BenchResult {
+@@ -183,6 +184,7 @@
+         sessions: 1,
+         db: None,
+         out: None,
++        diag_out: None,
+     };
+     let mut iter = std::env::args().skip(1);
+     while let Some(flag) = iter.next() {
+@@ -208,6 +210,9 @@
+             }
+             "--db" => args.db = Some(PathBuf::from(value(&mut iter, "--db")?)),
+             "--out" => args.out = Some(PathBuf::from(value(&mut iter, "--out")?)),
++            "--diag-out" => {
++                args.diag_out = Some(PathBuf::from(value(&mut iter, "--diag-out")?))
++            }
+             other => return Err(format!("unknown argument: {other}").into()),
+         }
+     }
+@@ -246,6 +251,7 @@
+     );
+     println!("  --db PATH                      database file (default a fresh temp directory)");
+     println!("  --out PATH                     also write pretty JSON here");
++    println!("  --diag-out PATH                write projection diagnostics JSON here (stderr always gets a copy)");
+     println!("  --help                         show this help");
+     println!();
+     println!("Writes synthetic but legal events through the public SessionStore API to a");
+@@ -685,6 +691,9 @@
+     }
+ 
+     let store = SessionStore::open(&db_path)?;
++    let timer_calibration = SessionStore::__diag_calibrate();
++    SessionStore::__diag_set_op("setup");
++    SessionStore::__diag_reset();
+     let mut timings = Timings::default();
+     let mut runs: Vec<SessionRun> = Vec::with_capacity(args.sessions);
+ 
+@@ -739,6 +748,9 @@
+         });
+     }
+ 
++    let setup_diagnostics = SessionStore::__diag_snapshot();
++    SessionStore::__diag_reset();
++
+     // Round-robin the sessions so each store call observes interleaved traffic.
+     // The sessions share one connection, so these appends are serialized.
+     loop {
+@@ -751,6 +763,7 @@
+             let cursor_before = run.cursor;
+             run.cursor += 1;
+             let operation = op.operation_name();
++            SessionStore::__diag_set_op(operation);
+             let preceding_operation = run.last_operation;
+             let messages_before = run.messages_before;
+             let messages_after = messages_before + op.message_increment();
+@@ -801,6 +814,7 @@
+         }
+     }
+ 
++    SessionStore::__diag_set_op("finish_attempt");
+     for run in &runs {
+         let start = Instant::now();
+         let cursor_before = run.cursor;
+@@ -814,6 +828,11 @@
+             run.messages_before,
+         );
+     }
++
++    let retained_cache_after_finish = store.__diag_cache_residency();
++    let workload_diagnostics = SessionStore::__diag_snapshot();
++    SessionStore::__diag_reset();
++    SessionStore::__diag_set_op("verify");
+ 
+     let mut verification = Vec::with_capacity(runs.len());
+     let mut verified = true;
+@@ -852,6 +871,9 @@
+         );
+     }
+ 
++    let read_diagnostics = SessionStore::__diag_snapshot();
++    SessionStore::__diag_reset();
++
+     let ids: Vec<String> = runs.iter().map(|run| run.id.clone()).collect();
+     let live_files = file_sizes(&db_path);
+     drop(store);
+@@ -900,6 +922,53 @@
+             })
+         })
+         .collect();
++
++    let workload_invariant_ok = workload_diagnostics
++        .get("cache")
++        .and_then(|cache| cache.get("hits_plus_misses_equals_calls"))
++        .and_then(Value::as_bool)
++        .unwrap_or(false);
++    let workload_boundaries = workload_diagnostics
++        .get("timed_boundaries")
++        .and_then(Value::as_u64)
++        .unwrap_or(0);
++    let diagnostics = json!({
++        "diagnostic": "cayw-core/projection-persistence-diagnostics",
++        "sample_origin": "actual in-process call path; counters and timings are not derived from the workload plan",
++        "source": {
++            "mutate_uses_projection_cache": SessionStore::__diag_mutate_uses_cache(),
++            "cached_projection_path_present_in_both_copies": true
++        },
++        "timer_calibration": timer_calibration,
++        "setup_excluded": setup_diagnostics,
++        "workload": workload_diagnostics,
++        "retained_cache_after_finish": retained_cache_after_finish,
++        "read_verification_excluded": read_diagnostics,
++        "invariant_checks": {
++            "workload_cache_hits_plus_misses_equals_cached_calls": workload_invariant_ok,
++            "counter_only_no_phase_timing": workload_boundaries == 0,
++            "meaning": "These check that the actual cached_projection path and phase timers were reached. They do not validate the workload plan."
++        },
++        "coverage": {
++            "instrumented": ["cached_projection actual hit/miss branches"],
++            "not_covered": ["phase timings", "concurrent workloads", "other processes or threads"],
++            "setup_and_final_reads_excluded_by_reset": true,
++            "finish_attempt_in_workload": true
++        },
++        "notes": ["Counter-only diagnostics from an independent bounded-cache copy. No product diagnostic API."]
++    });
++    if let Some(path) = &args.diag_out {
++        if let Some(parent) = path.parent()
++            && !parent.as_os_str().is_empty()
++        {
++            fs::create_dir_all(parent)?;
++        }
++        fs::write(path, serde_json::to_string_pretty(&diagnostics)? + "\n")?;
++    }
++    eprintln!(
++        "CAYW_PROJECTION_DIAGNOSTICS {}",
++        serde_json::to_string(&diagnostics)?
++    );
+ 
+     Ok(json!({
+         "benchmark": "cayw-core/refactor_persistence_bench",

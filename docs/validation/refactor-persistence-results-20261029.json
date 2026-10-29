@@ -1,0 +1,2222 @@
+{
+  "baseline_head": "e738dae1af73bf0ad3fe15f729a4557a2d9f4d24",
+  "example_sha256": "7efc151061a8552e82650ad03dc5a7efcf9f6a8f5a2f60fbd74438377a86ce97",
+  "scope": "Release binaries, legal synthetic public SessionStore calls, real SQLite WAL/FULL, serialized round-robin; no model or tool body.",
+  "aggregation": "Single-session data: median of two trial metrics. Multi-session: one trial. RSS: maximum process RSS across trials, includes input preparation.",
+  "rows": [
+    {
+      "size": "long",
+      "category": "message_update",
+      "sessions": 1,
+      "append_throughput_change_percent": 11.344874078541011,
+      "representative_operation": "message_update",
+      "before": {
+        "runs": 2,
+        "appended_events": 6149,
+        "timed_appends": 6146,
+        "projection_bytes": 467689,
+        "appends_per_second_median": 922.7122315901413,
+        "peak_process_rss_bytes_max": 38862848,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1266625.0,
+            "p99_ns": 5237687.5,
+            "first_quarter_median_ns": 386406.25,
+            "last_quarter_median_ns": 2120218.5
+          },
+          "begin_attempt": {
+            "p50_ns": 138479.5,
+            "p99_ns": 138479.5,
+            "first_quarter_median_ns": 138479.5,
+            "last_quarter_median_ns": 138479.5
+          },
+          "create_session": {
+            "p50_ns": 408583.5,
+            "p99_ns": 408583.5,
+            "first_quarter_median_ns": 408583.5,
+            "last_quarter_median_ns": 408583.5
+          },
+          "finish_attempt": {
+            "p50_ns": 2336250.0,
+            "p99_ns": 2336250.0,
+            "first_quarter_median_ns": 2336250.0,
+            "last_quarter_median_ns": 2336250.0
+          },
+          "message_update": {
+            "p50_ns": 806416.5,
+            "p99_ns": 4238687.5,
+            "first_quarter_median_ns": 274291.75,
+            "last_quarter_median_ns": 1288927.25
+          },
+          "snapshot_verify": {
+            "p50_ns": 822500.0,
+            "p99_ns": 822500.0,
+            "first_quarter_median_ns": 822500.0,
+            "last_quarter_median_ns": 822500.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-history-02-long-message_update-1-01",
+          "bench-before-history-02-long-message_update-1-02"
+        ],
+        "result_sha256": [
+          "c36eb85080bbe9cc55fee7e64282349744ba5a1c4b3bd486a007dc527b1593c0",
+          "51f524b45304de2df1dab7f72dfafc940deb7ae1925655b7fb7c859b272a5965"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 6149,
+        "timed_appends": 6146,
+        "projection_bytes": 467689,
+        "appends_per_second_median": 1027.3927723713387,
+        "peak_process_rss_bytes_max": 37765120,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 963208.5,
+            "p99_ns": 4673500.0,
+            "first_quarter_median_ns": 313520.5,
+            "last_quarter_median_ns": 1627760.75
+          },
+          "begin_attempt": {
+            "p50_ns": 175646.0,
+            "p99_ns": 175646.0,
+            "first_quarter_median_ns": 175646.0,
+            "last_quarter_median_ns": 175646.0
+          },
+          "create_session": {
+            "p50_ns": 414645.5,
+            "p99_ns": 414645.5,
+            "first_quarter_median_ns": 414645.5,
+            "last_quarter_median_ns": 414645.5
+          },
+          "finish_attempt": {
+            "p50_ns": 1787437.5,
+            "p99_ns": 1787437.5,
+            "first_quarter_median_ns": 1787437.5,
+            "last_quarter_median_ns": 1787437.5
+          },
+          "message_update": {
+            "p50_ns": 784187.0,
+            "p99_ns": 4206541.5,
+            "first_quarter_median_ns": 267875.0,
+            "last_quarter_median_ns": 1307781.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 141416.5,
+            "p99_ns": 141416.5,
+            "first_quarter_median_ns": 141416.5,
+            "last_quarter_median_ns": 141416.5
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-history-02-long-message_update-1-01",
+          "bench-reuse-history-02-long-message_update-1-02"
+        ],
+        "result_sha256": [
+          "e23c0eff27290b55f80f78288224367301ac05e1d388155e71efedda0212e127",
+          "85495decbe146c019f90b63a114e80ee8677ab12fc159c73e08c64847dd00544"
+        ]
+      }
+    },
+    {
+      "size": "long",
+      "category": "mixed",
+      "sessions": 1,
+      "append_throughput_change_percent": 42.21653379042267,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 2,
+        "appended_events": 8709,
+        "timed_appends": 8706,
+        "projection_bytes": 683604,
+        "appends_per_second_median": 405.59333812660975,
+        "peak_process_rss_bytes_max": 47611904,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 2453833.5,
+            "p99_ns": 8218833.5,
+            "first_quarter_median_ns": 686249.75,
+            "last_quarter_median_ns": 4140385.5
+          },
+          "begin_attempt": {
+            "p50_ns": 196521.0,
+            "p99_ns": 196521.0,
+            "first_quarter_median_ns": 196521.0,
+            "last_quarter_median_ns": 196521.0
+          },
+          "create_session": {
+            "p50_ns": 413000.0,
+            "p99_ns": 413000.0,
+            "first_quarter_median_ns": 413000.0,
+            "last_quarter_median_ns": 413000.0
+          },
+          "finish_attempt": {
+            "p50_ns": 4571854.0,
+            "p99_ns": 4571854.0,
+            "first_quarter_median_ns": 4571854.0,
+            "last_quarter_median_ns": 4571854.0
+          },
+          "host_event": {
+            "p50_ns": 1964125.0,
+            "p99_ns": 3898854.0,
+            "first_quarter_median_ns": 573947.5,
+            "last_quarter_median_ns": 3295135.5
+          },
+          "message_update": {
+            "p50_ns": 2101000.0,
+            "p99_ns": 7647687.5,
+            "first_quarter_median_ns": 607312.5,
+            "last_quarter_median_ns": 3485197.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 1911520.5,
+            "p99_ns": 1911520.5,
+            "first_quarter_median_ns": 1911520.5,
+            "last_quarter_median_ns": 1911520.5
+          },
+          "tool_started": {
+            "p50_ns": 2411250.0,
+            "p99_ns": 7992521.0,
+            "first_quarter_median_ns": 680927.25,
+            "last_quarter_median_ns": 4103719.0
+          }
+        },
+        "update_after_host_median_ns": 2058771.0,
+        "source_receipts": [
+          "bench-before-history-02-long-mixed-1-01",
+          "bench-before-history-02-long-mixed-1-02"
+        ],
+        "result_sha256": [
+          "15e9bf211805d9923bc88da334ab4ce99d49c35b8059127fc96aa3c25d72a903",
+          "87c0278d79a81a4d8a329568acc2f406c9a6b2577a40cd0701ed2d820f3a7f7e"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 8709,
+        "timed_appends": 8706,
+        "projection_bytes": 683604,
+        "appends_per_second_median": 576.8207867685333,
+        "peak_process_rss_bytes_max": 46104576,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1700042.0,
+            "p99_ns": 6862645.5,
+            "first_quarter_median_ns": 487635.5,
+            "last_quarter_median_ns": 2865770.75
+          },
+          "begin_attempt": {
+            "p50_ns": 213666.5,
+            "p99_ns": 213666.5,
+            "first_quarter_median_ns": 213666.5,
+            "last_quarter_median_ns": 213666.5
+          },
+          "create_session": {
+            "p50_ns": 378896.0,
+            "p99_ns": 378896.0,
+            "first_quarter_median_ns": 378896.0,
+            "last_quarter_median_ns": 378896.0
+          },
+          "finish_attempt": {
+            "p50_ns": 3329146.0,
+            "p99_ns": 3329146.0,
+            "first_quarter_median_ns": 3329146.0,
+            "last_quarter_median_ns": 3329146.0
+          },
+          "host_event": {
+            "p50_ns": 1241833.0,
+            "p99_ns": 2504312.5,
+            "first_quarter_median_ns": 380656.25,
+            "last_quarter_median_ns": 2059323.0
+          },
+          "message_update": {
+            "p50_ns": 1276229.5,
+            "p99_ns": 6054417.0,
+            "first_quarter_median_ns": 389583.5,
+            "last_quarter_median_ns": 2130958.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 420916.5,
+            "p99_ns": 420916.5,
+            "first_quarter_median_ns": 420916.5,
+            "last_quarter_median_ns": 420916.5
+          },
+          "tool_started": {
+            "p50_ns": 1707104.0,
+            "p99_ns": 6856145.5,
+            "first_quarter_median_ns": 491916.75,
+            "last_quarter_median_ns": 2841406.25
+          }
+        },
+        "update_after_host_median_ns": 1247333.5,
+        "source_receipts": [
+          "bench-reuse-history-02-long-mixed-1-01",
+          "bench-reuse-history-02-long-mixed-1-02"
+        ],
+        "result_sha256": [
+          "7fcce072d6a27c61a988b1475a0f9175b8becbb9ed0b00fb4c09b922f6af4a82",
+          "26e2d95e87105127cc9030612d89243db522cf44a015d5d932a40305353f7e4b"
+        ]
+      }
+    },
+    {
+      "size": "long",
+      "category": "normal",
+      "sessions": 1,
+      "append_throughput_change_percent": 37.77021524985125,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 2,
+        "appended_events": 28677,
+        "timed_appends": 28674,
+        "projection_bytes": 2222142,
+        "appends_per_second_median": 91.04878106575455,
+        "peak_process_rss_bytes_max": 95223808,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 10470250.5,
+            "p99_ns": 28842020.5,
+            "first_quarter_median_ns": 2530812.5,
+            "last_quarter_median_ns": 19490927.25
+          },
+          "begin_attempt": {
+            "p50_ns": 144437.5,
+            "p99_ns": 144437.5,
+            "first_quarter_median_ns": 144437.5,
+            "last_quarter_median_ns": 144437.5
+          },
+          "create_session": {
+            "p50_ns": 387791.5,
+            "p99_ns": 387791.5,
+            "first_quarter_median_ns": 387791.5,
+            "last_quarter_median_ns": 387791.5
+          },
+          "finish_attempt": {
+            "p50_ns": 29118833.0,
+            "p99_ns": 29118833.0,
+            "first_quarter_median_ns": 29118833.0,
+            "last_quarter_median_ns": 29118833.0
+          },
+          "host_event": {
+            "p50_ns": 8503313.0,
+            "p99_ns": 17740041.5,
+            "first_quarter_median_ns": 2168291.5,
+            "last_quarter_median_ns": 14994864.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 7967333.5,
+            "p99_ns": 7967333.5,
+            "first_quarter_median_ns": 7967333.5,
+            "last_quarter_median_ns": 7967333.5
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-history-02-long-normal-1-01",
+          "bench-before-history-02-long-normal-1-02"
+        ],
+        "result_sha256": [
+          "3d747fff508ab64fd630003d4562be7ba2405d3823ba2714bbf5890cdd2aa3cf",
+          "fe231849e3870dd0513c29d2462f5af0d2a8c4c70c43ddc4712bcc6c54ae41f0"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 28677,
+        "timed_appends": 28674,
+        "projection_bytes": 2222142,
+        "appends_per_second_median": 125.43810165665585,
+        "peak_process_rss_bytes_max": 88113152,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 7318145.5,
+            "p99_ns": 22826624.5,
+            "first_quarter_median_ns": 1697645.75,
+            "last_quarter_median_ns": 13328156.5
+          },
+          "begin_attempt": {
+            "p50_ns": 147792.0,
+            "p99_ns": 147792.0,
+            "first_quarter_median_ns": 147792.0,
+            "last_quarter_median_ns": 147792.0
+          },
+          "create_session": {
+            "p50_ns": 457563.0,
+            "p99_ns": 457563.0,
+            "first_quarter_median_ns": 457563.0,
+            "last_quarter_median_ns": 457563.0
+          },
+          "finish_attempt": {
+            "p50_ns": 22517625.0,
+            "p99_ns": 22517625.0,
+            "first_quarter_median_ns": 22517625.0,
+            "last_quarter_median_ns": 22517625.0
+          },
+          "host_event": {
+            "p50_ns": 5220166.5,
+            "p99_ns": 11527062.0,
+            "first_quarter_median_ns": 1344489.5,
+            "last_quarter_median_ns": 9321520.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 1316000.0,
+            "p99_ns": 1316000.0,
+            "first_quarter_median_ns": 1316000.0,
+            "last_quarter_median_ns": 1316000.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-history-02-long-normal-1-01",
+          "bench-reuse-history-02-long-normal-1-02"
+        ],
+        "result_sha256": [
+          "5aa138ee47de172b2fdb3684922b6a1066d2049c41d7a3db466f1f5e2f45a619",
+          "dbefa5b40734908c078176c9f95535c40807e376ea9681a528f26b342a6446c5"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "message_update",
+      "sessions": 1,
+      "append_throughput_change_percent": 4.215425609848755,
+      "representative_operation": "message_update",
+      "before": {
+        "runs": 2,
+        "appended_events": 773,
+        "timed_appends": 770,
+        "projection_bytes": 58664,
+        "appends_per_second_median": 4310.477883787578,
+        "peak_process_rss_bytes_max": 16859136,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 243896.0,
+            "p99_ns": 1017042.0,
+            "first_quarter_median_ns": 158187.25,
+            "last_quarter_median_ns": 365594.0
+          },
+          "begin_attempt": {
+            "p50_ns": 141104.5,
+            "p99_ns": 141104.5,
+            "first_quarter_median_ns": 141104.5,
+            "last_quarter_median_ns": 141104.5
+          },
+          "create_session": {
+            "p50_ns": 442937.5,
+            "p99_ns": 442937.5,
+            "first_quarter_median_ns": 442937.5,
+            "last_quarter_median_ns": 442937.5
+          },
+          "finish_attempt": {
+            "p50_ns": 406166.5,
+            "p99_ns": 406166.5,
+            "first_quarter_median_ns": 406166.5,
+            "last_quarter_median_ns": 406166.5
+          },
+          "message_update": {
+            "p50_ns": 200771.0,
+            "p99_ns": 400250.0,
+            "first_quarter_median_ns": 156958.0,
+            "last_quarter_median_ns": 263343.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 116687.5,
+            "p99_ns": 116687.5,
+            "first_quarter_median_ns": 116687.5,
+            "last_quarter_median_ns": 116687.5
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-history-02-medium-message_update-1-01",
+          "bench-before-history-02-medium-message_update-1-02"
+        ],
+        "result_sha256": [
+          "db4eda6f624275de918da4ae883758c06ebb281f10d74f9547699a37b9cb9be4",
+          "0f4520da0383a82ea11a355386719305c281325b2af16a4f185839a860e373ea"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 773,
+        "timed_appends": 770,
+        "projection_bytes": 58664,
+        "appends_per_second_median": 4492.182872407627,
+        "peak_process_rss_bytes_max": 16875520,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 217999.5,
+            "p99_ns": 980292.0,
+            "first_quarter_median_ns": 144479.0,
+            "last_quarter_median_ns": 298697.75
+          },
+          "begin_attempt": {
+            "p50_ns": 166562.5,
+            "p99_ns": 166562.5,
+            "first_quarter_median_ns": 166562.5,
+            "last_quarter_median_ns": 166562.5
+          },
+          "create_session": {
+            "p50_ns": 380812.5,
+            "p99_ns": 380812.5,
+            "first_quarter_median_ns": 380812.5,
+            "last_quarter_median_ns": 380812.5
+          },
+          "finish_attempt": {
+            "p50_ns": 332417.0,
+            "p99_ns": 332417.0,
+            "first_quarter_median_ns": 332417.0,
+            "last_quarter_median_ns": 332417.0
+          },
+          "message_update": {
+            "p50_ns": 206562.5,
+            "p99_ns": 541958.0,
+            "first_quarter_median_ns": 148604.0,
+            "last_quarter_median_ns": 261499.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 33479.5,
+            "p99_ns": 33479.5,
+            "first_quarter_median_ns": 33479.5,
+            "last_quarter_median_ns": 33479.5
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-history-02-medium-message_update-1-01",
+          "bench-reuse-history-02-medium-message_update-1-02"
+        ],
+        "result_sha256": [
+          "d7d25f83bab9006558f9576e8f729b8354ae8fee65b3bb4969723763b0b1232a",
+          "abaf11b7380645be0d22a064d723dc7f287c49a63dbd1dc254bf5617217f55ce"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "message_update",
+      "sessions": 2,
+      "append_throughput_change_percent": -2.0054534351348408,
+      "representative_operation": "message_update",
+      "before": {
+        "runs": 1,
+        "appended_events": 1546,
+        "timed_appends": 1540,
+        "projection_bytes": 117328,
+        "appends_per_second_median": 3856.4408056883144,
+        "peak_process_rss_bytes_max": 19873792,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 240542,
+            "p99_ns": 458083,
+            "first_quarter_median_ns": 131292,
+            "last_quarter_median_ns": 354959
+          },
+          "begin_attempt": {
+            "p50_ns": 120833,
+            "p99_ns": 152833,
+            "first_quarter_median_ns": 152833,
+            "last_quarter_median_ns": 120833
+          },
+          "create_session": {
+            "p50_ns": 135958,
+            "p99_ns": 565250,
+            "first_quarter_median_ns": 565250,
+            "last_quarter_median_ns": 135958
+          },
+          "finish_attempt": {
+            "p50_ns": 372917,
+            "p99_ns": 380792,
+            "first_quarter_median_ns": 380792,
+            "last_quarter_median_ns": 372917
+          },
+          "message_update": {
+            "p50_ns": 241792,
+            "p99_ns": 1157667,
+            "first_quarter_median_ns": 144187.5,
+            "last_quarter_median_ns": 332292.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 109792,
+            "p99_ns": 118333,
+            "first_quarter_median_ns": 118333,
+            "last_quarter_median_ns": 109792
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-message_update-2-01"
+        ],
+        "result_sha256": [
+          "e071c7800cb859acd29db950f6733517ccce4b2c3c47c2648dd1da20c100fb2e"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 1546,
+        "timed_appends": 1540,
+        "projection_bytes": 117328,
+        "appends_per_second_median": 3779.1016810766964,
+        "peak_process_rss_bytes_max": 19677184,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 259750,
+            "p99_ns": 424500,
+            "first_quarter_median_ns": 133208,
+            "last_quarter_median_ns": 363875
+          },
+          "begin_attempt": {
+            "p50_ns": 125291,
+            "p99_ns": 171375,
+            "first_quarter_median_ns": 171375,
+            "last_quarter_median_ns": 125291
+          },
+          "create_session": {
+            "p50_ns": 153542,
+            "p99_ns": 402209,
+            "first_quarter_median_ns": 402209,
+            "last_quarter_median_ns": 153542
+          },
+          "finish_attempt": {
+            "p50_ns": 385209,
+            "p99_ns": 387500,
+            "first_quarter_median_ns": 385209,
+            "last_quarter_median_ns": 387500
+          },
+          "message_update": {
+            "p50_ns": 250667,
+            "p99_ns": 1159750,
+            "first_quarter_median_ns": 144854.5,
+            "last_quarter_median_ns": 331333.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 111917,
+            "p99_ns": 114500,
+            "first_quarter_median_ns": 114500,
+            "last_quarter_median_ns": 111917
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-message_update-2-01"
+        ],
+        "result_sha256": [
+          "ab98f4cce320eb48b47ba79c701333050258cb6bac1596afb288c3ed600b7210"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "message_update",
+      "sessions": 8,
+      "append_throughput_change_percent": -2.023883215686517,
+      "representative_operation": "message_update",
+      "before": {
+        "runs": 1,
+        "appended_events": 6184,
+        "timed_appends": 6160,
+        "projection_bytes": 469312,
+        "appends_per_second_median": 3688.604287173386,
+        "peak_process_rss_bytes_max": 34324480,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 242250,
+            "p99_ns": 2284333,
+            "first_quarter_median_ns": 126792.0,
+            "last_quarter_median_ns": 350187.5
+          },
+          "begin_attempt": {
+            "p50_ns": 111750,
+            "p99_ns": 150083,
+            "first_quarter_median_ns": 132333.5,
+            "last_quarter_median_ns": 102333.0
+          },
+          "create_session": {
+            "p50_ns": 122958,
+            "p99_ns": 554750,
+            "first_quarter_median_ns": 340541.5,
+            "last_quarter_median_ns": 117312.5
+          },
+          "finish_attempt": {
+            "p50_ns": 378208,
+            "p99_ns": 400458,
+            "first_quarter_median_ns": 392833.0,
+            "last_quarter_median_ns": 369521.0
+          },
+          "message_update": {
+            "p50_ns": 240833,
+            "p99_ns": 2143583,
+            "first_quarter_median_ns": 130875.5,
+            "last_quarter_median_ns": 333437.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 104584,
+            "p99_ns": 121125,
+            "first_quarter_median_ns": 119500.0,
+            "last_quarter_median_ns": 105646.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-message_update-8-01"
+        ],
+        "result_sha256": [
+          "853fac8ff6917a220261b32b3577fe2f10e6bb73e78e6eb95d8ba5e126674ccb"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 6184,
+        "timed_appends": 6160,
+        "projection_bytes": 469312,
+        "appends_per_second_median": 3613.9512441121906,
+        "peak_process_rss_bytes_max": 33996800,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 255209,
+            "p99_ns": 2374583,
+            "first_quarter_median_ns": 127687.0,
+            "last_quarter_median_ns": 358083.0
+          },
+          "begin_attempt": {
+            "p50_ns": 98333,
+            "p99_ns": 180250,
+            "first_quarter_median_ns": 155667.0,
+            "last_quarter_median_ns": 91916.5
+          },
+          "create_session": {
+            "p50_ns": 109333,
+            "p99_ns": 524791,
+            "first_quarter_median_ns": 337645.5,
+            "last_quarter_median_ns": 98041.5
+          },
+          "finish_attempt": {
+            "p50_ns": 412708,
+            "p99_ns": 519708,
+            "first_quarter_median_ns": 490250.0,
+            "last_quarter_median_ns": 414291.5
+          },
+          "message_update": {
+            "p50_ns": 245208,
+            "p99_ns": 2309709,
+            "first_quarter_median_ns": 133146.0,
+            "last_quarter_median_ns": 335312.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 108625,
+            "p99_ns": 119959,
+            "first_quarter_median_ns": 119375.0,
+            "last_quarter_median_ns": 106646.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-message_update-8-01"
+        ],
+        "result_sha256": [
+          "1be0ea161739091336c3805ae7cf09450fb16e2a10f2831db00437484e52b92e"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "message_update",
+      "sessions": 32,
+      "append_throughput_change_percent": -0.3695643957078887,
+      "representative_operation": "message_update",
+      "before": {
+        "runs": 1,
+        "appended_events": 24736,
+        "timed_appends": 24640,
+        "projection_bytes": 1877270,
+        "appends_per_second_median": 2977.8804293769244,
+        "peak_process_rss_bytes_max": 95977472,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 247292,
+            "p99_ns": 5508125,
+            "first_quarter_median_ns": 124791.5,
+            "last_quarter_median_ns": 367041.5
+          },
+          "begin_attempt": {
+            "p50_ns": 90625,
+            "p99_ns": 169583,
+            "first_quarter_median_ns": 102354.0,
+            "last_quarter_median_ns": 90896.0
+          },
+          "create_session": {
+            "p50_ns": 98750,
+            "p99_ns": 400458,
+            "first_quarter_median_ns": 106958.5,
+            "last_quarter_median_ns": 99958.5
+          },
+          "finish_attempt": {
+            "p50_ns": 395750,
+            "p99_ns": 415125,
+            "first_quarter_median_ns": 396833.5,
+            "last_quarter_median_ns": 396083.0
+          },
+          "message_update": {
+            "p50_ns": 243042,
+            "p99_ns": 5621583,
+            "first_quarter_median_ns": 132625.0,
+            "last_quarter_median_ns": 345750.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 117584,
+            "p99_ns": 132708,
+            "first_quarter_median_ns": 120208.5,
+            "last_quarter_median_ns": 118458.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-message_update-32-01"
+        ],
+        "result_sha256": [
+          "77d7fed94f98ef233e67c21ac80972e301861496dc0a6760ab9454fbe49cd07f"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 24736,
+        "timed_appends": 24640,
+        "projection_bytes": 1877270,
+        "appends_per_second_median": 2966.875243563194,
+        "peak_process_rss_bytes_max": 94126080,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 252125,
+            "p99_ns": 5170667,
+            "first_quarter_median_ns": 130750.0,
+            "last_quarter_median_ns": 377312.5
+          },
+          "begin_attempt": {
+            "p50_ns": 95917,
+            "p99_ns": 172542,
+            "first_quarter_median_ns": 105270.5,
+            "last_quarter_median_ns": 95958.5
+          },
+          "create_session": {
+            "p50_ns": 100667,
+            "p99_ns": 399667,
+            "first_quarter_median_ns": 117083.0,
+            "last_quarter_median_ns": 96021.0
+          },
+          "finish_attempt": {
+            "p50_ns": 398333,
+            "p99_ns": 422666,
+            "first_quarter_median_ns": 412770.5,
+            "last_quarter_median_ns": 389979.0
+          },
+          "message_update": {
+            "p50_ns": 242458,
+            "p99_ns": 5679167,
+            "first_quarter_median_ns": 136312.0,
+            "last_quarter_median_ns": 345895.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 114417,
+            "p99_ns": 134250,
+            "first_quarter_median_ns": 116083.0,
+            "last_quarter_median_ns": 114396.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-message_update-32-01"
+        ],
+        "result_sha256": [
+          "f2bc080de06f6c1266eb61c69b0698af4b557b74148bf2569eb0a15829d93ebc"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 1,
+      "append_throughput_change_percent": 25.58424835758739,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 2,
+        "appended_events": 1093,
+        "timed_appends": 1090,
+        "projection_bytes": 85292,
+        "appends_per_second_median": 2695.3060038637013,
+        "peak_process_rss_bytes_max": 17334272,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 380333.5,
+            "p99_ns": 801375.0,
+            "first_quarter_median_ns": 194468.5,
+            "last_quarter_median_ns": 591937.5
+          },
+          "begin_attempt": {
+            "p50_ns": 143188.0,
+            "p99_ns": 143188.0,
+            "first_quarter_median_ns": 143188.0,
+            "last_quarter_median_ns": 143188.0
+          },
+          "create_session": {
+            "p50_ns": 410771.0,
+            "p99_ns": 410771.0,
+            "first_quarter_median_ns": 410771.0,
+            "last_quarter_median_ns": 410771.0
+          },
+          "finish_attempt": {
+            "p50_ns": 657250.0,
+            "p99_ns": 657250.0,
+            "first_quarter_median_ns": 657250.0,
+            "last_quarter_median_ns": 657250.0
+          },
+          "host_event": {
+            "p50_ns": 316812.5,
+            "p99_ns": 574875.0,
+            "first_quarter_median_ns": 170739.5,
+            "last_quarter_median_ns": 498604.25
+          },
+          "message_update": {
+            "p50_ns": 333042.0,
+            "p99_ns": 1173458.0,
+            "first_quarter_median_ns": 190916.75,
+            "last_quarter_median_ns": 522177.25
+          },
+          "snapshot_verify": {
+            "p50_ns": 234354.0,
+            "p99_ns": 234354.0,
+            "first_quarter_median_ns": 234354.0,
+            "last_quarter_median_ns": 234354.0
+          },
+          "tool_started": {
+            "p50_ns": 369875.0,
+            "p99_ns": 1073354.0,
+            "first_quarter_median_ns": 195708.5,
+            "last_quarter_median_ns": 588896.0
+          }
+        },
+        "update_after_host_median_ns": 335479.0,
+        "source_receipts": [
+          "bench-before-history-02-medium-mixed-1-01",
+          "bench-before-history-02-medium-mixed-1-02"
+        ],
+        "result_sha256": [
+          "0f1f83047407d956fcb88df22e4038e6d37a4618fe151c62d4ac00f81715c1fe",
+          "5ac769977e82cb4227da8129bd20b95cc296624f080caa19eb8f1c6560bb5056"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 1093,
+        "timed_appends": 1090,
+        "projection_bytes": 85292,
+        "appends_per_second_median": 3384.879785889155,
+        "peak_process_rss_bytes_max": 17465344,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 300167.0,
+            "p99_ns": 753125.5,
+            "first_quarter_median_ns": 162198.0,
+            "last_quarter_median_ns": 446364.25
+          },
+          "begin_attempt": {
+            "p50_ns": 147333.5,
+            "p99_ns": 147333.5,
+            "first_quarter_median_ns": 147333.5,
+            "last_quarter_median_ns": 147333.5
+          },
+          "create_session": {
+            "p50_ns": 530104.5,
+            "p99_ns": 530104.5,
+            "first_quarter_median_ns": 530104.5,
+            "last_quarter_median_ns": 530104.5
+          },
+          "finish_attempt": {
+            "p50_ns": 505208.0,
+            "p99_ns": 505208.0,
+            "first_quarter_median_ns": 505208.0,
+            "last_quarter_median_ns": 505208.0
+          },
+          "host_event": {
+            "p50_ns": 243187.5,
+            "p99_ns": 424458.5,
+            "first_quarter_median_ns": 139593.5,
+            "last_quarter_median_ns": 349521.0
+          },
+          "message_update": {
+            "p50_ns": 259479.0,
+            "p99_ns": 1028208.0,
+            "first_quarter_median_ns": 155469.0,
+            "last_quarter_median_ns": 368781.25
+          },
+          "snapshot_verify": {
+            "p50_ns": 54583.0,
+            "p99_ns": 54583.0,
+            "first_quarter_median_ns": 54583.0,
+            "last_quarter_median_ns": 54583.0
+          },
+          "tool_started": {
+            "p50_ns": 298750.0,
+            "p99_ns": 1102000.0,
+            "first_quarter_median_ns": 163062.75,
+            "last_quarter_median_ns": 452416.75
+          }
+        },
+        "update_after_host_median_ns": 257291.5,
+        "source_receipts": [
+          "bench-reuse-history-02-medium-mixed-1-01",
+          "bench-reuse-history-02-medium-mixed-1-02"
+        ],
+        "result_sha256": [
+          "171ea2a9ea96a6fd54ecbf03edc942ae3fa74afd1494fe84daabcbaeb0845d22",
+          "8fb38d5d79f506ea419b465de873256023bf7750710d2c37f38cede26e782527"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 2,
+      "append_throughput_change_percent": -0.34013197087123803,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 1,
+        "appended_events": 2186,
+        "timed_appends": 2180,
+        "projection_bytes": 170584,
+        "appends_per_second_median": 2677.8440170747886,
+        "peak_process_rss_bytes_max": 20774912,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 388250,
+            "p99_ns": 1195125,
+            "first_quarter_median_ns": 166000,
+            "last_quarter_median_ns": 581417
+          },
+          "begin_attempt": {
+            "p50_ns": 125500,
+            "p99_ns": 165416,
+            "first_quarter_median_ns": 165416,
+            "last_quarter_median_ns": 125500
+          },
+          "create_session": {
+            "p50_ns": 150625,
+            "p99_ns": 390167,
+            "first_quarter_median_ns": 390167,
+            "last_quarter_median_ns": 150625
+          },
+          "finish_attempt": {
+            "p50_ns": 616708,
+            "p99_ns": 687500,
+            "first_quarter_median_ns": 687500,
+            "last_quarter_median_ns": 616708
+          },
+          "host_event": {
+            "p50_ns": 325083,
+            "p99_ns": 577042,
+            "first_quarter_median_ns": 148896.0,
+            "last_quarter_median_ns": 488104.0
+          },
+          "message_update": {
+            "p50_ns": 336625,
+            "p99_ns": 1221917,
+            "first_quarter_median_ns": 158020.5,
+            "last_quarter_median_ns": 507000.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 232875,
+            "p99_ns": 251958,
+            "first_quarter_median_ns": 232875,
+            "last_quarter_median_ns": 251958
+          },
+          "tool_started": {
+            "p50_ns": 392750,
+            "p99_ns": 1462209,
+            "first_quarter_median_ns": 176479.0,
+            "last_quarter_median_ns": 579396.0
+          }
+        },
+        "update_after_host_median_ns": 336354.0,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-mixed-2-01"
+        ],
+        "result_sha256": [
+          "396b78bd3f6b135283a26047acbfca42041a3601e4d3decb588f2947066597de"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 2186,
+        "timed_appends": 2180,
+        "projection_bytes": 170584,
+        "appends_per_second_median": 2668.7358134426545,
+        "peak_process_rss_bytes_max": 21299200,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 390792,
+            "p99_ns": 915458,
+            "first_quarter_median_ns": 167792,
+            "last_quarter_median_ns": 588375
+          },
+          "begin_attempt": {
+            "p50_ns": 119959,
+            "p99_ns": 194750,
+            "first_quarter_median_ns": 194750,
+            "last_quarter_median_ns": 119959
+          },
+          "create_session": {
+            "p50_ns": 142667,
+            "p99_ns": 400459,
+            "first_quarter_median_ns": 400459,
+            "last_quarter_median_ns": 142667
+          },
+          "finish_attempt": {
+            "p50_ns": 636959,
+            "p99_ns": 663083,
+            "first_quarter_median_ns": 663083,
+            "last_quarter_median_ns": 636959
+          },
+          "host_event": {
+            "p50_ns": 331041,
+            "p99_ns": 572833,
+            "first_quarter_median_ns": 149791.5,
+            "last_quarter_median_ns": 502312.5
+          },
+          "message_update": {
+            "p50_ns": 338417,
+            "p99_ns": 1221916,
+            "first_quarter_median_ns": 158187.5,
+            "last_quarter_median_ns": 512625.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 217875,
+            "p99_ns": 236500,
+            "first_quarter_median_ns": 236500,
+            "last_quarter_median_ns": 217875
+          },
+          "tool_started": {
+            "p50_ns": 394125,
+            "p99_ns": 1375375,
+            "first_quarter_median_ns": 173875.0,
+            "last_quarter_median_ns": 573624.5
+          }
+        },
+        "update_after_host_median_ns": 338479.0,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-mixed-2-01"
+        ],
+        "result_sha256": [
+          "b00cb591af5aab57729ed46af8a3f0383b28e6223732525ffe29bd2d5e2bd1cc"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 8,
+      "append_throughput_change_percent": -10.80155357089283,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 1,
+        "appended_events": 8744,
+        "timed_appends": 8720,
+        "projection_bytes": 682336,
+        "appends_per_second_median": 2481.5623714978633,
+        "peak_process_rss_bytes_max": 38305792,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 388541,
+            "p99_ns": 2611834,
+            "first_quarter_median_ns": 168479.0,
+            "last_quarter_median_ns": 605979.0
+          },
+          "begin_attempt": {
+            "p50_ns": 98250,
+            "p99_ns": 134833,
+            "first_quarter_median_ns": 114854.0,
+            "last_quarter_median_ns": 96354.0
+          },
+          "create_session": {
+            "p50_ns": 111875,
+            "p99_ns": 430208,
+            "first_quarter_median_ns": 277854.0,
+            "last_quarter_median_ns": 108583.0
+          },
+          "finish_attempt": {
+            "p50_ns": 648250,
+            "p99_ns": 669250,
+            "first_quarter_median_ns": 663833.0,
+            "last_quarter_median_ns": 630208.0
+          },
+          "host_event": {
+            "p50_ns": 321167,
+            "p99_ns": 604541,
+            "first_quarter_median_ns": 146958.5,
+            "last_quarter_median_ns": 505687.5
+          },
+          "message_update": {
+            "p50_ns": 342417,
+            "p99_ns": 2577417,
+            "first_quarter_median_ns": 164229.0,
+            "last_quarter_median_ns": 526604.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 221125,
+            "p99_ns": 244250,
+            "first_quarter_median_ns": 233208.5,
+            "last_quarter_median_ns": 219646.0
+          },
+          "tool_started": {
+            "p50_ns": 377125,
+            "p99_ns": 3638459,
+            "first_quarter_median_ns": 169646.0,
+            "last_quarter_median_ns": 606312.5
+          }
+        },
+        "update_after_host_median_ns": 342437.5,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-mixed-8-01"
+        ],
+        "result_sha256": [
+          "744c9056da81c8be6074d8a8cf926b87b2ceb3767ef672cee2a887ec23d99539"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 8744,
+        "timed_appends": 8720,
+        "projection_bytes": 682336,
+        "appends_per_second_median": 2213.515082545403,
+        "peak_process_rss_bytes_max": 36372480,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 395291,
+            "p99_ns": 2730500,
+            "first_quarter_median_ns": 170562.0,
+            "last_quarter_median_ns": 592875.0
+          },
+          "begin_attempt": {
+            "p50_ns": 108291,
+            "p99_ns": 190250,
+            "first_quarter_median_ns": 160604.0,
+            "last_quarter_median_ns": 95500.0
+          },
+          "create_session": {
+            "p50_ns": 110750,
+            "p99_ns": 511208,
+            "first_quarter_median_ns": 324812.5,
+            "last_quarter_median_ns": 104167.0
+          },
+          "finish_attempt": {
+            "p50_ns": 636209,
+            "p99_ns": 662917,
+            "first_quarter_median_ns": 634000.0,
+            "last_quarter_median_ns": 644624.5
+          },
+          "host_event": {
+            "p50_ns": 333750,
+            "p99_ns": 577833,
+            "first_quarter_median_ns": 148896.0,
+            "last_quarter_median_ns": 498583.5
+          },
+          "message_update": {
+            "p50_ns": 345375,
+            "p99_ns": 2671000,
+            "first_quarter_median_ns": 163062.5,
+            "last_quarter_median_ns": 512979.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 218292,
+            "p99_ns": 231084,
+            "first_quarter_median_ns": 230521.0,
+            "last_quarter_median_ns": 215042.0
+          },
+          "tool_started": {
+            "p50_ns": 388000,
+            "p99_ns": 1821375,
+            "first_quarter_median_ns": 169708.0,
+            "last_quarter_median_ns": 589187.5
+          }
+        },
+        "update_after_host_median_ns": 345083.0,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-mixed-8-01"
+        ],
+        "result_sha256": [
+          "d918394b9716c28ed7ffeb09b840250eb96063d1b6c8e14f80e87d88d33f823d"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 32,
+      "append_throughput_change_percent": 18.500145475921492,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 1,
+        "appended_events": 34976,
+        "timed_appends": 34880,
+        "projection_bytes": 2729366,
+        "appends_per_second_median": 1734.5597986218881,
+        "peak_process_rss_bytes_max": 110428160,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 448000,
+            "p99_ns": 8515667,
+            "first_quarter_median_ns": 190813.0,
+            "last_quarter_median_ns": 610333.5
+          },
+          "begin_attempt": {
+            "p50_ns": 169166,
+            "p99_ns": 529375,
+            "first_quarter_median_ns": 226604.0,
+            "last_quarter_median_ns": 305896.0
+          },
+          "create_session": {
+            "p50_ns": 272792,
+            "p99_ns": 2968625,
+            "first_quarter_median_ns": 353354.0,
+            "last_quarter_median_ns": 436687.5
+          },
+          "finish_attempt": {
+            "p50_ns": 664125,
+            "p99_ns": 8897750,
+            "first_quarter_median_ns": 666521.0,
+            "last_quarter_median_ns": 666062.5
+          },
+          "host_event": {
+            "p50_ns": 385875,
+            "p99_ns": 940500,
+            "first_quarter_median_ns": 158333.0,
+            "last_quarter_median_ns": 515250.0
+          },
+          "message_update": {
+            "p50_ns": 407667,
+            "p99_ns": 9935209,
+            "first_quarter_median_ns": 179895.5,
+            "last_quarter_median_ns": 535416.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 222958,
+            "p99_ns": 260792,
+            "first_quarter_median_ns": 224062.5,
+            "last_quarter_median_ns": 224500.0
+          },
+          "tool_started": {
+            "p50_ns": 447208,
+            "p99_ns": 8476625,
+            "first_quarter_median_ns": 187437.5,
+            "last_quarter_median_ns": 604208.5
+          }
+        },
+        "update_after_host_median_ns": 406354.5,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-mixed-32-01"
+        ],
+        "result_sha256": [
+          "9e3db12b5ffa0a6433de89733285b9ff3fa02d8292a2a6ff1942e2edc07b9d2e"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 34976,
+        "timed_appends": 34880,
+        "projection_bytes": 2729366,
+        "appends_per_second_median": 2055.4558847337885,
+        "peak_process_rss_bytes_max": 103022592,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 401084,
+            "p99_ns": 7001542,
+            "first_quarter_median_ns": 168437.0,
+            "last_quarter_median_ns": 613291.5
+          },
+          "begin_attempt": {
+            "p50_ns": 96833,
+            "p99_ns": 174250,
+            "first_quarter_median_ns": 109124.5,
+            "last_quarter_median_ns": 92187.5
+          },
+          "create_session": {
+            "p50_ns": 104959,
+            "p99_ns": 493291,
+            "first_quarter_median_ns": 124375.0,
+            "last_quarter_median_ns": 98416.5
+          },
+          "finish_attempt": {
+            "p50_ns": 683083,
+            "p99_ns": 9501208,
+            "first_quarter_median_ns": 678291.5,
+            "last_quarter_median_ns": 682646.0
+          },
+          "host_event": {
+            "p50_ns": 342500,
+            "p99_ns": 609875,
+            "first_quarter_median_ns": 151021.0,
+            "last_quarter_median_ns": 524208.5
+          },
+          "message_update": {
+            "p50_ns": 354667,
+            "p99_ns": 7804042,
+            "first_quarter_median_ns": 163646.0,
+            "last_quarter_median_ns": 525896.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 224208,
+            "p99_ns": 252709,
+            "first_quarter_median_ns": 232146.0,
+            "last_quarter_median_ns": 217166.5
+          },
+          "tool_started": {
+            "p50_ns": 396208,
+            "p99_ns": 6793083,
+            "first_quarter_median_ns": 171229.0,
+            "last_quarter_median_ns": 608771.0
+          }
+        },
+        "update_after_host_median_ns": 356312.0,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-mixed-32-01"
+        ],
+        "result_sha256": [
+          "400cc9acd19a369bd7bb693c979fee30b86be8241fa6bf9ab06872337a820a32"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "normal",
+      "sessions": 1,
+      "append_throughput_change_percent": 32.96157515610672,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 2,
+        "appended_events": 3589,
+        "timed_appends": 3586,
+        "projection_bytes": 277005,
+        "appends_per_second_median": 769.17502118482,
+        "peak_process_rss_bytes_max": 22003712,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1312438.0,
+            "p99_ns": 3217437.5,
+            "first_quarter_median_ns": 390635.25,
+            "last_quarter_median_ns": 2201489.75
+          },
+          "begin_attempt": {
+            "p50_ns": 152104.5,
+            "p99_ns": 152104.5,
+            "first_quarter_median_ns": 152104.5,
+            "last_quarter_median_ns": 152104.5
+          },
+          "create_session": {
+            "p50_ns": 406208.5,
+            "p99_ns": 406208.5,
+            "first_quarter_median_ns": 406208.5,
+            "last_quarter_median_ns": 406208.5
+          },
+          "finish_attempt": {
+            "p50_ns": 2434479.0,
+            "p99_ns": 2434479.0,
+            "first_quarter_median_ns": 2434479.0,
+            "last_quarter_median_ns": 2434479.0
+          },
+          "host_event": {
+            "p50_ns": 1142479.0,
+            "p99_ns": 2147979.0,
+            "first_quarter_median_ns": 350406.0,
+            "last_quarter_median_ns": 1910770.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 940062.5,
+            "p99_ns": 940062.5,
+            "first_quarter_median_ns": 940062.5,
+            "last_quarter_median_ns": 940062.5
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-history-02-medium-normal-1-01",
+          "bench-before-history-02-medium-normal-1-02"
+        ],
+        "result_sha256": [
+          "2c4c35930324de03982a1e8395ee218ba6a144af5924c3afdb6abeb7e0341ab6",
+          "3f4b4135e1ff448f090257d096518e524c56fda6f5305c8db789d159bdf87327"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 3589,
+        "timed_appends": 3586,
+        "projection_bytes": 277005,
+        "appends_per_second_median": 1022.7072238746542,
+        "peak_process_rss_bytes_max": 22282240,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 893479.5,
+            "p99_ns": 2467229.5,
+            "first_quarter_median_ns": 296260.25,
+            "last_quarter_median_ns": 1459573.0
+          },
+          "begin_attempt": {
+            "p50_ns": 149687.5,
+            "p99_ns": 149687.5,
+            "first_quarter_median_ns": 149687.5,
+            "last_quarter_median_ns": 149687.5
+          },
+          "create_session": {
+            "p50_ns": 391646.0,
+            "p99_ns": 391646.0,
+            "first_quarter_median_ns": 391646.0,
+            "last_quarter_median_ns": 391646.0
+          },
+          "finish_attempt": {
+            "p50_ns": 1615458.0,
+            "p99_ns": 1615458.0,
+            "first_quarter_median_ns": 1615458.0,
+            "last_quarter_median_ns": 1615458.0
+          },
+          "host_event": {
+            "p50_ns": 725708.5,
+            "p99_ns": 1364228.5,
+            "first_quarter_median_ns": 255708.5,
+            "last_quarter_median_ns": 1176270.75
+          },
+          "snapshot_verify": {
+            "p50_ns": 113250.0,
+            "p99_ns": 113250.0,
+            "first_quarter_median_ns": 113250.0,
+            "last_quarter_median_ns": 113250.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-history-02-medium-normal-1-01",
+          "bench-reuse-history-02-medium-normal-1-02"
+        ],
+        "result_sha256": [
+          "32eaca13d634bedf86eb8f08bac1f519f999b24cb2c104e79d8410ae80ae4383",
+          "1269f4a75aa8d05be97843cedae8f76068232fdb680d6c39fcd5084e122d7ded"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "normal",
+      "sessions": 2,
+      "append_throughput_change_percent": -3.793715023889721,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 1,
+        "appended_events": 7178,
+        "timed_appends": 7172,
+        "projection_bytes": 554010,
+        "appends_per_second_median": 721.5936890832578,
+        "peak_process_rss_bytes_max": 31113216,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1320834,
+            "p99_ns": 3795416,
+            "first_quarter_median_ns": 427791,
+            "last_quarter_median_ns": 2235917
+          },
+          "begin_attempt": {
+            "p50_ns": 113917,
+            "p99_ns": 154208,
+            "first_quarter_median_ns": 154208,
+            "last_quarter_median_ns": 113917
+          },
+          "create_session": {
+            "p50_ns": 147208,
+            "p99_ns": 404500,
+            "first_quarter_median_ns": 404500,
+            "last_quarter_median_ns": 147208
+          },
+          "finish_attempt": {
+            "p50_ns": 2459625,
+            "p99_ns": 2500791,
+            "first_quarter_median_ns": 2500791,
+            "last_quarter_median_ns": 2459625
+          },
+          "host_event": {
+            "p50_ns": 1154666,
+            "p99_ns": 2215875,
+            "first_quarter_median_ns": 381562.5,
+            "last_quarter_median_ns": 1937250.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 986333,
+            "p99_ns": 989417,
+            "first_quarter_median_ns": 986333,
+            "last_quarter_median_ns": 989417
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-normal-2-01"
+        ],
+        "result_sha256": [
+          "9f2b51271f8ca437ab2824b69fcfe3978510a4d3ec3110020bb8afc6fc91ef3c"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 7178,
+        "timed_appends": 7172,
+        "projection_bytes": 554010,
+        "appends_per_second_median": 694.2184808890662,
+        "peak_process_rss_bytes_max": 30769152,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1312833,
+            "p99_ns": 3811792,
+            "first_quarter_median_ns": 407750,
+            "last_quarter_median_ns": 2221667
+          },
+          "begin_attempt": {
+            "p50_ns": 122709,
+            "p99_ns": 139750,
+            "first_quarter_median_ns": 139750,
+            "last_quarter_median_ns": 122709
+          },
+          "create_session": {
+            "p50_ns": 119458,
+            "p99_ns": 376625,
+            "first_quarter_median_ns": 376625,
+            "last_quarter_median_ns": 119458
+          },
+          "finish_attempt": {
+            "p50_ns": 2480209,
+            "p99_ns": 2491834,
+            "first_quarter_median_ns": 2480209,
+            "last_quarter_median_ns": 2491834
+          },
+          "host_event": {
+            "p50_ns": 1138750,
+            "p99_ns": 2194125,
+            "first_quarter_median_ns": 371021.5,
+            "last_quarter_median_ns": 1910854.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 985542,
+            "p99_ns": 985875,
+            "first_quarter_median_ns": 985875,
+            "last_quarter_median_ns": 985542
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-normal-2-01"
+        ],
+        "result_sha256": [
+          "cdb41df82c810aadb97861f8151bcfdc2b042f453eb1ade8e8b7e663f072a5cf"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "normal",
+      "sessions": 8,
+      "append_throughput_change_percent": -2.5623489508448394,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 1,
+        "appended_events": 28712,
+        "timed_appends": 28688,
+        "projection_bytes": 2216040,
+        "appends_per_second_median": 676.281563078136,
+        "peak_process_rss_bytes_max": 81854464,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1321959,
+            "p99_ns": 7025667,
+            "first_quarter_median_ns": 401062.5,
+            "last_quarter_median_ns": 2269104.5
+          },
+          "begin_attempt": {
+            "p50_ns": 110958,
+            "p99_ns": 169042,
+            "first_quarter_median_ns": 144041.5,
+            "last_quarter_median_ns": 105875.0
+          },
+          "create_session": {
+            "p50_ns": 123500,
+            "p99_ns": 402959,
+            "first_quarter_median_ns": 263229.5,
+            "last_quarter_median_ns": 136541.5
+          },
+          "finish_attempt": {
+            "p50_ns": 2608250,
+            "p99_ns": 2671875,
+            "first_quarter_median_ns": 2646541.5,
+            "last_quarter_median_ns": 2593250.0
+          },
+          "host_event": {
+            "p50_ns": 1146667,
+            "p99_ns": 2344542,
+            "first_quarter_median_ns": 359542.0,
+            "last_quarter_median_ns": 1967249.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 1053167,
+            "p99_ns": 1075958,
+            "first_quarter_median_ns": 1058499.5,
+            "last_quarter_median_ns": 1051792.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-normal-8-01"
+        ],
+        "result_sha256": [
+          "05b5e65690579240a22ff22a134c493313f92ef6496f524558c4df101a179d54"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 28712,
+        "timed_appends": 28688,
+        "projection_bytes": 2216040,
+        "appends_per_second_median": 658.9528695418462,
+        "peak_process_rss_bytes_max": 80953344,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1332708,
+            "p99_ns": 7543833,
+            "first_quarter_median_ns": 418979.5,
+            "last_quarter_median_ns": 2358104.5
+          },
+          "begin_attempt": {
+            "p50_ns": 128459,
+            "p99_ns": 239084,
+            "first_quarter_median_ns": 136771.0,
+            "last_quarter_median_ns": 91791.5
+          },
+          "create_session": {
+            "p50_ns": 110500,
+            "p99_ns": 383125,
+            "first_quarter_median_ns": 256083.5,
+            "last_quarter_median_ns": 110062.0
+          },
+          "finish_attempt": {
+            "p50_ns": 2606625,
+            "p99_ns": 3288791,
+            "first_quarter_median_ns": 2615146.0,
+            "last_quarter_median_ns": 2686104.0
+          },
+          "host_event": {
+            "p50_ns": 1176458,
+            "p99_ns": 2401833,
+            "first_quarter_median_ns": 372187.5,
+            "last_quarter_median_ns": 2041541.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 1046917,
+            "p99_ns": 1068500,
+            "first_quarter_median_ns": 1060729.0,
+            "last_quarter_median_ns": 1045354.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-normal-8-01"
+        ],
+        "result_sha256": [
+          "ff904db7e1502c6829ef55ef394e0fe2d9b074237c1b36b5d2302df089b778e0"
+        ]
+      }
+    },
+    {
+      "size": "medium",
+      "category": "normal",
+      "sessions": 32,
+      "append_throughput_change_percent": -1.0576554439644337,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 1,
+        "appended_events": 114848,
+        "timed_appends": 114752,
+        "projection_bytes": 8864182,
+        "appends_per_second_median": 560.9581738828298,
+        "peak_process_rss_bytes_max": 275480576,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1351208,
+            "p99_ns": 14707625,
+            "first_quarter_median_ns": 407084.0,
+            "last_quarter_median_ns": 2282625.5
+          },
+          "begin_attempt": {
+            "p50_ns": 90833,
+            "p99_ns": 181666,
+            "first_quarter_median_ns": 117083.5,
+            "last_quarter_median_ns": 86354.0
+          },
+          "create_session": {
+            "p50_ns": 100000,
+            "p99_ns": 401375,
+            "first_quarter_median_ns": 123291.5,
+            "last_quarter_median_ns": 92333.5
+          },
+          "finish_attempt": {
+            "p50_ns": 2579375,
+            "p99_ns": 15748667,
+            "first_quarter_median_ns": 2538937.5,
+            "last_quarter_median_ns": 2592916.5
+          },
+          "host_event": {
+            "p50_ns": 1172959,
+            "p99_ns": 2274417,
+            "first_quarter_median_ns": 366646.0,
+            "last_quarter_median_ns": 1960063.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 1018542,
+            "p99_ns": 1042125,
+            "first_quarter_median_ns": 1026041.5,
+            "last_quarter_median_ns": 1022104.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-sessions-02-medium-normal-32-01"
+        ],
+        "result_sha256": [
+          "58b07eed81ce6661de9b940fe15ea6d303dd6e398453a399c2e447ddc5222f10"
+        ]
+      },
+      "reuse": {
+        "runs": 1,
+        "appended_events": 114848,
+        "timed_appends": 114752,
+        "projection_bytes": 8864182,
+        "appends_per_second_median": 555.0251692183946,
+        "peak_process_rss_bytes_max": 271548416,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 1425291,
+            "p99_ns": 15062584,
+            "first_quarter_median_ns": 422104.0,
+            "last_quarter_median_ns": 2307166.5
+          },
+          "begin_attempt": {
+            "p50_ns": 92416,
+            "p99_ns": 180208,
+            "first_quarter_median_ns": 109042.0,
+            "last_quarter_median_ns": 90041.5
+          },
+          "create_session": {
+            "p50_ns": 100917,
+            "p99_ns": 394375,
+            "first_quarter_median_ns": 110562.0,
+            "last_quarter_median_ns": 96500.0
+          },
+          "finish_attempt": {
+            "p50_ns": 2574375,
+            "p99_ns": 16832125,
+            "first_quarter_median_ns": 2571062.5,
+            "last_quarter_median_ns": 2562333.0
+          },
+          "host_event": {
+            "p50_ns": 1238625,
+            "p99_ns": 2357792,
+            "first_quarter_median_ns": 385291.5,
+            "last_quarter_median_ns": 1993521.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 997041,
+            "p99_ns": 1034708,
+            "first_quarter_median_ns": 999541.5,
+            "last_quarter_median_ns": 998854.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-sessions-02-medium-normal-32-01"
+        ],
+        "result_sha256": [
+          "de2ec14c2ec1289886a5e53a4f284b8db5d27779ffd2e5c56ae5452697fae931"
+        ]
+      }
+    },
+    {
+      "size": "short",
+      "category": "message_update",
+      "sessions": 1,
+      "append_throughput_change_percent": -5.922307033524888,
+      "representative_operation": "message_update",
+      "before": {
+        "runs": 2,
+        "appended_events": 101,
+        "timed_appends": 98,
+        "projection_bytes": 7536,
+        "appends_per_second_median": 7559.607854580633,
+        "peak_process_rss_bytes_max": 10649600,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 129124.5,
+            "p99_ns": 228125.5,
+            "first_quarter_median_ns": 108812.5,
+            "last_quarter_median_ns": 132822.75
+          },
+          "begin_attempt": {
+            "p50_ns": 260500.0,
+            "p99_ns": 260500.0,
+            "first_quarter_median_ns": 260500.0,
+            "last_quarter_median_ns": 260500.0
+          },
+          "create_session": {
+            "p50_ns": 986042.0,
+            "p99_ns": 986042.0,
+            "first_quarter_median_ns": 986042.0,
+            "last_quarter_median_ns": 986042.0
+          },
+          "finish_attempt": {
+            "p50_ns": 145833.5,
+            "p99_ns": 145833.5,
+            "first_quarter_median_ns": 145833.5,
+            "last_quarter_median_ns": 145833.5
+          },
+          "message_update": {
+            "p50_ns": 134020.5,
+            "p99_ns": 263875.0,
+            "first_quarter_median_ns": 114520.75,
+            "last_quarter_median_ns": 135729.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 24687.0,
+            "p99_ns": 24687.0,
+            "first_quarter_median_ns": 24687.0,
+            "last_quarter_median_ns": 24687.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-history-02-short-message_update-1-01",
+          "bench-before-history-02-short-message_update-1-02"
+        ],
+        "result_sha256": [
+          "b51eeeafc27580a734a5e63ee465a46b25d4920edee6f378e54fa4bb0431bdc9",
+          "dc0172e72b97ca28335452fc54262c10e133d2cca9a55dad72d6cdbee366c95a"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 101,
+        "timed_appends": 98,
+        "projection_bytes": 7536,
+        "appends_per_second_median": 7111.904666901904,
+        "peak_process_rss_bytes_max": 10698752,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 130729.5,
+            "p99_ns": 300187.5,
+            "first_quarter_median_ns": 127145.75,
+            "last_quarter_median_ns": 139718.75
+          },
+          "begin_attempt": {
+            "p50_ns": 276687.5,
+            "p99_ns": 276687.5,
+            "first_quarter_median_ns": 276687.5,
+            "last_quarter_median_ns": 276687.5
+          },
+          "create_session": {
+            "p50_ns": 1103104.0,
+            "p99_ns": 1103104.0,
+            "first_quarter_median_ns": 1103104.0,
+            "last_quarter_median_ns": 1103104.0
+          },
+          "finish_attempt": {
+            "p50_ns": 136437.5,
+            "p99_ns": 136437.5,
+            "first_quarter_median_ns": 136437.5,
+            "last_quarter_median_ns": 136437.5
+          },
+          "message_update": {
+            "p50_ns": 136542.0,
+            "p99_ns": 283083.5,
+            "first_quarter_median_ns": 127562.25,
+            "last_quarter_median_ns": 145187.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 11062.5,
+            "p99_ns": 11062.5,
+            "first_quarter_median_ns": 11062.5,
+            "last_quarter_median_ns": 11062.5
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-history-02-short-message_update-1-01",
+          "bench-reuse-history-02-short-message_update-1-02"
+        ],
+        "result_sha256": [
+          "d8ccfd103d2916b81b649b34f86f5f073b4565d1b06cb23a4383f6bea1832c94",
+          "031fbd96d00bb56519716753c15250f5bf1f83436cb9b7e8b0663914821c0cf2"
+        ]
+      }
+    },
+    {
+      "size": "short",
+      "category": "mixed",
+      "sessions": 1,
+      "append_throughput_change_percent": 12.01833237919383,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 2,
+        "appended_events": 141,
+        "timed_appends": 138,
+        "projection_bytes": 10823,
+        "appends_per_second_median": 6064.644566525575,
+        "peak_process_rss_bytes_max": 10698752,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 171687.0,
+            "p99_ns": 230542.0,
+            "first_quarter_median_ns": 127395.75,
+            "last_quarter_median_ns": 202708.5
+          },
+          "begin_attempt": {
+            "p50_ns": 142833.0,
+            "p99_ns": 142833.0,
+            "first_quarter_median_ns": 142833.0,
+            "last_quarter_median_ns": 142833.0
+          },
+          "create_session": {
+            "p50_ns": 418250.0,
+            "p99_ns": 418250.0,
+            "first_quarter_median_ns": 418250.0,
+            "last_quarter_median_ns": 418250.0
+          },
+          "finish_attempt": {
+            "p50_ns": 218771.0,
+            "p99_ns": 218771.0,
+            "first_quarter_median_ns": 218771.0,
+            "last_quarter_median_ns": 218771.0
+          },
+          "host_event": {
+            "p50_ns": 150875.0,
+            "p99_ns": 228354.5,
+            "first_quarter_median_ns": 129437.75,
+            "last_quarter_median_ns": 177667.0
+          },
+          "message_update": {
+            "p50_ns": 170458.5,
+            "p99_ns": 214375.0,
+            "first_quarter_median_ns": 143000.25,
+            "last_quarter_median_ns": 193760.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 41521.5,
+            "p99_ns": 41521.5,
+            "first_quarter_median_ns": 41521.5,
+            "last_quarter_median_ns": 41521.5
+          },
+          "tool_started": {
+            "p50_ns": 162896.0,
+            "p99_ns": 215958.5,
+            "first_quarter_median_ns": 112302.0,
+            "last_quarter_median_ns": 205604.25
+          }
+        },
+        "update_after_host_median_ns": 169791.5,
+        "source_receipts": [
+          "bench-before-history-02-short-mixed-1-01",
+          "bench-before-history-02-short-mixed-1-02"
+        ],
+        "result_sha256": [
+          "3ac19cef639307581801bacfb15b7cb2383b302c9c1ab2e303392e8461f6dead",
+          "2b2a5355d68733c86dbd1531c858505a4ac58eddbbd01288f16a2c975f15bc8f"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 141,
+        "timed_appends": 138,
+        "projection_bytes": 10823,
+        "appends_per_second_median": 6793.513708147338,
+        "peak_process_rss_bytes_max": 10780672,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 144979.5,
+            "p99_ns": 245895.5,
+            "first_quarter_median_ns": 131854.5,
+            "last_quarter_median_ns": 162770.75
+          },
+          "begin_attempt": {
+            "p50_ns": 173020.5,
+            "p99_ns": 173020.5,
+            "first_quarter_median_ns": 173020.5,
+            "last_quarter_median_ns": 173020.5
+          },
+          "create_session": {
+            "p50_ns": 496979.5,
+            "p99_ns": 496979.5,
+            "first_quarter_median_ns": 496979.5,
+            "last_quarter_median_ns": 496979.5
+          },
+          "finish_attempt": {
+            "p50_ns": 178625.0,
+            "p99_ns": 178625.0,
+            "first_quarter_median_ns": 178625.0,
+            "last_quarter_median_ns": 178625.0
+          },
+          "host_event": {
+            "p50_ns": 127603.5,
+            "p99_ns": 421083.5,
+            "first_quarter_median_ns": 127677.0,
+            "last_quarter_median_ns": 140031.0
+          },
+          "message_update": {
+            "p50_ns": 144979.0,
+            "p99_ns": 394791.5,
+            "first_quarter_median_ns": 141479.25,
+            "last_quarter_median_ns": 161542.0
+          },
+          "snapshot_verify": {
+            "p50_ns": 14041.5,
+            "p99_ns": 14041.5,
+            "first_quarter_median_ns": 14041.5,
+            "last_quarter_median_ns": 14041.5
+          },
+          "tool_started": {
+            "p50_ns": 128667.0,
+            "p99_ns": 280083.0,
+            "first_quarter_median_ns": 106989.75,
+            "last_quarter_median_ns": 169958.25
+          }
+        },
+        "update_after_host_median_ns": 139958.5,
+        "source_receipts": [
+          "bench-reuse-history-02-short-mixed-1-01",
+          "bench-reuse-history-02-short-mixed-1-02"
+        ],
+        "result_sha256": [
+          "b6d9a54b7bb2bbfde59d67b23a13598d716b2d1495e12ed79caf7f4a1454ab90",
+          "b1e8bd1dc65532f74d1796344047039394a752ba24afe05f154fd1b7bcb2e570"
+        ]
+      }
+    },
+    {
+      "size": "short",
+      "category": "normal",
+      "sessions": 1,
+      "append_throughput_change_percent": 20.296671336380733,
+      "representative_operation": "host_event",
+      "before": {
+        "runs": 2,
+        "appended_events": 453,
+        "timed_appends": 450,
+        "projection_bytes": 34708,
+        "appends_per_second_median": 3973.1610596987503,
+        "peak_process_rss_bytes_max": 11845632,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 243708.5,
+            "p99_ns": 515209.0,
+            "first_quarter_median_ns": 159000.0,
+            "last_quarter_median_ns": 355239.25
+          },
+          "begin_attempt": {
+            "p50_ns": 139562.5,
+            "p99_ns": 139562.5,
+            "first_quarter_median_ns": 139562.5,
+            "last_quarter_median_ns": 139562.5
+          },
+          "create_session": {
+            "p50_ns": 385500.0,
+            "p99_ns": 385500.0,
+            "first_quarter_median_ns": 385500.0,
+            "last_quarter_median_ns": 385500.0
+          },
+          "finish_attempt": {
+            "p50_ns": 388063.0,
+            "p99_ns": 388063.0,
+            "first_quarter_median_ns": 388063.0,
+            "last_quarter_median_ns": 388063.0
+          },
+          "host_event": {
+            "p50_ns": 220583.0,
+            "p99_ns": 356896.0,
+            "first_quarter_median_ns": 157114.75,
+            "last_quarter_median_ns": 322208.5
+          },
+          "snapshot_verify": {
+            "p50_ns": 133833.0,
+            "p99_ns": 133833.0,
+            "first_quarter_median_ns": 133833.0,
+            "last_quarter_median_ns": 133833.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-before-history-02-short-normal-1-01",
+          "bench-before-history-02-short-normal-1-02"
+        ],
+        "result_sha256": [
+          "184956432aab13951ffd5d6ca79769b04b47c45a0b3a306f34421e14c2dc515c",
+          "f79b37ddebf5e98d78388df5f17c0734698902e5b3160da8be6578506029b30e"
+        ]
+      },
+      "reuse": {
+        "runs": 2,
+        "appended_events": 453,
+        "timed_appends": 450,
+        "projection_bytes": 34708,
+        "appends_per_second_median": 4779.5805016508675,
+        "peak_process_rss_bytes_max": 12140544,
+        "operations": {
+          "agent_lifecycle": {
+            "p50_ns": 200875.0,
+            "p99_ns": 786417.0,
+            "first_quarter_median_ns": 135166.75,
+            "last_quarter_median_ns": 265094.0
+          },
+          "begin_attempt": {
+            "p50_ns": 157646.5,
+            "p99_ns": 157646.5,
+            "first_quarter_median_ns": 157646.5,
+            "last_quarter_median_ns": 157646.5
+          },
+          "create_session": {
+            "p50_ns": 392958.5,
+            "p99_ns": 392958.5,
+            "first_quarter_median_ns": 392958.5,
+            "last_quarter_median_ns": 392958.5
+          },
+          "finish_attempt": {
+            "p50_ns": 278583.5,
+            "p99_ns": 278583.5,
+            "first_quarter_median_ns": 278583.5,
+            "last_quarter_median_ns": 278583.5
+          },
+          "host_event": {
+            "p50_ns": 176062.5,
+            "p99_ns": 364479.5,
+            "first_quarter_median_ns": 131593.5,
+            "last_quarter_median_ns": 231479.25
+          },
+          "snapshot_verify": {
+            "p50_ns": 30146.0,
+            "p99_ns": 30146.0,
+            "first_quarter_median_ns": 30146.0,
+            "last_quarter_median_ns": 30146.0
+          }
+        },
+        "update_after_host_median_ns": null,
+        "source_receipts": [
+          "bench-reuse-history-02-short-normal-1-01",
+          "bench-reuse-history-02-short-normal-1-02"
+        ],
+        "result_sha256": [
+          "7ebe48b45074234882bdb7d20da3b6ce6ff352f1fbb1e46d1e9395175cba353a",
+          "9ba79dad5f41b1d2ae2ebf9dfac17c440a2489c215182a5c3a4e33b108a17fa2"
+        ]
+      }
+    }
+  ]
+}

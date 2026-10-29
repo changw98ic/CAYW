@@ -1,0 +1,12 @@
+{
+  "ordinary-reuse.patch": {
+    "sha256": "5b0e23010ee856deffcb209084985e35c281bde0f8eaf33c38766da9a1121491",
+    "before_store_sha256": "a593d62e8761f707b60f844005fe9a154962ad1ea44e571a88abe6d427c93018",
+    "after_store_sha256": "610e23e252157dd456a8aa31d9d7abf94fdb41963fa2c5f1725137d9d853710f"
+  },
+  "bounded-cache.patch": {
+    "sha256": "b2ea8868d15f352e2b375cea1467fa95e35f4a803bf00fa407177b9cb3c5239b",
+    "before_store_sha256": "610e23e252157dd456a8aa31d9d7abf94fdb41963fa2c5f1725137d9d853710f",
+    "after_store_sha256": "527d593f0f873b84704393a6f59851df20457bc08c05164758ad85116512dbb3"
+  }
+}

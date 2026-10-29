@@ -1,0 +1,747 @@
+{
+  "head": "e738dae1af73bf0ad3fe15f729a4557a2d9f4d24",
+  "status": "uncommitted refactor worktree",
+  "scope": "Counts are per invocation. Separate feature, subset and repeated runs must not be added as unique tests.",
+  "checks": [
+    {
+      "name": "refactor-postlint-final-fmt-01",
+      "plan": "post-lint-final-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 1.5708881251048297,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "59e86a9278cd44ed778e7a5b5c0243b0610b7e6007fa69e4a26abd7139d769ed",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-postlint-final-check-01",
+      "plan": "post-lint-final-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "check",
+        "--workspace",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 7.4944797090720385,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "269ab33a6ad5c7fec355eac8c4101ed4a5f41dedd78fe8b2f2c6a87146953bc8",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "e5d02129fb708ae8c94948f44bfb21a4693136d2686b078e5364750ea09649d7"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-postlint-final-tests-01",
+      "plan": "post-lint-final-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "--workspace",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 837.2932662500534,
+      "source_changed": [
+        "docs/validation/refactor-implementation-20261029.md",
+        "docs/validation/refactor-persistence-20261029.md",
+        "docs/validation/refactor-projection-diagnostics-20261029/README.md",
+        "docs/validation/refactor-projection-diagnostics-20261029/bounded-cache.patch",
+        "docs/validation/refactor-projection-diagnostics-20261029/optimization-patches.json",
+        "docs/validation/refactor-projection-diagnostics-20261029/ordinary-reuse.patch"
+      ],
+      "product_changed": [],
+      "rust_result_groups": 392,
+      "passed_tests": 2656,
+      "failed_tests": 0,
+      "ignored_tests": 11,
+      "ignored_names": [
+        {
+          "name": "crash_effect_child",
+          "reason": "invoked by independent_crash_effect_is_durable_unknown_without_replay"
+        },
+        {
+          "name": "crash_child",
+          "reason": "subprocess fixture selected by abrupt_process_exit_recovers_unknown_without_replay"
+        },
+        {
+          "name": "live_scope_child",
+          "reason": "subprocess fixture selected by live_process_scope_lock_is_not_stolen"
+        },
+        {
+          "name": "lifecycle_child",
+          "reason": "invoked by the parent tests in a separate process"
+        },
+        {
+          "name": "server_binary_device_example_and_operator_commands_work_on_loopback",
+          "reason": "build the device example, then run --test binaries -- --ignored"
+        },
+        {
+          "name": "held_runtime_process",
+          "reason": "subprocess helper invoked explicitly by the parent test"
+        },
+        {
+          "name": "complete_capture_preserves_stream_and_accounting",
+          "reason": "requires CAYW_REPLAY_CAPTURE and a new CAYW_REPLAY_OUTPUT directory"
+        },
+        {
+          "name": "configured_transport_child",
+          "reason": "subprocess helper invoked explicitly by the parent tests"
+        },
+        {
+          "name": "local_stream_stages",
+          "reason": "requires CAYW_STREAM_FIXTURE and new CAYW_STREAM_OUTPUT; only local HTTP"
+        },
+        {
+          "name": "cleanup_failure_runner",
+          "reason": "isolates the deliberately persistent cleanup-unknown state"
+        },
+        {
+          "name": "fixture_child",
+          "reason": "subprocess fixture used by the child ownership tests"
+        }
+      ],
+      "receipt_sha256": "f738923916c09dea1598eede49355d2b0d024c7789e1c173b364e8dbeec625d4",
+      "logs": {
+        "stdout.log": "126ed9748a8b73c526696ce9d94b9096601f0bcd02c8af99a9876b5699db91ad",
+        "stderr.log": "1287a000119f0884302b68970d89182c6d5cfc157a2c560a2c046588e1bf438a"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-postlint-final-clippy-01",
+      "plan": "post-lint-final-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 24.0400574170053,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "596d33c7cfa5010ae9b2f0288383a623782f6ed8b4a1b9ce98329007cf286668",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "369f7193f8963467688fdf2a81347965fa9bb33b32b410b7404352db9fd5ec9e"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-postlint-final-diff-01",
+      "plan": "post-lint-final-plan.json",
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.048037749947980046,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "5d379de8c6c8ff52d3c9cb69ab0dae5682e03d82e030e25141568e0f25ca89da",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-tree-core-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "tree",
+        "-p",
+        "cayw-core",
+        "-e",
+        "normal",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.14344329200685024,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "7f9b4b9b131ab6fa627c5c07f14197920164ca64073570a535ef90deebb73e3f",
+      "logs": {
+        "stdout.log": "0ac08c5ed35d1fd5cfb9310da2e458ae3664665f778ca84161443692e791ab91",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-tree-queue-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "tree",
+        "-p",
+        "cayw-queue",
+        "-e",
+        "normal",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.14998129196465015,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "c96f7d281e87ea6c1d5d68c2294795e2301d89c965b4a05a25f4c8d33efdcf11",
+      "logs": {
+        "stdout.log": "99d04d9e705673f4cee509a609d7853707c51bdd1b0cc8285cc856119d26060d",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-process-windows-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "-p",
+        "cayw-runtime",
+        "--features",
+        "fault-injection",
+        "--test",
+        "refactor_process_recovery",
+        "--locked",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 13.329057374969125,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 1,
+      "passed_tests": 1,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "1b650106e06efb1f6b0d13d83cfc5a9f4e2cffbc6fc883b56d88e960f96bd71b",
+      "logs": {
+        "stdout.log": "2692d31969c7356a653b42e5ee26723225f45b7e6af9b3b0f2033a57866b9ace",
+        "stderr.log": "8d97a47cf8899353d53c592e155b1ea114e81604ec5d3628346285cbec0f70f3"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-crash-matrix-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "-p",
+        "cayw-runtime",
+        "--features",
+        "fault-injection",
+        "--test",
+        "crash_recovery_matrix",
+        "--locked",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 35.04612416704185,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 1,
+      "passed_tests": 2,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "9a503d704ba2c0835d7ae52d1d72c8ebd82bd7670171799ad8cca45c8c6a2485",
+      "logs": {
+        "stdout.log": "21aaf6bfd60771fcda573a13255be33e242eb8f75bba2e62c8e8b2078bd96482",
+        "stderr.log": "941f0d5aa3118eb13dd83c02dbaf131490db5eba3a6aedca0fa7b7470fde659d"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-crash-reconcile-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "-p",
+        "cayw-runtime",
+        "--features",
+        "fault-injection",
+        "--test",
+        "crash_reconciliation",
+        "--locked",
+        "--",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 10.498545042006299,
+      "source_changed": [
+        "docs/validation/refactor-retained-failures-20261029.json"
+      ],
+      "product_changed": [],
+      "rust_result_groups": 1,
+      "passed_tests": 3,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "ceb32df0ea1309d4d5a33067a85de5f6868971c26d02d6e95f874c0070563232",
+      "logs": {
+        "stdout.log": "8d8cdc57f108b39d23cf9792279a878f21a429a9048e24e234ce5a927a69c6f4",
+        "stderr.log": "445f795ced40c3a368fba15e77c7ea72374db4dd55ebcd93b6a1f81c14d1ed33"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-feature-check-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "check",
+        "-p",
+        "cayw-runtime",
+        "--all-targets",
+        "--features",
+        "plugins,pi-compat,strongflow,remote",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 15.010908249998465,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "eb06a2aeb1212e55eeab25e53bf3cd215979326cd24a88aa57e9aab7debd8599",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "1121476019e2451f83e5666f781b6f966c3b9bf224939cd42f422a8c486f910b"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-features-tests-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "-p",
+        "cayw-runtime",
+        "--features",
+        "plugins,pi-compat,strongflow",
+        "--test",
+        "plugin_execution",
+        "--test",
+        "review_services",
+        "--test",
+        "plugin_lifecycle",
+        "--test",
+        "pi_compat_runtime",
+        "--test",
+        "pi_mcp_combo",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 14.675719125196338,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 5,
+      "passed_tests": 16,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "f00fda8d0199e24d2ae12437b98d2079205b28384b585177e2d10d6ecbc325a5",
+      "logs": {
+        "stdout.log": "f1270f404701a07469256b4241f57ae1645c26f6166aa004adf4a9550563d62a",
+        "stderr.log": "ec5fdcc0b398c0afd724fea414a6bac8a50d9eeea955568b132ff31cbdb22e37"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-client-fmt-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "fmt",
+        "--manifest-path",
+        "examples/headless-client/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.0820072500500828,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "7b73109ec695c4bde1db53db02e98a325ec7ec283d4be45eae1cc34763d36483",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-client-check-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "check",
+        "--manifest-path",
+        "examples/headless-client/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 5.225142708979547,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "abd42ad926c5ac5eeebc3306b11a36a8dae6400fc9160113c3bedd19c4ac78c8",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "fc03e48c9da987b54be5b3112c42d6ad0be531f15c656d4d3034c6598de61720"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-client-test-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "--manifest-path",
+        "examples/headless-client/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 16.75084950006567,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 5,
+      "passed_tests": 41,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "ae223f80fe25a58bf1aea6286978e00fc3bd7056299d7fa675ec9b9d8b4a94e8",
+      "logs": {
+        "stdout.log": "2bda0dd15156937344c4273cc9e387633929f1e9a799dfe0c85b1b29b263fb6c",
+        "stderr.log": "b572e95e028fa31dcac3cdb44d29a7d910f239c905677c33d38556c6b344b660"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-client-clippy-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "clippy",
+        "--manifest-path",
+        "examples/headless-client/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.8922136670444161,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "95dc58b0b2f2293e3665f33617a9ac6e723b8df30fa5ef64966b6755c9c6b5a6",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "0cda19f76f364a77e2d2ba49fbfd85f12ba14cd4666047de4547a70bf92afbdf"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-offline-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "run",
+        "-p",
+        "cayw-agent",
+        "--example",
+        "offline",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.19994891714304686,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "1a819d4f098d576f802c597169f346a310f7a87c8f411dea1713a499de71e3c5",
+      "logs": {
+        "stdout.log": "0079fe65869ddc6aee961b0f3723d2d4c19dc5625db80b1892f5a5fe628bdef0",
+        "stderr.log": "cd1d570c124209d141e55f42d12971d555acdc500305554478b9f5c30a879b2e"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-remote-build-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "build",
+        "-p",
+        "cayw-remote",
+        "--example",
+        "device",
+        "--locked"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.14709579199552536,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 0,
+      "passed_tests": 0,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "fb3bc26d16ca3ba20a00f438223b55acd824324333e33bdfc40a9c2b3d6221c0",
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "4cf86278c1e6d659943a46a3d7e3da429ac15be90f0f17742e24ef85228e7d3e"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    },
+    {
+      "name": "refactor-remote-binary-02",
+      "plan": "bounded-final-boundaries-plan.json",
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "-p",
+        "cayw-remote",
+        "--test",
+        "binaries",
+        "--locked",
+        "--",
+        "--ignored"
+      ],
+      "exit_code": 0,
+      "passed": true,
+      "elapsed_seconds": 0.20921883289702237,
+      "source_changed": [],
+      "product_changed": [],
+      "rust_result_groups": 1,
+      "passed_tests": 1,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "ignored_names": [],
+      "receipt_sha256": "44ed62052ccc1f82eb23899c1eb9a7eaff0c6a460bab59bb4ef3c2170b3ab524",
+      "logs": {
+        "stdout.log": "d839921de2882c0a315e24086b0ae9f1e177d8a2763fa30120c02d39b28efd3d",
+        "stderr.log": "9f6640cc722dbc6b5ddf0371303edb292f8e30fab98957f7e68b6c7dbe36e2df"
+      },
+      "matches_delivered_sources": true,
+      "source_mismatch_files": []
+    }
+  ],
+  "normal_project_dependencies": {
+    "core": [
+      "cayw-agent-types",
+      "cayw-ai",
+      "cayw-core"
+    ],
+    "queue": [
+      "cayw-ai",
+      "cayw-queue"
+    ]
+  },
+  "sigkill_windows": {
+    "process": {
+      "executed": 2,
+      "checkpoints": [
+        "core.start.before",
+        "core.start.committed"
+      ],
+      "evidence": "process-windows-02/process-f8d81eef-5126-471b-99b1-062587ea3986/executed-windows.json"
+    },
+    "ipc": {
+      "executed": 14,
+      "checkpoints": [
+        "cells.intent.committed",
+        "core.start.committed",
+        "host.effect.before",
+        "host.effect.visible",
+        "host.effect.durable",
+        "core.capability_terminal.before",
+        "core.capability_terminal.committed",
+        "cells.call_terminal.committed",
+        "core.tool_result.committed",
+        "requests.task_end.before",
+        "requests.task_end.committed",
+        "queue.task_terminal.commit.before",
+        "queue.task_terminal.commit.committed",
+        "rpc.reply.before"
+      ],
+      "evidence": "crash-matrix-02/ipc-4b072604-5dfd-4ce5-8717-748791661cc7/executed-windows.json"
+    },
+    "sdk": {
+      "executed": 26,
+      "checkpoints": [
+        "cells.intent.before",
+        "cells.intent.committed",
+        "core.plan.before",
+        "core.plan.committed",
+        "core.start.before",
+        "core.start.committed",
+        "host.effect.before",
+        "host.effect.visible",
+        "host.effect.durable",
+        "core.capability_terminal.before",
+        "core.capability_terminal.committed",
+        "cells.call_terminal.before",
+        "cells.call_terminal.committed",
+        "cells.response_ack.before",
+        "cells.execution_terminal.committed",
+        "core.execution_terminal.before",
+        "core.execution_terminal.committed",
+        "core.tool_result.before",
+        "core.tool_result.committed",
+        "core.attempt_terminal.before",
+        "core.attempt_terminal.committed",
+        "requests.task_end.before",
+        "requests.task_end.committed",
+        "queue.task_terminal.commit.before",
+        "queue.task_terminal.commit.committed",
+        "sdk.reply.before"
+      ],
+      "evidence": "crash-matrix-02/sdk-8c4516b7-a3d4-4ed1-9e8c-3d130a027045/executed-windows.json"
+    }
+  },
+  "all_checks_passed": true,
+  "delivered_source_manifest_sha256": "d9161f327e1f7c76489f469a33c4c01cc49d939c77542c46f7fa1a0ca5667e9c",
+  "raw_evidence_root": ".local/refactor-20261029/",
+  "evidence_scope": "Raw stdout, stderr and receipt hashes retained locally. This artifact records hashes and parsed results; it is not a replacement for raw logs.",
+  "retained_failed_invocations": {
+    "artifact": "refactor-retained-failures-20261029.json",
+    "sha256": "76cfda35da0736de19e242798e9eba19c81d5c81d61efe140c2b5e3b76c45881",
+    "count": 7
+  }
+}

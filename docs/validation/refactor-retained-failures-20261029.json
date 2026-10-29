@@ -1,0 +1,162 @@
+{
+  "scope": "Retained failed invocations. Successful reruns do not overwrite or erase these failures. Raw evidence remains local.",
+  "raw_evidence_root": ".local/refactor-20261029/",
+  "failures": [
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 37.32705970807001,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "6292e55cb6f4dbbb8bb969cc1d497ec7d300bb04341084e81db5cc93ed920acc"
+      },
+      "name": "baseline-clippy-01",
+      "receipt_sha256": "ba4848d1309911a3564561a1d1cc38416d24d41834df9b5780d5d59ba5c8c459",
+      "source_before_file_count": 912,
+      "source_after_file_count": 912
+    },
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 1.557372875045985,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "acf4273a50eb86c5ca187996f6e3def22274768ba798a5ba0e813ac57613f9dd",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "name": "baseline-fmt-01",
+      "receipt_sha256": "a33b772b43173e0aea46e79872cc66d6ed829a5be36ce0465aae6d32e2631d3a",
+      "source_before_file_count": 914,
+      "source_after_file_count": 914
+    },
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "cayw-core",
+        "--example",
+        "refactor_persistence_bench"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 10.532831707969308,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "f7b5e02dba338b60dda3907dd3ed39186a52db8cfa85c151d9be0e82e366c0cf"
+      },
+      "name": "diag-bounded-build-01",
+      "receipt_sha256": "779b0457e323dd92c457a80c19de6d854bc07dd69cce3371bbab2a6325eba230",
+      "source_before_file_count": 942,
+      "source_after_file_count": 942
+    },
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 10.943503250135109,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "124eb1297a3ea3725cb5c833dde2493e65300f9e3d5ac9f40638ee5a9dd69063"
+      },
+      "name": "refactor-check-01",
+      "receipt_sha256": "bab9c18001957cd146f22a798b35d61b60262c040e411443935a017f188d266d",
+      "source_before_file_count": 931,
+      "source_after_file_count": 931
+    },
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "test",
+        "-p",
+        "cayw-core",
+        "--locked"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 7.956873083021492,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "1ffae8fd9d81d2a4bda268b825fc270c7214bc075c11dac9b07c1d7c102ab546",
+        "stderr.log": "f06e694c379a1e1efa1ff1f0adea5d437db4f9596c874d202bd3a647bacf8605"
+      },
+      "name": "refactor-core-02",
+      "receipt_sha256": "6d1747852640e9d9154feee0fcb7ab292f1e1e7e57d4cd90829a488b37e1383a",
+      "source_before_file_count": 932,
+      "source_after_file_count": 932
+    },
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 4.999373291851953,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr.log": "31fcb9d641ca2123d7f0761a6ae453499d970bdb7abbfb3ce66b56ad1263c195"
+      },
+      "name": "refactor-final-clippy-01",
+      "receipt_sha256": "453d1a2b50a18f94b425b4b7376cfc8f44a11f7343c61020b24fff513f4f01d5",
+      "source_before_file_count": 941,
+      "source_after_file_count": 941
+    },
+    {
+      "argv": [
+        "cargo",
+        "+1.95.0",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 1,
+      "elapsed_seconds": 1.560982583090663,
+      "timed_out": false,
+      "logs": {
+        "stdout.log": "2787ee2f4cfda940b1976a31a0db361cc634cf056aeb375716f3878935c3d878",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "name": "refactor-fmt-02",
+      "receipt_sha256": "5388435113a6338945b2a5113344cd661b7a7fbfceda2b1593b656944d577205",
+      "source_before_file_count": 931,
+      "source_after_file_count": 931
+    }
+  ]
+}

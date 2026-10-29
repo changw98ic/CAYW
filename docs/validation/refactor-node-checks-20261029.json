@@ -1,0 +1,103 @@
+{
+  "scope": "Completed dependency preparation and Node scripts. Relevant product files still match. Not browser UI validation or remote Actions.",
+  "checks": [
+    {
+      "name": "editor-deps-01",
+      "argv": [
+        "npm",
+        "ci",
+        "--prefix",
+        "crates/cayw-visual-editor/framework",
+        "--no-fund",
+        "--no-audit"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "d2c6f376b04f80fc482932f356ce4e1bd99ad2102e01be5b1fd96fc714ca94e3",
+      "logs": {
+        "stdout.log": "4b2a6d6dd20537c4547d3400fb8ff9b0ab4cb2fb23712d21473f154f63f398ba",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "relevant_prefix": "crates/cayw-visual-editor/framework/",
+      "relevant_file_count": 5,
+      "relevant_files_match_delivery": true,
+      "node_counts": {}
+    },
+    {
+      "name": "pi-deps-01",
+      "argv": [
+        "npm",
+        "ci",
+        "--prefix",
+        "crates/cayw-pi-compat/npm",
+        "--omit=dev",
+        "--no-fund",
+        "--no-audit"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "f2a7098d278e93858439450c789e8726e3b929227b529d3533e672d313ac368a",
+      "logs": {
+        "stdout.log": "4b047aaf1554f117a34d3acadf012c38da0fa1a34cce4f0a9c862413f10ed778",
+        "stderr.log": "586d928df3fe89ec184a21c45a8a50d4200ba0a962c3475c3ad489c83fb65d76"
+      },
+      "relevant_prefix": "crates/cayw-pi-compat/npm/",
+      "relevant_file_count": 3,
+      "relevant_files_match_delivery": true,
+      "node_counts": {}
+    },
+    {
+      "name": "webui-node-01",
+      "argv": [
+        "node",
+        "--test",
+        "crates/cayw-webui/tests/dom.test.mjs",
+        "crates/cayw-webui/tests/state.test.mjs",
+        "crates/cayw-webui/tests/ui.test.mjs",
+        "crates/cayw-webui/tests/workbench.test.mjs",
+        "crates/cayw-webui/tests/workbench_dom.test.mjs"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "2ea8d834cc350a75e7abb90d36b1fdc8bba650e5ae15909beb33b1b6ff3376d1",
+      "logs": {
+        "stdout.log": "e5f8c2591dec8b7ad935d17ba97cd8ccc747879e2ad73682fd34e85988f348b4",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "relevant_prefix": "crates/cayw-webui/",
+      "relevant_file_count": 24,
+      "relevant_files_match_delivery": true,
+      "node_counts": {
+        "tests": 90,
+        "pass": 90,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "name": "visual-node-01",
+      "argv": [
+        "node",
+        "--test",
+        "crates/cayw-visual-editor/framework/source.test.mjs",
+        "crates/cayw-visual-editor/tests/review_layout.mjs"
+      ],
+      "exit_code": 0,
+      "receipt_sha256": "0ff8d3dd0dbdf1ac38b1807208183df72d13c72eb54540396d842bdf5be58db1",
+      "logs": {
+        "stdout.log": "eaf9be98da8c893a5c0148c41093980c27f5acb47440842eb65dbd0f4a078381",
+        "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "relevant_prefix": "crates/cayw-visual-editor/framework/",
+      "relevant_file_count": 5,
+      "relevant_files_match_delivery": true,
+      "node_counts": {
+        "tests": 42,
+        "pass": 42,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    }
+  ]
+}

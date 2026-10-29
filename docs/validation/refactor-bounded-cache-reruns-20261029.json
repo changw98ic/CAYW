@@ -1,0 +1,849 @@
+{
+  "scope": "Three additional trials per unchanged release binary, after an anomalous original trial. Original and follow-up samples all retained. The additional median excludes the original by explicit scope; it does not replace the 24-run table.",
+  "versions": {
+    "single": {
+      "rows": [
+        {
+          "label": "medium-mixed-2-01",
+          "receipt": "bench-single-mixed-two-04-medium-mixed-2-01",
+          "exit_code": 0,
+          "config": {
+            "category": "mixed",
+            "sessions": 2,
+            "size": "medium",
+            "total_workload_ops": 1024,
+            "workload_ops_per_session": 512
+          },
+          "input": {
+            "appended_events_including_setup_and_finish": 2186,
+            "expected_messages": 256,
+            "host_events": 512,
+            "lifecycle_events": 1028,
+            "message_updates": 512,
+            "per_session": [
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 0,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "1ac2ff71-1c37-4211-bbcb-c5298d5fb464",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              },
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 1,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "a17dd03a-1679-4789-9305-f1e1f4ae70c9",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              }
+            ],
+            "planned_appends": 2180,
+            "tool_started_events": 128,
+            "workload_ops": 1024
+          },
+          "event_rows": 2186,
+          "projection_bytes": 170584,
+          "sqlite_version": "3.53.2",
+          "timed_store_calls": 2188,
+          "timed_store_ns": 810727184,
+          "timed_store_calls_per_second": 2698.8116880511557,
+          "timed_appends": 2180,
+          "timed_append_ns": 806262559,
+          "timed_appends_per_second": 2703.8338512256278,
+          "explain": {
+            "events_by_type": {
+              "expected_index": "core_events_by_type",
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=? AND cursor>?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events\n    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3\n    ORDER BY cursor LIMIT ?4",
+              "uses_expected_index": true,
+              "uses_index": true
+            },
+            "wait_log": {
+              "expected_index": null,
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='execution_wait_registered' ORDER BY cursor",
+              "uses_expected_index": null,
+              "uses_index": true
+            }
+          },
+          "peak_process_rss_bytes": 20611072,
+          "operations": {
+            "agent_lifecycle": {
+              "samples": 1028,
+              "p50_ns": 383375,
+              "p99_ns": 873917,
+              "first_quarter_median_ns": 168041,
+              "last_quarter_median_ns": 586917
+            },
+            "begin_attempt": {
+              "samples": 2,
+              "p50_ns": 97250,
+              "p99_ns": 291334,
+              "first_quarter_median_ns": 291334,
+              "last_quarter_median_ns": 97250
+            },
+            "create_session": {
+              "samples": 2,
+              "p50_ns": 110791,
+              "p99_ns": 2154333,
+              "first_quarter_median_ns": 2154333,
+              "last_quarter_median_ns": 110791
+            },
+            "finish_attempt": {
+              "samples": 2,
+              "p50_ns": 672833,
+              "p99_ns": 674834,
+              "first_quarter_median_ns": 674834,
+              "last_quarter_median_ns": 672833
+            },
+            "host_event": {
+              "samples": 512,
+              "p50_ns": 326708,
+              "p99_ns": 580000,
+              "first_quarter_median_ns": 145625.0,
+              "last_quarter_median_ns": 502604.0
+            },
+            "message_update": {
+              "samples": 512,
+              "p50_ns": 334916,
+              "p99_ns": 1166666,
+              "first_quarter_median_ns": 162124.5,
+              "last_quarter_median_ns": 515500.0
+            },
+            "snapshot_verify": {
+              "samples": 2,
+              "p50_ns": 227875,
+              "p99_ns": 235375,
+              "first_quarter_median_ns": 235375,
+              "last_quarter_median_ns": 227875
+            },
+            "tool_started": {
+              "samples": 128,
+              "p50_ns": 384417,
+              "p99_ns": 1432541,
+              "first_quarter_median_ns": 175020.5,
+              "last_quarter_median_ns": 575812.5
+            }
+          },
+          "result_sha256": "36b1a261fd463e0fc730945932044711422ce6419e5edcb6d59d6b801baaf911",
+          "receipt_sha256": "1fc05cd6b1f930c9a2eb5e877630d5762a5e89cc543293ff097b34d9165185db"
+        },
+        {
+          "label": "medium-mixed-2-02",
+          "receipt": "bench-single-mixed-two-04-medium-mixed-2-02",
+          "exit_code": 0,
+          "config": {
+            "category": "mixed",
+            "sessions": 2,
+            "size": "medium",
+            "total_workload_ops": 1024,
+            "workload_ops_per_session": 512
+          },
+          "input": {
+            "appended_events_including_setup_and_finish": 2186,
+            "expected_messages": 256,
+            "host_events": 512,
+            "lifecycle_events": 1028,
+            "message_updates": 512,
+            "per_session": [
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 0,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "49b82443-f06a-421a-9ffc-e258b5cad4f7",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              },
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 1,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "e63c5ce1-462f-4f22-9d4a-1750e582bb6a",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              }
+            ],
+            "planned_appends": 2180,
+            "tool_started_events": 128,
+            "workload_ops": 1024
+          },
+          "event_rows": 2186,
+          "projection_bytes": 170584,
+          "sqlite_version": "3.53.2",
+          "timed_store_calls": 2188,
+          "timed_store_ns": 803832032,
+          "timed_store_calls_per_second": 2721.961694604377,
+          "timed_appends": 2180,
+          "timed_append_ns": 801385907,
+          "timed_appends_per_second": 2720.28741828124,
+          "explain": {
+            "events_by_type": {
+              "expected_index": "core_events_by_type",
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=? AND cursor>?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events\n    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3\n    ORDER BY cursor LIMIT ?4",
+              "uses_expected_index": true,
+              "uses_index": true
+            },
+            "wait_log": {
+              "expected_index": null,
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='execution_wait_registered' ORDER BY cursor",
+              "uses_expected_index": null,
+              "uses_index": true
+            }
+          },
+          "peak_process_rss_bytes": 20791296,
+          "operations": {
+            "agent_lifecycle": {
+              "samples": 1028,
+              "p50_ns": 380625,
+              "p99_ns": 1065250,
+              "first_quarter_median_ns": 171916,
+              "last_quarter_median_ns": 572667
+            },
+            "begin_attempt": {
+              "samples": 2,
+              "p50_ns": 100917,
+              "p99_ns": 134125,
+              "first_quarter_median_ns": 134125,
+              "last_quarter_median_ns": 100917
+            },
+            "create_session": {
+              "samples": 2,
+              "p50_ns": 128000,
+              "p99_ns": 402458,
+              "first_quarter_median_ns": 402458,
+              "last_quarter_median_ns": 128000
+            },
+            "finish_attempt": {
+              "samples": 2,
+              "p50_ns": 608334,
+              "p99_ns": 637291,
+              "first_quarter_median_ns": 637291,
+              "last_quarter_median_ns": 608334
+            },
+            "host_event": {
+              "samples": 512,
+              "p50_ns": 317167,
+              "p99_ns": 570542,
+              "first_quarter_median_ns": 149687.5,
+              "last_quarter_median_ns": 485687.5
+            },
+            "message_update": {
+              "samples": 512,
+              "p50_ns": 324542,
+              "p99_ns": 1196458,
+              "first_quarter_median_ns": 168625.0,
+              "last_quarter_median_ns": 493937.0
+            },
+            "snapshot_verify": {
+              "samples": 2,
+              "p50_ns": 217292,
+              "p99_ns": 217708,
+              "first_quarter_median_ns": 217708,
+              "last_quarter_median_ns": 217292
+            },
+            "tool_started": {
+              "samples": 128,
+              "p50_ns": 381708,
+              "p99_ns": 1640916,
+              "first_quarter_median_ns": 173271.0,
+              "last_quarter_median_ns": 567145.5
+            }
+          },
+          "result_sha256": "b590b5955aa303b375dc93626bc2838107d56c125586cb2367b840d0a193ec9c",
+          "receipt_sha256": "7cf8eb4fc32ded462e6cb742278c3537ac52ee80b3441d194cf726f645b5bebc"
+        },
+        {
+          "label": "medium-mixed-2-03",
+          "receipt": "bench-single-mixed-two-04-medium-mixed-2-03",
+          "exit_code": 0,
+          "config": {
+            "category": "mixed",
+            "sessions": 2,
+            "size": "medium",
+            "total_workload_ops": 1024,
+            "workload_ops_per_session": 512
+          },
+          "input": {
+            "appended_events_including_setup_and_finish": 2186,
+            "expected_messages": 256,
+            "host_events": 512,
+            "lifecycle_events": 1028,
+            "message_updates": 512,
+            "per_session": [
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 0,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "efd05e5a-8fbf-4469-8218-7693f271189e",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              },
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 1,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "f3fd045a-7ba0-4bf5-9573-076312c82de0",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              }
+            ],
+            "planned_appends": 2180,
+            "tool_started_events": 128,
+            "workload_ops": 1024
+          },
+          "event_rows": 2186,
+          "projection_bytes": 170584,
+          "sqlite_version": "3.53.2",
+          "timed_store_calls": 2188,
+          "timed_store_ns": 814380355,
+          "timed_store_calls_per_second": 2686.70528036006,
+          "timed_appends": 2180,
+          "timed_append_ns": 811861190,
+          "timed_appends_per_second": 2685.1880923141553,
+          "explain": {
+            "events_by_type": {
+              "expected_index": "core_events_by_type",
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=? AND cursor>?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events\n    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3\n    ORDER BY cursor LIMIT ?4",
+              "uses_expected_index": true,
+              "uses_index": true
+            },
+            "wait_log": {
+              "expected_index": null,
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='execution_wait_registered' ORDER BY cursor",
+              "uses_expected_index": null,
+              "uses_index": true
+            }
+          },
+          "peak_process_rss_bytes": 20398080,
+          "operations": {
+            "agent_lifecycle": {
+              "samples": 1028,
+              "p50_ns": 389167,
+              "p99_ns": 1095084,
+              "first_quarter_median_ns": 176000,
+              "last_quarter_median_ns": 571042
+            },
+            "begin_attempt": {
+              "samples": 2,
+              "p50_ns": 135083,
+              "p99_ns": 140625,
+              "first_quarter_median_ns": 140625,
+              "last_quarter_median_ns": 135083
+            },
+            "create_session": {
+              "samples": 2,
+              "p50_ns": 168083,
+              "p99_ns": 392833,
+              "first_quarter_median_ns": 392833,
+              "last_quarter_median_ns": 168083
+            },
+            "finish_attempt": {
+              "samples": 2,
+              "p50_ns": 606458,
+              "p99_ns": 644000,
+              "first_quarter_median_ns": 644000,
+              "last_quarter_median_ns": 606458
+            },
+            "host_event": {
+              "samples": 512,
+              "p50_ns": 328916,
+              "p99_ns": 563708,
+              "first_quarter_median_ns": 154271.0,
+              "last_quarter_median_ns": 485562.5
+            },
+            "message_update": {
+              "samples": 512,
+              "p50_ns": 341417,
+              "p99_ns": 1184292,
+              "first_quarter_median_ns": 170896.0,
+              "last_quarter_median_ns": 491417.0
+            },
+            "snapshot_verify": {
+              "samples": 2,
+              "p50_ns": 215000,
+              "p99_ns": 217083,
+              "first_quarter_median_ns": 215000,
+              "last_quarter_median_ns": 217083
+            },
+            "tool_started": {
+              "samples": 128,
+              "p50_ns": 386083,
+              "p99_ns": 1422666,
+              "first_quarter_median_ns": 181166.5,
+              "last_quarter_median_ns": 568229.0
+            }
+          },
+          "result_sha256": "dbfaa173a2f185917250a3a9a4ce9c7402cd949a04f83f5da3fc2881d0ee050f",
+          "receipt_sha256": "f523de165056a95203bbe4ee50f7626ec9a3a0bf2f5a44ef3704459fce0d9f6f"
+        }
+      ],
+      "append_throughput_median": 2703.8338512256278,
+      "host_p50_ns_median": 326708,
+      "host_p99_ns_median": 570542
+    },
+    "bounded": {
+      "rows": [
+        {
+          "label": "medium-mixed-2-01",
+          "receipt": "bench-bounded-mixed-two-04-medium-mixed-2-01",
+          "exit_code": 0,
+          "config": {
+            "category": "mixed",
+            "sessions": 2,
+            "size": "medium",
+            "total_workload_ops": 1024,
+            "workload_ops_per_session": 512
+          },
+          "input": {
+            "appended_events_including_setup_and_finish": 2186,
+            "expected_messages": 256,
+            "host_events": 512,
+            "lifecycle_events": 1028,
+            "message_updates": 512,
+            "per_session": [
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 0,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "bc8847af-aa56-4c71-9b85-bc841df25d2c",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              },
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 1,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "9e675e23-5f7e-4a38-b40a-eb101c912bf5",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              }
+            ],
+            "planned_appends": 2180,
+            "tool_started_events": 128,
+            "workload_ops": 1024
+          },
+          "event_rows": 2186,
+          "projection_bytes": 170584,
+          "sqlite_version": "3.53.2",
+          "timed_store_calls": 2188,
+          "timed_store_ns": 618038717,
+          "timed_store_calls_per_second": 3540.2312829537505,
+          "timed_appends": 2180,
+          "timed_append_ns": 614444841,
+          "timed_appends_per_second": 3547.9181442097906,
+          "explain": {
+            "events_by_type": {
+              "expected_index": "core_events_by_type",
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=? AND cursor>?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events\n    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3\n    ORDER BY cursor LIMIT ?4",
+              "uses_expected_index": true,
+              "uses_index": true
+            },
+            "wait_log": {
+              "expected_index": null,
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='execution_wait_registered' ORDER BY cursor",
+              "uses_expected_index": null,
+              "uses_index": true
+            }
+          },
+          "peak_process_rss_bytes": 20955136,
+          "operations": {
+            "agent_lifecycle": {
+              "samples": 1028,
+              "p50_ns": 289458,
+              "p99_ns": 1042500,
+              "first_quarter_median_ns": 154042,
+              "last_quarter_median_ns": 428167
+            },
+            "begin_attempt": {
+              "samples": 2,
+              "p50_ns": 90875,
+              "p99_ns": 336291,
+              "first_quarter_median_ns": 336291,
+              "last_quarter_median_ns": 90875
+            },
+            "create_session": {
+              "samples": 2,
+              "p50_ns": 124667,
+              "p99_ns": 2020792,
+              "first_quarter_median_ns": 2020792,
+              "last_quarter_median_ns": 124667
+            },
+            "finish_attempt": {
+              "samples": 2,
+              "p50_ns": 456750,
+              "p99_ns": 467708,
+              "first_quarter_median_ns": 456750,
+              "last_quarter_median_ns": 467708
+            },
+            "host_event": {
+              "samples": 512,
+              "p50_ns": 233917,
+              "p99_ns": 409333,
+              "first_quarter_median_ns": 134958.5,
+              "last_quarter_median_ns": 349771.0
+            },
+            "message_update": {
+              "samples": 512,
+              "p50_ns": 244500,
+              "p99_ns": 413625,
+              "first_quarter_median_ns": 147313.0,
+              "last_quarter_median_ns": 350604.5
+            },
+            "snapshot_verify": {
+              "samples": 2,
+              "p50_ns": 44584,
+              "p99_ns": 52209,
+              "first_quarter_median_ns": 52209,
+              "last_quarter_median_ns": 44584
+            },
+            "tool_started": {
+              "samples": 128,
+              "p50_ns": 302417,
+              "p99_ns": 1561125,
+              "first_quarter_median_ns": 154479.5,
+              "last_quarter_median_ns": 422104.5
+            }
+          },
+          "result_sha256": "fc99e8badf424ba53afd1d93e8643ac3d9309fe0378cb1c7b4a799bfd72baca8",
+          "receipt_sha256": "26b0cfacfaf4bfb0fd531e9efc57f76053129d07a6410d6c175265aa8a256eeb"
+        },
+        {
+          "label": "medium-mixed-2-02",
+          "receipt": "bench-bounded-mixed-two-04-medium-mixed-2-02",
+          "exit_code": 0,
+          "config": {
+            "category": "mixed",
+            "sessions": 2,
+            "size": "medium",
+            "total_workload_ops": 1024,
+            "workload_ops_per_session": 512
+          },
+          "input": {
+            "appended_events_including_setup_and_finish": 2186,
+            "expected_messages": 256,
+            "host_events": 512,
+            "lifecycle_events": 1028,
+            "message_updates": 512,
+            "per_session": [
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 0,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "db6e015b-7db8-4407-ab71-ae61f85964b3",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              },
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 1,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "d51bc62f-4eeb-41ae-9c28-1a341795fa52",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              }
+            ],
+            "planned_appends": 2180,
+            "tool_started_events": 128,
+            "workload_ops": 1024
+          },
+          "event_rows": 2186,
+          "projection_bytes": 170584,
+          "sqlite_version": "3.53.2",
+          "timed_store_calls": 2188,
+          "timed_store_ns": 629056990,
+          "timed_store_calls_per_second": 3478.222219579819,
+          "timed_appends": 2180,
+          "timed_append_ns": 627210199,
+          "timed_appends_per_second": 3475.7087870632663,
+          "explain": {
+            "events_by_type": {
+              "expected_index": "core_events_by_type",
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=? AND cursor>?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events\n    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3\n    ORDER BY cursor LIMIT ?4",
+              "uses_expected_index": true,
+              "uses_index": true
+            },
+            "wait_log": {
+              "expected_index": null,
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='execution_wait_registered' ORDER BY cursor",
+              "uses_expected_index": null,
+              "uses_index": true
+            }
+          },
+          "peak_process_rss_bytes": 21020672,
+          "operations": {
+            "agent_lifecycle": {
+              "samples": 1028,
+              "p50_ns": 291000,
+              "p99_ns": 1163166,
+              "first_quarter_median_ns": 154167,
+              "last_quarter_median_ns": 427667
+            },
+            "begin_attempt": {
+              "samples": 2,
+              "p50_ns": 114375,
+              "p99_ns": 161583,
+              "first_quarter_median_ns": 161583,
+              "last_quarter_median_ns": 114375
+            },
+            "create_session": {
+              "samples": 2,
+              "p50_ns": 155834,
+              "p99_ns": 427416,
+              "first_quarter_median_ns": 427416,
+              "last_quarter_median_ns": 155834
+            },
+            "finish_attempt": {
+              "samples": 2,
+              "p50_ns": 450375,
+              "p99_ns": 452625,
+              "first_quarter_median_ns": 452625,
+              "last_quarter_median_ns": 450375
+            },
+            "host_event": {
+              "samples": 512,
+              "p50_ns": 231333,
+              "p99_ns": 452792,
+              "first_quarter_median_ns": 136979.0,
+              "last_quarter_median_ns": 339854.0
+            },
+            "message_update": {
+              "samples": 512,
+              "p50_ns": 244750,
+              "p99_ns": 1174208,
+              "first_quarter_median_ns": 151396.0,
+              "last_quarter_median_ns": 344979.0
+            },
+            "snapshot_verify": {
+              "samples": 2,
+              "p50_ns": 39208,
+              "p99_ns": 45375,
+              "first_quarter_median_ns": 45375,
+              "last_quarter_median_ns": 39208
+            },
+            "tool_started": {
+              "samples": 128,
+              "p50_ns": 298208,
+              "p99_ns": 1138500,
+              "first_quarter_median_ns": 160062.5,
+              "last_quarter_median_ns": 422500.0
+            }
+          },
+          "result_sha256": "3c37ef5223d432b8b8cff66d81e5a2b58ab72c75e6d1e2312e045e53d4e5eee1",
+          "receipt_sha256": "e72cb95cbee48d4ea8159c2242f8e25cb6a814a89fd473bef94b7185252e7201"
+        },
+        {
+          "label": "medium-mixed-2-03",
+          "receipt": "bench-bounded-mixed-two-04-medium-mixed-2-03",
+          "exit_code": 0,
+          "config": {
+            "category": "mixed",
+            "sessions": 2,
+            "size": "medium",
+            "total_workload_ops": 1024,
+            "workload_ops_per_session": 512
+          },
+          "input": {
+            "appended_events_including_setup_and_finish": 2186,
+            "expected_messages": 256,
+            "host_events": 512,
+            "lifecycle_events": 1028,
+            "message_updates": 512,
+            "per_session": [
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 0,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "8553311f-0fab-4150-91ab-b0ec14df9a8d",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              },
+              {
+                "expected_events_including_setup_and_finish": 1093,
+                "expected_messages": 128,
+                "host_events": 256,
+                "index": 1,
+                "lifecycle_events": 514,
+                "message_updates": 256,
+                "planned_appends": 1090,
+                "session_id": "c8065b5d-96d3-4e16-95d7-35d7773e2796",
+                "tool_started_events": 64,
+                "workload_ops": 512
+              }
+            ],
+            "planned_appends": 2180,
+            "tool_started_events": 128,
+            "workload_ops": 1024
+          },
+          "event_rows": 2186,
+          "projection_bytes": 170584,
+          "sqlite_version": "3.53.2",
+          "timed_store_calls": 2188,
+          "timed_store_ns": 619952970,
+          "timed_store_calls_per_second": 3529.2999725446916,
+          "timed_appends": 2180,
+          "timed_append_ns": 618081179,
+          "timed_appends_per_second": 3527.044786458382,
+          "explain": {
+            "events_by_type": {
+              "expected_index": "core_events_by_type",
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=? AND cursor>?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events\n    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3\n    ORDER BY cursor LIMIT ?4",
+              "uses_expected_index": true,
+              "uses_index": true
+            },
+            "wait_log": {
+              "expected_index": null,
+              "plan": [
+                "SEARCH core_events USING INDEX core_events_by_type (session_id=? AND <expr>=?)"
+              ],
+              "sql": "SELECT cursor, record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='execution_wait_registered' ORDER BY cursor",
+              "uses_expected_index": null,
+              "uses_index": true
+            }
+          },
+          "peak_process_rss_bytes": 21282816,
+          "operations": {
+            "agent_lifecycle": {
+              "samples": 1028,
+              "p50_ns": 290875,
+              "p99_ns": 982458,
+              "first_quarter_median_ns": 152500,
+              "last_quarter_median_ns": 430459
+            },
+            "begin_attempt": {
+              "samples": 2,
+              "p50_ns": 120667,
+              "p99_ns": 159041,
+              "first_quarter_median_ns": 159041,
+              "last_quarter_median_ns": 120667
+            },
+            "create_session": {
+              "samples": 2,
+              "p50_ns": 158792,
+              "p99_ns": 398084,
+              "first_quarter_median_ns": 398084,
+              "last_quarter_median_ns": 158792
+            },
+            "finish_attempt": {
+              "samples": 2,
+              "p50_ns": 458333,
+              "p99_ns": 477458,
+              "first_quarter_median_ns": 477458,
+              "last_quarter_median_ns": 458333
+            },
+            "host_event": {
+              "samples": 512,
+              "p50_ns": 230000,
+              "p99_ns": 408250,
+              "first_quarter_median_ns": 135229.0,
+              "last_quarter_median_ns": 351916.5
+            },
+            "message_update": {
+              "samples": 512,
+              "p50_ns": 238917,
+              "p99_ns": 1034000,
+              "first_quarter_median_ns": 147167.0,
+              "last_quarter_median_ns": 342937.5
+            },
+            "snapshot_verify": {
+              "samples": 2,
+              "p50_ns": 45708,
+              "p99_ns": 53708,
+              "first_quarter_median_ns": 53708,
+              "last_quarter_median_ns": 45708
+            },
+            "tool_started": {
+              "samples": 128,
+              "p50_ns": 286000,
+              "p99_ns": 1286708,
+              "first_quarter_median_ns": 159500.0,
+              "last_quarter_median_ns": 422562.5
+            }
+          },
+          "result_sha256": "d56c7f30c811d627eab4af1f7812244511f32fd9a9098f57f814e9d64004e04a",
+          "receipt_sha256": "852715ea07b2a2a2f1584efe2de054d6ee76761e1057b2ec447e7a26996ca853"
+        }
+      ],
+      "append_throughput_median": 3527.044786458382,
+      "host_p50_ns_median": 231333,
+      "host_p99_ns_median": 409333
+    }
+  },
+  "median_throughput_change_percent": 30.44606216685981,
+  "original_outlier_detail_sha256": "9a6ef1bd141c38a0b91e4632888e4770e78ba5fcc7465f5194ffd24bc86fab0c"
+}

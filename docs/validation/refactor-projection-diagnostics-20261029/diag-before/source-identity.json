@@ -1,0 +1,12 @@
+{
+  "original_manifest_sha256": "0c5dd77bd33b7591fb24ce49065395fae7fc8c019a7ff63efdf5ed3914ac70be",
+  "instrumented_source_files": {
+    "Cargo.toml": "48859ef079f55097831b82279d1c38583be0ad7c7a7e61273aa037b10ed7d9c5",
+    "Cargo.lock": "8ff6bf5d860cd91ebef1bb04e5beb195657146125167ff0a940b0c49abee0682",
+    "crates/cayw-core/Cargo.toml": "72b5a02dbb0c46bd8222f0b6ade0d7360daf1b637ca6615081bf795223f64e0a",
+    "crates/cayw-core/src/store.rs": "c4e8f8e0002de49564f93d9d1e70e68ec6bcaa1a1104251b09dcbc0ab35feceb",
+    "crates/cayw-core/examples/refactor_persistence_bench.rs": "e80ddbdd7b2f83df916c34cd4b457d6bff64ba73a380d37be3ef11eb4d9da8e9"
+  },
+  "original_product_store_sha256": null,
+  "original_product_bench_sha256": null
+}

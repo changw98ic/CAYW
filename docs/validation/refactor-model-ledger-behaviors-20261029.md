@@ -1,0 +1,65 @@
+# 模型账本整理的逐项行为对照
+
+本清单比较同一个冻结副本里的原测试、仅去重、去重并合并目标三组。
+三组的 21 条单元测试和 24 条集成测试逐条相同，均实际通过。
+合并只给集成测试增加模块前缀，原测试体逐字节不变。
+计时口径和命令见 [重构实施记录](refactor-implementation-20261029.md)。
+
+## 单元测试
+
+以下每条在三组中均保留且通过：
+
+- `model_requests::tests::already_cancelled_stream_does_not_dispatch_or_leave_a_reservation`
+- `model_requests::tests::an_existing_tool_unknown_survives_a_model_recording_error`
+- `model_requests::tests::committed_peer_cancel_before_started_releases_only_its_unused_hold`
+- `model_requests::tests::consecutive_equal_observations_keep_every_metadata_change_and_return`
+- `model_requests::tests::continuation_idempotence_after_task_execution_and_later_reconciliation`
+- `model_requests::tests::continuation_replay_across_sessions_allows_independent_cursors`
+- `model_requests::tests::dropped_request_needs_a_trusted_complete_report_before_its_hold_can_settle`
+- `model_requests::tests::equal_invalid_and_excess_usage_is_still_rejected`
+- `model_requests::tests::equal_observation_observes_peer_cancel_before_releasing_its_hold`
+- `model_requests::tests::equal_observation_rejects_a_recovered_core_lease`
+- `model_requests::tests::equal_observations_still_consume_the_received_observation_limit`
+- `model_requests::tests::equal_terminal_observations_are_never_coalesced`
+- `model_requests::tests::event_capacity_keeps_received_observation_order_and_a_durable_terminal_slot`
+- `model_requests::tests::legacy_pre_dispatch_cancellation_projects_as_a_released_hold`
+- `model_requests::tests::recorded_dispatch_marker_rejects_a_pre_dispatch_release_event`
+- `model_requests::tests::recording_failure_cannot_be_hidden_by_an_equal_previous_observation`
+- `model_requests::tests::release_is_refused_after_the_dispatch_marker`
+- `model_requests::tests::reservation_without_a_terminal_or_dispatch_marker_is_still_held`
+- `model_requests::tests::retained_error_stream_has_a_recorded_terminal_before_yield`
+- `model_requests::tests::stale_lease_drop_preserves_the_original_reservation_without_tool_unknown`
+- `model_requests::tests::trusted_configuration_increase_raises_the_same_session_limit_after_settlement`
+
+## 集成测试
+
+原测试目标移动到 `crates/cayw-runtime/tests/model_ledger/`。
+新的测试名称为原模块名加 `::` 再加下列函数名。
+以下每条在三组中均保留且通过：
+
+- `committed_peer_cancel_prevents_late_reported_done_from_settling`
+- `error_with_missing_partial_or_invalid_usage_retains_its_hold_after_reopen`
+- `exhausted_persistent_budget_never_invokes_a_second_http_request`
+- `failed_http_usage_settles_only_complete_reported_counts`
+- `failed_reservation_and_observation_writes_preserve_failure_and_known_usage`
+- `failed_start_record_never_invokes_the_http_adapter`
+- `failed_terminal_write_cannot_claim_completion_or_release_the_reservation`
+- `fork_branches_compete_for_one_hold_and_unknown_survives_new_fork_and_reopen`
+- `full_request_history_rejects_before_reserve_without_poisoning_existing_records`
+- `ipc_session_context_overview_returns_live_overview`
+- `missing_partial_and_invalid_usage_never_settle_default_zeroes`
+- `offline_demo_reports_explicit_synthetic_usage_and_completes_two_user_rounds`
+- `parent_and_child_share_one_persistent_budget_without_duplicate_token_charges`
+- `persistent_observed_and_finished_write_failures_keep_only_the_original_durable_hold`
+- `reported_error_usage_settles_without_completing_or_replaying_the_failed_task`
+- `reported_success_settles_tokens_and_reopen_preserves_identity_and_unknown_money`
+- `reported_zero_settles_and_over_reservation_retains_the_original_hold`
+- `runtime_deadline_after_usage_only_http_event_preserves_known_usage_and_reservation`
+- `runtime_deadline_while_waiting_for_http_headers_preserves_unknown_reservation`
+- `runtime_session_context_overview_reads_live_model_request_ledger`
+- `trusted_configuration_increase_continues_the_same_session_after_settlement`
+- `unrelated_roots_do_not_share_request_record_capacity`
+- `usage_only_reported_then_cancel_keeps_known_values_and_the_full_reservation`
+- `zero_output_model_is_rejected_before_storage_or_provider_invocation`
+
+本清单是固定响应和本机 HTTP 的覆盖对照，不是付费模型调用记录。

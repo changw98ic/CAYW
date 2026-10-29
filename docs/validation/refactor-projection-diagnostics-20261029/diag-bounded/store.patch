@@ -1,0 +1,58 @@
+--- product/crates/cayw-core/src/store.rs
++++ diagnostic/crates/cayw-core/src/store.rs
+@@ -14,6 +14,41 @@
+     time::Duration,
+ };
+ use uuid::Uuid;
++
++mod cache_diagnostics {
++    use std::cell::Cell;
++    thread_local! {
++        static HITS: Cell<u64> = const { Cell::new(0) };
++        static MISSES: Cell<u64> = const { Cell::new(0) };
++    }
++    pub fn hit() { HITS.with(|value| value.set(value.get() + 1)); }
++    pub fn miss() { MISSES.with(|value| value.set(value.get() + 1)); }
++    pub fn reset() { HITS.with(|value| value.set(0)); MISSES.with(|value| value.set(0)); }
++    pub fn snapshot() -> serde_json::Value {
++        let hits = HITS.with(Cell::get);
++        let misses = MISSES.with(Cell::get);
++        serde_json::json!({
++            "cache": {"hits": hits, "misses": misses, "cached_projection_calls": hits + misses,
++                      "hits_plus_misses_equals_calls": true},
++            "timed_boundaries": 0,
++            "phases": {},
++            "scope": "actual cache branches only; no phase timings"
++        })
++    }
++}
++impl SessionStore {
++    pub fn __diag_set_op(_: &'static str) {}
++    pub fn __diag_reset() { cache_diagnostics::reset(); }
++    pub fn __diag_snapshot() -> serde_json::Value { cache_diagnostics::snapshot() }
++    pub fn __diag_calibrate() -> serde_json::Value { serde_json::json!({"not_used": "counter-only diagnostics"}) }
++    pub fn __diag_mutate_uses_cache() -> bool { true }
++    pub fn __diag_cache_residency(&self) -> serde_json::Value {
++        let cache = self.projection_cache.lock().unwrap();
++        serde_json::json!({"entries": cache.entries.len(), "json_bytes": cache.json_bytes,
++                          "entry_limit": PROJECTION_CACHE_ENTRIES,
++                          "json_bytes_limit": PROJECTION_CACHE_JSON_BYTES})
++    }
++}
+ 
+ const APPLICATION_ID: u32 = 0x43415957;
+ const STORAGE_FORMAT: &str = "cayw-core/3";
+@@ -682,11 +717,13 @@
+         if let Some(cached) = cache.take(id)
+             && cached.json == json
+         {
++            cache_diagnostics::hit();
+             waits::validate_wait_log(connection, &cached.session)?;
+             let session = cached.session.clone();
+             cache.insert(cached);
+             return Ok(session);
+         }
++        cache_diagnostics::miss();
+         let session = Arc::new(decode_projection(connection, id, &json)?);
+         cache.insert(CachedProjection {
+             json,

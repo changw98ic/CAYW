@@ -1,0 +1,140 @@
+{
+  "scope": "Actual branch counters in an independent bounded-cache copy. Setup and final reads excluded; finish_attempt included. No phase timings. Residency counts retained JSON only; decoded allocations and process RSS are separate.",
+  "product_store_sha256": "527d593f0f873b84704393a6f59851df20457bc08c05164758ad85116512dbb3",
+  "product_bench_sha256": "7efc151061a8552e82650ad03dc5a7efcf9f6a8f5a2f60fbd74438377a86ce97",
+  "source_manifest_sha256": "56448f61fe30accc330685e24255e1aaff6924c8a61295e12f55235fb787ca87",
+  "runs": [
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 1,
+      "receipt": "diag-bounded-medium-mixed-1-01",
+      "cache_including_finish_attempt": {
+        "cached_projection_calls": 1091,
+        "hits": 1091,
+        "hits_plus_misses_equals_calls": true,
+        "misses": 0
+      },
+      "cache_hit_percent_including_finish_attempt": 100.0,
+      "retained_cache_after_finish": {
+        "entries": 1,
+        "entry_limit": 32,
+        "json_bytes": 85292,
+        "json_bytes_limit": 16777216
+      },
+      "diagnostics_sha256": "f3394f9a7674c8342716fffd0ba9c5d057e5ad630159764043d9d0792619b554",
+      "bench_sha256": "d2cc7debb146fe0bafb817c6bf12315d29534ff30536d19927443c135897aa9a",
+      "receipt_sha256": "13bff921b8267902fe7323edd2b540d5565500fdb7a5221fd20d6fe89953fac8"
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 2,
+      "receipt": "diag-bounded-medium-mixed-2-01",
+      "cache_including_finish_attempt": {
+        "cached_projection_calls": 2182,
+        "hits": 2182,
+        "hits_plus_misses_equals_calls": true,
+        "misses": 0
+      },
+      "cache_hit_percent_including_finish_attempt": 100.0,
+      "retained_cache_after_finish": {
+        "entries": 2,
+        "entry_limit": 32,
+        "json_bytes": 170584,
+        "json_bytes_limit": 16777216
+      },
+      "diagnostics_sha256": "33335a949e0d208837383d186ae354d21076869cceec6d8a8d107a05739b99e8",
+      "bench_sha256": "7e7f9c98f23a6ad1feaf556cebd6ca933cca6798372f49731c6628a40b1d84b6",
+      "receipt_sha256": "397e06538ea67093b42301e3d290d18ef625f7abcdf06247d09217d5c47fb1ac"
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 8,
+      "receipt": "diag-bounded-medium-mixed-8-01",
+      "cache_including_finish_attempt": {
+        "cached_projection_calls": 8728,
+        "hits": 8728,
+        "hits_plus_misses_equals_calls": true,
+        "misses": 0
+      },
+      "cache_hit_percent_including_finish_attempt": 100.0,
+      "retained_cache_after_finish": {
+        "entries": 8,
+        "entry_limit": 32,
+        "json_bytes": 682336,
+        "json_bytes_limit": 16777216
+      },
+      "diagnostics_sha256": "7fbfe0ce3bd8580b996bdc0298fa98a285ec2edfc956c06fbf2d0d50455d03f1",
+      "bench_sha256": "2d5c90d885387ebc5a7573c93a98566013fa7f603d11138981a9030ecd7c34b0",
+      "receipt_sha256": "3b91108dab2eab50526a82191e2b3772172562dfcbcdc44f2b7b001b7b0dca36"
+    },
+    {
+      "size": "medium",
+      "category": "mixed",
+      "sessions": 32,
+      "receipt": "diag-bounded-medium-mixed-32-01",
+      "cache_including_finish_attempt": {
+        "cached_projection_calls": 34912,
+        "hits": 34912,
+        "hits_plus_misses_equals_calls": true,
+        "misses": 0
+      },
+      "cache_hit_percent_including_finish_attempt": 100.0,
+      "retained_cache_after_finish": {
+        "entries": 32,
+        "entry_limit": 32,
+        "json_bytes": 2729366,
+        "json_bytes_limit": 16777216
+      },
+      "diagnostics_sha256": "efdf1c14392b2116cacf2d9be0e2cc9b3eb2d8b3337224755e6046e9c9864454",
+      "bench_sha256": "12a4fed2ad91924e15a6135f48f487c2048fe6fdd2cabc0112f95323bd243306",
+      "receipt_sha256": "a7d1650298fcdb03ebd91e328da08571d20fb4cf11fc54a96584a312823ddae2"
+    },
+    {
+      "size": "medium",
+      "category": "normal",
+      "sessions": 8,
+      "receipt": "diag-bounded-medium-normal-8-01",
+      "cache_including_finish_attempt": {
+        "cached_projection_calls": 28696,
+        "hits": 28696,
+        "hits_plus_misses_equals_calls": true,
+        "misses": 0
+      },
+      "cache_hit_percent_including_finish_attempt": 100.0,
+      "retained_cache_after_finish": {
+        "entries": 8,
+        "entry_limit": 32,
+        "json_bytes": 2216040,
+        "json_bytes_limit": 16777216
+      },
+      "diagnostics_sha256": "e4d83186159d9530b31c23ad4cc52745d04a25e68ee6b2eb0419d71369bdd39f",
+      "bench_sha256": "49e2a20a16b3675a260b8bda1a1b9f53e507eba88c16af93a0a272a7e7f0c2bb",
+      "receipt_sha256": "97710303516da89081382de8b420c0c8c66e18d948e46b345d2cef3e01676e0a"
+    },
+    {
+      "size": "medium",
+      "category": "normal",
+      "sessions": 32,
+      "receipt": "diag-bounded-medium-normal-32-01",
+      "cache_including_finish_attempt": {
+        "cached_projection_calls": 114784,
+        "hits": 114784,
+        "hits_plus_misses_equals_calls": true,
+        "misses": 0
+      },
+      "cache_hit_percent_including_finish_attempt": 100.0,
+      "retained_cache_after_finish": {
+        "entries": 32,
+        "entry_limit": 32,
+        "json_bytes": 8864182,
+        "json_bytes_limit": 16777216
+      },
+      "diagnostics_sha256": "3f7a49e38f517ee164bb122d0d3a8b8ea7ed7125de80332591f674a5f94b029a",
+      "bench_sha256": "c91c33a1f3658a06ffbc92ba979b66a302995d6bd52a281735ebefd5fc5a22bd",
+      "receipt_sha256": "b7c468c43cde6e0d952d028fc312ffe6166f7eb6f35401b2c2d76c009b100ff5"
+    }
+  ]
+}

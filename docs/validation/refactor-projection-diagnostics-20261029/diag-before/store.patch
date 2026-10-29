@@ -1,0 +1,435 @@
+# Instrumentation diff for crates/cayw-core/src/store.rs
+# This file is diagnostic metadata only. It is not product source.
+
+--- a/crates/cayw-core/src/store.rs
++++ b/crates/cayw-core/src/store.rs
+@@ -11,9 +11,209 @@
+     io::Write,
+     path::Path,
+     sync::{Arc, Mutex},
+-    time::Duration,
++    time::{Duration, Instant},
+ };
+ use uuid::Uuid;
++
++mod diag_timing {
++    use std::cell::RefCell;
++    use std::collections::BTreeMap;
++    use std::time::Instant;
++
++    /// True when this copy's ordinary `mutate` reuses the projection cache.
++    /// Both copies still have `cached_projection`, used by append_message_update.
++    pub const MUTATE_USES_CACHE: bool = false;
++
++    #[derive(Default)]
++    struct Entry {
++        count: u64,
++        total_ns: u64,
++        max_ns: u64,
++    }
++
++    #[derive(Default)]
++    struct Acc {
++        phases: BTreeMap<(&'static str, &'static str), Entry>,
++        hits: u64,
++        misses: u64,
++        cached_calls: u64,
++        boundaries: u64,
++    }
++
++    thread_local! {
++        static ACC: RefCell<Acc> = RefCell::new(Acc::default());
++        static OP: RefCell<&'static str> = RefCell::new("unlabeled");
++    }
++
++    pub fn set_op(op: &'static str) {
++        OP.with(|value| *value.borrow_mut() = op);
++    }
++
++    pub fn reset() {
++        ACC.with(|acc| *acc.borrow_mut() = Acc::default());
++    }
++
++    fn note_at(acc: &mut Acc, op: &'static str, phase: &'static str, nanos: u64) {
++        acc.boundaries = acc.boundaries.saturating_add(1);
++        let entry = acc.phases.entry((op, phase)).or_default();
++        entry.count = entry.count.saturating_add(1);
++        entry.total_ns = entry.total_ns.saturating_add(nanos);
++        entry.max_ns = entry.max_ns.max(nanos);
++    }
++
++    pub fn note(phase: &'static str, start: Instant) {
++        let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
++        let op = OP.with(|value| *value.borrow());
++        ACC.with(|acc| note_at(&mut acc.borrow_mut(), op, phase, nanos));
++    }
++
++    pub fn hit() {
++        ACC.with(|acc| {
++            let mut acc = acc.borrow_mut();
++            acc.hits = acc.hits.saturating_add(1);
++        });
++    }
++
++    pub fn miss() {
++        ACC.with(|acc| {
++            let mut acc = acc.borrow_mut();
++            acc.misses = acc.misses.saturating_add(1);
++        });
++    }
++
++    pub fn cached_call() {
++        ACC.with(|acc| {
++            let mut acc = acc.borrow_mut();
++            acc.cached_calls = acc.cached_calls.saturating_add(1);
++        });
++    }
++
++    fn summarize(mut values: Vec<u64>) -> serde_json::Value {
++        if values.is_empty() {
++            return serde_json::json!({"samples": 0});
++        }
++        values.sort_unstable();
++        let count = values.len();
++        let total: u64 = values.iter().sum();
++        let pick = |quantile: f64| -> u64 {
++            let rank = (quantile * count as f64).ceil() as usize;
++            values[rank.saturating_sub(1).min(count - 1)]
++        };
++        serde_json::json!({
++            "samples": count,
++            "min_ns": values[0],
++            "p50_ns": pick(0.50),
++            "p90_ns": pick(0.90),
++            "max_ns": values[count - 1],
++            "mean_ns": total / u64::try_from(count).unwrap_or(1),
++        })
++    }
++
++    /// Synthetic timer calibration only. It is reset before any workload runs
++    /// and is never mixed into workload phase samples.
++    pub fn calibrate() -> serde_json::Value {
++        let mut pair = Vec::with_capacity(1000);
++        for _ in 0..1000 {
++            let start = Instant::now();
++            let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
++            pair.push(nanos);
++        }
++        let mut note_path = Vec::with_capacity(1000);
++        for _ in 0..1000 {
++            let start = Instant::now();
++            note("calibration", start);
++            let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
++            note_path.push(nanos);
++        }
++        reset();
++        serde_json::json!({
++            "calibration_only": true,
++            "not_part_of_workload": true,
++            "iterations": 1000,
++            "timer_pair_ns": summarize(pair),
++            "note_path_ns": summarize(note_path),
++            "warning": "Synthetic timer costs on the reporting thread; do not compare with workload phases."
++        })
++    }
++
++    fn relation(phase: &str) -> &'static str {
++        match phase {
++            "total" | "cached_projection" | "decode" | "persist" | "load" => "parent",
++            _ => "exclusive",
++        }
++    }
++
++    pub fn snapshot() -> serde_json::Value {
++        ACC.with(|acc| {
++            let acc = acc.borrow();
++            let mut phases = serde_json::Map::new();
++            for ((op, phase), entry) in &acc.phases {
++                phases.insert(
++                    format!("{op}.{phase}"),
++                    serde_json::json!({
++                        "operation": op,
++                        "phase": phase,
++                        "relation": relation(phase),
++                        "count": entry.count,
++                        "total_ns": entry.total_ns,
++                        "max_ns": entry.max_ns,
++                        "mean_ns": if entry.count == 0 { 0 } else { entry.total_ns / entry.count },
++                    }),
++                );
++            }
++            serde_json::json!({
++                "thread": format!("{:?}", std::thread::current().id()),
++                "mutate_uses_cache": MUTATE_USES_CACHE,
++                "timed_boundaries": acc.boundaries,
++                "phases": phases,
++                "cache": {
++                    "hits": acc.hits,
++                    "misses": acc.misses,
++                    "cached_projection_calls": acc.cached_calls,
++                    "hits_plus_misses_equals_calls": acc.hits.saturating_add(acc.misses) == acc.cached_calls,
++                },
++                "relation_policy": {
++                    "parents": ["total", "cached_projection", "decode", "persist", "load"],
++                    "exclusive": [
++                        "lock_wait", "begin_immediate", "select_projection", "cache_lock",
++                        "wait_log_hit", "cache_take", "make_mut", "verify_lease",
++                        "apply_event", "increment", "change", "validate_wait_bindings",
++                        "encode_record", "encode_projection", "encode_lifecycle",
++                        "sql_insert", "sql_update", "sql_update_returning",
++                        "readback_projection", "commit", "publish_cache",
++                        "json", "input", "identity", "wait_bindings", "wait_log"
++                    ],
++                    "rule": "A parent phase contains the exclusive phases recorded under the same operation. Never sum parent and child entries."
++                },
++                "notes": [
++                    "Counters and timings come from the actual in-process call path, not from the workload plan.",
++                    "Thread-local aggregation; only the reporting thread is represented unless the workload uses more threads.",
++                    "Early-error calls record only the phases reached before the error; totals are recorded only on success.",
++                    "commit includes the WAL write, fsync, and any automatic checkpoint. fsync is not separated.",
++                    "SQLite statement phases include SQLite-side JSON work such as json_set in append_message_update."
++                ]
++            })
++        })
++    }
++}
++
++impl SessionStore {
++    pub fn __diag_set_op(op: &'static str) {
++        diag_timing::set_op(op);
++    }
++    pub fn __diag_reset() {
++        diag_timing::reset();
++    }
++    pub fn __diag_snapshot() -> serde_json::Value {
++        diag_timing::snapshot()
++    }
++    pub fn __diag_calibrate() -> serde_json::Value {
++        diag_timing::calibrate()
++    }
++    pub fn __diag_mutate_uses_cache() -> bool {
++        diag_timing::MUTATE_USES_CACHE
++    }
++}
+ 
+ const APPLICATION_ID: u32 = 0x43415957;
+ const STORAGE_FORMAT: &str = "cayw-core/3";
+@@ -635,19 +835,30 @@
+         connection: &Connection,
+         id: &str,
+     ) -> Result<Arc<StoredSession>, CoreError> {
++        let __diag_t_select = Instant::now();
+         let json = projection_json(connection, id)?;
++        diag_timing::note("select_projection", __diag_t_select);
++        diag_timing::cached_call();
++        let __diag_t_lock = Instant::now();
+         let mut cache = self
+             .projection_cache
+             .lock()
+             .map_err(|_| CoreError::StorePoisoned)?;
++        diag_timing::note("cache_lock", __diag_t_lock);
+         if let Some(cached) = cache.as_ref()
+             && cached.session.id == id
+             && cached.json == json
+         {
++            diag_timing::hit();
++            let __diag_t_wait = Instant::now();
+             waits::validate_wait_log(connection, &cached.session)?;
++            diag_timing::note("wait_log_hit", __diag_t_wait);
+             return Ok(cached.session.clone());
+         }
++        diag_timing::miss();
++        let __diag_t_decode = Instant::now();
+         let session = Arc::new(decode_projection(connection, id, &json)?);
++        diag_timing::note("decode", __diag_t_decode);
+         *cache = Some(CachedProjection {
+             json,
+             session: session.clone(),
+@@ -939,22 +1150,39 @@
+         lease: &AttemptLease,
+         event: &AgentEvent,
+     ) -> Result<EventRecord, CoreError> {
++        let __diag_total = Instant::now();
++        let __diag_t_lock = Instant::now();
+         let mut connection = self
+             .connection
+             .lock()
+             .map_err(|_| CoreError::StorePoisoned)?;
++        diag_timing::note("lock_wait", __diag_t_lock);
++        let __diag_t_begin = Instant::now();
+         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
++        diag_timing::note("begin_immediate", __diag_t_begin);
++        let __diag_t_cached = Instant::now();
+         let mut session = self.cached_projection(&transaction, &lease.session_id)?;
++        diag_timing::note("cached_projection", __diag_t_cached);
+         // Move the cached value into this transaction. On any error the cache is
+         // empty, so a later reader reloads the unchanged committed projection.
++        let __diag_t_take = Instant::now();
+         self.projection_cache
+             .lock()
+             .map_err(|_| CoreError::StorePoisoned)?
+             .take();
++        diag_timing::note("cache_take", __diag_t_take);
++        let __diag_t_make = Instant::now();
+         let state = Arc::make_mut(&mut session);
++        diag_timing::note("make_mut", __diag_t_make);
++        let __diag_t_verify = Instant::now();
+         state.verify_lease(lease)?;
++        diag_timing::note("verify_lease", __diag_t_verify);
++        let __diag_t_apply = Instant::now();
+         apply_agent_event(state, lease, event)?;
++        diag_timing::note("apply_event", __diag_t_apply);
++        let __diag_t_increment = Instant::now();
+         state.cursor = increment(state.cursor)?;
++        diag_timing::note("increment", __diag_t_increment);
+         let record = EventRecord {
+             protocol_version: PROTOCOL_VERSION,
+             session_id: state.id.clone(),
+@@ -967,24 +1195,37 @@
+         };
+         // The event contains the same message at a greater envelope depth than
+         // the projection. Its readable encoding checks every changed JSON value.
++        let __diag_t_record = Instant::now();
+         let record_json = encode_readable(&record)?;
++        diag_timing::note("encode_record", __diag_t_record);
++        let __diag_t_lifecycle = Instant::now();
+         let lifecycle = serde_json::to_string(&state.lifecycle)?;
++        diag_timing::note("encode_lifecycle", __diag_t_lifecycle);
++        let __diag_t_insert = Instant::now();
+         transaction.execute(
+             "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+             params![state.id, state.cursor as i64, record_json],
+         )?;
++        diag_timing::note("sql_insert", __diag_t_insert);
+         // A stream update changes only these two fields. Keep the already
+         // validated history in SQLite instead of decoding and encoding it again.
++        let __diag_t_update = Instant::now();
+         let json = transaction.query_row(
+             "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2, '$.lifecycle', json(?3)) WHERE id=?1 RETURNING projection",
+             params![state.id, state.cursor as i64, lifecycle],
+             |row| row.get(0),
+         )?;
++        diag_timing::note("sql_update_returning", __diag_t_update);
++        let __diag_t_commit = Instant::now();
+         transaction.commit()?;
++        diag_timing::note("commit", __diag_t_commit);
++        let __diag_t_publish = Instant::now();
+         *self
+             .projection_cache
+             .lock()
+             .map_err(|_| CoreError::StorePoisoned)? = Some(CachedProjection { json, session });
++        diag_timing::note("publish_cache", __diag_t_publish);
++        diag_timing::note("total", __diag_total);
+         Ok(record)
+     }
+ 
+@@ -1454,14 +1695,25 @@
+             &mut StoredSession,
+         ) -> Result<(T, Option<AttemptLease>, CoreEvent), CoreError>,
+     ) -> Result<(T, EventRecord), CoreError> {
++        let __diag_total = Instant::now();
++        let __diag_t_lock = Instant::now();
+         let mut connection = self
+             .connection
+             .lock()
+             .map_err(|_| CoreError::StorePoisoned)?;
++        diag_timing::note("lock_wait", __diag_t_lock);
++        let __diag_t_begin = Instant::now();
+         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
++        diag_timing::note("begin_immediate", __diag_t_begin);
++        let __diag_t_load = Instant::now();
+         let mut session = load(&transaction, session_id)?;
++        diag_timing::note("load", __diag_t_load);
++        let __diag_t_change = Instant::now();
+         let (result, lease, event) = change(&mut session)?;
++        diag_timing::note("change", __diag_t_change);
++        let __diag_t_persist = Instant::now();
+         let record = persist(&transaction, &mut session, lease, event)?;
++        diag_timing::note("persist", __diag_t_persist);
+         #[cfg(feature = "fault-injection")]
+         let crash_point = match &record.event {
+             CoreEvent::Agent { event } => match event.as_ref() {
+@@ -1487,11 +1739,14 @@
+         if let Some((before, _, data)) = &crash_point {
+             cayw_ai::faults::hit(before, data.clone());
+         }
++        let __diag_t_commit = Instant::now();
+         transaction.commit()?;
++        diag_timing::note("commit", __diag_t_commit);
+         #[cfg(feature = "fault-injection")]
+         if let Some((_, committed, data)) = crash_point {
+             cayw_ai::faults::hit(committed, data);
+         }
++        diag_timing::note("total", __diag_total);
+         Ok((result, record))
+     }
+ }
+@@ -1764,21 +2019,38 @@
+         .ok_or_else(|| CoreError::SessionNotFound(id.into()))
+ }
+ fn load(connection: &Connection, id: &str) -> Result<StoredSession, CoreError> {
+-    decode_projection(connection, id, &projection_json(connection, id)?)
++    let __diag_t_select = Instant::now();
++    let json = projection_json(connection, id)?;
++    diag_timing::note("select_projection", __diag_t_select);
++    let __diag_t_decode = Instant::now();
++    let session = decode_projection(connection, id, &json)?;
++    diag_timing::note("decode", __diag_t_decode);
++    Ok(session)
+ }
+ fn decode_projection(
+     connection: &Connection,
+     id: &str,
+     json: &str,
+ ) -> Result<StoredSession, CoreError> {
+-    let session = checked_input(serde_json::from_str::<StoredSession>(json)?)?;
++    let __diag_t_json = Instant::now();
++    let decoded = serde_json::from_str::<StoredSession>(json)?;
++    diag_timing::note("json", __diag_t_json);
++    let __diag_t_input = Instant::now();
++    let session = checked_input(decoded)?;
++    diag_timing::note("input", __diag_t_input);
++    let __diag_t_identity = Instant::now();
+     if session.id != id || session.cursor > i64::MAX as u64 || session.fence > i64::MAX as u64 {
+         return Err(CoreError::CorruptStore(
+             "The session identity or counter is inconsistent".into(),
+         ));
+     }
++    diag_timing::note("identity", __diag_t_identity);
++    let __diag_t_bindings = Instant::now();
+     session.validate_wait_bindings()?;
++    diag_timing::note("wait_bindings", __diag_t_bindings);
++    let __diag_t_wait_log = Instant::now();
+     waits::validate_wait_log(connection, &session)?;
++    diag_timing::note("wait_log", __diag_t_wait_log);
+     Ok(session)
+ }
+ fn insert_session(connection: &Connection, session: &StoredSession) -> Result<(), CoreError> {
+@@ -1803,17 +2075,27 @@
+         attempt: lease,
+         event,
+     };
++    let __diag_t_bindings = Instant::now();
+     session.validate_wait_bindings()?;
++    diag_timing::note("validate_wait_bindings", __diag_t_bindings);
++    let __diag_t_record = Instant::now();
+     let record_json = encode_readable(&record)?;
++    diag_timing::note("encode_record", __diag_t_record);
++    let __diag_t_projection = Instant::now();
+     let projection_json = encode_readable(session)?;
++    diag_timing::note("encode_projection", __diag_t_projection);
++    let __diag_t_insert = Instant::now();
+     connection.execute(
+         "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+         params![session.id, session.cursor as i64, record_json],
+     )?;
++    diag_timing::note("sql_insert", __diag_t_insert);
++    let __diag_t_update = Instant::now();
+     connection.execute(
+         "UPDATE core_sessions SET projection=?2 WHERE id=?1",
+         params![session.id, projection_json],
+     )?;
++    diag_timing::note("sql_update", __diag_t_update);
+     Ok(record)
+ }
+ 
