@@ -2506,6 +2506,51 @@ mod tests {
         }
     }
 
+    fn request_guard(context: &Arc<RunContext>, request: &mut ModelRequest) -> RequestGuard {
+        RequestGuard::reserve_test(
+            context.clone(),
+            request,
+            uuid::Uuid::new_v4().to_string(),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn request_identity(
+        context: &Arc<RunContext>,
+        request: &ModelRequest,
+        request_id: String,
+    ) -> ModelRequestIdentity {
+        ModelRequestIdentity {
+            request_id,
+            lease: context.lease.clone(),
+            task_id: context.task.id.clone(),
+            budget_session_id: context.lease.session_id.clone(),
+            turn: 1,
+            provider: request.model.provider.clone(),
+            model: request.model.id.clone(),
+        }
+    }
+
+    fn reopen_runtime(root: &std::path::Path, model: &Model, max_total_tokens: u64) -> Runtime {
+        Runtime::open(
+            root.join("session.db"),
+            root.join("workspace"),
+            Arc::new(UnreachableProvider),
+            model.clone(),
+            RuntimeConfig {
+                max_total_tokens,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn reopen_ledger(root: &std::path::Path, session: &str) -> ModelRequestLedger {
+        let store = SessionStore::open(root.join("session.db")).unwrap();
+        read(&store, session, 1000).unwrap()
+    }
+
     #[test]
     fn dropped_request_needs_a_trusted_complete_report_before_its_hold_can_settle() {
         struct CompleteCapture;
@@ -2520,13 +2565,7 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
         message.response_id = Some("drop-response".into());
@@ -2610,13 +2649,7 @@ mod tests {
     fn consecutive_equal_observations_keep_every_metadata_change_and_return() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
         let mut events = vec![delta(&message)];
@@ -2676,9 +2709,8 @@ mod tests {
         assert_eq!(ledger.reserved_tokens, 1000);
         assert_eq!(ledger.settled_tokens, 0);
         assert!(ledger.budget_unknown);
-        let reopened = SessionStore::open(temp.path().join("session.db")).unwrap();
         assert_eq!(
-            read(&reopened, &context.lease.session_id, 1000).unwrap(),
+            reopen_ledger(temp.path(), &context.lease.session_id),
             ledger
         );
     }
@@ -2687,13 +2719,7 @@ mod tests {
     fn equal_terminal_observations_are_never_coalesced() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
         message.stop_reason = StopReason::Stop;
@@ -2723,24 +2749,8 @@ mod tests {
     fn equal_observation_observes_peer_cancel_before_releasing_its_hold() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let peer = Runtime::open(
-            temp.path().join("session.db"),
-            temp.path().join("workspace"),
-            Arc::new(UnreachableProvider),
-            request.model.clone(),
-            RuntimeConfig {
-                max_total_tokens: 1000,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let peer = reopen_runtime(temp.path(), &request.model, 1000);
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
         message.usage = Usage {
@@ -2780,13 +2790,7 @@ mod tests {
     fn equal_observation_rejects_a_recovered_core_lease() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let event = delta(&AssistantMessage::new(&request.model));
         guard.observe(&event).unwrap();
@@ -2812,13 +2816,7 @@ mod tests {
     fn equal_observations_still_consume_the_received_observation_limit() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
         guard.observe(&delta(&message)).unwrap();
@@ -2856,13 +2854,7 @@ mod tests {
     fn recording_failure_cannot_be_hidden_by_an_equal_previous_observation() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let message = AssistantMessage::new(&request.model);
         let first = delta(&message);
@@ -2936,9 +2928,8 @@ mod tests {
     fn stale_lease_drop_preserves_the_original_reservation_without_tool_unknown() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let id = uuid::Uuid::new_v4().to_string();
-        let mut guard =
-            RequestGuard::reserve_test(context.clone(), &mut request, id.clone(), 1).unwrap();
+        let mut guard = request_guard(&context, &mut request);
+        let id = guard.id.clone();
         guard.start().unwrap();
         runtime.store().recover(&context.lease.session_id).unwrap();
         let recovered = runtime.store().snapshot(&context.lease.session_id).unwrap();
@@ -2956,9 +2947,8 @@ mod tests {
         assert_eq!(ledger.reserved_tokens, 1000);
         // The effective cap is the trusted configured value (C18). Reopen with
         // the same allocation to compare the durable ledger itself.
-        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
         assert_eq!(
-            read(&store, &context.lease.session_id, 1000).unwrap(),
+            reopen_ledger(temp.path(), &context.lease.session_id),
             ledger
         );
     }
@@ -2966,24 +2956,8 @@ mod tests {
     fn committed_peer_cancel_before_started_releases_only_its_unused_hold() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let peer = Runtime::open(
-            temp.path().join("session.db"),
-            temp.path().join("workspace"),
-            Arc::new(UnreachableProvider),
-            request.model.clone(),
-            RuntimeConfig {
-                max_total_tokens: 1000,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let peer = reopen_runtime(temp.path(), &request.model, 1000);
+        let mut guard = request_guard(&context, &mut request);
         assert!(!context.cancel.is_cancelled());
         assert!(
             peer.cancel(&peer.task(&context.task.id).unwrap().cancel_target())
@@ -3020,9 +2994,8 @@ mod tests {
         );
         assert!(!ledger.budget_unknown);
         assert!(!context.unknown.load(Ordering::Acquire));
-        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
         assert_eq!(
-            read(&store, &context.lease.session_id, 1000).unwrap(),
+            reopen_ledger(temp.path(), &context.lease.session_id),
             ledger,
             "the release must survive reopening the durable ledger"
         );
@@ -3035,15 +3008,7 @@ mod tests {
         // Simulate a crash after the durable reservation and before any
         // terminal. Without a `Started` marker the request is not dispatched,
         // but the crash itself is unresolved uncertainty: keep the hold.
-        let identity = ModelRequestIdentity {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            lease: context.lease.clone(),
-            task_id: context.task.id.clone(),
-            budget_session_id: context.lease.session_id.clone(),
-            turn: 1,
-            provider: request.model.provider.clone(),
-            model: request.model.id.clone(),
-        };
+        let identity = request_identity(&context, &request, uuid::Uuid::new_v4().to_string());
         append(
             &context.inner,
             &context.lease,
@@ -3061,9 +3026,8 @@ mod tests {
         assert_eq!(ledger.requests[0].terminal, None);
         assert_eq!(ledger.reserved_tokens, 1000);
         assert!(ledger.budget_unknown);
-        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
         assert_eq!(
-            read(&store, &context.lease.session_id, 1000).unwrap(),
+            reopen_ledger(temp.path(), &context.lease.session_id),
             ledger
         );
     }
@@ -3073,15 +3037,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (_runtime, context, request) = context(temp.path());
         let id = uuid::Uuid::new_v4().to_string();
-        let identity = ModelRequestIdentity {
-            request_id: id.clone(),
-            lease: context.lease.clone(),
-            task_id: context.task.id.clone(),
-            budget_session_id: context.lease.session_id.clone(),
-            turn: 1,
-            provider: request.model.provider.clone(),
-            model: request.model.id.clone(),
-        };
+        let identity = request_identity(&context, &request, id.clone());
         let reservation = append(
             &context.inner,
             &context.lease,
@@ -3109,8 +3065,7 @@ mod tests {
             },
         )
         .unwrap();
-        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
-        let ledger = read(&store, &context.lease.session_id, 1000).unwrap();
+        let ledger = reopen_ledger(temp.path(), &context.lease.session_id);
         assert_eq!(ledger.reserved_tokens, 0);
         assert_eq!(ledger.remaining_tokens, 1000);
         assert!(!ledger.budget_unknown);
@@ -3128,13 +3083,7 @@ mod tests {
     fn release_is_refused_after_the_dispatch_marker() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         assert!(matches!(
             guard.release_cancelled_before_dispatch(),
@@ -3156,15 +3105,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (_runtime, context, request) = context(temp.path());
         let id = uuid::Uuid::new_v4().to_string();
-        let identity = ModelRequestIdentity {
-            request_id: id.clone(),
-            lease: context.lease.clone(),
-            task_id: context.task.id.clone(),
-            budget_session_id: context.lease.session_id.clone(),
-            turn: 1,
-            provider: request.model.provider.clone(),
-            model: request.model.id.clone(),
-        };
+        let identity = request_identity(&context, &request, id.clone());
         let reservation = append(
             &context.inner,
             &context.lease,
@@ -3212,13 +3153,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
         let session = context.lease.session_id.clone();
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
         message.usage = Usage {
@@ -3243,17 +3178,7 @@ mod tests {
         // A trusted host explicitly allocates a larger budget before reopening
         // the original session tree. Consumption and the original record facts
         // stay intact; only the effective cap is raised.
-        let raised = Runtime::open(
-            temp.path().join("session.db"),
-            temp.path().join("workspace"),
-            Arc::new(UnreachableProvider),
-            request.model.clone(),
-            RuntimeConfig {
-                max_total_tokens: 2000,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let raised = reopen_runtime(temp.path(), &request.model, 2000);
         let ledger = raised.model_requests(&session).unwrap();
         assert_eq!(ledger.token_limit, 2000);
         assert_eq!(ledger.settled_tokens, 8);
@@ -3389,13 +3314,7 @@ mod tests {
     fn an_existing_tool_unknown_survives_a_model_recording_error() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_test(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-        )
-        .unwrap();
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         context.unknown.store(true, Ordering::Release);
         let before = runtime.store().snapshot(&context.lease.session_id).unwrap();
@@ -3442,9 +3361,8 @@ mod tests {
         assert_eq!(ledger.reserved_tokens, 0);
         assert_eq!(ledger.remaining_tokens, 1000);
         assert!(!ledger.budget_unknown);
-        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
         assert_eq!(
-            read(&store, &context.lease.session_id, 1000).unwrap(),
+            reopen_ledger(temp.path(), &context.lease.session_id),
             ledger
         );
     }
@@ -3482,15 +3400,7 @@ mod tests {
         let (runtime, context, request) = context(temp.path());
         let parent_session = context.lease.session_id.clone();
 
-        let identity = ModelRequestIdentity {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            lease: context.lease.clone(),
-            task_id: context.task.id.clone(),
-            budget_session_id: parent_session.clone(),
-            turn: 1,
-            provider: request.model.provider.clone(),
-            model: request.model.id.clone(),
-        };
+        let identity = request_identity(&context, &request, uuid::Uuid::new_v4().to_string());
         let res_cursor = append(
             &context.inner,
             &context.lease,
@@ -3578,8 +3488,7 @@ mod tests {
         assert!(child_ledger.budget_unknown);
         assert_eq!(child_ledger.reserved_tokens, 500);
 
-        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
-        let replayed = read(&store, &child_session, 1000).unwrap();
+        let replayed = reopen_ledger(temp.path(), &child_session);
         assert_eq!(replayed.continuations.len(), 1);
         assert_eq!(replayed.continuations[0], grant_rec);
     }
