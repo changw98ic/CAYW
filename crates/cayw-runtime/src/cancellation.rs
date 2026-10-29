@@ -1,29 +1,6 @@
-use crate::{Runtime, RuntimeError, TaskRecord, TaskState, lock};
-use serde::{Deserialize, Serialize};
+use crate::{Runtime, RuntimeError, TaskState, lock};
+pub use cayw_queue::CancelTarget;
 
-/// The original durable task owner observed by a trusted control client.
-/// A queued task has no Worker or Attempt until it is claimed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CancelTarget {
-    pub session_id: String,
-    pub task_id: String,
-    pub worker_id: Option<String>,
-    pub attempt_id: Option<String>,
-    /// Queue fence, scoped to this Task; this is not the Core Session fence.
-    pub fence: u64,
-}
-impl TaskRecord {
-    pub fn cancel_target(&self) -> CancelTarget {
-        CancelTarget {
-            session_id: self.session_id.clone(),
-            task_id: self.id.clone(),
-            worker_id: self.worker_id.clone(),
-            attempt_id: self.attempt_id.clone(),
-            fence: self.fence,
-        }
-    }
-}
 impl Runtime {
     /// Cancel only the exact original task owner. A stale target never selects
     /// another task, including a replacement in the same logical Session.
@@ -47,7 +24,7 @@ impl Runtime {
         }
         crate::requests::check_task_cancel(&self.inner, &task)?;
         let closing = crate::requests::closing(&self.inner, &task.id);
-        let cancelled = self.inner.queue.cancel(target);
+        let cancelled = self.inner.queue.cancel(target).map_err(RuntimeError::from);
         if cancelled.as_ref().is_ok_and(|changed| *changed)
             && let Some(run) = lock(&self.inner.active).get(&target.session_id)
             && run.task.id == target.task_id

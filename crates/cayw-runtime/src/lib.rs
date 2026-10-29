@@ -56,7 +56,7 @@ pub use cayw_artifacts::{
 };
 pub use cayw_context::{CostStatus, SessionLedgerSnapshot, SessionOverview};
 pub use cayw_plannotator::{FeedbackDecision, FeedbackDraft, LiveFileVersion, StructuredFeedback};
-pub use cayw_requests::TaskIntent;
+pub use cayw_queue::{QueueError, TaskIntent};
 pub use children::LocalAgents;
 pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,

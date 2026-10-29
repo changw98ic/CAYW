@@ -1,13 +1,13 @@
 use crate::AgentTool;
 use async_trait::async_trait;
 use cayw_ai::{
-    AssistantEvent, AssistantMessage, CancellationToken, Message, Model, StreamOptions, ToolCall,
-    ToolResultMessage,
+    AssistantMessage, CancellationToken, Message, Model, StreamOptions, ToolCall, ToolResultMessage,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, sync::Arc};
 use thiserror::Error;
+
+pub use cayw_agent_types::AgentEvent;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -41,42 +41,6 @@ pub struct AgentSnapshot {
     pub error_message: Option<String>,
     /// A cancelled/dropped tool may have produced effects that the host must inspect.
     pub needs_reconciliation: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AgentEvent {
-    AgentStart,
-    AgentEnd {
-        messages: Vec<Message>,
-    },
-    TurnStart,
-    TurnEnd {
-        message: AssistantMessage,
-        tool_results: Vec<ToolResultMessage>,
-    },
-    MessageStart {
-        message: Message,
-    },
-    MessageUpdate {
-        message: AssistantMessage,
-        event: Box<AssistantEvent>,
-    },
-    MessageEnd {
-        message: Message,
-    },
-    ToolExecutionStart {
-        call: ToolCall,
-    },
-    ToolExecutionUpdate {
-        call: ToolCall,
-        result: crate::ToolResult,
-    },
-    ToolExecutionEnd {
-        call: ToolCall,
-        result: crate::ToolResult,
-        duration_ms: Option<u64>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

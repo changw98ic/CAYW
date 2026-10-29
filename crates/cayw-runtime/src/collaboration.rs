@@ -943,9 +943,10 @@ impl Runtime {
             .queue
             .check(&task_lease)
             .map_err(|error| match error {
-                RuntimeError::Cancelled => RuntimeError::StaleApproval,
-                RuntimeError::Worker(_) => RuntimeError::StaleApproval,
-                other => other,
+                cayw_queue::QueueError::Cancelled | cayw_queue::QueueError::Worker(_) => {
+                    RuntimeError::StaleApproval
+                }
+                other => other.into(),
             })?;
         let answered = Answered {
             question_id: request.into(),

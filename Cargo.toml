@@ -3,12 +3,14 @@ resolver = "3"
 members = [
     "crates/cayw-ai",
     "crates/cayw-agent",
+    "crates/cayw-agent-types",
     "crates/cayw-core",
     "crates/cayw-device",
     "crates/cayw-codemode",
     "crates/cayw-host",
     "crates/cayw-ipc",
     "crates/cayw-runtime",
+    "crates/cayw-queue",
     "crates/cayw-providers",
     "crates/cayw-plugins",
     "crates/cayw-panel",
@@ -45,6 +47,7 @@ repository = "https://github.com/changw98ic/CAYW"
 
 [workspace.dependencies]
 cayw-ai = { path = "crates/cayw-ai", version = "0.1.0" }
+cayw-agent-types = { path = "crates/cayw-agent-types", version = "0.1.0" }
 cayw-codeintel = { path = "crates/cayw-codeintel", version = "0.1.0" }
 cayw-context = { path = "crates/cayw-context", version = "0.1.0" }
 cayw-run-inspector = { path = "crates/cayw-run-inspector", version = "0.1.0" }

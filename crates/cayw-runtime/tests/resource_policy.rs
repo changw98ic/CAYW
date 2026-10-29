@@ -1,4 +1,5 @@
-use cayw_runtime::{ResourcePolicy, RuntimeError, TaskResources};
+use cayw_queue::QueueError;
+use cayw_runtime::{ResourcePolicy, TaskResources};
 use serde_json::json;
 
 #[test]
@@ -17,7 +18,7 @@ fn policy_uses_a_positive_signed_storage_range_and_one_gib_default() {
                 max_declared_memory_bytes: limit
             }
             .validate(),
-            Err(RuntimeError::InvalidInput(_))
+            Err(QueueError::InvalidInput(_))
         ));
     }
 }
@@ -89,7 +90,7 @@ fn unsupported_guarantees_are_rejected_even_when_the_requested_number_is_zero() 
     ];
     for (request, resource) in cases {
         let error = request.validate(&policy).unwrap_err();
-        assert!(matches!(error, RuntimeError::InvalidInput(_)));
+        assert!(matches!(error, QueueError::InvalidInput(_)));
         assert!(error.to_string().contains(resource), "{error}");
     }
 }

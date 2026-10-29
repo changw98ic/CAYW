@@ -1017,7 +1017,8 @@ fn capacity_precheck(inner: &Inner) -> Result<(), RuntimeError> {
     inner.queue.check_child_capacity(
         inner.config.max_queued_runs,
         inner.config.max_concurrent_runs,
-    )
+    )?;
+    Ok(())
 }
 
 fn abort_started_child(inner: &Inner, lease: &TaskLease, reason: &str) {

@@ -310,6 +310,7 @@ name = "cayw-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cayw-agent-types",
  "cayw-ai",
  "futures",
  "serde",
@@ -317,6 +318,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-agent-types"
+version = "0.1.0"
+dependencies = [
+ "cayw-ai",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -444,7 +454,7 @@ dependencies = [
 name = "cayw-core"
 version = "0.1.0"
 dependencies = [
- "cayw-agent",
+ "cayw-agent-types",
  "cayw-ai",
  "rusqlite",
  "serde",
@@ -554,6 +564,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-queue"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cayw-ai",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "cayw-requests"
 version = "0.1.0"
 dependencies = [
@@ -561,6 +584,7 @@ dependencies = [
  "cayw-ai",
  "cayw-codemode",
  "cayw-host",
+ "cayw-queue",
  "rusqlite",
  "serde",
  "serde_json",
@@ -602,6 +626,7 @@ dependencies = [
  "cayw-ipc",
  "cayw-plannotator",
  "cayw-providers",
+ "cayw-queue",
  "cayw-requests",
  "cayw-run-inspector",
  "cayw-sources",

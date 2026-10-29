@@ -9,7 +9,7 @@ description = "Headless runtime integrating durable sessions, bounded Luau tools
 
 [features]
 default = []
-fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection", "cayw-content/fault-injection"]
+fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection", "cayw-content/fault-injection", "cayw-queue/fault-injection"]
 plugins = ["dep:cayw-plugins"]
 pi-compat = ["plugins", "dep:cayw-pi-compat"]
 strongflow = ["plugins", "cayw-plugins/strongflow"]
@@ -31,6 +31,7 @@ cayw-bridge = { path = "../cayw-bridge", version = "0.1.0" }
 cayw-host = { path = "../cayw-host", version = "0.1.0" }
 cayw-ipc = { path = "../cayw-ipc", version = "0.1.0" }
 cayw-providers = { path = "../cayw-providers", version = "0.1.0" }
+cayw-queue = { path = "../cayw-queue", version = "0.1.0" }
 cayw-plannotator = { path = "../cayw-plannotator", version = "0.1.0" }
 cayw-requests = { path = "../cayw-requests", version = "0.1.0" }
 cayw-run-inspector = { path = "../cayw-run-inspector", version = "0.1.0" }
@@ -52,6 +53,7 @@ tokio-util.workspace = true
 uuid = { version = "=1.27.0", features = ["v4"] }
 
 [dev-dependencies]
+cayw-queue = { path = "../cayw-queue", version = "0.1.0", features = ["test-support"] }
 cayw-pi-compat = { path = "../cayw-pi-compat", version = "0.1.0" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

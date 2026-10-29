@@ -216,7 +216,7 @@ async fn prepare_call(
         return prepared;
     }
     if prepared.invocation.cancel.is_cancelled() {
-        prepared.result = Some(ToolResult::cancelled(false));
+        prepared.result = Some(cancelled(false));
         return prepared;
     }
     if let Some(error) = &prepared.call.arguments_error {
@@ -268,7 +268,7 @@ async fn prepare_call(
     let decision = tokio::select! {
         biased;
         _ = prepared.invocation.cancel.cancelled() => {
-            prepared.result = Some(ToolResult::cancelled(false));
+            prepared.result = Some(cancelled(false));
             return prepared;
         }
         decision = before => decision,
@@ -313,7 +313,7 @@ async fn finish_call(
     let (mut result, duration_ms) = if let Some(result) = prepared.result.take() {
         (result, None)
     } else if prepared.invocation.cancel.is_cancelled() {
-        (ToolResult::cancelled(false), None)
+        (cancelled(false), None)
     } else {
         execute_call(&prepared, &emit).await
     };
@@ -389,7 +389,7 @@ async fn execute_call(prepared: &PreparedCall, emit: &EventSink) -> (ToolResult,
         // Its first poll checks cancellation again before calling any tool code.
         let execution = AssertUnwindSafe(async {
             if prepared.invocation.cancel.is_cancelled() {
-                return Ok(ToolResult::cancelled(false));
+                return Ok(cancelled(false));
             }
             started = Some(Instant::now());
             prepared.invocation.active.store(true, Ordering::Release);
@@ -404,7 +404,7 @@ async fn execute_call(prepared: &PreparedCall, emit: &EventSink) -> (ToolResult,
                 biased;
                 _ = prepared.invocation.cancel.cancelled(), if shutdown_deadline.is_none() => {
                     if !prepared.invocation.active.load(Ordering::Acquire) {
-                        break ToolResult::cancelled(false);
+                        break cancelled(false);
                     }
                     execution_cancel.cancel();
                     shutdown_deadline = Some(tokio::time::Instant::now() + prepared.shutdown_grace);
@@ -452,8 +452,28 @@ async fn execute_call(prepared: &PreparedCall, emit: &EventSink) -> (ToolResult,
     (result, duration_ms)
 }
 
+fn cancelled(started: bool) -> ToolResult {
+    ToolResult {
+        outcome_unknown: started,
+        ..ToolResult::error(if started {
+            "Tool execution cancelled; its effects may have occurred. Reconcile before retrying."
+        } else {
+            "Tool call cancelled before execution"
+        })
+    }
+}
+
+fn valid_content(result: &ToolResult) -> bool {
+    result.content.iter().all(|part| {
+        matches!(
+            part,
+            cayw_ai::Content::Text { .. } | cayw_ai::Content::Image { .. }
+        )
+    })
+}
+
 fn normalize_content(result: &mut ToolResult) {
-    if !result.valid_content() {
+    if !valid_content(result) {
         replace_with_error(
             result,
             "Tool results may contain only text and images".into(),

@@ -413,6 +413,15 @@ pub(crate) fn closing(inner: &Inner, task_id: &str) -> Result<(), RuntimeError> 
     };
     close_identity(inner, &identity)
 }
+/// One decision supplies both the queue terminal and its authority/audit outcome.
+pub(crate) fn outcome(terminal: crate::queue::TaskTerminal) -> TaskOutcome {
+    use crate::queue::TaskTerminal;
+    match terminal {
+        TaskTerminal::Completed => TaskOutcome::Completed,
+        TaskTerminal::Cancelled => TaskOutcome::Cancelled,
+        TaskTerminal::Failed | TaskTerminal::OutcomeUnknown => TaskOutcome::Failed,
+    }
+}
 /// Called with lifecycle coordination and the original task record. Queue may
 /// hold its terminal transaction, so authority settlement must not reread Queue.
 pub(crate) fn finish(

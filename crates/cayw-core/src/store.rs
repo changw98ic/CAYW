@@ -1,5 +1,5 @@
 use crate::*;
-use cayw_agent::{AgentEvent, ToolResult};
+use cayw_agent_types::{AgentEvent, ToolResult};
 use cayw_ai::{
     AssistantMessage, Content, Message, StopReason, ToolCall, ToolResultMessage, timestamp_ms,
 };

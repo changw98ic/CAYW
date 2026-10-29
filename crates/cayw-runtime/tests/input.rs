@@ -8,7 +8,8 @@ use cayw_ai::{
     ModelRequest, Provider, StopReason,
 };
 use cayw_ipc::RpcHandler;
-use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, RuntimeError, TaskInput};
+use cayw_queue::QueueError;
+use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, TaskInput};
 use futures::stream;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -289,7 +290,7 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
     // not MIME type or base64 decoding error.
     let err_under_budget = input.validate(&model, total_bytes - 1).unwrap_err();
     assert!(
-        matches!(err_under_budget, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_under_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error before mime/decode validation, got: {err_under_budget}"
     );
 
@@ -297,7 +298,7 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
     // and catches the invalid MIME type.
     let err_sufficient_budget = input.validate(&model, total_bytes).unwrap_err();
     assert!(
-        matches!(err_sufficient_budget, RuntimeError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
+        matches!(err_sufficient_budget, QueueError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
         "expected mime type error when budget is sufficient, got: {err_sufficient_budget}"
     );
 
@@ -315,13 +316,13 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
 
     let err_b64_under_budget = input_b64.validate(&model, total_b64_bytes - 1).unwrap_err();
     assert!(
-        matches!(err_b64_under_budget, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_b64_under_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error before base64 decode, got: {err_b64_under_budget}"
     );
 
     let err_b64_sufficient = input_b64.validate(&model, total_b64_bytes).unwrap_err();
     assert!(
-        matches!(err_b64_sufficient, RuntimeError::InvalidInput(ref msg) if msg.contains("not valid base64")),
+        matches!(err_b64_sufficient, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error when budget is sufficient, got: {err_b64_sufficient}"
     );
 }
@@ -390,19 +391,19 @@ fn task_input_multi_image_cumulative_budget_checked_before_decoding() {
     // Either image fits alone, but both exceed the cumulative budget.
     let err_individual = input.validate(&model, individual_budget).unwrap_err();
     assert!(
-        matches!(err_individual, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_individual, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "multi-image cumulative budget must reject before decoding: {err_individual}"
     );
 
     let err_under = input.validate(&model, total_bytes - 1).unwrap_err();
     assert!(
-        matches!(err_under, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error at total - 1: {err_under}"
     );
 
     let err_exact = input.validate(&model, total_bytes).unwrap_err();
     assert!(
-        matches!(err_exact, RuntimeError::InvalidInput(ref msg) if msg.contains("not valid base64")),
+        matches!(err_exact, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error once exact budget is met: {err_exact}"
     );
 
@@ -424,7 +425,7 @@ fn task_input_multi_image_cumulative_budget_checked_before_decoding() {
     assert!(valid_input.validate(&model, valid_total).is_ok());
     let err_valid_under = valid_input.validate(&model, valid_total - 1).unwrap_err();
     assert!(
-        matches!(err_valid_under, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_valid_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error for valid images at total - 1: {err_valid_under}"
     );
 }

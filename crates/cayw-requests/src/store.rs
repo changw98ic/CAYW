@@ -817,7 +817,7 @@ impl RequestStore {
         actor: &HostActor,
     ) -> Result<()> {
         identity.validate()?;
-        intent.validate()?;
+        crate::types::validate_intent(&intent)?;
         self.transaction(|tx, now, config| {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM request_tasks WHERE id=?1)",

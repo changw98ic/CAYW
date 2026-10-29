@@ -180,7 +180,7 @@ pub(crate) fn decide(
             .err();
         RuntimeError::RecoveryRequired {
             cause: Box::new(cause),
-            cleanup: cleanup.map(Box::new),
+            cleanup: cleanup.map(|error| Box::new(RuntimeError::from(error))),
             outcome_unknown: true,
         }
     });

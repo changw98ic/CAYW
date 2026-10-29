@@ -10,9 +10,9 @@ use cayw_ai::{
 };
 use cayw_ipc::RpcHandler;
 use cayw_plannotator::{FEEDBACK_SECTION_KEY, FeedbackDecision};
+use cayw_queue::QueueError;
 use cayw_runtime::{
-    ImageInput, PlanFeedbackInput, Runtime, RuntimeConfig, RuntimeError, ScopedPermission,
-    TaskInput, TaskState,
+    ImageInput, PlanFeedbackInput, Runtime, RuntimeConfig, ScopedPermission, TaskInput, TaskState,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -254,14 +254,14 @@ fn rt_06_prompt_budget_checked_before_image_decoding_or_mime_validation() {
     // Budget lower than total: budget error MUST be returned first.
     let err_budget = input.validate(&model, total_bytes - 1).unwrap_err();
     assert!(
-        matches!(err_budget, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error, got: {err_budget}"
     );
 
     // Budget sufficient: validation proceeds to MIME type check.
     let err_mime = input.validate(&model, total_bytes).unwrap_err();
     assert!(
-        matches!(err_mime, RuntimeError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
+        matches!(err_mime, QueueError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
         "expected MIME error once within budget, got: {err_mime}"
     );
 
@@ -278,13 +278,13 @@ fn rt_06_prompt_budget_checked_before_image_decoding_or_mime_validation() {
 
     let err_budget_b64 = input_b64.validate(&model, total_b64 - 1).unwrap_err();
     assert!(
-        matches!(err_budget_b64, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_budget_b64, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error before decoding, got: {err_budget_b64}"
     );
 
     let err_decode = input_b64.validate(&model, total_b64).unwrap_err();
     assert!(
-        matches!(err_decode, RuntimeError::InvalidInput(ref msg) if msg.contains("not valid base64")),
+        matches!(err_decode, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error once within budget, got: {err_decode}"
     );
 }
@@ -474,21 +474,21 @@ fn rt_06_multi_image_cumulative_budget_boundary_and_rejection_before_decode() {
     // Budget 60 would fit either image alone, but cumulative exceeds 60 on image 2.
     let err_individual_fit = input.validate(&model, 60).unwrap_err();
     assert!(
-        matches!(err_individual_fit, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_individual_fit, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "cumulative budget must reject before decoding when second image pushes over budget: {err_individual_fit}"
     );
 
     // Exact boundary: 107 bytes (total_bytes - 1) -> byte budget error before decoding.
     let err_boundary_under = input.validate(&model, total_bytes - 1).unwrap_err();
     assert!(
-        matches!(err_boundary_under, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_boundary_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error at total - 1, got: {err_boundary_under}"
     );
 
     // Exact boundary: 108 bytes (total_bytes) -> passes budget check, then fails on base64 decoding.
     let err_boundary_exact = input.validate(&model, total_bytes).unwrap_err();
     assert!(
-        matches!(err_boundary_exact, RuntimeError::InvalidInput(ref msg) if msg.contains("not valid base64")),
+        matches!(err_boundary_exact, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error once exact budget is met, got: {err_boundary_exact}"
     );
 
@@ -509,7 +509,7 @@ fn rt_06_multi_image_cumulative_budget_boundary_and_rejection_before_decode() {
     assert!(valid_input.validate(&model, valid_total).is_ok());
     let err_valid_under = valid_input.validate(&model, valid_total - 1).unwrap_err();
     assert!(
-        matches!(err_valid_under, RuntimeError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        matches!(err_valid_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected budget error at valid_total - 1, got: {err_valid_under}"
     );
 }

@@ -92,7 +92,7 @@ pub enum CoreRequest {
     },
     AppendAgentEvent {
         lease: AttemptLease,
-        event: Box<cayw_agent::AgentEvent>,
+        event: Box<cayw_agent_types::AgentEvent>,
     },
     BindToolOrigin {
         lease: AttemptLease,

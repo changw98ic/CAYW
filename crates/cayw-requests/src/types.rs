@@ -163,20 +163,14 @@ impl HostActor {
 }
 
 /// First-round evaluation requires this host-recorded user instruction AND an
-/// exact build.run/test.run profile in the existing host catalog.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TaskIntent {
-    General,
-    ExplicitProjectTestOrScript { user_instruction: String },
-}
-impl TaskIntent {
-    pub(crate) fn validate(&self) -> Result<()> {
-        if let Self::ExplicitProjectTestOrScript { user_instruction } = self {
-            text(user_instruction)?;
-        }
-        Ok(())
+/// exact build.run/test.run profile in the existing host catalog. The canonical
+/// definition lives in `cayw-queue`, which owns durable task identity.
+pub use cayw_queue::TaskIntent;
+pub(crate) fn validate_intent(intent: &TaskIntent) -> Result<()> {
+    if let TaskIntent::ExplicitProjectTestOrScript { user_instruction } = intent {
+        text(user_instruction)?;
     }
+    Ok(())
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

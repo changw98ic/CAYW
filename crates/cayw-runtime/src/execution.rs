@@ -598,7 +598,11 @@ async fn launch_worker(
             // Keep durable admission until an explicit recovery settles the
             // unfinished bookkeeping. A failed block write also leaves the
             // existing queued/running row occupying its original slot.
-            if let Err(cleanup) = inner.queue.block(&lease, &error.to_string()) {
+            if let Err(cleanup) = inner
+                .queue
+                .block(&lease, &error.to_string())
+                .map_err(RuntimeError::from)
+            {
                 return Err(RuntimeError::RecoveryRequired {
                     outcome_unknown: matches!(
                         &error,
@@ -640,7 +644,9 @@ async fn launch_worker(
                     .err()
                     .map(ToString::to_string)
                     .or_else(|| lock(&flags.reason).clone()),
-                |terminal| crate::requests::finish(&inner, &original, terminal.request_outcome()),
+                |terminal| {
+                    crate::requests::finish(&inner, &original, crate::requests::outcome(terminal))
+                },
             )
         })();
         // A fenced owner cannot free another owner's slot or replace a terminal.
@@ -650,7 +656,11 @@ async fn launch_worker(
                 cleanup: None,
                 outcome_unknown: unresolved,
             };
-            if let Err(cleanup) = inner.queue.block(&lease, &error.to_string()) {
+            if let Err(cleanup) = inner
+                .queue
+                .block(&lease, &error.to_string())
+                .map_err(RuntimeError::from)
+            {
                 return Err(RuntimeError::RecoveryRequired {
                     cause: Box::new(error),
                     cleanup: Some(Box::new(cleanup)),
@@ -774,7 +784,7 @@ async fn run_worker(
             .begin_attempt(&task.session_id, &worker.worker)?;
         if let Err(error) = inner.queue.attach(worker, &lease.attempt_id) {
             let _ = inner.store.finish_attempt(&lease);
-            return Err(error);
+            return Err(error.into());
         }
         lease
     };
