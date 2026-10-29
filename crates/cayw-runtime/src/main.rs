@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use cayw_ai::{CancellationToken, Model, Provider};
 use cayw_bridge::{AccessRequest, Limits, Provenance, Registry, RegistryPolicy, Visibility};
 use cayw_codemode::CapabilityError;
-use cayw_ipc::{ServerConfig, serve};
+use cayw_ipc::{RpcError, RpcHandler, ServerConfig, serve};
 use cayw_runtime::{HeadlessConfig, Runtime, ScopedPermission, fixture::OfflineProvider};
 use cayw_sources::{InstalledServer, install_mcp_servers_file};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
 const USAGE: &str = "cayw serve --db PATH --workspace DIR --listen 127.0.0.1:PORT --token-env ENV [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nWithout --offline, --config must contain one explicit model object: service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nServices: openai/chat_completions, magpie/chat_completions, anthropic/messages, gemini/stream_generate_content or gemini/generate_content.\nCAYW_PROVIDER_BASE_URL, CAYW_PROVIDER_API_KEY and CAYW_MODEL no longer select the server model.\nStarting a server makes no model request. session.prompt starts one.\n--config also reads host-owned JSON budgets, fixed pipe-based process profiles, exact permissions, optional task request policy/limits, optional web_access / vision options, optional pi_compat options, and optional mcp_servers_file (absolute path to external mcpServers JSON; absolute local stdio only → ManagedStdio prepare → Registry → Runtime Bridge).\nProfiles and request scopes alone grant no permission.\nOffline mode requires model to be omitted and uses a synthetic provider with real bounded Luau + Host file operations.\n--demo-authorized grants only the two exact offline demo file calls. All other calls await approval.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
@@ -22,6 +22,32 @@ impl RegistryPolicy for ServeBridgePolicy {
         _: CancellationToken,
     ) -> Result<(), CapabilityError> {
         Ok(())
+    }
+}
+
+struct CliRpcHandler {
+    runtime: Arc<Runtime>,
+    request_timeout_ms: u64,
+}
+
+#[async_trait]
+impl RpcHandler for CliRpcHandler {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        let mut response = self.runtime.call(method, params, cancel).await?;
+        if method == "runtime.health"
+            && let Value::Object(ref mut map) = response
+        {
+            map.insert(
+                "request_timeout_ms".to_string(),
+                json!(self.request_timeout_ms),
+            );
+        }
+        Ok(response)
     }
 }
 
@@ -244,6 +270,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         "pi_compat_enabled":pi_compat_enabled,
         "pi_installed":pi_installed,
     });
+    let request_timeout = config
+        .max_run_time
+        .checked_add(std::time::Duration::from_secs(60))
+        .ok_or("server request timeout calculation overflowed")?;
+    if request_timeout.is_zero()
+        || std::time::Instant::now()
+            .checked_add(request_timeout)
+            .is_none()
+    {
+        return Err("server request timeout is invalid or non-representable".into());
+    }
+    let request_timeout_ms: u64 = u64::try_from(request_timeout.as_millis())
+        .map_err(|_| "server request timeout in milliseconds exceeds u64")?;
+    if request_timeout_ms == 0 {
+        return Err("server request timeout in milliseconds must be non-zero".into());
+    }
     let provider_name = model.provider.clone();
     let model_name = model.id.clone();
     let runtime = Runtime::open(db, workspace, provider, model, config)?;
@@ -259,8 +301,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
         signal.cancel();
     });
     let mut ipc = ServerConfig::new(token);
-    ipc.request_timeout = std::time::Duration::from_secs(360);
-    serve(listener, Arc::new(runtime), ipc, shutdown).await?;
+    ipc.request_timeout = request_timeout;
+    let handler = Arc::new(CliRpcHandler {
+        runtime: Arc::new(runtime),
+        request_timeout_ms,
+    });
+    serve(listener, handler, ipc, shutdown).await?;
 
     #[cfg(feature = "pi-compat")]
     if let Some((pi_host, loaded)) = pi_keepalive {

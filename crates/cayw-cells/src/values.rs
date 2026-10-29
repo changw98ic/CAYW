@@ -45,7 +45,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: CELL_STORE.into(),
-            description: "Persist one bounded JSON value for the current session using an exact compare-and-set version. Version 0 creates a new key. The trusted backend must authorize the operation before it executes.".into(),
+            description: "Persist one bounded JSON value for the current session using an exact compare-and-set version. expected_version is required: version 0 creates a new key; updating an existing key requires the version returned by cells.load. The trusted backend must authorize the operation before it executes.".into(),
             parameters: json!({
                 "type":"object",
                 "properties":{
@@ -59,7 +59,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: CELL_LOAD.into(),
-            description: "Load one session-scoped JSON value and its current version. The trusted backend must authorize the read before it executes; matching session identity alone is not authorization.".into(),
+            description: "Load one session-scoped JSON value and its current version (returns an object with version and value, or null if absent). The trusted backend must authorize the read before it executes; matching session identity alone is not authorization.".into(),
             parameters: json!({
                 "type":"object",
                 "properties":{"key":key},

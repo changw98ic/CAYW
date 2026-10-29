@@ -336,3 +336,194 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
         .join()
         .unwrap();
 }
+
+struct EmptyBackend;
+#[async_trait]
+impl CellBackend for EmptyBackend {
+    fn capabilities(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
+    fn created(&self, _: &CellExecution) -> Result<(), CellError> {
+        Ok(())
+    }
+    async fn call(
+        &self,
+        _: &CellExecution,
+        _: u64,
+        _: &str,
+        _: Value,
+        _: CancellationToken,
+    ) -> Result<BackendResponse, CapabilityError> {
+        Err(CapabilityError::new("no fixture host capability"))
+    }
+    fn finished(&self, _: &CellExecution, _: &CellTerminal) -> Result<(), CellError> {
+        Ok(())
+    }
+}
+
+struct AllowAllValues;
+#[async_trait]
+impl CellValueAuthorizer for AllowAllValues {
+    async fn authorize(
+        &self,
+        _: &CellExecution,
+        _: CellValueOperation,
+        _: &Value,
+        _: CancellationToken,
+    ) -> Result<(), CapabilityError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn cross_exec_store_load_conflict_and_reopened_readback() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("cells.db");
+    let journal = Arc::new(SqliteJournal::open(&db_path).unwrap());
+    let limits = CellLimits::default();
+    let identity = CellIdentity {
+        session_id: "test-session".into(),
+        task_id: "test-task".into(),
+        attempt_id: "attempt-1".into(),
+        permission_context: "authorized".into(),
+    };
+    let backend = authorized_cell_backend(
+        Arc::new(EmptyBackend),
+        CellValueExecutor::new(journal.clone(), limits.clone()),
+        Arc::new(AllowAllValues),
+    );
+    let manager = CellManager::new(
+        identity.clone(),
+        journal.clone(),
+        backend.clone(),
+        ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+        limits.clone(),
+        Limits::default(),
+    )
+    .unwrap();
+    // 1. Cross-exec: initial store creation with expected_version = 0.
+    let create_page = manager
+        .exec(
+            ExecRequest {
+                script: "return store('search_result', { query = 'rust', count = 1 }, 0)".into(),
+                yield_time_ms: 1000,
+                max_output_tokens: 4096,
+            },
+            "call-1",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_page.status, CellStatus::Completed);
+    assert!(!create_page.vm_alive);
+    assert!(!create_page.has_more);
+    assert_eq!(
+        create_page.outputs[0].output,
+        CellOutput::Json {
+            value: json!({"version": 1})
+        }
+    );
+
+    // 2. Cross-exec: conflict when updating with wrong expected_version = 0.
+    let conflict_page = manager
+        .exec(
+            ExecRequest {
+                script: "return store('search_result', { query = 'rust', count = 2 }, 0)".into(),
+                yield_time_ms: 1000,
+                max_output_tokens: 4096,
+            },
+            "call-2",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflict_page.status, CellStatus::Failed);
+    assert!(
+        conflict_page
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("session value version does not match")
+    );
+
+    // 3. Cross-exec: load prior version and update successfully with expected_version.
+    let update_page = manager
+        .exec(
+            ExecRequest {
+                script: r#"
+                    local prev = load('search_result')
+                    assert(prev ~= nil, 'key should exist')
+                    assert(prev.version == 1, 'expected version 1')
+                    assert(prev.value.count == 1, 'expected count 1')
+                    return store('search_result', { query = 'rust', count = 2 }, prev.version)
+                "#
+                .into(),
+                yield_time_ms: 1000,
+                max_output_tokens: 4096,
+            },
+            "call-3",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_page.status, CellStatus::Completed);
+    assert_eq!(
+        update_page.outputs[0].output,
+        CellOutput::Json {
+            value: json!({"version": 2})
+        }
+    );
+
+    manager.close().await;
+    drop(manager);
+    drop(backend);
+    drop(journal);
+
+    // 4. Reopen real SQLite file and verify direct journal readback.
+    let reopened_journal = Arc::new(SqliteJournal::open(&db_path).unwrap());
+    let loaded = reopened_journal
+        .load("test-session", "search_result")
+        .unwrap()
+        .expect("persisted value in sqlite");
+    assert_eq!(loaded.version, 2);
+    assert_eq!(loaded.value, json!({"query": "rust", "count": 2}));
+
+    // 5. Reopen real SQLite file under a fresh CellManager/CellTool and verify exec readback.
+    let reopened_backend = authorized_cell_backend(
+        Arc::new(EmptyBackend),
+        CellValueExecutor::new(reopened_journal.clone(), limits.clone()),
+        Arc::new(AllowAllValues),
+    );
+    let reopened_manager = CellManager::new(
+        identity,
+        reopened_journal,
+        reopened_backend,
+        ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+        limits.clone(),
+        Limits::default(),
+    )
+    .unwrap();
+    let readback_page = reopened_manager
+        .exec(
+            ExecRequest {
+                script: "return load('search_result')".into(),
+                yield_time_ms: 1000,
+                max_output_tokens: 4096,
+            },
+            "call-4",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(readback_page.status, CellStatus::Completed);
+    assert_eq!(
+        readback_page.outputs[0].output,
+        CellOutput::Json {
+            value: json!({
+                "version": 2,
+                "value": { "query": "rust", "count": 2 }
+            })
+        }
+    );
+    reopened_manager.close().await;
+}

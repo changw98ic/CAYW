@@ -14,6 +14,46 @@ use tokio::{
 
 const TOKEN: &str = "public-client-test-token";
 const WATCHDOG: Duration = Duration::from_secs(30);
+
+struct TestServerHandler {
+    runtime: Arc<cayw_runtime::Runtime>,
+    request_timeout_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl cayw_ipc::RpcHandler for TestServerHandler {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: cayw_ai::CancellationToken,
+    ) -> Result<Value, cayw_ipc::RpcError> {
+        let mut response = self.runtime.call(method, params, cancel).await?;
+        if method == "runtime.health"
+            && let Value::Object(ref mut map) = response
+        {
+            map.insert("request_timeout_ms".into(), json!(self.request_timeout_ms));
+        }
+        Ok(response)
+    }
+}
+
+fn serve_test_runtime(
+    listener: TcpListener,
+    runtime: Arc<cayw_runtime::Runtime>,
+    token: &str,
+    timeout: Duration,
+    cancel: cayw_ai::CancellationToken,
+) -> JoinHandle<std::io::Result<()>> {
+    let mut config = cayw_ipc::ServerConfig::new(token);
+    config.request_timeout = timeout;
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap();
+    let handler = Arc::new(TestServerHandler {
+        runtime,
+        request_timeout_ms: timeout_ms,
+    });
+    tokio::spawn(cayw_ipc::serve(listener, handler, config, cancel))
+}
 fn command(root: &Path, mode: &str, address: Option<std::net::SocketAddr>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cayw-client"));
     command.env_clear().args(["--mode", mode]);
@@ -306,12 +346,13 @@ async fn check_two_turns(mode: &str) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let cancel = cayw_ai::CancellationToken::new();
-        let task = tokio::spawn(cayw_ipc::serve(
+        let task = serve_test_runtime(
             listener,
             Arc::new(runtime),
-            cayw_ipc::ServerConfig::new(TOKEN),
+            TOKEN,
+            Duration::from_secs(360),
             cancel.clone(),
-        ));
+        );
         runtime_server = Some((cancel, task));
         Some(address)
     } else {
@@ -530,12 +571,13 @@ async fn check_unknown_rejection(mode: &str) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let shutdown = cayw_ai::CancellationToken::new();
-    let server = tokio::spawn(cayw_ipc::serve(
+    let server = serve_test_runtime(
         listener,
         Arc::new(runtime),
-        cayw_ipc::ServerConfig::new(TOKEN),
+        TOKEN,
+        Duration::from_secs(360),
         shutdown.clone(),
-    ));
+    );
     let make = || {
         let mut cmd = command(root.path(), mode, (mode == "ipc").then_some(address));
         fixture.configure(&mut cmd, root.path());
@@ -691,26 +733,54 @@ async fn ipc_unknown_rejection_preserves_identity_and_never_replays() {
     check_unknown_rejection("ipc").await;
 }
 
-#[tokio::test]
-async fn ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
+async fn check_ctrl_c_cancel(mode: &str) {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
     let fixture = Fixture::start().await;
+    let mut runtime_server = None;
+    let address = if mode == "ipc" {
+        let configured = fixture.configured_provider();
+        let runtime = cayw_runtime::Runtime::open(
+            root.path().join("session.sqlite"),
+            root.path().join("workspace"),
+            configured.provider,
+            configured.model,
+            cayw_runtime::RuntimeConfig::default(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cancel = cayw_ai::CancellationToken::new();
+        let task = serve_test_runtime(
+            listener,
+            Arc::new(runtime),
+            TOKEN,
+            Duration::from_secs(360),
+            cancel.clone(),
+        );
+        runtime_server = Some((cancel, task));
+        Some(address)
+    } else {
+        None
+    };
     let make = || {
-        let mut command = command(root.path(), "sdk", None);
+        let mut command = command(root.path(), mode, address);
         fixture.configure(&mut command, root.path());
         command
     };
     let mut create = make();
     create.arg("create");
     let created = run(create).await;
-    let id = last(&created, "result")["result"]["id"].as_str().unwrap();
+    let id = last(&created, "result")["result"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let mut prompt = make();
     prompt
         .args([
             "prompt",
             "--session",
-            id,
+            &id,
             "--text",
             "cancel the held stream",
         ])
@@ -766,6 +836,11 @@ async fn ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
             .unwrap()
             .success()
     );
+    let initial_task = records
+        .iter()
+        .find(|record| record["type"] == "task")
+        .unwrap()["task"]
+        .clone();
     let requested = records
         .iter()
         .position(|record| record["type"] == "cancel_requested")
@@ -781,6 +856,7 @@ async fn ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
     assert!(requested < ack && ack < finish);
     assert_eq!(records[ack]["cancelled"], true);
     let target = &records[ack]["target"];
+    assert_eq!(target["task_id"], initial_task["id"]);
     assert_eq!(target["task_id"], records[finish]["task"]["id"]);
     for field in ["session_id", "worker_id", "attempt_id", "fence"] {
         assert_eq!(target[field], records[finish]["task"][field]);
@@ -794,7 +870,7 @@ async fn ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
         "client retried a cancelled request"
     );
     let mut audit = make();
-    audit.args(["audit", "--session", id]);
+    audit.args(["audit", "--session", &id]);
     let audit = run(audit).await;
     assert!(
         last(&audit, "result")["result"]
@@ -803,6 +879,20 @@ async fn ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
             .iter()
             .any(|record| record["kind"] == "run_cancelled")
     );
+    if let Some((cancel, task)) = runtime_server {
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sdk_ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
+    check_ctrl_c_cancel("sdk").await;
+}
+
+#[tokio::test]
+async fn ipc_ctrl_c_reports_cancel_ack_then_original_task_terminal_without_retry() {
+    check_ctrl_c_cancel("ipc").await;
 }
 
 #[tokio::test]

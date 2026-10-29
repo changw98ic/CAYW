@@ -21,6 +21,8 @@ cayw-client --mode ipc --address 127.0.0.1:4000 --token-env CAYW_IPC_TOKEN creat
 cayw-client --mode ipc --address 127.0.0.1:4000 --token-env CAYW_IPC_TOKEN prompt --session SESSION_ID --text "Carry out the authorized task" --cursor-file /absolute/state/events.cursor.json
 ```
 
+The CLI host sets its IPC request timeout to the configured task execution limit plus 60 seconds. The default 300-second task limit gives a 360-second IPC timeout; `budgets.max_run_time_ms: 900000` gives 960 seconds. The host reports the actual value as `runtime.health.request_timeout_ms`. Before executing a command, the IPC client reads this value over a short-lived authenticated connection, closes that connection, and applies the value to its execution and observation connections. Missing or invalid values fail before task admission. There is no separate timeout CLI option. Task limits, Host call limits, cancellation and disconnect cleanup still apply. A custom IPC host must report its own actual timeout; the general Runtime SDK health value does not infer transport settings.
+
 A prompt reports each pending approval as an event and waits. Use another client invocation to make an explicit trusted decision:
 
 ```sh

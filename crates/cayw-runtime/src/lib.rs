@@ -94,7 +94,7 @@ use serde::Serialize;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, Weak},
     time::Duration,
 };
 use tokio::sync::Notify;
@@ -306,7 +306,7 @@ pub(crate) struct Inner {
     model: Model,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
-    budget_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    budget_locks: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
     fleet: fleet::FleetRegistry,
     binding_cache: session::BindingCache,
     changed: Notify,
@@ -320,10 +320,14 @@ pub(crate) struct Inner {
 impl Inner {
     pub(crate) fn budget_lock(&self, budget_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = lock(&self.budget_locks);
-        locks
-            .entry(budget_session_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        locks.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = locks.get(budget_session_id).and_then(Weak::upgrade) {
+            existing
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(budget_session_id.to_string(), Arc::downgrade(&lock));
+            lock
+        }
     }
 }
 
@@ -777,5 +781,141 @@ impl Runtime {
             ));
         }
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cayw_ai::{AssistantStream, Model, ModelRequest, Provider};
+
+    struct NoopProvider;
+    impl Provider for NoopProvider {
+        fn stream(&self, _: ModelRequest, _: CancellationToken) -> AssistantStream {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    fn test_runtime(dir: &Path) -> Runtime {
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        Runtime::open(
+            dir.join("session.db"),
+            workspace,
+            Arc::new(NoopProvider),
+            Model::new("fixture", "test"),
+            RuntimeConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn released_budget_roots_are_pruned_on_next_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(temp.path());
+
+        let root1 = "session-root-1";
+        let root2 = "session-root-2";
+        let lock1 = runtime.inner.budget_lock(root1);
+        let lock2 = runtime.inner.budget_lock(root2);
+
+        {
+            let locks = lock(&runtime.inner.budget_locks);
+            assert_eq!(locks.len(), 2);
+            assert!(locks.contains_key(root1));
+            assert!(locks.contains_key(root2));
+        }
+
+        drop(lock1);
+        drop(lock2);
+
+        // The next access removes keys whose last holder has gone.
+        {
+            let locks = lock(&runtime.inner.budget_locks);
+            assert_eq!(locks.len(), 2);
+        }
+
+        // Subsequent access for root-3 triggers lazy cleanup of dead keys
+        let root3 = "session-root-3";
+        let lock3 = runtime.inner.budget_lock(root3);
+
+        {
+            let locks = lock(&runtime.inner.budget_locks);
+            assert_eq!(locks.len(), 1);
+            assert!(locks.contains_key(root3));
+            assert!(!locks.contains_key(root1));
+            assert!(!locks.contains_key(root2));
+        }
+
+        drop(lock3);
+        let root4 = "session-root-4";
+        let _lock4 = runtime.inner.budget_lock(root4);
+
+        {
+            let locks = lock(&runtime.inner.budget_locks);
+            assert_eq!(locks.len(), 1);
+            assert!(locks.contains_key(root4));
+            assert!(!locks.contains_key(root3));
+        }
+    }
+
+    #[tokio::test]
+    async fn active_and_waiting_locks_preserve_one_mutex() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(temp.path());
+        let root = "shared-session-root";
+        let active = runtime.inner.budget_lock(root);
+        let waiting = runtime.inner.budget_lock(root);
+        assert!(Arc::ptr_eq(&active, &waiting));
+        let permit = active.try_lock_owned().unwrap();
+        let mut waiter = Box::pin(waiting.lock_owned());
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+
+        // Only the owned guard and queued future keep the mutex alive.
+        let _unrelated = runtime.inner.budget_lock("unrelated-root");
+        assert!(lock(&runtime.inner.budget_locks).contains_key(root));
+        let same = runtime.inner.budget_lock(root);
+        assert!(same.try_lock_owned().is_err());
+        drop(permit);
+        let waiter_permit = waiter.await;
+        let same = runtime.inner.budget_lock(root);
+        assert!(same.try_lock_owned().is_err());
+        drop(waiter_permit);
+
+        let _another = runtime.inner.budget_lock("another-root");
+        assert!(!lock(&runtime.inner.budget_locks).contains_key(root));
+    }
+
+    #[tokio::test]
+    async fn canceled_waiter_is_reclaimed_and_later_requests_serialize() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(temp.path());
+        let root = "cancellation-session-root";
+        let holder = runtime.inner.budget_lock(root);
+        let weak = Arc::downgrade(&holder);
+        let permit = holder.try_lock_owned().unwrap();
+        let waiting = runtime.inner.budget_lock(root);
+        let cancel = CancellationToken::new();
+        let child = cancel.child_token();
+        let mut waiter = Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = child.cancelled() => Err(RuntimeError::Cancelled),
+                permit = waiting.lock_owned() => Ok(permit),
+            }
+        });
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        cancel.cancel();
+        assert!(matches!(waiter.await, Err(RuntimeError::Cancelled)));
+        drop(permit);
+        assert!(weak.upgrade().is_none());
+
+        let first = runtime.inner.budget_lock(root);
+        let second = runtime.inner.budget_lock(root);
+        assert!(Arc::ptr_eq(&first, &second));
+        let permit = first.try_lock_owned().unwrap();
+        assert!(second.clone().try_lock_owned().is_err());
+        drop(permit);
+        assert!(second.try_lock_owned().is_ok());
     }
 }

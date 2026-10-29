@@ -108,8 +108,36 @@ impl Connections {
             }
             Connection::Ipc { address, token_env } => {
                 let token = environment(token_env)?;
+                let probe = Client::connect(*address, token.clone()).await?;
+                let probe_api = Api::Ipc(probe);
+                let health = probe_api.health().await?;
+                probe_api.close().await;
+
+                let timeout_ms = health
+                    .get("request_timeout_ms")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        Failure::invalid(
+                            "server health response missing valid integer request_timeout_ms",
+                        )
+                    })?;
+                if timeout_ms == 0 {
+                    return Err(Failure::invalid(
+                        "server request_timeout_ms must be non-zero",
+                    ));
+                }
+                let request_timeout = Duration::from_millis(timeout_ms);
+                if request_timeout.is_zero()
+                    || std::time::Instant::now()
+                        .checked_add(request_timeout)
+                        .is_none()
+                {
+                    return Err(Failure::invalid(
+                        "server request_timeout_ms is invalid or non-representable",
+                    ));
+                }
                 let config = ClientConfig {
-                    request_timeout: Duration::from_secs(360),
+                    request_timeout,
                     ..ClientConfig::default()
                 };
                 let execute =
@@ -121,11 +149,9 @@ impl Connections {
                         return Err(error.into());
                     }
                 };
-                let api = Api::Ipc(observe);
-                let health = api.health().await?;
                 Ok(Self {
                     execute: Api::Ipc(execute),
-                    observe: api,
+                    observe: Api::Ipc(observe),
                     metadata: json!({"type":"runtime","mode":"ipc","health":health,"requested_model":health["model"]}),
                 })
             }

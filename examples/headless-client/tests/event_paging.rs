@@ -9,6 +9,29 @@ use tokio::{net::TcpListener, process::Command, task::JoinHandle};
 const TOKEN: &str = "headless-event-page-test-token";
 const WATCHDOG: Duration = Duration::from_secs(20);
 
+struct TestServerHandler {
+    runtime: Arc<Runtime>,
+    request_timeout_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl cayw_ipc::RpcHandler for TestServerHandler {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, cayw_ipc::RpcError> {
+        let mut response = self.runtime.call(method, params, cancel).await?;
+        if method == "runtime.health"
+            && let Value::Object(ref mut map) = response
+        {
+            map.insert("request_timeout_ms".into(), json!(self.request_timeout_ms));
+        }
+        Ok(response)
+    }
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     runtime: Runtime,
@@ -111,12 +134,12 @@ impl Fixture {
         let stop = CancellationToken::new();
         let mut config = ServerConfig::new(TOKEN);
         config.max_frame_bytes = max_frame_bytes;
-        let task = tokio::spawn(serve(
-            listener,
-            Arc::new(self.runtime.clone()),
-            config,
-            stop.clone(),
-        ));
+        let request_timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap();
+        let handler = Arc::new(TestServerHandler {
+            runtime: Arc::new(self.runtime.clone()),
+            request_timeout_ms,
+        });
+        let task = tokio::spawn(serve(listener, handler, config, stop.clone()));
         Server {
             address,
             stop,
