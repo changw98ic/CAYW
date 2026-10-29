@@ -43,16 +43,67 @@ pub struct HostDispatchResult {
     pub outcome_json: String,
 }
 
+/// Structured error returned by the host bridge.
+///
+/// Distinguishes between ordinary rejections (pre-execution failure, denied permissions,
+/// invalid arguments) and unknown outcomes (effects may have begun, timeout, cancellation
+/// during execution).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostDispatchError {
+    pub message: String,
+    pub outcome_unknown: bool,
+}
+
+impl HostDispatchError {
+    pub fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome_unknown: false,
+        }
+    }
+
+    pub fn unknown(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome_unknown: true,
+        }
+    }
+}
+
+impl std::fmt::Display for HostDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for HostDispatchError {}
+
+impl From<String> for HostDispatchError {
+    fn from(message: String) -> Self {
+        Self::rejected(message)
+    }
+}
+
+impl From<&str> for HostDispatchError {
+    fn from(message: &str) -> Self {
+        Self::rejected(message)
+    }
+}
+
 /// Real execution bridge. Runtime/Host consumers implement this; the protocol
 /// calls it for every accepted `FollowUpTask` / `InvokeTool`.
 pub trait HostActionDispatch: Send + Sync {
-    fn follow_up_task(&self, req: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String>;
-    fn invoke_tool(&self, req: ToolDispatch<'_>) -> Result<HostDispatchResult, String>;
+    fn follow_up_task(
+        &self,
+        req: FollowUpDispatch<'_>,
+    ) -> Result<HostDispatchResult, HostDispatchError>;
+    fn invoke_tool(&self, req: ToolDispatch<'_>) -> Result<HostDispatchResult, HostDispatchError>;
     /// Cancel an in-flight Host/Runtime handoff for `action_id`.
     ///
     /// Returns `Ok(true)` when a live flight was signalled (tool cancel token
     /// fired and/or a follow-up Runtime task was cancelled). Default: no-op.
-    fn cancel_action(&self, _action_id: &str) -> Result<bool, String> {
+    fn cancel_action(&self, _action_id: &str) -> Result<bool, HostDispatchError> {
         Ok(false)
     }
     /// Downcast support for product-path assertions (Recording vs Runtime).
@@ -105,7 +156,10 @@ impl HostActionDispatch for RecordingHostDispatch {
         self
     }
 
-    fn follow_up_task(&self, req: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String> {
+    fn follow_up_task(
+        &self,
+        req: FollowUpDispatch<'_>,
+    ) -> Result<HostDispatchResult, HostDispatchError> {
         self.calls
             .lock()
             .expect("dispatch lock")
@@ -127,7 +181,7 @@ impl HostActionDispatch for RecordingHostDispatch {
         })
     }
 
-    fn invoke_tool(&self, req: ToolDispatch<'_>) -> Result<HostDispatchResult, String> {
+    fn invoke_tool(&self, req: ToolDispatch<'_>) -> Result<HostDispatchResult, HostDispatchError> {
         self.calls
             .lock()
             .expect("dispatch lock")

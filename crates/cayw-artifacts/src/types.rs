@@ -142,6 +142,9 @@ pub enum ActionStatus {
     Applied,
     /// Cancelled while in-flight or after a follow-up task was queued.
     Cancelled,
+    /// Side-effect outcome could not be verified (e.g. host timeout/cancelled after effect began).
+    /// Requires explicit host/user reconciliation; cannot be cancelled or replaced.
+    OutcomeUnknown,
 }
 
 /// Durable record of a dispatched action (accepted or rejected).
@@ -199,6 +202,36 @@ pub struct UpdateArtifactRequest {
     pub expected_content_version: Option<u64>,
 }
 
+/// Reconciled terminal outcome for an artifact action with verified evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
+pub enum ArtifactReconciledOutcome {
+    /// External operation provably did not execute (no side effects).
+    NotExecuted { reason: String },
+    /// External operation succeeded with known outcome payload.
+    Applied {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_json: Option<String>,
+    },
+    /// External operation failed with a known error.
+    Failed { error: String },
+}
+
+/// Explicit reconciliation request submitted by a trusted host to resolve
+/// an action with an unknown outcome or a hanging tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactReconciliation {
+    pub session_id: String,
+    pub action_id: String,
+    pub expected_artifact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    pub actor: String,
+    pub evidence: String,
+    pub outcome: ArtifactReconciledOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArtifactError {
     #[error("invalid artifact input: {0}")]
@@ -223,6 +256,8 @@ pub enum ArtifactError {
     },
     #[error("action already recorded: {0}")]
     DuplicateAction(String),
+    #[error("session requires reconciliation: {0}")]
+    NeedsReconciliation(String),
     #[error("artifact io: {0}")]
     Io(String),
 }

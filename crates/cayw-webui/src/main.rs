@@ -152,12 +152,45 @@ mod tests {
     fn defaults_and_explicit_loopback_overrides() {
         let config = Config::parse([], environment()).unwrap();
         assert_eq!(config.web_addr, "127.0.0.1:0".parse().unwrap());
+        assert_eq!(config.ownership_path, PathBuf::from("ownership.json"));
         let config = Config::parse(
             ["--web-addr".to_owned(), "[::1]:7000".to_owned()],
             environment(),
         )
         .unwrap();
         assert_eq!(config.web_addr, "[::1]:7000".parse().unwrap());
+        assert_eq!(config.ownership_path, PathBuf::from("ownership.json"));
+
+        let config = Config::parse(
+            ["--ownership".to_owned(), "custom/ownership.json".to_owned()],
+            environment(),
+        )
+        .unwrap();
+        assert_eq!(
+            config.ownership_path,
+            PathBuf::from("custom/ownership.json")
+        );
+
+        let config = Config::parse(
+            [
+                "--ownership-path".to_owned(),
+                "override/ownership.json".to_owned(),
+            ],
+            environment(),
+        )
+        .unwrap();
+        assert_eq!(
+            config.ownership_path,
+            PathBuf::from("override/ownership.json")
+        );
+
+        let mut env = environment();
+        env.insert(
+            "CAYW_OWNERSHIP_PATH".to_owned(),
+            "env_ownership.json".to_owned(),
+        );
+        let config = Config::parse([], env).unwrap();
+        assert_eq!(config.ownership_path, PathBuf::from("env_ownership.json"));
     }
 
     #[test]

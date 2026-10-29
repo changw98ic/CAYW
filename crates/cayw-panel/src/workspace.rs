@@ -78,35 +78,12 @@ impl WorkspaceHooks {
         request: OpenPanelRequest,
     ) -> Result<OpenedPanel, PanelError> {
         validate_session_id(session_id)?;
-        let description = self.registry.describe(&request.panel_id)?;
-        let panel = description.panel.ok_or_else(|| {
-            PanelError::Invalid(format!(
-                "{} is a file viewer, not a panel",
-                request.panel_id
-            ))
-        })?;
-        let zone = match request.zone {
-            Some(zone) => {
-                if !panel.placement.allows(zone) {
-                    return Err(PanelError::ZoneNotAllowed(request.panel_id.clone()));
-                }
-                zone
-            }
-            None => panel.placement.default_zone(),
-        };
-        // Re-check against the live registry so a raced unload fails closed.
-        let panel = self.registry.require_panel(&request.panel_id, zone)?;
+        // Resolve descriptor and target zone under a single registry snapshot.
+        let (panel, zone) = self
+            .registry
+            .require_panel(&request.panel_id, request.zone)?;
         let path = match request.path {
-            Some(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    return Err(PanelError::Invalid("path is empty".into()));
-                }
-                if trimmed.len() > 4096 {
-                    return Err(PanelError::Invalid("path exceeds 4096 bytes".into()));
-                }
-                Some(trimmed.to_owned())
-            }
+            Some(value) => Some(validate_path(&value)?),
             None => None,
         };
 
@@ -161,6 +138,40 @@ impl WorkspaceHooks {
             .find(|opened| opened.instance_id == instance_id)
             .cloned()
             .ok_or_else(|| PanelError::NotFound(instance_id.into()))
+    }
+
+    pub fn update_path(
+        &self,
+        session_id: &str,
+        instance_id: &str,
+        path: &str,
+    ) -> Result<OpenedPanel, PanelError> {
+        validate_session_id(session_id)?;
+        let normalized = validate_path(path)?;
+        let mut state = self.state.lock().expect("workspace hooks poisoned");
+        let session = state
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| PanelError::NotFound(session_id.into()))?;
+        let zone = session
+            .opened
+            .iter()
+            .find(|opened| opened.instance_id == instance_id)
+            .map(|opened| opened.zone)
+            .ok_or_else(|| PanelError::NotFound(instance_id.into()))?;
+        let mut updated = None;
+        for opened in &mut session.opened {
+            if opened.zone == zone {
+                if opened.instance_id == instance_id {
+                    opened.path = Some(normalized.clone());
+                    opened.active = true;
+                    updated = Some(opened.clone());
+                } else {
+                    opened.active = false;
+                }
+            }
+        }
+        updated.ok_or_else(|| PanelError::NotFound(instance_id.into()))
     }
 
     pub fn close(&self, session_id: &str, instance_id: &str) -> Result<OpenedPanel, PanelError> {
@@ -225,4 +236,15 @@ fn validate_session_id(session_id: &str) -> Result<(), PanelError> {
         ));
     }
     Ok(())
+}
+
+fn validate_path(value: &str) -> Result<String, PanelError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PanelError::Invalid("path is empty".into()));
+    }
+    if trimmed.len() > 4096 {
+        return Err(PanelError::Invalid("path exceeds 4096 bytes".into()));
+    }
+    Ok(trimmed.to_owned())
 }

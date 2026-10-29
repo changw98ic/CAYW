@@ -11,7 +11,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 
+use crate::paths::{RetryPath, build_retry_paths};
 use crate::timeline::{RunTimeline, build_run_timeline};
+use crate::tracks::build_duration_track_with_epoch;
 use crate::types::{RunStep, SessionRunSnapshot, StepOutcome};
 
 /// Stable host digest of tool arguments (equal digests ⇒ same params).
@@ -54,7 +56,8 @@ struct SessionBuilder {
     turn: u64,
     ordinal: u64,
     open: HashMap<String, OpenCall>,
-    steps: Vec<RunStep>,
+    all_steps: Vec<RunStep>,
+    page_steps: Vec<RunStep>,
 }
 
 impl SessionBuilder {
@@ -64,11 +67,12 @@ impl SessionBuilder {
             turn: 0,
             ordinal: 0,
             open: HashMap::new(),
-            steps: Vec::new(),
+            all_steps: Vec::new(),
+            page_steps: Vec::new(),
         }
     }
 
-    fn on_agent(&mut self, record: &EventRecord, event: &AgentEvent) {
+    fn on_agent(&mut self, record: &EventRecord, event: &AgentEvent, emit_step: bool) {
         match event {
             AgentEvent::TurnStart => {
                 self.turn = self.turn.saturating_add(1);
@@ -87,11 +91,14 @@ impl SessionBuilder {
                 result,
                 duration_ms,
             } => {
-                let started = self
-                    .open
-                    .remove(&call.id)
-                    .map(|open| open.started_at_ms)
-                    .unwrap_or(record.timestamp);
+                let started_from_open = self.open.remove(&call.id).map(|open| open.started_at_ms);
+                let started = started_from_open.unwrap_or_else(|| {
+                    if let Some(duration) = duration_ms {
+                        record.timestamp.saturating_sub(*duration)
+                    } else {
+                        record.timestamp
+                    }
+                });
                 let elapsed =
                     duration_ms.unwrap_or_else(|| record.timestamp.saturating_sub(started));
                 if self.turn == 0 {
@@ -111,11 +118,46 @@ impl SessionBuilder {
                     evidence_cursor: Some(record.cursor),
                     error_summary: error_summary(result),
                 };
+                self.all_steps.push(step.clone());
+                if emit_step {
+                    self.page_steps.push(step);
+                }
                 self.ordinal = self.ordinal.saturating_add(1);
-                self.steps.push(step);
             }
             _ => {}
         }
+    }
+}
+
+/// Fold Core event records for one session within a window `[start..end]`
+/// into a [`SessionRunSnapshot`]. Events in `0..start` are consumed as prefix
+/// context (maintaining turn, ordinal, and open call start timestamps) without
+/// emitting steps prior to `start`.
+pub fn snapshot_from_runtime_events_window(
+    session_id: &str,
+    label: Option<String>,
+    task_fingerprint: Option<String>,
+    records: &[EventRecord],
+    start: usize,
+    end: usize,
+) -> SessionRunSnapshot {
+    let mut builder = SessionBuilder::new(session_id);
+    let clamped_start = start.min(records.len());
+    let clamped_end = end.min(records.len()).max(clamped_start);
+    for (i, record) in records[..clamped_end].iter().enumerate() {
+        if record.session_id != session_id {
+            continue;
+        }
+        if let CoreEvent::Agent { event } = &record.event {
+            let emit_step = i >= clamped_start;
+            builder.on_agent(record, event, emit_step);
+        }
+    }
+    SessionRunSnapshot {
+        session_id: session_id.into(),
+        label,
+        task_fingerprint,
+        steps: builder.page_steps,
     }
 }
 
@@ -129,45 +171,170 @@ pub fn snapshot_from_runtime_events(
     task_fingerprint: Option<String>,
     records: &[EventRecord],
 ) -> SessionRunSnapshot {
-    let mut builder = SessionBuilder::new(session_id);
-    for record in records {
-        if record.session_id != session_id {
-            continue;
-        }
-        if let CoreEvent::Agent { event } = &record.event {
-            builder.on_agent(record, event);
-        }
-    }
-    SessionRunSnapshot {
-        session_id: session_id.into(),
+    snapshot_from_runtime_events_window(
+        session_id,
         label,
         task_fingerprint,
-        steps: builder.steps,
-    }
+        records,
+        0,
+        records.len(),
+    )
 }
 
-/// Group records by session and build one snapshot per session that produced steps.
-pub fn snapshots_from_runtime_events(records: &[EventRecord]) -> Vec<SessionRunSnapshot> {
+/// Group records by session and build snapshots within an event window `[start..end]`.
+pub fn snapshots_from_runtime_events_window(
+    records: &[EventRecord],
+    start: usize,
+    end: usize,
+) -> Vec<SessionRunSnapshot> {
     let mut order: Vec<String> = Vec::new();
     let mut seen = BTreeMap::<String, ()>::new();
-    for record in records {
+    let clamped_end = end.min(records.len());
+    for record in &records[..clamped_end] {
         if seen.insert(record.session_id.clone(), ()).is_none() {
             order.push(record.session_id.clone());
         }
     }
     order
         .into_iter()
-        .map(|session_id| snapshot_from_runtime_events(&session_id, None, None, records))
+        .map(|session_id| {
+            snapshot_from_runtime_events_window(&session_id, None, None, records, start, end)
+        })
         .filter(|snapshot| !snapshot.steps.is_empty())
         .collect()
 }
 
+/// Group records by session and build one snapshot per session that produced steps.
+pub fn snapshots_from_runtime_events(records: &[EventRecord]) -> Vec<SessionRunSnapshot> {
+    snapshots_from_runtime_events_window(records, 0, records.len())
+}
+
+/// Translate event records within a window then fold each session into a [`RunTimeline`] and [`SessionRunSnapshot`].
+pub fn timelines_and_snapshots_from_runtime_events_window(
+    records: &[EventRecord],
+    start: usize,
+    end: usize,
+) -> (Vec<RunTimeline>, Vec<SessionRunSnapshot>) {
+    let mut order: Vec<String> = Vec::new();
+    let mut seen = BTreeMap::<String, ()>::new();
+    let clamped_end = end.min(records.len());
+    for record in &records[..clamped_end] {
+        if seen.insert(record.session_id.clone(), ()).is_none() {
+            order.push(record.session_id.clone());
+        }
+    }
+
+    let mut timelines = Vec::new();
+    let mut snapshots = Vec::new();
+
+    let clamped_start = start.min(records.len());
+    for session_id in order {
+        let mut builder = SessionBuilder::new(&session_id);
+        for (i, record) in records[..clamped_end].iter().enumerate() {
+            if record.session_id != session_id {
+                continue;
+            }
+            if let CoreEvent::Agent { event } = &record.event {
+                let emit_step = i >= clamped_start;
+                builder.on_agent(record, event, emit_step);
+            }
+        }
+        if builder.page_steps.is_empty() {
+            continue;
+        }
+
+        let full_snapshot = SessionRunSnapshot {
+            session_id: session_id.clone(),
+            label: None,
+            task_fingerprint: None,
+            steps: builder.all_steps,
+        };
+        let page_snapshot = SessionRunSnapshot {
+            session_id: session_id.clone(),
+            label: None,
+            task_fingerprint: None,
+            steps: builder.page_steps,
+        };
+
+        // Align track offset with the session's overall start time.
+        let session_t0 = full_snapshot.steps.first().map(|s| s.started_at_ms);
+        let track = build_duration_track_with_epoch(&page_snapshot, session_t0);
+
+        // Keep retry paths relevant to the steps in this window.
+        let all_retry_paths = build_retry_paths(&full_snapshot);
+        let page_step_ids: std::collections::HashSet<&str> = page_snapshot
+            .steps
+            .iter()
+            .map(|s| s.step_id.as_str())
+            .collect();
+        let retry_paths: Vec<RetryPath> = all_retry_paths
+            .into_iter()
+            .filter(|path| {
+                page_step_ids.contains(path.failure_step_id.as_str())
+                    || path
+                        .follow_up_step_ids
+                        .iter()
+                        .any(|id| page_step_ids.contains(id.as_str()))
+            })
+            .collect();
+
+        let failure_count = page_snapshot
+            .steps
+            .iter()
+            .filter(|step| step.outcome == StepOutcome::Failed)
+            .count() as u64;
+
+        let timeline = RunTimeline {
+            session_id: session_id.clone(),
+            label: None,
+            task_fingerprint: None,
+            step_count: page_snapshot.steps.len() as u64,
+            failure_count,
+            retry_paths,
+            track,
+        };
+
+        snapshots.push(page_snapshot);
+        timelines.push(timeline);
+    }
+
+    (timelines, snapshots)
+}
+
+/// Translate event records within a window then fold each session into a [`RunTimeline`].
+pub fn timelines_from_runtime_events_window(
+    records: &[EventRecord],
+    start: usize,
+    end: usize,
+) -> Vec<RunTimeline> {
+    timelines_and_snapshots_from_runtime_events_window(records, start, end).0
+}
+
 /// Translate event records then fold each session into a [`RunTimeline`].
 pub fn timelines_from_runtime_events(records: &[EventRecord]) -> Vec<RunTimeline> {
-    snapshots_from_runtime_events(records)
-        .iter()
-        .map(build_run_timeline)
-        .collect()
+    timelines_from_runtime_events_window(records, 0, records.len())
+}
+
+/// Merge two or more session run snapshots for the same session into one combined snapshot.
+pub fn merge_session_snapshots(
+    session_id: &str,
+    label: Option<String>,
+    task_fingerprint: Option<String>,
+    snapshots: &[SessionRunSnapshot],
+) -> SessionRunSnapshot {
+    let mut steps = Vec::new();
+    for snapshot in snapshots {
+        if snapshot.session_id == session_id {
+            steps.extend(snapshot.steps.clone());
+        }
+    }
+    steps.sort_by_key(|step| (step.turn, step.ordinal, step.started_at_ms));
+    SessionRunSnapshot {
+        session_id: session_id.into(),
+        label,
+        task_fingerprint,
+        steps,
+    }
 }
 
 /// Pagination / truncation signal for a run-inspector response.

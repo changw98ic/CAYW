@@ -30,8 +30,10 @@ mod types;
 pub use compare::{AlignedTurn, SessionCompare, TurnLane, compare_sessions};
 pub use from_runtime::{
     RunInspectorPage, RunInspectorView, inspect_runtime_events, inspect_runtime_events_page,
-    params_digest, snapshot_from_runtime_events, snapshots_from_runtime_events,
-    timelines_from_runtime_events,
+    merge_session_snapshots, params_digest, snapshot_from_runtime_events,
+    snapshot_from_runtime_events_window, snapshots_from_runtime_events,
+    snapshots_from_runtime_events_window, timelines_and_snapshots_from_runtime_events_window,
+    timelines_from_runtime_events, timelines_from_runtime_events_window,
 };
 pub use paths::{RetryPath, build_retry_paths};
 pub use timeline::{RunTimeline, build_run_timeline};

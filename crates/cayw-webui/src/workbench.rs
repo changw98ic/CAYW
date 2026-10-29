@@ -156,7 +156,7 @@ impl Workbench {
 
     /// Minimal editor / terminal interaction against an open instance.
     ///
-    /// - `editor`: re-open the same panel id with an updated path (reveal).
+    /// - `editor`: update the open panel instance's path (reveal) and activate.
     /// - `terminal`: activate a bottom-zone terminal instance.
     pub fn interact(
         &self,
@@ -173,21 +173,8 @@ impl Workbench {
         match kind {
             "editor" => {
                 let path = path
-                    .map(|value| value.trim().to_owned())
-                    .filter(|value| !value.is_empty())
                     .ok_or_else(|| PanelError::Invalid("editor interact requires path".into()))?;
-                // Close+reopen keeps WorkspaceHooks as the single mutator while
-                // refreshing the file-oriented path hint for the same panel id.
-                let _ = self.hooks.close(session_id, instance_id)?;
-                self.hooks.open(
-                    session_id,
-                    OpenPanelRequest {
-                        panel_id: opened.panel_id,
-                        zone: Some(opened.zone),
-                        path: Some(path),
-                        activate: true,
-                    },
-                )
+                self.hooks.update_path(session_id, instance_id, &path)
             }
             "terminal" => {
                 if opened.zone != PanelZone::Bottom {
@@ -198,17 +185,8 @@ impl Workbench {
                 self.hooks.activate(session_id, instance_id)
             }
             "trace" | "artifacts" | "plannotator" | "tasks" | "usage" | "activate" => {
-                if let Some(path) = path.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) {
-                    let _ = self.hooks.close(session_id, instance_id)?;
-                    self.hooks.open(
-                        session_id,
-                        OpenPanelRequest {
-                            panel_id: opened.panel_id,
-                            zone: Some(opened.zone),
-                            path: Some(path),
-                            activate: true,
-                        },
-                    )
+                if let Some(path) = path.as_deref() {
+                    self.hooks.update_path(session_id, instance_id, path)
                 } else {
                     self.hooks.activate(session_id, instance_id)
                 }

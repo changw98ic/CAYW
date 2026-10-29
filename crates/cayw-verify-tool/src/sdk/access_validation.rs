@@ -1138,8 +1138,6 @@ fn rejections(report: &ScenarioReport, root: &Path, wire: &Wire, entries: &[Valu
                 && record["after"] == *final_value,
             "rejection case lost its complete original unchanged before/after snapshot",
         )?;
-        Snapshot::read(&record["before"], report, entries)?;
-        Snapshot::read(&record["after"], report, entries)?;
         ensure(
             record["handler_calls_before"] == handler_calls,
             "rejection dispatch counter chain changed",

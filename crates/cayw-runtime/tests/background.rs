@@ -569,8 +569,8 @@ async fn concurrent_runtime_instances_do_not_falsely_orphan_active_tasks() {
         "peer runtime must not orphan active background task"
     );
 
-    // Kill it cleanly
-    rt1.background_kill(&started.id).unwrap();
+    // Kill it cleanly across runtime instances (rt2 kills rt1's task)
+    rt2.background_kill(&started.id).unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let view = rt1.background_inspect(&started.id).unwrap().unwrap();

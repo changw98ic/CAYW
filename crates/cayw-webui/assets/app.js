@@ -30,56 +30,6 @@ export function buildTraceDebugLaunchUrl({ baseUrl } = {}) {
   return localServiceUrl(baseUrl);
 }
 
-export function formatContextOverview(stats) {
-  if (!stats) return { tokensText: '无用量数据', hitRateText: '0.0%', costText: '未知', composition: [], ledgerSettled: 0, ledgerReserved: 0, ledgerRemaining: 0, budgetUnknown: false, requestCount: 0, turnCount: 0, evolution: [] };
-  const tokens = stats.tokens || {};
-  const cache = stats.cache || {};
-  const cost = stats.cost || {};
-  const hitRate = typeof cache.hit_rate === 'number' ? (cache.hit_rate * 100).toFixed(1) + '%' : '0.0%';
-  const costText = `${cost.status || 'unknown'}${cost.amount ? ` (${cost.amount} ${cost.currency || 'USD'})` : ''}`;
-  const tokensText = `总计: ${tokens.total_tokens || 0} (输入: ${tokens.input || 0}, 输出: ${tokens.output || 0}, 缓存读: ${tokens.cache_read || 0}, 缓存写: ${tokens.cache_write || 0}, 推理: ${tokens.reasoning || 0})`;
-  return {
-    tokensText,
-    hitRateText: hitRate,
-    costText,
-    composition: array(stats.composition),
-    ledgerSettled: stats.ledger_settled_tokens || 0,
-    ledgerReserved: stats.ledger_reserved_tokens || 0,
-    ledgerRemaining: stats.ledger_remaining_tokens || 0,
-    budgetUnknown: Boolean(stats.budget_unknown),
-    requestCount: stats.request_count || 0,
-    turnCount: stats.turn_count || 0,
-    evolution: array(stats.evolution),
-  };
-}
-
-export function formatRunInspectorSteps(steps) {
-  return array(steps).map(s => ({
-    stepId: s.step_id || '',
-    turn: s.turn || 1,
-    ordinal: s.ordinal || 0,
-    tool: s.tool || 'model',
-    outcome: s.outcome || 'success',
-    elapsedMs: s.elapsed_ms || 0,
-    startedAtMs: s.started_at_ms || 0,
-    errorSummary: s.error_summary || null,
-  }));
-}
-
-export function formatFleetMembers(members) {
-  return array(members).map(m => ({
-    childTaskId: m.child_task_id || '',
-    childSessionId: m.child_session_id || '',
-    parentTaskId: m.parent_task_id || '',
-    label: m.label || 'subagent',
-    depth: m.depth || 1,
-    mode: m.mode || 'foreground',
-    detached: Boolean(m.detached),
-    state: m.state || 'running',
-    error: m.error || null,
-  }));
-}
-
 export function validatePlanFeedback(plan, draft) {
   if (!plan || !plan.task_id) {
     throw new Error('当前会话尚未生成计划，无法提交批注');
@@ -170,8 +120,25 @@ const attemptTerminalLease = (id, record) => {
   const lease = record.event.lease;
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
-const readMethods = new Set(['runtime.health', 'session.list', 'session.get', 'session.events', 'task.get', 'capabilities.list']);
-const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'stale_approval', 'stale_cancellation', 'cancelled']);
+const readMethods = new Set([
+  'runtime.health',
+  'session.list',
+  'session.get',
+  'session.events',
+  'task.get',
+  'capabilities.list',
+  'session.tasks',
+  'session.plan',
+  'runtime.fleet',
+  'session.context_overview',
+  'session.run_inspector',
+  'artifacts.list',
+  'artifacts.preview',
+  'artifacts.action_list',
+  'artifacts.action_get',
+  'plannotator.list',
+]);
+const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'needs_reconciliation_outcome_unknown', 'stale_approval', 'stale_cancellation', 'cancelled']);
 
 export class RpcError extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -179,7 +146,7 @@ export class RpcError extends Error {
     this.code = code;
     this.outcome_unknown = outcomeUnknown;
     this.status = status;
-    this.auth = code === 'forbidden' && status === 403;
+    this.auth = status === 403 || status === 401 || (code === 'forbidden' && status === 403);
   }
 }
 
@@ -206,12 +173,12 @@ export function noteSessionError(view, error) {
   const faults = { ...view.faults };
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
   if (error.code === 'session_frozen') faults.frozen = { after };
-  if ((error.code === 'needs_reconciliation' || error.code === 'tool_outcome_unknown') && !faults.reconciliation) faults.reconciliation = { after, callIds: [], terminal: null };
+  if ((error.code === 'needs_reconciliation' || error.code === 'needs_reconciliation_outcome_unknown' || error.code === 'tool_outcome_unknown') && !faults.reconciliation) faults.reconciliation = { after, callIds: [], terminal: null };
   return { ...view, faults };
 }
 
 export function finishWrite(view, key, error = null, result = null) {
-  const rejected = error && !error.outcome_unknown && rejectedCodes.has(error.code);
+  const rejected = error && rejectedCodes.has(error.code) && (!error.outcome_unknown || error.code === 'needs_reconciliation_outcome_unknown');
   const next = noteSessionError(view, error ?? {});
   next.writes = next.writes.flatMap(write => {
     if (write.key !== key) return [write];
@@ -448,6 +415,7 @@ function boot() {
   const errorText = error => clip(({
     session_frozen: '强流程当前不可用，会话保持冻结。请在会话提示中确认后创建普通聊天分支。',
     needs_reconciliation: '工具副作用尚未核对，需要由宿主检查真实结果。',
+    needs_reconciliation_outcome_unknown: '工具副作用尚未核对，需要由宿主检查真实结果。',
     tool_outcome_unknown: '工具结果尚未核对，需要由宿主检查真实副作用。',
   })[error?.code] ?? (error?.outcome_unknown ? '连接中断或请求结果待确认。页面不会自动重发，请等待事件同步或由宿主核对。' : error?.message ?? '发生未知错误。'), 2500);
   const report = error => {
@@ -492,6 +460,7 @@ function boot() {
 
   let panelCatalog = null;
   let openedPanels = [];
+  let openedPanelsSession = null;
   const panelSessionId = () => selected || 'webui-local';
 
   async function panelsApi(method, params = {}) {
@@ -543,7 +512,9 @@ function boot() {
     const bottomOpen = ui['panel-bottom-open'];
     sidebarOpen.replaceChildren();
     bottomOpen.replaceChildren();
-    for (const opened of openedPanels) {
+    const currentSession = panelSessionId();
+    const activePanels = openedPanelsSession === currentSession ? openedPanels.filter(p => !p.session_id || p.session_id === currentSession) : [];
+    for (const opened of activePanels) {
       const card = el('div', 'panel-card');
       card.dataset.active = opened.active ? 'true' : 'false';
       card.append(el('strong', '', opened.title || opened.panel_id));
@@ -575,8 +546,8 @@ function boot() {
       if (opened.zone === 'bottom') bottomOpen.append(card);
       else sidebarOpen.append(card);
     }
-    ui['panel-bottom'].hidden = !(array(panelCatalog?.bottom).length || openedPanels.some(item => item.zone === 'bottom'));
-    ui['panel-bottom-status'].textContent = openedPanels.filter(item => item.zone === 'bottom').length ? `${openedPanels.filter(item => item.zone === 'bottom').length} 个已打开` : '可从目录打开底部面板';
+    ui['panel-bottom'].hidden = !(array(panelCatalog?.bottom).length || activePanels.some(item => item.zone === 'bottom'));
+    ui['panel-bottom-status'].textContent = activePanels.filter(item => item.zone === 'bottom').length ? `${activePanels.filter(item => item.zone === 'bottom').length} 个已打开` : '可从目录打开底部面板';
   }
 
   function renderActivePanelContent(container, opened) {
@@ -661,9 +632,15 @@ function boot() {
       inspectContent.textContent = '点击刷新读取会话执行步骤与恢复时间线…';
 
       const loadInspect = async () => {
+        const targetSessionId = panelSessionId();
+        const generation = selectionGeneration;
+        const login = loginGeneration;
         try {
           inspectContent.textContent = '正在读取执行透视…';
-          const res = await rpc('session.run_inspector', { session_id: panelSessionId(), after: 0, limit: 100 });
+          const res = await rpc('session.run_inspector', { session_id: targetSessionId, after: 0, limit: 100 });
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           inspectContent.replaceChildren();
 
           const metaP = el('p', 'small muted', `扫描事件: ${res?.events_scanned ?? 0} / 总事件: ${res?.events_total ?? 0}${res?.has_more ? ' (存在更多)' : ''} · 协议版本: ${res?.protocol_version ?? 2}`);
@@ -746,8 +723,14 @@ function boot() {
       });
 
       const loadArts = async () => {
+        const targetSessionId = panelSessionId();
+        const generation = selectionGeneration;
+        const login = loginGeneration;
         try {
-          const list = await rpc('artifacts.list', { session_id: panelSessionId() });
+          const list = await rpc('artifacts.list', { session_id: targetSessionId });
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           artContainer.replaceChildren();
           if (!array(list).length) {
             artContainer.textContent = '当前会话暂无生成产物。';
@@ -879,12 +862,18 @@ function boot() {
 
       let currentPlan = null;
       const loadPlanAndFeedback = async () => {
+        const targetSessionId = panelSessionId();
+        const generation = selectionGeneration;
+        const login = loginGeneration;
         try {
-          const plan = await rpc('session.plan', { session_id: reviewedSessionId });
+          const plan = await rpc('session.plan', { session_id: targetSessionId });
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           currentPlan = plan;
           planSteps.replaceChildren();
           if (currentPlan && currentPlan.task_id) {
-            validatePlanFeedback(currentPlan, { session_id: reviewedSessionId, decision: 'approve' });
+            validatePlanFeedback(currentPlan, { session_id: targetSessionId, decision: 'approve' });
             planFactP.textContent = `关联任务: ${currentPlan.task_id} · 共享版本: v${currentPlan.version} · 内容摘要: ${currentPlan.content_sha256}`;
             for (const step of array(currentPlan.steps)) {
               planSteps.append(el('p', 'small', `[${step.status}] ${step.text}`));
@@ -895,6 +884,9 @@ function boot() {
             submitBtn.disabled = true;
           }
         } catch (err) {
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           planFactP.textContent = '读取计划状态失败：' + (err.message || String(err));
           submitBtn.disabled = true;
         }
@@ -918,7 +910,7 @@ function boot() {
         submitStatus.textContent = '正在提交批注…';
         try {
           const payload = validatePlanFeedback(currentPlan, {
-            session_id: reviewedSessionId,
+            session_id: panelSessionId(),
             decision: decisionSelect.value,
             summary: summaryInput.value.trim() || '计划审查批注',
             comments: [{
@@ -938,8 +930,14 @@ function boot() {
 
       const listContainer = el('div', 'item-list');
       const loadFeedback = async () => {
+        const targetSessionId = panelSessionId();
+        const generation = selectionGeneration;
+        const login = loginGeneration;
         try {
-          const items = await rpc('plannotator.list', { session_id: reviewedSessionId });
+          const items = await rpc('plannotator.list', { session_id: targetSessionId });
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           listContainer.replaceChildren();
           if (!array(items).length) {
             listContainer.textContent = '当前会话暂无批注记录。';
@@ -955,6 +953,9 @@ function boot() {
             listContainer.append(card);
           }
         } catch (err) {
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           listContainer.textContent = '读取批注失败：' + (err.message || String(err));
         }
       };
@@ -969,18 +970,50 @@ function boot() {
       contentBox.textContent = '正在读取任务队列与子 Agent…';
 
       const loadTasksAndFleet = async () => {
+        const targetSessionId = panelSessionId();
+        const generation = selectionGeneration;
+        const login = loginGeneration;
+        contentBox.textContent = '正在读取数据…';
         try {
-          contentBox.textContent = '正在读取数据…';
-          let tasks = [];
-          try { tasks = await rpc('session.tasks', { session_id: panelSessionId() }); } catch { tasks = []; }
+          let tasks = null;
+          let tasksError = null;
+          try {
+            tasks = await rpc('session.tasks', { session_id: targetSessionId });
+          } catch (err) {
+            if (err.auth) { handleError(err); return; }
+            tasksError = err;
+          }
+
           let plan = null;
-          try { plan = await rpc('session.plan', { session_id: panelSessionId() }); } catch { plan = null; }
+          let planError = null;
+          try {
+            plan = await rpc('session.plan', { session_id: targetSessionId });
+          } catch (err) {
+            if (err.auth) { handleError(err); return; }
+            planError = err;
+          }
+
           let fleet = null;
-          try { fleet = await rpc('runtime.fleet', { parent_session_id: panelSessionId() }); } catch { fleet = null; }
+          let fleetError = null;
+          try {
+            fleet = await rpc('runtime.fleet', { parent_session_id: targetSessionId });
+          } catch (err) {
+            if (err.auth) { handleError(err); return; }
+            fleetError = err;
+          }
+
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
 
           contentBox.replaceChildren();
 
-          if (plan?.steps && Array.isArray(plan.steps)) {
+          if (planError) {
+            const planBox = el('div', 'item-card');
+            planBox.append(el('strong', '', '当前计划 (读取失败)'));
+            planBox.append(el('p', 'small error', `读取计划失败：${errorText(planError)}`));
+            contentBox.append(planBox);
+          } else if (plan?.steps && Array.isArray(plan.steps)) {
             const planBox = el('div', 'item-card');
             planBox.append(el('strong', '', `当前计划 (v${plan.version || 1}) · 任务: ${plan.task_id || 'unknown'}`));
             for (const step of plan.steps) {
@@ -990,82 +1023,102 @@ function boot() {
             contentBox.append(planBox);
           }
 
-          const taskItems = array(tasks);
-          const tasksCard = el('div', 'item-card');
-          tasksCard.append(el('strong', '', `会话任务队列 (${taskItems.length})`));
-          if (!taskItems.length) {
-            tasksCard.append(el('p', 'small muted', '当前会话暂无排队任务。'));
+          if (tasksError) {
+            const tasksCard = el('div', 'item-card');
+            tasksCard.append(el('strong', '', '会话任务队列 (读取失败)'));
+            tasksCard.append(el('p', 'small error', `读取任务队列失败：${errorText(tasksError)}`));
+            contentBox.append(tasksCard);
           } else {
-            for (const t of taskItems) {
-              const tRow = el('div', 'control-row');
-              tRow.append(el('strong', '', t.id || 'task'));
-              tRow.append(el('span', 'badge', t.state || 'queued'));
-              tRow.append(el('span', 'small muted', clip(t.input?.text || '', 60)));
-              tasksCard.append(tRow);
+            const taskItems = array(tasks);
+            const tasksCard = el('div', 'item-card');
+            tasksCard.append(el('strong', '', `会话任务队列 (${taskItems.length})`));
+            if (!taskItems.length) {
+              tasksCard.append(el('p', 'small muted', '当前会话暂无排队任务。'));
+            } else {
+              for (const t of taskItems) {
+                const tRow = el('div', 'control-row');
+                tRow.append(el('strong', '', t.id || 'task'));
+                tRow.append(el('span', 'badge', t.state || 'queued'));
+                tRow.append(el('span', 'small muted', clip(t.input?.text || '', 60)));
+                tasksCard.append(tRow);
+              }
             }
+            contentBox.append(tasksCard);
           }
-          contentBox.append(tasksCard);
 
-          const members = array(fleet?.members);
-          const fleetCard = el('div', 'item-card');
-          fleetCard.append(el('strong', '', `子 Agent 舰队管理 (FleetView · ${members.length} 个实例)`));
-          if (!members.length) {
-            fleetCard.append(el('p', 'small muted', '当前会话暂无派生的子 Agent。'));
+          if (fleetError) {
+            const fleetCard = el('div', 'item-card');
+            fleetCard.append(el('strong', '', '子 Agent 舰队管理 (FleetView · 读取失败)'));
+            fleetCard.append(el('p', 'small error', `读取子 Agent 舰队失败：${errorText(fleetError)}`));
+            contentBox.append(fleetCard);
           } else {
-            for (const m of members) {
-              const mCard = el('div', 'item-card');
-              const mh = el('div', 'control-row');
-              mh.append(el('strong', '', m.label || m.child_task_id));
-              mh.append(el('span', `badge ${m.state || ''}`, m.state || 'running'));
-              mh.append(el('span', 'small muted', `深度: ${m.depth} · 模式: ${m.mode || 'foreground'}${m.detached ? ' (分离)' : ''}`));
-              mCard.append(mh);
+            const members = array(fleet?.members);
+            const fleetCard = el('div', 'item-card');
+            fleetCard.append(el('strong', '', `子 Agent 舰队管理 (FleetView · ${members.length} 个实例)`));
+            if (!members.length) {
+              fleetCard.append(el('p', 'small muted', '当前会话暂无派生的子 Agent。'));
+            } else {
+              for (const m of members) {
+                const mCard = el('div', 'item-card');
+                const mh = el('div', 'control-row');
+                mh.append(el('strong', '', m.label || m.child_task_id));
+                mh.append(el('span', `badge ${m.state || ''}`, m.state || 'running'));
+                mh.append(el('span', 'small muted', `深度: ${m.depth} · 模式: ${m.mode || 'foreground'}${m.detached ? ' (分离)' : ''}`));
+                mCard.append(mh);
 
-              if (m.error) {
-                mCard.append(el('p', 'small error', `错误: ${m.error}`));
+                if (m.error) {
+                  mCard.append(el('p', 'small error', `错误: ${m.error}`));
+                }
+
+                if (m.state === 'running' || m.state === 'Running') {
+                  const ctrlRow = el('div', 'control-row');
+                  const stopBtn = el('button', 'secondary', '停止子 Agent');
+                  stopBtn.type = 'button';
+                  stopBtn.addEventListener('click', async () => {
+                    statusP.textContent = `正在停止子任务 ${m.child_task_id}…`;
+                    try {
+                      await rpc('runtime.fleet.stop', { child_task_id: m.child_task_id });
+                      statusP.textContent = `子任务 ${m.child_task_id} 已发送停止信号。`;
+                      await loadTasksAndFleet();
+                    } catch (err) {
+                      if (err.auth) { handleError(err); return; }
+                      statusP.textContent = '停止子任务失败：' + (err.message || String(err));
+                    }
+                  });
+
+                  const steerInput = el('input');
+                  steerInput.type = 'text';
+                  steerInput.placeholder = '输入引导指令 (steer)…';
+                  const steerBtn = el('button', 'quiet', '发送引导');
+                  steerBtn.type = 'button';
+                  steerBtn.addEventListener('click', async () => {
+                    const text = steerInput.value.trim();
+                    if (!text) return;
+                    statusP.textContent = '正在向子任务发送引导指令…';
+                    try {
+                      await rpc('runtime.fleet.steer', { child_task_id: m.child_task_id, text });
+                      statusP.textContent = '已向子任务发送引导指令。';
+                      steerInput.value = '';
+                    } catch (err) {
+                      if (err.auth) { handleError(err); return; }
+                      statusP.textContent = '发送引导失败：' + (err.message || String(err));
+                    }
+                  });
+
+                  ctrlRow.append(stopBtn, steerInput, steerBtn);
+                  mCard.append(ctrlRow);
+                }
+
+                fleetCard.append(mCard);
               }
-
-              if (m.state === 'running' || m.state === 'Running') {
-                const ctrlRow = el('div', 'control-row');
-                const stopBtn = el('button', 'secondary', '停止子 Agent');
-                stopBtn.type = 'button';
-                stopBtn.addEventListener('click', async () => {
-                  statusP.textContent = `正在停止子任务 ${m.child_task_id}…`;
-                  try {
-                    await rpc('runtime.fleet.stop', { child_task_id: m.child_task_id });
-                    statusP.textContent = `子任务 ${m.child_task_id} 已发送停止信号。`;
-                    await loadTasksAndFleet();
-                  } catch (err) {
-                    statusP.textContent = '停止子任务失败：' + (err.message || String(err));
-                  }
-                });
-
-                const steerInput = el('input');
-                steerInput.type = 'text';
-                steerInput.placeholder = '输入引导指令 (steer)…';
-                const steerBtn = el('button', 'quiet', '发送引导');
-                steerBtn.type = 'button';
-                steerBtn.addEventListener('click', async () => {
-                  const text = steerInput.value.trim();
-                  if (!text) return;
-                  statusP.textContent = '正在向子任务发送引导指令…';
-                  try {
-                    await rpc('runtime.fleet.steer', { child_task_id: m.child_task_id, text });
-                    statusP.textContent = '已向子任务发送引导指令。';
-                    steerInput.value = '';
-                  } catch (err) {
-                    statusP.textContent = '发送引导失败：' + (err.message || String(err));
-                  }
-                });
-
-                ctrlRow.append(stopBtn, steerInput, steerBtn);
-                mCard.append(ctrlRow);
-              }
-
-              fleetCard.append(mCard);
             }
+            contentBox.append(fleetCard);
           }
-          contentBox.append(fleetCard);
         } catch (err) {
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
+          if (err.auth) { handleError(err); return; }
           contentBox.textContent = '读取任务与 Fleet 失败：' + (err.message || String(err));
         }
       };
@@ -1080,8 +1133,14 @@ function boot() {
       usageOutput.textContent = '正在读取会话统计…';
 
       const loadUsage = async () => {
+        const targetSessionId = panelSessionId();
+        const generation = selectionGeneration;
+        const login = loginGeneration;
         try {
-          const stats = await rpc('session.context_overview', { session_id: panelSessionId() });
+          const stats = await rpc('session.context_overview', { session_id: targetSessionId });
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
           usageOutput.replaceChildren();
 
           const tokens = stats.tokens || {};
@@ -1116,6 +1175,10 @@ function boot() {
             usageOutput.append(evoCard);
           }
         } catch (err) {
+          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
+            return;
+          }
+          if (err.auth) { handleError(err); return; }
           usageOutput.textContent = '读取用量失败：' + (err.message || String(err));
         }
       };
@@ -1128,23 +1191,41 @@ function boot() {
     container.append(body);
   }
 
+  async function syncPanelsForSession(sessionId, generation = selectionGeneration, login = loginGeneration) {
+    if (!token) return;
+    try {
+      const list = await panelsApi('panels.list_open', { session_id: sessionId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
+      openedPanelsSession = sessionId;
+      renderOpenedPanels();
+    } catch (error) {
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      handleError(error);
+    }
+  }
+
   async function refreshPanels() {
     if (!token) return;
     const login = loginGeneration;
+    const generation = selectionGeneration;
+    const sessionId = panelSessionId();
     ui['panel-sidebar-status'].textContent = '正在读取面板目录…';
     try {
       const catalog = await panelsApi('panels.catalog');
-      if (login !== loginGeneration) return;
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
       panelCatalog = catalog;
       renderPanelGuide(ui['panel-sidebar-guide'], catalog?.sidebar, 'sidebar');
       renderPanelGuide(ui['panel-bottom-guide'], catalog?.bottom, 'bottom');
       const ids = array(catalog?.sidebar).map(panel => panel.id).concat(array(catalog?.bottom).map(panel => panel.id));
       ui['panel-sidebar-status'].textContent = ids.length ? `已注册 ${[...new Set(ids)].length} 个面板` : '暂无已注册面板';
-      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
-      if (login !== loginGeneration) return;
+      const list = await panelsApi('panels.list_open', { session_id: sessionId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
+      openedPanelsSession = sessionId;
       renderOpenedPanels();
     } catch (error) {
-      if (login !== loginGeneration) return;
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
       ui['panel-sidebar-status'].textContent = errorText(error);
       if (error.auth) disconnect(error.message);
     }
@@ -1152,58 +1233,74 @@ function boot() {
 
   async function openRegisteredPanel(panelId, zone) {
     const login = loginGeneration;
+    const generation = selectionGeneration;
+    const sessionId = panelSessionId();
     report(null);
     try {
-      const params = { session_id: panelSessionId(), panel_id: panelId, zone, activate: true };
+      const params = { session_id: sessionId, panel_id: panelId, zone, activate: true };
       if (panelId === 'files') params.path = 'README.md';
       await panelsApi('panels.open', params);
-      if (login !== loginGeneration) return;
-      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
-      if (login !== loginGeneration) return;
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      const list = await panelsApi('panels.list_open', { session_id: sessionId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
+      openedPanelsSession = sessionId;
       renderOpenedPanels();
     } catch (error) {
-      if (login === loginGeneration) handleError(error);
+      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
     }
   }
 
   async function activateOpenedPanel(instanceId) {
     const login = loginGeneration;
+    const generation = selectionGeneration;
+    const sessionId = panelSessionId();
     try {
-      await panelsApi('panels.activate', { session_id: panelSessionId(), instance_id: instanceId });
-      if (login !== loginGeneration) return;
-      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
-      if (login !== loginGeneration) return;
+      await panelsApi('panels.activate', { session_id: sessionId, instance_id: instanceId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      const list = await panelsApi('panels.list_open', { session_id: sessionId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
+      openedPanelsSession = sessionId;
       renderOpenedPanels();
     } catch (error) {
-      if (login === loginGeneration) handleError(error);
+      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
     }
   }
 
   async function closeOpenedPanel(instanceId) {
     const login = loginGeneration;
+    const generation = selectionGeneration;
+    const sessionId = panelSessionId();
     try {
-      await panelsApi('panels.close', { session_id: panelSessionId(), instance_id: instanceId });
-      if (login !== loginGeneration) return;
-      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
-      if (login !== loginGeneration) return;
+      await panelsApi('panels.close', { session_id: sessionId, instance_id: instanceId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      const list = await panelsApi('panels.list_open', { session_id: sessionId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
+      openedPanelsSession = sessionId;
       renderOpenedPanels();
     } catch (error) {
-      if (login === loginGeneration) handleError(error);
+      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
     }
   }
 
   async function interactOpenedPanel(instanceId, kind, path) {
     const login = loginGeneration;
+    const generation = selectionGeneration;
+    const sessionId = panelSessionId();
     try {
-      const params = { session_id: panelSessionId(), instance_id: instanceId, kind };
+      const params = { session_id: sessionId, instance_id: instanceId, kind };
       if (path) params.path = path;
       await panelsApi('panels.interact', params);
-      if (login !== loginGeneration) return;
-      openedPanels = await panelsApi('panels.list_open', { session_id: panelSessionId() });
-      if (login !== loginGeneration) return;
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      const list = await panelsApi('panels.list_open', { session_id: sessionId });
+      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
+      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
+      openedPanelsSession = sessionId;
       renderOpenedPanels();
     } catch (error) {
-      if (login === loginGeneration) handleError(error);
+      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
     }
   }
 
@@ -1239,6 +1336,7 @@ function boot() {
     ui['fork-dialog'].close();
     panelCatalog = null;
     openedPanels = [];
+    openedPanelsSession = null;
     ui['panel-sidebar-guide'].replaceChildren();
     ui['panel-sidebar-open'].replaceChildren();
     ui['panel-bottom-guide'].replaceChildren();
@@ -1320,6 +1418,10 @@ function boot() {
     const login = loginGeneration;
     clearTimeout(timer);
     selected = id;
+    openedPanels = [];
+    openedPanelsSession = id;
+    renderOpenedPanels();
+    syncPanelsForSession(id, generation, login);
     if (!views.has(id)) rememberView(createView(id));
     ui['poll-status'].textContent = '正在读取会话…';
     ui['prompt'].value = '';
@@ -1824,7 +1926,13 @@ function boot() {
     const button = ui[btnId];
     if (!button) return;
     button.addEventListener('click', async () => {
-      const existing = openedPanels.find(p => p.panel_id === panelId);
+      const currentSession = panelSessionId();
+      if (openedPanelsSession !== currentSession) {
+        openedPanels = [];
+        openedPanelsSession = currentSession;
+        renderOpenedPanels();
+      }
+      const existing = openedPanels.find(p => p.panel_id === panelId && (!p.session_id || p.session_id === currentSession));
       if (existing) {
         await activateOpenedPanel(existing.instance_id);
       } else {

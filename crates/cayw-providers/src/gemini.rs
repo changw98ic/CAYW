@@ -1,5 +1,4 @@
 use crate::common::{self, Format, Result};
-use base64::Engine;
 use cayw_ai::{
     AssistantEvent, AssistantMessage, CancellationToken, Content, Message, ModelRequest,
     StopReason, ToolCall, ToolDefinition, current_system,
@@ -12,20 +11,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static RESPONSE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
-    common::validate_request(request, Format::Gemini)?;
+    let mut prepared = common::prepare_request(request, Format::Gemini)?;
     let system = current_system(&request.messages);
     let mut contents = Vec::new();
     let mut pending = Vec::new();
     let mut outputs = BTreeMap::new();
-    for message in &request.messages {
+    for (idx, message) in request.messages.iter().enumerate() {
         match message {
             Message::System(_) | Message::Custom { .. } => {}
-            Message::User { content, .. } => common::append_turn(
-                &mut contents,
-                "user",
-                "parts",
-                common::input_parts(content, request.model.supports_images, Format::Gemini)?,
-            ),
+            Message::User { .. } => {
+                let parts = prepared
+                    .user_parts
+                    .remove(&idx)
+                    .expect("validated user parts");
+                common::append_turn(&mut contents, "user", "parts", parts);
+            }
             Message::Assistant(assistant) => {
                 let parts = history_parts(assistant)?;
                 pending = assistant
@@ -45,7 +45,6 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 common::append_turn(&mut contents, "model", "parts", parts);
             }
             Message::ToolResult(result) => {
-                common::tool_output(result)?;
                 let text = cayw_ai::content_text(&result.content);
                 let output = result
                     .structured_content
@@ -204,9 +203,9 @@ fn validate_part(part: &Value) -> Result<()> {
             .ok_or("Invalid Gemini thought signature")?;
         // Signatures are opaque base64 bytes. Validate the representation only;
         // authenticating the encrypted contents remains the provider's job.
-        base64::engine::general_purpose::STANDARD
-            .decode(signature)
-            .map_err(|_| "Invalid Gemini thought signature".to_owned())?;
+        if !common::validate_standard_base64(signature) {
+            return Err("Invalid Gemini thought signature".into());
+        }
     }
     match (part.get("text"), part.get("functionCall")) {
         (Some(text), None) if text.is_string() => Ok(()),
@@ -350,10 +349,6 @@ impl State {
                             if let Some(event) = self.end_text() {
                                 yield event;
                                 common::checkpoint(cancel).await?;
-                            }
-                            common::object(function)?;
-                            if function.as_object().expect("checked object").keys().any(|key| !matches!(key.as_str(), "id" | "name" | "args")) {
-                                Err("Partial or nonstandard Gemini function arguments are unsupported".to_owned())?;
                             }
                             let name = common::string(function, "name")?;
                             let id = if let Some(id) = function.get("id") {

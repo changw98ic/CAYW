@@ -177,10 +177,6 @@ impl PanelRegistry {
         self.list_panels(Some(zone))
             .into_iter()
             .filter(|panel| !panel.hidden)
-            .filter(|panel| match zone {
-                PanelZone::Sidebar => panel.placement != PanelPlacement::BottomOnly,
-                PanelZone::Bottom => true,
-            })
             .collect()
     }
 
@@ -237,8 +233,8 @@ impl PanelRegistry {
     pub(crate) fn require_panel(
         &self,
         id: &str,
-        zone: PanelZone,
-    ) -> Result<PanelDescriptor, PanelError> {
+        zone: Option<PanelZone>,
+    ) -> Result<(PanelDescriptor, PanelZone), PanelError> {
         let state = self.state.lock().expect("panel registry poisoned");
         let stored = state
             .entries
@@ -246,10 +242,16 @@ impl PanelRegistry {
             .ok_or_else(|| PanelError::NotFound(id.into()))?;
         match &stored.entry {
             Entry::Panel(panel) => {
-                if !panel.placement.allows(zone) {
-                    return Err(PanelError::ZoneNotAllowed(id.into()));
-                }
-                Ok(panel.clone())
+                let resolved_zone = match zone {
+                    Some(requested) => {
+                        if !panel.placement.allows(requested) {
+                            return Err(PanelError::ZoneNotAllowed(id.into()));
+                        }
+                        requested
+                    }
+                    None => panel.placement.default_zone(),
+                };
+                Ok((panel.clone(), resolved_zone))
             }
             Entry::FileViewer(_) => Err(PanelError::Invalid(format!(
                 "{id} is a file viewer, not a panel"

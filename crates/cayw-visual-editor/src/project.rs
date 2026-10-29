@@ -384,10 +384,12 @@ impl Project {
     /// Current injected draft with fresh source mapping.
     pub async fn snapshot(&self) -> Result<Snapshot, ProjectError> {
         let state = self.state.lock().await;
+        let document = parse_document(&state.draft)?;
         build_snapshot(
             &self.page,
             &state.original_sha256,
             &state.draft,
+            &document,
             state.selection,
         )
     }
@@ -405,7 +407,7 @@ impl Project {
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| ProjectError::new("invalid_operation", "operation kind is required"))?;
-        let selection = match kind {
+        let (document, selection) = match kind {
             "undo" => {
                 let previous = state.undo.pop().ok_or_else(|| {
                     ProjectError::new("history_empty", "there is no operation to undo")
@@ -413,7 +415,8 @@ impl Project {
                 let current = state.draft.clone();
                 push_history(&mut state.redo, &current);
                 state.draft = previous;
-                None
+                let document = parse_document(&state.draft)?;
+                (document, None)
             }
             "redo" => {
                 let next = state.redo.pop().ok_or_else(|| {
@@ -422,7 +425,8 @@ impl Project {
                 let current = state.draft.clone();
                 push_history(&mut state.undo, &current);
                 state.draft = next;
-                None
+                let document = parse_document(&state.draft)?;
+                (document, None)
             }
             _ => {
                 let document = parse_document(&state.draft)?;
@@ -436,7 +440,7 @@ impl Project {
                     push_history(&mut state.undo, &previous);
                     state.redo.clear();
                 }
-                selection
+                (next_document, selection)
             }
         };
         state.selection = selection;
@@ -444,6 +448,7 @@ impl Project {
             &self.page,
             &state.original_sha256,
             &state.draft,
+            &document,
             state.selection,
         )
     }
@@ -533,10 +538,12 @@ impl Project {
                 return Err(ProjectError::new("save_failed", error.message));
             }
         }
+        let document = parse_document(&state.draft)?;
         match build_snapshot(
             &self.page,
             &state.original_sha256,
             &state.draft,
+            &document,
             state.selection,
         ) {
             Ok(snapshot) => Ok(snapshot),
@@ -576,7 +583,8 @@ impl Project {
         };
         // Build the full response before changing any project state: a source
         // that cannot be mapped must leave the old draft and selection intact.
-        let snapshot = build_snapshot(&self.page, &sha256, &source, None)?;
+        let document = parse_document(&source)?;
+        let snapshot = build_snapshot(&self.page, &sha256, &source, &document, None)?;
         state.conflicted = false;
         state.original_sha256 = sha256;
         state.saved = source.clone();
@@ -746,9 +754,9 @@ fn build_snapshot(
     page: &str,
     sha256: &str,
     draft: &str,
+    document: &Document,
     selection: Option<usize>,
 ) -> Result<Snapshot, ProjectError> {
-    let document = parse_document(draft)?;
     let selected_id = selection.and_then(|offset| {
         document
             .nodes
@@ -756,7 +764,7 @@ fn build_snapshot(
             .find(|node| node.editable && node.start_tag_span.start == offset)
             .map(|node| node.id.clone())
     });
-    let html = instrument(draft, &document)?;
+    let html = instrument(draft, document)?;
     let nodes = document
         .nodes
         .iter()

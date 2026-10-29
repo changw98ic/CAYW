@@ -572,11 +572,11 @@ impl cayw_host::ExternalHost for Service<'_> {
             }
             PUT => {
                 let input: PutInput = serde_json::from_value(arguments).map_err(known)?;
-                input.expected()?;
+                let expected = input.expected()?;
                 if input.text.len() as u64 > store.limits().max_content_bytes.min(MAX_TEXT_BYTES) {
                     return Err(known("content text exceeds its UTF-8 byte budget"));
                 }
-                (input.name.clone(), input.scope, Some(input))
+                (input.name, input.scope, Some((expected, input.text)))
             }
             _ => return Err(known("not a content capability")),
         };
@@ -589,9 +589,9 @@ impl cayw_host::ExternalHost for Service<'_> {
             // No await occurs after a lock is acquired until the synchronous
             // transaction returns. Cancellation cannot detach a live commit.
             let result = match &put {
-                Some(input) => store
-                    .try_put(&key, input.expected()?, input.text.as_bytes())
-                    .map(|record| Some((record, input.text.as_bytes().to_vec()))),
+                Some((expected, text)) => store
+                    .try_put(&key, *expected, text.as_bytes())
+                    .map(|record| Some((record, text.as_bytes().to_vec()))),
                 None => store.try_read(&key),
             };
             match result {

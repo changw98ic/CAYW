@@ -380,13 +380,15 @@ pub(crate) struct Backend {
 }
 impl Backend {
     pub(crate) fn new(context: Arc<RunContext>) -> Result<Self, RuntimeError> {
-        let base = Arc::new(
-            context
-                .inner
-                .host_root
-                .task_host(Arc::new(CatalogGate), Arc::new(CatalogAudit))
-                .map_err(|error| RuntimeError::Workspace(error.to_string()))?,
-        );
+        let mut host = context
+            .inner
+            .host_root
+            .task_host(Arc::new(CatalogGate), Arc::new(CatalogAudit))
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        if let Some(content) = &context.inner.content {
+            host = host.with_session_content(content.clone(), &context.lease.session_id);
+        }
+        let base = Arc::new(host);
         let requests = crate::requests::start(&context, &base)?;
         let mut catalog = crate::requests::operation_definitions(&context.inner, &base);
         catalog.extend(crate::requests::definitions(&context.inner));

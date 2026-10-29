@@ -166,38 +166,6 @@ fn should_externalize(threshold: usize, text_len: usize, max_content: usize) -> 
     threshold > 0 && text_len > threshold && text_len <= max_content
 }
 
-#[cfg(test)]
-fn externalize_value(
-    store: &ContentStore,
-    session: &str,
-    task_id: &str,
-    threshold: usize,
-    value: Value,
-) -> Result<Value, CapabilityError> {
-    let text = match serde_json::to_string(&value) {
-        Ok(text) => text,
-        Err(_) => return Ok(value),
-    };
-    let max = store.limits().max_content_bytes.min(1024 * 1024) as usize;
-    if !should_externalize(threshold, text.len(), max) {
-        return Ok(value);
-    }
-    let mut stored = store_result(
-        store,
-        session,
-        task_id,
-        json!({
-            "text": text,
-            "encoding": "json",
-            "scope": "session",
-        }),
-    )?;
-    if let Some(obj) = stored.as_object_mut() {
-        obj.insert("externalized".into(), Value::Bool(true));
-    }
-    Ok(stored)
-}
-
 const STORAGE_PREPARED: &str = "runtime_result_storage_prepared";
 const STORAGE_TERMINAL: &str = "runtime_result_storage_terminal";
 const STORAGE_RECONCILED: &str = "runtime_result_storage_reconciled";
@@ -879,7 +847,7 @@ fn known(error: impl std::fmt::Display) -> CapabilityError {
 }
 
 fn is_busy(error: &CapabilityError) -> bool {
-    error.message.contains("busy")
+    !error.outcome_unknown && error.message.contains("busy")
 }
 
 fn content_error(error: cayw_content::Error) -> CapabilityError {
@@ -1032,6 +1000,9 @@ pub fn page_bytes(bytes: &[u8], offset: u64, limit: usize) -> (u64, u64, bool, S
     (start as u64, next, has_more, text)
 }
 
+/// Search stored UTF-8 bytes for literal `query`, returning bounded line snippets.
+/// Each snippet's `offset` is the exact UTF-8 byte offset in `bytes` where `text` begins,
+/// suitable for direct indexing via `result.get`.
 pub fn search_bytes(bytes: &[u8], query: &str, limit: usize) -> Vec<ResultSnippet> {
     if query.is_empty() || limit == 0 {
         return vec![];
@@ -1040,15 +1011,45 @@ pub fn search_bytes(bytes: &[u8], query: &str, limit: usize) -> Vec<ResultSnippe
     let mut matches = Vec::new();
     let mut byte_offset = 0usize;
     for (line_no, line) in text.split_inclusive('\n').enumerate() {
-        if line.contains(query) {
-            let snippet = if line.len() > MAX_SNIPPET_BYTES {
-                let end = utf8_ceil_end(line.as_bytes(), 0, MAX_SNIPPET_BYTES);
-                format!("{}…", &line[..end].trim_end_matches('\n'))
+        if let Some(match_idx) = line.find(query) {
+            let line_bytes = line.as_bytes();
+            let query_len = query.len();
+            let (start, end) = if line.len() <= MAX_SNIPPET_BYTES {
+                let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                (0, trimmed.len())
             } else {
-                line.trim_end_matches('\n').to_string()
+                let match_end = match_idx + query_len;
+                let (raw_start, raw_end) = if query_len >= MAX_SNIPPET_BYTES {
+                    (match_idx, (match_idx + MAX_SNIPPET_BYTES).min(line.len()))
+                } else {
+                    let budget = MAX_SNIPPET_BYTES - query_len;
+                    let leading = budget / 2;
+                    let mut s = match_idx.saturating_sub(leading);
+                    let mut e = (s + MAX_SNIPPET_BYTES).min(line.len());
+                    if e < match_end {
+                        e = match_end;
+                        s = e.saturating_sub(MAX_SNIPPET_BYTES);
+                    } else if e == line.len() {
+                        s = line.len().saturating_sub(MAX_SNIPPET_BYTES);
+                    }
+                    (s, e)
+                };
+                let s = utf8_floor(line_bytes, raw_start);
+                let mut e = utf8_ceil_end(line_bytes, s, raw_end);
+                if query_len <= MAX_SNIPPET_BYTES && e < match_end {
+                    e = match_end;
+                    while e < line_bytes.len() && line_bytes[e] & 0b1100_0000 == 0b1000_0000 {
+                        e += 1;
+                    }
+                }
+                (s, e)
             };
+            let snippet = line[start..end]
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string();
             matches.push(ResultSnippet {
-                offset: byte_offset as u64,
+                offset: (byte_offset + start) as u64,
                 line: (line_no as u64) + 1,
                 text: snippet,
             });
@@ -1187,6 +1188,106 @@ struct Service<'a> {
     scope: &'a Arc<CallScope>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreStage {
+    Initial,
+    BodyCommitted,
+}
+
+pub(crate) struct StoreOperation {
+    body: Id,
+    meta_name: Id,
+    bytes: Vec<u8>,
+    meta: Meta,
+    meta_bytes: Vec<u8>,
+    pub(crate) stage: StoreStage,
+    #[cfg(test)]
+    after_body_commit: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl StoreOperation {
+    pub(crate) fn prepare(
+        store: &ContentStore,
+        session: &str,
+        task_id: &str,
+        arguments: Value,
+    ) -> Result<Self, CapabilityError> {
+        let input: StoreInput = serde_json::from_value(arguments).map_err(known)?;
+        let encoding = parse_encoding(input.encoding.as_deref())?;
+        validate_payload(&input.text, &encoding)?;
+        let max = store.limits().max_content_bytes.min(1024 * 1024);
+        if input.text.len() as u64 > max {
+            return Err(known("result text exceeds its UTF-8 byte budget"));
+        }
+        let (task, scope) = owners(input.scope, session, task_id);
+        let handle = match input.handle {
+            Some(handle) => handle,
+            None => new_handle()?,
+        };
+        let body = body_key(store.device_id().as_str(), session, task, &handle).map_err(known)?;
+        let meta_name =
+            meta_key(store.device_id().as_str(), session, task, &handle).map_err(known)?;
+        let bytes = input.text.into_bytes();
+        let content_hash = ContentHash::of(&bytes).to_string();
+        let meta = Meta {
+            v: 1,
+            handle: handle.to_string(),
+            content_hash,
+            bytes: bytes.len() as u64,
+            encoding,
+            released: false,
+            scope,
+            session_id: session.into(),
+            task_id: task.map(str::to_owned),
+        };
+        let meta_bytes = serde_json::to_vec(&meta).map_err(known)?;
+        Ok(Self {
+            body,
+            meta_name,
+            bytes,
+            meta,
+            meta_bytes,
+            stage: StoreStage::Initial,
+            #[cfg(test)]
+            after_body_commit: None,
+        })
+    }
+
+    pub(crate) fn step(&mut self, store: &ContentStore) -> Result<Value, CapabilityError> {
+        if self.stage == StoreStage::Initial {
+            if read_meta(store, &self.meta_name)?.is_some() {
+                return Err(known("result handle already exists"));
+            }
+            match store.try_put(&self.body, ExpectedRevision::Absent, &self.bytes) {
+                Err(cayw_content::Error::Busy) => return Err(known("result body store is busy")),
+                Err(error) => return Err(content_error(error)),
+                Ok(_) => {
+                    self.stage = StoreStage::BodyCommitted;
+                }
+            }
+        }
+
+        #[cfg(test)]
+        if let Some(hook) = self.after_body_commit.take() {
+            hook();
+        }
+
+        match store.try_put(&self.meta_name, ExpectedRevision::Absent, &self.meta_bytes) {
+            Err(cayw_content::Error::Busy) => return Err(known("result metadata store is busy")),
+            Err(error) => return Err(content_error(error)),
+            Ok(_) => {}
+        }
+
+        let view = view_from_meta(&self.meta);
+        serde_json::to_value(view).map_err(known).map(|mut value| {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("stored".into(), Value::Bool(true));
+            }
+            value
+        })
+    }
+}
+
 #[async_trait]
 impl cayw_host::ExternalHost for Service<'_> {
     async fn call(
@@ -1205,13 +1306,25 @@ impl cayw_host::ExternalHost for Service<'_> {
             .ok_or_else(|| known("local content storage is not configured"))?;
         let session = self.scope.context.lease.session_id.as_str();
         let task_id = self.scope.context.task.id.as_str();
+
+        let mut store_op = if capability == STORE {
+            Some(StoreOperation::prepare(
+                store,
+                session,
+                task_id,
+                arguments.clone(),
+            )?)
+        } else {
+            None
+        };
+
         loop {
             self.scope.check_authority(&cancel)?;
             if let Err(error) = check_private(store) {
                 return Err(known(error));
             }
             let outcome = match capability {
-                STORE => store_result(store, session, task_id, arguments.clone()),
+                STORE => store_op.as_mut().expect("store_op initialized").step(store),
                 GET => get_result(store, session, task_id, arguments.clone()),
                 BATCH_GET => batch_get(store, session, task_id, arguments.clone()),
                 SEARCH => search_result(store, session, task_id, arguments.clone()),
@@ -1237,63 +1350,6 @@ fn check_private(store: &ContentStore) -> Result<(), String> {
         return Err("content directory must not be writable by group or other users".into());
     }
     Ok(())
-}
-
-fn store_result(
-    store: &ContentStore,
-    session: &str,
-    task_id: &str,
-    arguments: Value,
-) -> Result<Value, CapabilityError> {
-    let input: StoreInput = serde_json::from_value(arguments).map_err(known)?;
-    let encoding = parse_encoding(input.encoding.as_deref())?;
-    validate_payload(&input.text, &encoding)?;
-    let max = store.limits().max_content_bytes.min(1024 * 1024);
-    if input.text.len() as u64 > max {
-        return Err(known("result text exceeds its UTF-8 byte budget"));
-    }
-    let (task, scope) = owners(input.scope, session, task_id);
-    let handle = match input.handle {
-        Some(handle) => handle,
-        None => new_handle()?,
-    };
-    let body = body_key(store.device_id().as_str(), session, task, &handle).map_err(known)?;
-    let meta_name = meta_key(store.device_id().as_str(), session, task, &handle).map_err(known)?;
-    if read_meta(store, &meta_name)?.is_some() {
-        return Err(known("result handle already exists"));
-    }
-    let bytes = input.text.as_bytes();
-    let content_hash = ContentHash::of(bytes).to_string();
-    let record = match store.try_put(&body, ExpectedRevision::Absent, bytes) {
-        Err(cayw_content::Error::Busy) => return Err(known("result body store is busy")),
-        Err(error) => return Err(content_error(error)),
-        Ok(record) => record,
-    };
-    let meta = Meta {
-        v: 1,
-        handle: handle.to_string(),
-        content_hash: content_hash.clone(),
-        bytes: bytes.len() as u64,
-        encoding,
-        released: false,
-        scope,
-        session_id: session.into(),
-        task_id: task.map(str::to_owned),
-    };
-    let meta_bytes = serde_json::to_vec(&meta).map_err(known)?;
-    match store.try_put(&meta_name, ExpectedRevision::Absent, &meta_bytes) {
-        Err(cayw_content::Error::Busy) => return Err(known("result metadata store is busy")),
-        Err(error) => return Err(content_error(error)),
-        Ok(_) => {}
-    }
-    let _ = record;
-    let view = view_from_meta(&meta);
-    serde_json::to_value(view).map_err(known).map(|mut value| {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("stored".into(), Value::Bool(true));
-        }
-        value
-    })
 }
 
 fn load_live(
@@ -1799,13 +1855,14 @@ mod unit {
     fn content_store_backed_handle_pages_searches_and_releases() {
         let (_root, store) = open_store();
         let body = "line-one\nneedle alpha\nline-three\nneedle beta\ntrail";
-        let stored = store_result(
+        let mut op = StoreOperation::prepare(
             &store,
             "sess-a",
             "task-a",
             json!({"text": body, "encoding": "utf8", "handle": "demo1"}),
         )
         .unwrap();
+        let stored = op.step(&store).unwrap();
         assert_eq!(stored["handle"], "demo1");
         assert_eq!(stored["bytes"], body.len() as u64);
 
@@ -1870,20 +1927,22 @@ mod unit {
     #[cfg(target_os = "macos")]
     fn task_scope_does_not_collide_with_session_scope() {
         let (_root, store) = open_store();
-        store_result(
+        let mut op_task = StoreOperation::prepare(
             &store,
             "sess-a",
             "task-a",
             json!({"text": "task-body", "scope": "task", "handle": "same"}),
         )
         .unwrap();
-        store_result(
+        op_task.step(&store).unwrap();
+        let mut op_session = StoreOperation::prepare(
             &store,
             "sess-a",
             "task-a",
             json!({"text": "session-body", "scope": "session", "handle": "same"}),
         )
         .unwrap();
+        op_session.step(&store).unwrap();
         let task_page = get_result(
             &store,
             "sess-a",
@@ -1903,47 +1962,142 @@ mod unit {
     }
 
     #[test]
+    fn search_returns_bounded_snippet_with_match_offset_on_long_line() {
+        let padding = "a".repeat(700);
+        let body = format!("{padding}target_marker_needle suffix\n");
+        let hits = search_bytes(body.as_bytes(), "target_marker_needle", 4);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        let hit = &hits[0];
+        assert!(hit.text.len() <= MAX_SNIPPET_BYTES);
+        let match_in_snippet = hit.text.find("target_marker_needle").unwrap();
+        assert_eq!(hit.offset as usize + match_in_snippet, padding.len());
+        let (offset, next, _, page) = page_bytes(body.as_bytes(), hit.offset, hit.text.len());
+        assert_eq!(offset, hit.offset);
+        assert_eq!(next, hit.offset + hit.text.len() as u64);
+        assert_eq!(page, hit.text);
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
-    fn over_threshold_host_result_is_stored_and_retrievable_by_handle() {
-        let (_root, store) = open_store();
-        let threshold = 64usize;
-        let body = json!({"payload": "x".repeat(200), "n": 42});
-        let stub = externalize_value(&store, "sess-a", "task-a", threshold, body.clone()).unwrap();
-        assert_eq!(stub["externalized"], true);
-        assert_eq!(stub["stored"], true);
-        assert_eq!(stub["encoding"], "json");
-        assert!(stub["bytes"].as_u64().unwrap() > threshold as u64);
-        let handle = stub["handle"].as_str().unwrap();
+    fn store_operation_retries_only_metadata_when_busy_after_body_committed() {
+        let (root, store) = open_store();
+        let mut op = StoreOperation::prepare(
+            &store,
+            "sess-retry",
+            "task-retry",
+            json!({"text": "committed-body-content"}),
+        )
+        .unwrap();
+
+        assert_eq!(op.stage, StoreStage::Initial);
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join(".lock"))
+            .unwrap();
+        let held_lock = file.try_clone().unwrap();
+        op.after_body_commit = Some(Box::new(move || file.lock().unwrap()));
+
+        let err = op.step(&store).unwrap_err();
+        assert!(is_busy(&err));
+        assert_eq!(op.stage, StoreStage::BodyCommitted);
+        let err = op.step(&store).unwrap_err();
+        assert!(is_busy(&err));
+        assert_eq!(op.stage, StoreStage::BodyCommitted);
+        held_lock.unlock().unwrap();
+        let body_before_retry = store.try_read(&op.body).unwrap().unwrap();
+        assert_eq!(body_before_retry.0.version, 1);
+        assert_eq!(body_before_retry.1, b"committed-body-content");
+        assert!(read_meta(&store, &op.meta_name).unwrap().is_none());
+
+        let res = op.step(&store).unwrap();
+        assert_eq!(
+            store.try_read(&op.body).unwrap().unwrap(),
+            body_before_retry
+        );
+        assert_eq!(res["stored"], true);
+        assert_eq!(res["handle"], op.meta.handle.as_str());
 
         let page = get_result(
             &store,
-            "sess-a",
-            "task-a",
-            json!({"handle": handle, "offset": 0, "limit": 4096}),
+            "sess-retry",
+            "task-retry",
+            json!({"handle": op.meta.handle.as_str(), "offset": 0, "limit": 64}),
         )
         .unwrap();
-        assert_eq!(page["has_more"], false);
-        let recovered: Value = serde_json::from_str(page["text"].as_str().unwrap()).unwrap();
-        assert_eq!(recovered, body);
+        assert_eq!(page["text"], "committed-body-content");
     }
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn under_threshold_host_result_passes_through_unchanged() {
-        let (_root, store) = open_store();
-        let body = json!({"ok": true, "n": 1});
-        let out = externalize_value(&store, "sess-a", "task-a", 1024, body.clone()).unwrap();
-        assert_eq!(out, body);
-        assert!(out.get("externalized").is_none());
-        assert!(out.get("handle").is_none());
+    fn store_operation_retries_only_metadata_with_explicit_handle_without_revision_conflict() {
+        let (root, store) = open_store();
+        let explicit_handle = "custom-handle-abc";
+        let mut op = StoreOperation::prepare(
+            &store,
+            "sess-explicit",
+            "task-explicit",
+            json!({
+                "handle": explicit_handle,
+                "text": "explicit-body-content",
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(op.stage, StoreStage::Initial);
+        assert_eq!(op.meta.handle.as_str(), explicit_handle);
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join(".lock"))
+            .unwrap();
+        let held_lock = file.try_clone().unwrap();
+        op.after_body_commit = Some(Box::new(move || file.lock().unwrap()));
+
+        // Body commits before this operation's hook acquires the real store lock.
+        let err = op.step(&store).unwrap_err();
+        assert!(is_busy(&err));
+        assert_eq!(op.stage, StoreStage::BodyCommitted);
+        let err = op.step(&store).unwrap_err();
+        assert!(is_busy(&err));
+        assert_eq!(op.stage, StoreStage::BodyCommitted);
+        held_lock.unlock().unwrap();
+        let body_before_retry = store.try_read(&op.body).unwrap().unwrap();
+        assert_eq!(body_before_retry.0.version, 1);
+        assert_eq!(body_before_retry.1, b"explicit-body-content");
+        assert!(read_meta(&store, &op.meta_name).unwrap().is_none());
+
+        // The retry writes only metadata, retaining the body's original revision.
+        let res = op.step(&store).unwrap();
+        assert_eq!(
+            store.try_read(&op.body).unwrap().unwrap(),
+            body_before_retry
+        );
+        assert_eq!(res["stored"], true);
+        assert_eq!(res["handle"], explicit_handle);
+
+        let page = get_result(
+            &store,
+            "sess-explicit",
+            "task-explicit",
+            json!({"handle": explicit_handle, "offset": 0, "limit": 64}),
+        )
+        .unwrap();
+        assert_eq!(page["text"], "explicit-body-content");
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
-    fn zero_threshold_disables_auto_externalize() {
-        let (_root, store) = open_store();
-        let body = json!({"payload": "y".repeat(500)});
-        let out = externalize_value(&store, "sess-a", "task-a", 0, body.clone()).unwrap();
-        assert_eq!(out, body);
+    fn is_busy_does_not_retry_when_outcome_unknown() {
+        let err_busy_known = CapabilityError::new("result metadata store is busy");
+        assert!(is_busy(&err_busy_known));
+
+        let err_busy_unknown = CapabilityError::unknown("result metadata store is busy");
+        assert!(!is_busy(&err_busy_unknown));
+
+        let err_other = CapabilityError::new("unexpected disk failure");
+        assert!(!is_busy(&err_other));
     }
 }

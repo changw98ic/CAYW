@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_bridge::{
     AccessRequest, DispatchDropState, DispatchJournal, DispatchOutcome, DispatchRecord,
-    InvocationContext, Limits, Provenance, Registry, RegistryPolicy, SourceIdentity, Visibility,
+    InvocationContext, Limits, Operation, Provenance, Registry, RegistryPolicy, RequestKey,
+    SourceIdentity, SourceOperation, SourceRequest, Visibility,
 };
 use cayw_sources::{MCP_PROTOCOL, StdioConfig, StdioSource};
 use serde_json::{Value, json};
@@ -219,4 +220,139 @@ async fn invalid_paths_bounds_and_pre_cancel_never_spawn_a_child() {
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn oversized_outgoing_request_frame_rejected_without_unknown_outcome_or_killing_connection() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = StdioConfig::new(
+        Path::new(env!("CARGO_BIN_EXE_cayw-sources-local-fixture")),
+        root.path(),
+    );
+    config.max_frame_bytes = 2048;
+    let prepared = StdioSource::connect(config, CancellationToken::new())
+        .await
+        .unwrap();
+    let control = prepared.control();
+    let (manifest, handle) = prepared.into_parts();
+    let registry = Registry::new(Limits::default(), Arc::new(Policy)).unwrap();
+    registry
+        .register(
+            SourceIdentity {
+                id: "local".into(),
+                version: "2".into(),
+                origin: "host:local-stdio".into(),
+            },
+            manifest,
+            handle,
+        )
+        .unwrap();
+
+    let big_string = "a".repeat(4096);
+    let err = call(
+        &registry,
+        1,
+        "mcp.prompts.get",
+        json!({"server":"local","name":"add-help","arguments":{"topic":big_string}}),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.message, "stdio outgoing frame bound exceeded");
+    assert!(
+        !err.outcome_unknown,
+        "pre-flight frame bound failure must not be unknown"
+    );
+    assert_eq!(control.snapshot().tool_calls, 0);
+
+    let res = call(
+        &registry,
+        2,
+        "mcp.call",
+        json!({"server":"local","tool":"add","arguments":{"a":10,"b":20}}),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(res["value"]["sum"], 30);
+    assert_eq!(control.snapshot().tool_calls, 1);
+
+    registry.disconnect("local").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn oversized_outgoing_tool_request_frame_rejected_without_unknown_outcome_or_killing_connection()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = StdioConfig::new(
+        Path::new(env!("CARGO_BIN_EXE_cayw-sources-local-fixture")),
+        root.path(),
+    );
+    config.max_frame_bytes = 2048;
+    let prepared = StdioSource::connect(config, CancellationToken::new())
+        .await
+        .unwrap();
+    let control = prepared.control();
+    let (_manifest, handle) = prepared.into_parts();
+
+    let big_string = "a".repeat(4096);
+    let key = RequestKey {
+        id: 1,
+        source: Provenance {
+            registry_incarnation: "test-direct".into(),
+            source: SourceIdentity {
+                id: "local".into(),
+                version: "2".into(),
+                origin: "host:local-stdio".into(),
+            },
+            generation: 1,
+            manifest_sha256: "0".repeat(64),
+        },
+        operation: Operation::Invoke,
+        target: "add".into(),
+    };
+    let oversized_req = SourceRequest {
+        key: key.clone(),
+        operation: SourceOperation::InvokeTool {
+            name: "add".into(),
+            arguments: json!({"a": 10, "b": 20, "extra": big_string}),
+        },
+        max_result_bytes: 4096,
+    };
+    let err = handle
+        .request(oversized_req, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.message, "stdio outgoing frame bound exceeded");
+    assert!(
+        !err.outcome_unknown,
+        "pre-flight frame bound failure for tool invocation (effect: true) must not be unknown"
+    );
+    assert_eq!(control.snapshot().tool_calls, 0);
+
+    let normal_req = SourceRequest {
+        key: RequestKey { id: 2, ..key },
+        operation: SourceOperation::InvokeTool {
+            name: "add".into(),
+            arguments: json!({"a": 10, "b": 20}),
+        },
+        max_result_bytes: 4096,
+    };
+    let reply = handle
+        .request(normal_req, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(reply.value["sum"], 30);
+    assert_eq!(control.snapshot().tool_calls, 1);
+
+    handle.disconnect();
+    tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
+        .await
+        .unwrap();
+    assert!(control.snapshot().reaped);
 }

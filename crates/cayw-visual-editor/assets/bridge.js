@@ -366,7 +366,9 @@
         display: style.display || '',
         gap: style.gap || '',
         flexDirection: style.flexDirection || '',
-        gridTemplateColumns: String(style.gridTemplateColumns || '').slice(0, 400)
+        gridTemplateColumns: String(style.gridTemplateColumns || '').slice(0, 400),
+        alignItems: style.alignItems || '',
+        justifyContent: style.justifyContent || ''
       },
       text: visibleText(elementNode),
       attributes: {

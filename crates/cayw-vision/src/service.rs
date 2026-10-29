@@ -83,7 +83,7 @@ impl Clone for VisionService {
 }
 
 impl VisionService {
-    /// Build from env-selected backends (tesseract / HTTP when present; fixture otherwise).
+    /// Build from env-selected backends (tesseract / HTTP when configured; unavailable backends otherwise).
     pub fn from_env(limits: Limits) -> Result<Self, CapabilityError> {
         limits.validate()?;
         Ok(Self {
@@ -124,7 +124,6 @@ impl VisionService {
         args: &Value,
         cancel: &CancellationToken,
     ) -> Result<Value, CapabilityError> {
-        self.limits.validate()?;
         if cancel.is_cancelled() {
             return Err(error("cancelled", "vision operation cancelled"));
         }
@@ -160,6 +159,13 @@ impl VisionService {
         let height = value["height"].as_u64().ok_or_else(|| {
             VisionError::InvalidInput("image.height must be a positive integer".into())
         })? as u32;
+        let has_rgba = value.get("rgba_base64").is_some();
+        let has_handle = value.get("handle").is_some();
+        if has_rgba && has_handle {
+            return Err(VisionError::InvalidInput(
+                "image must provide exactly one of rgba_base64 or handle, not both".into(),
+            ));
+        }
         let rgba = if let Some(b64) = value.get("rgba_base64").and_then(|v| v.as_str()) {
             base64_decode(b64)?
         } else if let Some(handle) = value.get("handle").and_then(|v| v.as_str()) {
@@ -179,16 +185,6 @@ impl VisionService {
                 "image.rgba_base64 or image.handle must be present".into(),
             ));
         };
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|px| px.checked_mul(4))
-            .ok_or_else(|| VisionError::InvalidInput("image dimensions overflow".into()))?;
-        if rgba.len() != expected {
-            return Err(VisionError::InvalidInput(format!(
-                "rgba_base64 length {} does not match {width}x{height} (need {expected})",
-                rgba.len()
-            )));
-        }
         if rgba.len() > self.limits.max_image_bytes {
             return Err(VisionError::InvalidInput(format!(
                 "image exceeds max_image_bytes ({})",

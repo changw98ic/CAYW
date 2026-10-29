@@ -1349,6 +1349,41 @@ fn editor_csp(preview_origin: &str) -> HeaderValue {
     .unwrap_or_else(|_| HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"))
 }
 
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    max_bytes: usize,
+) -> io::Result<usize> {
+    line.clear();
+    let mut total_read = 0;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            let to_take = pos + 1;
+            let room = (max_bytes + 1).saturating_sub(line.len());
+            let copy_len = to_take.min(room);
+            line.extend_from_slice(&available[..copy_len]);
+            reader.consume(to_take);
+            total_read += to_take;
+            break;
+        } else {
+            let to_take = available.len();
+            let room = (max_bytes + 1).saturating_sub(line.len());
+            let copy_len = to_take.min(room);
+            line.extend_from_slice(&available[..copy_len]);
+            reader.consume(to_take);
+            total_read += to_take;
+            if line.len() > max_bytes {
+                break;
+            }
+        }
+    }
+    Ok(total_read)
+}
+
 /// Durable operation audit. A start without a settlement, an unreadable log or
 /// a retained unknown marker refuses a new run. There is deliberately no
 /// automatic or in-process way to clear that state.
@@ -1382,9 +1417,7 @@ impl StateAudit {
             let mut line = Vec::new();
             let mut index = 0usize;
             loop {
-                line.clear();
-                let read = reader
-                    .read_until(b'\n', &mut line)
+                let read = read_bounded_line(&mut reader, &mut line, MAX_AUDIT_LINE_BYTES)
                     .map_err(EditorError::Io)?;
                 if read == 0 {
                     break;

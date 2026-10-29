@@ -129,7 +129,7 @@ macro_rules! json_variants {
 json_fields!(ToolCall, arguments);
 json_fields!(ToolDefinition, parameters);
 json_fields!(SystemMessage, tools_added);
-json_fields!(AssistantMessage, content, usage_fields);
+json_fields!(AssistantMessage, content, usage_fields, provider_metadata);
 json_fields!(ToolResult, content, details, structured_content);
 json_fields!(ToolResultMessage, content, details, structured_content);
 json_fields!(crate::ToolReconciliationOrigin, call);

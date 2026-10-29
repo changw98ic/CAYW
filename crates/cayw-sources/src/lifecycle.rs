@@ -346,49 +346,19 @@ async fn ensure_connected(
         control.wait_closed().await;
         return Err(failure("managed MCP source closed during connect"));
     }
-    enum Install {
-        Ready(Arc<dyn SourceHandle>),
-        LostRace {
-            existing: Arc<dyn SourceHandle>,
-            unused: Arc<dyn SourceHandle>,
-            control: StdioControl,
-        },
-    }
-    let install = {
+    {
         let mut state = lock(&shared.state);
-        if let Some(live) = state.live.as_ref() {
-            Install::LostRace {
-                existing: live.handle.clone(),
-                unused: handle,
-                control,
-            }
-        } else {
-            state.connect_generation = state.connect_generation.saturating_add(1);
-            state.spawn_count = state.spawn_count.saturating_add(1);
-            state.last_activity = Instant::now();
-            state.live = Some(Live {
-                handle: handle.clone(),
-                control,
-                _server_info: server_info,
-            });
-            Install::Ready(handle)
-        }
-    };
-    match install {
-        Install::Ready(handle) => {
-            shared.notify.notify_waiters();
-            Ok(handle)
-        }
-        Install::LostRace {
-            existing,
-            unused,
+        state.connect_generation = state.connect_generation.saturating_add(1);
+        state.spawn_count = state.spawn_count.saturating_add(1);
+        state.last_activity = Instant::now();
+        state.live = Some(Live {
+            handle: handle.clone(),
             control,
-        } => {
-            unused.disconnect();
-            control.wait_closed().await;
-            Ok(existing)
-        }
+            _server_info: server_info,
+        });
     }
+    shared.notify.notify_waiters();
+    Ok(handle)
 }
 
 fn compatible_catalog(pinned: &Manifest, fresh: &Manifest) -> bool {

@@ -1084,7 +1084,6 @@ async fn stage(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<Value, CapabilityError> {
-    validate_arguments("git.stage", arguments, &host.config)?;
     let paths = stage_paths(arguments, &host.config)?;
     let expected_head = object_id_value(arguments.get("expected_head"), "expected_head")?;
     let expected_tree =
@@ -1159,7 +1158,6 @@ async fn commit(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<Value, CapabilityError> {
-    validate_arguments("git.commit", arguments, &host.config)?;
     let message = arguments["message"]
         .as_str()
         .expect("validated commit message");
@@ -1283,7 +1281,6 @@ async fn branch(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<Value, CapabilityError> {
-    validate_arguments("git.branch", arguments, &host.config)?;
     let action = arguments["action"].as_str().expect("validated action");
     let name = arguments["name"].as_str().expect("validated name");
     let target = object_id_value(arguments.get("commit"), "commit")?;
@@ -1553,7 +1550,6 @@ async fn worktree(
     cancel: &CancellationToken,
     deadline: Instant,
 ) -> Result<Value, CapabilityError> {
-    validate_arguments("git.worktree", arguments, &host.config)?;
     let action = arguments["action"].as_str().expect("validated action");
     let name = arguments["name"].as_str().expect("validated name");
     let expected_head = object_id_value(arguments.get("expected_head"), "expected_head")?;

@@ -154,7 +154,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// Called under model budget admission, after every earlier hold is known.
+    /// Called after model budget admission, including any explicit host grant.
     /// Only the Provider request changes; the Agent and Core keep the originals.
     pub(crate) fn model_input_messages(
         &self,

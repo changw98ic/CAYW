@@ -252,3 +252,51 @@ async fn denied_put_has_no_local_record_and_no_started_call() {
                 && e["event"]["call"]["name"] == "content.put")
     );
 }
+
+#[tokio::test]
+async fn put_rejects_invalid_expected_revision_at_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("workspace")).unwrap();
+    let hex64 = "0".repeat(64);
+    let args =
+        json!({"name":"entry_check","text":"data","expected_version":0,"expected_revision":hex64});
+    let cfg = config(&root, vec![ScopedPermission::exact("content.put", args)]);
+    let script = format!(
+        "return cayw.call('content.put', {{name='entry_check',text='data',expected_version=0,expected_revision='{}'}})",
+        hex64
+    );
+    let rt = open(&root, &script, cfg);
+    let session = rt.create(None).unwrap().id;
+    rt.prompt(
+        &session,
+        "invalid revision at entry",
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        rt.content_inspect(&session, None, "entry_check")
+            .unwrap()
+            .is_none()
+    );
+    let failed = rt
+        .events(&session, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .any(|record| {
+            let value = serde_json::to_value(record).unwrap();
+            let call = &value["event"]["call"];
+            value["event"]["type"] == "capability_settled"
+                && call["name"] == "content.put"
+                && call["outcome"]["type"] == "failed"
+                && call["outcome"]["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("creation requires version 0 without a revision")
+        });
+    assert!(
+        failed,
+        "expected settled failed capability with revision error"
+    );
+}

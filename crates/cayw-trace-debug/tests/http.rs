@@ -719,3 +719,149 @@ async fn run_inspector_route_returns_timeline_and_page_metadata() {
 
     running.shutdown().await;
 }
+
+#[tokio::test]
+async fn run_inspector_route_cross_page_pagination_is_equivalent_to_full_projection() {
+    use cayw_agent::{AgentEvent, ToolResult};
+    use cayw_ai::ToolCall;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = TraceStore::open(directory.path().join("trace.json")).unwrap();
+
+    let session = "sess-http-inspect";
+    let lease = AttemptLease {
+        session_id: session.into(),
+        attempt_id: "att-1".into(),
+        worker_id: "worker-1".into(),
+        fence: 1,
+    };
+    let rec = |cursor, ts, event: AgentEvent| EventRecord {
+        protocol_version: 3,
+        session_id: session.into(),
+        cursor,
+        timestamp: ts,
+        attempt: Some(lease.clone()),
+        event: CoreEvent::Agent {
+            event: Box::new(event),
+        },
+    };
+
+    let events = vec![
+        rec(1, 1_000, AgentEvent::TurnStart),
+        rec(
+            2,
+            1_020,
+            AgentEvent::ToolExecutionStart {
+                call: ToolCall::new("call_1", "fs.read", json!({"path": "a.txt"})),
+            },
+        ),
+        // Event 3: tool 1 completes without duration_ms; must compute elapsed = 1080 - 1020 = 60
+        rec(
+            3,
+            1_080,
+            AgentEvent::ToolExecutionEnd {
+                call: ToolCall::new("call_1", "fs.read", json!({"path": "a.txt"})),
+                result: ToolResult::text("contents"),
+                duration_ms: None,
+            },
+        ),
+        rec(
+            4,
+            1_100,
+            AgentEvent::ToolExecutionStart {
+                call: ToolCall::new("call_2", "fs.write", json!({"path": "b.txt"})),
+            },
+        ),
+        // Boundary point between page 1 and page 2 will split call_2's start (event 4) and end (event 6)!
+        rec(5, 2_000, AgentEvent::TurnStart),
+        rec(
+            6,
+            2_050,
+            AgentEvent::ToolExecutionEnd {
+                call: ToolCall::new("call_2", "fs.write", json!({"path": "b.txt"})),
+                result: ToolResult::text("done"),
+                duration_ms: None,
+            },
+        ),
+    ];
+    store.ingest(&events).unwrap();
+
+    let running = start_store(directory, store, TOKEN.to_string()).await;
+    let http = client();
+    let auth = |builder: reqwest::RequestBuilder| {
+        builder.header("authorization", format!("Bearer {TOKEN}"))
+    };
+
+    // 1. Full unpaged projection: after=0&limit=100
+    let full_res = auth(http.get(url(running.address, "/api/run-inspector?after=0&limit=100")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(full_res.status(), reqwest::StatusCode::OK);
+    let full_body: serde_json::Value = full_res.json().await.unwrap();
+    assert_eq!(full_body["events_total"], 6);
+    assert_eq!(full_body["events_scanned"], 6);
+    assert_eq!(full_body["has_more"], false);
+
+    let full_snapshots = full_body["snapshots"].as_array().expect("snapshots array");
+    assert_eq!(full_snapshots.len(), 1);
+    let full_steps = full_snapshots[0]["steps"].as_array().expect("steps");
+    assert_eq!(full_steps.len(), 2);
+    assert_eq!(full_steps[0]["step_id"], "call_1");
+    assert_eq!(full_steps[0]["started_at_ms"], 1_020);
+    assert_eq!(full_steps[0]["elapsed_ms"], 60);
+    assert_eq!(full_steps[1]["step_id"], "call_2");
+    assert_eq!(full_steps[1]["started_at_ms"], 1_100);
+    assert_eq!(full_steps[1]["elapsed_ms"], 950);
+
+    // 2. Cross-page pagination with boundary splitting call_2:
+    // Page 1: after=0&limit=4 (covers events 0..4, which includes call_2's ToolExecutionStart)
+    let page1_res = auth(http.get(url(running.address, "/api/run-inspector?after=0&limit=4")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1_res.status(), reqwest::StatusCode::OK);
+    let page1_body: serde_json::Value = page1_res.json().await.unwrap();
+    assert_eq!(page1_body["after"], 0);
+    assert_eq!(page1_body["events_scanned"], 4);
+    assert_eq!(page1_body["has_more"], true);
+    assert_eq!(page1_body["next_after"], 4);
+
+    let page1_snapshots = page1_body["snapshots"].as_array().expect("snapshots");
+    assert_eq!(page1_snapshots.len(), 1);
+    let page1_steps = page1_snapshots[0]["steps"].as_array().expect("steps");
+    // Only call_1 finished within events 0..4
+    assert_eq!(page1_steps.len(), 1);
+    assert_eq!(page1_steps[0]["step_id"], "call_1");
+    assert_eq!(page1_steps[0]["started_at_ms"], 1_020);
+    assert_eq!(page1_steps[0]["elapsed_ms"], 60);
+
+    // Page 2: after=4&limit=4 (covers events 4..6, which includes call_2's ToolExecutionEnd)
+    let page2_res = auth(http.get(url(running.address, "/api/run-inspector?after=4&limit=4")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2_res.status(), reqwest::StatusCode::OK);
+    let page2_body: serde_json::Value = page2_res.json().await.unwrap();
+    assert_eq!(page2_body["after"], 4);
+    assert_eq!(page2_body["events_scanned"], 2);
+    assert_eq!(page2_body["has_more"], false);
+    assert_eq!(page2_body["next_after"], 6);
+
+    let page2_snapshots = page2_body["snapshots"].as_array().expect("snapshots");
+    assert_eq!(page2_snapshots.len(), 1);
+    let page2_steps = page2_snapshots[0]["steps"].as_array().expect("steps");
+    assert_eq!(page2_steps.len(), 1);
+    // CRITICAL: call_2's started_at_ms must be the real start timestamp (1_100),
+    // NOT forged to end timestamp (2_050), and elapsed_ms must be 950 (not 0)!
+    assert_eq!(page2_steps[0]["step_id"], "call_2");
+    assert_eq!(page2_steps[0]["started_at_ms"], 1_100);
+    assert_eq!(page2_steps[0]["elapsed_ms"], 950);
+
+    // 3. Equivalence check: merging paged steps matches full unpaged steps exactly
+    let mut combined_steps = page1_steps.clone();
+    combined_steps.extend(page2_steps.clone());
+    assert_eq!(combined_steps, *full_steps);
+
+    running.shutdown().await;
+}

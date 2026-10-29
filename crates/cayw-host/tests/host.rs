@@ -23,6 +23,7 @@ impl Workspace {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
         Self(root)
     }
     fn path(&self) -> &Path {
@@ -2072,4 +2073,155 @@ async fn default_host_omits_vision_catalog() {
             .any(|d| d.name.starts_with("vision.")),
         "ordinary HostConfig::default() must not advertise vision.*"
     );
+}
+
+#[tokio::test]
+async fn session_content_scope_preserves_configured_and_disabled_services() {
+    let ws = Workspace::new();
+    let content_dir = Workspace::new();
+    let store = Arc::new(
+        cayw_content::ContentStore::open(
+            content_dir.path(),
+            cayw_content::Id::new("device-fixture").unwrap(),
+            cayw_content::Limits::default(),
+        )
+        .unwrap(),
+    );
+
+    // 1. Host without web_access or vision cannot gain capabilities via with_session_content
+    let (plain_host, _, _) = host(ws.path(), HostConfig::default());
+    let plain_scoped = plain_host.with_session_content(store.clone(), "session-disabled");
+    assert!(
+        !plain_scoped
+            .capabilities()
+            .iter()
+            .any(|d| d.name.starts_with("web.") || d.name.starts_with("vision.")),
+        "disabled host must not gain web or vision tools after with_session_content"
+    );
+
+    // 2. Host with web_access and vision retains capabilities and routes through session sink
+    let configured_config = HostConfig {
+        web_access: Some(cayw_web_access::WebAccessOptions::fixture()),
+        vision: Some(cayw_vision::Limits::default()),
+        ..HostConfig::default()
+    };
+    let (configured_host, _, _) = host(ws.path(), configured_config);
+    let configured_scoped =
+        configured_host.with_session_content(store.clone(), "session-configured");
+    let names: Vec<_> = configured_scoped
+        .capabilities()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "web.search"));
+    assert!(names.iter().any(|n| n == "web.fetch"));
+    assert!(names.iter().any(|n| n == "vision.crop"));
+
+    let search_result = call(
+        &configured_scoped,
+        "web.search",
+        json!({"query": "test query", "limit": 3}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(search_result["provider"], "fixture");
+
+    // 3. Verify vision.crop writes through ContentVisionSink into ContentStore
+    use base64::Engine;
+    let rgba = {
+        let mut buf = vec![0u8; 8 * 8 * 4];
+        for i in 0..16 {
+            let idx = i * 4;
+            buf[idx..idx + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        buf
+    };
+    let crop_result = call(
+        &configured_scoped,
+        "vision.crop",
+        json!({
+            "image": {
+                "width": 8,
+                "height": 8,
+                "rgba_base64": base64::engine::general_purpose::STANDARD.encode(&rgba),
+            },
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 4
+        }),
+    )
+    .await
+    .expect("vision.crop with session content");
+    assert_eq!(crop_result["width"], 4);
+    assert_eq!(crop_result["height"], 4);
+    assert_eq!(crop_result["stored"], true);
+    let crop_handle = crop_result["handle"].as_str().expect("crop handle");
+    assert_eq!(crop_result["session_id"], "session-configured");
+
+    let crop_body_key = cayw_host::result_body_key(
+        store.device_id().as_str(),
+        "session-configured",
+        None,
+        crop_handle,
+    )
+    .unwrap();
+    let (_, crop_body) = store
+        .try_read(&crop_body_key)
+        .unwrap()
+        .expect("stored crop body in ContentStore");
+    assert!(!crop_body.is_empty());
+    let decoded_crop = base64::engine::general_purpose::STANDARD
+        .decode(&crop_body)
+        .expect("valid base64 crop body");
+    assert_eq!(decoded_crop.len(), 4 * 4 * 4);
+
+    // 4. Verify reading back the cropped image from sink via a secondary crop call
+    let second_crop = call(
+        &configured_scoped,
+        "vision.crop",
+        json!({
+            "image": {
+                "width": 4,
+                "height": 4,
+                "handle": crop_handle,
+            },
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 2,
+        }),
+    )
+    .await
+    .expect("second vision.crop using handle from sink");
+    assert_eq!(second_crop["width"], 2);
+    assert_eq!(second_crop["height"], 2);
+    assert_eq!(second_crop["stored"], true);
+
+    // 5. Verify web.fetch routes downloaded body through ContentWebSink into ContentStore
+    let fetch_result = call(
+        &configured_scoped,
+        "web.fetch",
+        json!({"url": "https://example.com/"}),
+    )
+    .await
+    .expect("web.fetch with session content");
+    assert_eq!(fetch_result["status"], 200);
+    assert_eq!(fetch_result["stored"], true);
+    let fetch_handle = fetch_result["handle"].as_str().expect("web fetch handle");
+    assert_eq!(fetch_result["session_id"], "session-configured");
+
+    let fetch_body_key = cayw_host::result_body_key(
+        store.device_id().as_str(),
+        "session-configured",
+        None,
+        fetch_handle,
+    )
+    .unwrap();
+    let (_, fetch_body) = store
+        .try_read(&fetch_body_key)
+        .unwrap()
+        .expect("stored web body in ContentStore");
+    let fetch_html = String::from_utf8(fetch_body).expect("valid utf-8 HTML body");
+    assert!(fetch_html.contains("Example Domain"));
 }

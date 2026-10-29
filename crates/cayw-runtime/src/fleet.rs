@@ -188,12 +188,19 @@ impl FleetRegistry {
             ));
         }
         let members = lock(&self.members);
+        let range: (std::ops::Bound<&str>, std::ops::Bound<&str>) = match after {
+            Some(cursor) => (
+                std::ops::Bound::Excluded(cursor),
+                std::ops::Bound::Unbounded,
+            ),
+            None => (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
+        };
         let mut rows: Vec<FleetMember> = members
-            .iter()
+            .range::<str, _>(range)
             .filter(|(_, entry)| {
                 parent_session_id.is_none_or(|parent| entry.parent_session_id == parent)
             })
-            .filter(|(id, _)| after.is_none_or(|cursor| id.as_str() > cursor))
+            .take(limit + 1)
             .map(|(id, entry)| FleetMember {
                 child_task_id: id.clone(),
                 child_session_id: entry.child_session_id.clone(),
@@ -207,7 +214,6 @@ impl FleetRegistry {
                 error: entry.error.clone(),
             })
             .collect();
-        rows.sort_by(|left, right| left.child_task_id.cmp(&right.child_task_id));
         let next_after = (rows.len() > limit).then(|| rows[limit - 1].child_task_id.clone());
         rows.truncate(limit);
         Ok(FleetView {
@@ -216,11 +222,22 @@ impl FleetRegistry {
         })
     }
 
-    pub(crate) fn stop(&self, child_task_id: &str) -> Result<Value, RuntimeError> {
+    pub(crate) fn stop(
+        &self,
+        child_task_id: &str,
+        caller_session_id: Option<&str>,
+    ) -> Result<Value, RuntimeError> {
         let members = lock(&self.members);
         let entry = members.get(child_task_id).ok_or_else(|| {
             RuntimeError::InvalidInput(format!("fleet has no child task {child_task_id}"))
         })?;
+        if let Some(caller) = caller_session_id
+            && entry.parent_session_id != caller
+        {
+            return Err(RuntimeError::InvalidInput(format!(
+                "caller session {caller} is not authorized to control child task {child_task_id}"
+            )));
+        }
         if !matches!(entry.state, FleetMemberState::Running) {
             return Ok(json!({
                 "child_task_id": child_task_id,
@@ -240,7 +257,12 @@ impl FleetRegistry {
         }))
     }
 
-    pub(crate) fn steer(&self, child_task_id: &str, text: &str) -> Result<Value, RuntimeError> {
+    pub(crate) fn steer(
+        &self,
+        child_task_id: &str,
+        text: &str,
+        caller_session_id: Option<&str>,
+    ) -> Result<Value, RuntimeError> {
         if text.trim().is_empty() || text.len() > 256 * 1024 {
             return Err(RuntimeError::InvalidInput(
                 "fleet steer text must contain 1..262144 bytes".into(),
@@ -250,6 +272,13 @@ impl FleetRegistry {
         let entry = members.get(child_task_id).ok_or_else(|| {
             RuntimeError::InvalidInput(format!("fleet has no child task {child_task_id}"))
         })?;
+        if let Some(caller) = caller_session_id
+            && entry.parent_session_id != caller
+        {
+            return Err(RuntimeError::InvalidInput(format!(
+                "caller session {caller} is not authorized to control child task {child_task_id}"
+            )));
+        }
         if !matches!(entry.state, FleetMemberState::Running) {
             return Err(RuntimeError::InvalidInput(
                 "fleet steer requires a running child".into(),
@@ -288,7 +317,7 @@ impl Runtime {
                 "child_task_id must contain 1..128 bytes".into(),
             ));
         }
-        self.inner.fleet.stop(child_task_id)
+        self.inner.fleet.stop(child_task_id, None)
     }
 
     /// Append a steering user message to a running fleet member.
@@ -298,6 +327,6 @@ impl Runtime {
                 "child_task_id must contain 1..128 bytes".into(),
             ));
         }
-        self.inner.fleet.steer(child_task_id, text)
+        self.inner.fleet.steer(child_task_id, text, None)
     }
 }

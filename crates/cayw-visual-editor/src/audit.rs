@@ -167,7 +167,7 @@ impl AuditStore {
                 "state directory contains an unresolved unknown operation; reconcile it before editing",
             ));
         }
-        match scan(&path, &state_dir) {
+        match scan(&path) {
             Ok(None) => {}
             Ok(Some(reason)) => {
                 let _ = write_marker(&marker, &reason);
@@ -318,7 +318,9 @@ impl AuditSink for AuditStore {
 }
 
 /// Scans the audit file. `Ok(Some(reason))` means the state cannot be used.
-fn scan(path: &Path, state_dir: &Path) -> std::io::Result<Option<String>> {
+/// When scanning returns an unresolved reason or read error, the caller in
+/// [`AuditStore::open`] writes the durable unknown marker.
+fn scan(path: &Path) -> std::io::Result<Option<String>> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > MAX_AUDIT_BYTES {
         return Ok(Some(
@@ -393,9 +395,6 @@ fn scan(path: &Path, state_dir: &Path) -> std::io::Result<Option<String>> {
             "audit call {call_id} was started but never settled; reconcile the state directory"
         )));
     }
-    // Rewrite the marker only when it is absent; the marker is the durable
-    // cross-process fence. The caller handles a missing directory separately.
-    let _ = state_dir;
     Ok(None)
 }
 
@@ -519,7 +518,7 @@ mod tests {
             "{\"event\":\"started\",\"call_id\":\"a\",\"capability\":\"fs.write\",\"at_ms\":1}\n",
         )
         .unwrap();
-        let reason = scan(&path, dir.path()).unwrap().unwrap();
+        let reason = scan(&path).unwrap().unwrap();
         assert!(reason.contains("never settled"));
     }
 
@@ -535,7 +534,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let reason = scan(&path, dir.path()).unwrap().unwrap();
+        let reason = scan(&path).unwrap().unwrap();
         assert!(reason.contains("unknown outcome"));
     }
 
@@ -551,6 +550,6 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(scan(&path, dir.path()).unwrap().is_none());
+        assert!(scan(&path).unwrap().is_none());
     }
 }

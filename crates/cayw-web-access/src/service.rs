@@ -182,7 +182,7 @@ impl WebAccess {
         })
     }
 
-    /// Fetch (if needed via URL) or extract from an already-stored content ref.
+    /// Fetch a URL and extract readable text from the downloaded body.
     pub async fn extract_url(&self, url: &str) -> Result<ExtractResult, WebAccessError> {
         validate_http_url(url)?;
         let raw = self.transport.get(url, self.limits.max_body_bytes).await?;

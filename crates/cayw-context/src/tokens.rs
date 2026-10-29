@@ -63,8 +63,9 @@ pub fn cache_hit_rate(tokens: &TokenTotals) -> Option<f64> {
 
 /// Merge cost views. Any unknown participant yields unknown with empty amount.
 ///
-/// First cut does **not** sum heterogeneous monetary strings. Multiple distinct
-/// reported amounts collapse to unknown rather than inventing a total.
+/// First cut does **not** sum heterogeneous monetary strings. Multiple independent
+/// reported amounts collapse to unknown rather than inventing a total or deduplicating
+/// independent expenses by value.
 pub fn merge_cost<'a, I>(views: I) -> CostView
 where
     I: IntoIterator<Item = &'a CostView>,
@@ -82,14 +83,12 @@ where
                     Some(value) if !value.is_empty() => value,
                     _ => return CostView::unknown(),
                 };
-                match reported {
-                    None => reported = Some((amount, currency)),
-                    Some((prev_amount, prev_currency)) => {
-                        if prev_amount != amount || prev_currency != currency {
-                            return CostView::unknown();
-                        }
-                    }
+                if reported.is_some() {
+                    // Two or more independent reported amounts cannot be summed without
+                    // an exact monetary type, and independent costs must not be deduplicated.
+                    return CostView::unknown();
                 }
+                reported = Some((amount, currency));
             }
         }
     }

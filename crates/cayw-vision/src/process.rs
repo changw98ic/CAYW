@@ -10,15 +10,21 @@
 use cayw_ai::CancellationToken;
 use std::io;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 /// Poll interval while waiting for a short-lived vision child (tesseract/curl).
 const POLL: Duration = Duration::from_millis(20);
 
+/// Default byte limit on stdout/stderr when no tighter budget is specified (16 MiB).
+pub(crate) const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug)]
 pub(crate) enum RunError {
     Cancelled,
+    OutputLimitExceeded(String),
     Io(io::Error),
 }
 
@@ -26,6 +32,7 @@ impl RunError {
     pub(crate) fn message(&self) -> String {
         match self {
             Self::Cancelled => "cancelled".into(),
+            Self::OutputLimitExceeded(msg) => msg.clone(),
             Self::Io(err) => err.to_string(),
         }
     }
@@ -60,13 +67,55 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Spawn `command`, wait for exit, honor `cancel` by killing the child.
+fn read_bounded_stream(
+    pipe: Option<impl io::Read>,
+    max_bytes: usize,
+    stream_name: &'static str,
+    limit_exceeded: Arc<AtomicBool>,
+    limit_error: Arc<Mutex<Option<String>>>,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let Some(mut pipe) = pipe else {
+        return buf;
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        if limit_exceeded.load(Ordering::SeqCst) {
+            break;
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let current_len = buf.len();
+                if current_len.saturating_add(n) > max_bytes {
+                    let allowed = max_bytes.saturating_sub(current_len);
+                    buf.extend_from_slice(&chunk[..allowed]);
+                    let mut lock = limit_error.lock().unwrap();
+                    if lock.is_none() {
+                        *lock = Some(format!("{stream_name} exceeded limit of {max_bytes} bytes"));
+                    }
+                    limit_exceeded.store(true, Ordering::SeqCst);
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    buf
+}
+
+/// Spawn `command`, wait for exit, honor `cancel` and output byte limits by killing the child.
 ///
-/// Stdout/stderr are collected on side threads so a chatty child cannot fill
-/// the pipe and deadlock while we poll cancellation.
-pub(crate) fn run_command_cancellable(
+/// Stdout and stderr are collected on side threads up to their specified limits.
+/// Exceeding either limit triggers immediate termination and reaping of the child
+/// via [`KillOnDrop`], avoiding unbounded memory growth before JSON parsing or caching.
+pub(crate) fn run_command_bounded(
     mut command: Command,
     cancel: &CancellationToken,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
 ) -> Result<Output, RunError> {
     if cancel.is_cancelled() {
         return Err(RunError::Cancelled);
@@ -81,19 +130,19 @@ pub(crate) fn run_command_cancellable(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
+    let limit_exceeded = Arc::new(AtomicBool::new(false));
+    let limit_error = Arc::new(Mutex::new(None));
+
+    let stdout_flag = limit_exceeded.clone();
+    let stdout_err = limit_error.clone();
     let stdout_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout {
-            let _ = io::copy(&mut pipe, &mut buf);
-        }
-        buf
+        read_bounded_stream(stdout, max_stdout_bytes, "stdout", stdout_flag, stdout_err)
     });
+
+    let stderr_flag = limit_exceeded.clone();
+    let stderr_err = limit_error.clone();
     let stderr_handle = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stderr {
-            let _ = io::copy(&mut pipe, &mut buf);
-        }
-        buf
+        read_bounded_stream(stderr, max_stderr_bytes, "stderr", stderr_flag, stderr_err)
     });
 
     let mut guard = KillOnDrop::new(child);
@@ -104,6 +153,17 @@ pub(crate) fn run_command_cancellable(
             let _ = stdout_handle.join();
             let _ = stderr_handle.join();
             return Err(RunError::Cancelled);
+        }
+        if limit_exceeded.load(Ordering::SeqCst) {
+            drop(guard);
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            let msg = limit_error
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "output limit exceeded".into());
+            return Err(RunError::OutputLimitExceeded(msg));
         }
         match guard.try_wait() {
             Ok(Some(status)) => break status,
@@ -121,11 +181,36 @@ pub(crate) fn run_command_cancellable(
     let _ = guard.take();
     let stdout = stdout_handle.join().unwrap_or_default();
     let stderr = stderr_handle.join().unwrap_or_default();
+
+    if limit_exceeded.load(Ordering::SeqCst) {
+        let msg = limit_error
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "output limit exceeded".into());
+        return Err(RunError::OutputLimitExceeded(msg));
+    }
+
     Ok(Output {
         status,
         stdout,
         stderr,
     })
+}
+
+/// Spawn `command`, wait for exit, honor `cancel` by killing the child.
+///
+/// Uses [`DEFAULT_MAX_OUTPUT_BYTES`] for stdout and stderr bounds.
+pub(crate) fn run_command_cancellable(
+    command: Command,
+    cancel: &CancellationToken,
+) -> Result<Output, RunError> {
+    run_command_bounded(
+        command,
+        cancel,
+        DEFAULT_MAX_OUTPUT_BYTES,
+        DEFAULT_MAX_OUTPUT_BYTES,
+    )
 }
 
 #[cfg(test)]
@@ -251,5 +336,123 @@ mod tests {
             "stdout={:?}",
             String::from_utf8_lossy(&output.stdout)
         );
+    }
+
+    #[test]
+    fn bounded_stdout_exact_boundary() {
+        let cancel = CancellationToken::new();
+        let exact_bytes = b"0123456789"; // 10 bytes
+
+        // Exactly at limit: succeeds
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("printf '0123456789'");
+        let output = run_command_bounded(cmd, &cancel, 10, 1024).unwrap();
+        assert!(output.status.success());
+        assert_eq!(&output.stdout, exact_bytes);
+
+        // One byte below output length: rejected with OutputLimitExceeded
+        let mut cmd2 = Command::new("sh");
+        cmd2.arg("-c").arg("printf '0123456789'");
+        let err = run_command_bounded(cmd2, &cancel, 9, 1024).unwrap_err();
+        assert!(
+            matches!(err, RunError::OutputLimitExceeded(ref msg) if msg.contains("stdout exceeded limit of 9 bytes")),
+            "expected limit exceeded error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_streaming_child_without_eof_is_killed_on_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("streaming.pid");
+        let script = dir.path().join("infinite_stream.sh");
+        let body = format!(
+            "#!/bin/sh\necho $$ > '{}'\nwhile true; do\n  printf 'AAAAAAAAAAAAAAAA'\n  sleep 0.05\ndone\n",
+            pid_path.display()
+        );
+        fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let cancel = CancellationToken::new();
+        let cmd = Command::new(&script);
+        // Limit stdout to 32 bytes. Child sends infinite stream without EOF.
+        let result = run_command_bounded(cmd, &cancel, 32, 1024);
+        assert!(
+            matches!(result, Err(RunError::OutputLimitExceeded(ref msg)) if msg.contains("stdout exceeded limit of 32 bytes")),
+            "expected OutputLimitExceeded, got {result:?}"
+        );
+
+        // Child process must have been killed and reaped (no lingering process).
+        if let Ok(content) = fs::read_to_string(&pid_path)
+            && let Ok(pid) = content.trim().parse::<u32>()
+        {
+            let reap_deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < reap_deadline && pid_still_alive(pid) {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                !pid_still_alive(pid),
+                "streaming child pid {pid} must be killed when output limit exceeded"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_stderr_kills_child_when_exceeded() {
+        let cancel = CancellationToken::new();
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("printf 'error-message-overflow' >&2");
+        let err = run_command_bounded(cmd, &cancel, 1024, 8).unwrap_err();
+        assert!(
+            matches!(err, RunError::OutputLimitExceeded(ref msg) if msg.contains("stderr exceeded limit of 8 bytes")),
+            "expected stderr limit exceeded error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_streaming_stderr_without_eof_is_killed_on_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("streaming_stderr.pid");
+        let script = dir.path().join("infinite_stderr_stream.sh");
+        let body = format!(
+            "#!/bin/sh\necho $$ > '{}'\nwhile true; do\n  printf 'BBBBBBBBBBBBBBBB' >&2\n  sleep 0.05\ndone\n",
+            pid_path.display()
+        );
+        fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+
+        let cancel = CancellationToken::new();
+        let cmd = Command::new(&script);
+        // Limit stderr to 32 bytes. Child sends infinite stream on stderr without EOF.
+        let result = run_command_bounded(cmd, &cancel, 1024, 32);
+        assert!(
+            matches!(result, Err(RunError::OutputLimitExceeded(ref msg)) if msg.contains("stderr exceeded limit of 32 bytes")),
+            "expected stderr OutputLimitExceeded, got {result:?}"
+        );
+
+        // Child process must have been killed and reaped (no lingering process).
+        if let Ok(content) = fs::read_to_string(&pid_path)
+            && let Ok(pid) = content.trim().parse::<u32>()
+        {
+            let reap_deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < reap_deadline && pid_still_alive(pid) {
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                !pid_still_alive(pid),
+                "streaming child pid {pid} must be killed when stderr limit exceeded"
+            );
+        }
     }
 }

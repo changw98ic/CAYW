@@ -125,9 +125,34 @@ fn write_new(root: &Path, name: &str, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+/// Check that all declared scenarios have executed all declared repetitions.
+pub fn scenario_coverage_complete(meta: &Value, samples: &[Value]) -> bool {
+    let count = match meta["samples_per_scenario"].as_u64() {
+        Some(count) if count > 0 => count,
+        _ => return false,
+    };
+    let scenarios = match meta["scenarios"].as_array() {
+        Some(scenarios) if !scenarios.is_empty() => scenarios,
+        _ => return false,
+    };
+    for scenario in scenarios {
+        let Some(name) = scenario["name"].as_str() else {
+            return false;
+        };
+        for iteration in 1..=count {
+            if !samples.iter().any(|s| {
+                s["scenario"].as_str() == Some(name) && s["iteration"].as_u64() == Some(iteration)
+            }) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Derived values are recomputed by both the writer and reader. Timings are
 /// grouped by scenario so unlike operations never become one benchmark.
-fn derived(samples: &[Value]) -> Result<Value> {
+fn derived(meta: &Value, samples: &[Value], sampling_stopped: bool) -> Result<Value> {
     let mut phases = BTreeMap::<(&str, &str), Vec<u64>>::new();
     for sample in samples {
         let scenario = sample["scenario"].as_str().ok_or("scenario absent")?;
@@ -192,8 +217,13 @@ fn derived(samples: &[Value]) -> Result<Value> {
             "usage":{"status":"not_measured","total_tokens":null},
             "cost":{"status":"not_measured","amount":null,"currency":null},"attempts":attempts}))
     }).collect::<Result<Vec<_>>>()?;
+    let complete = scenario_coverage_complete(meta, samples);
+    let semantic_passed = !samples.is_empty()
+        && samples.iter().all(|s| s["status"] == "passed")
+        && !sampling_stopped
+        && complete;
     Ok(
-        json!({"sample_count":samples.len(),"semantic_passed":!samples.is_empty() && samples.iter().all(|s|s["status"]=="passed"),
+        json!({"sample_count":samples.len(),"semantic_passed":semantic_passed,
         "repair_summary":repair_summary,
         "failed_samples":samples.iter().filter(|s|s["status"]=="failed").count(),
         "unsupported_samples":samples.iter().filter(|s|s["status"]=="unsupported").count(),
@@ -315,9 +345,8 @@ impl BundleWriter {
         Ok(())
     }
     pub fn finish(self, sampling_stopped: bool) -> Result<bool> {
-        let mut summary = derived(&self.samples)?;
-        let passed = summary["semantic_passed"] == true && !sampling_stopped;
-        summary["semantic_passed"] = passed.into();
+        let mut summary = derived(&self.meta, &self.samples, sampling_stopped)?;
+        let passed = summary["semantic_passed"].as_bool().unwrap_or(false);
         summary["schema_version"] = 2.into();
         summary["run_id"] = self.meta["run_id"].clone();
         summary["source"] = self.meta["source"].clone();
@@ -389,6 +418,7 @@ impl Bundle {
                 return Err("duplicate scenario declaration".into());
             }
         }
+        let max_samples = meta["samples_per_scenario"].as_u64();
         for sample in &samples {
             let parsed: ScenarioReport = serde_json::from_value(sample.clone())?;
             let spec = specifications
@@ -402,6 +432,7 @@ impl Bundle {
                 || sample["binding"] != meta["binding"]
                 || parsed.specification != spec["specification"]
                 || parsed.iteration == 0
+                || max_samples.is_none_or(|max| u64::from(parsed.iteration) > max)
                 || parsed.sample_id != format!("{:04}/{}", parsed.iteration, parsed.scenario)
                 || !ids.insert(parsed.sample_id.clone())
             {
@@ -481,7 +512,16 @@ impl Bundle {
             crate::sdk::validate_recorded_sample(&parsed, &raw_root)?;
         }
         validate_repair_pairs(root, &samples)?;
-        let expected = derived(&samples)?;
+        let sampling_stopped = summary["sampling_stopped"].as_bool().unwrap_or(false);
+        if summary["semantic_passed"] == true
+            && (!scenario_coverage_complete(&meta, &samples) || sampling_stopped)
+        {
+            return Err(
+                "summary semantic_passed contradicts incomplete scenario coverage or stopped sampling"
+                    .into(),
+            );
+        }
+        let expected = derived(&meta, &samples, sampling_stopped)?;
         for (key, value) in expected.as_object().unwrap() {
             if let Some(stored) = summary.get(key)
                 && stored != value
@@ -628,19 +668,8 @@ pub fn compare(left: &Bundle, right: &Bundle) -> Comparison {
                 "{side} needs at least three repetitions per scenario"
             ));
         }
-        if let (Some(count), Some(scenarios)) = (count, bundle.meta["scenarios"].as_array()) {
-            for scenario in scenarios {
-                for iteration in 1..=count {
-                    if !bundle
-                        .samples
-                        .iter()
-                        .any(|s| s["scenario"] == scenario["name"] && s["iteration"] == iteration)
-                    {
-                        missing.push(format!("{side} incomplete scenario repetitions"));
-                        break;
-                    }
-                }
-            }
+        if !scenario_coverage_complete(&bundle.meta, &bundle.samples) {
+            missing.push(format!("{side} incomplete scenario repetitions"));
         }
         if bundle
             .samples

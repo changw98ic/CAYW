@@ -47,9 +47,9 @@ mod persist;
 mod store;
 mod types;
 
-pub use actions::{ActionProtocol, ActionSnapshot};
+pub use actions::{ActionProtocol, ActionSnapshot, ArtifactReconciliationVerifier};
 pub use dispatch::{
-    FollowUpDispatch, HostActionDispatch, HostDispatchResult, RecordedHostCall,
+    FollowUpDispatch, HostActionDispatch, HostDispatchError, HostDispatchResult, RecordedHostCall,
     RecordingHostDispatch, SharedHostDispatch, ToolDispatch,
 };
 pub use identity::{validate_body, validate_id, validate_title};
@@ -117,9 +117,16 @@ impl ArtifactWorkspace {
     }
 
     /// Replace both maps from a recovery bundle (simulates restart).
+    ///
+    /// Both snapshots are validated before either catalog is modified. If action
+    /// restoration fails (e.g. invalid action ID or state key), the store remains
+    /// untouched.
     pub fn restore_recovery(&self, bundle: RecoveryBundle) -> Result<(), ArtifactError> {
-        self.store.restore_snapshot(bundle.artifacts)?;
-        self.actions.restore_snapshot(bundle.actions)?;
+        let prepared_artifacts = ArtifactStore::prepare_snapshot(bundle.artifacts)?;
+        let (prepared_actions, prepared_state) = ActionProtocol::prepare_snapshot(bundle.actions)?;
+        self.store.commit_prepared(prepared_artifacts);
+        self.actions
+            .commit_prepared(prepared_actions, prepared_state);
         Ok(())
     }
 

@@ -1287,6 +1287,8 @@ async fn registered_panels_are_reachable_from_webui_product_entry() {
     )
     .await;
     assert_eq!(revealed["result"]["path"], "src/lib.rs");
+    assert_eq!(revealed["result"]["instance_id"], instance_id);
+    assert_eq!(revealed["result"]["active"], true);
 
     let terminal = envelope(
         fixture

@@ -50,7 +50,8 @@ pub use bridge::{BridgeDispatchEvent, BridgeDispatchOrigin, BridgeDispatchPage};
 pub use cancellation::CancelTarget;
 pub use cayw_artifacts::{
     ActionIntent, ActionKind, ActionOutcome, ActionRecord, ActionRequest, ActionStatus,
-    ArtifactKind, ArtifactPreview, ArtifactRecord, HostActionDispatch, PutArtifactRequest,
+    ArtifactKind, ArtifactPreview, ArtifactReconciledOutcome, ArtifactReconciliation,
+    ArtifactReconciliationVerifier, ArtifactRecord, HostActionDispatch, PutArtifactRequest,
     RecoveryBundle, UpdateArtifactRequest,
 };
 pub use cayw_context::{CostStatus, SessionLedgerSnapshot, SessionOverview};
@@ -66,10 +67,11 @@ pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::{HeadlessConfig, PiCompatConfig};
 pub use model_requests::{
-    ModelCostStatus, ModelRequestIdentity, ModelRequestLedger, ModelRequestObservation,
-    ModelRequestOrigin, ModelRequestReconciledOutcome, ModelRequestReconciliation,
-    ModelRequestReconciliationRecord, ModelRequestReconciliationVerifier, ModelRequestRecord,
-    ModelRequestTerminal, ModelReservationPolicy, ModelUsageObservation,
+    ModelBudgetContinuation, ModelBudgetContinuationRecord, ModelCostStatus, ModelRequestIdentity,
+    ModelRequestLedger, ModelRequestObservation, ModelRequestOrigin, ModelRequestReconciledOutcome,
+    ModelRequestReconciliation, ModelRequestReconciliationRecord,
+    ModelRequestReconciliationVerifier, ModelRequestRecord, ModelRequestTerminal,
+    ModelReservationPolicy, ModelUsageObservation,
 };
 pub use permissions::{ApprovalChoice, ScopedPermission};
 pub use plannotator::PlanFeedbackInput;
@@ -193,6 +195,9 @@ pub struct RuntimeConfig {
     /// Trusted host policy for exact model-request non-dispatch or complete
     /// reported-usage evidence. Absence denies new reconciliation decisions.
     pub model_request_reconciliation_verifier: Option<Arc<dyn ModelRequestReconciliationVerifier>>,
+    /// Trusted host policy for artifact action / tool outcome receipts.
+    pub artifact_reconciliation_verifier:
+        Option<Arc<dyn cayw_artifacts::ArtifactReconciliationVerifier>>,
     /// Optional externally supplied shared plugin registry.
     #[cfg(feature = "plugins")]
     pub plugin_registry: Option<Arc<cayw_plugins::PluginRegistry>>,
@@ -228,6 +233,7 @@ impl Default for RuntimeConfig {
             request_limits: Default::default(),
             reconciliation_verifier: None,
             model_request_reconciliation_verifier: None,
+            artifact_reconciliation_verifier: None,
             #[cfg(feature = "plugins")]
             plugin_registry: None,
         }
@@ -695,6 +701,7 @@ impl Runtime {
             ));
         }
         let _coordinate = self.inner.coordination.enter()?;
+        self.ensure_artifact_executor_idle(id)?;
         let snapshot = self.inner.store.snapshot(id)?;
         if results::has_pending_storage(self, id, snapshot.cursor)? {
             return Err(RuntimeError::NeedsReconciliation);
@@ -715,6 +722,7 @@ impl Runtime {
             .cells
             .is_frozen(id)
             .map_err(|error| RuntimeError::Workspace(error.to_string()))?
+            || self.has_artifact_unknown(id)?
         {
             return Err(RuntimeError::NeedsReconciliation);
         }
@@ -756,12 +764,14 @@ impl Runtime {
     }
     pub(crate) fn check_ready(&self, id: &str) -> Result<SessionView, RuntimeError> {
         let snapshot = self.get(id)?;
+        self.ensure_artifact_executor_idle(id)?;
         if snapshot.state == SessionState::NeedsReconciliation
             || self
                 .inner
                 .cells
                 .is_frozen(id)
                 .map_err(|error| RuntimeError::Workspace(error.to_string()))?
+            || self.has_artifact_unknown(id)?
         {
             return Err(RuntimeError::NeedsReconciliation);
         }

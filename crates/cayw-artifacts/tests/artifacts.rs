@@ -219,11 +219,17 @@ fn invoke_tool_hits_host_dispatch_bridge() {
 fn host_dispatch_error_rejects_action() {
     struct FailingDispatch;
     impl HostActionDispatch for FailingDispatch {
-        fn follow_up_task(&self, _req: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String> {
-            Err("runtime unavailable".into())
+        fn follow_up_task(
+            &self,
+            _req: FollowUpDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Err(HostDispatchError::rejected("runtime unavailable"))
         }
-        fn invoke_tool(&self, _req: ToolDispatch<'_>) -> Result<HostDispatchResult, String> {
-            Err("host denied".into())
+        fn invoke_tool(
+            &self,
+            _req: ToolDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Err(HostDispatchError::rejected("host denied"))
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -254,6 +260,251 @@ fn host_dispatch_error_rejects_action() {
             .as_deref()
             .unwrap()
             .contains("runtime unavailable")
+    );
+}
+
+#[test]
+fn transactional_snapshot_recovery_preserves_store_on_action_failure() {
+    let ws = ArtifactWorkspace::new();
+    put_card(&ws, "card-original", "sess-1", "<p>original</p>", 100);
+
+    // Prepare a recovery bundle where artifacts are valid, but actions contain an invalid action_id
+    let mut bundle = ws.export_recovery();
+    bundle.artifacts = ArtifactSnapshot {
+        artifacts: vec![ArtifactRecord {
+            artifact_id: "card-new".into(),
+            session_id: "sess-1".into(),
+            kind: ArtifactKind::HtmlCard,
+            title: "New".into(),
+            body: "<p>new</p>".into(),
+            content_version: 1,
+            created_at_ms: 200,
+            updated_at_ms: 200,
+            result_handle: None,
+        }],
+    };
+    bundle.actions.actions.push(ActionRecord {
+        action_id: "invalid action id with spaces!".into(),
+        artifact_id: "card-new".into(),
+        session_id: "sess-1".into(),
+        kind: ActionKind::Button,
+        intent: ActionIntent::ReadOnly {
+            note: "test".into(),
+        },
+        status: ActionStatus::Applied,
+        rejection_reason: None,
+        outcome_json: None,
+        requested_at_ms: 200,
+        recorded_at_ms: 200,
+    });
+
+    let res = ws.restore_recovery(bundle);
+    assert!(res.is_err(), "recovery must fail due to invalid action ID");
+
+    // The store must NOT have been updated with card-new; card-original must still be there!
+    assert!(
+        ws.store.get("card-original").is_ok(),
+        "original card must remain untouched"
+    );
+    assert!(
+        ws.store.get("card-new").is_err(),
+        "uncommitted new card must not exist"
+    );
+}
+
+#[test]
+fn host_dispatch_unknown_records_outcome_unknown_and_blocks_session() {
+    struct UnknownDispatch;
+    impl HostActionDispatch for UnknownDispatch {
+        fn follow_up_task(
+            &self,
+            _req: FollowUpDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Err(HostDispatchError::unknown(
+                "backend timeout during follow-up",
+            ))
+        }
+        fn invoke_tool(
+            &self,
+            _req: ToolDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Err(HostDispatchError::unknown("capability uncertain timeout"))
+        }
+        fn cancel_action(&self, _action_id: &str) -> Result<bool, HostDispatchError> {
+            Err(HostDispatchError::unknown("cancel uncertain timeout"))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let ws = ArtifactWorkspace::with_dispatch(Arc::new(UnknownDispatch));
+    put_card(&ws, "card-a", "sess-1", "<button>x</button>", 1);
+
+    // 1. Dispatching with unknown error records OutcomeUnknown status
+    let outcome = ws
+        .actions
+        .dispatch(ActionRequest {
+            action_id: "act-unknown-1".into(),
+            artifact_id: "card-a".into(),
+            session_id: "sess-1".into(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::FollowUpTask {
+                prompt: "summarize".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 10,
+        })
+        .unwrap();
+
+    assert_eq!(outcome.record.status, ActionStatus::OutcomeUnknown);
+    assert!(
+        outcome
+            .record
+            .rejection_reason
+            .as_deref()
+            .unwrap()
+            .contains("backend timeout during follow-up")
+    );
+    assert!(ws.actions.has_outcome_unknown("sess-1"));
+
+    // 2. Subsequent action on the same session is blocked with NeedsReconciliation
+    let blocked = ws
+        .actions
+        .dispatch(ActionRequest {
+            action_id: "act-blocked-2".into(),
+            artifact_id: "card-a".into(),
+            session_id: "sess-1".into(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::ReadOnly {
+                note: "test".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 20,
+        })
+        .unwrap_err();
+
+    assert!(matches!(blocked, ArtifactError::NeedsReconciliation(_)));
+}
+
+#[test]
+fn host_dispatch_unknown_cancel_preserves_needs_reconciliation() {
+    struct CancelUnknownDispatch;
+    impl HostActionDispatch for CancelUnknownDispatch {
+        fn follow_up_task(
+            &self,
+            _req: FollowUpDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Ok(HostDispatchResult {
+                outcome_json: "{}".into(),
+            })
+        }
+        fn invoke_tool(
+            &self,
+            _req: ToolDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Ok(HostDispatchResult {
+                outcome_json: "{}".into(),
+            })
+        }
+        fn cancel_action(&self, _action_id: &str) -> Result<bool, HostDispatchError> {
+            Err(HostDispatchError::unknown(
+                "cancel failed with unknown outcome",
+            ))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let ws = ArtifactWorkspace::with_dispatch(Arc::new(CancelUnknownDispatch));
+    put_card(&ws, "card-a", "sess-1", "<button>x</button>", 1);
+
+    let outcome = ws
+        .actions
+        .dispatch(ActionRequest {
+            action_id: "act-cancel-me".into(),
+            artifact_id: "card-a".into(),
+            session_id: "sess-1".into(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::FollowUpTask {
+                prompt: "run".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 10,
+        })
+        .unwrap();
+    assert_eq!(outcome.record.status, ActionStatus::Applied);
+
+    // Cancel returning unknown must return NeedsReconciliation rather than Invalid
+    let cancel_err = ws.actions.cancel("act-cancel-me").unwrap_err();
+    assert!(
+        matches!(cancel_err, ArtifactError::NeedsReconciliation(msg) if msg.contains("cancel_action: cancel failed with unknown outcome"))
+    );
+}
+
+#[test]
+fn outcome_unknown_blocks_subsequent_actions() {
+    struct UnknownDispatch;
+    impl HostActionDispatch for UnknownDispatch {
+        fn follow_up_task(
+            &self,
+            _req: FollowUpDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Err(HostDispatchError::unknown(
+                "timeout after tool started effects",
+            ))
+        }
+        fn invoke_tool(
+            &self,
+            _req: ToolDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            Err(HostDispatchError::unknown("interrupted during execution"))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let ws = ArtifactWorkspace::with_dispatch(Arc::new(UnknownDispatch));
+    put_card(&ws, "card-a", "sess-1", "<button>x</button>", 1);
+    let outcome = ws
+        .actions
+        .dispatch(ActionRequest {
+            action_id: "act-unknown".into(),
+            artifact_id: "card-a".into(),
+            session_id: "sess-1".into(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::FollowUpTask {
+                prompt: "run risky task".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(outcome.record.status, ActionStatus::OutcomeUnknown);
+    assert!(ws.actions.has_outcome_unknown("sess-1"));
+
+    // Subsequent action on sess-1 must be blocked with NeedsReconciliation
+    let err = ws
+        .actions
+        .dispatch(ActionRequest {
+            action_id: "act-subsequent".into(),
+            artifact_id: "card-a".into(),
+            session_id: "sess-1".into(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::ReadOnly {
+                note: "safe read".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 2,
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ArtifactError::NeedsReconciliation(_)),
+        "subsequent actions must require reconciliation, got {err:?}"
     );
 }
 

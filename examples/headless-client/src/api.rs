@@ -113,33 +113,8 @@ impl Connections {
                 let health = probe_api.health().await?;
                 probe_api.close().await;
 
-                let timeout_ms = health
-                    .get("request_timeout_ms")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| {
-                        Failure::invalid(
-                            "server health response missing valid integer request_timeout_ms",
-                        )
-                    })?;
-                if timeout_ms == 0 {
-                    return Err(Failure::invalid(
-                        "server request_timeout_ms must be non-zero",
-                    ));
-                }
-                let request_timeout = Duration::from_millis(timeout_ms);
-                if request_timeout.is_zero()
-                    || std::time::Instant::now()
-                        .checked_add(request_timeout)
-                        .is_none()
-                {
-                    return Err(Failure::invalid(
-                        "server request_timeout_ms is invalid or non-representable",
-                    ));
-                }
-                let config = ClientConfig {
-                    request_timeout,
-                    ..ClientConfig::default()
-                };
+                let config = client_config_from_health(&health)?;
+                let timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap_or(0);
                 let execute =
                     Client::connect_with_config(*address, token.clone(), config.clone()).await?;
                 let observe = match Client::connect_with_config(*address, token, config).await {
@@ -152,7 +127,13 @@ impl Connections {
                 Ok(Self {
                     execute: Api::Ipc(execute),
                     observe: Api::Ipc(observe),
-                    metadata: json!({"type":"runtime","mode":"ipc","health":health,"requested_model":health["model"]}),
+                    metadata: json!({
+                        "type": "runtime",
+                        "mode": "ipc",
+                        "health": health,
+                        "requested_model": health["model"],
+                        "request_timeout_ms": timeout_ms,
+                    }),
                 })
             }
         }
@@ -161,6 +142,38 @@ impl Connections {
         self.execute.close().await;
         self.observe.close().await;
     }
+}
+pub(crate) fn parse_server_request_timeout(health: &Value) -> Result<Duration> {
+    let timeout_ms = health
+        .get("request_timeout_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            Failure::invalid("server health response missing valid integer request_timeout_ms")
+        })?;
+    if timeout_ms == 0 {
+        return Err(Failure::invalid(
+            "server request_timeout_ms must be non-zero",
+        ));
+    }
+    let request_timeout = Duration::from_millis(timeout_ms);
+    if request_timeout.is_zero()
+        || std::time::Instant::now()
+            .checked_add(request_timeout)
+            .is_none()
+    {
+        return Err(Failure::invalid(
+            "server request_timeout_ms is invalid or non-representable",
+        ));
+    }
+    Ok(request_timeout)
+}
+
+pub(crate) fn client_config_from_health(health: &Value) -> Result<ClientConfig> {
+    let request_timeout = parse_server_request_timeout(health)?;
+    Ok(ClientConfig {
+        request_timeout,
+        ..ClientConfig::default()
+    })
 }
 fn environment(name: &str) -> Result<String> {
     std::env::var(name)
@@ -312,4 +325,58 @@ async fn rpc<T: DeserializeOwned>(client: &Client, method: &str, params: Value) 
     Ok(serde_json::from_value(
         client.request(method, params).await?,
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_server_request_timeout_valid() {
+        let health = json!({
+            "status": "ok",
+            "request_timeout_ms": 5000,
+        });
+        let timeout = parse_server_request_timeout(&health)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(timeout, Duration::from_millis(5000));
+        let config =
+            client_config_from_health(&health).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(config.request_timeout, Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn parse_server_request_timeout_missing() {
+        let health = json!({ "status": "ok" });
+        let err = parse_server_request_timeout(&health).unwrap_err();
+        assert_eq!(
+            err.message,
+            "server health response missing valid integer request_timeout_ms"
+        );
+    }
+
+    #[test]
+    fn parse_server_request_timeout_zero() {
+        let health = json!({
+            "status": "ok",
+            "request_timeout_ms": 0,
+        });
+        let err = parse_server_request_timeout(&health).unwrap_err();
+        assert_eq!(err.message, "server request_timeout_ms must be non-zero");
+    }
+
+    #[test]
+    fn parse_server_request_timeout_negative_or_string() {
+        let health = json!({
+            "status": "ok",
+            "request_timeout_ms": -100,
+        });
+        assert!(parse_server_request_timeout(&health).is_err());
+
+        let health_str = json!({
+            "status": "ok",
+            "request_timeout_ms": "5000",
+        });
+        assert!(parse_server_request_timeout(&health_str).is_err());
+    }
 }

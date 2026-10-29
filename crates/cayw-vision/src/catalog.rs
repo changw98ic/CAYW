@@ -13,14 +13,21 @@ fn object(properties: Value, required: &[&str]) -> Value {
 }
 
 fn image_schema() -> Value {
-    object(
-        json!({
+    json!({
+        "type": "object",
+        "properties": {
             "width": {"type":"integer","minimum":1,"maximum":8192},
             "height": {"type":"integer","minimum":1,"maximum":8192},
-            "rgba_base64": {"type":"string","minLength":1}
-        }),
-        &["width", "height", "rgba_base64"],
-    )
+            "rgba_base64": {"type":"string","minLength":1},
+            "handle": {"type":"string","minLength":1}
+        },
+        "required": ["width", "height"],
+        "additionalProperties": false,
+        "oneOf": [
+            {"required": ["rgba_base64"]},
+            {"required": ["handle"]}
+        ]
+    })
 }
 
 /// Canonical vision capability names exposed through Host → Runtime catalog.
@@ -66,7 +73,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         (
             "vision.ocr",
-            "OCR an RGBA8 image via the host OCR backend (tesseract when installed; fixture fallback for CI).",
+            "OCR an RGBA8 image via the host OCR backend (tesseract when configured; unavailable when unconfigured).",
             object(
                 json!({
                     "image": image.clone(),
@@ -77,7 +84,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
         (
             "vision.describe",
-            "Describe / visual Q&A over an RGBA8 image. Uses HTTP describe when CAYW_VISION_DESCRIBE_URL is set; otherwise the offline counting/fixture backend.",
+            "Describe / visual Q&A over an RGBA8 image. Uses HTTP describe when CAYW_VISION_DESCRIBE_URL is set; unavailable when unconfigured (fixture backend when CAYW_VISION_DESCRIBE=fixture).",
             object(
                 json!({
                     "image": image,

@@ -11,7 +11,7 @@ use cayw_plannotator::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) const FEEDBACK_RECORDED: &str = "plannotator_feedback_recorded";
 
@@ -19,7 +19,7 @@ pub(crate) const FEEDBACK_RECORDED: &str = "plannotator_feedback_recorded";
 pub(crate) struct PlannotatorState {
     store: FeedbackStore,
     live_files: BTreeMap<String, BTreeMap<String, LiveFileVersion>>,
-    hydrated: BTreeSet<String>,
+    cursors: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,36 +66,61 @@ fn attempt_ordinal(inner: &Inner, session: &str) -> Result<u64, RuntimeError> {
 }
 
 fn hydrate_session(inner: &Inner, session: &str) -> Result<(), RuntimeError> {
-    {
+    let snapshot = inner.store.snapshot(session)?;
+    let last_cursor = {
         let state = lock(&inner.plannotator);
-        if state.hydrated.contains(session) {
-            return Ok(());
-        }
-    }
-    let events = collaboration::read_log(inner, session)?;
-    let mut state = lock(&inner.plannotator);
-    if state.hydrated.contains(session) {
+        state.cursors.get(session).copied()
+    };
+    if let Some(cursor) = last_cursor
+        && cursor >= snapshot.cursor
+    {
         return Ok(());
     }
-    for record in events {
-        let CoreEvent::Host { kind, data } = record.event else {
-            continue;
-        };
-        if kind != FEEDBACK_RECORDED {
-            continue;
+    let mut cursor = last_cursor.unwrap_or(0);
+    let mut new_feedback = Vec::new();
+    while cursor < snapshot.cursor {
+        let limit = (snapshot.cursor - cursor).min(cayw_core::MAX_EVENT_PAGE as u64) as usize;
+        let page = inner.store.events(session, cursor, limit)?;
+        if page.is_empty() {
+            break;
         }
-        let payload = data.get("decision").cloned().unwrap_or(data);
-        let feedback: StructuredFeedback = serde_json::from_value(payload).map_err(|error| {
-            RuntimeError::InvalidInput(format!("invalid plannotator feedback event: {error}"))
-        })?;
-        if feedback.session_id != session {
-            return Err(RuntimeError::InvalidInput(
-                "plannotator feedback event session mismatch".into(),
-            ));
+        let next = page.last().map_or(cursor, |record| record.cursor);
+        if next <= cursor {
+            break;
         }
+        for record in page {
+            cursor = record.cursor;
+            let CoreEvent::Host { kind, data } = record.event else {
+                continue;
+            };
+            if kind != FEEDBACK_RECORDED {
+                continue;
+            }
+            let payload = data.get("decision").cloned().unwrap_or(data);
+            let feedback: StructuredFeedback =
+                serde_json::from_value(payload).map_err(|error| {
+                    RuntimeError::InvalidInput(format!(
+                        "invalid plannotator feedback event: {error}"
+                    ))
+                })?;
+            if feedback.session_id != session {
+                return Err(RuntimeError::InvalidInput(
+                    "plannotator feedback event session mismatch".into(),
+                ));
+            }
+            new_feedback.push(feedback);
+        }
+    }
+    let mut state = lock(&inner.plannotator);
+    for feedback in new_feedback {
         state.store.restore(feedback);
     }
-    state.hydrated.insert(session.into());
+    let target_cursor = cursor.max(snapshot.cursor);
+    state
+        .cursors
+        .entry(session.into())
+        .and_modify(|c| *c = (*c).max(target_cursor))
+        .or_insert(target_cursor);
     Ok(())
 }
 
@@ -104,10 +129,10 @@ fn persist_feedback(
     session: &str,
     actor: &str,
     feedback: &StructuredFeedback,
-) -> Result<(), RuntimeError> {
+) -> Result<u64, RuntimeError> {
     let snapshot = inner.store.snapshot(session)?;
     let data = serde_json::to_value(feedback).map_err(RuntimeError::Json)?;
-    inner
+    let record = inner
         .store
         .append_control_event(
             session,
@@ -119,7 +144,7 @@ fn persist_feedback(
         )
         .map_err(RuntimeError::Core)?;
     inner.changed.notify_waiters();
-    Ok(())
+    Ok(record.cursor)
 }
 
 impl Runtime {
@@ -145,10 +170,15 @@ impl Runtime {
             .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
         // Durable write before memory commit so a failed API cannot leave
         // injectable state for for_attempt / feedback_messages_for_attempt.
-        persist_feedback(&self.inner, &feedback.session_id, actor, &feedback)?;
+        let new_cursor = persist_feedback(&self.inner, &feedback.session_id, actor, &feedback)?;
         {
             let mut state = lock(&self.inner.plannotator);
             state.store.commit(feedback.clone());
+            state
+                .cursors
+                .entry(feedback.session_id.clone())
+                .and_modify(|c| *c = (*c).max(new_cursor))
+                .or_insert(new_cursor);
         }
         Ok(feedback)
     }
@@ -201,17 +231,18 @@ impl Runtime {
             &input.actor,
         )?;
         let mut state = lock(&self.inner.plannotator);
-        state
+        let session_files = state
             .live_files
             .entry(feedback.session_id.clone())
-            .or_default()
-            .insert(
-                path,
-                LiveFileVersion {
-                    version: plan.version,
-                    content_sha256: sha,
-                },
-            );
+            .or_default();
+        session_files.retain(|k, _| !k.starts_with("plan:"));
+        session_files.insert(
+            path,
+            LiveFileVersion {
+                version: plan.version,
+                content_sha256: sha,
+            },
+        );
         Ok(feedback)
     }
 
@@ -250,6 +281,7 @@ pub(crate) fn feedback_messages_for_attempt(
     inner: &Inner,
     session_id: &str,
 ) -> Result<Vec<Message>, RuntimeError> {
+    refresh_plan_live_files(inner, session_id)?;
     hydrate_session(inner, session_id)?;
     let attempt = attempt_ordinal(inner, session_id)?;
     if attempt == 0 {
@@ -300,23 +332,21 @@ pub(crate) fn feedback_messages_for_attempt(
 /// Sync live plan identity from Core before apply when a plan exists.
 pub(crate) fn refresh_plan_live_files(inner: &Inner, session_id: &str) -> Result<(), RuntimeError> {
     let events = collaboration::read_log(inner, session_id)?;
-    let Some(stored) = latest_plan_any(&events)? else {
-        return Ok(());
-    };
-    let sha = plan_content_sha(&stored.steps)?;
-    let path = plan_path(&stored.task_id);
+    let maybe_plan = latest_plan_any(&events)?;
     let mut state = lock(&inner.plannotator);
-    state
-        .live_files
-        .entry(session_id.into())
-        .or_default()
-        .insert(
+    let session_files = state.live_files.entry(session_id.into()).or_default();
+    session_files.retain(|k, _| !k.starts_with("plan:"));
+    if let Some(stored) = maybe_plan {
+        let sha = plan_content_sha(&stored.steps)?;
+        let path = plan_path(&stored.task_id);
+        session_files.insert(
             path,
             LiveFileVersion {
                 version: stored.version,
                 content_sha256: sha,
             },
         );
+    }
     Ok(())
 }
 

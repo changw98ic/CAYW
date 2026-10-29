@@ -195,7 +195,6 @@ fn apply_input(
         if !seen.insert(incoming.sequence) {
             return Err(CellError::Conflict);
         }
-        validate_json(&incoming.arguments, limits.json_depth, limits.item_bytes)?;
         let index = incoming
             .sequence
             .checked_sub(1)
@@ -339,16 +338,13 @@ fn settle_call(
     let (status, result, omitted, hash, error) = match terminal {
         HostCallTerminal::Succeeded {
             result: HostResult::Value(value),
-        } => {
-            validate_json(value, limits.json_depth, limits.item_bytes)?;
-            (
-                IntentStatus::Succeeded,
-                Some(value.clone()),
-                false,
-                Some(HostResult::value_hash(value)),
-                None,
-            )
-        }
+        } => (
+            IntentStatus::Succeeded,
+            Some(value.clone()),
+            false,
+            Some(HostResult::value_hash(value)),
+            None,
+        ),
         HostCallTerminal::Succeeded {
             result: HostResult::Omitted { sha256 },
         } => {

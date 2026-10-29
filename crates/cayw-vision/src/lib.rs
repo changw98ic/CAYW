@@ -5,10 +5,10 @@
 //! re-bill vision backends.
 //!
 //! **Backends:** [`TesseractOcrEngine`] shells out to the system `tesseract`
-//! CLI when installed. [`HttpDescribeBackend`] POSTs when
-//! `CAYW_VISION_DESCRIBE_URL` is set. Otherwise [`FixtureOcrEngine`] /
-//! [`CountingDescribeBackend`] keep CI offline and dependency-free
-//! (`CAYW_VISION_OCR=fixture` forces the fixture OCR path).
+//! CLI when configured (`CAYW_VISION_OCR=tesseract`). [`HttpDescribeBackend`]
+//! POSTs when `CAYW_VISION_DESCRIBE_URL` is set. When unconfigured, explicit
+//! unavailable backends are used; offline tests inject [`FixtureOcrEngine`] or
+//! [`CountingDescribeBackend`] directly.
 //!
 //! Host / Runtime expose `vision.crop` / `vision.pixel_diff` / `vision.colors` /
 //! `vision.ocr` / `vision.describe` via [`definitions`] and [`VisionService`].

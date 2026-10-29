@@ -720,7 +720,7 @@ fn apply_manifest(
     event: &EventRecord,
 ) -> Result<(), Error> {
     crate::engine::validate_plan(plan)?;
-    let generated = crate::engine::script_for_plan(plan)?;
+    let generated = crate::engine::script_for_plan_validated(plan)?;
     if project.source_hash != script_digest(&generated) {
         return Err(Error::Conflict(
             "节点计划与 Core 记录的实际执行源码不一致".into(),

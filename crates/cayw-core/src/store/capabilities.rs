@@ -155,7 +155,7 @@ fn validate_key(key: &CapabilityCallKey) -> Result<(), CoreError> {
 
 fn validate_outcome(outcome: &CapabilityOutcome) -> Result<(), CoreError> {
     match outcome {
-        CapabilityOutcome::Completed { result } => bounded_value(result),
+        CapabilityOutcome::Completed { .. } => Ok(()),
         CapabilityOutcome::Failed { error } | CapabilityOutcome::OutcomeUnknown { error } => {
             nonempty(error, "error")
         }
@@ -273,7 +273,6 @@ impl SessionStore {
         let input = checked_input(input)?;
         validate_key(&input.key)?;
         identifier(&input.name, "capability name")?;
-        bounded_value(&input.arguments)?;
         self.mutate(&lease.session_id, |session| {
             session.admit_work(lease)?;
             if session.capabilities.len() >= MAX_CAPABILITY_CALLS {
@@ -464,10 +463,7 @@ impl SessionStore {
     ) -> Result<EventRecord, CoreError> {
         let outcome = checked_input(outcome)?;
         let state = match &outcome {
-            ExecutionOutcome::Completed { result } => {
-                bounded_value(result)?;
-                ExecutionState::Completed
-            }
+            ExecutionOutcome::Completed { .. } => ExecutionState::Completed,
             ExecutionOutcome::Failed { error } => {
                 nonempty(error, "error")?;
                 ExecutionState::Failed
@@ -531,9 +527,6 @@ impl SessionStore {
             CapabilityOutcome::OutcomeUnknown { .. }
         ) {
             return Err(invalid("Reconciliation requires a known outcome"));
-        }
-        if let Some(provenance) = &reconciliation.external_provenance {
-            bounded_value(provenance)?;
         }
         self.verify_reconciliation(&ReconciliationRequest::Capability {
             reconciliation: reconciliation.clone(),

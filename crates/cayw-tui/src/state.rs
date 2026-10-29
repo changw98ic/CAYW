@@ -666,7 +666,12 @@ impl App {
     }
 
     pub fn upsert_snapshot(&mut self, value: Value, select: bool) -> Result<(), String> {
-        let mut incoming = SessionView::from_snapshot(value)?;
+        let incoming = SessionView::from_snapshot(value)?;
+        self.upsert_session_view(incoming, select);
+        Ok(())
+    }
+
+    fn upsert_session_view(&mut self, mut incoming: SessionView, select: bool) {
         let id = incoming.id.clone();
         if let Some(index) = self.sessions.iter().position(|session| session.id == id) {
             let old = &self.sessions[index];
@@ -675,13 +680,16 @@ impl App {
                 if select {
                     self.select_id(&id);
                 }
-                return Ok(());
+                return;
             }
             incoming.scroll = old.scroll;
             incoming.cursor = old.cursor;
             incoming.logs = old.logs.clone();
             incoming.settled_capabilities = old.settled_capabilities.clone();
             incoming.stream_replay = old.stream_replay.clone();
+            if incoming.active_attempt.is_none() && incoming.state != "idle" {
+                incoming.active_attempt = old.active_attempt.clone();
+            }
             incoming.project_stream();
             if matches!(incoming.state.as_str(), "running" | "awaiting_approval") {
                 incoming.tool_status = old.tool_status.clone();
@@ -713,23 +721,25 @@ impl App {
         if select || self.selected_id.is_none() {
             self.select_id(&id);
         }
-        Ok(())
     }
 
     pub fn apply_list(&mut self, value: Value) -> Result<(), String> {
-        let list = value
-            .as_array()
-            .ok_or("session.list did not return an array")?;
+        let list = match value {
+            Value::Array(list) => list,
+            _ => return Err("session.list did not return an array".into()),
+        };
         // Validate the complete page before mutating existing projections.
         let mut ids = BTreeSet::new();
+        let mut views = Vec::with_capacity(list.len());
         for value in list {
-            let session = SessionView::from_snapshot(value.clone())?;
-            if !ids.insert(session.id) {
+            let session = SessionView::from_snapshot(value)?;
+            if !ids.insert(session.id.clone()) {
                 return Err("session.list contains duplicate ids".into());
             }
+            views.push(session);
         }
-        for value in list {
-            self.upsert_snapshot(value.clone(), false)?;
+        for session in views {
+            self.upsert_session_view(session, false);
         }
         self.status = if self.sessions.is_empty() {
             "No sessions. Ctrl+N creates one."

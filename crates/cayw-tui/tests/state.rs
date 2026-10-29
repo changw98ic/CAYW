@@ -343,6 +343,45 @@ fn recovery_unknown_ids_block_prompt_until_authoritative_snapshot() {
 }
 
 #[test]
+fn reconciled_event_and_same_cursor_authoritative_snapshot_clears_unknown_and_unblocks_prompt() {
+    let mut app = app("running");
+    app.apply_events(
+        "s1",
+        json!([
+            {"cursor": 1, "event": {"type": "attempt_recovered", "lease": null, "unknown_call_ids": ["c1"], "not_executed_call_ids": []}},
+            {"cursor": 2, "event": {"type": "reconciled"}}
+        ]),
+    )
+    .unwrap();
+
+    let session = app.selected().unwrap();
+    assert_eq!(session.cursor, 2);
+    assert_eq!(session.state, "needs_reconciliation");
+    assert!(!session.synced);
+    assert!(!session.can_prompt());
+    assert!(session.has_unknown());
+    assert!(
+        session
+            .unresolved_calls
+            .iter()
+            .any(|c| c["call"]["id"] == "c1")
+    );
+
+    // Authoritative snapshot arrives with snapshot_cursor == old.cursor (2 == 2)
+    // and empty unresolved_calls after Core reconciliation.
+    app.upsert_snapshot(snapshot("idle", 2), false).unwrap();
+
+    let session = app.selected().unwrap();
+    assert_eq!(session.cursor, 2);
+    assert_eq!(session.snapshot_cursor, 2);
+    assert_eq!(session.state, "idle");
+    assert!(session.synced);
+    assert!(session.unresolved_calls.is_empty());
+    assert!(!session.has_unknown());
+    assert!(session.can_prompt());
+}
+
+#[test]
 fn unicode_vertical_navigation_keeps_grapheme_boundaries_and_short_line_columns() {
     let mut editor = Editor::default();
     editor.insert("你🙂e\u{301}\nx\n尾🙂");
@@ -512,4 +551,123 @@ fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_unknown_out
             .is_empty()
     );
     assert_eq!(app.view, ViewTab::Chat);
+}
+
+#[test]
+fn apply_list_validates_page_atomically_and_preserves_cursor_draft_unknown_and_attempt() {
+    let mut app = app("running");
+    let attempt = json!({"session_id":"s1","attempt_id":"a1","worker_id":"worker","fence":1});
+    let records = json!([
+        {"cursor": 1, "attempt": attempt, "event": {"type": "attempt_started", "lease": attempt}},
+        {"cursor": 2, "attempt": attempt, "event": {"type": "agent", "event": {"type": "message_update", "message": {"content": [{"type": "text", "text": "streaming text"}]}}}},
+        {"cursor": 3, "attempt": attempt, "event": {"type": "agent", "event": {"type": "tool_execution_end", "call": {"id": "call-unknown", "name": "fs.write"}, "result": {"outcome_unknown": true, "content": "error"}}}}
+    ]);
+    app.apply_events("s1", records).unwrap();
+    assert_eq!(app.selected().unwrap().cursor, 3);
+    assert_eq!(
+        app.selected().unwrap().streaming_text.as_deref(),
+        Some("streaming text")
+    );
+    assert!(app.selected().unwrap().has_unknown());
+    assert_eq!(app.selected().unwrap().state, "needs_reconciliation");
+
+    // Enter a draft in the composer
+    app.focus = Focus::Composer;
+    app.input.insert("draft prompt");
+
+    // 1. apply_list with duplicate IDs fails atomically without altering existing session
+    let dup_list = json!([snapshot("idle", 0), snapshot("idle", 0),]);
+    assert!(app.apply_list(dup_list).is_err());
+    assert_eq!(app.selected().unwrap().cursor, 3);
+    assert_eq!(app.input.text(), "draft prompt");
+    assert!(app.selected().unwrap().has_unknown());
+
+    // 2. apply_list with invalid state fails atomically
+    let mut bad_item = snapshot("idle", 0);
+    bad_item["id"] = json!("s2");
+    bad_item["state"] = json!("invalid_state");
+    let bad_list = json!([snapshot("idle", 0), bad_item]);
+    assert!(app.apply_list(bad_list).is_err());
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.selected().unwrap().cursor, 3);
+
+    // 3. Valid apply_list with s1 (snapshot has cursor 0 and attempt null) and s2
+    let mut s1_snap = snapshot("running", 0);
+    s1_snap["attempt"] = Value::Null;
+    let mut s2_snap = snapshot("idle", 0);
+    s2_snap["id"] = json!("s2");
+    s2_snap["label"] = json!("session two");
+    let valid_list = json!([s1_snap, s2_snap]);
+
+    app.apply_list(valid_list).unwrap();
+    assert_eq!(app.sessions.len(), 2);
+
+    let s1 = app.sessions.iter().find(|s| s.id == "s1").unwrap();
+    // Preserves cursor
+    assert_eq!(s1.cursor, 3);
+    // Preserves unknown state and unresolved calls
+    assert!(s1.has_unknown());
+    assert_eq!(s1.state, "needs_reconciliation");
+    assert!(
+        s1.unresolved_calls
+            .iter()
+            .any(|c| c["call"]["id"] == "call-unknown")
+    );
+    // Preserves active attempt and streaming text
+    assert_eq!(s1.streaming_text.as_deref(), Some("streaming text"));
+    // Preserves draft
+    assert_eq!(app.input.text(), "draft prompt");
+}
+
+#[test]
+fn apply_list_with_higher_cursor_authoritative_unknown_atomically_updates_and_locks_session() {
+    let mut app = app("idle");
+    assert_eq!(app.selected().unwrap().cursor, 0);
+    assert_eq!(app.selected().unwrap().state, "idle");
+    assert!(app.selected().unwrap().can_prompt());
+
+    // 1. apply_list with an invalid item fails atomically without updating s1
+    let mut bad_s1 = snapshot("needs_reconciliation", 2);
+    bad_s1["unresolved_calls"] =
+        json!([{"call": {"id": "c-auth", "name": "fs.write"}, "state": "outcome_unknown"}]);
+    let mut bad_s2 = snapshot("idle", 0);
+    bad_s2["id"] = json!("s2");
+    bad_s2["state"] = json!("invalid_state");
+    let bad_list = json!([bad_s1, bad_s2]);
+    assert!(app.apply_list(bad_list).is_err());
+
+    let s1 = app.selected().unwrap();
+    assert_eq!(s1.cursor, 0);
+    assert_eq!(s1.snapshot_cursor, 0);
+    assert_eq!(s1.state, "idle");
+    assert!(s1.unresolved_calls.is_empty());
+    assert!(!s1.has_unknown());
+    assert!(s1.can_prompt());
+
+    // 2. Valid apply_list where s1 snapshot has snapshot_cursor 2 >= old.cursor (0)
+    // and contains a genuine authoritative outcome_unknown call
+    let mut valid_s1 = snapshot("needs_reconciliation", 2);
+    valid_s1["unresolved_calls"] =
+        json!([{"call": {"id": "c-auth", "name": "fs.write"}, "state": "outcome_unknown"}]);
+    let mut valid_s2 = snapshot("idle", 1);
+    valid_s2["id"] = json!("s2");
+    valid_s2["label"] = json!("session two");
+    let valid_list = json!([valid_s1, valid_s2]);
+
+    app.apply_list(valid_list).unwrap();
+    assert_eq!(app.sessions.len(), 2);
+
+    let s1 = app.sessions.iter().find(|s| s.id == "s1").unwrap();
+    assert_eq!(s1.snapshot_cursor, 2);
+    assert_eq!(s1.state, "needs_reconciliation");
+    assert!(s1.has_unknown());
+    assert_eq!(s1.unresolved_calls.len(), 1);
+    assert_eq!(s1.unresolved_calls[0]["call"]["id"], "c-auth");
+    assert_eq!(s1.unresolved_calls[0]["state"], "outcome_unknown");
+    assert!(!s1.can_prompt());
+
+    let s2 = app.sessions.iter().find(|s| s.id == "s2").unwrap();
+    assert_eq!(s2.snapshot_cursor, 1);
+    assert_eq!(s2.state, "idle");
+    assert!(s2.can_prompt());
 }

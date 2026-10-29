@@ -173,35 +173,11 @@ impl FrameworkProject {
                 )
             })?;
 
-        let mut baseline = BTreeMap::new();
-        let mut draft = BTreeMap::new();
-        let mut total = 0usize;
-        for path in paths {
-            let (source, sha256) = read_source(&host, &path).await?;
-            if source.len() > MAX_FILE_BYTES {
-                return Err(ProjectError::new(
-                    "source_too_large",
-                    format!("{path} exceeds the {MAX_FILE_BYTES}-byte editor limit"),
-                ));
-            }
-            total = total.checked_add(source.len()).ok_or_else(|| {
-                ProjectError::new("source_too_large", "project source size overflow")
-            })?;
-            if total > MAX_TOTAL_BYTES {
-                return Err(ProjectError::new(
-                    "source_too_large",
-                    format!("project source exceeds the {MAX_TOTAL_BYTES}-byte editor limit"),
-                ));
-            }
-            baseline.insert(
-                path.clone(),
-                FileState {
-                    saved: source.clone(),
-                    sha256,
-                },
-            );
-            draft.insert(path, source);
-        }
+        let baseline = read_all(&host, paths.iter()).await?;
+        let draft: BTreeMap<String, String> = baseline
+            .iter()
+            .map(|(path, file)| (path.clone(), file.saved.clone()))
+            .collect();
         if draft.is_empty() {
             return Err(ProjectError::new(
                 "invalid_project",

@@ -221,22 +221,11 @@ fn pdf_scope_is_literal_only_not_full_engine() {
 
 #[tokio::test]
 async fn ddg_search_distinguishes_empty_and_evidence() {
-    let quoted_noresults_path =
-        std::path::Path::new("/tmp/cayw-f01-f20-repair-20261028/search-ddg-quoted-noresults.html");
-    let noresults_html = if quoted_noresults_path.exists() {
-        std::fs::read_to_string(quoted_noresults_path).expect("read real quoted noresults")
-    } else {
-        r#"<div class="result result--no-result"><div class="no-results__message"><h1>No results found</h1></div></div>"#.to_string()
-    };
-
-    let normal_path =
-        std::path::Path::new("/tmp/cayw-f01-f20-repair-20261028/search-ddg-response.html");
-    let normal_html = if normal_path.exists() {
-        std::fs::read_to_string(normal_path).expect("read real search response")
-    } else {
+    let noresults_html =
+        r#"<div class="result result--no-result"><div class="no-results__message"><h1>No results found</h1></div></div>"#.to_string();
+    let normal_html =
         r#"<div class="result"><a class="result__a" href="https://example.com/rust">Rust</a></div>"#
-            .to_string()
-    };
+            .to_string();
 
     let challenge_html = r#"<html><body><h1>Unfortunately, bots use DuckDuckGo too</h1><p>Please complete the challenge</p></body></html>"#;
     let structural_drift_html = r#"<html><head><title>Search Results</title></head><body><div class="new_layout">Nothing to see here</div></body></html>"#;

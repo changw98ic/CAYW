@@ -5,7 +5,7 @@ use crate::{
     session::{BindingRecord, cursor_conflict},
 };
 use async_trait::async_trait;
-use cayw_ai::{ArgumentValidator, CancellationToken, ToolDefinition};
+use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_plugins::{Plugin, PluginContext, PluginDescription};
 use serde_json::Value;
@@ -312,7 +312,6 @@ struct PluginCapability {
     plugin: String,
     description: PluginDescription,
     definition: ToolDefinition,
-    validator: ArgumentValidator,
 }
 /// Captured once for the task; later calls cannot select a newly loaded plugin.
 pub(crate) struct PluginCatalog {
@@ -337,15 +336,12 @@ impl PluginCatalog {
         {
             let plugin = binding.description()?;
             for definition in plugin.manifest.capabilities.iter().cloned() {
-                let validator = ArgumentValidator::new(&definition.parameters)
-                    .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
                 capabilities.insert(
                     definition.name.clone(),
                     PluginCapability {
                         plugin: binding.plugin().into(),
                         description: plugin.clone(),
                         definition,
-                        validator,
                     },
                 );
             }
@@ -421,9 +417,6 @@ impl cayw_host::ExternalHost for PluginService<'_> {
         let cap = self.cap;
         let context = &self.scope.context;
         self.scope.check_authority(&cancel)?;
-        cap.validator
-            .validate(&args)
-            .map_err(|error| CapabilityError::new(error.to_string()))?;
         let current = context
             .inner
             .registry

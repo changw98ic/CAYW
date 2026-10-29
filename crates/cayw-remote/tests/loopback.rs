@@ -1215,6 +1215,36 @@ async fn maximum_handler_reply_still_has_queryable_terminal_status() {
 }
 
 #[tokio::test]
+async fn oversized_handler_reply_encodes_within_frame_limit_and_settles_outcome_unknown() {
+    struct Oversized;
+    #[async_trait]
+    impl DeviceHandler for Oversized {
+        async fn handle(&self, _: Value, _: CancellationToken) -> Result<Value, RemoteError> {
+            Ok(json!("x".repeat(128 * 1024)))
+        }
+    }
+    let h = Harness::with_limits(Limits {
+        max_frame_bytes: 2048,
+        ..Default::default()
+    })
+    .await;
+    let cred = h.bind().await;
+    let (stop, task) = device(&h, &cred, Arc::new(Oversized));
+    h.connected(&cred).await;
+    h.operator
+        .invoke(&cred.device_id, "oversized", json!({}))
+        .await
+        .unwrap();
+    let result = h.terminal(&cred, "oversized").await;
+    assert!(result.state.is_terminal());
+    assert_eq!(result.state, RequestState::OutcomeUnknown);
+    assert_eq!(result.error, Some(RemoteError::OutcomeUnknown));
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn successful_null_is_a_completed_value() {
     struct Null;
     #[async_trait]

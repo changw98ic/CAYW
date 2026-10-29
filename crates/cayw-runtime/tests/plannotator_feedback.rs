@@ -5,9 +5,13 @@ use cayw_ai::{
     AssistantEvent, AssistantStream, CancellationToken, Message, Model, ModelRequest, Provider,
 };
 use cayw_ipc::RpcHandler;
-use cayw_plannotator::{FEEDBACK_SECTION_KEY, FeedbackDecision};
+use cayw_plannotator::{
+    AnnotationComment, AnnotationTarget, FEEDBACK_SECTION_KEY, FeedbackDecision, FeedbackDraft,
+    FileVersionBinding, LiveFileVersion, TargetKind,
+};
 use cayw_runtime::{PlanFeedbackInput, Runtime, RuntimeConfig, ScopedPermission, TaskState};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 const PLAN_SCRIPT: &str = r#"return cayw.call('plan.update',{expected_version=0,steps={{id='inspect',text='Inspect workspace',status='in_progress'},{id='edit',text='Apply edit',status='pending'}}})"#;
@@ -519,5 +523,290 @@ async fn concurrent_plan_update_and_feedback_preserve_reviewed_identity_across_r
             .unwrap_err()
             .to_string()
             .contains("version conflict")
+    );
+}
+
+#[tokio::test]
+async fn peer_runtime_observes_new_feedback_without_restart_and_injects_into_next_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let first = Arc::new(Script(PLAN_SCRIPT));
+    let rt1 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        first,
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig {
+            permissions: vec![ScopedPermission::exact("plan.update", plan_scope())],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let id = rt1.create(None).unwrap().id;
+    start(&rt1, &id).await.unwrap().unwrap();
+    assert_eq!(rt1.tasks(&id).unwrap()[0].state, TaskState::Completed);
+
+    // Peer runtime rt2 is opened concurrently on the same database.
+    let second_capture = Arc::new(Capture::new("return 1"));
+    let rt2 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        second_capture.clone(),
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+
+    // rt2 queries feedback first: sees empty feedback list.
+    assert!(rt2.plannotator_feedback(&id).unwrap().is_empty());
+
+    // rt1 submits feedback on the active plan.
+    let submitted = rt1
+        .submit_plan_feedback(PlanFeedbackInput {
+            session_id: id.clone(),
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![cayw_plannotator::AnnotationComment {
+                comment_id: "c1".into(),
+                body: "require extra validation step".into(),
+                anchor: None,
+                created_at_ms: 1,
+            }],
+            summary: Some("peer feedback test".into()),
+            ..reviewed(&rt1, &id)
+        })
+        .unwrap();
+    assert_eq!(submitted.decision, FeedbackDecision::DenyWithFeedback);
+
+    // rt2 (without reopening / restarting) MUST observe the new feedback incrementally.
+    let rt2_restored = rt2.plannotator_feedback(&id).unwrap();
+    assert_eq!(rt2_restored.len(), 1);
+    assert_eq!(rt2_restored[0].decision, FeedbackDecision::DenyWithFeedback);
+    assert_eq!(
+        rt2_restored[0].summary.as_deref(),
+        Some("peer feedback test")
+    );
+
+    // rt2 initiates the next attempt; the captured provider messages must include the feedback section.
+    rt2.prompt(&id, "follow up from peer", CancellationToken::new())
+        .await
+        .unwrap();
+
+    let seen = second_capture.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "rt2 provider must see follow-up turn");
+    let injected = seen.iter().any(|turn| {
+        turn.iter().any(|message| match message {
+            Message::System(system) => system
+                .sections
+                .get(FEEDBACK_SECTION_KEY)
+                .and_then(|v| v.as_ref())
+                .is_some_and(|body| {
+                    body.contains("deny_with_feedback")
+                        && body.contains("require extra validation step")
+                }),
+            _ => false,
+        })
+    });
+    assert!(
+        injected,
+        "rt2 follow up attempt must inject {FEEDBACK_SECTION_KEY} without restart; seen={seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn interleaved_feedback_across_runtimes_retains_all_records_without_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let script = Arc::new(Script(PLAN_SCRIPT));
+    let rt1 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        script.clone(),
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig {
+            permissions: vec![ScopedPermission::exact("plan.update", plan_scope())],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let id = rt1.create(None).unwrap().id;
+    start(&rt1, &id).await.unwrap().unwrap();
+    let plan = rt1.plan(&id).unwrap().expect("plan");
+
+    let rt2 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        script,
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+
+    // Both runtimes observe initial empty state.
+    assert!(rt1.plannotator_feedback(&id).unwrap().is_empty());
+    assert!(rt2.plannotator_feedback(&id).unwrap().is_empty());
+
+    // rt1 submits first feedback.
+    rt1.submit_plan_feedback(PlanFeedbackInput {
+        session_id: id.clone(),
+        expected_task_id: plan.task_id.clone(),
+        expected_version: plan.version,
+        expected_content_sha256: plan.content_sha256.clone(),
+        decision: FeedbackDecision::ApproveWithNotes,
+        comments: vec![cayw_plannotator::AnnotationComment {
+            comment_id: "c1".into(),
+            body: "rt1 note".into(),
+            anchor: None,
+            created_at_ms: 1,
+        }],
+        summary: Some("note-from-rt1".into()),
+        actor: "rt1".into(),
+    })
+    .unwrap();
+
+    // rt2 (without restart) submits second feedback.
+    rt2.submit_plan_feedback(PlanFeedbackInput {
+        session_id: id.clone(),
+        expected_task_id: plan.task_id.clone(),
+        expected_version: plan.version,
+        expected_content_sha256: plan.content_sha256.clone(),
+        decision: FeedbackDecision::DenyWithFeedback,
+        comments: vec![cayw_plannotator::AnnotationComment {
+            comment_id: "c2".into(),
+            body: "rt2 note".into(),
+            anchor: None,
+            created_at_ms: 2,
+        }],
+        summary: Some("note-from-rt2".into()),
+        actor: "rt2".into(),
+    })
+    .unwrap();
+
+    // Both runtimes without restart must observe both feedback records.
+    let fb1 = rt1.plannotator_feedback(&id).unwrap();
+    assert_eq!(fb1.len(), 2);
+    assert!(
+        fb1.iter()
+            .any(|f| f.summary.as_deref() == Some("note-from-rt1"))
+    );
+    assert!(
+        fb1.iter()
+            .any(|f| f.summary.as_deref() == Some("note-from-rt2"))
+    );
+
+    let fb2 = rt2.plannotator_feedback(&id).unwrap();
+    assert_eq!(fb2.len(), 2);
+    assert!(
+        fb2.iter()
+            .any(|f| f.summary.as_deref() == Some("note-from-rt1"))
+    );
+    assert!(
+        fb2.iter()
+            .any(|f| f.summary.as_deref() == Some("note-from-rt2"))
+    );
+}
+
+#[tokio::test]
+async fn peer_runtime_observes_generic_file_target_feedback_without_restart_and_injects_into_next_attempt()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let rt1 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(Script("return 1")),
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    let id = rt1.create(None).unwrap().id;
+
+    let second_capture = Arc::new(Capture::new("return 1"));
+    let rt2 = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        second_capture.clone(),
+        Model::new("fixture", "plannotator"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+
+    // rt2 queries feedback first: initially empty.
+    assert!(rt2.plannotator_feedback(&id).unwrap().is_empty());
+
+    // rt1 submits feedback on a generic file target.
+    let path = "crates/cayw-runtime/src/lib.rs".to_string();
+    let sha = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string();
+    rt1.submit_plannotator_feedback(
+        FeedbackDraft {
+            session_id: id.clone(),
+            target: AnnotationTarget {
+                target_id: "target-lib-rs".into(),
+                kind: TargetKind::Markdown,
+                file: FileVersionBinding {
+                    path: path.clone(),
+                    version: 1,
+                    content_sha256: sha.clone(),
+                },
+                label: Some("lib.rs review".into()),
+            },
+            decision: FeedbackDecision::DenyWithFeedback,
+            comments: vec![AnnotationComment {
+                comment_id: "c-lib-1".into(),
+                body: "sanitize all input lengths".into(),
+                anchor: None,
+                created_at_ms: 1,
+            }],
+            summary: Some("peer generic feedback".into()),
+            created_at_ms: 1,
+            current_attempt: 0,
+        },
+        "rt1-generic",
+    )
+    .unwrap();
+
+    // rt2 (without reopening / restarting) observes the generic feedback incrementally.
+    let rt2_fb = rt2.plannotator_feedback(&id).unwrap();
+    assert_eq!(rt2_fb.len(), 1);
+    assert_eq!(rt2_fb[0].target.file.path, path);
+    assert_eq!(rt2_fb[0].summary.as_deref(), Some("peer generic feedback"));
+
+    // Register live file on rt2.
+    let mut live = BTreeMap::new();
+    live.insert(
+        path.clone(),
+        LiveFileVersion {
+            version: 1,
+            content_sha256: sha.clone(),
+        },
+    );
+    rt2.set_plannotator_live_files(&id, live).unwrap();
+
+    // rt2 follow-up attempt injects the feedback section into the prompt.
+    rt2.prompt(
+        &id,
+        "attempt with generic feedback",
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let seen = second_capture.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "rt2 provider must see follow-up turn");
+    let injected = seen.iter().any(|turn| {
+        turn.iter().any(|message| match message {
+            Message::System(system) => system
+                .sections
+                .get(FEEDBACK_SECTION_KEY)
+                .and_then(|v| v.as_ref())
+                .is_some_and(|body| {
+                    body.contains("deny_with_feedback")
+                        && body.contains("sanitize all input lengths")
+                }),
+            _ => false,
+        })
+    });
+    assert!(
+        injected,
+        "rt2 follow up attempt must inject generic file {FEEDBACK_SECTION_KEY} without restart; seen={seen:?}"
     );
 }

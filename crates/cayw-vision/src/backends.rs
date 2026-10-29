@@ -1,18 +1,17 @@
-//! Real OCR / describe backends with fixture fallback for CI.
+//! Configured OCR / describe backends report unavailable when not configured.
 //!
-//! - [`TesseractOcrEngine`]: shells out to the `tesseract` CLI when installed.
+//! - [`TesseractOcrEngine`]: shells out to the configured `tesseract` CLI.
 //! - [`HttpDescribeBackend`]: optional HTTP describe when `CAYW_VISION_DESCRIBE_URL`
 //!   is set (Bearer token from `CAYW_VISION_DESCRIBE_KEY` when present).
-//! - [`FixtureOcrEngine`] / [`CountingDescribeBackend`]: remain the default when
-//!   those deps / env keys are absent so CI stays offline and dependency-free.
+//! - Test fixtures require explicit injection or, for describe, explicit selection.
 //!
 //! Subprocess OCR / curl describe honor [`CancellationToken`]: cancel kills the
 //! child via [`crate::process::run_command_cancellable`] (KillOnDrop), so Host
 //! cancel does not leave orphan tesseract/curl processes.
 
 use crate::image::ImageBuffer;
-use crate::process::{RunError, run_command_cancellable};
-use crate::router::{CountingDescribeBackend, DescribeBackend, FixtureOcrEngine, OcrEngine};
+use crate::process::{RunError, run_command_bounded, run_command_cancellable};
+use crate::router::{CountingDescribeBackend, DescribeBackend, OcrEngine};
 use crate::types::{DescribeRequest, VisionError};
 use cayw_ai::CancellationToken;
 use std::io::Write;
@@ -21,12 +20,17 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Env: force OCR engine selection (`tesseract` | `fixture`).
+/// Env: force OCR engine selection (`tesseract`).
 pub const ENV_OCR: &str = "CAYW_VISION_OCR";
-/// Env: HTTP describe endpoint (POST JSON). Absent → counting/fixture describe.
+/// Env: HTTP describe endpoint (POST JSON). Absent → unconfigured describe.
 pub const ENV_DESCRIBE_URL: &str = "CAYW_VISION_DESCRIBE_URL";
 /// Env: optional Bearer token for [`ENV_DESCRIBE_URL`].
 pub const ENV_DESCRIBE_KEY: &str = "CAYW_VISION_DESCRIBE_KEY";
+
+/// Default maximum response bytes collected from HTTP describe backend (1 MiB).
+pub const DEFAULT_MAX_DESCRIBE_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Maximum stderr bytes collected from HTTP describe backend curl invocation (64 KiB).
+pub const DEFAULT_MAX_DESCRIBE_STDERR_BYTES: usize = 64 * 1024;
 
 /// OCR via the system `tesseract` binary (PPM stdin path, stdout text).
 #[derive(Debug, Clone)]
@@ -135,10 +139,20 @@ fn write_ppm(path: &Path, image: &ImageBuffer) -> Result<(), VisionError> {
 pub struct HttpDescribeBackend {
     url: String,
     key: Option<String>,
+    max_response_bytes: usize,
     billed: AtomicU64,
 }
 
 impl HttpDescribeBackend {
+    pub fn new(url: impl Into<String>, key: Option<String>, max_response_bytes: usize) -> Self {
+        Self {
+            url: url.into(),
+            key,
+            max_response_bytes,
+            billed: AtomicU64::new(0),
+        }
+    }
+
     pub fn from_env() -> Result<Self, VisionError> {
         let url = std::env::var(ENV_DESCRIBE_URL)
             .map_err(|_| VisionError::DescribeFailed(format!("{ENV_DESCRIBE_URL} is not set")))?;
@@ -150,11 +164,7 @@ impl HttpDescribeBackend {
         let key = std::env::var(ENV_DESCRIBE_KEY)
             .ok()
             .filter(|k| !k.is_empty());
-        Ok(Self {
-            url,
-            key,
-            billed: AtomicU64::new(0),
-        })
+        Ok(Self::new(url, key, DEFAULT_MAX_DESCRIBE_RESPONSE_BYTES))
     }
 }
 
@@ -200,9 +210,18 @@ impl DescribeBackend for HttpDescribeBackend {
             cmd.args(["-H", &format!("authorization: Bearer {key}")]);
         }
         cmd.arg(&self.url);
-        let output = run_command_cancellable(cmd, cancel).map_err(|err| match err {
+        let output = run_command_bounded(
+            cmd,
+            cancel,
+            self.max_response_bytes,
+            DEFAULT_MAX_DESCRIBE_STDERR_BYTES,
+        )
+        .map_err(|err| match err {
             RunError::Cancelled => VisionError::Cancelled,
-            other => VisionError::DescribeFailed(format!("spawn curl: {}", other.message())),
+            RunError::OutputLimitExceeded(msg) => {
+                VisionError::DescribeFailed(format!("describe output limit exceeded: {msg}"))
+            }
+            RunError::Io(err) => VisionError::DescribeFailed(format!("spawn curl: {err}")),
         })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -230,24 +249,50 @@ impl DescribeBackend for HttpDescribeBackend {
     }
 }
 
-/// Pick OCR: `CAYW_VISION_OCR=fixture` forces fixture; `=tesseract` requires CLI;
-/// otherwise prefer tesseract when detectable, else empty fixture (CI-safe).
-pub fn resolve_ocr_engine() -> Arc<dyn OcrEngine> {
-    match std::env::var(ENV_OCR).ok().as_deref() {
-        Some("fixture") => Arc::new(FixtureOcrEngine::new()),
-        Some("tesseract") => Arc::new(
-            TesseractOcrEngine::detect()
-                .unwrap_or_else(|_| TesseractOcrEngine::new("tesseract", "eng")),
-        ),
-        Some(other) => {
-            let _ = other;
-            Arc::new(FixtureOcrEngine::new())
-        }
-        None => match TesseractOcrEngine::detect() {
-            Ok(engine) => Arc::new(engine),
-            Err(_) => Arc::new(FixtureOcrEngine::new()),
-        },
+struct UnavailableOcrEngine {
+    cause: VisionError,
+}
+
+impl OcrEngine for UnavailableOcrEngine {
+    fn name(&self) -> &str {
+        "unavailable"
     }
+
+    fn recognize(
+        &self,
+        _image: &ImageBuffer,
+        _cancel: &CancellationToken,
+    ) -> Result<String, VisionError> {
+        Err(self.cause.clone())
+    }
+}
+
+/// Pick OCR: `CAYW_VISION_OCR=tesseract` configures tesseract; unconfigured or invalid
+/// values return explicit unavailable engines; test fixtures are injected explicitly.
+pub fn resolve_ocr_engine() -> Arc<dyn OcrEngine> {
+    ocr_engine(
+        std::env::var(ENV_OCR).ok().as_deref(),
+        TesseractOcrEngine::detect,
+    )
+}
+
+fn ocr_engine(
+    config: Option<&str>,
+    detect: impl FnOnce() -> Result<TesseractOcrEngine, VisionError>,
+) -> Arc<dyn OcrEngine> {
+    let cause = match config {
+        Some("tesseract") => match detect() {
+            Ok(engine) => return Arc::new(engine),
+            Err(cause) => cause,
+        },
+        Some(other) => VisionError::OcrFailed(format!(
+            "invalid {ENV_OCR} value '{other}': expected 'tesseract'"
+        )),
+        None => VisionError::OcrFailed(
+            "vision ocr backend is not configured: set CAYW_VISION_OCR=tesseract or inject an OcrEngine".into(),
+        ),
+    };
+    Arc::new(UnavailableOcrEngine { cause })
 }
 
 /// Unconfigured describe backend that returns an explicit failure explaining how to configure a backend.
@@ -276,10 +321,27 @@ impl DescribeBackend for UnconfiguredDescribeBackend {
 /// counting fixture only when explicitly configured via `CAYW_VISION_DESCRIBE=fixture` or `counting`;
 /// otherwise `UnconfiguredDescribeBackend` so testing counting does not masquerade as default Q&A.
 pub fn resolve_describe_backend() -> Arc<dyn DescribeBackend> {
-    if let Ok(backend) = HttpDescribeBackend::from_env() {
-        return Arc::new(backend);
+    describe_backend(
+        std::env::var(ENV_DESCRIBE_URL).ok().as_deref(),
+        std::env::var(ENV_DESCRIBE_KEY).ok().as_deref(),
+        std::env::var("CAYW_VISION_DESCRIBE").ok().as_deref(),
+    )
+}
+
+pub(crate) fn describe_backend(
+    url: Option<&str>,
+    key: Option<&str>,
+    mode: Option<&str>,
+) -> Arc<dyn DescribeBackend> {
+    if let Some(url) = url.filter(|u| !u.trim().is_empty()) {
+        let key = key.filter(|k| !k.is_empty()).map(String::from);
+        return Arc::new(HttpDescribeBackend::new(
+            url,
+            key,
+            DEFAULT_MAX_DESCRIBE_RESPONSE_BYTES,
+        ));
     }
-    if let Ok(mode) = std::env::var("CAYW_VISION_DESCRIBE")
+    if let Some(mode) = mode
         && (mode == "fixture" || mode == "counting")
     {
         return Arc::new(CountingDescribeBackend::new());
@@ -302,6 +364,7 @@ pub(crate) fn base64_decode(text: &str) -> Result<Vec<u8>, VisionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::router::FixtureOcrEngine;
 
     #[test]
     fn ppm_roundtrip_invokes_tesseract_when_present() {
@@ -320,5 +383,101 @@ mod tests {
     fn fixture_engine_name_is_stable() {
         let engine = FixtureOcrEngine::new();
         assert_eq!(engine.name(), "fixture");
+    }
+
+    #[test]
+    fn ocr_configuration_preserves_unavailable_causes_through_service() {
+        use crate::VisionRouter;
+        use crate::service::{Limits, VisionService};
+        use serde_json::json;
+
+        for config in [None, Some("misspelled"), Some("fixture"), Some("tesseract")] {
+            let engine = ocr_engine(config, || {
+                assert_eq!(config, Some("tesseract"));
+                Err(VisionError::OcrFailed("tesseract binary missing".into()))
+            });
+            assert_eq!(engine.name(), "unavailable");
+            let service = VisionService::with_router(
+                VisionRouter::new(engine, Arc::new(CountingDescribeBackend::new())),
+                Limits::default(),
+            )
+            .unwrap();
+            let error = service
+                .execute_value(
+                    "vision.ocr",
+                    &json!({"image":{"width":1,"height":1,"rgba_base64":"AAAA/w=="}}),
+                    &CancellationToken::new(),
+                )
+                .unwrap_err()
+                .to_string();
+            let expected = match config {
+                None => "not configured",
+                Some("tesseract") => "tesseract binary missing",
+                Some(value) => value,
+            };
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn describe_backend_selection_preserves_unconfigured_and_fixture() {
+        let empty_img = ImageBuffer::solid(1, 1, [0, 0, 0, 255]).unwrap();
+        let cancel = CancellationToken::new();
+        let req = DescribeRequest {
+            question: "test?".into(),
+            json: false,
+        };
+
+        // None / empty URL → UnconfiguredDescribeBackend
+        let unconfigured = describe_backend(None, None, None);
+        let err = unconfigured
+            .describe(&empty_img, &req, &cancel)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not configured"), "{err}");
+
+        let unconfigured_empty = describe_backend(Some("   "), None, None);
+        let err = unconfigured_empty
+            .describe(&empty_img, &req, &cancel)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not configured"), "{err}");
+
+        // Explicit fixture / counting mode → CountingDescribeBackend
+        // Counting describe backend requires explicit seed; unseeded calls fail honestly
+        // without masquerading as real Q&A.
+        for mode in ["fixture", "counting"] {
+            let counting = describe_backend(None, None, Some(mode));
+            let err = counting
+                .describe(&empty_img, &req, &cancel)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("no seeded answer"),
+                "expected counting backend requiring explicit seed, got: {err}"
+            );
+            assert_eq!(counting.billed_requests(), 0);
+        }
+
+        // Explicit seed on CountingDescribeBackend succeeds and increments billing
+        let seeded = CountingDescribeBackend::new();
+        seeded.seed(empty_img.sha256(), &req.question, "seeded answer");
+        let res = seeded.describe(&empty_img, &req, &cancel).unwrap();
+        assert_eq!(res, "seeded answer");
+        assert_eq!(seeded.billed_requests(), 1);
+
+        // Unknown / unsupported mode string → fallback to UnconfiguredDescribeBackend
+        for unknown_mode in ["unsupported", "invalid_mode", "custom"] {
+            let unconfigured_unknown = describe_backend(None, None, Some(unknown_mode));
+            let err = unconfigured_unknown
+                .describe(&empty_img, &req, &cancel)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("not configured"),
+                "expected unconfigured fallback for mode '{unknown_mode}', got: {err}"
+            );
+            assert_eq!(unconfigured_unknown.billed_requests(), 0);
+        }
     }
 }

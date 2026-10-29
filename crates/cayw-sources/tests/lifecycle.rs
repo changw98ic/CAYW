@@ -292,3 +292,60 @@ async fn import_product_entry_lands_source_in_registry() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn concurrent_lazy_calls_serialize_under_connect_lock_without_duplicate_spawn() {
+    let root = tempfile::tempdir().unwrap();
+    let prepared = ManagedStdio::prepare(
+        spec(root.path(), LifecycleMode::Lazy, Duration::from_secs(60)),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let control = prepared.control();
+    let (manifest, handle) = prepared.into_parts();
+    let registry = Registry::new(Limits::default(), Arc::new(Policy)).unwrap();
+    registry
+        .register(
+            SourceIdentity {
+                id: "local".into(),
+                version: "2".into(),
+                origin: "host:test-managed-stdio".into(),
+            },
+            manifest,
+            handle,
+        )
+        .unwrap();
+
+    let registry = Arc::new(registry);
+    let mut tasks = Vec::new();
+    for i in 0..5 {
+        let reg = registry.clone();
+        tasks.push(tokio::spawn(async move {
+            call(
+                &reg,
+                10 + i,
+                "mcp.call",
+                json!({"server":"local","tool":"add","arguments":{"a":i,"b":1}}),
+                CancellationToken::new(),
+            )
+            .await
+        }));
+    }
+
+    for (i, task) in tasks.into_iter().enumerate() {
+        let res = task.await.unwrap().unwrap();
+        assert_eq!(res["value"]["sum"], i as i64 + 1);
+    }
+
+    let snap = control.snapshot();
+    assert!(snap.connected);
+    // 1 probe spawn during prepare + exactly 1 live connection spawn
+    assert_eq!(snap.spawn_count, 2);
+    assert_eq!(snap.connect_generation, 1);
+
+    registry.disconnect("local").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
+        .await
+        .unwrap();
+}

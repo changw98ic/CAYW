@@ -30,10 +30,19 @@ pub struct OwnershipStore {
 
 impl OwnershipStore {
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let path = path.as_ref();
+        if path.as_os_str().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ownership path cannot be empty",
+            ));
         }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let path = path.to_path_buf();
         let state = if path.exists() {
             let bytes = fs::read(&path)?;
             if bytes.is_empty() {
@@ -56,16 +65,23 @@ impl OwnershipStore {
         let bytes = serde_json::to_vec_pretty(state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let tmp = path.with_extension("tmp");
-        {
+        let write_result = (|| -> io::Result<()> {
             let mut file = File::create(&tmp)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
+            fs::rename(&tmp, path)?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp);
+            return write_result;
         }
-        fs::rename(&tmp, path)?;
-        if let Some(parent) = path.parent() {
-            let dir = File::open(parent)?;
-            dir.sync_all()?;
-        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let dir = File::open(parent)?;
+        dir.sync_all()?;
         Ok(())
     }
 
@@ -192,5 +208,35 @@ mod tests {
             restored.task_device("task-child").as_deref(),
             Some("device-alpha")
         );
+    }
+
+    #[test]
+    fn parent_resolution_handles_bare_and_dot_slash_filenames() {
+        let bare = Path::new("ownership.json");
+        let parent = bare
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent, Path::new("."));
+
+        let dot_slash = Path::new("./ownership.json");
+        let parent_dot = dot_slash
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_dot, Path::new("."));
+
+        let nested = Path::new("nested/dir/ownership.json");
+        let parent_nested = nested
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        assert_eq!(parent_nested, Path::new("nested/dir"));
+    }
+
+    #[test]
+    fn empty_path_rejected_at_open() {
+        let err = OwnershipStore::open("").err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }

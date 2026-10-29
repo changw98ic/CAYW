@@ -1420,7 +1420,9 @@
         display: pick(computed.display),
         gap: pick(computed.gap),
         flexDirection: pick(computed.flexDirection),
-        gridTemplateColumns: pick(computed.gridTemplateColumns)
+        gridTemplateColumns: pick(computed.gridTemplateColumns),
+        alignItems: pick(computed.alignItems),
+        justifyContent: pick(computed.justifyContent)
       },
       text: pick(data.text).slice(0, MAX_TEXT),
       attributes: { src: pick(attributes.src), href: pick(attributes.href) },

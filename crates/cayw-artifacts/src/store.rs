@@ -158,7 +158,9 @@ impl ArtifactStore {
         }
     }
 
-    pub fn restore_snapshot(&self, snapshot: ArtifactSnapshot) -> Result<(), ArtifactError> {
+    pub(crate) fn prepare_snapshot(
+        snapshot: ArtifactSnapshot,
+    ) -> Result<BTreeMap<String, ArtifactRecord>, ArtifactError> {
         let mut map = BTreeMap::new();
         for record in snapshot.artifacts {
             validate_id("artifact_id", &record.artifact_id).map_err(ArtifactError::Invalid)?;
@@ -176,8 +178,17 @@ impl ArtifactStore {
                 ));
             }
         }
+        Ok(map)
+    }
+
+    pub(crate) fn commit_prepared(&self, artifacts: BTreeMap<String, ArtifactRecord>) {
         let mut guard = self.inner.lock().expect("artifact store lock");
-        guard.artifacts = map;
+        guard.artifacts = artifacts;
+    }
+
+    pub fn restore_snapshot(&self, snapshot: ArtifactSnapshot) -> Result<(), ArtifactError> {
+        let map = Self::prepare_snapshot(snapshot)?;
+        self.commit_prepared(map);
         Ok(())
     }
 }

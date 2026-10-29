@@ -245,3 +245,97 @@ fn serde_roundtrip_descriptors() {
     let back: FileViewerDescriptor = serde_json::from_str(&json).unwrap();
     assert_eq!(back, viewer);
 }
+
+#[test]
+fn workspace_hooks_update_path_preserves_instance_and_rejects_invalid_path() {
+    let registry = Arc::new(PanelRegistry::new());
+    let _files = registry.register_panel(official_files()).unwrap();
+    let _db = registry.register_panel(third_party_db()).unwrap();
+    let hooks = WorkspaceHooks::new(Arc::clone(&registry));
+
+    let files = hooks
+        .open(
+            "session-up",
+            OpenPanelRequest {
+                panel_id: "files".into(),
+                zone: Some(PanelZone::Sidebar),
+                path: Some("README.md".into()),
+                activate: true,
+            },
+        )
+        .unwrap();
+
+    let db = hooks
+        .open(
+            "session-up",
+            OpenPanelRequest {
+                panel_id: "vendor:db".into(),
+                zone: Some(PanelZone::Sidebar),
+                path: None,
+                activate: true,
+            },
+        )
+        .unwrap();
+
+    // Prior to invalid update: files is inactive, db is active.
+    let before = hooks.list_open("session-up", None).unwrap();
+    assert_eq!(before.len(), 2);
+    assert!(
+        !before
+            .iter()
+            .find(|p| p.instance_id == files.instance_id)
+            .unwrap()
+            .active
+    );
+    assert!(
+        before
+            .iter()
+            .find(|p| p.instance_id == db.instance_id)
+            .unwrap()
+            .active
+    );
+
+    // Invalid oversized path (> 4096 bytes) fails before any mutation.
+    let oversized = "a".repeat(4097);
+    let err = hooks
+        .update_path("session-up", &files.instance_id, &oversized)
+        .unwrap_err();
+    assert!(matches!(err, PanelError::Invalid(_)));
+
+    // Invalid empty path fails before any mutation.
+    let err_empty = hooks
+        .update_path("session-up", &files.instance_id, "   ")
+        .unwrap_err();
+    assert!(matches!(err_empty, PanelError::Invalid(_)));
+
+    // After failed update: open list, instance_ids, paths, and active states must be untouched.
+    let after_fail = hooks.list_open("session-up", None).unwrap();
+    assert_eq!(after_fail, before);
+
+    // Valid update: updates path and activates files; instance_id is strictly preserved.
+    let updated = hooks
+        .update_path("session-up", &files.instance_id, "src/lib.rs")
+        .unwrap();
+    assert_eq!(updated.instance_id, files.instance_id);
+    assert_eq!(updated.path.as_deref(), Some("src/lib.rs"));
+    assert!(updated.active);
+
+    let after_success = hooks.list_open("session-up", None).unwrap();
+    let files_after = after_success
+        .iter()
+        .find(|p| p.instance_id == files.instance_id)
+        .unwrap();
+    let db_after = after_success
+        .iter()
+        .find(|p| p.instance_id == db.instance_id)
+        .unwrap();
+    assert_eq!(files_after.path.as_deref(), Some("src/lib.rs"));
+    assert!(files_after.active);
+    assert!(!db_after.active);
+
+    // Nonexistent instance returns NotFound.
+    let err_nf = hooks
+        .update_path("session-up", "files:999", "src/main.rs")
+        .unwrap_err();
+    assert!(matches!(err_nf, PanelError::NotFound(_)));
+}

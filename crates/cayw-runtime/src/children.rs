@@ -901,28 +901,76 @@ impl ExternalHost for ChildService {
         arguments: Value,
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
-        if name != CAPABILITY {
-            return Err(known("local agent service received a different capability"));
+        match name {
+            CAPABILITY => {
+                // Host already validated the schema; parse again with deny_unknown_fields
+                // so extra model fields can never become authority.
+                let args: RunArgs = serde_json::from_value(arguments)
+                    .map_err(|error| known(format!("agent.run arguments are invalid: {error}")))?;
+                if args.prompt.trim().is_empty()
+                    || args.prompt.len() > self.context.inner.config.max_prompt_bytes
+                {
+                    return Err(known(
+                        "agent.run prompt is empty or exceeds the prompt byte budget",
+                    ));
+                }
+                if let Some(label) = &args.label
+                    && (label.trim().is_empty() || label.len() > 1024)
+                {
+                    return Err(known("agent.run label must contain 1..1024 bytes"));
+                }
+                let label = args.label.unwrap_or_else(|| DEFAULT_LABEL.into());
+                let mode = AgentRunMode::parse(args.mode.as_deref()).map_err(known)?;
+                self.run(args.prompt, label, cancel, mode).await
+            }
+            CAPABILITY_FLEET => {
+                let args: FleetArgs = serde_json::from_value(arguments).map_err(|error| {
+                    known(format!("agent.fleet arguments are invalid: {error}"))
+                })?;
+                let caller_session = self.context.lease.session_id.as_str();
+                if let Some(parent) = args.parent_session_id.as_deref()
+                    && parent != caller_session
+                {
+                    return Err(known(format!(
+                        "caller session {caller_session} is not authorized to query session {parent}"
+                    )));
+                }
+                let effective_parent = args.parent_session_id.as_deref().or(Some(caller_session));
+                let view = self
+                    .context
+                    .inner
+                    .fleet
+                    .snapshot(
+                        effective_parent,
+                        args.after.as_deref(),
+                        args.limit.unwrap_or(100),
+                    )
+                    .map_err(known)?;
+                serde_json::to_value(view).map_err(|error| known(error.to_string()))
+            }
+            CAPABILITY_STOP => {
+                let args: StopArgs = serde_json::from_value(arguments)
+                    .map_err(|error| known(format!("agent.stop arguments are invalid: {error}")))?;
+                let caller_session = self.context.lease.session_id.as_str();
+                self.context
+                    .inner
+                    .fleet
+                    .stop(&args.child_task_id, Some(caller_session))
+                    .map_err(known)
+            }
+            CAPABILITY_STEER => {
+                let args: SteerArgs = serde_json::from_value(arguments).map_err(|error| {
+                    known(format!("agent.steer arguments are invalid: {error}"))
+                })?;
+                let caller_session = self.context.lease.session_id.as_str();
+                self.context
+                    .inner
+                    .fleet
+                    .steer(&args.child_task_id, &args.text, Some(caller_session))
+                    .map_err(known)
+            }
+            other => Err(known(format!("local agent service received {other}"))),
         }
-        // Host already validated the schema; parse again with deny_unknown_fields
-        // so extra model fields can never become authority.
-        let args: RunArgs = serde_json::from_value(arguments)
-            .map_err(|error| known(format!("agent.run arguments are invalid: {error}")))?;
-        if args.prompt.trim().is_empty()
-            || args.prompt.len() > self.context.inner.config.max_prompt_bytes
-        {
-            return Err(known(
-                "agent.run prompt is empty or exceeds the prompt byte budget",
-            ));
-        }
-        if let Some(label) = &args.label
-            && (label.trim().is_empty() || label.len() > 1024)
-        {
-            return Err(known("agent.run label must contain 1..1024 bytes"));
-        }
-        let label = args.label.unwrap_or_else(|| DEFAULT_LABEL.into());
-        let mode = AgentRunMode::parse(args.mode.as_deref()).map_err(known)?;
-        self.run(args.prompt, label, cancel, mode).await
     }
 }
 
@@ -944,45 +992,21 @@ pub(crate) async fn call(
         .local_agents
         .clone()
         .ok_or_else(|| known("local agents are not enabled by the trusted host"))?;
-    match name {
-        CAPABILITY_FLEET => {
-            let args: FleetArgs = serde_json::from_value(arguments)
-                .map_err(|error| known(format!("agent.fleet arguments are invalid: {error}")))?;
-            let view = context
-                .inner
-                .fleet
-                .snapshot(
-                    args.parent_session_id.as_deref(),
-                    args.after.as_deref(),
-                    args.limit.unwrap_or(100),
-                )
-                .map_err(known)?;
-            return serde_json::to_value(view).map_err(|error| known(error.to_string()));
+    let definition = match name {
+        CAPABILITY => {
+            // Reject nesting before any permission wait. A child at max_depth must not
+            // be able to sit in an approval queue for a call that can never run.
+            if context.scope.depth() >= config.max_depth {
+                return Err(known("local agent depth limit reached"));
+            }
+            definition()
         }
-        CAPABILITY_STOP => {
-            let args: StopArgs = serde_json::from_value(arguments)
-                .map_err(|error| known(format!("agent.stop arguments are invalid: {error}")))?;
-            return context.inner.fleet.stop(&args.child_task_id).map_err(known);
-        }
-        CAPABILITY_STEER => {
-            let args: SteerArgs = serde_json::from_value(arguments)
-                .map_err(|error| known(format!("agent.steer arguments are invalid: {error}")))?;
-            return context
-                .inner
-                .fleet
-                .steer(&args.child_task_id, &args.text)
-                .map_err(known);
-        }
-        CAPABILITY => {}
+        CAPABILITY_FLEET => fleet_definition(),
+        CAPABILITY_STOP => stop_definition(),
+        CAPABILITY_STEER => steer_definition(),
         other => return Err(known(format!("local agent service received {other}"))),
-    }
-    // Reject nesting before any permission wait. A child at max_depth must not
-    // be able to sit in an approval queue for a call that can never run.
-    if context.scope.depth() >= config.max_depth {
-        return Err(known("local agent depth limit reached"));
-    }
+    };
     let service = ChildService { context, config };
-    let definition = definition();
     let child = cancel.child_token();
     let _cancel_on_drop = child.clone().drop_guard();
     let run = host.call_service(&definition, arguments, child.clone(), &service);

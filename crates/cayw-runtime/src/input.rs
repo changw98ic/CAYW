@@ -42,6 +42,22 @@ impl TaskInput {
             ));
         }
         let mut bytes = self.text.len();
+        if bytes > max_prompt_bytes {
+            return Err(RuntimeError::InvalidInput(
+                "prompt exceeds the byte budget".into(),
+            ));
+        }
+        for image in &self.images {
+            bytes = bytes
+                .checked_add(image.mime_type.len())
+                .and_then(|total| total.checked_add(image.data.len()))
+                .ok_or_else(|| RuntimeError::InvalidInput("prompt size overflow".into()))?;
+            if bytes > max_prompt_bytes {
+                return Err(RuntimeError::InvalidInput(
+                    "prompt exceeds the byte budget".into(),
+                ));
+            }
+        }
         for image in &self.images {
             if !IMAGE_MIME_TYPES.contains(&image.mime_type.as_str()) {
                 return Err(RuntimeError::InvalidInput(
@@ -61,15 +77,6 @@ impl TaskInput {
                     "image data is not canonical padded base64".into(),
                 ));
             }
-            bytes = bytes
-                .checked_add(image.mime_type.len())
-                .and_then(|total| total.checked_add(image.data.len()))
-                .ok_or_else(|| RuntimeError::InvalidInput("prompt size overflow".into()))?;
-        }
-        if bytes > max_prompt_bytes {
-            return Err(RuntimeError::InvalidInput(
-                "prompt exceeds the byte budget".into(),
-            ));
         }
         Ok(())
     }

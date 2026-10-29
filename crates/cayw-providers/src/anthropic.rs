@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
-    common::validate_request(request, Format::Anthropic)?;
+    let mut prepared = common::prepare_request(request, Format::Anthropic)?;
     let max_tokens = request
         .options
         .max_tokens
@@ -15,27 +15,34 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
         .ok_or("Anthropic requires an explicit positive maximum output token count")?;
     let system = current_system(&request.messages);
     let mut messages = Vec::new();
-    for message in &request.messages {
+    for (idx, message) in request.messages.iter().enumerate() {
         match message {
             Message::System(_) | Message::Custom { .. } => {}
-            Message::User { content, .. } => common::append_turn(
-                &mut messages,
-                "user",
-                "content",
-                common::input_parts(content, request.model.supports_images, Format::Anthropic)?,
-            ),
+            Message::User { .. } => {
+                let parts = prepared
+                    .user_parts
+                    .remove(&idx)
+                    .expect("validated user parts");
+                common::append_turn(&mut messages, "user", "content", parts);
+            }
             Message::Assistant(assistant) => {
                 let content = history_content(assistant)?;
                 common::append_turn(&mut messages, "assistant", "content", content);
             }
-            Message::ToolResult(result) => common::append_turn(
-                &mut messages,
-                "user",
-                "content",
-                vec![
-                    json!({"type":"tool_result","tool_use_id":result.tool_call_id,"content":common::tool_output(result)?,"is_error":result.is_error}),
-                ],
-            ),
+            Message::ToolResult(result) => {
+                let tool_output = prepared
+                    .tool_outputs
+                    .remove(&idx)
+                    .expect("validated tool output");
+                common::append_turn(
+                    &mut messages,
+                    "user",
+                    "content",
+                    vec![
+                        json!({"type":"tool_result","tool_use_id":result.tool_call_id,"content":tool_output,"is_error":result.is_error}),
+                    ],
+                );
+            }
         }
     }
     if messages.first().is_none_or(|m| m["role"] != "user") {

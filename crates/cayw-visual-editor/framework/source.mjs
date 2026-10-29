@@ -366,15 +366,21 @@ function staticStyleKeyName(key) {
   return null;
 }
 
-function staticStyleLiteralValue(value) {
+function staticStyleRawValue(value) {
   if (!value) return null;
   if (value.type === 'StringLiteral') return value.value;
-  if (value.type === 'NumericLiteral') return String(value.value);
+  if (value.type === 'NumericLiteral') return value.value;
   if (value.type === 'UnaryExpression' && value.operator === '-' && value.argument
     && value.argument.type === 'NumericLiteral') {
-    return `-${value.argument.value}`;
+    return -value.argument.value;
   }
   return null;
+}
+
+function staticStyleLiteralValue(value) {
+  const raw = staticStyleRawValue(value);
+  if (raw === null) return null;
+  return typeof raw === 'number' ? String(raw) : raw;
 }
 
 // A style object built only from literal values is static source, not a
@@ -386,7 +392,7 @@ function isStaticStyleObjectExpression(expression) {
     property.type === 'ObjectProperty'
     && !property.computed
     && staticStyleKeyName(property.key) !== null
-    && staticStyleLiteralValue(property.value) !== null
+    && staticStyleRawValue(property.value) !== null
   ));
 }
 
@@ -410,7 +416,7 @@ function staticStyleDeclarations(attribute) {
   const declarations = [];
   for (const property of (expression && expression.properties) || []) {
     const key = staticStyleKeyName(property.key);
-    const value = staticStyleLiteralValue(property.value);
+    const value = staticStyleRawValue(property.value);
     if (key === null || value === null) continue;
     declarations.push([key.startsWith('--') ? key : cssPropertyFromReactKey(key), value]);
   }
@@ -1471,9 +1477,36 @@ function reactStyleLiteral(declarations) {
   const entries = declarations.map(([name, value]) => {
     const key = name.startsWith('--') ? name : reactStyleKey(name);
     const emittedKey = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? key : JSON.stringify(name);
-    return `${emittedKey}: ${JSON.stringify(value)}`;
+    const emittedValue = typeof value === 'number' ? String(value) : JSON.stringify(value);
+    return `${emittedKey}: ${emittedValue}`;
   });
   return `{{ ${entries.join(', ')} }}`;
+}
+
+function mergeReactStyleDeclarations(attribute, updates) {
+  const existing = attribute && attribute.staticStyleObject ? staticStyleDeclarations(attribute) : [];
+  const declarations = [];
+  const updatedKeys = new Set();
+  for (const [name, value] of existing) {
+    let matched = false;
+    for (const [updateName, updateValue] of updates) {
+      if (name === updateName) {
+        declarations.push([name, updateValue]);
+        updatedKeys.add(updateName);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      declarations.push([name, value]);
+    }
+  }
+  for (const [updateName, updateValue] of updates) {
+    if (!updatedKeys.has(updateName)) {
+      declarations.push([updateName, updateValue]);
+    }
+  }
+  return declarations;
 }
 
 function componentStyleDeclarations(css) {
@@ -2201,14 +2234,32 @@ export function editDocuments(input) {
     ensureEditable(record);
     const properties = operation.properties;
     const updates = validateStyleProperties(properties);
-    const declarations = mergeStyleDeclarations(currentStyle(record), updates);
-    if (record.framework === 'react'
-      && declarations.some(([, value]) => /!\s*important\s*$/i.test(value))) {
-      fail('invalid_style', 'React inline styles cannot express !important; remove it or use a stylesheet class');
+    if (record.framework === 'react') {
+      if (record.styleDynamic) {
+        fail('dynamic_region', 'the existing style attribute is dynamic and cannot be overwritten');
+      }
+      const attribute = findStaticAttribute(record, 'style');
+      let declarations;
+      if (attribute) {
+        if (attribute.dynamic) {
+          if (!attribute.staticStyleObject) {
+            fail('dynamic_region', 'the existing style attribute is dynamic and cannot be overwritten');
+          }
+          declarations = mergeReactStyleDeclarations(attribute, updates);
+        } else {
+          declarations = mergeStyleDeclarations(attribute.hasValue ? attribute.value : '', updates);
+        }
+      } else {
+        declarations = updates;
+      }
+      if (declarations.some(([, value]) => /!\s*important\s*$/i.test(String(value)))) {
+        fail('invalid_style', 'React inline styles cannot express !important; remove it or use a stylesheet class');
+      }
+      edits = [reactStyleEdit(record, declarations)];
+    } else {
+      const declarations = mergeStyleDeclarations(currentStyle(record), updates);
+      edits = [setAttributeEdit(record, 'style', styleText(declarations))];
     }
-    edits = [record.framework === 'react'
-      ? reactStyleEdit(record, declarations)
-      : setAttributeEdit(record, 'style', styleText(declarations))];
     selectionMode = 'exact';
     selectionHint = record.startJs;
   } else if (kind === 'text') {

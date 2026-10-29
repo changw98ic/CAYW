@@ -932,6 +932,18 @@ async fn invalid_history_and_unsupported_inputs_fail_before_network() {
             timestamp: 0,
         });
         cases.push(req);
+        for bad_data in ["aGVsbG8-", "aGVsbG8", "aGVsbG8===", ""] {
+            let mut req = request(kind);
+            req.model.supports_images = true;
+            req.messages.push(Message::User {
+                content: vec![Content::Image {
+                    data: bad_data.into(),
+                    mime_type: "image/png".into(),
+                }],
+                timestamp: 0,
+            });
+            cases.push(req);
+        }
         let mut req = request(kind);
         req.options.thinking_level = cayw_ai::ThinkingLevel::High;
         cases.push(req);

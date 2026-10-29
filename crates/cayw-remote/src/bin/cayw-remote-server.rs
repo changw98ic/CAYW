@@ -3,7 +3,14 @@ use cayw_remote::{
     serve,
 };
 use serde_json::Value;
-use std::{env, fs::OpenOptions, io::Write, net::SocketAddr, time::Duration};
+use std::{
+    env,
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    net::SocketAddr,
+    path::Path,
+    time::Duration,
+};
 use tokio::net::TcpListener;
 
 fn setting(name: &str, default: &str) -> String {
@@ -11,6 +18,24 @@ fn setting(name: &str, default: &str) -> String {
 }
 fn token() -> Result<Secret, RemoteError> {
     Secret::new(env::var("CAYW_REMOTE_OPERATOR_TOKEN").map_err(|_| RemoteError::Configuration)?)
+}
+fn read_bounded_payload(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, RemoteError> {
+    let file = File::open(path).map_err(|_| RemoteError::Configuration)?;
+    let metadata = file.metadata().map_err(|_| RemoteError::Configuration)?;
+    if !metadata.is_file() {
+        return Err(RemoteError::Configuration);
+    }
+    if metadata.len() > limit {
+        return Err(RemoteError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RemoteError::Configuration)?;
+    if bytes.len() as u64 > limit {
+        return Err(RemoteError::TooLarge);
+    }
+    Ok(bytes)
 }
 fn output(value: impl serde::Serialize) -> Result<(), RemoteError> {
     println!(
@@ -111,10 +136,7 @@ async fn run() -> Result<(), RemoteError> {
         "device-status" => output(operator.device_status(device()?).await?),
         "invoke" => {
             let path = args.get(3).ok_or(RemoteError::Configuration)?;
-            let bytes = std::fs::read(path).map_err(|_| RemoteError::Configuration)?;
-            if bytes.len() > 64 * 1024 {
-                return Err(RemoteError::TooLarge);
-            }
+            let bytes = read_bounded_payload(path, 64 * 1024)?;
             let value: Value =
                 serde_json::from_slice(&bytes).map_err(|_| RemoteError::InvalidRequest)?;
             output(operator.invoke(device()?, id()?, value).await?)

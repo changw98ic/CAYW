@@ -84,7 +84,8 @@ impl ContentStore {
         title: Option<String>,
     ) -> Result<ContentRef, WebAccessError> {
         let content_sha256 = hex_sha256(&bytes);
-        let (id, handle_view) = if let Some(sink) = &self.sink {
+        let byte_len = bytes.len() as u64;
+        let (id, handle_view, stored_text, stored_bytes) = if let Some(sink) = &self.sink {
             let identity = serde_json::to_vec(&(kind, mime_type.as_deref(), &content_sha256))
                 .expect("web content identity serializes");
             let view = sink.put(&hex_sha256(&identity), &bytes, mime_type.as_deref())?;
@@ -98,17 +99,18 @@ impl ContentStore {
                     )
                 })?
                 .to_string();
-            (id, Some(view))
+            // When sink is active, do not retain redundant text or bytes copies in memory.
+            (id, Some(view), None, Vec::new())
         } else {
             let mut guard = self.inner.lock().expect("content store lock");
             guard.next += 1;
-            (format!("webc-{}", guard.next), None)
+            (format!("webc-{}", guard.next), None, text, bytes)
         };
         let meta = ContentRef {
             id: id.clone(),
             kind,
             content_sha256,
-            byte_len: bytes.len() as u64,
+            byte_len,
             mime_type: mime_type.clone(),
             source_url,
             title,
@@ -118,8 +120,8 @@ impl ContentStore {
             id,
             StoredBody {
                 meta: meta.clone(),
-                text,
-                bytes,
+                text: stored_text,
+                bytes: stored_bytes,
                 handle_view,
             },
         );
@@ -137,7 +139,7 @@ impl ContentStore {
             && let Some(body) = guard.bodies.get_mut(id)
         {
             body.text = None;
-            body.bytes.clear();
+            body.bytes = Vec::new();
         }
     }
 
@@ -350,6 +352,13 @@ mod tests {
             sink.0.lock().unwrap().get(&meta.id).unwrap(),
             b"authoritative device content"
         );
+        // Verify sink mode does not store text or bytes duplicate in process memory
+        {
+            let guard = store.inner.lock().unwrap();
+            let body = guard.bodies.get(&meta.id).unwrap();
+            assert!(body.text.is_none());
+            assert!(body.bytes.is_empty());
+        }
         // Evict cached body from local store
         store.evict_body(&meta.id);
         // Read through store falls back to reading from sink
@@ -357,5 +366,35 @@ mod tests {
             store.get_text(&meta.id).unwrap(),
             "authoritative device content"
         );
+    }
+
+    #[test]
+    fn standalone_mode_retains_body_and_supports_eviction() {
+        let store = ContentStore::new();
+        let meta = store
+            .put_text(
+                ContentKind::Text,
+                "standalone text",
+                Some("text/plain".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        {
+            let guard = store.inner.lock().unwrap();
+            let body = guard.bodies.get(&meta.id).unwrap();
+            assert_eq!(body.text.as_deref(), Some("standalone text"));
+            assert_eq!(body.bytes.as_slice(), b"standalone text");
+        }
+        assert_eq!(store.get_text(&meta.id).unwrap(), "standalone text");
+        store.evict_body(&meta.id);
+        {
+            let guard = store.inner.lock().unwrap();
+            let body = guard.bodies.get(&meta.id).unwrap();
+            assert!(body.text.is_none());
+            assert!(body.bytes.is_empty());
+            assert_eq!(body.bytes.capacity(), 0);
+        }
+        assert!(store.get_text(&meta.id).is_err());
     }
 }

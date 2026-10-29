@@ -310,3 +310,86 @@ fn late_tool_past_first_page_is_folded_when_all_records_supplied() {
         "page-2 window must include the late tool"
     );
 }
+
+#[test]
+fn windowed_projection_preserves_start_timestamp_across_page_boundary() {
+    let session = "boundary-sess";
+    let args = json!({"path": "file.txt"});
+    let records = vec![
+        record(session, 1, 1_000, agent(AgentEvent::TurnStart)),
+        record(
+            session,
+            2,
+            1_020,
+            agent(AgentEvent::ToolExecutionStart {
+                call: call("c1", "read", args.clone()),
+            }),
+        ),
+        // Page boundary here: start=2 (0-indexed offset into records)
+        record(
+            session,
+            3,
+            1_080,
+            agent(AgentEvent::ToolExecutionEnd {
+                call: call("c1", "read", args.clone()),
+                result: ToolResult::text("hello"),
+                duration_ms: None, // No explicit duration; must compute from start event
+            }),
+        ),
+        record(session, 4, 2_000, agent(AgentEvent::TurnStart)),
+        record(
+            session,
+            5,
+            2_010,
+            agent(AgentEvent::ToolExecutionStart {
+                call: call("c2", "write", args.clone()),
+            }),
+        ),
+        record(
+            session,
+            6,
+            2_040,
+            agent(AgentEvent::ToolExecutionEnd {
+                call: call("c2", "write", args),
+                result: ToolResult::text("ok"),
+                duration_ms: Some(30),
+            }),
+        ),
+    ];
+
+    // Full unpaged projection
+    let full_snapshot = snapshot_from_runtime_events(session, None, None, &records);
+    assert_eq!(full_snapshot.steps.len(), 2);
+    assert_eq!(full_snapshot.steps[0].step_id, "c1");
+    assert_eq!(full_snapshot.steps[0].started_at_ms, 1_020);
+    assert_eq!(full_snapshot.steps[0].elapsed_ms, 60);
+    assert_eq!(full_snapshot.steps[0].turn, 1);
+
+    // Page 1: records 0..2 (TurnStart and ToolExecutionStart) -> emits 0 steps because tool hasn't ended
+    let page1_snapshot = snapshot_from_runtime_events_window(session, None, None, &records, 0, 2);
+    assert_eq!(page1_snapshot.steps.len(), 0);
+
+    // Page 2: records 2..6 (ToolExecutionEnd for c1, TurnStart, c2 start, c2 end)
+    // Prefix records 0..2 must be read for context without emitting steps.
+    let page2_snapshot = snapshot_from_runtime_events_window(session, None, None, &records, 2, 6);
+    assert_eq!(page2_snapshot.steps.len(), 2);
+
+    let c1_paged = &page2_snapshot.steps[0];
+    assert_eq!(c1_paged.step_id, "c1");
+    // Verify started_at_ms is NOT forged to record.timestamp (1_080) and elapsed is NOT 0
+    assert_eq!(c1_paged.started_at_ms, 1_020);
+    assert_eq!(c1_paged.elapsed_ms, 60);
+    assert_eq!(c1_paged.turn, 1);
+    assert_eq!(c1_paged.ordinal, 0);
+
+    let c2_paged = &page2_snapshot.steps[1];
+    assert_eq!(c2_paged.step_id, "c2");
+    assert_eq!(c2_paged.started_at_ms, 2_010);
+    assert_eq!(c2_paged.elapsed_ms, 30);
+    assert_eq!(c2_paged.turn, 2);
+    assert_eq!(c2_paged.ordinal, 0);
+
+    // Merging snapshots across pages produces the exact full snapshot
+    let merged = merge_session_snapshots(session, None, None, &[page1_snapshot, page2_snapshot]);
+    assert_eq!(merged, full_snapshot);
+}

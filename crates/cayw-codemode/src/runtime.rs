@@ -320,24 +320,28 @@ fn restricted_coroutine(
         .map_err(Fault::from_lua)?
         .get("unpack")
         .map_err(Fault::from_lua)?;
+    let select: mlua::Function = lua.globals().get("select").map_err(Fault::from_lua)?;
     // `wrap` must reuse the guarded `resume`, so it is built here rather than
     // taken from the native library.
     let wrap: mlua::Function = lua
         .load(
-            r#"
-            local create, resume, unpack = ...
+            r##"
+            local create, resume, unpack, select = ...
+            local function pack(...)
+                return select("#", ...), {...}
+            end
             return function(f)
                 local co = create(f)
                 return function(...)
-                    local result = {resume(co, ...)}
+                    local count, result = pack(resume(co, ...))
                     if not result[1] then error(result[2], 0) end
-                    return unpack(result, 2, #result)
+                    return unpack(result, 2, count)
                 end
             end
-            "#,
+            "##,
         )
         .set_name("trusted-coroutine-wrap")
-        .call((create, resume, unpack))
+        .call((create, resume, unpack, select))
         .map_err(Fault::from_lua)?;
     table.raw_set("wrap", wrap).map_err(Fault::from_lua)?;
     // The script may call these functions but cannot replace the guard.

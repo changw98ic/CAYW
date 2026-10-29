@@ -156,7 +156,7 @@ fn owned_dispatch_deep_leaf_matrix_survives_on_small_stack() {
                 execution_id: "vm".into(),
                 sequence: 0,
             };
-            for variant in 0..15 {
+            for variant in 0..16 {
                 let deep = || nested(25_000);
                 let call = || ToolCall::new("invalid", "invalid", deep());
                 let result = || ToolResult {
@@ -209,10 +209,17 @@ fn owned_dispatch_deep_leaf_matrix_survives_on_small_stack() {
                             }),
                         }
                     }
+                    15 => {
+                        let mut message = AssistantMessage::new(&Model::new("offline", "fixture"));
+                        message.provider_metadata.insert("deep_meta".into(), deep());
+                        AgentEvent::MessageStart {
+                            message: Message::Assistant(message),
+                        }
+                    }
                     _ => AgentEvent::AgentStart,
                 };
                 let request = match variant {
-                    0..=6 => CoreRequest::AppendAgentEvent {
+                    0..=6 | 15 => CoreRequest::AppendAgentEvent {
                         lease: lease.clone(),
                         event: Box::new(event),
                     },

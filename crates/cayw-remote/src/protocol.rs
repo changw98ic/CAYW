@@ -386,10 +386,84 @@ impl Envelope {
         Ok(())
     }
     pub(crate) fn encode(&self, limit: usize) -> Result<String, RemoteError> {
-        let result = serde_json::to_string(self).map_err(|_| RemoteError::InvalidRequest)?;
-        if result.len() > limit {
-            return Err(RemoteError::TooLarge);
+        struct BoundedWriter {
+            bytes: Vec<u8>,
+            limit: usize,
+            overflow: bool,
         }
-        Ok(result)
+        impl std::io::Write for BoundedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if buf.len() > self.limit.saturating_sub(self.bytes.len()) {
+                    self.overflow = true;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "payload exceeds limit",
+                    ));
+                }
+                if self.bytes.len() + buf.len() > self.bytes.capacity() {
+                    let target = (self.bytes.capacity().saturating_mul(2))
+                        .max(self.bytes.len() + buf.len())
+                        .min(self.limit);
+                    self.bytes
+                        .try_reserve_exact(target - self.bytes.len())
+                        .map_err(|_| std::io::Error::other("cannot allocate buffer"))?;
+                }
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut writer = BoundedWriter {
+            bytes: Vec::new(),
+            limit,
+            overflow: false,
+        };
+        match serde_json::to_writer(&mut writer, self) {
+            Ok(()) => String::from_utf8(writer.bytes).map_err(|_| RemoteError::InvalidRequest),
+            Err(_) if writer.overflow => Err(RemoteError::TooLarge),
+            Err(_) => Err(RemoteError::InvalidRequest),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelope_encode_bounded_under_limit() {
+        let envelope = Envelope::new("req-1".into(), "dev-1".into(), 1, Body::Status);
+        let encoded = envelope.encode(1024).unwrap();
+        assert!(encoded.contains("req-1"));
+        assert!(encoded.contains("status"));
+    }
+
+    #[test]
+    fn envelope_encode_rejects_oversized_payload_early() {
+        let large_str = "x".repeat(10_000);
+        let envelope = Envelope::new(
+            "req-1".into(),
+            "dev-1".into(),
+            1,
+            Body::Invoke {
+                payload: serde_json::json!({ "data": large_str }),
+            },
+        );
+        let err = envelope.encode(256).unwrap_err();
+        assert_eq!(err, RemoteError::TooLarge);
+    }
+
+    #[test]
+    fn envelope_encode_exact_boundary() {
+        let envelope = Envelope::new("req-1".into(), "dev-1".into(), 1, Body::Status);
+        let normal = serde_json::to_string(&envelope).unwrap();
+        let exact_len = normal.len();
+        assert!(envelope.encode(exact_len).is_ok());
+        assert_eq!(
+            envelope.encode(exact_len - 1).unwrap_err(),
+            RemoteError::TooLarge
+        );
     }
 }

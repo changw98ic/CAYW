@@ -300,6 +300,48 @@ test('react style edits always produce executable style objects', () => {
   assert.deepEqual(reactStyleObject(withConverted), { marginTop: '4px', color: 'blue' });
 });
 
+test('react style edits preserve numeric AST literals and reject dynamic objects', () => {
+  const files = [{
+    path: 'src/App.jsx',
+    source: `<main><div style={{ width: 10, marginTop: -2, opacity: 0.5 }}>Test</div><span style={dynamicStyle}>Dynamic</span></main>`,
+  }];
+  const { nodes } = mapDocuments({ framework: 'react', files, revision: REVISION });
+  const div = nodeByTag(nodes, 'div');
+  const span = nodeByTag(nodes, 'span');
+
+  const styled = editDocuments({
+    framework: 'react',
+    files,
+    revision: REVISION,
+    operation: {
+      kind: 'style',
+      id: div.id,
+      properties: { color: 'blue' },
+    },
+  });
+  const output = applyPatches(files, styled.patches).get('src/App.jsx');
+  assert.match(output, /style=\{\{ width: 10, marginTop: -2, opacity: 0.5, color: "blue" \}\}/);
+  const styleObj = reactStyleObject(output);
+  assert.equal(styleObj.width, 10);
+  assert.equal(typeof styleObj.width, 'number');
+  assert.equal(styleObj.marginTop, -2);
+  assert.equal(typeof styleObj.marginTop, 'number');
+  assert.equal(styleObj.opacity, 0.5);
+  assert.equal(typeof styleObj.opacity, 'number');
+  assert.equal(styleObj.color, 'blue');
+
+  assert.throws(
+    () => editDocuments({
+      framework: 'react',
+      files,
+      revision: REVISION,
+      operation: { kind: 'style', id: span.id, properties: { color: 'red' } },
+    }),
+    (error) => error.code === 'dynamic_region',
+    'dynamic style objects must be refused',
+  );
+});
+
 test('tsx style edits use the same object form', () => {
   const files = [{
     path: 'src/A.tsx',

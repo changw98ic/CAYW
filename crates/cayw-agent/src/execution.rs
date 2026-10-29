@@ -97,6 +97,8 @@ pub(crate) async fn execute_batch(
                 .is_some_and(|tool| tool.mode == Some(ExecutionMode::Sequential))
         });
 
+    let batch_cancel = cancel.child_token();
+
     if sequential {
         let mut outcomes = Vec::with_capacity(calls.len());
         for call in calls {
@@ -107,11 +109,15 @@ pub(crate) async fn execute_batch(
                 &registry,
                 batch_error.as_deref(),
                 &hooks,
-                &cancel,
+                &batch_cancel,
                 &emit,
             )
             .await;
-            outcomes.push(finish_call(prepared, hooks.clone(), emit.clone()).await);
+            let outcome = finish_call(prepared, hooks.clone(), emit.clone()).await;
+            if outcome.result.outcome_unknown {
+                batch_cancel.cancel();
+            }
+            outcomes.push(outcome);
         }
         return outcomes;
     }
@@ -128,7 +134,7 @@ pub(crate) async fn execute_batch(
                 &registry,
                 batch_error.as_deref(),
                 &hooks,
-                &cancel,
+                &batch_cancel,
                 &emit,
             )
             .await,
@@ -143,6 +149,9 @@ pub(crate) async fn execute_batch(
     }
     let mut ordered = (0..count).map(|_| None).collect::<Vec<_>>();
     while let Some((index, outcome)) = pending.next().await {
+        if outcome.result.outcome_unknown {
+            batch_cancel.cancel();
+        }
         ordered[index] = Some(outcome);
     }
     ordered.into_iter().flatten().collect()
@@ -490,6 +499,8 @@ mod tests {
         release: Option<Arc<Notify>>,
         progress: Option<Arc<Mutex<Option<ToolProgress>>>>,
         panic: bool,
+        unknown: bool,
+        shutdown_grace: Option<Duration>,
     }
 
     #[async_trait]
@@ -504,6 +515,9 @@ mod tests {
         fn execution_mode(&self) -> Option<ExecutionMode> {
             self.mode
         }
+        fn shutdown_grace(&self) -> Duration {
+            self.shutdown_grace.unwrap_or(Duration::from_secs(3))
+        }
         async fn execute(&self, context: ToolContext) -> Result<ToolResult, String> {
             self.executions.fetch_add(1, Ordering::SeqCst);
             if let Some(started) = &self.started {
@@ -517,6 +531,13 @@ mod tests {
                 release.notified().await;
             }
             assert!(!self.panic, "execution panic");
+            if self.unknown {
+                return Ok(ToolResult {
+                    outcome_unknown: true,
+                    is_error: true,
+                    ..ToolResult::text("unknown tool effect")
+                });
+            }
             Ok(ToolResult::text(context.arguments["n"].to_string()))
         }
     }
@@ -530,6 +551,8 @@ mod tests {
             release: None,
             progress: None,
             panic: false,
+            unknown: false,
+            shutdown_grace: None,
         }
     }
 
@@ -914,5 +937,215 @@ mod tests {
         .await;
         assert!(outcomes[0].result.is_error && outcomes[0].result.outcome_unknown);
         assert!(outcomes[0].duration_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn sequential_natural_unknown_stops_subsequent_tools_and_pairs_all_events() {
+        let mut first = test_tool("first");
+        first.unknown = true;
+        first.mode = Some(ExecutionMode::Sequential);
+        let second = test_tool("second");
+        let second_executions = second.executions.clone();
+
+        let events = Arc::new(Mutex::new(vec![]));
+        let parent_cancel = CancellationToken::new();
+        let assistant = assistant(vec![
+            ToolCall::new("1", "first", json!({"n": 1})),
+            ToolCall::new("2", "second", json!({"n": 2})),
+        ]);
+        let outcomes = execute_batch(
+            &assistant,
+            &context(vec![Arc::new(first), Arc::new(second)]),
+            ExecutionMode::Parallel,
+            Arc::new(NoHooks),
+            parent_cancel.clone(),
+            sink(events.clone()),
+        )
+        .await;
+
+        assert_eq!(second_executions.load(Ordering::SeqCst), 0);
+        assert!(!parent_cancel.is_cancelled());
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].call.id, "1");
+        assert!(outcomes[0].result.outcome_unknown);
+        assert!(outcomes[0].result.is_error);
+        assert_eq!(outcomes[1].call.id, "2");
+        assert!(!outcomes[1].result.outcome_unknown);
+        assert!(outcomes[1].result.is_error);
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
+                .count(),
+            2
+        );
+        assert!(matches!(&events[0], AgentEvent::ToolExecutionStart { call } if call.id == "1"));
+        assert!(
+            matches!(&events[1], AgentEvent::ToolExecutionEnd { call, result, .. } if call.id == "1" && result.outcome_unknown)
+        );
+        assert!(matches!(&events[2], AgentEvent::ToolExecutionStart { call } if call.id == "2"));
+        assert!(
+            matches!(&events[3], AgentEvent::ToolExecutionEnd { call, result, .. } if call.id == "2" && !result.outcome_unknown && result.is_error)
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_panic_stops_subsequent_tools_and_pairs_all_events() {
+        let mut first = test_tool("first");
+        first.panic = true;
+        first.mode = Some(ExecutionMode::Sequential);
+        let second = test_tool("second");
+        let second_executions = second.executions.clone();
+
+        let events = Arc::new(Mutex::new(vec![]));
+        let parent_cancel = CancellationToken::new();
+        let assistant = assistant(vec![
+            ToolCall::new("1", "first", json!({"n": 1})),
+            ToolCall::new("2", "second", json!({"n": 2})),
+        ]);
+        let outcomes = execute_batch(
+            &assistant,
+            &context(vec![Arc::new(first), Arc::new(second)]),
+            ExecutionMode::Parallel,
+            Arc::new(NoHooks),
+            parent_cancel.clone(),
+            sink(events.clone()),
+        )
+        .await;
+
+        assert_eq!(second_executions.load(Ordering::SeqCst), 0);
+        assert!(!parent_cancel.is_cancelled());
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].result.outcome_unknown);
+        assert!(!outcomes[1].result.outcome_unknown);
+        assert!(outcomes[1].result.is_error);
+    }
+
+    #[tokio::test]
+    async fn parallel_natural_unknown_stops_unstarted_calls_and_pairs_all_events() {
+        let mut first = test_tool("first");
+        first.unknown = true;
+        let second = test_tool("second");
+        let second_executions = second.executions.clone();
+
+        let events = Arc::new(Mutex::new(vec![]));
+        let parent_cancel = CancellationToken::new();
+        let assistant = assistant(vec![
+            ToolCall::new("1", "first", json!({"n": 1})),
+            ToolCall::new("2", "second", json!({"n": 2})),
+        ]);
+        let outcomes = execute_batch(
+            &assistant,
+            &context(vec![Arc::new(first), Arc::new(second)]),
+            ExecutionMode::Parallel,
+            Arc::new(NoHooks),
+            parent_cancel.clone(),
+            sink(events.clone()),
+        )
+        .await;
+
+        assert_eq!(second_executions.load(Ordering::SeqCst), 0);
+        assert!(!parent_cancel.is_cancelled());
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].call.id, "1");
+        assert!(outcomes[0].result.outcome_unknown);
+        assert_eq!(outcomes[1].call.id, "2");
+        assert!(!outcomes[1].result.outcome_unknown);
+        assert!(outcomes[1].result.is_error);
+    }
+
+    struct DelayedUnknownTool {
+        wait_for_sibling: Arc<Notify>,
+    }
+    #[async_trait]
+    impl AgentTool for DelayedUnknownTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "first".into(),
+                description: String::new(),
+                parameters: json!({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]}),
+            }
+        }
+        async fn execute(&self, _: ToolContext) -> Result<ToolResult, String> {
+            self.wait_for_sibling.notified().await;
+            Ok(ToolResult {
+                outcome_unknown: true,
+                is_error: true,
+                ..ToolResult::text("unknown")
+            })
+        }
+    }
+
+    struct CleanupSiblingTool {
+        started: Arc<Notify>,
+        cleaned_up: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl AgentTool for CleanupSiblingTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "second".into(),
+                description: String::new(),
+                parameters: json!({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]}),
+            }
+        }
+        fn shutdown_grace(&self) -> Duration {
+            Duration::from_millis(500)
+        }
+        async fn execute(&self, context: ToolContext) -> Result<ToolResult, String> {
+            self.started.notify_one();
+            context.cancel.cancelled().await;
+            self.cleaned_up.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult::text("cleaned up during grace"))
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_natural_unknown_cleans_up_running_sibling_with_grace() {
+        let sibling_started = Arc::new(Notify::new());
+        let cleaned_up = Arc::new(AtomicUsize::new(0));
+        let first = Arc::new(DelayedUnknownTool {
+            wait_for_sibling: sibling_started.clone(),
+        });
+        let second = Arc::new(CleanupSiblingTool {
+            started: sibling_started,
+            cleaned_up: cleaned_up.clone(),
+        });
+
+        let events = Arc::new(Mutex::new(vec![]));
+        let assistant = assistant(vec![
+            ToolCall::new("1", "first", json!({"n": 1})),
+            ToolCall::new("2", "second", json!({"n": 2})),
+        ]);
+        let outcomes = execute_batch(
+            &assistant,
+            &context(vec![first, second]),
+            ExecutionMode::Parallel,
+            Arc::new(NoHooks),
+            CancellationToken::new(),
+            sink(events.clone()),
+        )
+        .await;
+
+        assert_eq!(cleaned_up.load(Ordering::SeqCst), 1);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].call.id, "1");
+        assert!(outcomes[0].result.outcome_unknown);
+        assert_eq!(outcomes[1].call.id, "2");
+        assert!(!outcomes[1].result.outcome_unknown);
+        assert!(!outcomes[1].result.is_error);
+        assert_eq!(
+            outcomes[1].result.content,
+            vec![Content::text("cleaned up during grace")]
+        );
     }
 }

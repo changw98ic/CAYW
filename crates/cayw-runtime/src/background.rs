@@ -24,7 +24,6 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Notify;
 
 const RUN: &str = "bg.run";
 const STATUS: &str = "bg.status";
@@ -171,7 +170,6 @@ pub(crate) struct BackgroundRegistry {
     runner: Arc<cayw_host::ProcessRunner>,
     coordination: crate::coordination::Coordination,
     live: Mutex<BTreeMap<String, LiveHandle>>,
-    notify: Notify,
 }
 
 fn now_ms() -> i64 {
@@ -443,6 +441,10 @@ impl BackgroundRegistry {
                 identity_snapshot TEXT NOT NULL,
                 evidence TEXT NOT NULL,
                 confirmed_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_background_cancels (
+                task_id TEXT PRIMARY KEY,
+                requested_ms INTEGER NOT NULL
             );",
         )?;
         let parent = canonical_store.parent().ok_or_else(|| {
@@ -457,7 +459,6 @@ impl BackgroundRegistry {
             runner,
             coordination,
             live: Mutex::new(BTreeMap::new()),
-            notify: Notify::new(),
         };
         registry.mark_orphans()?;
         Ok(registry)
@@ -636,6 +637,22 @@ impl BackgroundRegistry {
             let _ = fs::remove_file(&log_path);
             connection.execute(
                 "DELETE FROM runtime_background_log_index WHERE id=?1",
+                params![id],
+            )?;
+            connection.execute(
+                "DELETE FROM runtime_background_processes WHERE task_id=?1",
+                params![id],
+            )?;
+            connection.execute(
+                "DELETE FROM runtime_background_executors WHERE task_id=?1",
+                params![id],
+            )?;
+            connection.execute(
+                "DELETE FROM runtime_background_cleanup_confirmations WHERE task_id=?1",
+                params![id],
+            )?;
+            connection.execute(
+                "DELETE FROM runtime_background_cancels WHERE task_id=?1",
                 params![id],
             )?;
             connection.execute(
@@ -934,15 +951,6 @@ impl BackgroundRegistry {
     }
 
     #[cfg(test)]
-    fn append_log_index(&self, id: &str, offset: u64, line: u64) -> Result<(), RuntimeError> {
-        lock(&self.connection).execute(
-            "INSERT OR IGNORE INTO runtime_background_log_index(id,offset,line) VALUES(?1,?2,?3)",
-            params![id, offset as i64, line as i64],
-        )?;
-        Ok(())
-    }
-
-    #[cfg(test)]
     fn update_log_bytes(&self, id: &str, bytes: u64) -> Result<(), RuntimeError> {
         lock(&self.connection).execute(
             "UPDATE runtime_background_tasks SET log_bytes=?2 WHERE id=?1",
@@ -970,9 +978,6 @@ impl BackgroundRegistry {
             if status != BackgroundStatus::OutcomeUnknown {
                 Self::require_cleanup(&Self::cleanup_records(&tx, id)?)?;
             }
-            // Prune older known results before inserting this terminal. Unknown
-            // tasks and their ownership records are never retention candidates.
-            self.prune_finished(&tx)?;
             tx.execute(
                 "UPDATE runtime_background_tasks
                  SET status=?2, exit_code=?3, error=?4, finished_ms=?5
@@ -985,6 +990,9 @@ impl BackgroundRegistry {
                     now_ms()
                 ],
             )?;
+            // Prune older known results after recording this terminal. Unknown
+            // tasks and their ownership records are never retention candidates.
+            self.prune_finished(&tx)?;
             tx.commit()?;
         }
         let view = self.load(id)?.ok_or_else(|| {
@@ -997,7 +1005,6 @@ impl BackgroundRegistry {
         } else if let Some(live) = lock(&self.live).get_mut(id) {
             live.execution_done = true;
         }
-        self.notify.notify_waiters();
         Ok(view)
     }
 
@@ -1006,7 +1013,6 @@ impl BackgroundRegistry {
             live.persistence_failure = Some(format!("background result is not durable: {error}"));
             live.execution_done = true;
         }
-        self.notify.notify_waiters();
     }
 
     fn apply_persistence_failure(&self, view: &mut BackgroundTaskView) {
@@ -1068,8 +1074,66 @@ impl BackgroundRegistry {
         }
         if let Some(live) = lock(&self.live).get(id) {
             live.cancel.cancel();
+            let connection = lock(&self.connection);
+            let _ = connection.execute(
+                "INSERT INTO runtime_background_cancels(task_id, requested_ms) VALUES(?1, ?2)
+                 ON CONFLICT(task_id) DO UPDATE SET requested_ms=excluded.requested_ms",
+                params![id, now_ms()],
+            );
+            return Ok(view);
         }
-        // Soft mark; the waiter finishes with killed once the child exits.
+        let connection = lock(&self.connection);
+        let executor: Option<(RawProcessIdentity, String)> = connection
+            .query_row(
+                "SELECT pid,parent_pid,process_group,started_seconds,started_microseconds,cleanup_state
+                 FROM runtime_background_executors WHERE task_id=?1",
+                [id],
+                |row| Ok((RawProcessIdentity::read(row, 0)?, row.get::<_, String>(5)?)),
+            )
+            .optional()?;
+        let Some((executor_raw, cleanup_state)) = executor else {
+            return Err(RuntimeError::Worker(
+                "background task has no original executor record".into(),
+            ));
+        };
+        if cleanup_state != "open" {
+            return Err(RuntimeError::Worker(
+                "background task original executor is already closed".into(),
+            ));
+        }
+        let Some(executor_id) = executor_raw.decode() else {
+            return Err(RuntimeError::Worker(
+                "background task executor identity is incomplete".into(),
+            ));
+        };
+        #[cfg(target_os = "macos")]
+        {
+            match executor_id.is_running() {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RuntimeError::Worker(
+                        "background task original executor is not running".into(),
+                    ));
+                }
+                Err(error) => {
+                    return Err(RuntimeError::Worker(format!(
+                        "observe background executor: {error}"
+                    )));
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = executor_id;
+            return Err(RuntimeError::Worker(
+                "background task executor cannot be verified on this platform".into(),
+            ));
+        }
+        connection.execute(
+            "INSERT INTO runtime_background_cancels(task_id, requested_ms) VALUES(?1, ?2)
+             ON CONFLICT(task_id) DO UPDATE SET requested_ms=excluded.requested_ms",
+            params![id, now_ms()],
+        )?;
         Ok(view)
     }
 
@@ -1186,7 +1250,6 @@ impl BackgroundRegistry {
             tx.commit()?;
         }
         lock(&self.live).remove(id);
-        self.notify.notify_waiters();
         self.load(id)?.ok_or_else(|| {
             RuntimeError::InvalidInput("background task missing after recover".into())
         })
@@ -1383,6 +1446,14 @@ fn kill_task(
         .map_err(known)?
         .ok_or_else(|| known("background task not found"))?;
     ensure_owner(&view, session)?;
+    if view.status.is_terminal() {
+        return serde_json::to_value(json!({
+            "id": view.id,
+            "status": view.status,
+            "cancel_requested": false
+        }))
+        .map_err(known);
+    }
     let view = registry.request_kill(id).map_err(known)?;
     serde_json::to_value(json!({"id": view.id, "status": view.status, "cancel_requested": true}))
         .map_err(known)
@@ -1608,7 +1679,47 @@ async fn drive_child(
         io: profile.io,
     };
 
+    let cancel_poll = cancel.clone();
+    let registry_poll = registry.clone();
+    let id_poll = id.clone();
+    let is_cancelled = {
+        let connection = lock(&registry.connection);
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_background_cancels WHERE task_id=?1)",
+                [&id],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    };
+    if is_cancelled {
+        cancel.cancel();
+    }
+    let watcher = tokio::spawn(async move {
+        while !cancel_poll.is_cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if cancel_poll.is_cancelled() {
+                break;
+            }
+            let cancelled = {
+                let connection = lock(&registry_poll.connection);
+                connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_background_cancels WHERE task_id=?1)",
+                        [&id_poll],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap_or(false)
+            };
+            if cancelled {
+                cancel_poll.cancel();
+                break;
+            }
+        }
+    });
+
     let result = runner.run(spec, cancel).await;
+    watcher.abort();
     match result {
         Ok(proc_res) => {
             if let Err(error) = registry.record_cleanup(&id, "device_confirmed") {
@@ -1674,30 +1785,12 @@ fn write_logs(
     file.write_all(stderr).map_err(io_error)?;
     file.flush().map_err(io_error)?;
     file.sync_all().map_err(io_error)?;
-    let mut offset = 0;
-    let mut line = 1;
+    let total_bytes = (stdout.len() + stderr.len()) as i64;
     let mut connection = lock(&registry.connection);
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    tx.execute("DELETE FROM runtime_background_log_index WHERE id=?1", [id])?;
-    tx.execute(
-        "INSERT INTO runtime_background_log_index(id,offset,line) VALUES(?1,0,1)",
-        [id],
-    )?;
-    for bytes in [stdout, stderr] {
-        for (index, byte) in bytes.iter().enumerate() {
-            if *byte == b'\n' {
-                line += 1;
-                tx.execute(
-                    "INSERT INTO runtime_background_log_index(id,offset,line) VALUES(?1,?2,?3)",
-                    params![id, offset + index as i64 + 1, line],
-                )?;
-            }
-        }
-        offset += bytes.len() as i64;
-    }
     let updated = tx.execute(
         "UPDATE runtime_background_tasks SET log_bytes=?2 WHERE id=?1 AND status='running'",
-        params![id, offset],
+        params![id, total_bytes],
     )?;
     if updated != 1 {
         return Err(RuntimeError::Worker(
@@ -1890,8 +1983,6 @@ mod tests {
                 .unwrap();
             std::fs::write(&log, b"hello\nworld\n").unwrap();
             registry.update_log_bytes(&id, 12).unwrap();
-            registry.append_log_index(&id, 0, 1).unwrap();
-            registry.append_log_index(&id, 6, 2).unwrap();
             let view = registry.load(&id).unwrap().unwrap();
             assert_eq!(view.session_id, "sess-1");
             assert_eq!(view.status, BackgroundStatus::Running);
@@ -2212,57 +2303,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_log_index_or_byte_count_keeps_unknown_without_partial_index() {
-        for (seed, trigger) in [
-            (
-                0x47,
-                "CREATE TRIGGER fail_log_index BEFORE INSERT ON runtime_background_log_index BEGIN SELECT RAISE(ABORT,'injected log index failure'); END;",
-            ),
-            (
-                0x48,
+    async fn failed_log_byte_count_keeps_unknown() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let id = hex32(0x48);
+        let registry =
+            Arc::new(BackgroundRegistry::open(&db, &BackgroundConfig::default()).unwrap());
+        let log = insert(&registry, &id);
+        lock(&registry.connection)
+            .execute_batch(
                 "CREATE TRIGGER fail_log_bytes BEFORE UPDATE OF log_bytes ON runtime_background_tasks BEGIN SELECT RAISE(ABORT,'injected log bytes failure'); END;",
-            ),
-        ] {
-            let dir = tempdir().unwrap();
-            let db = dir.path().join("sessions.db");
-            let id = hex32(seed);
-            let registry =
-                Arc::new(BackgroundRegistry::open(&db, &BackgroundConfig::default()).unwrap());
-            let log = insert(&registry, &id);
-            lock(&registry.connection).execute_batch(trigger).unwrap();
-            let outcome = drive_child(
-                registry.clone(),
-                id.clone(),
-                test_profile(vec!["echo executed".into()]),
-                dir.path().canonicalize().unwrap(),
-                log.clone(),
-                CancellationToken::new(),
             )
-            .await;
-            assert!(matches!(outcome, ChildOutcome::Unknown(_)));
-            assert!(fs::read_to_string(log).unwrap().contains("executed"));
-            let partial: bool = lock(&registry.connection)
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runtime_background_log_index WHERE id=?1)",
-                    [&id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(
-                !partial,
-                "log metadata transaction must roll back completely"
-            );
-            assert_eq!(registry.load(&id).unwrap().unwrap().log_bytes, 0);
-            let view = registry
-                .finish(
-                    &id,
-                    BackgroundStatus::OutcomeUnknown,
-                    None,
-                    Some("log metadata failed"),
-                )
-                .unwrap();
-            assert_eq!(view.status, BackgroundStatus::OutcomeUnknown);
-        }
+            .unwrap();
+        let outcome = drive_child(
+            registry.clone(),
+            id.clone(),
+            test_profile(vec!["echo executed".into()]),
+            dir.path().canonicalize().unwrap(),
+            log.clone(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, ChildOutcome::Unknown(_)));
+        assert!(fs::read_to_string(log).unwrap().contains("executed"));
+        assert_eq!(registry.load(&id).unwrap().unwrap().log_bytes, 0);
+        let view = registry
+            .finish(
+                &id,
+                BackgroundStatus::OutcomeUnknown,
+                None,
+                Some("log metadata failed"),
+            )
+            .unwrap();
+        assert_eq!(view.status, BackgroundStatus::OutcomeUnknown);
     }
 
     #[test]

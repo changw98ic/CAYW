@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
+    io::Write,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -30,10 +31,16 @@ use validation::{check_values, checked_input, encode_readable};
 #[derive(Clone)]
 pub struct SessionStore {
     connection: Arc<Mutex<Connection>>,
+    projection_cache: Arc<Mutex<Option<CachedProjection>>>,
     reconciliation_verifier: Option<Arc<dyn ReconciliationVerifier>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+struct CachedProjection {
+    json: String,
+    session: Arc<StoredSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredSession {
     id: String,
@@ -57,7 +64,7 @@ enum HistoryEntry {
     ToolSlot { call_id: String },
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Lifecycle {
     started: bool,
@@ -220,6 +227,30 @@ fn identifier(value: &str, field: &str) -> Result<(), CoreError> {
     }
     Ok(())
 }
+struct ByteCountWriter {
+    written: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for ByteCountWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buf.len());
+        if self.written > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Metadata byte limit exceeded",
+            ));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn bounded_value(value: &Value) -> Result<(), CoreError> {
     let mut pending = vec![(value, 0)];
     let mut nodes = 0;
@@ -243,7 +274,20 @@ fn bounded_value(value: &Value) -> Result<(), CoreError> {
             _ => {}
         }
     }
-    if serde_json::to_vec(value)?.len() > MAX_METADATA_BYTES {
+    let mut writer = ByteCountWriter {
+        written: 0,
+        limit: MAX_METADATA_BYTES,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(CoreError::InvalidInput(
+                "Metadata byte limit exceeded".into(),
+            ));
+        }
+        return Err(error.into());
+    }
+    if writer.written > MAX_METADATA_BYTES {
         return Err(CoreError::InvalidInput(
             "Metadata byte limit exceeded".into(),
         ));
@@ -423,6 +467,7 @@ impl SessionStore {
         connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            projection_cache: Arc::new(Mutex::new(None)),
             reconciliation_verifier: None,
         })
     }
@@ -580,7 +625,34 @@ impl SessionStore {
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        Ok(load(&connection, session_id)?.snapshot())
+        Ok(self.cached_projection(&connection, session_id)?.snapshot())
+    }
+
+    // Compare the complete persisted value, including within write transactions.
+    // Equal cursors alone cannot detect a peer change or a damaged projection.
+    fn cached_projection(
+        &self,
+        connection: &Connection,
+        id: &str,
+    ) -> Result<Arc<StoredSession>, CoreError> {
+        let json = projection_json(connection, id)?;
+        let mut cache = self
+            .projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        if let Some(cached) = cache.as_ref()
+            && cached.session.id == id
+            && cached.json == json
+        {
+            waits::validate_wait_log(connection, &cached.session)?;
+            return Ok(cached.session.clone());
+        }
+        let session = Arc::new(decode_projection(connection, id, &json)?);
+        *cache = Some(CachedProjection {
+            json,
+            session: session.clone(),
+        });
+        Ok(session)
     }
 
     /// Includes resolved requests so a waiting runtime can observe a durable decision.
@@ -589,7 +661,10 @@ impl SessionStore {
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        Ok(load(&connection, session_id)?.approvals)
+        Ok(self
+            .cached_projection(&connection, session_id)?
+            .approvals
+            .clone())
     }
 
     pub fn approval(
@@ -620,7 +695,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
         let transaction = connection.transaction()?;
-        let session = load(&transaction, session_id)?;
+        let session = self.cached_projection(&transaction, session_id)?;
         if after > session.cursor {
             return Err(CoreError::FutureCursor {
                 after,
@@ -678,7 +753,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
         let transaction = connection.transaction()?;
-        let session = load(&transaction, session_id)?;
+        let session = self.cached_projection(&transaction, session_id)?;
         if after > session.cursor {
             return Err(CoreError::FutureCursor {
                 after,
@@ -776,7 +851,8 @@ impl SessionStore {
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        load(&connection, &lease.session_id)?.verify_lease(lease)
+        self.cached_projection(&connection, &lease.session_id)?
+            .verify_lease(lease)
     }
 
     pub fn append_host_event(
@@ -841,6 +917,9 @@ impl SessionStore {
         event: &AgentEvent,
     ) -> Result<EventRecord, CoreError> {
         check_values(event)?;
+        if matches!(event, AgentEvent::MessageUpdate { .. }) {
+            return self.append_message_update(lease, event);
+        }
         self.mutate(&lease.session_id, |session| {
             session.verify_lease(lease)?;
             apply_agent_event(session, lease, event)?;
@@ -853,6 +932,60 @@ impl SessionStore {
             ))
         })
         .map(|(_, record)| record)
+    }
+
+    fn append_message_update(
+        &self,
+        lease: &AttemptLease,
+        event: &AgentEvent,
+    ) -> Result<EventRecord, CoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = self.cached_projection(&transaction, &lease.session_id)?;
+        // Move the cached value into this transaction. On any error the cache is
+        // empty, so a later reader reloads the unchanged committed projection.
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take();
+        let state = Arc::make_mut(&mut session);
+        state.verify_lease(lease)?;
+        apply_agent_event(state, lease, event)?;
+        state.cursor = increment(state.cursor)?;
+        let record = EventRecord {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: state.id.clone(),
+            cursor: state.cursor,
+            timestamp: timestamp_ms(),
+            attempt: Some(lease.clone()),
+            event: CoreEvent::Agent {
+                event: Box::new(event.clone()),
+            },
+        };
+        // The event contains the same message at a greater envelope depth than
+        // the projection. Its readable encoding checks every changed JSON value.
+        let record_json = encode_readable(&record)?;
+        let lifecycle = serde_json::to_string(&state.lifecycle)?;
+        transaction.execute(
+            "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+            params![state.id, state.cursor as i64, record_json],
+        )?;
+        // A stream update changes only these two fields. Keep the already
+        // validated history in SQLite instead of decoding and encoding it again.
+        let json = transaction.query_row(
+            "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2, '$.lifecycle', json(?3)) WHERE id=?1 RETURNING projection",
+            params![state.id, state.cursor as i64, lifecycle],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        *self
+            .projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)? = Some(CachedProjection { json, session });
+        Ok(record)
     }
 
     /// Commit immediately before invoking the executor. ToolExecutionStart only
@@ -1620,17 +1753,25 @@ fn increment(value: u64) -> Result<u64, CoreError> {
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or(CoreError::CounterExhausted)
 }
-fn load(connection: &Connection, id: &str) -> Result<StoredSession, CoreError> {
-    let data: Option<String> = connection
+fn projection_json(connection: &Connection, id: &str) -> Result<String, CoreError> {
+    connection
         .query_row(
             "SELECT projection FROM core_sessions WHERE id=?1",
             [id],
             |row| row.get(0),
         )
-        .optional()?;
-    let session = checked_input(serde_json::from_str::<StoredSession>(
-        &data.ok_or_else(|| CoreError::SessionNotFound(id.into()))?,
-    )?)?;
+        .optional()?
+        .ok_or_else(|| CoreError::SessionNotFound(id.into()))
+}
+fn load(connection: &Connection, id: &str) -> Result<StoredSession, CoreError> {
+    decode_projection(connection, id, &projection_json(connection, id)?)
+}
+fn decode_projection(
+    connection: &Connection,
+    id: &str,
+    json: &str,
+) -> Result<StoredSession, CoreError> {
+    let session = checked_input(serde_json::from_str::<StoredSession>(json)?)?;
     if session.id != id || session.cursor > i64::MAX as u64 || session.fence > i64::MAX as u64 {
         return Err(CoreError::CorruptStore(
             "The session identity or counter is inconsistent".into(),
@@ -1662,8 +1803,6 @@ fn persist(
         attempt: lease,
         event,
     };
-    check_values(&record)?;
-    check_values(session)?;
     session.validate_wait_bindings()?;
     let record_json = encode_readable(&record)?;
     let projection_json = encode_readable(session)?;

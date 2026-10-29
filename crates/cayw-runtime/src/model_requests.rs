@@ -1,11 +1,14 @@
-//! Durable model accounting. No tokenizer or price is assumed. A request holds
-//! the budget lineage's entire remainder until a complete reported terminal
-//! commits, including a known model failure, or a cancellation is durably
+//! Durable model accounting. No tokenizer or price is assumed. By default a
+//! request holds the budget lineage's entire remainder until a complete reported
+//! terminal commits, including a known model failure, or a cancellation is durably
 //! recorded before dispatch. A failed task can have known token consumption;
 //! cancellation, missing or invalid usage, and crash uncertainty retain the hold.
-//! Only one unsettled request can run in a session tree. A new task, child, fork
-//! or reopen never resets consumption or unknown holds. The effective cap is
-//! the trusted host's current configuration; records keep their original limits.
+//! Only one request may be in flight in a session tree. A new task, child, fork
+//! or reopen never resets consumption or historical unknown holds. The effective
+//! cap is the trusted host's current configuration; records keep their original limits.
+//! A trusted host can explicitly grant a newly queued task finite additional
+//! tokens while historical unknown holds remain intact. Its requests reserve
+//! only the remaining granted amount within the tree's available budget.
 use crate::{Inner, Runtime, RuntimeError, execution::RunContext};
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, ModelRequest, Provider,
@@ -25,6 +28,7 @@ use std::{
 
 const KIND: &str = "model_request";
 const RECONCILIATION_KIND: &str = "model_request_reconciliation";
+const CONTINUATION_KIND: &str = "model_budget_continuation";
 const MAX_REQUESTS: usize = 4096;
 const MAX_OBSERVATIONS: usize = 65_536;
 const MAX_LEDGER_EVENTS: usize = 262_144;
@@ -131,6 +135,25 @@ pub struct ModelRequestReconciliationRecord {
     pub reconciliation: ModelRequestReconciliation,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBudgetContinuation {
+    pub task_id: String,
+    pub expected: Vec<ModelRequestOrigin>,
+    pub additional_tokens: u64,
+    pub token_limit: u64,
+    pub actor: String,
+    pub evidence: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelBudgetContinuationRecord {
+    pub cursor: u64,
+    pub session_id: String,
+    pub continuation: ModelBudgetContinuation,
+}
+
 /// Trusted host code must authorize the actor and verify evidence for the exact
 /// original request. For ReportedUsage it must bind the complete response capture,
 /// request/response identities, original Agent event prefix and protocol counters
@@ -208,6 +231,7 @@ pub struct ModelRequestLedger {
     pub cost_status: ModelCostStatus,
     pub cost_amount: Option<String>,
     pub cost_currency: Option<String>,
+    pub continuations: Vec<ModelBudgetContinuationRecord>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -573,6 +597,20 @@ fn project(
             },
         )?;
     }
+    let mut continuations = Vec::new();
+    for snapshot in &sessions {
+        if lineage(&snapshot.id, &links)? != root {
+            continue;
+        }
+        visit_selected(store, snapshot, "host", Some(CONTINUATION_KIND), |event| {
+            ledger_events += 1;
+            if ledger_events > MAX_LEDGER_EVENTS {
+                return Err(corrupt());
+            }
+            apply_continuation(&mut continuations, &records, event)
+        })?;
+    }
+    continuations.sort_by_key(|c| c.cursor);
     let pending_terminals = records
         .values()
         .filter(|record| {
@@ -640,6 +678,7 @@ fn project(
             cost_status: ModelCostStatus::Unknown,
             cost_amount: None,
             cost_currency: None,
+            continuations,
         },
         events: ledger_events,
         pending_terminals,
@@ -747,7 +786,7 @@ fn valid_response_label(value: &Option<String>) -> bool {
 /// Only bounded nonnegative counters are accepted; price and opaque data belong
 /// in the trusted evidence, not in this accounting decision.
 fn valid_report_fields(fields: &BTreeMap<String, Value>) -> bool {
-    fields.len() <= FIELDS.len() + 2
+    fields.len() <= FIELDS.len()
         && fields.iter().all(|(key, value)| {
             let details: &[&str] = match key.as_str() {
                 "prompt_tokens_details" => &[
@@ -1192,6 +1231,146 @@ fn apply_reconciliation(
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuationDecision {
+    actor: String,
+    decision: ModelBudgetContinuation,
+}
+
+fn validate_continuation_input(input: &ModelBudgetContinuation) -> Result<(), RuntimeError> {
+    if [(&input.actor, 256), (&input.evidence, 64 * 1024)]
+        .into_iter()
+        .any(|(text, limit)| text.trim().is_empty() || text.len() > limit)
+    {
+        return Err(RuntimeError::InvalidInput(
+            "model budget continuation requires bounded actor and evidence".into(),
+        ));
+    }
+    if input.task_id.trim().is_empty()
+        || input.task_id.len() > 256
+        || input.task_id.chars().any(char::is_control)
+    {
+        return Err(RuntimeError::InvalidInput(
+            "model budget continuation requires a valid task_id".into(),
+        ));
+    }
+    if input.additional_tokens == 0 {
+        return Err(RuntimeError::InvalidInput(
+            "model budget continuation requires additional_tokens > 0".into(),
+        ));
+    }
+    if input.token_limit == 0 {
+        return Err(RuntimeError::InvalidInput(
+            "model budget continuation requires token_limit > 0".into(),
+        ));
+    }
+    if input.expected.is_empty() || input.expected.len() > MAX_REQUESTS {
+        return Err(RuntimeError::InvalidInput(
+            "model budget continuation expected must be nonempty and bounded".into(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for exp in &input.expected {
+        if !seen.insert(&exp.identity.request_id) {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation expected contains duplicate requests".into(),
+            ));
+        }
+        if exp.identity.task_id == input.task_id {
+            return Err(RuntimeError::InvalidInput(
+                "target task id must differ from historical request task ids".into(),
+            ));
+        }
+        if exp.reservation_tokens == 0 {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation expected must have nonzero reservation_tokens".into(),
+            ));
+        }
+        let Some(res_cursor) = exp.reservation_cursor else {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation expected must have reservation_cursor".into(),
+            ));
+        };
+        if exp.last_cursor < res_cursor {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation expected last_cursor precedes reservation_cursor".into(),
+            ));
+        }
+        if exp.identity.turn == 0
+            || exp.identity.request_id.trim().is_empty()
+            || exp.identity.task_id.trim().is_empty()
+            || exp.identity.budget_session_id.trim().is_empty()
+            || exp.identity.lease.session_id.trim().is_empty()
+        {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation expected has invalid identity shape".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_continuation(
+    continuations: &mut Vec<ModelBudgetContinuationRecord>,
+    records: &BTreeMap<String, ModelRequestRecord>,
+    event: &EventRecord,
+) -> Result<(), RuntimeError> {
+    let CoreEvent::Host { kind, data } = &event.event else {
+        return Err(corrupt());
+    };
+    if kind != CONTINUATION_KIND || event.attempt.is_some() {
+        return Err(corrupt());
+    }
+    let decision: ContinuationDecision =
+        serde_json::from_value(data.clone()).map_err(|_| corrupt())?;
+    let input = decision.decision;
+    if decision.actor != input.actor {
+        return Err(corrupt());
+    }
+    validate_continuation_input(&input).map_err(|_| corrupt())?;
+    for expected in &input.expected {
+        let record = records
+            .get(&expected.identity.request_id)
+            .ok_or_else(corrupt)?;
+        if ModelRequestOrigin::from(record) != *expected {
+            return Err(corrupt());
+        }
+        if expected.reservation_tokens == 0 || record.reservation_tokens == 0 {
+            return Err(corrupt());
+        }
+        if expected.identity.task_id == input.task_id || record.identity.task_id == input.task_id {
+            return Err(corrupt());
+        }
+        let Some(res_cursor) = expected.reservation_cursor else {
+            return Err(corrupt());
+        };
+        if expected.last_cursor < res_cursor {
+            return Err(corrupt());
+        }
+        if expected.identity.lease.session_id == event.session_id
+            && expected.last_cursor >= event.cursor
+        {
+            return Err(corrupt());
+        }
+    }
+    if let Some(existing) = continuations
+        .iter()
+        .find(|c| c.continuation.task_id == input.task_id)
+    {
+        if existing.continuation != input {
+            return Err(corrupt());
+        }
+    } else {
+        continuations.push(ModelBudgetContinuationRecord {
+            cursor: event.cursor,
+            session_id: event.session_id.clone(),
+            continuation: input,
+        });
+    }
+    Ok(())
+}
+
 impl Runtime {
     /// Append a trusted decision for one stopped, unsettled model request.
     /// This releases only that request's token hold. It never resumes a task,
@@ -1289,6 +1468,159 @@ impl Runtime {
         Ok(ModelRequestReconciliationRecord {
             cursor: event.cursor,
             reconciliation: input,
+        })
+    }
+
+    /// Authorize an explicit durable continuation grant for a newly queued task
+    /// in a session lineage with historical unknown model reservations.
+    pub async fn authorize_model_budget_continuation(
+        &self,
+        input: ModelBudgetContinuation,
+    ) -> Result<ModelBudgetContinuationRecord, RuntimeError> {
+        validate_continuation_input(&input)?;
+        let initial_task = self.inner.queue.get(&input.task_id)?;
+        let session = initial_task.session_id;
+
+        let budget = {
+            let _coordinate = self.inner.coordination.enter()?;
+            lineage_root(&self.inner.store, &session)?
+        };
+        let _budget = self
+            .inner
+            .budget_lock(&budget)
+            .try_lock_owned()
+            .map_err(|_| RuntimeError::Busy)?;
+        let _coordinate = self.inner.coordination.enter()?;
+        if lineage_root(&self.inner.store, &session)? != budget {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation target session changed its budget identity".into(),
+            ));
+        }
+
+        let _owners = self.stopped_model_budget(&budget)?;
+
+        let tree_limit = self.model_token_limit();
+        let projection = project(&self.inner.store, &session, tree_limit)?;
+
+        if let Some(existing) = projection
+            .ledger
+            .continuations
+            .iter()
+            .find(|c| c.continuation.task_id == input.task_id)
+        {
+            return if existing.continuation == input {
+                Ok(existing.clone())
+            } else {
+                Err(RuntimeError::InvalidInput(
+                    "model budget continuation already exists for this task with different parameters".into(),
+                ))
+            };
+        }
+
+        let target_task = self.inner.queue.get(&input.task_id)?;
+        if target_task.session_id != session {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation target session changed".into(),
+            ));
+        }
+
+        if target_task.state != crate::TaskState::Queued
+            || target_task.worker_id.is_some()
+            || target_task.attempt_id.is_some()
+            || target_task.dispatches != 0
+            || target_task.holds_slot
+            || target_task.cancel_requested
+        {
+            return Err(RuntimeError::InvalidInput(
+                "target task for model budget continuation must be newly queued with no worker, attempt, dispatch, or slot".into(),
+            ));
+        }
+
+        if projection
+            .ledger
+            .requests
+            .iter()
+            .any(|r| r.identity.task_id == input.task_id)
+            || input
+                .expected
+                .iter()
+                .any(|exp| exp.identity.task_id == input.task_id)
+        {
+            return Err(RuntimeError::InvalidInput(
+                "target task id must differ from historical request task ids".into(),
+            ));
+        }
+
+        if input.token_limit > tree_limit {
+            return Err(RuntimeError::Budget(
+                "model budget continuation token_limit exceeds current tree token limit",
+            ));
+        }
+        let total_occupied = projection
+            .ledger
+            .settled_tokens
+            .checked_add(projection.ledger.reserved_tokens)
+            .ok_or_else(|| RuntimeError::Budget("model token budget overflow"))?;
+        let required = total_occupied
+            .checked_add(input.additional_tokens)
+            .ok_or_else(|| RuntimeError::Budget("model token budget overflow"))?;
+        if required > input.token_limit {
+            return Err(RuntimeError::Budget(
+                "model budget continuation occupied plus additional tokens exceeds grant token_limit",
+            ));
+        }
+
+        let mut outstanding_records = Vec::new();
+        for record in &projection.ledger.requests {
+            if record.outstanding_reservation_tokens > 0 {
+                outstanding_records.push(record);
+            }
+        }
+        if outstanding_records.len() != input.expected.len() {
+            return Err(RuntimeError::InvalidInput(
+                "model budget continuation expected does not match all outstanding unreconciled reservations".into(),
+            ));
+        }
+        for record in &outstanding_records {
+            if record.outstanding_reservation_tokens != record.reservation_tokens
+                || record.reservation_tokens == 0
+            {
+                return Err(RuntimeError::InvalidInput(
+                    "outstanding reservation does not have a full hold".into(),
+                ));
+            }
+            let origin = ModelRequestOrigin::from(*record);
+            if !input.expected.iter().any(|exp| exp == &origin) {
+                return Err(RuntimeError::InvalidInput(
+                    "model budget continuation expected does not match outstanding reservation identity or cursors".into(),
+                ));
+            }
+        }
+
+        if !projection.room_with_limit(1, MAX_LEDGER_EVENTS) {
+            return Err(RuntimeError::Budget("model accounting event capacity"));
+        }
+        let data = serde_json::to_value(&input)?;
+        if serde_json::to_vec(&serde_json::json!({"actor": input.actor, "decision": data}))?.len()
+            > self.inner.config.max_event_bytes
+        {
+            return Err(RuntimeError::Budget("model accounting event byte"));
+        }
+
+        let snapshot = self.inner.store.snapshot(&session)?;
+        let event = self.inner.store.append_control_event(
+            &session,
+            snapshot.cursor,
+            None,
+            &input.actor,
+            CONTINUATION_KIND,
+            data,
+        )?;
+        self.inner.changed.notify_waiters();
+        Ok(ModelBudgetContinuationRecord {
+            cursor: event.cursor,
+            session_id: session,
+            continuation: input,
         })
     }
 
@@ -1413,6 +1745,8 @@ const FIELDS: &[&str] = &[
     "audio_tokens",
     "input_tokens",
     "output_tokens",
+    "input_tokens_details",
+    "output_tokens_details",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
     "promptTokenCount",
@@ -1630,10 +1964,11 @@ impl RequestGuard {
         // Reserved + Started + at least one observation + a protected Finished.
         let has_request_room = projection.room_with_limit(4, event_limit);
         let ledger = projection.ledger;
-        context.scope.tokens().store(
-            ledger.settled_tokens.saturating_add(ledger.reserved_tokens),
-            Ordering::Release,
-        );
+        let total_occupied = ledger.settled_tokens.saturating_add(ledger.reserved_tokens);
+        context
+            .scope
+            .tokens()
+            .store(total_occupied, Ordering::Release);
         let identity = ModelRequestIdentity {
             request_id: id.clone(),
             lease: context.lease.clone(),
@@ -1655,9 +1990,56 @@ impl RequestGuard {
                 "model identity exceeds accounting bounds".into(),
             ));
         }
-        let reason = if ledger.budget_unknown {
+
+        let task_grant = ledger
+            .continuations
+            .iter()
+            .find(|c| c.continuation.task_id == context.task.id)
+            .map(|c| &c.continuation);
+
+        let unknown_allowed = if let Some(grant) = task_grant {
+            let mut all_match = true;
+            for record in &ledger.requests {
+                if record.outstanding_reservation_tokens > 0 {
+                    let origin = ModelRequestOrigin::from(record);
+                    if !grant.expected.iter().any(|exp| exp == &origin) {
+                        all_match = false;
+                        break;
+                    }
+                }
+            }
+            all_match
+        } else {
+            false
+        };
+
+        let unknown_blocked = ledger.budget_unknown && !unknown_allowed;
+
+        let (reservation_tokens, effective_token_limit) = if let Some(grant) = task_grant {
+            let tree_available = ledger.remaining_tokens;
+            let grant_tree_room = grant.token_limit.saturating_sub(total_occupied);
+
+            let mut task_consumption = 0_u64;
+            for record in &ledger.requests {
+                if record.identity.task_id == context.task.id {
+                    let settled = record.settled_tokens.unwrap_or(0);
+                    task_consumption = task_consumption
+                        .saturating_add(settled)
+                        .saturating_add(record.outstanding_reservation_tokens);
+                }
+            }
+
+            let grant_task_room = grant.additional_tokens.saturating_sub(task_consumption);
+            let available = tree_available.min(grant_tree_room).min(grant_task_room);
+            let eff_limit = grant.token_limit.min(ledger.token_limit);
+            (available, eff_limit)
+        } else {
+            (ledger.remaining_tokens, ledger.token_limit)
+        };
+
+        let reason = if unknown_blocked {
             Some("unsettled_model_reservation")
-        } else if ledger.overflowed || ledger.remaining_tokens == 0 {
+        } else if ledger.overflowed || reservation_tokens == 0 {
             Some("model_token_budget_exhausted")
         } else {
             None
@@ -1671,7 +2053,7 @@ impl RequestGuard {
                 &context.lease,
                 &Entry::Rejected {
                     identity,
-                    token_limit: ledger.token_limit,
+                    token_limit: effective_token_limit,
                     reason: reason.into(),
                 },
             )?;
@@ -1689,8 +2071,8 @@ impl RequestGuard {
                 .options
                 .max_tokens
                 .or(request.model.max_output_tokens)
-                .unwrap_or(ledger.remaining_tokens)
-                .min(ledger.remaining_tokens),
+                .unwrap_or(reservation_tokens)
+                .min(reservation_tokens),
         );
         let cursor = append(
             &context.inner,
@@ -1698,22 +2080,23 @@ impl RequestGuard {
             &Entry::Reserved {
                 identity,
                 policy: ModelReservationPolicy::EntireSessionRemainder,
-                tokens: ledger.remaining_tokens,
+                tokens: reservation_tokens,
                 token_limit: ledger.token_limit,
                 output_max_tokens: request.options.max_tokens.expect("set above"),
             },
         )?;
+        let new_occupied = total_occupied.saturating_add(reservation_tokens);
         context
             .scope
             .tokens()
-            .store(ledger.token_limit, Ordering::Release);
+            .store(new_occupied, Ordering::Release);
         drop(_coordinate);
         Ok(Self {
             context,
             id,
             reservation: cursor,
             cursor,
-            tokens: ledger.remaining_tokens,
+            tokens: reservation_tokens,
             event_limit,
             observations: 0,
             started: false,
@@ -3091,5 +3474,279 @@ mod tests {
             runtime.model_requests(&context.lease.session_id).unwrap(),
             ledger
         );
+    }
+
+    #[tokio::test]
+    async fn continuation_replay_across_sessions_allows_independent_cursors() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, request) = context(temp.path());
+        let parent_session = context.lease.session_id.clone();
+
+        let identity = ModelRequestIdentity {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            lease: context.lease.clone(),
+            task_id: context.task.id.clone(),
+            budget_session_id: parent_session.clone(),
+            turn: 1,
+            provider: request.model.provider.clone(),
+            model: request.model.id.clone(),
+        };
+        let res_cursor = append(
+            &context.inner,
+            &context.lease,
+            &Entry::Reserved {
+                identity: identity.clone(),
+                policy: ModelReservationPolicy::EntireSessionRemainder,
+                tokens: 500,
+                token_limit: 1000,
+                output_max_tokens: 16,
+            },
+        )
+        .unwrap();
+        let started_cursor = append(
+            &context.inner,
+            &context.lease,
+            &Entry::Started {
+                request_id: identity.request_id.clone(),
+                reservation_cursor: res_cursor,
+                previous_cursor: res_cursor,
+            },
+        )
+        .unwrap();
+        let last_cursor = append(
+            &context.inner,
+            &context.lease,
+            &Entry::Finished {
+                request_id: identity.request_id.clone(),
+                reservation_cursor: res_cursor,
+                previous_cursor: started_cursor,
+                terminal: ModelRequestTerminal::Failed,
+                settled_tokens: None,
+                last_received: None,
+            },
+        )
+        .unwrap();
+
+        let origin = ModelRequestOrigin {
+            identity,
+            reservation_tokens: 500,
+            reservation_cursor: Some(res_cursor),
+            started_cursor: Some(started_cursor),
+            terminal: Some(ModelRequestTerminal::Failed),
+            terminal_cursor: Some(last_cursor),
+            last_cursor,
+        };
+
+        runtime
+            .inner
+            .queue
+            .finish(
+                &context.task,
+                crate::queue::TaskTerminal::Failed,
+                Some("synthetic".into()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        runtime.store().finish_attempt(&context.lease).unwrap();
+
+        let forked = runtime
+            .fork(&parent_session, "child session", true)
+            .unwrap();
+        let child_session = forked.id;
+
+        let child_task = runtime
+            .enqueue(&child_session, "child continuation task")
+            .unwrap();
+
+        let grant = ModelBudgetContinuation {
+            task_id: child_task.id.clone(),
+            expected: vec![origin.clone()],
+            additional_tokens: 200,
+            token_limit: 1000,
+            actor: "trusted-host".into(),
+            evidence: "fork-continuation".into(),
+        };
+
+        let grant_rec = runtime
+            .authorize_model_budget_continuation(grant.clone())
+            .await
+            .unwrap();
+
+        let child_ledger = runtime.model_requests(&child_session).unwrap();
+        assert_eq!(child_ledger.continuations.len(), 1);
+        assert_eq!(child_ledger.continuations[0], grant_rec);
+        assert!(child_ledger.budget_unknown);
+        assert_eq!(child_ledger.reserved_tokens, 500);
+
+        let store = SessionStore::open(temp.path().join("session.db")).unwrap();
+        let replayed = read(&store, &child_session, 1000).unwrap();
+        assert_eq!(replayed.continuations.len(), 1);
+        assert_eq!(replayed.continuations[0], grant_rec);
+    }
+
+    #[tokio::test]
+    async fn continuation_idempotence_after_task_execution_and_later_reconciliation() {
+        struct ReconcileAll;
+        impl ModelRequestReconciliationVerifier for ReconcileAll {
+            fn verify(&self, _: &ModelRequestReconciliation) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("workspace")).unwrap();
+        let model = Model::new("fixture", "accounting-guard");
+        let runtime = Runtime::open(
+            temp.path().join("session.db"),
+            temp.path().join("workspace"),
+            Arc::new(UnreachableProvider),
+            model.clone(),
+            RuntimeConfig {
+                max_total_tokens: 1500,
+                model_request_reconciliation_verifier: Some(Arc::new(ReconcileAll)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let session = runtime.create(None).unwrap();
+        let parent_task = runtime.enqueue(&session.id, "parent task").unwrap();
+        let worker = runtime.inner.queue.claim(&parent_task.id).unwrap();
+        assert!(runtime.inner.queue.admit(&worker, 4).unwrap());
+        let lease = runtime
+            .inner
+            .store
+            .begin_attempt(&session.id, &worker.worker)
+            .unwrap();
+        runtime
+            .inner
+            .queue
+            .attach(&worker, &lease.attempt_id)
+            .unwrap();
+        let identity = ModelRequestIdentity {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            lease: lease.clone(),
+            task_id: parent_task.id.clone(),
+            budget_session_id: session.id.clone(),
+            turn: 1,
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+        };
+        let res_cursor = append(
+            &runtime.inner,
+            &lease,
+            &Entry::Reserved {
+                identity: identity.clone(),
+                policy: ModelReservationPolicy::EntireSessionRemainder,
+                tokens: 500,
+                token_limit: 1000,
+                output_max_tokens: 16,
+            },
+        )
+        .unwrap();
+        let started_cursor = append(
+            &runtime.inner,
+            &lease,
+            &Entry::Started {
+                request_id: identity.request_id.clone(),
+                reservation_cursor: res_cursor,
+                previous_cursor: res_cursor,
+            },
+        )
+        .unwrap();
+        let last_cursor = append(
+            &runtime.inner,
+            &lease,
+            &Entry::Finished {
+                request_id: identity.request_id.clone(),
+                reservation_cursor: res_cursor,
+                previous_cursor: started_cursor,
+                terminal: ModelRequestTerminal::Failed,
+                settled_tokens: None,
+                last_received: None,
+            },
+        )
+        .unwrap();
+
+        let origin = ModelRequestOrigin {
+            identity,
+            reservation_tokens: 500,
+            reservation_cursor: Some(res_cursor),
+            started_cursor: Some(started_cursor),
+            terminal: Some(ModelRequestTerminal::Failed),
+            terminal_cursor: Some(last_cursor),
+            last_cursor,
+        };
+
+        runtime
+            .inner
+            .queue
+            .finish(
+                &worker,
+                crate::queue::TaskTerminal::Failed,
+                Some("synthetic".into()),
+                |_| Ok(()),
+            )
+            .unwrap();
+        runtime.store().finish_attempt(&lease).unwrap();
+
+        let target_task = runtime.enqueue(&session.id, "target task").unwrap();
+        let grant = ModelBudgetContinuation {
+            task_id: target_task.id.clone(),
+            expected: vec![origin.clone()],
+            additional_tokens: 200,
+            token_limit: 1500,
+            actor: "trusted-host".into(),
+            evidence: "grant-evidence".into(),
+        };
+
+        let grant_rec = runtime
+            .authorize_model_budget_continuation(grant.clone())
+            .await
+            .unwrap();
+
+        let target_worker = runtime.inner.queue.claim(&target_task.id).unwrap();
+        assert!(runtime.inner.queue.admit(&target_worker, 4).unwrap());
+        runtime
+            .inner
+            .queue
+            .finish(
+                &target_worker,
+                crate::queue::TaskTerminal::Completed,
+                Some("task done".into()),
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        let retry_rec = runtime
+            .authorize_model_budget_continuation(grant.clone())
+            .await
+            .unwrap();
+        assert_eq!(grant_rec, retry_rec);
+
+        let reconciliation = ModelRequestReconciliation {
+            expected: origin.clone(),
+            actor: "reconcile-host".into(),
+            evidence: "upstream-drop-proof".into(),
+            outcome: ModelRequestReconciledOutcome::NotDispatched {
+                reason: "never-dispatched".into(),
+            },
+        };
+        let rec_rec = runtime
+            .reconcile_model_request(reconciliation)
+            .await
+            .unwrap();
+        assert_eq!(rec_rec.reconciliation.expected, origin);
+
+        let ledger = runtime.model_requests(&session.id).unwrap();
+        assert_eq!(ledger.continuations.len(), 1);
+        assert_eq!(ledger.continuations[0], grant_rec);
+        assert_eq!(ledger.requests[0].settled_tokens, Some(0));
+        assert_eq!(ledger.requests[0].outstanding_reservation_tokens, 0);
+
+        let retry_after_reconcile = runtime
+            .authorize_model_budget_continuation(grant)
+            .await
+            .unwrap();
+        assert_eq!(grant_rec, retry_after_reconcile);
     }
 }

@@ -3,8 +3,9 @@
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_ipc::RpcHandler;
 use cayw_runtime::{
-    ActionIntent, ActionKind, ActionRequest, ActionStatus, ArtifactKind, PutArtifactRequest,
-    Runtime, RuntimeConfig, RuntimeHostDispatch, ScopedPermission, TaskState,
+    ActionIntent, ActionKind, ActionRequest, ActionStatus, ArtifactKind, ArtifactReconciledOutcome,
+    ArtifactReconciliation, ArtifactReconciliationVerifier, PutArtifactRequest, Runtime,
+    RuntimeConfig, RuntimeError, RuntimeHostDispatch, ScopedPermission, TaskState,
 };
 use futures::stream;
 use serde_json::json;
@@ -479,6 +480,7 @@ async fn runtime_create_and_fork_reject_gateway_device_metadata() {
 }
 
 struct ControlledHost {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
     started_tx: std::sync::mpsc::Sender<()>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     token: Arc<std::sync::Mutex<Option<CancellationToken>>>,
@@ -539,6 +541,7 @@ impl cayw_host::ExternalHost for ControlledHost {
         _arguments: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<serde_json::Value, cayw_codemode::CapabilityError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _guard = CancelGuard {
             token: cancel.clone(),
             cancelled: self.cancelled.clone(),
@@ -557,6 +560,103 @@ impl cayw_host::ExternalHost for ControlledHost {
     }
 }
 
+struct ControlledReconciliationVerifier;
+
+impl ArtifactReconciliationVerifier for ControlledReconciliationVerifier {
+    fn verify(&self, request: &ArtifactReconciliation) -> Result<(), String> {
+        if request.actor != "trusted-test-host"
+            || request.evidence
+                != "controlled Host joined; token cancelled; original invocation counted once"
+            || !matches!(&request.outcome, ArtifactReconciledOutcome::Failed { error } if error == "controlled Host cancelled after admission")
+        {
+            return Err("controlled Host evidence does not match".into());
+        }
+        Ok(())
+    }
+}
+
+async fn reconcile_controlled_cancellation_and_continue(
+    rt: &Runtime,
+    session: &str,
+    action_id: &str,
+    calls: &std::sync::atomic::AtomicUsize,
+) {
+    assert!(!rt.is_tool_flight_active(action_id));
+    assert_eq!(
+        rt.get_artifact_action(action_id).unwrap().status,
+        ActionStatus::OutcomeUnknown
+    );
+    assert!(matches!(
+        rt.enqueue(session, "blocked until trusted cancellation reconciliation"),
+        Err(RuntimeError::NeedsReconciliation)
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let audit = rt.audit(session, 0, 100).unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|event| event.kind == "artifact.action.outcome_unknown"
+                && event.data["action_id"] == action_id)
+    );
+    let call_id = audit
+        .iter()
+        .find(|event| event.kind == "artifact.tool.started" && event.data["action_id"] == action_id)
+        .unwrap()
+        .data["call_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reconciled = rt
+        .reconcile_artifact_action(ArtifactReconciliation {
+            session_id: session.into(),
+            action_id: action_id.into(),
+            expected_artifact_id: "card-tool".into(),
+            call_id: Some(call_id),
+            actor: "trusted-test-host".into(),
+            evidence: "controlled Host joined; token cancelled; original invocation counted once"
+                .into(),
+            outcome: ArtifactReconciledOutcome::Failed {
+                error: "controlled Host cancelled after admission".into(),
+            },
+        })
+        .unwrap();
+    assert_eq!(reconciled.status, ActionStatus::Rejected);
+    assert!(!rt.has_artifact_unknown(session).unwrap());
+    let task = rt
+        .enqueue(
+            session,
+            "continue original session after trusted reconciliation",
+        )
+        .unwrap();
+    let completed = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        rt.resume(&task.id, CancellationToken::new()),
+    )
+    .await
+    .expect("continued task must finish")
+    .unwrap();
+    assert_eq!(completed.id, session);
+    assert_eq!(rt.task(&task.id).unwrap().state, TaskState::Completed);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let audit = rt.audit(session, 0, 100).unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|event| event.kind == "artifact.tool.started"
+                && event.data["action_id"] == action_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|event| event.kind == "artifact.action.reconciled"
+                && event.data["action_id"] == action_id)
+            .count(),
+        1
+    );
+}
+
 fn open_with_external(
     permissions: Vec<ScopedPermission>,
     external: Arc<dyn cayw_host::ExternalHost>,
@@ -570,6 +670,7 @@ fn open_with_external(
         Model::new("fixture", "artifact-dispatch"),
         RuntimeConfig {
             permissions,
+            artifact_reconciliation_verifier: Some(Arc::new(ControlledReconciliationVerifier)),
             host: cayw_host::HostConfig {
                 external: Some(external),
                 ..Default::default()
@@ -581,13 +682,15 @@ fn open_with_external(
     (dir, rt)
 }
 
-#[test]
-fn controlled_host_tool_cancellation_and_unrelated_artifact_operations() {
+#[tokio::test]
+async fn controlled_host_tool_cancellation_and_unrelated_artifact_operations() {
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let cancelled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let token_holder = Arc::new(std::sync::Mutex::new(None));
     let release = CancellationToken::new();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let host = Arc::new(ControlledHost {
+        calls: calls.clone(),
         started_tx,
         cancelled: cancelled_flag.clone(),
         token: token_holder.clone(),
@@ -656,9 +759,9 @@ fn controlled_host_tool_cancellation_and_unrelated_artifact_operations() {
         .expect("cancel_artifact_action must succeed without blocking on in-flight tool execution");
     assert_eq!(cancel_outcome.record.status, ActionStatus::Cancelled);
 
-    // 4. Verify dispatch finished with Cancelled status:
+    // Cancellation after admission leaves the effect unknown until trusted reconciliation.
     let dispatch_result = dispatch.finish();
-    assert_eq!(dispatch_result.record.status, ActionStatus::Cancelled);
+    assert_eq!(dispatch_result.record.status, ActionStatus::OutcomeUnknown);
 
     // 5. Verify the tool received cancellation on its CancellationToken:
     assert!(
@@ -681,15 +784,18 @@ fn controlled_host_tool_cancellation_and_unrelated_artifact_operations() {
         kinds.contains(&"artifact.action.cancelled"),
         "audit must contain artifact.action.cancelled, got {kinds:?}"
     );
+    reconcile_controlled_cancellation_and_continue(&rt, &session, "act-long", &calls).await;
 }
 
-#[test]
-fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_semantics() {
+#[tokio::test]
+async fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_semantics() {
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let cancelled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let token_holder = Arc::new(std::sync::Mutex::new(None));
     let release = CancellationToken::new();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let host = Arc::new(ControlledHost {
+        calls: calls.clone(),
         started_tx,
         cancelled: cancelled_flag.clone(),
         token: token_holder.clone(),
@@ -763,9 +869,9 @@ fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_semant
         .expect("cancel_artifact_action must reach in-flight flight even after recovery reload");
     assert_eq!(cancel_outcome.record.status, ActionStatus::Cancelled);
 
-    // 4. Verify dispatch finished with Cancelled status:
+    // Cancellation after admission leaves the effect unknown until trusted reconciliation.
     let dispatch_result = dispatch.finish();
-    assert_eq!(dispatch_result.record.status, ActionStatus::Cancelled);
+    assert_eq!(dispatch_result.record.status, ActionStatus::OutcomeUnknown);
 
     // 5. Verify the tool received cancellation on its CancellationToken:
     assert!(
@@ -780,4 +886,5 @@ fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_semant
         kinds.contains(&"artifact.action.cancelled"),
         "audit must contain artifact.action.cancelled, got {kinds:?}"
     );
+    reconcile_controlled_cancellation_and_continue(&rt, &session, "act-recovering", &calls).await;
 }

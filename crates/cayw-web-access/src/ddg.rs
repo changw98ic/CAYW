@@ -294,28 +294,74 @@ pub fn extract_ddg_hits(html: &str) -> Vec<SearchHit> {
     let mut hits: Vec<SearchHit> = Vec::new();
     let mut rest = html;
     while let Some(idx) = rest.find("result__a") {
-        let window = &rest[idx..];
-        let Some(tag_start) = window.rfind('<') else {
+        // Tag opening `<` must be before `idx` in the current slice, with no closing `>` in between.
+        let Some(tag_start) = rest[..idx].rfind('<') else {
             rest = &rest[idx + 9..];
             continue;
         };
-        // Prefer scanning forward from result__a for href and title text.
-        let after = &window[9..];
-        let href = extract_attr(window, "href")
-            .or_else(|| extract_attr(after, "href"))
-            .or_else(|| {
-                // class may appear before href on the same tag starting earlier
-                let tag = &window[tag_start..];
-                let end = tag
-                    .find('>')
-                    .unwrap_or_else(|| tag.floor_char_boundary(tag.len().min(400)));
-                extract_attr(&tag[..end], "href")
-            });
+        if rest[tag_start..idx].contains('>') {
+            rest = &rest[idx + 9..];
+            continue;
+        }
+        // Must be an `<a>` tag.
+        let tag_head = &rest[tag_start..idx];
+        let tag_name = tag_head.trim_start_matches('<');
+        let name_end = tag_name
+            .find(|c: char| c.is_ascii_whitespace() || c == '>')
+            .unwrap_or(tag_name.len());
+        if !tag_name[..name_end].eq_ignore_ascii_case("a") {
+            rest = &rest[idx + 9..];
+            continue;
+        }
+
+        // Tag must close with `>` after `idx`.
+        let Some(close_rel) = rest[idx..].find('>') else {
+            rest = &rest[idx + 9..];
+            continue;
+        };
+        let tag_end = idx + close_rel;
+        let opening_tag = &rest[tag_start..=tag_end];
+
+        // Ensure this tag really has `result__a` as a class.
+        let is_result_a = extract_attr(opening_tag, "class")
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .any(|c| c == "result__a" || c.contains("result__a"));
+        if !is_result_a {
+            rest = &rest[tag_end + 1..];
+            continue;
+        }
+
+        // Extract href strictly from this anchor's opening tag.
+        // Never look ahead to subsequent elements or anchors.
+        let href = extract_attr(opening_tag, "href");
         let Some(href) = href else {
-            rest = &rest[idx + 9..];
+            rest = &rest[tag_end + 1..];
             continue;
         };
-        let title = anchor_inner_text(window).unwrap_or_default();
+
+        // Extract title between the opening `>` and closing `</a>`.
+        let after_tag = &rest[tag_end + 1..];
+        let title = if let Some(end_a) = after_tag.find("</a>") {
+            let content = if let Some(next_a) = after_tag.to_ascii_lowercase().find("<a") {
+                if next_a < end_a {
+                    &after_tag[..next_a]
+                } else {
+                    &after_tag[..end_a]
+                }
+            } else {
+                &after_tag[..end_a]
+            };
+            strip_tags(content)
+        } else {
+            let limit = after_tag
+                .to_ascii_lowercase()
+                .find("<a")
+                .unwrap_or_else(|| after_tag.len().min(400));
+            strip_tags(&after_tag[..limit])
+        };
+
         let url = resolve_ddg_href(&href);
         if url.starts_with("http://") || url.starts_with("https://") {
             // Dedup by URL.
@@ -329,7 +375,7 @@ pub fn extract_ddg_hits(html: &str) -> Vec<SearchHit> {
                 });
             }
         }
-        rest = &rest[idx + 9..];
+        rest = &rest[tag_end + 1..];
     }
     hits
 }
@@ -343,43 +389,71 @@ fn nonempty(s: String) -> Option<String> {
     }
 }
 
-fn extract_attr(s: &str, name: &str) -> Option<String> {
-    let patterns = [
-        format!("{name}=\""),
-        format!("{name}='"),
-        format!("{name} = \""),
-        format!("{name} = '"),
-    ];
-    for (i, pat) in patterns.iter().enumerate() {
-        if let Some(pos) = s.find(pat) {
-            let start = pos + pat.len();
-            let quote = if i % 2 == 0 { '"' } else { '\'' };
-            let end = s[start..].find(quote)? + start;
-            return Some(s[start..end].to_string());
+fn extract_attr(tag: &str, attr_name: &str) -> Option<String> {
+    let tag_bytes = tag.as_bytes();
+    let mut i = 0;
+    // Skip tag name (e.g. "<a")
+    if i < tag_bytes.len() && tag_bytes[i] == b'<' {
+        i += 1;
+        while i < tag_bytes.len() && !tag_bytes[i].is_ascii_whitespace() && tag_bytes[i] != b'>' {
+            i += 1;
+        }
+    }
+    while i < tag_bytes.len() {
+        while i < tag_bytes.len() && tag_bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= tag_bytes.len() || tag_bytes[i] == b'>' || tag_bytes[i] == b'/' {
+            break;
+        }
+        let key_start = i;
+        while i < tag_bytes.len()
+            && !tag_bytes[i].is_ascii_whitespace()
+            && tag_bytes[i] != b'='
+            && tag_bytes[i] != b'>'
+            && tag_bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        let key = &tag[key_start..i];
+        while i < tag_bytes.len() && tag_bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let mut val = None;
+        if i < tag_bytes.len() && tag_bytes[i] == b'=' {
+            i += 1;
+            while i < tag_bytes.len() && tag_bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < tag_bytes.len() {
+                if tag_bytes[i] == b'"' || tag_bytes[i] == b'\'' {
+                    let quote = tag_bytes[i];
+                    i += 1;
+                    let val_start = i;
+                    while i < tag_bytes.len() && tag_bytes[i] != quote {
+                        i += 1;
+                    }
+                    val = Some(tag[val_start..i].to_string());
+                    if i < tag_bytes.len() && tag_bytes[i] == quote {
+                        i += 1;
+                    }
+                } else {
+                    let val_start = i;
+                    while i < tag_bytes.len()
+                        && !tag_bytes[i].is_ascii_whitespace()
+                        && tag_bytes[i] != b'>'
+                    {
+                        i += 1;
+                    }
+                    val = Some(tag[val_start..i].to_string());
+                }
+            }
+        }
+        if key.eq_ignore_ascii_case(attr_name) {
+            return val;
         }
     }
     None
-}
-
-fn anchor_inner_text(from_class: &str) -> Option<String> {
-    let gt = from_class.find('>')?;
-    let after = &from_class[gt + 1..];
-    let close = after.find("</a>")?;
-    let raw = after[..close].to_string();
-    // Strip nested tags lightly.
-    let mut out = String::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '<' {
-            while chars.peek().is_some_and(|x| *x != '>') {
-                chars.next();
-            }
-            chars.next();
-        } else {
-            out.push(c);
-        }
-    }
-    Some(out)
 }
 
 /// Cap `s` to at most `max_bytes` without splitting a UTF-8 scalar.
@@ -748,5 +822,57 @@ mod tests {
         assert!(resp.hits.is_empty());
         assert_eq!(resp.empty_reason, Some(SearchEmptyReason::HttpError));
         assert_eq!(resp.evidence.as_ref().unwrap().http_status, Some(500));
+    }
+
+    #[test]
+    fn parses_anchors_with_various_attribute_orders_and_avoids_href_bleeding() {
+        // First anchor has href before class="result__a".
+        // Second anchor is an unrelated anchor without class="result__a".
+        // Third anchor has class="result__a" before href.
+        // Fourth anchor has class="result__a" but NO href — it must be ignored, NOT borrow href from subsequent anchor!
+        // Fifth anchor has href before class.
+        let html = r#"
+        <div class="result">
+          <a href="https://example.com/first" class="result__a">First Title</a>
+        </div>
+        <div class="unrelated">
+          <a href="https://example.com/unrelated">Unrelated</a>
+        </div>
+        <div class="result">
+          <a class="result__a" href="https://example.com/third">Third Title</a>
+        </div>
+        <div class="result">
+          <a class="result__a">Anchor Without Href</a>
+        </div>
+        <div class="result">
+          <a id="foo" href="https://example.com/fifth" class="result__a" target="_blank">Fifth Title</a>
+        </div>
+        "#;
+        let hits = extract_ddg_hits(html);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].url, "https://example.com/first");
+        assert_eq!(hits[0].title.as_deref(), Some("First Title"));
+        assert_eq!(hits[0].rank, 1);
+
+        assert_eq!(hits[1].url, "https://example.com/third");
+        assert_eq!(hits[1].title.as_deref(), Some("Third Title"));
+        assert_eq!(hits[1].rank, 2);
+
+        assert_eq!(hits[2].url, "https://example.com/fifth");
+        assert_eq!(hits[2].title.as_deref(), Some("Fifth Title"));
+        assert_eq!(hits[2].rank, 3);
+    }
+
+    #[test]
+    fn parses_anchors_with_single_quotes_and_spaces_in_attributes() {
+        let html = r#"
+        <div class="result">
+          <a class = 'result__a' href = 'https://example.com/single-quotes'>Single Quotes Title</a>
+        </div>
+        "#;
+        let hits = extract_ddg_hits(html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://example.com/single-quotes");
+        assert_eq!(hits[0].title.as_deref(), Some("Single Quotes Title"));
     }
 }

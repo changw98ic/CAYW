@@ -442,12 +442,17 @@ async fn run_inspector_route(State(state): State<Arc<Server>>, uri: Uri) -> Resp
         Some(limit) => start.saturating_add(limit).min(document.events.len()),
         None => document.events.len(),
     };
-    let page = &document.events[start..end];
-    let timelines = cayw_run_inspector::timelines_from_runtime_events(page);
+    let (timelines, snapshots) =
+        cayw_run_inspector::timelines_and_snapshots_from_runtime_events_window(
+            &document.events,
+            start,
+            end,
+        );
     let next_after = end as u64;
     Json(json!({
         "protocol_version": cayw_run_inspector::RUN_INSPECTOR_PROTOCOL_VERSION,
         "timelines": timelines,
+        "snapshots": snapshots,
         "events_total": events_total,
         "after": start as u64,
         "events_scanned": (end - start) as u64,

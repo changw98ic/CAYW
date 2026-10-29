@@ -6,12 +6,20 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::dispatch::{FollowUpDispatch, HostActionDispatch, SharedHostDispatch, ToolDispatch};
+use crate::dispatch::{
+    FollowUpDispatch, HostActionDispatch, HostDispatchError, SharedHostDispatch, ToolDispatch,
+};
 use crate::identity::validate_id;
 use crate::store::ArtifactStore;
 use crate::types::{
     ActionIntent, ActionOutcome, ActionRecord, ActionRequest, ActionStatus, ArtifactError,
+    ArtifactReconciledOutcome, ArtifactReconciliation,
 };
+
+/// Host policy for validating artifact action/tool reconciliation receipts.
+pub trait ArtifactReconciliationVerifier: Send + Sync {
+    fn verify(&self, request: &ArtifactReconciliation) -> Result<(), String>;
+}
 
 /// Dispatches and persists artifact actions with Session ownership checks.
 ///
@@ -41,6 +49,11 @@ struct ActionInner {
     #[serde(skip)]
     in_flight: BTreeMap<String, usize>,
 }
+
+pub(crate) type PreparedActionSnapshot = (
+    BTreeMap<String, ActionRecord>,
+    BTreeMap<String, BTreeMap<String, String>>,
+);
 
 struct InFlightAction<'a> {
     inner: &'a Mutex<ActionInner>,
@@ -103,6 +116,17 @@ impl ActionProtocol {
             return Err(ArtifactError::DuplicateAction(req.action_id));
         }
 
+        if guard
+            .actions
+            .values()
+            .any(|r| r.session_id == req.session_id && r.status == ActionStatus::OutcomeUnknown)
+        {
+            return Err(ArtifactError::NeedsReconciliation(format!(
+                "session {} has an artifact action with outcome_unknown and requires reconciliation",
+                req.session_id
+            )));
+        }
+
         if artifact.session_id != req.session_id {
             let record = rejected_record(
                 &req,
@@ -157,6 +181,15 @@ impl ActionProtocol {
         };
 
         let applied = apply_intent(&req, self.dispatch.as_ref(), &self.inner)?;
+        if let IntentApply::OutcomeUnknown { reason } = &applied {
+            let record = outcome_unknown_record(&req, recorded_at_ms, reason.clone());
+            self.inner
+                .lock()
+                .expect("action lock")
+                .actions
+                .insert(req.action_id.clone(), record.clone());
+            return Ok(ActionOutcome { record });
+        }
         // If cancel won the race before/during the bridge, best-effort tear down
         // any flight the bridge registered after the cancel mark.
         {
@@ -201,6 +234,9 @@ impl ActionProtocol {
             },
             IntentApply::Rejected { reason } => rejected_record(&req, recorded_at_ms, reason),
             IntentApply::Cancelled { reason } => cancelled_record(&req, recorded_at_ms, reason),
+            IntentApply::OutcomeUnknown { reason } => {
+                outcome_unknown_record(&req, recorded_at_ms, reason)
+            }
         };
         guard
             .actions
@@ -257,6 +293,11 @@ impl ActionProtocol {
         if snapshot.status == ActionStatus::Cancelled {
             return Ok(ActionOutcome { record: snapshot });
         }
+        if snapshot.status == ActionStatus::OutcomeUnknown {
+            return Err(ArtifactError::NeedsReconciliation(format!(
+                "action {action_id} has outcome_unknown and cannot be cancelled without reconciliation"
+            )));
+        }
         if matches!(snapshot.status, ActionStatus::Rejected) {
             return Err(ArtifactError::Invalid(format!(
                 "action {action_id} is already rejected and cannot be cancelled"
@@ -272,16 +313,24 @@ impl ActionProtocol {
             )));
         }
 
-        let signalled = self
-            .dispatch
-            .cancel_action(action_id)
-            .map_err(|reason| ArtifactError::Invalid(format!("cancel_action: {reason}")))?;
+        let signalled = self.dispatch.cancel_action(action_id).map_err(|reason| {
+            if reason.outcome_unknown {
+                ArtifactError::NeedsReconciliation(format!("cancel_action: {reason}"))
+            } else {
+                ArtifactError::Invalid(format!("cancel_action: {reason}"))
+            }
+        })?;
 
         let mut guard = self.inner.lock().expect("action lock");
         let existing = guard
             .actions
             .get_mut(action_id)
             .ok_or_else(|| ArtifactError::NotFound(action_id.to_owned()))?;
+        if existing.status == ActionStatus::OutcomeUnknown {
+            return Err(ArtifactError::NeedsReconciliation(format!(
+                "action {action_id} has outcome_unknown and cannot be cancelled without reconciliation"
+            )));
+        }
         if existing.status == ActionStatus::Cancelled {
             return Ok(ActionOutcome {
                 record: existing.clone(),
@@ -343,6 +392,113 @@ impl ActionProtocol {
         Ok(guard.state.get(artifact_id).cloned().unwrap_or_default())
     }
 
+    pub fn has_outcome_unknown(&self, session_id: &str) -> bool {
+        let guard = self.inner.lock().expect("action lock");
+        guard
+            .actions
+            .values()
+            .any(|r| r.session_id == session_id && r.status == ActionStatus::OutcomeUnknown)
+    }
+
+    /// Reconcile an action with verified host evidence.
+    pub fn reconcile(
+        &self,
+        reconciliation: &ArtifactReconciliation,
+    ) -> Result<ActionRecord, ArtifactError> {
+        validate_id("action_id", &reconciliation.action_id).map_err(ArtifactError::Invalid)?;
+        validate_id("session_id", &reconciliation.session_id).map_err(ArtifactError::Invalid)?;
+        validate_id("artifact_id", &reconciliation.expected_artifact_id)
+            .map_err(ArtifactError::Invalid)?;
+
+        let mut guard = self.inner.lock().expect("action lock");
+        let action = guard
+            .actions
+            .get_mut(&reconciliation.action_id)
+            .ok_or_else(|| ArtifactError::NotFound(reconciliation.action_id.clone()))?;
+
+        if action.session_id != reconciliation.session_id {
+            return Err(ArtifactError::Invalid(format!(
+                "action {} belongs to session {}, not {}",
+                reconciliation.action_id, action.session_id, reconciliation.session_id
+            )));
+        }
+        if action.artifact_id != reconciliation.expected_artifact_id {
+            return Err(ArtifactError::Invalid(format!(
+                "action {} targets artifact {}, not {}",
+                reconciliation.action_id, action.artifact_id, reconciliation.expected_artifact_id
+            )));
+        }
+        if reconciliation.call_id.is_none()
+            && action.status != ActionStatus::OutcomeUnknown
+            && action.status != ActionStatus::Accepted
+        {
+            let matches_existing = match (&reconciliation.outcome, action.status) {
+                (ArtifactReconciledOutcome::Applied { result_json }, ActionStatus::Applied) => {
+                    action.outcome_json.as_ref() == result_json.as_ref()
+                }
+                (ArtifactReconciledOutcome::NotExecuted { .. }, ActionStatus::Cancelled) => true,
+                (ArtifactReconciledOutcome::Failed { .. }, ActionStatus::Rejected) => true,
+                _ => false,
+            };
+            if matches_existing {
+                return Ok(action.clone());
+            }
+            return Err(ArtifactError::Invalid(format!(
+                "action {} is in status {:?}, which does not require reconciliation",
+                reconciliation.action_id, action.status
+            )));
+        }
+
+        match &reconciliation.outcome {
+            ArtifactReconciledOutcome::Applied { result_json } => {
+                action.status = ActionStatus::Applied;
+                action.outcome_json = result_json.clone();
+                action.rejection_reason = None;
+            }
+            ArtifactReconciledOutcome::NotExecuted { reason } => {
+                action.status = ActionStatus::Cancelled;
+                action.rejection_reason = Some(format!("reconciled_not_executed: {reason}"));
+            }
+            ArtifactReconciledOutcome::Failed { error } => {
+                action.status = ActionStatus::Rejected;
+                action.rejection_reason = Some(format!("reconciled_failed: {error}"));
+            }
+        }
+        Ok(action.clone())
+    }
+
+    /// Refresh an unchanged, inactive unknown record from its durable decision.
+    pub fn refresh_reconciled(&self, expected: &ActionRecord, record: ActionRecord) -> bool {
+        if expected.status != ActionStatus::OutcomeUnknown
+            || !matches!(
+                record.status,
+                ActionStatus::Applied | ActionStatus::Rejected | ActionStatus::Cancelled
+            )
+            || record.action_id != expected.action_id
+            || record.artifact_id != expected.artifact_id
+            || record.session_id != expected.session_id
+            || record.kind != expected.kind
+            || record.intent != expected.intent
+            || record.requested_at_ms != expected.requested_at_ms
+        {
+            return false;
+        }
+        let mut guard = self.inner.lock().expect("action lock");
+        if guard.in_flight.contains_key(&expected.action_id)
+            || guard.actions.get(&expected.action_id) != Some(expected)
+        {
+            return false;
+        }
+        guard.actions.insert(record.action_id.clone(), record);
+        true
+    }
+
+    /// Insert or replace a reconciled action record (e.g. recovered from durable audit).
+    pub fn upsert_reconciled(&self, record: ActionRecord) {
+        let mut guard = self.inner.lock().expect("action lock");
+        guard.actions.insert(record.action_id.clone(), record);
+    }
+
     pub fn export_snapshot(&self) -> ActionSnapshot {
         let guard = self.inner.lock().expect("action lock");
         ActionSnapshot {
@@ -351,7 +507,9 @@ impl ActionProtocol {
         }
     }
 
-    pub fn restore_snapshot(&self, snapshot: ActionSnapshot) -> Result<(), ArtifactError> {
+    pub(crate) fn prepare_snapshot(
+        snapshot: ActionSnapshot,
+    ) -> Result<PreparedActionSnapshot, ArtifactError> {
         let mut actions = BTreeMap::new();
         for record in snapshot.actions {
             validate_id("action_id", &record.action_id).map_err(ArtifactError::Invalid)?;
@@ -369,6 +527,14 @@ impl ActionProtocol {
                 validate_id("state_key", key).map_err(ArtifactError::Invalid)?;
             }
         }
+        Ok((actions, snapshot.state))
+    }
+
+    pub(crate) fn commit_prepared(
+        &self,
+        mut actions: BTreeMap<String, ActionRecord>,
+        state: BTreeMap<String, BTreeMap<String, String>>,
+    ) {
         let mut guard = self.inner.lock().expect("action lock");
         // A snapshot cannot replace a record while its original dispatch or a
         // cancellation call is still running across the host bridge.
@@ -378,7 +544,12 @@ impl ActionProtocol {
             }
         }
         guard.actions = actions;
-        guard.state = snapshot.state;
+        guard.state = state;
+    }
+
+    pub fn restore_snapshot(&self, snapshot: ActionSnapshot) -> Result<(), ArtifactError> {
+        let (actions, state) = Self::prepare_snapshot(snapshot)?;
+        self.commit_prepared(actions, state);
         Ok(())
     }
 }
@@ -413,15 +584,40 @@ fn cancelled_record(req: &ActionRequest, recorded_at_ms: u64, reason: String) ->
     }
 }
 
-fn classify_bridge_err(prefix: &str, reason: String) -> IntentApply {
-    let lower = reason.to_ascii_lowercase();
-    if lower.contains("cancel") {
-        IntentApply::Cancelled {
-            reason: format!("{prefix}: {reason}"),
+fn outcome_unknown_record(
+    req: &ActionRequest,
+    recorded_at_ms: u64,
+    reason: String,
+) -> ActionRecord {
+    ActionRecord {
+        action_id: req.action_id.clone(),
+        artifact_id: req.artifact_id.clone(),
+        session_id: req.session_id.clone(),
+        kind: req.kind,
+        intent: req.intent.clone(),
+        status: ActionStatus::OutcomeUnknown,
+        requested_at_ms: req.requested_at_ms,
+        recorded_at_ms,
+        rejection_reason: Some(reason),
+        outcome_json: None,
+    }
+}
+
+fn classify_bridge_err(prefix: &str, error: HostDispatchError) -> IntentApply {
+    if error.outcome_unknown {
+        IntentApply::OutcomeUnknown {
+            reason: format!("{prefix}: {}", error.message),
         }
     } else {
-        IntentApply::Rejected {
-            reason: format!("{prefix}: {reason}"),
+        let lower = error.message.to_ascii_lowercase();
+        if lower.contains("cancel") {
+            IntentApply::Cancelled {
+                reason: format!("{prefix}: {}", error.message),
+            }
+        } else {
+            IntentApply::Rejected {
+                reason: format!("{prefix}: {}", error.message),
+            }
         }
     }
 }
@@ -471,6 +667,7 @@ enum IntentApply {
     Applied { outcome_json: String },
     Rejected { reason: String },
     Cancelled { reason: String },
+    OutcomeUnknown { reason: String },
 }
 
 fn apply_intent(
@@ -558,31 +755,41 @@ mod tests {
             self
         }
 
-        fn follow_up_task(&self, _: FollowUpDispatch<'_>) -> Result<HostDispatchResult, String> {
+        fn follow_up_task(
+            &self,
+            _: FollowUpDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
             unreachable!()
         }
 
-        fn invoke_tool(&self, _: ToolDispatch<'_>) -> Result<HostDispatchResult, String> {
-            self.started.send(()).map_err(|error| error.to_string())?;
+        fn invoke_tool(
+            &self,
+            _: ToolDispatch<'_>,
+        ) -> Result<HostDispatchResult, HostDispatchError> {
+            self.started
+                .send(())
+                .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
             self.release
                 .lock()
                 .unwrap()
                 .recv_timeout(Duration::from_secs(30))
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
             Ok(HostDispatchResult {
                 outcome_json: "{}".into(),
             })
         }
 
-        fn cancel_action(&self, _: &str) -> Result<bool, String> {
+        fn cancel_action(&self, _: &str) -> Result<bool, HostDispatchError> {
             self.cancelled.store(true, Ordering::SeqCst);
             if let Some(held) = &self.cancellation {
-                held.started.send(()).map_err(|error| error.to_string())?;
+                held.started
+                    .send(())
+                    .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
                 held.release
                     .lock()
                     .unwrap()
                     .recv_timeout(Duration::from_secs(30))
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
             }
             Ok(true)
         }

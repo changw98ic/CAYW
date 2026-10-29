@@ -381,7 +381,12 @@ fn write_luau(out: &mut String, value: &Value) {
 /// so local recompute can restore context mutations and object identity without
 /// re-executing upstream bodies.
 pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
-    script_from(
+    validate_plan(plan)?;
+    script_for_plan_validated(plan)
+}
+
+pub(crate) fn script_for_plan_validated(plan: &GraphPlan) -> Result<String, crate::Error> {
+    script_from_validated(
         plan,
         &plan.entry,
         SeedSpec::Values {
@@ -396,7 +401,7 @@ pub fn script_for_plan(plan: &GraphPlan) -> Result<String, crate::Error> {
 /// Local recompute script: starts at `start_node` with a captured shared seed.
 /// Upstream node functions are not invoked. Callers must supply a seed for
 /// non-entry starts; plain JSON Values are only used for entry-node edits.
-fn script_for_local_recompute(
+fn script_for_local_recompute_validated(
     plan: &GraphPlan,
     start_node: &str,
     seed: SeedSpec<'_>,
@@ -406,7 +411,7 @@ fn script_for_local_recompute(
             "local recompute start node {start_node:?} is not in the plan"
         )));
     }
-    script_from(plan, start_node, seed, "local recompute from edited node")
+    script_from_validated(plan, start_node, seed, "local recompute from edited node")
 }
 
 enum SeedSpec<'a> {
@@ -421,13 +426,12 @@ enum SeedSpec<'a> {
     Shared(&'a Value),
 }
 
-fn script_from(
+fn script_from_validated(
     plan: &GraphPlan,
     start_node: &str,
     seed: SeedSpec<'_>,
     banner: &str,
 ) -> Result<String, crate::Error> {
-    validate_plan(plan)?;
     for node in &plan.nodes {
         validate_node_source(&node.source)?;
     }
@@ -1139,7 +1143,7 @@ pub async fn evaluate(
     let (mut steps, script) = if let Some(changed) = changed_node {
         match local_start(plan, base, changed) {
             Ok((prefix, seed)) => {
-                let script = script_for_local_recompute(plan, changed, seed.as_spec())?;
+                let script = script_for_local_recompute_validated(plan, changed, seed.as_spec())?;
                 (prefix, script)
             }
             Err(gap) => {
@@ -1147,7 +1151,7 @@ pub async fn evaluate(
             }
         }
     } else {
-        (Vec::new(), script_for_plan(plan)?)
+        (Vec::new(), script_for_plan_validated(plan)?)
     };
     // Local recompute starts at the edit: every VM-started node is fresh.
     let record_steps = true;

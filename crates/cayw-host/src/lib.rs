@@ -969,17 +969,9 @@ impl Host {
 
         if let Some(wa) = &self.web_access {
             scope.web_access = Some(Arc::new(wa.with_sink(web_sink)));
-        } else if let Some(opts) = &scope.config.web_access
-            && let Ok(wa) = opts.build_with_sink(Some(web_sink))
-        {
-            scope.web_access = Some(Arc::new(wa));
         }
         if let Some(v) = &self.vision {
             scope.vision = Some(Arc::new(v.as_ref().clone().with_sink(vision_sink)));
-        } else if let Some(limits) = scope.config.vision
-            && let Ok(svc) = cayw_vision::VisionService::from_env(limits)
-        {
-            scope.vision = Some(Arc::new(svc.with_sink(vision_sink)));
         }
 
         scope

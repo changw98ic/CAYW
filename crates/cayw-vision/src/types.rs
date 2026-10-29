@@ -29,9 +29,9 @@ pub enum VisionError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OcrRequest {
-    /// Optional engine hint (`fixture`, `local`, `vision`, …). First cut uses
-    /// whatever engine the router was constructed with; the hint is recorded
-    /// in the result for diagnostics.
+    /// Optional engine hint (`fixture`, `local`, `vision`, …). Participates in
+    /// cache key identity; does not dynamically switch the configured engine
+    /// and is not echoed in [`OcrResult`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_hint: Option<String>,
 }

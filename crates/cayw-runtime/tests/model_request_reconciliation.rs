@@ -179,14 +179,20 @@ impl Provider for CapturedResponse {
     fn stream(&self, _: ModelRequest, _: CancellationToken) -> AssistantStream {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let partial = self.previous.clone();
+        // The saved prefix does not prove the usage of the complete response.
+        let mut failure = partial.clone();
+        failure.usage_status = UsageStatus::Unknown;
+        failure.usage = Usage::default();
+        failure.usage_fields.clear();
         Box::pin(futures::stream::iter([
             AssistantEvent::TextDelta {
                 index: 0,
                 delta: "saved response prefix".into(),
                 partial: partial.clone(),
             },
+            AssistantEvent::UsageUpdate { partial },
             AssistantEvent::Error {
-                message: partial.failure(
+                message: failure.failure(
                     if self.abort {
                         StopReason::Aborted
                     } else {
@@ -204,6 +210,14 @@ fn response_prefix() -> AssistantMessage {
     message.content.push(Content::text("saved response prefix"));
     message.response_id = Some("captured-response".into());
     message.response_model = Some("service-model".into());
+    message
+}
+
+fn protocol_prefix(usage: Usage, fields: serde_json::Value) -> AssistantMessage {
+    let mut message = response_prefix();
+    message.usage_status = UsageStatus::Reported;
+    message.usage = usage;
+    message.usage_fields = serde_json::from_value(fields).unwrap();
     message
 }
 
@@ -1729,8 +1743,17 @@ async fn reported_usage_cas_failure_and_concurrent_retries_never_double_settle()
 
 #[tokio::test]
 async fn reported_usage_checks_each_supported_protocol_without_replaying_a_failure() {
-    for (usage, fields, reason) in [
+    for (prev_usage, prev_fields, usage, fields, reason) in [
         (
+            Usage {
+                input: 80,
+                output: 6,
+                cache_read: 3,
+                cache_write: 2,
+                total_tokens: 91,
+                ..Default::default()
+            },
+            json!({"input_tokens":80,"output_tokens":6,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}),
             Usage {
                 input: 80,
                 output: 12,
@@ -1743,11 +1766,29 @@ async fn reported_usage_checks_each_supported_protocol_without_replaying_a_failu
             StopReason::Error,
         ),
         (
+            Usage {
+                input: 80,
+                output: 6,
+                cache_read: 3,
+                cache_write: 2,
+                reasoning: 4,
+                total_tokens: 91,
+            },
+            json!({"input_tokens":85,"output_tokens":6,"total_tokens":91,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":4}}),
             complete_report().usage,
             json!({"input_tokens":85,"output_tokens":12,"total_tokens":97,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":7}}),
             StopReason::Length,
         ),
         (
+            Usage {
+                input: 87,
+                output: 6,
+                cache_read: 3,
+                reasoning: 4,
+                total_tokens: 96,
+                ..Default::default()
+            },
+            json!({"promptTokenCount":85,"candidatesTokenCount":2,"cachedContentTokenCount":3,"thoughtsTokenCount":4,"toolUsePromptTokenCount":5,"totalTokenCount":96}),
             Usage {
                 input: 87,
                 output: 12,
@@ -1760,7 +1801,28 @@ async fn reported_usage_checks_each_supported_protocol_without_replaying_a_failu
             StopReason::ToolUse,
         ),
     ] {
-        let f = reported_fixture().await;
+        let previous = protocol_prefix(prev_usage, prev_fields);
+        let f = reported_fixture_with(previous.clone(), false).await;
+        let update = &f
+            .record
+            .observations
+            .iter()
+            .find(|entry| entry.observation.event == "usage_update")
+            .unwrap()
+            .observation;
+        assert_eq!(update.usage_status, UsageStatus::Reported);
+        assert_eq!(update.usage, previous.usage);
+        assert_eq!(update.usage_fields, previous.usage_fields);
+        for entry in &f.record.observations {
+            assert!(!entry.observation.metadata_redacted);
+        }
+        let terminal = &f.record.observations.last().unwrap().observation;
+        assert_eq!(terminal.event, "error");
+        assert_eq!(terminal.usage_status, UsageStatus::Unknown);
+        assert_eq!(terminal.usage, Usage::default());
+        assert!(terminal.usage_fields.is_empty());
+        assert_eq!(f.record.settled_tokens, None);
+        assert_eq!(f.record.outstanding_reservation_tokens, LIMIT);
         let mut input = reported_decision(&f.record);
         let report = report_mut(&mut input);
         report.usage = usage.clone();
@@ -1773,7 +1835,11 @@ async fn reported_usage_checks_each_supported_protocol_without_replaying_a_failu
         f.runtime.reconcile_model_request(input).await.unwrap();
         let record = &f.runtime.model_requests(&f.session).unwrap().requests[0];
         assert_eq!(record.settled_tokens, Some(usage.total_tokens));
+        assert_eq!(record.outstanding_reservation_tokens, 0);
         assert_eq!(record.terminal, Some(ModelRequestTerminal::Failed));
+        assert_eq!(record.observations, f.record.observations);
+        assert_eq!(record.terminal_cursor, f.record.terminal_cursor);
+        assert_eq!(record.last_cursor, f.record.last_cursor);
         assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
     }
 }

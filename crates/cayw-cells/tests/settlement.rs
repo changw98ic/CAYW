@@ -1077,6 +1077,38 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
             let record = cells.record(&page.cell_id).unwrap();
             cells.close().await;
             drop(cells);
+
+            let multi_identity = CellIdentity {
+                session_id: "session-multi".into(),
+                task_id: "multi".into(),
+                attempt_id: "original-attempt".into(),
+                permission_context: "authorized".into(),
+            };
+            let multi_cells = manager(
+                multi_identity.clone(),
+                journal.clone(),
+                Backend::new(false),
+                ReadCoordinator::new(vec![], CellLimits::default()).unwrap(),
+            );
+            let multi_page = terminal(
+                &multi_cells,
+                multi_cells
+                    .exec(
+                        request("cayw.call('write',{k='v'}); cayw.call('unknown',{})"),
+                        "parent",
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let multi_record = multi_cells.record(&multi_page.cell_id).unwrap();
+            multi_cells.close().await;
+            drop(multi_cells);
+
+            assert!(journal.is_frozen("session").unwrap());
+            assert!(journal.is_frozen("session-multi").unwrap());
+
             let scope = journal
                 .stopped_scope(
                     ExecutorStopped {
@@ -1119,6 +1151,78 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
                 assert_eq!(
                     scope.record(&record.execution()).unwrap().revision,
                     record.revision
+                );
+            }
+            let multi_scope = journal
+                .stopped_scope(
+                    ExecutorStopped {
+                        identity: multi_identity,
+                        evidence: "executor stopped multi".into(),
+                    },
+                    CellLimits::default(),
+                )
+                .unwrap();
+            for shape in [
+                "multi-arguments",
+                "multi-result",
+                "multi-first-arguments",
+                "multi-first-result",
+            ] {
+                let mut deep = Value::Null;
+                for _ in 0..10_000 {
+                    deep = Value::Array(vec![deep]);
+                }
+                let mut settlement = HostSettlement {
+                    execution: multi_record.execution(),
+                    calls: vec![
+                        HostCallSettlement {
+                            sequence: 1,
+                            name: "write".into(),
+                            arguments: json!({"k": "v"}),
+                            dependencies: None,
+                            terminal: HostCallTerminal::Succeeded {
+                                result: HostResult::Value(json!(true)),
+                            },
+                        },
+                        HostCallSettlement {
+                            sequence: 2,
+                            name: "unknown".into(),
+                            arguments: json!({}),
+                            dependencies: None,
+                            terminal: HostCallTerminal::Succeeded {
+                                result: HostResult::Value(json!(true)),
+                            },
+                        },
+                    ],
+                    execution_terminal: None,
+                    evidence: "Core record multi".into(),
+                };
+                match shape {
+                    "multi-arguments" => {
+                        settlement.calls[1].arguments = deep;
+                    }
+                    "multi-result" => {
+                        settlement.calls[1].terminal = HostCallTerminal::Succeeded {
+                            result: HostResult::Value(deep),
+                        };
+                    }
+                    "multi-first-arguments" => {
+                        settlement.calls[0].arguments = deep;
+                    }
+                    "multi-first-result" => {
+                        settlement.calls[0].terminal = HostCallTerminal::Succeeded {
+                            result: HostResult::Value(deep),
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(multi_scope.settle(settlement).is_err());
+                assert_eq!(
+                    multi_scope
+                        .record(&multi_record.execution())
+                        .unwrap()
+                        .revision,
+                    multi_record.revision
                 );
             }
         });

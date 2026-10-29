@@ -934,6 +934,55 @@ async fn pure_computation_coroutines_run_without_reaching_the_host() {
 }
 
 #[tokio::test]
+async fn wrapped_coroutines_preserve_exact_return_arity_including_trailing_nils() {
+    let (host, code) = mode(Limits::default());
+    let report = code
+        .execute(
+            r##"
+        local zero_fn = coroutine.wrap(function() end)
+        local zero_count = select("#", zero_fn())
+
+        local nil_fn = coroutine.wrap(function() return nil end)
+        local nil_count = select("#", nil_fn())
+
+        local pair_fn = coroutine.wrap(function() return 1, nil end)
+        local pair_count = select("#", pair_fn())
+
+        local yield_fn = coroutine.wrap(function()
+            coroutine.yield(nil)
+            return nil
+        end)
+        local yield_count = select("#", yield_fn())
+        local return_count = select("#", yield_fn())
+
+        return {
+            zero = zero_count,
+            single_nil = nil_count,
+            trailing_nil = pair_count,
+            yielded_nil = yield_count,
+            returned_nil = return_count,
+        }
+    "##,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.return_value,
+        json!({
+            "zero": 0,
+            "single_nil": 1,
+            "trailing_nil": 2,
+            "yielded_nil": 1,
+            "returned_nil": 1,
+        })
+    );
+    assert!(report.calls.is_empty());
+    assert!(host.received.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn host_calls_inside_script_coroutines_are_rejected_before_dispatch() {
     let (host, code) = mode(Limits::default());
     let report = code

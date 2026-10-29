@@ -1,4 +1,3 @@
-use base64::Engine;
 use cayw_ai::{
     ArgumentValidator, AssistantEvent, AssistantMessage, CancellationToken, Content, Message,
     ModelRequest, StopReason, ThinkingLevel, ToolCall, ToolDefinition, ToolResultMessage,
@@ -61,7 +60,13 @@ pub(crate) enum Format {
     Responses,
 }
 
-pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result<()> {
+#[derive(Debug, Default)]
+pub(crate) struct ValidatedRequest {
+    pub user_parts: BTreeMap<usize, Vec<Value>>,
+    pub tool_outputs: BTreeMap<usize, Vec<Value>>,
+}
+
+pub(crate) fn prepare_request(request: &ModelRequest, format: Format) -> Result<ValidatedRequest> {
     if request.model.id.trim().is_empty() {
         return Err("Model ID must not be empty".into());
     }
@@ -101,7 +106,10 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
     let mut definitions = BTreeMap::<String, ToolDefinition>::new();
     let mut has_conversation = false;
     let mut awaiting_model = false;
-    for message in &request.messages {
+    let mut user_parts = BTreeMap::new();
+    let mut tool_outputs = BTreeMap::new();
+
+    for (idx, message) in request.messages.iter().enumerate() {
         match message {
             Message::Custom { .. } => {}
             Message::System(system) => {
@@ -119,7 +127,8 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
             }
             Message::User { content, .. } => {
                 require_results(&pending)?;
-                input_parts(content, request.model.supports_images, format)?;
+                let parts = input_parts(content, request.model.supports_images, format)?;
+                user_parts.insert(idx, parts);
                 has_conversation = true;
                 awaiting_model = true;
             }
@@ -196,7 +205,8 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
                 if call.name != result.tool_name {
                     return Err("Tool result name does not match its call".into());
                 }
-                tool_output(result)?;
+                let output = validate_and_build_tool_output(result, format)?;
+                tool_outputs.insert(idx, output);
                 // Invalid arguments require a paired failure result. Unknown
                 // outcomes were rejected before walking the history.
                 if call.invalid_arguments && !result.is_error {
@@ -216,7 +226,10 @@ pub(crate) fn validate_request(request: &ModelRequest, format: Format) -> Result
     if !awaiting_model {
         return Err("Request must end with a user or paired tool-result turn".into());
     }
-    Ok(())
+    Ok(ValidatedRequest {
+        user_parts,
+        tool_outputs,
+    })
 }
 
 struct PendingCall {
@@ -316,6 +329,17 @@ pub(crate) fn active_tools(request: &ModelRequest) -> BTreeMap<String, ToolDefin
         .collect()
 }
 
+pub(crate) fn validate_standard_base64(data: &str) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let mut reader = base64::read::DecoderReader::new(
+        data.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    std::io::copy(&mut reader, &mut std::io::sink()).is_ok()
+}
+
 pub(crate) fn input_parts(content: &[Content], images: bool, format: Format) -> Result<Vec<Value>> {
     if content.is_empty() {
         return Err("User content must not be empty".into());
@@ -331,7 +355,7 @@ pub(crate) fn input_parts(content: &[Content], images: bool, format: Format) -> 
             if !matches!(mime_type.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") || (format == Format::Gemini && mime_type == "image/gif") {
                 return Err("Unsupported user image MIME type".into());
             }
-            if data.is_empty() || base64::engine::general_purpose::STANDARD.decode(data).is_err() {
+            if !validate_standard_base64(data) {
                 return Err("User image data must be nonempty standard base64".into());
             }
             Ok(match format {
@@ -344,17 +368,38 @@ pub(crate) fn input_parts(content: &[Content], images: bool, format: Format) -> 
     }).collect()
 }
 
-pub(crate) fn tool_output(result: &ToolResultMessage) -> Result<Vec<Value>> {
-    let mut output = Vec::new();
+pub(crate) fn validate_and_build_tool_output(
+    result: &ToolResultMessage,
+    format: Format,
+) -> Result<Vec<Value>> {
     for part in &result.content {
-        if let Content::Text { text } = part {
-            output.push(json!({"type":"text","text":text}));
-        } else {
+        if !matches!(part, Content::Text { .. }) {
             return Err("Tool results support text and structured JSON only".into());
         }
     }
-    if let Some(structured) = &result.structured_content {
-        output.push(json!({"type":"text","text":structured.to_string()}));
+    let mut output = Vec::new();
+    match format {
+        Format::Anthropic => {
+            for part in &result.content {
+                if let Content::Text { text } = part {
+                    output.push(json!({"type":"text","text":text}));
+                }
+            }
+            if let Some(structured) = &result.structured_content {
+                output.push(json!({"type":"text","text":structured.to_string()}));
+            }
+        }
+        Format::Responses => {
+            for part in &result.content {
+                if let Content::Text { text } = part {
+                    output.push(json!({"type":"input_text","text":text}));
+                }
+            }
+            if let Some(structured) = &result.structured_content {
+                output.push(json!({"type":"input_text","text":structured.to_string()}));
+            }
+        }
+        Format::Gemini => {}
     }
     Ok(output)
 }
@@ -466,5 +511,41 @@ pub(crate) fn text_delta(
         index,
         delta: delta.to_owned(),
         partial: message.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_standard_base64_rejects_empty_invalid_padding_and_non_standard_alphabet() {
+        // Valid standard base64 strings
+        assert!(validate_standard_base64("aGVsbG8=")); // "hello" (5 bytes -> 8 chars with 1 '=')
+        assert!(validate_standard_base64("YQ==")); // "a" (1 byte -> 4 chars with 2 '=')
+        assert!(validate_standard_base64("YWJj")); // "abc" (3 bytes -> 4 chars without padding)
+        assert!(validate_standard_base64("MDEyMzQ1Njc4OQ=="));
+        assert!(validate_standard_base64("PD4/")); // "<>?" (valid standard alphabet including '/')
+        assert!(validate_standard_base64("PD4+")); // "<>>" (valid standard alphabet including '+' at index 62)
+        assert!(validate_standard_base64("+A==")); // valid standard alphabet with leading '+' and padding
+
+        // Empty string
+        assert!(!validate_standard_base64(""));
+
+        // Non-standard characters (e.g. url-safe base64 '-' and '_')
+        assert!(!validate_standard_base64("aGVsbG8-"));
+        assert!(!validate_standard_base64("aGVsbG8_"));
+        assert!(!validate_standard_base64("PD4?")); // '?' is not valid base64
+
+        // Invalid padding: unpadded when padding required, excessive padding, leading padding
+        assert!(!validate_standard_base64("aGVsbG8")); // 7 chars (not multiple of 4)
+        assert!(!validate_standard_base64("aGVsbG8==="));
+        assert!(!validate_standard_base64("=aGVsbG8"));
+        assert!(!validate_standard_base64("===="));
+
+        // Embedded whitespace or newlines (must be strict standard base64)
+        assert!(!validate_standard_base64("aGVsbG8=\n"));
+        assert!(!validate_standard_base64("aGV sbG8="));
+        assert!(!validate_standard_base64("aGV\tsbG8="));
     }
 }

@@ -61,7 +61,7 @@ pub struct TaskRecord {
     pub resources: TaskResources,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TaskLease {
     pub id: String,
     pub worker: String,

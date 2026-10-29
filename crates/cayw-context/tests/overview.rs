@@ -243,6 +243,92 @@ fn merge_cost_collapses_distinct_reported_amounts() {
 }
 
 #[test]
+fn merge_cost_collapses_multiple_reported_amounts_even_with_same_amount() {
+    let a = CostView::reported("0.01", "USD");
+    let b = CostView::reported("0.01", "USD");
+    let merged = merge_cost([&a, &b]);
+    assert_eq!(merged.status, CostStatus::Unknown);
+    assert!(merged.amount.is_none());
+    assert!(merged.currency.is_none());
+}
+
+#[test]
+fn merge_cost_retains_single_reported_amount() {
+    let a = CostView::reported("0.01", "USD");
+    let merged = merge_cost([&a]);
+    assert_eq!(merged.status, CostStatus::Reported);
+    assert_eq!(merged.amount.as_deref(), Some("0.01"));
+    assert_eq!(merged.currency.as_deref(), Some("USD"));
+}
+
+#[test]
+fn merge_cost_returns_unknown_for_empty_or_invalid() {
+    let empty: Vec<CostView> = vec![];
+    assert_eq!(merge_cost(empty.iter()).status, CostStatus::Unknown);
+
+    let invalid = CostView {
+        status: CostStatus::Reported,
+        amount: Some("".into()),
+        currency: Some("USD".into()),
+    };
+    assert_eq!(merge_cost([&invalid]).status, CostStatus::Unknown);
+}
+
+#[test]
+fn cross_session_overview_collapses_two_sessions_with_same_reported_cost() {
+    let mut a = snapshot(
+        "a",
+        None,
+        "a",
+        None,
+        vec![request(
+            "a1",
+            "a",
+            None,
+            "a",
+            1,
+            tokens(10, 5, 0, 0, 0),
+            CostStatus::Reported,
+        )],
+    );
+    a.cost_status = CostStatus::Reported;
+    a.cost_amount = Some("0.01".into());
+    a.cost_currency = Some("USD".into());
+
+    let mut b = snapshot(
+        "b",
+        None,
+        "b",
+        None,
+        vec![request(
+            "b1",
+            "b",
+            None,
+            "b",
+            1,
+            tokens(20, 5, 0, 0, 0),
+            CostStatus::Reported,
+        )],
+    );
+    b.cost_status = CostStatus::Reported;
+    b.cost_amount = Some("0.01".into());
+    b.cost_currency = Some("USD".into());
+
+    let cross = build_cross_session_overview(&[a.clone(), b]);
+    assert_eq!(cross.session_count, 2);
+    // Two independent sessions each with 0.01 USD must NOT be deduplicated into 0.01 USD.
+    assert_eq!(cross.cost.status, CostStatus::Unknown);
+    assert!(cross.cost.amount.is_none());
+
+    // Single session retains reported cost
+    let single = build_cross_session_overview(&[a]);
+    assert_eq!(single.session_count, 1);
+    assert_eq!(single.cost.status, CostStatus::Reported);
+    assert_eq!(single.cost.amount.as_deref(), Some("0.01"));
+    assert_eq!(single.cost.currency.as_deref(), Some("USD"));
+}
+
+#[test]
 fn fleet_rejects_empty_budget_or_missing_members() {
     assert!(matches!(
         build_fleet_overview("", &[]),
