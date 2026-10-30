@@ -397,6 +397,7 @@ dependencies = [
  "cayw-ipc",
  "cayw-runtime",
  "futures",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

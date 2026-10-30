@@ -165,7 +165,7 @@ Every wire frame is one bounded JSON object followed by LF. Response IDs must co
 | --- | --- |
 | `unsupported_version`, `unauthorized` | Handshake rejected; fix contract/token before explicit new connection |
 | `invalid_params`, `request_too_large`, `client_busy` | Local validation/capacity rejection before dispatch; outcome known |
-| `stored_data_corrupt` | Persisted JSON/queue data is invalid; this is not an invalid client parameter and must not be retried as a new request |
+| `stored_data_corrupt` | Persisted JSON is invalid; this is not an invalid client parameter and must not be retried as a new request |
 | `busy` | Server's in-flight handler limit rejected dispatch; outcome known |
 | `stale_approval`, `session_error` | Runtime rejected the request; inspect message/current Session |
 | `needs_reconciliation_outcome_unknown` | Original unknown effect blocks new work; `ClientError.outcome_unknown` is true; submit actual host evidence |
@@ -176,7 +176,9 @@ Every wire frame is one bounded JSON object followed by LF. Response IDs must co
 | `cancelled_outcome_unknown`, `timeout_outcome_unknown` | RPC cancelled/timed out after admission; inspect durable records |
 | `connection_closed`, `connection_lost`, `protocol_error` for in-flight calls | Original request may have run; inspect durable state, never blindly retry |
 
-Runtime error messages include the RPC method and only the supplied session/task IDs as bounded operation context. Prompt text and arbitrary parameters are not copied into the message. Error codes and `outcome_unknown` are derived from typed causes, including nested `recovery_required` causes and cleanup errors, so a false wrapper flag cannot make a nested unknown effect look known.
+Runtime error messages include the RPC method and only the supplied session/task IDs as bounded operation context. Prompt text and arbitrary parameters are not copied into the message. Error codes and `outcome_unknown` are derived from typed causes, including nested `recovery_required` causes and cleanup errors, so a false wrapper flag cannot make a nested unknown effect look known. The independent headless client preserves these codes and states in both SDK and IPC modes.
+
+A queue JSON decode failure wrapped in SQLite's `FromSqlConversionFailure` is classified as `storage_corrupt` by its typed JSON cause. Other conversion failures retain their own classification; the original source is preserved. A caught Runtime worker panic preserves a string payload with control and non-printing characters escaped for display. Non-string payloads use `non-string panic payload`. Either form keeps `worker_panicked_outcome_unknown`, explicit recovery and the original admission hold.
 
 The client and server intersect declared frame/in-flight/ID limits. Local over-capacity calls fail before sending; server over-capacity calls return `busy`. A bounded response queue closes a slow connection if it fills. Reads and writes have deadlines. A too-large or unretainable handler response can be unknown after effects; a locally rejected oversized request is known unexecuted. Cancellation targets a request in the same connection using a distinct request ID; original and cancellation acknowledgments are separately paired. Dropping an admitted client request future closes the shared connection. Explicit `request_with_cancel` keeps polling that request to its terminal. Transport cancellation alone does not prove side effects were undone.
 

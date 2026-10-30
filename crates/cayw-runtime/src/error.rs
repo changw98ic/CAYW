@@ -32,6 +32,11 @@ pub enum StorageFailure {
 
 impl StorageFailure {
     pub fn from_sqlite(error: &rusqlite::Error) -> Self {
+        if let rusqlite::Error::FromSqlConversionFailure(_, _, source) = error
+            && source.is::<serde_json::Error>()
+        {
+            return Self::Corrupt;
+        }
         match error.sqlite_error_code() {
             Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
                 Self::Busy
@@ -452,6 +457,16 @@ mod tests {
         assert_eq!(request_busy.code(), "storage_busy_outcome_unknown");
         assert_eq!(request_busy.storage_failure(), Some(StorageFailure::Busy));
         assert!(request_busy.outcome_unknown());
+    }
+
+    #[test]
+    fn non_json_sql_conversion_does_not_claim_corrupt_json() {
+        let error = rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(io::Error::other("non-JSON conversion fixture")),
+        );
+        assert_eq!(StorageFailure::from_sqlite(&error), StorageFailure::Other);
     }
 
     #[test]

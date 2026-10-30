@@ -556,13 +556,18 @@ async fn launch_worker(
         .await;
         let outcome = match outcome {
             Ok(result) => result,
-            Err(_) => {
+            Err(payload) => {
                 worker_cancel.cancel();
+                let reason = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string panic payload");
                 // Ownership may already have changed in another connection.
                 // Only explicit host recovery can invalidate an unfinished lease.
                 Err(RuntimeError::RecoveryRequired {
                     cause: Box::new(RuntimeError::WorkerPanicked(
-                        "worker panicked; explicitly recover and inspect persisted effects".into(),
+                        reason.escape_debug().to_string(),
                     )),
                     cleanup: None,
                     outcome_unknown: true,

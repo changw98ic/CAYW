@@ -239,7 +239,7 @@ async fn prompt_reads_large_history_before_reporting_original_unknown() {
     assert!(!output.status.success());
     let errors = rows(&output.stderr);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["code"], "needs_reconciliation");
+    assert_eq!(errors[0]["code"], "needs_reconciliation_outcome_unknown");
     assert_eq!(errors[0]["outcome_unknown"], true);
     assert_eq!(emitted_events(&output), expected);
     assert_eq!(saved_cursor(&cursor)["after"], before.cursor);

@@ -47,40 +47,19 @@ impl From<serde_json::Error> for Failure {
 }
 impl From<RuntimeError> for Failure {
     fn from(error: RuntimeError) -> Self {
-        let code = match &error {
-            RuntimeError::Cancelled => "cancelled",
-            RuntimeError::NeedsReconciliation => "needs_reconciliation",
-            RuntimeError::Busy => "busy",
-            RuntimeError::QueueFull => "queue_full",
-            RuntimeError::Budget(_) => "budget_exceeded",
-            RuntimeError::StaleApproval => "stale_approval",
-            RuntimeError::StaleCancellation => "stale_cancellation",
-            RuntimeError::RecoveryRequired { .. } => "recovery_required",
-            _ => "runtime_error",
-        };
-        let unknown = matches!(
-            &error,
-            RuntimeError::NeedsReconciliation
-                | RuntimeError::RecoveryRequired {
-                    outcome_unknown: true,
-                    ..
-                }
-        );
+        // The RuntimeError contract owns code selection and nested unknown
+        // state. Keep the concrete message; do not re-classify it here.
         Self {
-            code: code.into(),
+            code: error.code().into(),
             message: error.to_string(),
-            outcome_unknown: unknown,
+            outcome_unknown: error.outcome_unknown(),
         }
     }
 }
 impl From<cayw_ipc::ClientError> for Failure {
     fn from(error: cayw_ipc::ClientError) -> Self {
-        let code = match error.code.as_str() {
-            "needs_reconciliation_outcome_unknown" => "needs_reconciliation".into(),
-            _ => error.code,
-        };
         Self {
-            code,
+            code: error.code,
             message: error.message,
             outcome_unknown: error.outcome_unknown,
         }
@@ -293,5 +272,123 @@ async fn drain(api: &Api, id: &str, cursor: &mut Cursor) -> Result<()> {
             return Ok(());
         }
         cursor.process(&page)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cayw_core::CoreError;
+    use cayw_runtime::StorageFailure;
+
+    fn sqlite(code: rusqlite::ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
+
+    /// The SDK path used by `--mode sdk`.
+    fn classify_sdk(error: RuntimeError) -> (String, bool) {
+        let failure = Failure::from(error);
+        (failure.code, failure.outcome_unknown)
+    }
+
+    /// The existing IPC path: RuntimeError -> RpcError -> ClientError -> Failure.
+    fn classify_ipc(error: RuntimeError) -> (String, bool) {
+        let client = cayw_ipc::ClientError::from(cayw_ipc::RpcError::from(error));
+        let failure = Failure::from(client);
+        (failure.code, failure.outcome_unknown)
+    }
+
+    #[test]
+    fn storage_failures_keep_their_typed_code_and_message() {
+        let busy = RuntimeError::Journal(sqlite(rusqlite::ErrorCode::DatabaseBusy));
+        assert_eq!(busy.storage_failure(), Some(StorageFailure::Busy));
+        let expected_message = busy.to_string();
+        let failure = Failure::from(busy);
+        assert_eq!(failure.code, "storage_busy");
+        assert!(!failure.outcome_unknown);
+        assert_eq!(failure.message, expected_message);
+
+        let disk_full = sqlite(rusqlite::ErrorCode::DiskFull);
+        let full = RuntimeError::Core(CoreError::Database(disk_full));
+        assert_eq!(full.storage_failure(), Some(StorageFailure::Full));
+        let expected_message = full.to_string();
+        let failure = Failure::from(full);
+        assert_eq!(failure.code, "storage_full");
+        assert!(!failure.outcome_unknown);
+        assert_eq!(failure.message, expected_message);
+    }
+
+    #[test]
+    fn recovery_required_reads_the_nested_unknown_state() {
+        let nested_cause = RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::NeedsReconciliation),
+            cleanup: None,
+            outcome_unknown: false,
+        };
+        let failure = Failure::from(nested_cause);
+        assert_eq!(failure.code, "runtime_outcome_unknown");
+        assert!(failure.outcome_unknown);
+
+        let nested_cleanup = RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::Worker("known".into())),
+            cleanup: Some(Box::new(RuntimeError::WorkerPanicked(
+                "cleanup panicked".into(),
+            ))),
+            outcome_unknown: false,
+        };
+        let failure = Failure::from(nested_cleanup);
+        assert_eq!(failure.code, "runtime_outcome_unknown");
+        assert!(failure.outcome_unknown);
+
+        let known = RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::Worker("known".into())),
+            cleanup: None,
+            outcome_unknown: false,
+        };
+        let failure = Failure::from(known);
+        assert_eq!(failure.code, "recovery_required");
+        assert!(!failure.outcome_unknown);
+    }
+
+    fn assert_sdk_and_ipc_agree(name: &str, build: fn() -> RuntimeError) {
+        assert_eq!(classify_sdk(build()), classify_ipc(build()), "{name}");
+    }
+
+    #[test]
+    fn sdk_and_ipc_paths_classify_known_and_unknown_failures_the_same() {
+        assert_sdk_and_ipc_agree("storage busy", || {
+            RuntimeError::Journal(sqlite(rusqlite::ErrorCode::DatabaseBusy))
+        });
+        assert_sdk_and_ipc_agree("storage full", || {
+            RuntimeError::Core(CoreError::Database(sqlite(rusqlite::ErrorCode::DiskFull)))
+        });
+        assert_sdk_and_ipc_agree("worker panicked", || {
+            RuntimeError::WorkerPanicked("panicked".into())
+        });
+        assert_sdk_and_ipc_agree("nested unknown recovery", || {
+            RuntimeError::RecoveryRequired {
+                cause: Box::new(RuntimeError::NeedsReconciliation),
+                cleanup: None,
+                outcome_unknown: false,
+            }
+        });
+        assert_sdk_and_ipc_agree("known recovery", || RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::Worker("known".into())),
+            cleanup: None,
+            outcome_unknown: false,
+        });
+    }
+
+    #[test]
+    fn reconciliation_keeps_the_runtime_code_in_both_modes() {
+        let expected = ("needs_reconciliation_outcome_unknown".into(), true);
+        assert_eq!(classify_sdk(RuntimeError::NeedsReconciliation), expected);
+        assert_eq!(classify_ipc(RuntimeError::NeedsReconciliation), expected);
     }
 }

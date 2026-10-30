@@ -9,7 +9,7 @@ use cayw_ai::{
 };
 use cayw_ipc::RpcHandler;
 use cayw_queue::QueueError;
-use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, TaskInput};
+use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, RuntimeError, StorageFailure, TaskInput};
 use futures::stream;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -51,6 +51,69 @@ fn runtime(temp: &tempfile::TempDir, supports_images: bool) -> (Runtime, Arc<Fix
 
 async fn rpc(runtime: &Runtime, method: &str, params: Value) -> Result<Value, cayw_ipc::RpcError> {
     runtime.call(method, params, CancellationToken::new()).await
+}
+
+#[tokio::test]
+async fn corrupt_queue_json_keeps_its_typed_cause_and_rpc_classification() {
+    for (column, index) in [("input_json", 2), ("intent", 10)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, provider) = runtime(&temp, false);
+        let session = runtime.create(None).unwrap().id;
+        let task = runtime
+            .enqueue(&session, "queued corruption fixture")
+            .unwrap();
+        let db = rusqlite::Connection::open(temp.path().join("sessions.db")).unwrap();
+        assert_eq!(
+            db.execute(
+                &format!("UPDATE runtime_tasks SET {column}=?1 WHERE id=?2"),
+                rusqlite::params!["{", task.id],
+            )
+            .unwrap(),
+            1,
+        );
+
+        for error in [
+            runtime.task(&task.id).unwrap_err(),
+            runtime.tasks(&session).unwrap_err(),
+        ] {
+            let RuntimeError::Journal(rusqlite::Error::FromSqlConversionFailure(
+                actual_index,
+                rusqlite::types::Type::Text,
+                source,
+            )) = &error
+            else {
+                panic!("queue must preserve its JSON conversion error: {error:?}");
+            };
+            assert_eq!(*actual_index, index);
+            let json_error = source.downcast_ref::<serde_json::Error>().unwrap();
+            assert!(error.to_string().contains(&json_error.to_string()));
+            assert_eq!(error.storage_failure(), Some(StorageFailure::Corrupt));
+            assert_eq!(error.code(), "storage_corrupt");
+            assert!(!error.outcome_unknown());
+        }
+
+        for (method, params) in [
+            ("task.get", json!({"task_id": task.id})),
+            ("session.tasks", json!({"session_id": session})),
+        ] {
+            let error = rpc(&runtime, method, params).await.unwrap_err();
+            assert_eq!(error.code, "storage_corrupt");
+            assert!(error.message.contains(&format!("method={method}")));
+            assert!(error.message.contains("EOF while parsing an object"));
+            assert!(!cayw_ipc::ClientError::from(error).outcome_unknown);
+        }
+        assert!(provider.seen.lock().unwrap().is_empty());
+        assert_eq!(runtime.health().unwrap().queued, 1);
+        assert_eq!(
+            db.query_row(
+                &format!("SELECT {column} FROM runtime_tasks WHERE id=?1"),
+                [&task.id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "{",
+        );
+    }
 }
 
 #[tokio::test]

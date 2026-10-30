@@ -719,7 +719,7 @@ async fn check_unknown_rejection(mode: &str) {
     shutdown.cancel();
     server.await.unwrap().unwrap();
     assert_eq!(error["session_id"], id);
-    assert_eq!(error["code"], "needs_reconciliation", "{mode}: {error}");
+    assert_eq!(error["code"], rpc_error.code, "{mode}: {error}");
     assert_eq!(error["outcome_unknown"], true, "{mode}: {error}");
     assert_eq!(rpc_error.code, "needs_reconciliation_outcome_unknown");
     assert!(rpc_error.outcome_unknown);
