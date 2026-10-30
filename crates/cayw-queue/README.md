@@ -19,9 +19,10 @@ acquires the host lock.
 ## Canonical task intent
 
 `TaskIntent` is defined once, here. `cayw-requests` re-exports this exact type and does
-not keep a second copy. Each layer validates with its own error type: the request store
-and the Runtime check the 1..2048-byte instruction rule when they accept trusted host
-input, so no model-facing path can infer an intent from prompt text.
+not keep a second copy. Public queue entry points check `TaskIntent::validate`
+before accepting a task. Runtime relies on that check instead of repeating its
+rules. The request store checks its own trusted authority input. No model-facing
+path infers intent from prompt text.
 
 ## Error boundary
 

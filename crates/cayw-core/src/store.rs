@@ -903,18 +903,10 @@ impl SessionStore {
     ) -> Result<EventRecord, CoreError> {
         let data = checked_input(data)?;
         validate_host_kind(kind)?;
-        self.mutate(&lease.session_id, |session| {
+        self.append_cursor_event(&lease.session_id, kind, data, |session| {
             session.verify_lease(lease)?;
-            Ok((
-                (),
-                Some(lease.clone()),
-                CoreEvent::Host {
-                    kind: kind.into(),
-                    data,
-                },
-            ))
+            Ok(Some(lease.clone()))
         })
-        .map(|(_, record)| record)
     }
 
     /// Records a trusted host decision against the exact observed session state.
@@ -932,23 +924,72 @@ impl SessionStore {
         let data = checked_input(data)?;
         nonempty(actor, "actor")?;
         validate_host_kind(kind)?;
-        self.mutate(session_id, |session| {
-            if session.attempt.as_ref() != expected_attempt {
-                return Err(CoreError::StaleLease);
-            }
-            if session.cursor != expected_cursor {
-                return Err(invalid("Host decision requires the current session cursor"));
-            }
-            Ok((
-                (),
-                session.attempt.clone(),
-                CoreEvent::Host {
-                    kind: kind.into(),
-                    data: serde_json::json!({"actor": actor, "decision": data}),
-                },
-            ))
-        })
-        .map(|(_, record)| record)
+        self.append_cursor_event(
+            session_id,
+            kind,
+            serde_json::json!({"actor": actor, "decision": data}),
+            |session| {
+                if session.attempt.as_ref() != expected_attempt {
+                    return Err(CoreError::StaleLease);
+                }
+                if session.cursor != expected_cursor {
+                    return Err(invalid("Host decision requires the current session cursor"));
+                }
+                Ok(session.attempt.clone())
+            },
+        )
+    }
+
+    fn append_cursor_event(
+        &self,
+        session_id: &str,
+        kind: &str,
+        data: Value,
+        check: impl FnOnce(&StoredSession) -> Result<Option<AttemptLease>, CoreError>,
+    ) -> Result<EventRecord, CoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = self.cached_projection(&transaction, session_id)?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take(session_id);
+        let state = Arc::make_mut(&mut session);
+        let attempt = check(state)?;
+        state.cursor = increment(state.cursor)?;
+        state.validate_wait_bindings()?;
+        let record = EventRecord {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: state.id.clone(),
+            cursor: state.cursor,
+            timestamp: timestamp_ms(),
+            attempt,
+            event: CoreEvent::Host {
+                kind: kind.into(),
+                data,
+            },
+        };
+        let record_json = encode_readable(&record)?;
+        transaction.execute(
+            "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+            params![state.id, state.cursor as i64, record_json],
+        )?;
+        // Host records change only the cursor. SQLite still processes the JSON,
+        // but Rust does not validate and encode the retained history again.
+        let json = transaction.query_row(
+            "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2) WHERE id=?1 RETURNING projection",
+            params![state.id, state.cursor as i64],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .insert(CachedProjection { json, session });
+        Ok(record)
     }
 
     pub fn append_agent_event(
@@ -1365,7 +1406,7 @@ impl SessionStore {
                 "Tool origin differs from its original approval Task",
             ));
         }
-        let record = persist(
+        let (record, _) = persist(
             &transaction,
             &mut session,
             Some(lease.clone()),
@@ -1510,7 +1551,7 @@ impl SessionStore {
             .take(session_id);
         let state = Arc::make_mut(&mut session);
         let (result, lease, event) = change(state)?;
-        let record = persist(&transaction, state, lease, event)?;
+        let (record, json) = persist(&transaction, state, lease, event)?;
         #[cfg(feature = "fault-injection")]
         let crash_point = match &record.event {
             CoreEvent::Agent { event } => match event.as_ref() {
@@ -1536,9 +1577,6 @@ impl SessionStore {
         if let Some((before, _, data)) = &crash_point {
             cayw_ai::faults::hit(before, data.clone());
         }
-        // Read back the projection written in this transaction instead of
-        // encoding it again. It is published only after a successful commit.
-        let json = projection_json(&transaction, session_id)?;
         transaction.commit()?;
         #[cfg(feature = "fault-injection")]
         if let Some((_, committed, data)) = crash_point {
@@ -1849,7 +1887,7 @@ fn persist(
     session: &mut StoredSession,
     lease: Option<AttemptLease>,
     event: CoreEvent,
-) -> Result<EventRecord, CoreError> {
+) -> Result<(EventRecord, String), CoreError> {
     session.cursor = increment(session.cursor)?;
     let record = EventRecord {
         protocol_version: PROTOCOL_VERSION,
@@ -1870,7 +1908,7 @@ fn persist(
         "UPDATE core_sessions SET projection=?2 WHERE id=?1",
         params![session.id, projection_json],
     )?;
-    Ok(record)
+    Ok((record, projection_json))
 }
 
 fn validate_result(result: &ToolResult) -> Result<(), CoreError> {
@@ -2538,7 +2576,7 @@ mod tests {
                 "CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY);
                  CREATE TABLE fixture_deferred(parent INTEGER REFERENCES fixture_parent(id) DEFERRABLE INITIALLY DEFERRED);
                  CREATE TRIGGER fail_host_commit AFTER INSERT ON core_events
-                 WHEN json_extract(NEW.record, '$.event.type')='host'
+                 WHEN json_extract(NEW.record, '$.event.type') IN ('host','attempt_finished')
                  BEGIN INSERT INTO fixture_deferred VALUES(1); END;",
             )
             .unwrap();
@@ -2561,6 +2599,21 @@ mod tests {
                     .any(|entry| Arc::ptr_eq(&entry.session, &peer_cached))
             );
         }
+        assert_eq!(store.snapshot(&session.id).unwrap(), before);
+        assert_eq!(store.events(&session.id, 0, 100).unwrap(), events);
+        assert!(matches!(
+            store.finish_attempt(&lease),
+            Err(CoreError::Database(_))
+        ));
+        assert!(
+            !store
+                .projection_cache
+                .lock()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.session.id == session.id)
+        );
         assert_eq!(store.snapshot(&session.id).unwrap(), before);
         assert_eq!(store.events(&session.id, 0, 100).unwrap(), events);
         store

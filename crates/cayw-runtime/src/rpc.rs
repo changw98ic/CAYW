@@ -17,37 +17,35 @@ fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
 fn encode(value: impl serde::Serialize) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|error| RpcError::new("serialization", error.to_string()))
 }
-impl From<RuntimeError> for RpcError {
-    fn from(error: RuntimeError) -> Self {
-        let code = match &error {
-            RuntimeError::InvalidInput(_) | RuntimeError::Json(_) => "invalid_params",
-            RuntimeError::Busy => "busy",
-            RuntimeError::QueueFull => "queue_full",
-            RuntimeError::Cancelled => "cancelled",
-            RuntimeError::Budget(_) => "budget_exceeded",
-            RuntimeError::NeedsReconciliation => "needs_reconciliation_outcome_unknown",
-            RuntimeError::Frozen(_) => "session_frozen",
-            RuntimeError::StaleApproval => "stale_approval",
-            RuntimeError::StaleCancellation => "stale_cancellation",
-            RuntimeError::RecoveryRequired {
-                outcome_unknown: true,
-                ..
-            } => "runtime_outcome_unknown",
-            RuntimeError::RecoveryRequired { .. } => "recovery_required",
-            RuntimeError::Core(_) => "session_error",
-            RuntimeError::Request(error) => match error {
-                cayw_requests::RequestError::InvalidInput(_) => "invalid_params",
-                cayw_requests::RequestError::Stale => "request_stale",
-                cayw_requests::RequestError::NotFound => "request_not_found",
-                cayw_requests::RequestError::Denied(_) => "request_denied",
-                cayw_requests::RequestError::Budget => "request_budget_exceeded",
-                cayw_requests::RequestError::PolicyMismatch => "request_policy_changed",
-                _ => "request_authority_unavailable_outcome_unknown",
-            },
-            _ => "runtime_error",
-        };
-        Self::new(code, error.to_string())
+const MAX_CONTEXT_FIELD_BYTES: usize = 128;
+
+fn safe_context_field(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= MAX_CONTEXT_FIELD_BYTES
+        && !value.chars().any(|c| c.is_control() || c.is_whitespace()))
+    .then_some(value)
+}
+
+/// Only the method and supplied session/task IDs are retained. Prompt text and
+/// arbitrary parameters never enter the error message.
+fn operation_context(method: &str, params: &Value) -> String {
+    let mut context = String::from("method=");
+    context.push_str(safe_context_field(method).unwrap_or("<invalid>"));
+    for key in ["session_id", "task_id", "child_task_id"] {
+        if let Some(value) = params.get(key).and_then(Value::as_str)
+            && let Some(value) = safe_context_field(value)
+        {
+            context.push(' ');
+            context.push_str(key);
+            context.push('=');
+            context.push_str(value);
+        }
     }
+    context
+}
+
+fn with_operation_context(error: RpcError, context: &str) -> RpcError {
+    RpcError::new(error.code, format!("{context}: {}", error.message))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -319,11 +317,8 @@ struct RevokeRequest {
     reason: String,
 }
 
-/// The IPC transport owns framing, authentication, request ids and disconnect
-/// cancellation. Local SDK calls and this adapter execute the same Runtime API.
-#[async_trait]
-impl RpcHandler for Runtime {
-    async fn call(
+impl Runtime {
+    async fn dispatch_rpc(
         &self,
         method: &str,
         params: Value,
@@ -649,6 +644,23 @@ impl RpcHandler for Runtime {
                 format!("unknown runtime method {method}"),
             )),
         }
+    }
+}
+
+/// The IPC transport owns framing, authentication, request ids and disconnect
+/// cancellation. Local SDK calls and this adapter execute the same Runtime API.
+#[async_trait]
+impl RpcHandler for Runtime {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        let context = operation_context(method, &params);
+        self.dispatch_rpc(method, params, cancel)
+            .await
+            .map_err(|error| with_operation_context(error, &context))
     }
 }
 

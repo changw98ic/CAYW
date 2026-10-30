@@ -434,7 +434,6 @@ impl Runtime {
         resources: crate::TaskResources,
     ) -> Result<TaskRecord, RuntimeError> {
         resources.validate(&self.inner.config.resources)?;
-        crate::requests::validate_intent(&intent)?;
         input.validate(&self.inner.model, self.inner.config.max_prompt_bytes)?;
         let _coordinate = self.inner.coordination.enter()?;
         self.check_ready(session)?;
@@ -562,7 +561,7 @@ async fn launch_worker(
                 // Ownership may already have changed in another connection.
                 // Only explicit host recovery can invalidate an unfinished lease.
                 Err(RuntimeError::RecoveryRequired {
-                    cause: Box::new(RuntimeError::Worker(
+                    cause: Box::new(RuntimeError::WorkerPanicked(
                         "worker panicked; explicitly recover and inspect persisted effects".into(),
                     )),
                     cleanup: None,
@@ -674,7 +673,11 @@ async fn launch_worker(
     let _cancel_on_drop = PromptGuard(child);
     worker
         .await
-        .map_err(|e| RuntimeError::Worker(e.to_string()))?
+        .map_err(|error| RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::WorkerLost(error)),
+            cleanup: None,
+            outcome_unknown: true,
+        })?
 }
 
 pub(crate) async fn resume_child(

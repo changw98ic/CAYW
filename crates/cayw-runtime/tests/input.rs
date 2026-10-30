@@ -461,3 +461,42 @@ async fn task_enqueue_rejects_multi_image_cumulative_oversized_on_budget_first()
     );
     assert!(runtime.tasks(&session).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn rpc_invalid_intent_reports_operation_context_and_inserts_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, false);
+    let session = runtime.create(None).unwrap().id;
+    let error = rpc(
+        &runtime,
+        "task.enqueue_with_intent",
+        json!({
+            "session_id": session,
+            "text": "run the project tests",
+            "intent": {
+                "kind": "explicit_project_test_or_script",
+                "user_instruction": "   "
+            }
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "invalid_params");
+    assert!(
+        error.message.contains("method=task.enqueue_with_intent"),
+        "missing method context: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains(&format!("session_id={session}")),
+        "missing session context: {}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("run the project tests"),
+        "prompt text must not appear in operation context: {}",
+        error.message
+    );
+    assert!(runtime.tasks(&session).unwrap().is_empty());
+}

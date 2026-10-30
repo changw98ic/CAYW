@@ -165,11 +165,18 @@ Every wire frame is one bounded JSON object followed by LF. Response IDs must co
 | --- | --- |
 | `unsupported_version`, `unauthorized` | Handshake rejected; fix contract/token before explicit new connection |
 | `invalid_params`, `request_too_large`, `client_busy` | Local validation/capacity rejection before dispatch; outcome known |
+| `stored_data_corrupt` | Persisted JSON/queue data is invalid; this is not an invalid client parameter and must not be retried as a new request |
 | `busy` | Server's in-flight handler limit rejected dispatch; outcome known |
 | `stale_approval`, `session_error` | Runtime rejected the request; inspect message/current Session |
 | `needs_reconciliation_outcome_unknown` | Original unknown effect blocks new work; `ClientError.outcome_unknown` is true; submit actual host evidence |
+| `storage_busy`, `storage_full`, `storage_io`, `storage_corrupt`, `storage_error` | Typed persistence failure; distinguish contention, disk capacity, I/O and corruption without matching message text. Inspect the original operation before retrying |
+| `storage_busy_outcome_unknown`, `storage_full_outcome_unknown`, `storage_io_outcome_unknown`, `storage_corrupt_outcome_unknown`, `storage_error_outcome_unknown`, `stored_data_corrupt_outcome_unknown`, `request_clock_invalid_outcome_unknown` | Requests authority failures retain their existing unknown state while exposing the concrete cause. A storage category does not prove rollback or permit replay |
+| `content_commit_outcome_unknown`, `content_error`, `workspace_error` | Content commits that may have completed retain unknown state; other content/workspace failures preserve their own category |
+| `worker_failed`, `worker_panicked_outcome_unknown`, `worker_lost_outcome_unknown`, `agent_error`, `agent_outcome_unknown` | Typed worker/agent distinction. A panic or lost worker keeps `outcome_unknown` true; it is not an ordinary known failure or an automatic retry |
 | `cancelled_outcome_unknown`, `timeout_outcome_unknown` | RPC cancelled/timed out after admission; inspect durable records |
 | `connection_closed`, `connection_lost`, `protocol_error` for in-flight calls | Original request may have run; inspect durable state, never blindly retry |
+
+Runtime error messages include the RPC method and only the supplied session/task IDs as bounded operation context. Prompt text and arbitrary parameters are not copied into the message. Error codes and `outcome_unknown` are derived from typed causes, including nested `recovery_required` causes and cleanup errors, so a false wrapper flag cannot make a nested unknown effect look known.
 
 The client and server intersect declared frame/in-flight/ID limits. Local over-capacity calls fail before sending; server over-capacity calls return `busy`. A bounded response queue closes a slow connection if it fills. Reads and writes have deadlines. A too-large or unretainable handler response can be unknown after effects; a locally rejected oversized request is known unexecuted. Cancellation targets a request in the same connection using a distinct request ID; original and cancellation acknowledgments are separately paired. Dropping an admitted client request future closes the shared connection. Explicit `request_with_cancel` keeps polling that request to its terminal. Transport cancellation alone does not prove side effects were undone.
 

@@ -71,9 +71,44 @@ fn streamed_projection_keeps_history_and_observes_peer_recovery_and_damage() {
         store.validate_lease(&lease).unwrap();
         assert_eq!(store.snapshot(&id).unwrap().messages, prefix.messages);
     }
+    let before_host = store.snapshot(&id).unwrap();
+    let host = store
+        .append_host_event(&lease, "stream_progress", serde_json::json!({"chunk": 32}))
+        .unwrap();
+    assert!(matches!(
+        store.append_control_event(
+            &id,
+            before_host.cursor,
+            Some(&lease),
+            "host",
+            "stream_note",
+            serde_json::json!({"note": "stale"}),
+        ),
+        Err(CoreError::InvalidEvent(_))
+    ));
+    let control = store
+        .append_control_event(
+            &id,
+            host.cursor,
+            Some(&lease),
+            "host",
+            "stream_note",
+            serde_json::json!({"note": "retained"}),
+        )
+        .unwrap();
+    assert_eq!(host.attempt.as_ref(), Some(&lease));
+    assert_eq!(control.attempt.as_ref(), Some(&lease));
+    assert_eq!(
+        store.events(&id, before_host.cursor, 100).unwrap(),
+        [host, control]
+    );
+    let mut expected = before_host;
+    expected.cursor += 2;
+    assert_eq!(store.snapshot(&id).unwrap(), expected);
     let peer = SessionStore::open(&path).unwrap();
     let before_recovery = peer.snapshot(&id).unwrap();
-    assert_eq!(before_recovery.cursor, prefix.cursor + 32);
+    assert_eq!(before_recovery, expected);
+    assert_eq!(before_recovery.cursor, prefix.cursor + 34);
     assert_eq!(before_recovery.messages, vec![user]);
     peer.recover(&id).unwrap();
     assert!(matches!(

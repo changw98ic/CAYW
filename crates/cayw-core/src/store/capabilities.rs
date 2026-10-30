@@ -445,7 +445,7 @@ impl SessionStore {
         call.stage = CapabilityStage::Settled;
         call.outcome = Some(outcome);
         let call = call.clone();
-        let event = persist(
+        let (event, _) = persist(
             &transaction,
             &mut session,
             Some(lease.clone()),

@@ -11,6 +11,7 @@ mod completion;
 mod content;
 mod context_overview;
 mod coordination;
+mod error;
 mod execution;
 pub mod fixture;
 mod fleet;
@@ -63,6 +64,7 @@ pub use collaboration::{
 };
 pub use content::{ContentConfig, ContentScope, ContentView};
 pub use context_overview::session_ledger_snapshot_from_model_requests;
+pub use error::{RuntimeError, StorageFailure, WorkerFailure};
 pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::{HeadlessConfig, PiCompatConfig};
@@ -91,7 +93,7 @@ pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
 
 use cayw_ai::{CancellationToken, Model, Provider, ToolDefinition};
-use cayw_core::{ApprovalRequest, CoreError, EventRecord, SessionState, SessionStore};
+use cayw_core::{ApprovalRequest, EventRecord, SessionState, SessionStore};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -100,51 +102,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Notify;
-
-#[derive(Debug, thiserror::Error)]
-pub enum RuntimeError {
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-    #[error("session already has a queued or running task")]
-    Busy,
-    #[error("runtime task queue is full")]
-    QueueFull,
-    #[error("task cancelled before execution")]
-    Cancelled,
-    #[error("task exceeded its {0} budget")]
-    Budget(&'static str),
-    #[error("session requires reconciliation before it can continue")]
-    NeedsReconciliation,
-    #[error("session is frozen: {0}")]
-    Frozen(String),
-    #[error("approval is no longer pending for an active attempt")]
-    StaleApproval,
-    #[error("cancellation does not match the original task execution identity")]
-    StaleCancellation,
-    #[error("persistent session error: {0}")]
-    Core(#[from] CoreError),
-    #[error("runtime journal error: {0}")]
-    Journal(#[from] rusqlite::Error),
-    #[error("task request authority error: {0}")]
-    Request(#[from] cayw_requests::RequestError),
-    #[error("local content error: {0}")]
-    Content(#[from] cayw_content::Error),
-    #[error("invalid serialized data: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("agent error: {0}")]
-    Agent(#[from] cayw_agent::AgentError),
-    #[error("workspace error: {0}")]
-    Workspace(String),
-    #[error("runtime worker failed: {0}")]
-    Worker(String),
-    #[error("task requires explicit recovery: {cause}; cleanup error: {cleanup:?}")]
-    RecoveryRequired {
-        #[source]
-        cause: Box<RuntimeError>,
-        cleanup: Option<Box<RuntimeError>>,
-        outcome_unknown: bool,
-    },
-}
 
 #[derive(Clone)]
 pub struct RuntimeConfig {

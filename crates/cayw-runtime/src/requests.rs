@@ -4,8 +4,7 @@ use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_requests::{
     AuthorizationReceipt, EvaluationTicket, HostActor, HostIdentity, OperationCatalog,
-    OperationScope, RequestEvent, RequestRecord, RequestTools, TaskIdentity, TaskIntent,
-    TaskOutcome,
+    OperationScope, RequestEvent, RequestRecord, RequestTools, TaskIdentity, TaskOutcome,
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -515,21 +514,6 @@ pub(crate) fn finish_session(inner: &Inner, session: &str) -> Result<(), Runtime
             TaskOutcome::Cancelled
         };
         finish(inner, &task, outcome)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_intent(intent: &TaskIntent) -> Result<(), RuntimeError> {
-    if let TaskIntent::ExplicitProjectTestOrScript { user_instruction } = intent
-        && (user_instruction.trim().is_empty()
-            || user_instruction.len() > 2048
-            || user_instruction
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t'))
-    {
-        return Err(RuntimeError::InvalidInput(
-            "explicit task instruction must contain 1..2048 ordinary bytes".into(),
-        ));
     }
     Ok(())
 }
