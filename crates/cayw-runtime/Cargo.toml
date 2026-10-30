@@ -74,6 +74,10 @@ path = "tests/fixtures/process.rs"
 test = false
 doc = false
 
+[[example]]
+name = "runtime_error_live"
+required-features = ["fault-injection"]
+
 [[test]]
 name = "pi_compat_runtime"
 required-features = ["pi-compat"]
