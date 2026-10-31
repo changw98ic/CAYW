@@ -212,45 +212,40 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Some(path) if !configure_only || path.try_exists()? => HeadlessConfig::load(path)?,
         _ => HeadlessConfig::default(),
     };
+    let settings_paths = local
+        .as_ref()
+        .cloned()
+        .unwrap_or(LocalPaths::from_environment(&workspace)?);
     if configure_only {
         let path = config_file.as_ref().expect("configuration path");
         let configured = cli_setup::configure(path)?;
         let mut activation = json!(null);
         if configured {
             let model = HeadlessConfig::load(path)?.model().cloned();
-            let paths = LocalPaths::from_environment(&workspace)?;
-            if let (Some(model), Ok((address, token))) = (model, paths.connect()) {
-                let update = async {
-                    let client = cayw_ipc::Client::connect(address, token).await?;
-                    client
-                        .request(
-                            "settings.models.put",
-                            json!({"name":"configured","model":model}),
-                        )
-                        .await?;
-                    client
-                        .request("settings.models.use", json!({"name":"configured"}))
-                        .await
-                }
-                .await;
-                activation = match update {
-                    Ok(_) => json!({"applied":true}),
-                    Err(error) => json!({"applied":false,"error":error.to_string()}),
-                };
+            let paths = settings_paths.clone();
+            if let Some(model) = model {
+                paths.initialize()?;
+                cli_settings::save_configured_model(&paths, model).map_err(|error| format!("模型文件已保存，但工作区模型方案的保存未确认：{error}；请读取实际方案后重试"))?;
+                activation = cli_settings::reload_running_model(&paths).await;
             }
         }
         println!(
             "{}",
             json!({"configured":configured,"model_configured":HeadlessConfig::load(path)?.model().is_some(),"config_file":path,"activation":activation})
         );
+        if activation["error"].is_string() {
+            return Err(format!("模型方案已保存，但运行服务的应用结果未确认：{}。请读取模型方案与服务状态；检查所选环境变量后再决定重试或重启。", activation["error"].as_str().unwrap_or("unknown activation error")).into());
+        }
         return Ok(());
     }
+    let stored_model_configured = cli_settings::selected_model(&settings_paths)?.is_some();
     let db = explicit_db
         .or_else(|| local.as_ref().map(|paths| paths.database.clone()))
         .expect("explicit or local database");
     if !initialize_only
         && !offline
         && headless.model().is_none()
+        && !stored_model_configured
         && cli_setup::interactive()
         && let Some(path) = config_file.as_ref()
         && cli_setup::offer(path)?
@@ -268,7 +263,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             config,
         )?;
         drop(runtime);
-        if headless.model().is_none() {
+        if headless.model().is_none() && !stored_model_configured {
             eprintln!("{}", model_setup_hint(config_file.as_deref()));
         }
         println!(
@@ -276,7 +271,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             json!({
                 "initialized":true,"workspace":workspace,"database":db,
                 "data_dir":paths.data_dir,"config_file":paths.config_file,
-                "token_file":paths.token_file,"model_configured":headless.model().is_some()
+                "token_file":paths.token_file,"model_configured":stored_model_configured || headless.model().is_some()
             })
         );
         return Ok(());
@@ -293,10 +288,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if pi_compat {
         headless.enable_pi_compat();
     }
-    let settings_paths = local
-        .as_ref()
-        .cloned()
-        .unwrap_or(LocalPaths::from_environment(&workspace)?);
     settings_paths.initialize()?;
     let mut settings = cli_settings::Settings {
         #[cfg(feature = "plugins")]

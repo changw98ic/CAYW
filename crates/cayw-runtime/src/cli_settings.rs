@@ -68,47 +68,104 @@ fn name(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn read_models(paths: &LocalPaths) -> Result<(Option<Vec<u8>>, Models)> {
+    let original = match read_private(&paths.state_file("models.json"), 1024 * 1024) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let models: Models = original
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?
+        .unwrap_or_default();
+    for (id, model) in &models.models {
+        name(id)?;
+        model.validate()?;
+    }
+    if models
+        .selected
+        .as_ref()
+        .is_some_and(|id| !models.models.contains_key(id))
+    {
+        return Err("selected model profile is missing".into());
+    }
+    Ok((original, models))
+}
+
+pub fn selected_model(paths: &LocalPaths) -> Result<Option<ProviderConfig>> {
+    let (_, models) = read_models(paths)?;
+    models
+        .selected
+        .as_ref()
+        .map(|id| {
+            models
+                .models
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "selected model profile is missing".into())
+        })
+        .transpose()
+}
+
+/// configure and live management share the same persisted selected profile.
+/// This stores metadata only; an offline CLI never reads model credentials.
+pub fn save_configured_model(paths: &LocalPaths, model: ProviderConfig) -> Result<()> {
+    model.validate()?;
+    let (original, mut models) = read_models(paths)?;
+    if models.models.len() >= 64 && !models.models.contains_key("configured") {
+        return Err(
+            "at most 64 model profiles are supported; remove an unused profile before configuring"
+                .into(),
+        );
+    }
+    models.models.insert("configured".into(), model);
+    models.selected = Some("configured".into());
+    save_config(
+        &paths.state_file("models.json"),
+        original.as_deref(),
+        &serde_json::to_vec_pretty(&models)?,
+    )
+    .map_err(uncertain)
+}
+
+/// Reload only from the persisted profile. An absent connection is offline;
+/// malformed discovery, transport loss and rejected activation remain explicit.
+pub async fn reload_running_model(paths: &LocalPaths) -> Value {
+    let reload: Result<Option<Value>> = async {
+        match paths.connection_file.symlink_metadata() {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let (address, token) = paths.connect()?;
+        let client = Client::connect(address, token).await?;
+        Ok(Some(
+            client.request("settings.models.reload", json!({})).await?,
+        ))
+    }
+    .await;
+    match reload {
+        Ok(None) => Value::Null,
+        Ok(Some(_)) => json!({"applied":true}),
+        Err(error) => {
+            let unknown = error
+                .downcast_ref::<cayw_ipc::ClientError>()
+                .is_none_or(|error| error.outcome_unknown);
+            json!({"applied":if unknown { Value::Null } else { json!(false) },"outcome_unknown":unknown,"error":error.to_string()})
+        }
+    }
+}
+
 impl Settings {
     fn model_path(&self) -> PathBuf {
         self.paths.state_file("models.json")
     }
     pub fn selected_model(&self) -> Result<Option<ProviderConfig>> {
-        let (_, models) = self.models()?;
-        models
-            .selected
-            .as_ref()
-            .map(|id| {
-                models
-                    .models
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| "selected model profile is missing".into())
-            })
-            .transpose()
+        selected_model(&self.paths)
     }
     fn models(&self) -> Result<(Option<Vec<u8>>, Models)> {
-        let original = match read_private(&self.model_path(), 1024 * 1024) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        let models: Models = original
-            .as_deref()
-            .map(serde_json::from_slice)
-            .transpose()?
-            .unwrap_or_default();
-        for (id, model) in &models.models {
-            name(id)?;
-            model.validate()?;
-        }
-        if models
-            .selected
-            .as_ref()
-            .is_some_and(|id| !models.models.contains_key(id))
-        {
-            return Err("selected model profile is missing".into());
-        }
-        Ok((original, models))
+        read_models(&self.paths)
     }
     pub async fn call(
         &mut self,
@@ -166,6 +223,22 @@ impl Settings {
             "settings.models.list" => {
                 let _: Empty = parse(params)?;
             }
+            "settings.models.reload" => {
+                let _: Empty = parse(params)?;
+                if self.offline {
+                    return Err("offline fixture cannot select a real model".into());
+                }
+                let id = models
+                    .selected
+                    .as_ref()
+                    .ok_or("no selected model profile")?;
+                let model = models
+                    .models
+                    .get(id)
+                    .ok_or("selected model profile is missing")?;
+                runtime.select_model(model.build()?)?;
+                self.available = true;
+            }
             "settings.models.put" => {
                 let put: Put = parse(params)?;
                 name(&put.name)?;
@@ -204,7 +277,7 @@ impl Settings {
             }
             _ => return Err("unsupported model settings method".into()),
         }
-        if method != "settings.models.list" {
+        if !matches!(method, "settings.models.list" | "settings.models.reload") {
             save_config(
                 &self.model_path(),
                 original.as_deref(),

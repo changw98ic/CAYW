@@ -2094,7 +2094,7 @@ function mountSettings(rpc, selectedSession) {
     const current = document.createElement('p'); current.textContent = `当前：${models.health.provider} / ${models.health.model}`; modelList.append(current);
     for (const [name, model] of Object.entries(models.models || {})) {
       const row = document.createElement('div'); const label = document.createElement('p');
-      label.textContent = `${name} · ${model.id}${models.selected === name ? ' · 当前方案' : ''}`; row.append(label);
+      label.textContent = `${name} · ${model.id}${models.selected === name ? ' · 已保存选择' : ''}`; row.append(label);
       row.append(button('编辑', async () => { modelForm.elements.name.value = name; serviceOptions(model.service, false); for (const [key, value] of Object.entries(model)) modelForm.elements[key].value = value; }));
       const use = button('使用', async () => { await rpc('settings.models.use', {name}); await refresh(); }); use.disabled = models.offline; row.append(use);
       const remove = button('删除', async () => { await rpc('settings.models.remove', {name}); await refresh(); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);

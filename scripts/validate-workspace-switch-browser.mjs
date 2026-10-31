@@ -83,12 +83,11 @@ try {
   await page.locator('#approvals').waitFor({state:'visible'});
   assert.equal(requests.filter(r=>r.method==='task.resume').length,1,'switching does not replay or replace resume');
   assert.equal(requests.find(r=>r.method==='task.resume').workspace_id,'local');
-  const snapshot=await rpc('session.get',{session_id:aSession});
-  await rpc('approval.decide',{session_id:aSession,approval_id:snapshot.pending_approvals[0].id,decision:'deny'});
+  await page.locator('#cancel-button').click();
   const terminal = await until(async()=>{const task=await rpc('task.get',{task_id:aTask.id});return ['failed','cancelled','completed','interrupted','outcome_unknown'].includes(task.state) ? task : null;});
-  assert.equal(terminal.state,'failed'); receipts.denied_task_state = terminal.state;
+  assert.equal(terminal.state,'cancelled'); receipts.cancelled_task_state = terminal.state;
   await assert.rejects(access(join(roots.A,'cayw-demo.txt')));
-  checks.push('switch back restores original session/approval; only original task resumes, denial prevents file effect');
+  checks.push('switch back restores original session/approval; only original task resumes, explicit cancellation prevents file effect');
   await page.locator('#workspace-choice').selectOption(id('C'));await page.locator('#switch-workspace').click();
   await page.locator('#workspace-switch-status').filter({hasText:`当前：${roots.C}`}).waitFor();
   const reusedC=await rpc('settings.workspaces.open',{id:id('C')});assert(reusedC.reused);assert.equal(reusedC.managed,false);

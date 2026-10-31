@@ -215,10 +215,30 @@ try:
     assert configured['activation']['applied']
     assert rpc(online, token, 'runtime.health')['model'] == 'from-wizard'
     configured_bytes = config.read_bytes()
+    selected_bytes = (state_dir/'models.json').read_bytes()
     cli('configure', input='')
     assert config.read_bytes() == configured_bytes
+    assert (state_dir/'models.json').read_bytes() == selected_bytes
     checks.append('CLI import/use and configure hot application; interrupted replacement preserves configured model')
     stop(child)
+    # A was selected online. With its service stopped, configure B must update
+    # the very same selected profile used by the next startup, without a key read.
+    absent_key = json.loads(cli('configure', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-no-key\nCAYW_ABSENT_PRODUCT_KEY\n64\ny\n').stdout)
+    assert absent_key['activation'] is None
+    offline_b = json.loads(cli('configure', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-B\nCAYW_PRODUCT_TEST_KEY\n64\ny\n').stdout)
+    assert offline_b['activation'] is None
+    child, rebooted, token = launch()
+    assert rpc(rebooted, token, 'runtime.health')['model'] == 'offline-B'
+    assert rpc(rebooted, token, 'settings.models.list')['models']['configured']['id'] == 'offline-B'
+    # Failed activation keeps the desired profile visible, returns a failing CLI
+    # status and leaves the actual live adapter unchanged. No model request.
+    failed = cli('configure', input='openai\n\nhttp://127.0.0.1:9/v1\nunavailable-key-model\nCAYW_ABSENT_PRODUCT_KEY\n64\ny\n', good=False)
+    assert json.loads(failed.stdout)['activation']['applied'] is False
+    assert 'CAYW_ABSENT_PRODUCT_KEY' in failed.stderr
+    assert rpc(rebooted, token, 'runtime.health')['model'] == 'offline-B'
+    cli('configure', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-B\nCAYW_PRODUCT_TEST_KEY\n64\ny\n')
+    stop(child)
+    checks.append('online A -> stop -> offline configure B -> restart selects B; failed activation is explicit and preserves live model')
     alternate = evidence/'other-workspace'; alternate.mkdir()
     child, other, token = launch(work=alternate)
     assert not rpc(other, token, 'settings.models.list')['models']

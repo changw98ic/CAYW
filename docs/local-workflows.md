@@ -31,7 +31,7 @@ cayw models use daily --workspace /你的项目
 cayw models remove unused --workspace /你的项目
 ```
 
-`model.json` 是原 `config.json` 的 `model` 对象，不包含预算或权限。最多保存 64 个方案，名称允许字母、数字、`._-`。方案保存在当前工作区的 `models.json`，选中方案优先于旧 `config.json.model`。旧配置仍可启动；`cayw configure` 支持替换已有模型，取消或输入中断保留原文件，保存后尝试在当前工作区的运行服务中应用名为 `configured` 的方案，结果中的 `activation` 明确区分已保存与已应用。配置预算、工具权限及进程 profile 仍通过启动配置选择，模型管理不修改它们。
+`model.json` 是原 `config.json` 的 `model` 对象，不包含预算或权限。最多保存 64 个方案，名称允许字母、数字、`._-`。方案保存在当前工作区的 `models.json`，选中方案优先于旧 `config.json.model`。旧配置仍可启动；`cayw configure` 支持替换已有模型，取消或输入中断保留原文件，在线或离线保存都会通过同一写入函数原子更新当前工作区的 `models.json` 并选中 `configured` 方案；`config.json.model` 保留兼容副本。在线服务随后从这一方案库重新加载，不再分别执行另一组 put/use 写入。结果中的 `activation` 区分已保存与已应用；激活失败返回非零退出码、保留当前运行模型，并说明已保存选择。停服后保存 B，再启动会读取 B，不会被旧的 A 遮蔽。配置预算、工具权限及进程 profile 仍通过启动配置选择，模型管理不修改它们。
 
 切换对后续开始的 Task Attempt 生效，包括尚未派发的任务。每个运行中的 Attempt 固定 Provider、模型名称和输出上限，后续工具回合继续使用同一快照，持久账本记录实际模型身份。切换不增加预算，不清除已消费或未知预留。不能删除选中的方案；先选择另一方案。`--offline` 明确使用合成 Provider，拒绝选择真实模型方案。
 

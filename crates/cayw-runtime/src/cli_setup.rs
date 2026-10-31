@@ -50,7 +50,7 @@ fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write
         model.validate()?;
         writeln!(
             output,
-            "当前模型：{}。继续填写可替换，取消会保留原配置。",
+            "配置文件原有模型：{}。继续填写可替换，取消会保留原配置。",
             model.id()
         )?;
     }
