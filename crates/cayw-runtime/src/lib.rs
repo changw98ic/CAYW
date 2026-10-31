@@ -266,8 +266,7 @@ pub(crate) struct Inner {
     background: Option<Arc<background::BackgroundRegistry>>,
     root: PathBuf,
     host_root: cayw_host::Host,
-    provider: Arc<dyn Provider>,
-    model: Model,
+    selection: Mutex<ConfiguredProvider>,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
     budget_locks: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
@@ -426,8 +425,7 @@ impl Runtime {
                 background,
                 root,
                 host_root,
-                provider,
-                model,
+                selection: Mutex::new(ConfiguredProvider { provider, model }),
                 active: Mutex::new(BTreeMap::new()),
                 budget_locks: Mutex::new(BTreeMap::new()),
                 fleet: fleet::FleetRegistry::default(),
@@ -467,16 +465,30 @@ impl Runtime {
     pub fn workspace(&self) -> &Path {
         &self.inner.root
     }
+    /// Trusted host selection for future task attempts. Running attempts retain
+    /// their exact provider/model snapshot, including accounting and output limits.
+    pub fn select_model(&self, selection: ConfiguredProvider) -> Result<(), RuntimeError> {
+        if selection.model.provider.trim().is_empty()
+            || selection.model.id.trim().is_empty()
+            || selection.model.max_output_tokens == Some(0)
+        {
+            return Err(RuntimeError::InvalidInput("invalid model selection".into()));
+        }
+        *lock(&self.inner.selection) = selection;
+        Ok(())
+    }
+
     pub fn health(&self) -> Result<Health, RuntimeError> {
         let (running, queued) = self.inner.queue.counts()?;
+        let selection = lock(&self.inner.selection);
         Ok(Health {
             status: "ok",
             protocol_version: cayw_core::PROTOCOL_VERSION,
             running,
             queued,
             max_concurrent_runs: self.inner.config.max_concurrent_runs,
-            provider: self.inner.model.provider.clone(),
-            model: self.inner.model.id.clone(),
+            provider: selection.model.provider.clone(),
+            model: selection.model.id.clone(),
         })
     }
     pub fn create(&self, label: Option<String>) -> Result<SessionView, RuntimeError> {

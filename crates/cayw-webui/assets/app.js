@@ -1334,6 +1334,7 @@ function boot() {
     ui['session-picker'].open = true;
     ui['prompt'].value = '';
     ui['fork-dialog'].close();
+    if ($('settings-dialog')?.open) $('settings-dialog').close();
     panelCatalog = null;
     openedPanels = [];
     openedPanelsSession = null;
@@ -1765,6 +1766,7 @@ function boot() {
     }
   });
 
+  mountSettings(rpc, () => selected);
   ui['logout'].addEventListener('click', () => disconnect());
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
   ui['refresh-panels'].addEventListener('click', refreshPanels);
@@ -1952,4 +1954,100 @@ function boot() {
   });
   window.addEventListener('online', () => { if (token && selected) schedulePoll(0); });
   window.addEventListener('pagehide', () => { token = ''; for (const controller of controllers) controller.abort(); });
+}
+
+// Host settings share the existing authenticated RPC and its cancellation/error
+// handling. Neither credential values nor plugin code are stored by the browser.
+function mountSettings(rpc, selectedSession) {
+  const $ = id => document.getElementById(id);
+  const open = $('open-settings');
+  if (!open) return;
+  const dialog = $('settings-dialog');
+  let busy = false;
+  const status = text => { $('settings-status').textContent = text; };
+  const button = (text, handler) => {
+    const node = document.createElement('button'); node.type = 'button'; node.textContent = text;
+    node.addEventListener('click', () => action(handler)); return node;
+  };
+  async function action(handler) {
+    if (busy) return;
+    busy = true; dialog.setAttribute('aria-busy', 'true'); status('处理中…');
+    try { await handler(); status('已完成。'); }
+    catch (error) { status(error.message || String(error)); }
+    finally { busy = false; dialog.removeAttribute('aria-busy'); }
+  }
+  const modelForm = $('model-settings-form');
+  const serviceDefaults = {
+    openai: ['https://api.openai.com/v1', 'OPENAI_API_KEY', ['chat_completions', 'responses']],
+    anthropic: ['https://api.anthropic.com/v1', 'ANTHROPIC_API_KEY', ['messages']],
+    gemini: ['https://generativelanguage.googleapis.com/v1beta', 'GEMINI_API_KEY', ['stream_generate_content', 'generate_content']],
+    magpie: ['http://127.0.0.1:3425/v1', 'MAGPIE_API_KEY', ['chat_completions', 'responses', 'messages', 'stream_generate_content', 'generate_content']],
+  };
+  function serviceOptions(service, defaults) {
+    const [base, key, apis] = serviceDefaults[service];
+    modelForm.elements.api.replaceChildren(...apis.map(api => { const option = document.createElement('option'); option.value = api; option.textContent = api; return option; }));
+    if (defaults) { modelForm.elements.base_url.value = base; modelForm.elements.api_key_env.value = key; apiVersion(); }
+  }
+  function apiVersion() {
+    const api = modelForm.elements.api.value;
+    modelForm.elements.api_version.value = api === 'messages' ? '2023-06-01' : api.includes('generate_content') ? 'v1beta' : 'v1';
+    if (modelForm.elements.service.value === 'magpie' && /^http:\/\/127\.0\.0\.1:3425\/v1(?:beta)?$/.test(modelForm.elements.base_url.value)) modelForm.elements.base_url.value = api.includes('generate_content') ? 'http://127.0.0.1:3425/v1beta' : 'http://127.0.0.1:3425/v1';
+  }
+  if (modelForm.elements) {
+    modelForm.elements.service.addEventListener('change', () => serviceOptions(modelForm.elements.service.value, true));
+    modelForm.elements.api.addEventListener('change', apiVersion);
+  }
+
+  async function refresh() {
+    const workspace = await rpc('settings.workspace');
+    $('settings-workspace').textContent = `当前目录：${workspace.workspace}${workspace.offline ? ' · 离线演示' : ''}\n已登记工作区：${(workspace.known_workspaces || []).join('、')}`;
+    const models = await rpc('settings.models.list');
+    const modelList = $('model-profiles'); modelList.replaceChildren();
+    const current = document.createElement('p'); current.textContent = `当前：${models.health.provider} / ${models.health.model}`; modelList.append(current);
+    for (const [name, model] of Object.entries(models.models || {})) {
+      const row = document.createElement('div'); const label = document.createElement('p');
+      label.textContent = `${name} · ${model.id}${models.selected === name ? ' · 当前方案' : ''}`; row.append(label);
+      row.append(button('编辑', async () => { modelForm.elements.name.value = name; serviceOptions(model.service, false); for (const [key, value] of Object.entries(model)) modelForm.elements[key].value = value; }));
+      const use = button('使用', async () => { await rpc('settings.models.use', {name}); await refresh(); }); use.disabled = models.offline; row.append(use);
+      const remove = button('删除', async () => { await rpc('settings.models.remove', {name}); await refresh(); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);
+    }
+    const list = $('plugin-profiles'); list.replaceChildren();
+    try {
+      const plugins = await rpc('settings.plugins.list');
+      for (const plugin of plugins.entries || []) {
+        const row = document.createElement('div'); const label = document.createElement('p');
+        label.textContent = `${plugin.name} ${plugin.descriptor.manifest.version} · ${plugin.available ? '可用' : plugin.enabled ? '异常' : '已停用'}${plugin.last_error ? ' · ' + plugin.last_error : ''}`; row.append(label);
+        const detail = document.createElement('pre'); detail.textContent = JSON.stringify({ ...plugin.descriptor, executable_sha256: plugin.executable_sha256 }, null, 2); row.append(detail);
+        row.append(button('编辑登记', async () => { $('plugin-settings-form').elements.name.value = plugin.name; $('plugin-settings-form').elements.descriptor.value = JSON.stringify(plugin.descriptor, null, 2); }));
+        const loaded = plugin.enabled || plugin.available;
+        row.append(button(loaded ? '停用' : '启用', async () => {
+          const approve = $('plugin-process-approval');
+          if (!loaded && !approve.checked) throw new Error('请先审阅插件并勾选本地进程执行批准。');
+          await rpc(`settings.plugins.${loaded ? 'disable' : 'enable'}`, { name: plugin.name, ...(!loaded ? {approve_process:true} : {}) });
+          approve.checked = false; await refresh();
+        }));
+        const bind = button('绑定到当前会话', async () => {
+          const session_id = selectedSession(); if (!session_id) throw new Error('请先选择一个空闲会话。');
+          await rpc('settings.plugins.bind', {name:plugin.name, session_id}); status('已绑定；原会话绑定不可替换。');
+        }); bind.disabled = !plugin.available; row.append(bind);
+        row.append(button('卸载登记', async () => { await rpc('settings.plugins.remove', {name:plugin.name}); await refresh(); })); list.append(row);
+      }
+    } catch (error) { const message = document.createElement('p'); message.textContent = error.message || String(error); list.append(message); }
+  }
+  open.addEventListener('click', () => { $('plugin-process-approval').checked = false; dialog.showModal(); action(refresh); });
+  $('close-settings').addEventListener('click', () => dialog.close());
+  $('refresh-settings').addEventListener('click', () => action(refresh));
+  modelForm.addEventListener('submit', event => {
+    event.preventDefault(); action(async () => {
+      const values = Object.fromEntries(new FormData(modelForm)); const name = values.name; delete values.name;
+      values.max_output_tokens = Number(values.max_output_tokens);
+      await rpc('settings.models.put', {name, model:values}); await refresh();
+    });
+  });
+  $('plugin-settings-form').addEventListener('submit', event => {
+    event.preventDefault(); action(async () => {
+      const form = $('plugin-settings-form'); const name = form.elements.name.value.trim();
+      await rpc(`settings.plugins.${name ? 'update' : 'install'}`, { ...(name ? {name} : {}), descriptor:JSON.parse(form.elements.descriptor.value) }); await refresh();
+    });
+  });
 }

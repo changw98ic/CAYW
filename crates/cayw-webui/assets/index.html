@@ -32,6 +32,7 @@
       <details id="session-picker" class="session-picker" open>
       <summary class="session-picker-summary"><span>会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
       <div class="session-picker-content">
+      <button id="open-settings" type="button">工作区 / 模型 / 插件</button>
       <div class="section-heading"><h2 id="sessions-heading">会话</h2><button id="refresh-sessions" class="quiet" type="button">刷新</button></div>
       <form id="create-form" class="create-form">
         <label for="session-label" class="small">新会话名称</label>
@@ -97,6 +98,34 @@
     <p>强流程绑定的会话将保持冻结。确认后，Runtime 会创建新的普通聊天会话；原会话及其记录继续保留。</p>
     <p>尚未核对的工具副作用不能通过 Fork 清除。</p>
     <form id="fork-form"><label for="fork-label">新会话名称</label><input id="fork-label" maxlength="160" required><label class="confirm-label"><input id="fork-confirm" type="checkbox" required>我确认新建普通聊天分支，并理解原会话仍被冻结。</label><p id="fork-error" class="error" role="alert"></p><div class="dialog-actions"><button id="close-fork" class="secondary" type="button">返回</button><button id="fork-button" type="submit">确认 Fork</button></div></form>
+  </dialog>
+  <dialog id="settings-dialog" aria-labelledby="settings-heading">
+    <div class="section-heading"><h2 id="settings-heading">工作区设置</h2><button id="close-settings" type="button" class="quiet">关闭</button></div>
+    <p id="settings-workspace" class="small muted"></p>
+    <p class="small muted">每个工作区固定自己的目录和会话数据库。切换项目：在终端运行 cayw start --workspace /项目路径。</p>
+    <p id="settings-status" role="status" aria-live="polite"></p>
+    <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。只保存密钥环境变量名称；服务启动时需已有该变量。保存不发送模型请求。</p>
+    <div id="model-profiles"></div>
+    <form id="model-settings-form">
+      <label>方案名称<input name="name" required maxlength="80" pattern="[a-zA-Z0-9_.-]+" placeholder="daily"></label>
+      <label>服务<select name="service"><option value="openai">OpenAI / 兼容服务</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="magpie">Magpie</option></select></label>
+      <label>接口<select name="api"><option>chat_completions</option><option>responses</option><option>messages</option><option>stream_generate_content</option><option>generate_content</option></select></label>
+      <label>服务地址<input name="base_url" type="url" required value="https://api.openai.com/v1"></label>
+      <label>模型名称<input name="id" required maxlength="256"></label>
+      <label>API 版本<input name="api_version" required value="v1"></label>
+      <label>密钥环境变量名称<input name="api_key_env" required value="OPENAI_API_KEY" maxlength="128"></label>
+      <label>单次输出 token 上限<input name="max_output_tokens" type="number" required min="1" max="9007199254740991" value="4096"></label>
+      <button type="submit">保存模型方案</button>
+    </form>
+    <h3>插件</h3><p class="small muted">支持本机 External IPC 插件。登记和更新不执行代码；不支持 npm、URL 下载或动态 Native 安装。停用或更新后，已绑定会话保持冻结。</p>
+    <div id="plugin-profiles"></div>
+    <form id="plugin-settings-form">
+      <label>本地插件描述 JSON<textarea name="descriptor" required rows="7" maxlength="240000" placeholder='{"executable":"/绝对路径/plugin","argv":[],"manifest":{"name":"example","version":"1.0.0","protocol_version":1,"kind":"external","capabilities":[],"permissions":{}}}'></textarea></label>
+      <label>更新已有插件时填写名称<input name="name" maxlength="128" placeholder="留空表示安装新插件"></label>
+      <button type="submit">校验并登记</button>
+    </form>
+    <label class="confirm-label"><input id="plugin-process-approval" type="checkbox">我已审阅插件路径、参数、能力与权限，批准以我的身份执行此本地程序。进程隔离不是安全沙箱。</label>
+    <button id="refresh-settings" type="button" class="secondary">刷新状态</button>
   </dialog>
   <noscript><p class="notice">此界面需要 JavaScript 来读取本机会话和事件。请启用 JavaScript 后刷新。</p></noscript>
 </body>

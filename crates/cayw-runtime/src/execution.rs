@@ -22,6 +22,7 @@ use std::{
 
 pub(crate) struct RunContext {
     pub inner: Arc<Inner>,
+    pub selection: crate::ConfiguredProvider,
     pub lease: AttemptLease,
     pub task: TaskLease,
     pub cancel: CancellationToken,
@@ -41,7 +42,9 @@ pub(crate) struct RunContext {
 #[cfg(test)]
 impl RunContext {
     pub(crate) fn model_fixture(inner: Arc<Inner>, lease: AttemptLease, task: TaskLease) -> Self {
+        let selection = lock(&inner.selection).clone();
         Self {
+            selection,
             scope: Arc::new(crate::children::RunScope::root(&inner)),
             inner,
             lease,
@@ -434,7 +437,10 @@ impl Runtime {
         resources: crate::TaskResources,
     ) -> Result<TaskRecord, RuntimeError> {
         resources.validate(&self.inner.config.resources)?;
-        input.validate(&self.inner.model, self.inner.config.max_prompt_bytes)?;
+        input.validate(
+            &lock(&self.inner.selection).model,
+            self.inner.config.max_prompt_bytes,
+        )?;
         let _coordinate = self.inner.coordination.enter()?;
         self.check_ready(session)?;
         let task = self.inner.queue.enqueue_with_resources(
@@ -797,6 +803,7 @@ async fn run_worker(
         lease
     };
     let context = Arc::new(RunContext {
+        selection: lock(&inner.selection).clone(),
         inner: inner.clone(),
         lease: lease.clone(),
         task: worker.clone(),
@@ -989,7 +996,7 @@ async fn execute_with_cells(
         Arc::new(crate::model_requests::AccountedProvider::new(
             context.clone(),
         )),
-        inner.model.clone(),
+        context.selection.model.clone(),
     );
     // FleetView intervention: steer/stop need the live Agent control.
     inner
@@ -1023,10 +1030,13 @@ async fn execute_with_cells(
     agent.set_max_turns(inner.config.max_turns)?;
     agent.set_stream_options(cayw_ai::StreamOptions {
         max_tokens: Some(
-            context
-                .scope
-                .token_limit()
-                .min(inner.model.max_output_tokens.unwrap_or(u64::MAX)),
+            context.scope.token_limit().min(
+                context
+                    .selection
+                    .model
+                    .max_output_tokens
+                    .unwrap_or(u64::MAX),
+            ),
         ),
         ..Default::default()
     })?;

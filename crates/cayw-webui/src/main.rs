@@ -110,8 +110,17 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|_| "无法读取网页监听地址".to_owned())?;
-    println!("网页界面：http://{address}/");
-    println!("在网页中输入 CAYW_WEB_TOKEN 的值；令牌不会写入网页地址或浏览器存储。");
+    if env::var_os("CAYW_LAUNCHER").is_some() {
+        println!(
+            "{}",
+            serde_json::json!({"url":format!("http://{address}/")})
+        );
+    } else {
+        println!("网页界面：http://{address}/");
+    }
+    if env::var_os("CAYW_LAUNCHER").is_none() {
+        println!("在网页中输入 CAYW_WEB_TOKEN 的值；令牌不会写入网页地址或浏览器存储。");
+    }
     let cancel = CancellationToken::new();
     let signal_cancel = cancel.clone();
     let signal = tokio::spawn(async move {

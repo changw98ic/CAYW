@@ -2384,7 +2384,7 @@ impl Provider for AccountedProvider {
             // hold because a crash at this boundary is indistinguishable.
             let provider_cancel=cancel.child_token();
             let _cancel_on_drop=provider_cancel.clone().drop_guard();
-            let mut upstream=context.inner.provider.stream(request.clone(),provider_cancel.clone());
+            let mut upstream=context.selection.provider.stream(request.clone(),provider_cancel.clone());
             while let Some(event)=upstream.next().await {
                 partial=event.message().clone();
                 let invalid=match guard.observe(&event) {

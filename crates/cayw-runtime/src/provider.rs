@@ -40,6 +40,7 @@ pub struct ProviderConfig {
 }
 
 /// Host-selected adapter and model, ready for the existing `Runtime::open` interface.
+#[derive(Clone)]
 pub struct ConfiguredProvider {
     pub provider: Arc<dyn Provider>,
     pub model: Model,

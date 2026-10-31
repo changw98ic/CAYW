@@ -1,4 +1,8 @@
+#[cfg(feature = "plugins")]
+mod cli_plugins;
+mod cli_settings;
 mod cli_setup;
+mod cli_start;
 mod cli_tui;
 
 use async_trait::async_trait;
@@ -18,7 +22,7 @@ use cayw_sources::{InstalledServer, install_mcp_servers_file};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
-const USAGE: &str = "cayw init [--workspace DIR]\ncayw configure [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nFirst use automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nThe workspace defaults to the current directory. Each workspace has its own SQLite database.\ninit creates private configuration, an IPC token and the database without starting a service. Existing files are kept.\nserve also initializes automatically; cayw-client discovers its local connection from the same workspace.\nRun `cayw tui` in another terminal in that workspace for the interactive terminal interface.\nRun `cayw configure` to set up a model in ~/.cayw/config.json (or use --config PATH).\nWithout a model, a terminal serve offers guided setup; noninteractive use prints the next step.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nWithout a model, serve accepts queries but rejects task execution with model_not_configured before admission.\nStarting a server and creating sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
+const USAGE: &str = "cayw start [--workspace DIR] [--ui web|tui|none] [--offline]\ncayw models --help\ncayw plugins --help\ncayw init [--workspace DIR]\ncayw configure [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nFirst use automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nThe workspace defaults to the current directory. Each workspace has its own SQLite database.\ninit creates private configuration, an IPC token and the database without starting a service. Existing files are kept.\nserve also initializes automatically; cayw-client discovers its local connection from the same workspace.\nRun `cayw tui` in another terminal in that workspace for the interactive terminal interface.\nRun `cayw configure` to set up a model in ~/.cayw/config.json (or use --config PATH).\nWithout a model, a terminal serve offers guided setup; noninteractive use prints the next step.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nWithout a model, serve accepts queries but rejects task execution with model_not_configured before admission.\nStarting a server and creating sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
 
 struct ServeBridgePolicy;
 #[async_trait]
@@ -38,7 +42,7 @@ impl RegistryPolicy for ServeBridgePolicy {
 struct CliRpcHandler {
     runtime: Arc<Runtime>,
     request_timeout_ms: u64,
-    model_available: bool,
+    settings: tokio::sync::Mutex<cli_settings::Settings>,
     model_setup_hint: String,
 }
 
@@ -61,16 +65,23 @@ impl RpcHandler for CliRpcHandler {
         params: Value,
         cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
-        if !self.model_available
-            && matches!(
-                method,
-                "session.prompt"
-                    | "task.enqueue"
-                    | "task.enqueue_with_intent"
-                    | "task.enqueue_scheduled"
-                    | "task.enqueue_with_resources"
-                    | "task.resume"
-            )
+        if method.starts_with("settings.") {
+            return self
+                .settings
+                .lock()
+                .await
+                .call(&self.runtime, method, params, cancel)
+                .await;
+        }
+        if matches!(
+            method,
+            "session.prompt"
+                | "task.enqueue"
+                | "task.enqueue_with_intent"
+                | "task.enqueue_scheduled"
+                | "task.enqueue_with_resources"
+                | "task.resume"
+        ) && !self.settings.lock().await.available
         {
             return Err(RpcError::new(
                 "model_not_configured",
@@ -107,11 +118,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     }
+    if command == "start" {
+        return cli_start::run(arguments).await;
+    }
+    if command == "models" || command == "plugins" {
+        return cli_settings::run(arguments, command == "plugins").await;
+    }
     if command == "tui" {
         return cli_tui::run(arguments);
     }
     if !matches!(command.as_str(), "serve" | "init" | "configure") {
-        return Err("expected `init`, `configure`, `serve` or `tui`; use --help".into());
+        return Err("expected `start`, `models`, `plugins`, `init`, `configure`, `serve` or `tui`; use --help".into());
     }
     let initialize_only = command == "init";
     let configure_only = command == "configure";
@@ -196,15 +213,34 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
     if configure_only {
         let path = config_file.as_ref().expect("configuration path");
-        let configured = if headless.model().is_some() {
-            eprintln!("模型已配置：{}。如需更改，请编辑此文件。", path.display());
-            true
-        } else {
-            cli_setup::configure(path)?
-        };
+        let configured = cli_setup::configure(path)?;
+        let mut activation = json!(null);
+        if configured {
+            let model = HeadlessConfig::load(path)?.model().cloned();
+            let paths = LocalPaths::from_environment(&workspace)?;
+            if let (Some(model), Ok((address, token))) = (model, paths.connect()) {
+                let update = async {
+                    let client = cayw_ipc::Client::connect(address, token).await?;
+                    client
+                        .request(
+                            "settings.models.put",
+                            json!({"name":"configured","model":model}),
+                        )
+                        .await?;
+                    client
+                        .request("settings.models.use", json!({"name":"configured"}))
+                        .await
+                }
+                .await;
+                activation = match update {
+                    Ok(_) => json!({"applied":true}),
+                    Err(error) => json!({"applied":false,"error":error.to_string()}),
+                };
+            }
+        }
         println!(
             "{}",
-            json!({"configured":configured,"model_configured":configured,"config_file":path})
+            json!({"configured":configured,"model_configured":HeadlessConfig::load(path)?.model().is_some(),"config_file":path,"activation":activation})
         );
         return Ok(());
     }
@@ -256,7 +292,21 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if pi_compat {
         headless.enable_pi_compat();
     }
-    let selected = headless.model().cloned();
+    let settings_paths = local
+        .as_ref()
+        .cloned()
+        .unwrap_or(LocalPaths::from_environment(&workspace)?);
+    settings_paths.initialize()?;
+    let mut settings = cli_settings::Settings {
+        #[cfg(feature = "plugins")]
+        plugins: cli_plugins::Plugins::new(settings_paths.state_file("plugins.json")),
+        paths: settings_paths,
+        offline,
+        available: false,
+    };
+    let selected = settings
+        .selected_model()?
+        .or_else(|| headless.model().cloned());
     if offline && selected.is_some() {
         return Err(
             "model configuration conflicts with --offline; omit model for a fixture run".into(),
@@ -264,6 +314,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
     let model_configured = selected.is_some();
     let model_available = offline || model_configured;
+    settings.available = model_available;
     let mcp_servers_file = headless.mcp_servers_file().map(PathBuf::from);
     let pi_compat_cfg = headless.pi_compat().cloned();
     let mut config = headless.into_runtime_config()?;
@@ -428,6 +479,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         None
     };
     let runtime = Runtime::open(&db, &workspace, provider, model, config)?;
+    #[cfg(feature = "plugins")]
+    settings.plugins.restore(&runtime).await?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -456,7 +509,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let handler = Arc::new(CliRpcHandler {
         runtime: Arc::new(runtime),
         request_timeout_ms,
-        model_available,
+        settings: tokio::sync::Mutex::new(settings),
         model_setup_hint: setup_hint,
     });
     serve(listener, handler, ipc, shutdown).await?;

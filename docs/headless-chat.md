@@ -6,7 +6,7 @@ CAYW 可以安装为独立的 `cayw` Runtime 和 `cayw-client` Rust 客户端。
 
 ## 安装
 
-macOS Apple Silicon 发行包以 `install.sh` 作为安装入口，旁边是 `bin/cayw`、`bin/cayw-tui`、`bin/cayw-client` 和 `SHA256SUMS`。解压后在该目录运行：
+macOS Apple Silicon 发行包以 `install.sh` 作为安装入口，旁边是 `bin/cayw`、`bin/cayw-tui`、`bin/cayw-webui`、`bin/cayw-client` 和 `SHA256SUMS`。解压后在该目录运行：
 
 ```sh
 sh install.sh                 # 默认安装到 $HOME/.local/bin
@@ -14,7 +14,7 @@ sh install.sh --prefix DIR    # 安装到 DIR/bin
 sh install.sh --force         # 目标已有不同程序时替换
 ```
 
-脚本可以从任意目录运行，并按自身位置定位发行文件；包目录可以包含空格。它只接受 Darwin arm64，其他系统和架构会明确拒绝。安装前检查三个程序可执行，并按 `SHA256SUMS` 核对摘要；校验或自检失败时不改动已有程序。脚本不联网、不使用 sudo、不修改 shell 配置，也不读写 `~/.cayw` 或模型凭据。目标目录不在 `PATH` 时，脚本会打印 `export PATH=...` 提示。安装后用三个程序的 `--help` 自检。源码中的脚本位于 `scripts/install-cli.sh`，发布时放在包根目录并命名为 `install.sh`。
+脚本可以从任意目录运行，并按自身位置定位发行文件；包目录可以包含空格。它只接受 Darwin arm64，其他系统和架构会明确拒绝。安装前检查四个程序可执行，并按 `SHA256SUMS` 核对摘要；校验或自检失败时不改动已有程序。脚本不联网、不使用 sudo、不修改 shell 配置，也不读写 `~/.cayw` 或模型凭据。目标目录不在 `PATH` 时，脚本会打印 `export PATH=...` 提示。安装后用四个程序的 `--help` 自检。源码中的脚本位于 `scripts/install-cli.sh`，发布时放在包根目录并命名为 `install.sh`。
 
 需要从源码安装无界面入口时，准备 macOS、Rust 1.95+ 和仓库源码。以下命令在仓库根目录执行，把两个程序装入同一指定目录：
 
@@ -29,6 +29,8 @@ cargo +1.95.0 install --path examples/headless-client --root "$CAYW_INSTALL_ROOT
 如需终端交互界面，再执行 `cargo +1.95.0 install --path crates/cayw-tui --root "$CAYW_INSTALL_ROOT" --bin cayw-tui --locked`，随后使用同目录的 `cayw tui`。
 
 Runtime 默认 feature 为空。它独立于 UI、plugin 和 remote，也不需要 VerifyTool 服务。客户端是独立 Cargo workspace，单独保留锁文件。`--root` 指定安装目录，程序位于它的 `bin/` 下。验证记录使用仓外独立安装目录和 `--debug --offline`；上面的日常安装采用 Cargo 默认的 release 构建。
+
+统一启动、具名模型方案和本地插件管理见[本地工作流](local-workflows.md)。无界面入口保持独立；完整发行包额外包含可选的 TUI 与 WebUI。
 
 ## 终端交互界面
 
@@ -199,7 +201,8 @@ cayw_chat create --label 'Two user turns'
 没有模型配置时，可以先用固定响应跑通管理服务和客户端。在一个目录启动：
 
 ```sh
-CAYW_HOME="$HOME/cayw-demo" "$CAYW_INSTALL_ROOT/bin/cayw" serve --offline --demo-authorized
+export CAYW_HOME="$HOME/cayw-demo"
+"$CAYW_INSTALL_ROOT/bin/cayw" serve --offline --demo-authorized
 ```
 
 服务自动初始化根目录、`config.json`、`ipc.token` 和当前工作区的数据库。`--offline` 使用本机固定响应，不联网。`--demo-authorized` 只预先授权演示任务需要的两个精确文件调用：写入 `cayw-demo.txt`（内容为 `headless runtime demo`）和读取同一个文件。其他能力调用仍需审批或被拒绝。
@@ -207,6 +210,7 @@ CAYW_HOME="$HOME/cayw-demo" "$CAYW_INSTALL_ROOT/bin/cayw" serve --offline --demo
 在另一个终端的同一目录创建会话并执行演示任务：
 
 ```sh
+export CAYW_HOME="$HOME/cayw-demo"  # 与服务终端使用同一个数据根
 "$CAYW_INSTALL_ROOT/bin/cayw-client" create
 "$CAYW_INSTALL_ROOT/bin/cayw-client" prompt --session "$CAYW_SESSION_ID" --text 'Run the offline demo'
 ```

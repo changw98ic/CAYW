@@ -29,6 +29,18 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
+    "settings.workspace",
+    "settings.models.list",
+    "settings.models.put",
+    "settings.models.use",
+    "settings.models.remove",
+    "settings.plugins.list",
+    "settings.plugins.bind",
+    "settings.plugins.install",
+    "settings.plugins.update",
+    "settings.plugins.enable",
+    "settings.plugins.disable",
+    "settings.plugins.remove",
     "runtime.health",
     "runtime.resources",
     "runtime.fleet",
@@ -777,27 +789,30 @@ fn persist_ownership_bind(
 }
 
 fn side_effecting(method: &str) -> bool {
-    matches!(
-        method,
-        "session.create"
-            | "session.prompt"
-            | "task.enqueue"
-            | "task.resume"
-            | "session.cancel"
-            | "approval.decide"
-            | "session.fork"
-            | "runtime.fleet.stop"
-            | "runtime.fleet.steer"
-            | "runtime.background.kill"
-            | "runtime.background.recover"
-            | "plannotator.submit"
-            | "artifacts.put"
-            | "artifacts.update"
-            | "artifacts.action"
-            | "artifacts.action_cancel"
-            | "artifacts.recovery_save"
-            | "artifacts.recovery_load"
-    )
+    (method.starts_with("settings.")
+        && !method.ends_with(".list")
+        && method != "settings.workspace")
+        || matches!(
+            method,
+            "session.create"
+                | "session.prompt"
+                | "task.enqueue"
+                | "task.resume"
+                | "session.cancel"
+                | "approval.decide"
+                | "session.fork"
+                | "runtime.fleet.stop"
+                | "runtime.fleet.steer"
+                | "runtime.background.kill"
+                | "runtime.background.recover"
+                | "plannotator.submit"
+                | "artifacts.put"
+                | "artifacts.update"
+                | "artifacts.action"
+                | "artifacts.action_cancel"
+                | "artifacts.recovery_save"
+                | "artifacts.recovery_load"
+        )
 }
 
 fn redact(text: &str, state: &Gateway) -> String {

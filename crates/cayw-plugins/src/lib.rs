@@ -43,6 +43,13 @@ pub struct PluginManifest {
     pub permissions: BTreeMap<String, BTreeSet<String>>,
 }
 
+impl PluginManifest {
+    /// Validate compatibility and capability schemas without executing code.
+    pub fn validate(&self) -> Result<(), PluginError> {
+        registry::validate_manifest(self).map(|_| ())
+    }
+}
+
 /// The host constructs this context. It is never taken from a plugin response.
 #[derive(Debug, Clone, Default)]
 pub struct PluginContext {

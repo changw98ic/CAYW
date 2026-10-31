@@ -72,6 +72,10 @@ impl LocalPaths {
         initialization.lock()?;
         private_directory(&self.data_dir.join("workspaces"))?;
         private_directory(&self.state_dir)?;
+        create_private(
+            &self.state_dir.join("workspace.json"),
+            &serde_json::to_vec(&serde_json::json!({"workspace":self.workspace}))?,
+        )?;
         create_private(&self.config_file, b"{\n  \"permissions\": []\n}\n")?;
         self.validate_config()?;
         let token = format!(
@@ -131,6 +135,34 @@ impl LocalPaths {
             ));
         }
         Ok((connection.address, self.token()?))
+    }
+
+    pub fn known_workspaces(&self) -> io::Result<Vec<PathBuf>> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(self.data_dir.join("workspaces"))? {
+            let entry = entry?;
+            if paths.len() >= 256 {
+                break;
+            }
+            check_directory(&entry.path())?;
+            let path = entry.path().join("workspace.json");
+            let bytes = match read_private(&path, 16384) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            if let Some(path) = value["workspace"].as_str() {
+                paths.push(PathBuf::from(path));
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    /// Host state belonging to this canonical workspace, never inside the project.
+    pub fn state_file(&self, name: &str) -> PathBuf {
+        self.state_dir.join(name)
     }
 
     pub fn acquire_server(&self) -> io::Result<LocalServer> {
@@ -251,7 +283,7 @@ fn open_private(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_private(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+pub fn read_private(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     open_private(path)?
         .take(limit + 1)
@@ -280,11 +312,11 @@ fn private_lock(path: &Path) -> io::Result<File> {
 pub fn model_setup_hint(config_file: Option<&Path>) -> String {
     match config_file {
         Some(path) => format!(
-            "尚未配置模型。配置文件：{}。运行 `cayw configure --config {}` 逐项配置模型。设置所选密钥环境变量后，重新启动 `cayw serve`。",
+            "尚未配置模型。配置文件：{}。运行 `cayw configure --config {}` 逐项配置模型。网页的“工作区 / 模型 / 插件”也可保存并选择模型方案。服务启动时需已设置所选密钥环境变量。",
             path.display(),
             shell_path(path)
         ),
-        None => "尚未配置模型。运行 `cayw configure` 完成配置，然后在当前启动命令中加入 `--config <配置文件路径>`。设置所选密钥环境变量后重新启动服务。".into(),
+        None => "尚未配置模型。运行 `cayw configure` 完成配置，然后在当前启动命令中加入 `--config <配置文件路径>`。服务启动时需已设置所选密钥环境变量。".into(),
     }
 }
 

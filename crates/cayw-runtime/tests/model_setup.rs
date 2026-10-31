@@ -370,10 +370,9 @@ async fn missing_model_reports_configure_and_the_actual_path_without_blocking() 
     assert!(serve_text.contains(config_text), "stderr: {serve_text}");
 }
 
-// Break caught: `configure` runs the wizard again even though a model already
-// exists, or it overwrites the existing model instead of keeping it.
+// Break caught: cancelling a replacement wizard destroys the existing model or host settings.
 #[tokio::test]
-async fn configure_keeps_an_existing_model_without_asking_again() {
+async fn configure_cancelled_replacement_keeps_existing_model() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -387,13 +386,10 @@ async fn configure_keeps_an_existing_model_without_asking_again() {
     write_private(&config_file, &serde_json::to_vec(&existing).unwrap());
     let before: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
 
-    // A re-prompt would block forever because this pipe is neither closed nor
-    // written to; the watchdog turns that into a clear failure.
-    let output = run_holding_stdin(configure_command(
-        home.path(),
-        workspace.path(),
-        root.path(),
-    ))
+    let output = run_with_input(
+        configure_command(home.path(), workspace.path(), root.path()),
+        b"",
+    )
     .await;
     assert!(
         output.status.success(),

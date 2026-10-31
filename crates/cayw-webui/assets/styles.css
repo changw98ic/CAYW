@@ -35,3 +35,11 @@
 .create-device-row{margin-top:6px;display:flex;gap:6px;align-items:center}
 .create-device-row label{margin-bottom:0;white-space:nowrap}
 .create-device-row input{font-size:12px;padding:4px 8px}
+
+#settings-dialog { box-sizing: border-box; width: min(52rem, 94vw); max-height: 90vh; overflow: auto; }
+#settings-dialog label { display: block; margin: .7rem 0; }
+#settings-dialog input:not([type="checkbox"]), #settings-dialog select, #settings-dialog textarea { display: block; width: 100%; box-sizing: border-box; padding: .55rem; }
+#settings-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+#model-profiles > div, #plugin-profiles > div { border-block-end: 1px solid currentColor; padding: .6rem 0; }
+#settings-dialog button { margin: .25rem; }
+#settings-status { white-space: pre-wrap; overflow-wrap: anywhere; }

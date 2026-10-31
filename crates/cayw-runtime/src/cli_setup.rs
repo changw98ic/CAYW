@@ -50,10 +50,9 @@ fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write
         model.validate()?;
         writeln!(
             output,
-            "模型已配置：{}。如需更改，请编辑此文件。",
-            path.display()
+            "当前模型：{}。继续填写可替换，取消会保留原配置。",
+            model.id()
         )?;
-        return Ok(true);
     }
     let Some(model) = read_model(input, output)? else {
         writeln!(output, "已取消配置，原配置未改动。")?;
@@ -83,7 +82,7 @@ fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write
     writeln!(output, "  export {name}='你的密钥'")?;
     writeln!(
         output,
-        "然后运行 `cayw serve --config {}`。",
+        "尚未启动服务时运行 `cayw start --config {}`；已有服务会尝试即时应用。",
         shell_path(path)
     )?;
     Ok(true)
