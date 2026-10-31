@@ -10,9 +10,13 @@ cayw start --workspace /你的项目 --ui none # 仅服务
 
 `start` 在前台管理自己启动的进程。网页启动结果为一行 JSON：`url` 为本机地址，`web_token_file` 为私有令牌文件路径；读取该文件，将内容粘贴到网页登录框。令牌自动生成，与 IPC 令牌独立，不进入 URL、HTML 或浏览器持久存储。刷新网页后重新输入同一枚网页令牌即可读取原会话，不自动重发任务。退出本次启动后令牌失效，下次启动生成新令牌。
 
-工作区由规范化后的目录路径确定，数据库位于 `CAYW_HOME/workspaces/<目录摘要>/`。网页设置展示当前目录与已登记目录；切换目录使用 `cayw start --workspace DIR`，不会把已有会话或执行器换根。当前版本没有在网页内直接启动另一工作区的进程。移动项目目录后会产生另一工作区身份，不自动搬迁数据库。
+工作区由规范化后的目录路径确定，数据库位于 `CAYW_HOME/workspaces/<目录摘要>/`。网页侧栏的工作区选择器显示已登记目录。选择后点击“连接 / 切换”，网关会复用该目录的现有服务，或由本机宿主启动独立 Runtime。切换不会把已有会话或执行器换根，也不停止旧工作区的任务。浏览器提交的是登记标识，不接受任意目录路径；添加新目录先在本机执行 `cayw init --workspace DIR`，再在网页刷新目录。移动项目目录后会产生另一工作区身份，不自动搬迁数据库。 每个页面保留自己的选择，其他页面的请求不随之改路由。已提交任务的 enqueue/resume 捕获原工作区，切换不取消连接、不重发任务；返回原工作区继续读取同一 Task/Attempt 的事件和审批。
+
+网关保留会话与任务归属，工作区标识不匹配的请求在转发前被拒绝。目录管理请求固定交给最初宿主；目标 IPC 地址只在宿主与网关之间传递，不返回浏览器。宿主最多持有 16 个由本次启动创建的 Runtime；正常退出清理这些实例，复用的外部服务由原所有者管理。新实例不复制原工作区命令行中的演示授权、权限或自定义配置路径。
 
 重复运行同一工作区的 `start` 会返回现有启动信息；正在初始化时返回 `starting: true`。若 `serve` 已独立启动，`start` 复用该服务，退出界面保留它。已有服务不能通过第二条启动命令修改 `--offline`、`--config` 等启动参数。Ctrl+C / SIGTERM 停止本次拥有的 UI 与 Runtime，并等待原有任务取消和持久化清理；若清理未确认会报错，不自动重放任务。
+
+工作区和工具状态通过认证的 CLI 宿主控制接口提供，均未注册成模型工具。网页请求在 `/api/rpc` 的顶层携带 `workspace_id`；省略时保留原有网关路由。`settings.workspaces.list` 返回登记标识与路径，`settings.workspaces.open` 只接收 `{ "id": "登记标识" }`，管理请求固定转发给初始宿主。网关根据握手回执登记目标连接，再移除内部 IPC 地址后返回给浏览器。`settings.tools` 只读取已知同目录程序的安装元数据与宿主编译/启用状态；侧栏的“刷新安装状态”可重新读取。
 
 ## 模型日常管理
 
@@ -70,7 +74,7 @@ cayw plugins remove my-plugin
 
 ## 打包和验证
 
-在 macOS arm64 源码目录运行 `sh scripts/package-cli.sh /新的输出目录`，构建四个程序和启用 plugins 的 Runtime，生成 `BUILD.json`、`SHA256SUMS` 与安装脚本。不会安装、推送或发布。包内 `install.sh` 对四个程序检查摘要、暂存文件和 `--help`，替换失败时尝试恢复备份。可视化编辑器、Trace 调试与 Pi 兼容仍是独立可选组件，不随这个基础包安装；工作台保留其已有入口和独立认证。
+在 macOS arm64 源码目录运行 `sh scripts/package-cli.sh /新的输出目录`，构建四个程序和启用 plugins 的 Runtime，生成 `BUILD.json`、`SHA256SUMS` 与安装脚本。不会安装、推送或发布。包内 `install.sh` 对四个程序检查摘要、暂存文件和 `--help`，替换失败时尝试恢复备份。可视化编辑器、Trace 调试与 Pi 兼容仍是独立可选组件，不随这个基础包安装；工作台读取实际同目录安装状态，未安装的 Editor/Trace 默认入口禁用，侧栏明确显示安装与启动命令，Pi 则区分未编译、未启用和已启用。已安装的外部服务仍需单独启动；连接配置中只有有效本机地址才允许打开，令牌保持独立。安装命令根据当前二进制所在位置选择相同前缀的安装方式或源码构建方式，需在 CAYW 源码根目录运行。
 
 复跑入口：
 
@@ -82,6 +86,7 @@ cargo test -p cayw-runtime --features plugins --test model_switch --locked
 cargo build -p cayw-runtime --features plugins --bin cayw --bin cayw-runtime-plugin-fixture -p cayw-webui --bin cayw-webui --locked
 python3 scripts/validate-product-workflows.py target/debug /新的证据目录
 CAYW_PLAYWRIGHT_MODULE=/绝对路径/playwright/index.mjs node scripts/validate-product-settings-browser.mjs target/debug /另一个新证据目录
+CAYW_PLAYWRIGHT_MODULE=/绝对路径/playwright/index.mjs node scripts/validate-workspace-switch-browser.mjs target/debug /工作区切换新证据目录
 ```
 
 这些验证只用合成 Provider、离线 Fixture、本机进程与临时配置，不加载用户模型配置或真实密钥，不调用外部付费模型。平台和实际运行范围见对应验证记录，其他平台的开发结果不构成 macOS 验收。

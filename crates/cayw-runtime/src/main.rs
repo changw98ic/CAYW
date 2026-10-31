@@ -4,6 +4,7 @@ mod cli_settings;
 mod cli_setup;
 mod cli_start;
 mod cli_tui;
+mod cli_workspaces;
 
 use async_trait::async_trait;
 use cayw_ai::{
@@ -300,6 +301,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut settings = cli_settings::Settings {
         #[cfg(feature = "plugins")]
         plugins: cli_plugins::Plugins::new(settings_paths.state_file("plugins.json")),
+        workspaces: cli_workspaces::Workspaces::new(settings_paths.clone(), offline),
+        pi_enabled: false,
         paths: settings_paths,
         offline,
         available: false,
@@ -344,6 +347,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let pi_compat_enabled = pi_compat || pi_compat_cfg.as_ref().is_some_and(|p| p.enabled);
+    settings.pi_enabled = pi_compat_enabled;
     #[allow(unused_mut)]
     let mut pi_installed = 0usize;
     #[cfg(feature = "pi-compat")]
@@ -512,7 +516,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         settings: tokio::sync::Mutex::new(settings),
         model_setup_hint: setup_hint,
     });
-    serve(listener, handler, ipc, shutdown).await?;
+    let serving = serve(listener, handler.clone(), ipc, shutdown).await;
+    let workspaces = handler.settings.lock().await.workspaces.shutdown().await;
 
     #[cfg(feature = "pi-compat")]
     if let Some((pi_host, loaded)) = pi_keepalive {
@@ -532,5 +537,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             .await;
         }
     }
-    Ok(())
+    match (serving, workspaces) {
+        (Err(service), Err(cleanup)) => {
+            Err(format!("{service}; workspace cleanup also failed: {cleanup}").into())
+        }
+        (Err(service), _) => Err(service.into()),
+        (_, Err(cleanup)) => Err(cleanup),
+        _ => Ok(()),
+    }
 }

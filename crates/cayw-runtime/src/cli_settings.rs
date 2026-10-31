@@ -30,6 +30,8 @@ struct Models {
 
 pub struct Settings {
     pub paths: LocalPaths,
+    pub workspaces: crate::cli_workspaces::Workspaces,
+    pub pi_enabled: bool,
     pub offline: bool,
     pub available: bool,
     #[cfg(feature = "plugins")]
@@ -135,6 +137,13 @@ impl Settings {
         params: Value,
         _cancel: CancellationToken,
     ) -> Result<Value> {
+        if method.starts_with("settings.workspaces.") {
+            return self.workspaces.call(method, params, _cancel).await;
+        }
+        if method == "settings.tools" {
+            let _: Empty = parse(params)?;
+            return crate::cli_workspaces::optional_tools(self.pi_enabled);
+        }
         if method == "settings.workspace" {
             let _: Empty = parse(params)?;
             return Ok(

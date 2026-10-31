@@ -105,7 +105,7 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
         None => result,
     }
 }
-async fn stop_child(child: &mut Child) -> Result<()> {
+pub(super) async fn stop_child(child: &mut Child) -> Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
     }

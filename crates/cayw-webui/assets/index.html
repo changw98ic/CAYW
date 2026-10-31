@@ -30,8 +30,15 @@
   <div id="workspace" class="workspace" hidden>
     <aside class="sidebar" aria-labelledby="sessions-heading">
       <details id="session-picker" class="session-picker" open>
-      <summary class="session-picker-summary"><span>会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
+      <summary class="session-picker-summary"><span>工作区与会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
       <div class="session-picker-content">
+      <section class="workspace-switcher" aria-label="选择工作区">
+        <label for="workspace-choice">工作区</label><select id="workspace-choice"></select>
+        <button id="switch-workspace" type="button">连接 / 切换</button>
+        <button id="refresh-workspaces" type="button" class="quiet">刷新目录</button>
+        <p id="workspace-switch-status" class="small muted" role="status">连接后读取已登记工作区。</p>
+      </section>
+      <details id="optional-tools"><summary>可选工具状态与安装</summary><button id="refresh-optional-tools" type="button" class="quiet">刷新安装状态</button><div id="optional-tools-status" class="small muted">连接后读取本机安装状态。</div></details>
       <button id="open-settings" type="button">工作区 / 模型 / 插件</button>
       <div class="section-heading"><h2 id="sessions-heading">会话</h2><button id="refresh-sessions" class="quiet" type="button">刷新</button></div>
       <form id="create-form" class="create-form">
@@ -102,7 +109,7 @@
   <dialog id="settings-dialog" aria-labelledby="settings-heading">
     <div class="section-heading"><h2 id="settings-heading">工作区设置</h2><button id="close-settings" type="button" class="quiet">关闭</button></div>
     <p id="settings-workspace" class="small muted"></p>
-    <p class="small muted">每个工作区固定自己的目录和会话数据库。切换项目：在终端运行 cayw start --workspace /项目路径。</p>
+    <p class="small muted">每个工作区固定自己的目录和会话数据库。使用侧栏的工作区选择器切换；旧工作区的任务继续运行。新目录先通过本机 cayw init --workspace DIR 登记。</p>
     <p id="settings-status" role="status" aria-live="polite"></p>
     <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。只保存密钥环境变量名称；服务启动时需已有该变量。保存不发送模型请求。</p>
     <div id="model-profiles"></div>

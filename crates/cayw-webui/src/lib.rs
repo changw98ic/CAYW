@@ -30,6 +30,9 @@ pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
     "settings.workspace",
+    "settings.workspaces.list",
+    "settings.workspaces.open",
+    "settings.tools",
     "settings.models.list",
     "settings.models.put",
     "settings.models.use",
@@ -283,6 +286,7 @@ struct Gateway {
     /// Durable Session/Task → device maps (F13). Present when served via
     /// [`serve_with_ownership`]; create/bind writes and route/restore reads it.
     ownership: Option<Arc<OwnershipStore>>,
+    workspace_ids: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// Serve the embedded interface on an already-bound loopback listener.
@@ -398,6 +402,7 @@ async fn serve_inner(
         cancel: cancel.clone(),
         workbench,
         ownership,
+        workspace_ids: Default::default(),
     });
     let app = Router::new()
         .route("/", get(index))
@@ -551,6 +556,8 @@ fn secure_headers(mut response: Response) -> Response {
 struct BrowserRequest {
     method: String,
     params: Value,
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 
 async fn rpc(
@@ -630,17 +637,48 @@ async fn rpc(
     // into the IPC endpoint. Fallback to default only when the store has no entry
     // (or the bound id is local/empty) — never when a non-local owner is missing.
     let restored_device = resolve_owned_device(&state, &request.method, &request.params);
-    let owned_device = match route_device(&state, &request.method, &request.params, restored_device)
-    {
-        Ok(device) => device,
-        Err((status, body)) => {
-            return (
-                StatusCode::from_u16(status).expect("valid status"),
-                Json(body),
-            )
-                .into_response();
+    let mut owned_device =
+        match route_device(&state, &request.method, &request.params, restored_device) {
+            Ok(device) => device,
+            Err((status, body)) => {
+                return (
+                    StatusCode::from_u16(status).expect("valid status"),
+                    Json(body),
+                )
+                    .into_response();
+            }
+        };
+    if request.method.starts_with("settings.workspaces.") {
+        // Catalog/startup is always controlled by this gateway's original host.
+        owned_device = None;
+    } else if let Some(scope) = request.workspace_id.as_deref() {
+        // Existing remote-device sessions remain in the primary gateway's
+        // scope. Registered local workspaces use a separate reserved namespace.
+        let primary_remote = scope == "local"
+            && owned_device.as_deref().is_some_and(|owner| {
+                owner != "local"
+                    && !state
+                        .workspace_ids
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(owner)
+            });
+        if scope.is_empty()
+            || scope.len() > 128
+            || (!primary_remote && owned_device.as_deref().is_some_and(|owner| owner != scope))
+        {
+            return error_response(
+                StatusCode::CONFLICT,
+                "workspace_mismatch",
+                "Request workspace does not match the recorded session/task owner",
+                false,
+            );
         }
-    };
+        if !primary_remote {
+            owned_device = Some(scope.to_owned());
+        }
+    }
+
     let endpoint = match state.devices.endpoint_for(owned_device.as_deref()) {
         Ok(endpoint) => endpoint,
         Err(code) => {
@@ -674,7 +712,11 @@ async fn rpc(
         biased;
         _ = state.cancel.cancelled() => shutting_down(side_effecting(&request.method)),
         result = timeout(budget, client.request(&method, runtime_params)) => match result {
-            Ok(Ok(result)) => {
+            Ok(Ok(mut result)) => {
+                if method == "settings.workspaces.open"
+                    && let Err(message) = register_workspace(&state, &mut result) {
+                    return error_response(StatusCode::BAD_GATEWAY, "workspace_receipt_outcome_unknown", message, true);
+                }
                 // Successful RPC data is a protocol value, never diagnostic
                 // text. Reject an accidental credential disclosure as a whole
                 // rather than rewriting keys, ids, statuses or user content.
@@ -696,6 +738,45 @@ async fn rpc(
             Err(_) => error_response(StatusCode::GATEWAY_TIMEOUT, "request_timeout", "Runtime request timed out; check session events before taking further action", side_effecting(&request.method)),
         }
     }
+}
+
+// IPC addresses and credentials stay on the gateway. The browser only receives
+// an opaque registered workspace ID and display metadata.
+fn register_workspace(state: &Gateway, result: &mut Value) -> Result<(), &'static str> {
+    let id = result["id"].as_str().ok_or("Workspace receipt has no id")?;
+    let address: SocketAddr = result["ipc_addr"]
+        .as_str()
+        .ok_or("Workspace receipt has no endpoint")?
+        .parse()
+        .map_err(|_| "Workspace endpoint is invalid")?;
+    if id == "local" {
+        if address != state.devices.default.address {
+            return Err("Primary workspace endpoint changed");
+        }
+    } else {
+        if !id.starts_with("workspace-") {
+            return Err("Unexpected workspace id");
+        }
+        let mut known = state
+            .workspace_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !known.contains(id) && state.devices.endpoint_for(Some(id)).is_ok() {
+            return Err("Workspace ID conflicts with a registered device endpoint");
+        }
+        let endpoint = IpcEndpoint::new(address, state.devices.default.token.clone())
+            .map_err(|_| "Workspace endpoint must use loopback")?;
+        state
+            .devices
+            .register(id, endpoint)
+            .map_err(|_| "Workspace endpoint could not be registered")?;
+        known.insert(id.to_owned());
+    }
+    result
+        .as_object_mut()
+        .ok_or("Workspace receipt must be an object")?
+        .remove("ipc_addr");
+    Ok(())
 }
 
 /// Restore Session/Task → device affinity from the durable store (the maps
@@ -791,7 +872,8 @@ fn persist_ownership_bind(
 fn side_effecting(method: &str) -> bool {
     (method.starts_with("settings.")
         && !method.ends_with(".list")
-        && method != "settings.workspace")
+        && method != "settings.workspace"
+        && method != "settings.tools")
         || matches!(
             method,
             "session.create"

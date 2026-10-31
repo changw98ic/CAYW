@@ -73,7 +73,7 @@ return { files = files, matches = matches }
 
 macOS Apple Silicon 发行包解压后，在包目录运行 `sh install.sh` 即可安装 `cayw`、`cayw-tui`、`cayw-webui` 和 `cayw-client`，默认位置为 `~/.local/bin`。用 `--prefix DIR` 改到 `DIR/bin`；目标已有不同程序时需加 `--force`。脚本会核对 `SHA256SUMS`，不联网、不使用 sudo、不修改 shell 配置。`scripts/install-cli.sh` 是发行包安装入口，发布时位于包根目录并命名为 `install.sh`；从源码构建仍需下面的 Cargo 命令。
 
-安装完整发行包后，在项目目录运行 `cayw start` 即可启动本机 Runtime 与网页，或用 `cayw start --ui tui` 打开终端界面。`--workspace DIR` 选择工作区；各工作区保存独立会话和模型方案。网页“工作区 / 模型 / 插件”可管理模型方案和本地 External 插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再经显式批准启动，普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
+安装完整发行包后，在项目目录运行 `cayw start` 即可启动本机 Runtime 与网页，或用 `cayw start --ui tui` 打开终端界面。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立会话和模型方案。网页“工作区 / 模型 / 插件”可管理模型方案和本地 External 插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再经显式批准启动，普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
 
 
 需要 **Rust 1.95+** 从源码运行离线示例：

@@ -1595,7 +1595,7 @@ async fn ownership_restore_routes_rpc_to_registered_device_endpoint() {
 
     let created = envelope(http.post(format!("http://{web_addr}/api/rpc"))
         .bearer_auth(WEB_TOKEN)
-        .json(&json!({"method":"session.create","params":{"id":"sess-on-alpha","device_id":"device-alpha"}}))
+        .json(&json!({"method":"session.create","workspace_id":"local","params":{"id":"sess-on-alpha","device_id":"device-alpha"}}))
         .send().await.unwrap(), StatusCode::OK).await;
     assert_eq!(
         created["result"]["runtime_marker"], "alpha-runtime",

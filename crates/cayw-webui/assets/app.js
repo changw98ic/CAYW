@@ -121,6 +121,7 @@ const attemptTerminalLease = (id, record) => {
   return lease?.session_id === id && sameLease(lease, record.attempt) ? lease : null;
 };
 const readMethods = new Set([
+  'settings.workspace', 'settings.workspaces.list', 'settings.tools', 'settings.models.list', 'settings.plugins.list',
   'runtime.health',
   'session.list',
   'session.get',
@@ -394,6 +395,10 @@ function boot() {
     'wb-tasks', 'wb-usage', 'wb-artifacts', 'wb-plannotator', 'wb-editor', 'wb-trace',
   ].map(id => [id, $(id)]));
   let token = '';
+  let workspaceId = 'local';
+  let workspaceBusy = false;
+  const sessionWorkspaces = new Map();
+  let toolAvailability = {};
   let loginGeneration = 0;
   let selected = null;
   let sessions = [];
@@ -424,17 +429,17 @@ function boot() {
   };
   const activeView = () => selected ? views.get(selected) : undefined;
 
-  async function rpc(method, params = {}) {
+  async function rpc(method, params = {}, scope = sessionWorkspaces.get(params.session_id) || workspaceId) {
     const controller = new AbortController();
     controllers.add(controller);
     const requestToken = token;
     let timeout;
-    if (!['session.prompt', 'task.resume'].includes(method)) timeout = setTimeout(() => controller.abort(), 15000);
+    if (!['session.prompt', 'task.resume'].includes(method)) timeout = setTimeout(() => controller.abort(), method === 'settings.workspaces.open' ? 45000 : 15000);
     try {
       const response = await fetch('/api/rpc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
-        body: JSON.stringify({ method, params }),
+        body: JSON.stringify({ method, params, workspace_id:scope }),
         signal: controller.signal,
         cache: 'no-store',
         credentials: 'omit',
@@ -580,6 +585,10 @@ function boot() {
       const actionsRow = el('div', 'control-row');
       const openBtn = el('button', 'primary', '新窗口打开编辑器服务');
       openBtn.type = 'button';
+      openBtn.disabled = true;
+      const validateAddress = () => { try { localServiceUrl(addrInput.value.trim()); openBtn.disabled = false; } catch { openBtn.disabled = true; } };
+      addrInput.addEventListener('input', validateAddress);
+      validateAddress();
       openBtn.addEventListener('click', () => {
         try {
           const url = buildVisualEditorLaunchUrl({ baseUrl: addrInput.value.trim() });
@@ -592,7 +601,7 @@ function boot() {
       updatePathBtn.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'editor', pathInput.value.trim()));
 
       actionsRow.append(openBtn, updatePathBtn);
-      const notice = el('p', 'small muted', '在新窗口中输入 CAYW_EDITOR_TOKEN 登录。编辑项目和页面由编辑器启动参数确定；这里的文件路径只更新宿主记录。主网页令牌和 IPC 凭据不会传给编辑器。');
+      const notice = el('p', 'small muted', `${toolAvailability.editor?.installed ? '已安装，需单独启动服务。' : '未检测到同目录安装；请先安装或提供已启动的本机服务地址。'} cargo install --path crates/cayw-visual-editor --bin cayw-visual-editor --locked；cayw-visual-editor --help。 在新窗口中输入 CAYW_EDITOR_TOKEN 登录。编辑项目和页面由编辑器启动参数确定；这里的文件路径只更新宿主记录。主网页令牌和 IPC 凭据不会传给编辑器。`);
       cfgCard.append(addrLabel, addrInput, pathLabel, pathInput, actionsRow, notice);
       body.append(cfgCard);
     } else if (panelId === 'trace') {
@@ -611,6 +620,10 @@ function boot() {
       const actionsRow = el('div', 'control-row');
       const openBtn = el('button', 'primary', '新窗口打开 Trace Debug');
       openBtn.type = 'button';
+      openBtn.disabled = true;
+      const validateAddress = () => { try { localServiceUrl(addrInput.value.trim()); openBtn.disabled = false; } catch { openBtn.disabled = true; } };
+      addrInput.addEventListener('input', validateAddress);
+      validateAddress();
       openBtn.addEventListener('click', () => {
         try {
           const url = buildTraceDebugLaunchUrl({ baseUrl: addrInput.value.trim() });
@@ -618,7 +631,7 @@ function boot() {
         } catch (error) { handleError(error); }
       });
       actionsRow.append(openBtn);
-      const notice = el('p', 'small muted', '在新窗口中输入 CAYW_TRACE_WEB_TOKEN 登录。采集的会话由 Trace 启动参数确定。主网页令牌和 IPC 凭据不会传给 Trace 页面。');
+      const notice = el('p', 'small muted', `${toolAvailability.trace?.installed ? '已安装，需单独启动服务。' : '未检测到同目录安装；请先安装或提供已启动的本机服务地址。'} cargo install --path crates/cayw-trace-debug --bin cayw-trace-debug --locked；cayw-trace-debug --help。 在新窗口中输入 CAYW_TRACE_WEB_TOKEN 登录。采集的会话由 Trace 启动参数确定。主网页令牌和 IPC 凭据不会传给 Trace 页面。`);
       cfgCard.append(addrLabel, addrInput, actionsRow, notice);
 
       const inspectCard = el('div', 'item-card');
@@ -1360,6 +1373,7 @@ function boot() {
       const evict = [...views.keys()].find(id => id !== selected && !promptPending.has(id) && !views.get(id).writes.length && !views.get(id).activeAttempt && !Object.keys(views.get(id).faults).length);
       if (!evict) break;
       views.delete(evict);
+      sessionWorkspaces.delete(evict);
     }
   }
 
@@ -1404,6 +1418,7 @@ function boot() {
   }
 
   function updateSessionSummary(snapshot) {
+    if ((sessionWorkspaces.get(snapshot.id) || 'local') !== workspaceId) return;
     const current = views.get(snapshot.id)?.snapshot;
     if (current && current.cursor > snapshot.cursor) snapshot = current;
     const index = sessions.findIndex(session => session.id === snapshot.id);
@@ -1419,6 +1434,7 @@ function boot() {
     const login = loginGeneration;
     clearTimeout(timer);
     selected = id;
+    sessionWorkspaces.set(id, workspaceId);
     openedPanels = [];
     openedPanelsSession = id;
     renderOpenedPanels();
@@ -1665,6 +1681,8 @@ function boot() {
 
   let writeSequence = 0;
   async function writeRpc(id, method, params) {
+    const scope = sessionWorkspaces.get(id) || workspaceId;
+    sessionWorkspaces.set(id, scope);
     const login = loginGeneration;
     const key = ++writeSequence;
     const view = views.get(id);
@@ -1675,7 +1693,7 @@ function boot() {
       if (method === 'session.prompt') {
         // Admission returns our Task ID before execution starts. Never select a
         // Session's current task when a delayed stop action eventually runs.
-        const admission = rpc('task.enqueue', params).then(task => {
+        const admission = rpc('task.enqueue', params, scope).then(task => {
           if (task?.session_id !== id || typeof task.id !== 'string' || !task.id) throw new RpcError('invalid_response', '任务入队未返回原任务编号，请由宿主核对。', true);
           if (login === loginGeneration && views.has(id)) rememberView({ ...views.get(id), originalTaskId: task.id });
           return task.id;
@@ -1683,8 +1701,8 @@ function boot() {
         taskAdmissions.set(id, admission);
         if (id === selected) renderComposer();
         const taskId = await admission;
-        result = await rpc('task.resume', { task_id: taskId });
-      } else result = await rpc(method, params);
+        result = await rpc('task.resume', { task_id: taskId }, scope);
+      } else result = await rpc(method, params, scope);
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, null, result));
       return result;
     } catch (error) {
@@ -1753,6 +1771,8 @@ function boot() {
       ui['connection-status'].textContent = '已连接本机';
       report(null);
       renderView();
+      await refreshWorkspaceCatalog();
+      await refreshOptionalTools();
       await refreshPanels();
       await refreshSessions();
       if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
@@ -1766,6 +1786,70 @@ function boot() {
     }
   });
 
+  async function refreshWorkspaceCatalog() {
+    const status = $('workspace-switch-status');
+    try {
+      const catalog = await rpc('settings.workspaces.list');
+      if (!Array.isArray(catalog?.workspaces)) throw new Error('当前宿主未提供工作区目录。');
+      const picker = $('workspace-choice'); picker.replaceChildren();
+      for (const workspace of catalog.workspaces) {
+        const option = el('option', '', `${workspace.path}${workspace.state === 'unavailable' ? '（目录不可用）' : ''}`);
+        option.value = workspace.id; option.disabled = workspace.state === 'unavailable'; picker.append(option);
+      }
+      picker.value = workspaceId;
+      $('switch-workspace').disabled = workspaceBusy;
+      status.textContent = '只连接本机已登记目录。新目录使用 cayw init --workspace DIR 登记后刷新；切换不停止旧任务。';
+    } catch (error) { $('switch-workspace').disabled = true; status.textContent = `工作区目录不可用，请确认使用新版 cayw start 启动。${error.message || String(error)}`; }
+  }
+  async function refreshOptionalTools() {
+    const container = $('optional-tools-status');
+    try {
+      const tools = await rpc('settings.tools');
+      if (!object(tools?.editor) || !object(tools?.trace) || !object(tools?.pi)) throw new Error('宿主未提供可选工具状态；连接外部服务前请先确认已安装并启动。');
+      toolAvailability = tools; container.replaceChildren(el('p', '', tools.note || '请在 CAYW 源码根目录运行安装命令，并单独启动外部服务。'));
+      for (const [name, label] of [['editor','可视化编辑器'],['trace','Trace 调试'],['pi','Pi 兼容']]) {
+        const item = tools[name]; const state = !item.installed ? '未安装 / 未编译' : name === 'pi' ? (item.enabled ? '已启用' : '未启用') : '已安装，需单独启动并连接服务';
+        container.append(el('p', '', `${label}：${state}`), el('pre', '', `${item.install}\n${item.start}`));
+        const button = $('wb-' + name);
+        if (button) { button.disabled = !item.installed; button.textContent = `${label}（${item.installed ? '需连接' : '未安装'}）`; button.title = `${state}。${item.install}；${item.start}`; }
+      }
+    } catch (error) {
+      toolAvailability = {};
+      for (const name of ['editor','trace']) { const button = $('wb-' + name); if (button) { button.disabled = true; button.textContent = `${name === 'editor' ? '可视化编辑器' : 'Trace 调试'}（状态未确认）`; } }
+      container.textContent = `可选工具状态未确认，请确认服务与界面版本一致；安装与启动说明见本地工作流文档。${error.message || String(error)}`;
+    }
+  }
+  async function switchWorkspace() {
+    if (workspaceBusy || !token) return;
+    workspaceBusy = true; $('switch-workspace').disabled = true;
+    const login = loginGeneration;
+    const status = $('workspace-switch-status');
+    status.textContent = '正在连接工作区；原工作区任务继续运行…';
+    try {
+      const target = await rpc('settings.workspaces.open', {id:$('workspace-choice').value});
+      if (login !== loginGeneration) return;
+      if (typeof target?.id !== 'string' || typeof target?.path !== 'string') throw new Error('工作区连接回执无效，请刷新状态。');
+      if (target.id !== workspaceId) {
+        // In-flight enqueue/resume keeps its captured workspace and transport.
+        // Do not disconnect, abort controllers, or cancel another root's task.
+        workspaceId = target.id;
+        ++selectionGeneration; ++listGeneration; clearTimeout(timer);
+        selected = null; sessions = []; openedPanels = []; openedPanelsSession = null;
+        ui['fork-dialog'].close(); ui['prompt'].value = ''; ui['session-picker'].open = true;
+        report(null); renderSessionList(); renderView(); renderOpenedPanels();
+        await refreshPanels(); await refreshSessions();
+        if (sessions.length) await selectSession(sessions[0].id);
+      }
+      $('workspace-choice').value = target.id;
+      await refreshOptionalTools();
+      status.textContent = `当前：${target.path}。${target.reused ? '已复用原服务。' : '已启动独立服务。'}旧工作区任务继续运行。`;
+    } catch (error) { status.textContent = errorText(error); }
+    finally { workspaceBusy = false; $('switch-workspace').disabled = false; }
+  }
+  $('switch-workspace').addEventListener('click', switchWorkspace);
+  $('refresh-workspaces').addEventListener('click', refreshWorkspaceCatalog);
+  $('refresh-optional-tools').addEventListener('click', refreshOptionalTools);
+
   mountSettings(rpc, () => selected);
   ui['logout'].addEventListener('click', () => disconnect());
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
@@ -1774,6 +1858,7 @@ function boot() {
     event.preventDefault();
     if (ui['create-button'].disabled || !ui['session-label'].value.trim()) return;
     const login = loginGeneration;
+    const scope = workspaceId;
     ui['create-button'].disabled = true;
     ui['create-button'].textContent = '创建中…';
     report(null);
@@ -1782,7 +1867,8 @@ function boot() {
       const deviceVal = ui['session-device']?.value?.trim();
       if (deviceVal) params.device_id = deviceVal;
       const snapshot = await rpc('session.create', params);
-      if (login !== loginGeneration) return;
+      sessionWorkspaces.set(snapshot.id, scope);
+      if (login !== loginGeneration || scope !== workspaceId) return;
       const view = applySnapshot(createView(snapshot.id), snapshot, true);
       rememberView(view);
       ui['session-label'].value = '';
@@ -1810,6 +1896,7 @@ function boot() {
     const id = selected;
     const text = ui['prompt'].value.trim();
     const login = loginGeneration;
+    const scope = workspaceId;
     const requestedAfter = views.get(id)?.cursor ?? 0;
     const requestedEpoch = views.get(id)?.proofEpoch ?? 0;
     promptPending.add(id);
@@ -1827,7 +1914,7 @@ function boot() {
       if (id === selected) renderView();
     } catch (error) {
       if (login !== loginGeneration) return;
-      handleError(error);
+      if (scope === workspaceId) handleError(error);
     } finally {
       if (login === loginGeneration) {
         promptPending.delete(id);
@@ -1840,6 +1927,7 @@ function boot() {
     if (ui['cancel-button'].disabled || !selected) return;
     const id = selected;
     const login = loginGeneration;
+    const scope = sessionWorkspaces.get(id) || workspaceId;
     ui['cancel-button'].dataset.pending = 'true';
     ui['cancel-button'].textContent = '正在停止…';
     renderComposer();
@@ -1850,7 +1938,7 @@ function boot() {
       const admission = taskAdmissions.get(id);
       const taskId = admission ? await admission : views.get(id)?.originalTaskId;
       if (typeof taskId !== 'string' || !taskId) throw new RpcError('invalid_params', '未保存原任务编号，请在宿主中指定原 Task 后取消。');
-      const task = await rpc('task.get', { task_id: taskId });
+      const task = await rpc('task.get', { task_id: taskId }, scope);
       if (task?.id !== taskId || task.session_id !== id) throw new RpcError('invalid_response', '返回的任务与原取消目标不符。', true);
       if (login !== loginGeneration) return;
       const target = { session_id: id, task_id: taskId, worker_id: task.worker_id, attempt_id: task.attempt_id, fence: task.fence };

@@ -43,3 +43,6 @@
 #model-profiles > div, #plugin-profiles > div { border-block-end: 1px solid currentColor; padding: .6rem 0; }
 #settings-dialog button { margin: .25rem; }
 #settings-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.workspace-switcher select { width: 100%; margin-block: .4rem; padding: .5rem; }
+#optional-tools-status pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
