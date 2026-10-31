@@ -125,9 +125,16 @@ fn sdk_does_not_fall_back_to_legacy_environment() {
         .args(["prompt", "--session", &id, "--text", "must not run"]);
     let output = prompt.output().unwrap();
     assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("model configuration"), "{error}");
-    assert!(!error.contains("synthetic-old-key"));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["code"], "model_not_configured");
+    assert!(!error["outcome_unknown"].as_bool().unwrap());
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("cayw configure")
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-old-key"));
 }
 
 // Break caught: an unrelated credential hides a missing selected credential for prompt.

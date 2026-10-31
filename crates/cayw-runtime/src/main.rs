@@ -1,14 +1,24 @@
+mod cli_setup;
+mod cli_tui;
+
 use async_trait::async_trait;
-use cayw_ai::{CancellationToken, Model, Provider};
+use cayw_ai::{
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Model, ModelRequest,
+    Provider, StopReason,
+};
 use cayw_bridge::{AccessRequest, Limits, Provenance, Registry, RegistryPolicy, Visibility};
 use cayw_codemode::CapabilityError;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig, serve};
-use cayw_runtime::{HeadlessConfig, Runtime, ScopedPermission, fixture::OfflineProvider};
+use cayw_runtime::{
+    HeadlessConfig, Runtime, ScopedPermission,
+    fixture::OfflineProvider,
+    local_cli::{LocalPaths, model_setup_hint},
+};
 use cayw_sources::{InstalledServer, install_mcp_servers_file};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
-const USAGE: &str = "cayw serve --db PATH --workspace DIR --listen 127.0.0.1:PORT --token-env ENV [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nWithout --offline, --config must contain one explicit model object: service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nServices: openai/chat_completions, magpie/chat_completions, anthropic/messages, gemini/stream_generate_content or gemini/generate_content.\nCAYW_PROVIDER_BASE_URL, CAYW_PROVIDER_API_KEY and CAYW_MODEL no longer select the server model.\nStarting a server makes no model request. session.prompt starts one.\n--config also reads host-owned JSON budgets, fixed pipe-based process profiles, exact permissions, optional task request policy/limits, optional web_access / vision options, optional pi_compat options, and optional mcp_servers_file (absolute path to external mcpServers JSON; absolute local stdio only → ManagedStdio prepare → Registry → Runtime Bridge).\nProfiles and request scopes alone grant no permission.\nOffline mode requires model to be omitted and uses a synthetic provider with real bounded Luau + Host file operations.\n--demo-authorized grants only the two exact offline demo file calls. All other calls await approval.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
+const USAGE: &str = "cayw init [--workspace DIR]\ncayw configure [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nFirst use automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nThe workspace defaults to the current directory. Each workspace has its own SQLite database.\ninit creates private configuration, an IPC token and the database without starting a service. Existing files are kept.\nserve also initializes automatically; cayw-client discovers its local connection from the same workspace.\nRun `cayw tui` in another terminal in that workspace for the interactive terminal interface.\nRun `cayw configure` to set up a model in ~/.cayw/config.json (or use --config PATH).\nWithout a model, a terminal serve offers guided setup; noninteractive use prints the next step.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nWithout a model, serve accepts queries but rejects task execution with model_not_configured before admission.\nStarting a server and creating sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
 
 struct ServeBridgePolicy;
 #[async_trait]
@@ -28,6 +38,19 @@ impl RegistryPolicy for ServeBridgePolicy {
 struct CliRpcHandler {
     runtime: Arc<Runtime>,
     request_timeout_ms: u64,
+    model_available: bool,
+    model_setup_hint: String,
+}
+
+struct UnconfiguredProvider;
+impl Provider for UnconfiguredProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let message = AssistantMessage::new(&request.model).failure(
+            StopReason::Error,
+            "model is not configured; configure the CLI model and restart serve",
+        );
+        Box::pin(futures::stream::iter([AssistantEvent::Error { message }]))
+    }
 }
 
 #[async_trait]
@@ -38,6 +61,22 @@ impl RpcHandler for CliRpcHandler {
         params: Value,
         cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
+        if !self.model_available
+            && matches!(
+                method,
+                "session.prompt"
+                    | "task.enqueue"
+                    | "task.enqueue_with_intent"
+                    | "task.enqueue_scheduled"
+                    | "task.enqueue_with_resources"
+                    | "task.resume"
+            )
+        {
+            return Err(RpcError::new(
+                "model_not_configured",
+                self.model_setup_hint.clone(),
+            ));
+        }
         let mut response = self.runtime.call(method, params, cancel).await?;
         if method == "runtime.health"
             && let Value::Object(ref mut map) = response
@@ -68,9 +107,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     }
-    if command != "serve" {
-        return Err("expected `serve`; use --help".into());
+    if command == "tui" {
+        return cli_tui::run(arguments);
     }
+    if !matches!(command.as_str(), "serve" | "init" | "configure") {
+        return Err("expected `init`, `configure`, `serve` or `tui`; use --help".into());
+    }
+    let initialize_only = command == "init";
+    let configure_only = command == "configure";
     let mut values = BTreeMap::new();
     let mut offline = false;
     let mut demo_authorized = false;
@@ -93,14 +137,34 @@ async fn run() -> Result<(), Box<dyn Error>> {
             _ => return Err(format!("unknown option {flag}").into()),
         }
     }
-    let db = PathBuf::from(values.remove("--db").ok_or("--db is required")?);
-    let workspace = PathBuf::from(
-        values
-            .remove("--workspace")
-            .ok_or("--workspace is required")?,
-    );
-    if !workspace.is_absolute() || !workspace.is_dir() {
-        return Err("--workspace must be an absolute existing directory".into());
+    if initialize_only
+        && (offline
+            || demo_authorized
+            || pi_compat
+            || values.keys().any(|key| key != "--workspace"))
+    {
+        return Err("init accepts only --workspace; use --help".into());
+    }
+    if configure_only
+        && (offline
+            || demo_authorized
+            || pi_compat
+            || values
+                .keys()
+                .any(|key| !matches!(key.as_str(), "--workspace" | "--config")))
+    {
+        return Err("configure accepts only --workspace and --config; use --help".into());
+    }
+    if demo_authorized && !offline {
+        return Err("--demo-authorized requires --offline".into());
+    }
+    let workspace = values
+        .remove("--workspace")
+        .map(PathBuf::from)
+        .map_or_else(std::env::current_dir, Ok)?
+        .canonicalize()?;
+    if !workspace.is_dir() {
+        return Err("--workspace must be an existing directory".into());
     }
     let address: SocketAddr = values
         .remove("--listen")
@@ -109,22 +173,86 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if !address.ip().is_loopback() {
         return Err("local runtime IPC must bind a loopback address".into());
     }
-    let token_env = values
-        .remove("--token-env")
-        .ok_or("--token-env is required")?;
-    let token =
-        std::env::var(&token_env).map_err(|_| "IPC token environment variable is missing")?;
+    let explicit_db = values.remove("--db").map(PathBuf::from);
+    let explicit_config = values.remove("--config").map(PathBuf::from);
+    let explicit_token = values.remove("--token-env");
+    let default_database = explicit_db.is_none();
+    let local_token = explicit_token.is_none();
+    let discoverable = default_database && local_token;
+    let local = if (!configure_only || explicit_config.is_none())
+        && (initialize_only || explicit_db.is_none() || explicit_token.is_none())
+    {
+        let paths = LocalPaths::from_environment(&workspace)?;
+        paths.initialize()?;
+        Some(paths)
+    } else {
+        None
+    };
+    let config_file =
+        explicit_config.or_else(|| local.as_ref().map(|paths| paths.config_file.clone()));
+    let mut headless = match config_file.as_ref() {
+        Some(path) if !configure_only || path.try_exists()? => HeadlessConfig::load(path)?,
+        _ => HeadlessConfig::default(),
+    };
+    if configure_only {
+        let path = config_file.as_ref().expect("configuration path");
+        let configured = if headless.model().is_some() {
+            eprintln!("模型已配置：{}。如需更改，请编辑此文件。", path.display());
+            true
+        } else {
+            cli_setup::configure(path)?
+        };
+        println!(
+            "{}",
+            json!({"configured":configured,"model_configured":configured,"config_file":path})
+        );
+        return Ok(());
+    }
+    let db = explicit_db
+        .or_else(|| local.as_ref().map(|paths| paths.database.clone()))
+        .expect("explicit or local database");
+    if !initialize_only
+        && !offline
+        && headless.model().is_none()
+        && cli_setup::interactive()
+        && let Some(path) = config_file.as_ref()
+        && cli_setup::offer(path)?
+    {
+        headless = HeadlessConfig::load(path)?;
+    }
+    if initialize_only {
+        let config = headless.clone().into_runtime_config()?;
+        let paths = local.as_ref().expect("local initialization paths");
+        let runtime = Runtime::open(
+            &db,
+            &workspace,
+            Arc::new(UnconfiguredProvider),
+            Model::new("unconfigured", "unconfigured"),
+            config,
+        )?;
+        drop(runtime);
+        if headless.model().is_none() {
+            eprintln!("{}", model_setup_hint(config_file.as_deref()));
+        }
+        println!(
+            "{}",
+            json!({
+                "initialized":true,"workspace":workspace,"database":db,
+                "data_dir":paths.data_dir,"config_file":paths.config_file,
+                "token_file":paths.token_file,"model_configured":headless.model().is_some()
+            })
+        );
+        return Ok(());
+    }
+    let token = match explicit_token {
+        Some(name) => {
+            std::env::var(&name).map_err(|_| "IPC token environment variable is missing")?
+        }
+        None => local.as_ref().expect("local token paths").token()?,
+    };
     if token.len() < 16 {
         return Err("IPC token must contain at least 16 bytes".into());
     }
-    if demo_authorized && !offline {
-        return Err("--demo-authorized requires --offline".into());
-    }
-    let mut headless = values
-        .remove("--config")
-        .map(HeadlessConfig::load)
-        .transpose()?
-        .unwrap_or_default();
     if pi_compat {
         headless.enable_pi_compat();
     }
@@ -134,12 +262,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
             "model configuration conflicts with --offline; omit model for a fixture run".into(),
         );
     }
-    if !offline && selected.is_none() {
-        return Err(
-            "model configuration is required in --config; use --offline for a no-network demo"
-                .into(),
-        );
-    }
+    let model_configured = selected.is_some();
+    let model_available = offline || model_configured;
     let mcp_servers_file = headless.mcp_servers_file().map(PathBuf::from);
     let pi_compat_cfg = headless.pi_compat().cloned();
     let mut config = headless.into_runtime_config()?;
@@ -147,10 +271,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (provider, model): (Arc<dyn Provider>, Model) = if let Some(selected) = selected {
         let configured = selected.build()?;
         (configured.provider, configured.model)
-    } else {
+    } else if offline {
         (
             Arc::new(OfflineProvider::default()),
             Model::new("fixture", "offline-runtime"),
+        )
+    } else {
+        (
+            Arc::new(UnconfiguredProvider),
+            Model::new("unconfigured", "unconfigured"),
         )
     };
     if demo_authorized {
@@ -288,23 +417,47 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
     let provider_name = model.provider.clone();
     let model_name = model.id.clone();
-    let runtime = Runtime::open(db, workspace, provider, model, config)?;
+    let mut local_server = if default_database {
+        Some(
+            local
+                .as_ref()
+                .expect("local discovery paths")
+                .acquire_server()?,
+        )
+    } else {
+        None
+    };
+    let runtime = Runtime::open(&db, &workspace, provider, model, config)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    println!(
-        "{}",
-        json!({"listening":listener.local_addr()?.to_string(),"protocol_version":cayw_ipc::PROTOCOL_VERSION,"offline_fixture":offline,"disconnect_policy":"cancel_in_flight","demo_authorized":demo_authorized,"provider":provider_name,"model":model_name,"model_configuration":model_configuration,"configuration":configuration})
-    );
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        let _ = interrupt.recv().await;
         signal.cancel();
     });
+    if discoverable {
+        local_server
+            .as_mut()
+            .expect("local discovery server")
+            .publish(listener.local_addr()?)?;
+    }
+    println!(
+        "{}",
+        json!({"listening":listener.local_addr()?.to_string(),"protocol_version":cayw_ipc::PROTOCOL_VERSION,"offline_fixture":offline,"disconnect_policy":"cancel_in_flight","demo_authorized":demo_authorized,"provider":provider_name,"model":model_name,"model_configured":model_configured,"model_configuration":model_configuration,"configuration":configuration,"workspace":workspace,"database":db,"config_file":config_file,"token_file":local.as_ref().filter(|_| local_token).map(|paths| &paths.token_file),"connection_file":local.as_ref().filter(|_| discoverable).map(|paths| &paths.connection_file)})
+    );
+    let setup_hint = model_setup_hint(config_file.as_deref());
+    if !model_available {
+        eprintln!("{setup_hint}");
+        eprintln!("服务可创建和查询会话。配置模型后才能执行任务。");
+    }
     let mut ipc = ServerConfig::new(token);
     ipc.request_timeout = request_timeout;
     let handler = Arc::new(CliRpcHandler {
         runtime: Arc::new(runtime),
         request_timeout_ms,
+        model_available,
+        model_setup_hint: setup_hint,
     });
     serve(listener, handler, ipc, shutdown).await?;
 

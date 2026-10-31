@@ -71,7 +71,9 @@ return { files = files, matches = matches }
 
 ## 本地体验
 
-需要 **Rust 1.95+**。在仓库根目录运行离线示例：
+macOS Apple Silicon 发行包解压后，在包目录运行 `sh install.sh` 即可安装 `cayw`、`cayw-tui` 和 `cayw-client`，默认位置为 `~/.local/bin`。用 `--prefix DIR` 改到 `DIR/bin`；目标已有不同程序时需加 `--force`。脚本会核对 `SHA256SUMS`，不联网、不使用 sudo、不修改 shell 配置。`scripts/install-cli.sh` 是发行包安装入口，发布时位于包根目录并命名为 `install.sh`；从源码构建仍需下面的 Cargo 命令。
+
+需要 **Rust 1.95+** 从源码运行离线示例：
 
 ```sh
 cargo run -p cayw-agent --example offline --locked
@@ -86,7 +88,18 @@ assistant: 2 + 3 = 5
 completed: 5 messages, running=false
 ```
 
-安装独立 Runtime 和 Rust 客户端后，可以通过 Rust SDK 或认证本机 IPC 使用同一个持久会话。安装、宿主配置、两回合文件任务、审批与取消的用法见[无界面对话指南](docs/headless-chat.md)。
+终端交互界面使用 `cayw tui`。先在项目目录运行 `cayw serve`，再在另一终端的同一目录运行 `cayw tui`，即可选择会话、发送消息、审批和取消。界面自动连接当前工作区的服务，快捷键见 [TUI 说明](crates/cayw-tui/README.md)。
+
+安装独立 Runtime 和 Rust 客户端后，可以通过 Rust SDK 或认证本机 IPC 使用同一个持久会话。`cayw serve` 会自动初始化默认数据根（macOS 为 `~/.cayw`，可用 `CAYW_HOME` 指定专用根），工作区默认为当前目录。没有配置模型时，创建和查询可用，`prompt` 返回 `model_not_configured`，不会发送模型请求。可以用固定响应做离线演示：
+
+```sh
+cayw serve --offline --demo-authorized
+# 另一终端，在同一目录
+cayw-client create
+cayw-client prompt --session SESSION_ID --text 'Run the offline demo'
+```
+
+演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。真实模型运行 `cayw configure` 配置（只保存凭据的环境变量名），或直接编辑数据根的 `config.json` 加入 `model` 后重启服务。没有配置时，`cayw serve` 在终端会询问是否运行 `cayw configure`；非交互环境会打印配置路径和 `cayw configure` 提示。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
 
 ## 文档与参与
 

@@ -17,6 +17,7 @@ pub mod fixture;
 mod fleet;
 mod input;
 pub mod launch;
+pub mod local_cli;
 mod model_requests;
 mod permissions;
 mod plannotator;

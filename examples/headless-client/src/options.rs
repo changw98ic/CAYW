@@ -1,9 +1,12 @@
 use crate::{Failure, Result};
 use std::{collections::BTreeMap, net::SocketAddr, path::PathBuf};
 
-pub const USAGE: &str = "cayw-client --mode sdk|ipc [connection options] COMMAND [arguments]\n\nSDK: --db PATH --workspace DIR [--config PATH]\n     The host JSON may include model {service,api,id,base_url,api_version,max_output_tokens,api_key_env}. Only prompt requires the model object and its selected credential environment variable.\nIPC: --address 127.0.0.1:PORT --token-env ENV\n\ncreate [--label TEXT]\nget|tasks|recover --session ID\ncancel --session ID --task ID\naudit --session ID [--after N --limit N]\nevents --session ID [--after N --limit N --wait-ms N --cursor-file PATH]\nprompt --session ID --text TEXT [--cursor-file PATH]\napprove --session ID --approval ID --decision allow_once|allow_task|deny\n\nOutput is JSONL. A prompt is submitted once. No automatic approval or replay.\nPrompt reads events on a separate connection. Ctrl+C requests cancellation and\ncontinues waiting for the original task and process cleanup. Save the cursor\nonly after a complete contiguous page is written and flushed. A saved cursor\nbelongs to one Session. Reuse the Session ID for subsequent user turns.\n";
+pub const USAGE: &str = "cayw-client [connection options] COMMAND [arguments]\n\nDefault: discover cayw serve for the current workspace via ~/.cayw (or CAYW_HOME).\n         Use --workspace DIR to select another existing workspace.\nIPC: [--mode ipc] [--address 127.0.0.1:PORT --token-env ENV]\n     Supply both address and token-env together to use an explicit host.\nSDK: --mode sdk --db PATH --workspace DIR [--config PATH]\n     Only prompt requires a model object and its selected credential environment variable.\n\ncreate [--label TEXT]\nget|tasks|recover --session ID\ncancel --session ID --task ID\naudit --session ID [--after N --limit N]\nevents --session ID [--after N --limit N --wait-ms N --cursor-file PATH]\nprompt --session ID --text TEXT [--cursor-file PATH]\napprove --session ID --approval ID --decision allow_once|allow_task|deny\n\nOutput is JSONL. A prompt is submitted once. No automatic approval or replay.\nPrompt reads events on a separate connection. Ctrl+C requests cancellation and\ncontinues waiting for the original task and process cleanup. Save the cursor\nonly after a complete contiguous page is written and flushed. A saved cursor\nbelongs to one Session. Reuse the Session ID for subsequent user turns.\n";
 
 pub enum Connection {
+    Local {
+        workspace: PathBuf,
+    },
     Sdk {
         db: PathBuf,
         workspace: PathBuf,
@@ -81,13 +84,20 @@ impl Options {
         ) {
             return Err(Failure::invalid("unknown command; use --help"));
         }
-        let mode = take(&mut flags, "--mode")?;
+        let mode = flags.remove("--mode").unwrap_or_else(|| "ipc".into());
         let connection = match mode.as_str() {
             "sdk" => Connection::Sdk {
                 db: take(&mut flags, "--db")?.into(),
                 workspace: take(&mut flags, "--workspace")?.into(),
                 config: flags.remove("--config").map(Into::into),
             },
+            "ipc" if !flags.contains_key("--address") && !flags.contains_key("--token-env") => {
+                let workspace = flags
+                    .remove("--workspace")
+                    .map(PathBuf::from)
+                    .map_or_else(std::env::current_dir, Ok)?;
+                Connection::Local { workspace }
+            }
             "ipc" => {
                 let address: SocketAddr = take(&mut flags, "--address")?
                     .parse()
@@ -228,6 +238,22 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect()
+    }
+
+    #[test]
+    fn local_discovery_is_default_and_explicit_hosts_require_both_fields() {
+        let parsed = Options::parse(vec!["create".into()]).ok().unwrap();
+        assert!(matches!(parsed.connection, Connection::Local { .. }));
+        let parsed = Options::parse(vec!["--mode".into(), "ipc".into(), "create".into()])
+            .ok()
+            .unwrap();
+        assert!(matches!(parsed.connection, Connection::Local { .. }));
+        for incomplete in [
+            vec!["--address", "127.0.0.1:4000", "create"],
+            vec!["--token-env", "TOKEN", "create"],
+        ] {
+            assert!(Options::parse(incomplete.into_iter().map(String::from).collect()).is_err());
+        }
     }
 
     #[test]

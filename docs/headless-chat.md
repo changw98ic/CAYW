@@ -1,12 +1,22 @@
 # macOS 无界面对话
 
-CAYW 可以安装为独立的 `cayw` Runtime 和 `cayw-client` Rust 客户端。客户端通过公开 Rust SDK 或认证本机 IPC 管理持久会话。模型通过 Luau 调用实际 Rust 能力；宿主逐次检查权限、预算、取消和结果。
+CAYW 可以安装为独立的 `cayw` Runtime 和 `cayw-client` Rust 客户端。客户端通过公开 Rust SDK 或认证本机 IPC 管理持久会话。模型通过 Luau 调用实际 Rust 能力；宿主逐次检查权限、预算、取消和结果。默认不需要手动指定数据库：`cayw serve` 使用默认数据根并自动初始化。
 
 当前启动入口通过一份显式配置选择模型服务与 API。Magpie 的四种格式已分别在 macOS ARM64 完成两个真实用户回合：Chat Completions / `opencode-go/deepseek-v4.1-flash`、Responses / `codex/gpt-6-luna`、Messages / `factory/claude-haiku-5-5`、Gemini 流式 / `antigravity/gemini-3.8-flash`。Chat、Responses 和 Gemini 的成功记录来自 r02，Haiku 来自修复后的独立 r03 重试；每行只证明自己的源码、配置与实际传输，见[四格式矩阵及证据](validation/issue-10-provider-protocols-macos.md)。官方服务直连和旧 group 路由未纳入本次验收。此前 #6 的[首个真实闭环记录](validation/issue-6-headless-chat-macos.md)仍只证明当时的源码和场景。
 
 ## 安装
 
-需要 macOS、Rust 1.95+ 和仓库源码。以下命令在仓库根目录执行，把两个程序装入同一指定目录：
+macOS Apple Silicon 发行包以 `install.sh` 作为安装入口，旁边是 `bin/cayw`、`bin/cayw-tui`、`bin/cayw-client` 和 `SHA256SUMS`。解压后在该目录运行：
+
+```sh
+sh install.sh                 # 默认安装到 $HOME/.local/bin
+sh install.sh --prefix DIR    # 安装到 DIR/bin
+sh install.sh --force         # 目标已有不同程序时替换
+```
+
+脚本可以从任意目录运行，并按自身位置定位发行文件；包目录可以包含空格。它只接受 Darwin arm64，其他系统和架构会明确拒绝。安装前检查三个程序可执行，并按 `SHA256SUMS` 核对摘要；校验或自检失败时不改动已有程序。脚本不联网、不使用 sudo、不修改 shell 配置，也不读写 `~/.cayw` 或模型凭据。目标目录不在 `PATH` 时，脚本会打印 `export PATH=...` 提示。安装后用三个程序的 `--help` 自检。源码中的脚本位于 `scripts/install-cli.sh`，发布时放在包根目录并命名为 `install.sh`。
+
+需要从源码安装无界面入口时，准备 macOS、Rust 1.95+ 和仓库源码。以下命令在仓库根目录执行，把两个程序装入同一指定目录：
 
 ```sh
 export CAYW_INSTALL_ROOT="$HOME/.local/cayw-headless"
@@ -16,11 +26,31 @@ cargo +1.95.0 install --path examples/headless-client --root "$CAYW_INSTALL_ROOT
 "$CAYW_INSTALL_ROOT/bin/cayw-client" --help
 ```
 
-Runtime 默认 feature 为空。此安装不启用 UI、plugin 或 remote，也不需要 VerifyTool 服务。客户端是独立 Cargo workspace，单独保留锁文件。`--root` 指定安装目录，程序位于它的 `bin/` 下。验证记录使用仓外独立安装目录和 `--debug --offline`；上面的日常安装采用 Cargo 默认的 release 构建。
+如需终端交互界面，再执行 `cargo +1.95.0 install --path crates/cayw-tui --root "$CAYW_INSTALL_ROOT" --bin cayw-tui --locked`，随后使用同目录的 `cayw tui`。
 
-## 准备工作区和可信配置
+Runtime 默认 feature 为空。它独立于 UI、plugin 和 remote，也不需要 VerifyTool 服务。客户端是独立 Cargo workspace，单独保留锁文件。`--root` 指定安装目录，程序位于它的 `bin/` 下。验证记录使用仓外独立安装目录和 `--debug --offline`；上面的日常安装采用 Cargo 默认的 release 构建。
 
-工作区目录和数据库父目录必须已存在。以下例子使用一个专用目录：
+## 终端交互界面
+
+发行包也包含现有的 `cayw-tui`。在项目目录启动 `cayw serve` 后，在另一终端进入同一目录运行：
+
+```sh
+cayw tui
+```
+
+界面自动使用当前工作区的服务地址和私有访问码。`cayw tui --workspace DIR` 可以选择其他工作区。`Ctrl+N` 新建会话，输入框中 `Enter` 发送，`Ctrl+X` 取消运行，`Ctrl+Q` 退出界面。退出界面后，独立启动的服务继续运行。完整快捷键见 [TUI 说明](../crates/cayw-tui/README.md)。`cayw-client` 保留逐行 JSON 输出，供脚本和自动化使用。
+
+## 默认位置、初始化与可信配置
+
+在 macOS 上，CAYW 默认把运行数据放在 `~/.cayw`。设置 `CAYW_HOME` 可以改用另一个专用根。工作区默认是当前目录；数据库按工作区的规范路径哈希，放在该根下各自的分目录中。不同工作区互不覆盖。
+
+`cayw init` 可以提前初始化，但不是启动前提。缺少文件时，`cayw serve` 会自动完成同样的初始化：在根目录创建 `config.json`（内容为 `{"permissions":[]}`）和 `ipc.token`，并初始化当前工作区的 SQLite 数据库。已有的私有文件不会被替换。根目录的 `init.lock` 串行处理首次配置和访问码创建；完整文件写入后才发布到正式路径。
+
+没有配置模型时，服务照常启动并报告 `model_configured=false`。创建和查询会话可用；`prompt`、`enqueue` 和 `resume` 在入队前返回 `model_not_configured`，不发送模型请求。CAYW 不会自动选择模型，也不会写入私密凭据。要使用真实模型，运行 `cayw configure` 交互配置，或编辑根目录 `config.json` 的 `model` 对象，然后重启 `cayw serve`。配置只保存凭据的环境变量名称。没有模型配置且标准输入和标准错误都是终端时，`cayw serve` 会询问是否现在配置模型；没有终端时，它会打印配置路径并提示运行 `cayw configure`。
+
+`--db`、`--workspace`、`--listen`、`--token-env` 和 `--config` 仍可显式提供，用于精确控制宿主；显式路径不会被默认根替换。省略这些选项时才使用默认位置。使用默认数据库的服务都取得同一个工作区服务锁，包括只提供 `--token-env` 的情况。显式令牌模式不发布自动发现连接，启动信息中的 `token_file` 为 `null`；客户端应显式提供地址和令牌环境变量。
+
+下面的详细示例使用一个独立的显式目录，方便重复运行：
 
 ```sh
 export CAYW_CHAT_ROOT="$HOME/cayw-headless-example"
@@ -95,7 +125,7 @@ cp examples/headless-client/host.example.json "$CAYW_CHAT_ROOT/host.json"
 
 ## 连接模型服务和本机 IPC
 
-`cayw serve` 只通过 `--config` 的一个 `model` 对象选择模型服务。将以下内容加入前述宿主配置；配置只保存凭据的环境变量名称，不保存凭据值：
+`cayw serve` 通过根目录 `config.json`（或显式 `--config`）中的一个 `model` 对象选择模型服务。`cayw configure` 可交互生成该对象；也可以手动将以下内容加入该文件。配置只保存凭据的环境变量名称，不保存凭据值：
 
 ```json
 {
@@ -128,7 +158,7 @@ cp examples/headless-client/host.example.json "$CAYW_CHAT_ROOT/host.json"
 
 Anthropic 的版本通过 `anthropic-version` 请求头发送，其余版本由所选 API 声明。当前入口只接受表中版本；其他版本不会被静默替换。模型名称必须明确；Gemini 接受模型名称或 `models/名称`。可信宿主可以指定合法 HTTP 或 HTTPS 地址、主机、端口和部署前缀，包括 `localhost`。适配器在该前缀后追加 `chat/completions`、`responses`、`messages` 或 Gemini 的 `models/…:方法` 路径；表中地址只是示例。URL 禁止携带用户名、密码、查询参数或片段。未知字段、矛盾组合和无效输出限制会在读取模型凭据及联网前失败。选定服务/API 不证明任意网关已经兼容；本机固定响应也不能当作官方服务证据。HTTP 客户端读取 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及其小写形式，并遵循 `NO_PROXY` 绕过名单。自动重试和跳转仍关闭，TLS 证书验证仍开启。
 
-加载配置不读取模型凭据。启动真实适配器时，只读取 `api_key_env` 指定的一项模型凭据；缺失、空值或无效请求头值会导致启动失败。宿主仍单独读取 `--token-env` 指定的 IPC 令牌。`--offline` 要求省略 `model`，同时提供两者会被拒绝。
+加载配置不读取模型凭据。启动真实适配器时，只读取 `api_key_env` 指定的一项模型凭据；缺失、空值或无效请求头值会导致启动失败。宿主仍单独读取 `--token-env` 指定的 IPC 令牌。`--offline` 要求省略 `model`，同时提供两者会被拒绝。`--offline` 使用本机固定响应，不联网；加入 `--demo-authorized` 后才预先授权演示任务的两个精确文件调用。
 
 旧的 `CAYW_PROVIDER_BASE_URL`、`CAYW_PROVIDER_API_KEY`、`CAYW_MODEL` 不再选择 `cayw serve` 的模型，也不会覆盖 `model`。迁移时把端点和模型移入该对象，将凭据移到 `api_key_env` 指定的环境变量，再删除旧的三项启动设置。Rust 宿主可调用 `HeadlessConfig::model()` 和 `ProviderConfig::build()`，将得到的适配器和模型传给原有 `Runtime::open`；宿主也可用 `build_with_environment` 提供自己的凭据读取函数。通用 `Runtime::open` 的注入接口保持不变。
 
@@ -146,11 +176,13 @@ Anthropic 的版本通过 `anthropic-version` 请求头发送，其余版本由�
 
 服务只监听本机回环地址。连接仍需 `hello` 认证。启动输出的 `model_configuration` 包含选中的服务、API、模型、端点、版本、输出限制和凭据变量名称，不包含凭据值。预算摘要和进程配置名称仍单独输出。`--listen 127.0.0.1:0` 可由系统分配端口，再使用启动输出的实际地址。
 
-启动宿主、创建或读取会话不发模型请求。`prompt` 才启动任务。以下 IPC 客户端只需要地址和令牌；模型配置和凭据由 Runtime 进程持有。独立 `examples/headless-client` 的 SDK 模式允许省略 `model` 对象。创建、查询、审批、取消和恢复命令都不读取模型密钥。若原数据库使用默认以外的宿主策略，控制命令仍须传入对应的可信配置。SDK `prompt` 在任务入队前检查模型对象和选中凭据。
+启动宿主、创建或读取会话不发模型请求。`prompt` 才启动任务。默认的 `cayw-client` 从当前工作区对应的 `connection.json` 自动发现服务；只有显式连接时才需要地址和令牌。模型配置和凭据由 Runtime 进程持有。独立 `examples/headless-client` 的 SDK 模式仍要显式提供 `--db` 和 `--workspace`，并允许省略 `model` 对象。创建、查询、审批、取消和恢复命令都不读取模型密钥。若原数据库使用默认以外的宿主策略，控制命令仍须传入对应的可信配置。SDK `prompt` 在任务入队前检查模型对象和选中凭据。
 
 `cayw serve` 的 IPC 请求等待上限为任务执行期限加 60 秒。任务默认 300 秒，对应 IPC 360 秒；配置 `budgets.max_run_time_ms: 900000` 后，对应 IPC 960 秒。服务通过 `runtime.health.request_timeout_ms` 返回实际生效值。客户端先用一个短连接读取并关闭，再把该值用于执行和观察连接。字段缺失、类型错误、零值或不可表示的期限会在任务入队前报错。无需另传超时选项。任务执行期限、Host 调用期限、取消和断连清理继续独立生效。自行编写 IPC 宿主时，宿主应报告自己的实际等待上限；通用 Runtime SDK 的健康信息不推测传输设置。
 
-在另一终端定义一个方便重复调用的函数；该终端需有相同的安装目录和 IPC 令牌：
+在默认根和当前工作区下，`cayw-client create` 不需要 `--mode`、`--address` 或 `--token-env`；它读取当前工作区对应的 `connection.json` 来连接。`get`、`prompt` 等命令仍显式传 `--session`。客户端输出逐行 JSON，不提供交互式聊天界面。
+
+需要精确控制连接时，可以继续使用显式地址和令牌。`--address` 和 `--token-env` 必须同时提供；只给其中一个会报错。`--mode ipc` 下省略两者时，客户端自动发现服务；`--mode sdk` 仍要 `--db` 和 `--workspace`。
 
 ```sh
 cayw_chat() {
@@ -161,6 +193,25 @@ cayw_chat create --label 'Two user turns'
 ```
 
 从 `result` 行取得实际会话 `id`，设置 `CAYW_SESSION_ID`。客户端输出为逐行 JSON；每行的 `type` 区分事件、任务、结果和错误。完整字段见[客户端说明](../examples/headless-client/README.md)。
+
+## 默认离线演示
+
+没有模型配置时，可以先用固定响应跑通管理服务和客户端。在一个目录启动：
+
+```sh
+CAYW_HOME="$HOME/cayw-demo" "$CAYW_INSTALL_ROOT/bin/cayw" serve --offline --demo-authorized
+```
+
+服务自动初始化根目录、`config.json`、`ipc.token` 和当前工作区的数据库。`--offline` 使用本机固定响应，不联网。`--demo-authorized` 只预先授权演示任务需要的两个精确文件调用：写入 `cayw-demo.txt`（内容为 `headless runtime demo`）和读取同一个文件。其他能力调用仍需审批或被拒绝。
+
+在另一个终端的同一目录创建会话并执行演示任务：
+
+```sh
+"$CAYW_INSTALL_ROOT/bin/cayw-client" create
+"$CAYW_INSTALL_ROOT/bin/cayw-client" prompt --session "$CAYW_SESSION_ID" --text 'Run the offline demo'
+```
+
+`create` 从当前工作区的 `connection.json` 自动发现服务。固定响应模拟模型写出 Luau 脚本，实际文件和权限仍由 Host 执行和检查。它只用于离线演示，不代表真实模型的回答或能力。没有 `--offline --demo-authorized` 时，默认无配置模型返回 `model_not_configured`，不会用固定响应冒充模型回复。
 
 ## 两个用户回合与审批
 

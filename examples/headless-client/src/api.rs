@@ -48,6 +48,11 @@ impl Connections {
     /// requiring a model object or reading the selected credential.
     pub async fn open(connection: &Connection, needs_model: bool) -> Result<Self> {
         match connection {
+            Connection::Local { workspace } => {
+                let paths = cayw_runtime::local_cli::LocalPaths::from_environment(workspace)?;
+                let (address, token) = paths.connect()?;
+                Self::ipc(address, token).await
+            }
             Connection::Sdk {
                 db,
                 workspace,
@@ -61,8 +66,10 @@ impl Connections {
                 let runtime = headless.into_runtime_config()?;
                 let (provider, model, model_configuration, requested_model, model_execution) =
                     if needs_model {
-                        let selected = selected.ok_or_else(|| {
-                            Failure::invalid("model configuration is required for prompt")
+                        let selected = selected.ok_or_else(|| Failure {
+                            code: "model_not_configured".into(),
+                            message: cayw_runtime::local_cli::model_setup_hint(config.as_deref()),
+                            outcome_unknown: false,
                         })?;
                         let configured = selected.build()?;
                         (
@@ -107,37 +114,36 @@ impl Connections {
                 })
             }
             Connection::Ipc { address, token_env } => {
-                let token = environment(token_env)?;
-                let probe = Client::connect(*address, token.clone()).await?;
-                let probe_api = Api::Ipc(probe);
-                let health = probe_api.health().await?;
-                probe_api.close().await;
-
-                let config = client_config_from_health(&health)?;
-                let timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap_or(0);
-                let execute =
-                    Client::connect_with_config(*address, token.clone(), config.clone()).await?;
-                let observe = match Client::connect_with_config(*address, token, config).await {
-                    Ok(client) => client,
-                    Err(error) => {
-                        execute.close().await;
-                        return Err(error.into());
-                    }
-                };
-                Ok(Self {
-                    execute: Api::Ipc(execute),
-                    observe: Api::Ipc(observe),
-                    metadata: json!({
-                        "type": "runtime",
-                        "mode": "ipc",
-                        "health": health,
-                        "requested_model": health["model"],
-                        "request_timeout_ms": timeout_ms,
-                    }),
-                })
+                Self::ipc(*address, environment(token_env)?).await
             }
         }
     }
+
+    async fn ipc(address: std::net::SocketAddr, token: String) -> Result<Self> {
+        let probe = Client::connect(address, token.clone()).await?;
+        let probe_api = Api::Ipc(probe);
+        let health = probe_api.health().await?;
+        probe_api.close().await;
+        let config = client_config_from_health(&health)?;
+        let timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap_or(0);
+        let execute = Client::connect_with_config(address, token.clone(), config.clone()).await?;
+        let observe = match Client::connect_with_config(address, token, config).await {
+            Ok(client) => client,
+            Err(error) => {
+                execute.close().await;
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            execute: Api::Ipc(execute),
+            observe: Api::Ipc(observe),
+            metadata: json!({
+                "type": "runtime", "mode": "ipc", "health": health,
+                "requested_model": health["model"], "request_timeout_ms": timeout_ms,
+            }),
+        })
+    }
+
     pub async fn close(&self) {
         self.execute.close().await;
         self.observe.close().await;

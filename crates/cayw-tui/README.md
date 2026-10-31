@@ -10,7 +10,23 @@
 
 ## 运行方式
 
-连接已启动的本机 Runtime IPC：
+发行包通过 `sh install.sh` 同时安装 `cayw`、`cayw-tui` 和 `cayw-client`。先在项目目录运行：
+
+```sh
+cayw serve
+```
+
+再在另一终端进入同一项目目录，打开终端交互界面：
+
+```sh
+cayw tui
+```
+
+`cayw tui` 使用 `~/.cayw`（或 `CAYW_HOME`）中当前工作区的连接记录，把本机连接设置交给同目录的 `cayw-tui`。无需手填地址或访问码，也不会启动另一份 Runtime。`--workspace DIR` 可以连接其他项目。退出界面后，独立启动的服务继续运行。
+
+从源码构建时，用 `cargo build -p cayw-runtime -p cayw-tui --bins --release --locked` 把两个程序放入同一个构建目录，再运行 `target/release/cayw tui`。
+
+需要直接连接显式地址的本机 Runtime IPC 时：
 
 ```sh
 CAYW_IPC_ADDR=127.0.0.1:4100 \

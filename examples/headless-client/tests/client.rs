@@ -100,10 +100,17 @@ async fn help_and_invalid_input_never_need_model_credentials() {
         .unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        help.contains("--mode sdk|ipc"),
-        "missing independently usable client help: {help}"
-    );
+    for expected in [
+        "cayw-client [connection options] COMMAND",
+        "Default: discover cayw serve for the current workspace via ~/.cayw (or CAYW_HOME).",
+        "IPC: [--mode ipc]",
+        "SDK: --mode sdk --db PATH --workspace DIR",
+    ] {
+        assert!(
+            help.contains(expected),
+            "missing independently usable client help {expected:?}: {help}"
+        );
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_cayw-client"))
         .env_clear()
         .args([
