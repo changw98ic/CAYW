@@ -1,0 +1,388 @@
+{
+  "code_commit": "92fee2297742c5efd90332fd16e43202345a98dd",
+  "baseline": "0e2b2596a67b98ab5c048974b08523413eaf33c5",
+  "branch": "feat/product-workflows-20261031",
+  "platform": "Linux x86_64; macOS acceptance unrun",
+  "source_unchanged_during_checks": true,
+  "frozen_binaries_unchanged": true,
+  "current_commands": {
+    "custom-discovery": {
+      "argv": [
+        "python3",
+        "/workspace/CAYW-delivery-20261031-frozen/support/check-custom-discovery.py",
+        "/tmp/cayw-shipping-source-binaries"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:58:02.181464+00:00",
+      "finished_utc": "2026-10-31T07:58:02.255792+00:00",
+      "exit_code": 0,
+      "log_sha256": "e8b76afadaa2bf03d2176f18adbcc20c6fd18cd9b4630757809c6f63dec6f6ef"
+    },
+    "product-clippy": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "cayw-runtime",
+        "-p",
+        "cayw-webui",
+        "--features",
+        "cayw-runtime/plugins,cayw-runtime/pi-compat,cayw-runtime/strongflow",
+        "--lib",
+        "--bin",
+        "cayw",
+        "--bin",
+        "cayw-webui",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "dead_code",
+        "-A",
+        "unused_mut",
+        "-A",
+        "unreachable_code",
+        "-A",
+        "clippy::useless_conversion"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:57:33.036314+00:00",
+      "finished_utc": "2026-10-31T07:57:39.571394+00:00",
+      "exit_code": 0,
+      "log_sha256": "720533ea17c1d278969faae4d08cb59701f40ab0940ae4a410254d24c0a3b444"
+    },
+    "product-flow": {
+      "argv": [
+        "python3",
+        "scripts/validate-product-workflows.py",
+        "/tmp/cayw-shipping-source-binaries",
+        "/tmp/cayw-shipping-product-flow"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:57:22.349533+00:00",
+      "finished_utc": "2026-10-31T07:57:33.015254+00:00",
+      "exit_code": 0,
+      "log_sha256": "bf04058031abea1eaa0ef800770a3d458a1d4bd4fa0673e7f1f90c0c2ec1f5c9"
+    },
+    "fmt": {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:57:39.596000+00:00",
+      "finished_utc": "2026-10-31T07:57:41.469325+00:00",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "workspace-browser": {
+      "argv": [
+        "node",
+        "scripts/validate-workspace-switch-browser.mjs",
+        "/tmp/cayw-shipping-source-binaries",
+        "/tmp/cayw-shipping-workspace-browser"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:57:20.265853+00:00",
+      "finished_utc": "2026-10-31T07:57:22.328592+00:00",
+      "exit_code": 0,
+      "log_sha256": "b8921e7039e73e1ae10c81a01914754091fd2e97741296d5dedaebfd9e84fbe7"
+    }
+  },
+  "preceding_code_commit": "9ad1a5a18463014030d3efb1495fd43c149bb7fd",
+  "preceding_commands": {
+    "runtime-regression": {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "cayw-runtime",
+        "--features",
+        "plugins",
+        "--test",
+        "model_switch",
+        "--test",
+        "provider_config",
+        "--test",
+        "runtime",
+        "--locked"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:30.978518+00:00",
+      "finished_utc": "2026-10-31T07:53:31.852211+00:00",
+      "exit_code": 0,
+      "log_sha256": "b73e482f813fdbfb1ea739bbcb2f92b4df2af896ba8703bb3c755f5b465e2b66"
+    },
+    "browser-flow": {
+      "argv": [
+        "node",
+        "scripts/validate-product-settings-browser.mjs",
+        "/tmp/cayw-reviewed-final-binaries",
+        "/tmp/cayw-reviewed-browser-flow"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:32.204257+00:00",
+      "finished_utc": "2026-10-31T07:53:38.384803+00:00",
+      "exit_code": 0,
+      "log_sha256": "9818b33e2a0957da34836e8dd11a7d28f34c4d42e5a2c7b91bf5cd14f20dd7a5"
+    },
+    "workspace-clippy": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:51.674040+00:00",
+      "finished_utc": "2026-10-31T07:53:52.784709+00:00",
+      "exit_code": 101,
+      "log_sha256": "87e46113e90ad6b47463d2c5e63d1ea8ad62960d59d5836d3893d7efce3cf3f8"
+    },
+    "gateway-regression": {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "cayw-webui",
+        "--test",
+        "gateway",
+        "--locked"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:31.876571+00:00",
+      "finished_utc": "2026-10-31T07:53:44.684045+00:00",
+      "exit_code": 0,
+      "log_sha256": "89fd642b39a5d2295abad5a0d8243da04987ca8d0689db5c44cc80fbbfea74c1"
+    },
+    "product-clippy": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "cayw-runtime",
+        "-p",
+        "cayw-webui",
+        "--features",
+        "cayw-runtime/plugins,cayw-runtime/pi-compat,cayw-runtime/strongflow",
+        "--lib",
+        "--bin",
+        "cayw",
+        "--bin",
+        "cayw-webui",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "dead_code",
+        "-A",
+        "unused_mut",
+        "-A",
+        "unreachable_code",
+        "-A",
+        "clippy::useless_conversion"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:45.082337+00:00",
+      "finished_utc": "2026-10-31T07:53:51.651707+00:00",
+      "exit_code": 0,
+      "log_sha256": "96f4eb4b7546af46578e43279ce595916e2ada63f658aad1ee584c694d61076e"
+    },
+    "product-flow": {
+      "argv": [
+        "python3",
+        "scripts/validate-product-workflows.py",
+        "/tmp/cayw-reviewed-final-binaries",
+        "/tmp/cayw-reviewed-product-flow"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:21.283242+00:00",
+      "finished_utc": "2026-10-31T07:53:32.181711+00:00",
+      "exit_code": 0,
+      "log_sha256": "be310164043816cec31803352a03557fa7644f7661494a2d705248c2ac419e2a"
+    },
+    "shell-syntax": {
+      "argv": [
+        "sh",
+        "-n",
+        "scripts/install-cli.sh",
+        "scripts/package-cli.sh"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:38.514648+00:00",
+      "finished_utc": "2026-10-31T07:53:38.515768+00:00",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "ui-unit": {
+      "argv": [
+        "node",
+        "--test",
+        "crates/cayw-webui/tests/core-protocol.mjs",
+        "crates/cayw-webui/tests/dom.test.mjs",
+        "crates/cayw-webui/tests/state.test.mjs",
+        "crates/cayw-webui/tests/ui.test.mjs",
+        "crates/cayw-webui/tests/workbench.test.mjs",
+        "crates/cayw-webui/tests/workbench_dom.test.mjs"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:30.971110+00:00",
+      "finished_utc": "2026-10-31T07:53:36.573162+00:00",
+      "exit_code": 0,
+      "log_sha256": "624a98490197af98a6a1aad3db68fa37664655580b3e8762c5c1c48be2b2f795"
+    },
+    "fmt": {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:36.601436+00:00",
+      "finished_utc": "2026-10-31T07:53:38.493904+00:00",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "workspace-check": {
+      "argv": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--locked"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:44.704918+00:00",
+      "finished_utc": "2026-10-31T07:53:45.061559+00:00",
+      "exit_code": 0,
+      "log_sha256": "22d48bea399e21da724169032e3fe3783e828a456f4de873970bf3794bac7efe"
+    },
+    "workspace-browser": {
+      "argv": [
+        "node",
+        "scripts/validate-workspace-switch-browser.mjs",
+        "/tmp/cayw-reviewed-final-binaries",
+        "/tmp/cayw-reviewed-workspace-browser"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:19.261875+00:00",
+      "finished_utc": "2026-10-31T07:53:21.260354+00:00",
+      "exit_code": 0,
+      "log_sha256": "c027458bf04bdff1fb8bf6178abd11562bd74fad7d3d78e076d5f3fa03deb848"
+    },
+    "tui-pty": {
+      "argv": [
+        "python3",
+        "/workspace/CAYW-delivery-20261031/support/validate-tui-pty.py",
+        "/tmp/cayw-reviewed-final-binaries"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-10-31T07:53:38.537383+00:00",
+      "finished_utc": "2026-10-31T07:53:38.697237+00:00",
+      "exit_code": 0,
+      "log_sha256": "5857dae3a96626088830c347625880bfe8249e0a31a71a6d13320705be10ada7"
+    }
+  },
+  "preceding_to_current_source_delta": [
+    "crates/cayw-runtime/src/cli_workspaces.rs",
+    "crates/cayw-runtime/src/main.rs"
+  ],
+  "regressions": {
+    "runtime": 14,
+    "gateway": 27,
+    "ui_unit_dom": 101
+  },
+  "flows": {
+    "workspaces": {
+      "passed": true,
+      "platform": "linux",
+      "checks": [
+        "only registered opaque IDs accepted; arbitrary paths/extra fields rejected",
+        "default UI disables absent Editor/Trace and shows install/start paths and Pi build/enable state",
+        "switch A to managed B keeps original running Task/Attempt/fence and request; repeat open reuses runtime; cross-owner requests rejected",
+        "switch back restores original session/approval; only original task resumes, explicit cancellation prevents file effect",
+        "browser switches to externally owned C by reusing it",
+        "host shutdown removes its managed B; external C stays alive and queryable"
+      ],
+      "receipts": {
+        "original_task": {
+          "id": "22aa6e59-c810-41c1-bc0c-f1097aa6bf7b",
+          "worker_id": "50100b92-ca66-4da0-a823-49cedb1390c9",
+          "attempt_id": "4dfc4fa7-27fe-486a-9b00-9ec34607a0aa",
+          "fence": 1
+        },
+        "cancelled_task_state": "cancelled"
+      }
+    },
+    "product": {
+      "passed": true,
+      "platform": "linux",
+      "checks": [
+        "unified Web startup, private token, duplicate start reuse",
+        "authenticated real offline prompt, Host file effect, reconnect without replay",
+        "named models persist, invalid update preserves model, offline selection rejected",
+        "plugin registration, explicit approval, actual handshake, bind/freeze, failed update and failed enable",
+        "management persistence failure preserves live status and uncertainty; explicit retry after fixture repair",
+        "restart restores approved plugin and durable sessions; uninstall registration",
+        "configuration interruption and declined save preserve existing file",
+        "cancel approval-waiting task by current Task/Attempt/fence; no file side effect",
+        "attach to existing runtime; launcher shutdown preserves its owner",
+        "live model activation and switch without restart or model request; active removal refused",
+        "CLI import/use and configure hot application; interrupted replacement preserves configured model",
+        "online A -> stop -> offline configure B -> restart selects B; failed activation is explicit and preserves live model",
+        "workspace selection creates isolated model/session state and lists registered roots"
+      ],
+      "binaries": {
+        "cayw": "3313662c79aeec60be530e1171d9ba14004190d3e11aa3bdcba7ba4075e3e284",
+        "cayw-webui": "d3798892a95d3bb32f2a7c1ecd61b8c0b7e2276f43aae8c1c738c578d9de649c",
+        "cayw-runtime-plugin-fixture": "12b0f3fe199ceb80b897c8bb891baaeb9655c75e86c0221f7e872be0f98efdee"
+      }
+    },
+    "browser": {
+      "passed": true,
+      "platform": "linux",
+      "checks": [
+        "browser model save and provider-specific defaults, offline use disabled",
+        "browser plugin register, mandatory process consent, actual process enable",
+        "browser create/prompt, real file output, refresh/reconnect to persistent conversation"
+      ],
+      "errors": []
+    }
+  },
+  "remaining": [
+    "macOS arm64 native build/install/upgrade rollback acceptance unrun",
+    "strict full workspace Clippy blocked by pre-existing non-macOS Device errors"
+  ],
+  "binaries": {
+    "cayw": {
+      "path": "/tmp/cayw-shipping-source-binaries/cayw",
+      "sha256": "3313662c79aeec60be530e1171d9ba14004190d3e11aa3bdcba7ba4075e3e284",
+      "bytes": 328954320
+    },
+    "cayw-webui": {
+      "path": "/tmp/cayw-shipping-source-binaries/cayw-webui",
+      "sha256": "d3798892a95d3bb32f2a7c1ecd61b8c0b7e2276f43aae8c1c738c578d9de649c",
+      "bytes": 47859024
+    },
+    "cayw-tui": {
+      "path": "/tmp/cayw-shipping-source-binaries/cayw-tui",
+      "sha256": "f0a091fa038357d92ca88402b7bc439db7e0bd85781342105163060710b03a03",
+      "bytes": 40927872
+    },
+    "cayw-runtime-plugin-fixture": {
+      "path": "/tmp/cayw-shipping-source-binaries/cayw-runtime-plugin-fixture",
+      "sha256": "12b0f3fe199ceb80b897c8bb891baaeb9655c75e86c0221f7e872be0f98efdee",
+      "bytes": 101608432
+    }
+  }
+}
