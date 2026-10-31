@@ -66,6 +66,7 @@ async function setupApp(t, handler) {
   const calls = [];
   const openedWindows = [];
   const server = createServer(async (req, res) => {
+    if (req.url === '/api/browser/logout') { res.writeHead(204); res.end(); return; }
     let body = '';
     for await (const chunk of req) body += chunk;
     const call = JSON.parse(body);
@@ -120,8 +121,12 @@ async function setupApp(t, handler) {
   vm.runInContext(source.replaceAll('export ', ''), context, { filename: 'app.js' });
 
   const WEB_TOKEN = 'test-web-token-0123456789abcdef';
-  elements['web-token'].value = WEB_TOKEN;
-  await elements['login-form'].dispatch('submit');
+  // The shipped page now connects automatically with its browser session.
+  const connectedBy = Date.now() + 5000;
+  while (elements['login-button'].disabled) {
+    assert(Date.now() < connectedBy, 'automatic login did not settle');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
   assert.equal(elements.workspace.hidden, false);
 
   const waitTick = (ms = 100) => new Promise(resolve => setTimeout(resolve, ms));
@@ -852,7 +857,7 @@ test('workbench_dom: tasks panel handles RPC errors with explicit failure displa
 
   assert.equal(app.ui.workspace.hidden, true, 'auth error hides workspace');
   assert.equal(app.ui['login-panel'].hidden, false, 'auth error shows login panel');
-  assert.ok(app.ui['login-error'].textContent.includes('令牌无效或已失效'), 'auth error message rendered');
+  assert.ok(app.ui['login-error'].textContent.includes('cayw start'), 'expired login explains automatic command recovery');
 });
 
 test('workbench_dom: session switching synchronizes panel ownership and isolates per-session panel instances', async t => {

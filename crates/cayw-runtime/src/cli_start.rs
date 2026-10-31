@@ -10,12 +10,13 @@ use tokio::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const HELP: &str = "cayw start [--workspace DIR] [--ui web|tui|none] [--offline] [--demo-authorized] [--config PATH]\n\nOne foreground command starts or connects to this workspace's runtime and starts the chosen UI.\nWeb prints its loopback URL and a private token file; no token setup is required.\nCtrl+C stops only processes started by this command. Existing services are kept.\nUse --workspace to choose another project. No model request is made by startup.";
+const HELP: &str = "cayw start [--workspace DIR] [--ui web|tui|none] [--offline] [--demo-authorized] [--config PATH] [--no-open]\n\nOne foreground command starts or connects to this workspace's runtime and starts the chosen UI.\nWeb opens your default browser with a one-use login link; refresh keeps the session.\n--no-open, SSH and headless launches print a short-lived clickable link instead.\nCtrl+C stops only processes started by this command. Existing services are kept.\nUse --workspace to choose another project. No model request is made by startup.";
 
 pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut workspace = std::env::current_dir()?;
     let mut ui = "web".to_string();
     let mut extra = Vec::new();
+    let mut no_open = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -24,6 +25,7 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
             }
             "--workspace" => workspace = PathBuf::from(args.next().ok_or("missing workspace")?),
             "--ui" => ui = args.next().ok_or("missing UI")?,
+            "--no-open" => no_open = true,
             "--offline" | "--demo-authorized" | "--pi-compat" => extra.push(arg),
             "--config" => {
                 extra.push(arg);
@@ -56,14 +58,24 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     save_if_missing(&lock_path, b"")?;
     let lock = std::fs::File::open(&lock_path)?;
     if lock.try_lock().is_err() {
-        match read_private(&paths.state_file("launcher.json"), 16384) {
-            Ok(ready) => println!("{}", String::from_utf8(ready)?),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                println!("{}", json!({"starting":true,"workspace":paths.workspace}))
+        // A concurrent first start may still be waiting on Runtime/UI readiness.
+        // Wait for its private descriptor so the second command can hand off too.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match read_private(&paths.state_file("launcher.json"), 16384) {
+                Ok(ready) => {
+                    present(&paths, serde_json::from_slice(&ready)?, no_open).await?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err("another launcher has not confirmed readiness; inspect its terminal and retry".into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
         }
-        return Ok(());
     }
     match std::fs::remove_file(paths.state_file("launcher.json")) {
         Ok(()) => {}
@@ -80,9 +92,9 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut children = Vec::<Child>::new();
     let result = start(
         &paths,
-        &executable,
         &ui_binary,
         &ui,
+        no_open,
         &extra,
         &stop,
         &mut children,
@@ -137,9 +149,9 @@ async fn healthy(paths: &LocalPaths) -> Result<(std::net::SocketAddr, String)> {
 }
 async fn start(
     paths: &LocalPaths,
-    executable: &std::path::Path,
     ui_binary: &std::path::Path,
     ui: &str,
+    no_open: bool,
     extra: &[String],
     stop: &CancellationToken,
     children: &mut Vec<Child>,
@@ -150,7 +162,7 @@ async fn start(
         }
         (address, token, false)
     } else {
-        let mut command = Command::new(executable);
+        let mut command = Command::new(std::env::current_exe()?);
         command
             .arg("serve")
             .arg("--workspace")
@@ -222,7 +234,7 @@ async fn start(
         Err(e) => return Err(e.into()),
     };
     save_config(&path, previous.as_deref(), &serde_json::to_vec(&ready)?)?;
-    println!("{ready}");
+    present(paths, ready, no_open).await?;
     loop {
         tokio::select! {
             _ = stop.cancelled() => return Ok(()),
@@ -242,5 +254,124 @@ fn save_if_missing(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => save_config(path, None, bytes),
         Err(e) => Err(e),
+    }
+}
+
+// Read the private control credential only inside this local launcher. A
+// browser receives a fresh, authority-bound, one-use ticket, never this token.
+async fn present(paths: &LocalPaths, mut ready: Value, no_open: bool) -> Result<()> {
+    if ready["ui"] == "web" {
+        let base = ready["url"].as_str().ok_or("missing browser URL")?;
+        let url = reqwest::Url::parse(base)?;
+        if url.scheme() != "http"
+            || url.username() != ""
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !url
+                .host_str()
+                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                .is_some_and(|ip| ip.is_loopback())
+        {
+            return Err("invalid local browser control address".into());
+        }
+        let token = String::from_utf8(read_private(&paths.state_file("web.token"), 4096)?)?;
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()?
+            .post(url.join("api/browser/launch")?)
+            .bearer_auth(token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "browser handoff failed (HTTP {}); existing service was kept",
+                response.status()
+            )
+            .into());
+        }
+        let handoff: Value = response.json().await?;
+        let link = handoff["launch_url"]
+            .as_str()
+            .ok_or("missing browser handoff link")?;
+        let ticket = link
+            .strip_prefix(&format!("{base}?launch="))
+            .ok_or("invalid browser handoff link")?;
+        if ticket.len() != 64 || !ticket.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid browser handoff ticket".into());
+        }
+        let skip = open_skip_reason(no_open);
+        let opened = match skip {
+            Some(reason) => {
+                ready["browser_open"] = json!(reason);
+                false
+            }
+            None => match open_browser(link).await {
+                Ok(()) => {
+                    ready["browser_open"] = json!("opened");
+                    true
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Browser could not be opened: {error}. Open the launch_url below within 60 seconds; rerun cayw start for a new link."
+                    );
+                    ready["browser_open"] = json!("failed");
+                    false
+                }
+            },
+        };
+        if !opened {
+            ready["launch_url"] = json!(link);
+            ready["launch_expires_in"] = json!(60);
+        }
+        ready
+            .as_object_mut()
+            .expect("ready object")
+            .remove("web_token_file");
+    }
+    println!("{ready}");
+    Ok(())
+}
+fn open_skip_reason(no_open: bool) -> Option<&'static str> {
+    if no_open {
+        return Some("disabled");
+    }
+    if ["SSH_CONNECTION", "SSH_TTY"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+    {
+        return Some("ssh");
+    }
+    if !cfg!(target_os = "macos")
+        && !["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+    {
+        return Some("no-desktop");
+    }
+    None
+}
+async fn open_browser(link: &str) -> Result<()> {
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = Command::new(program)
+        .arg(link)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!("system browser opener exited with {status}").into()),
+        Ok(Err(error)) => Err(error.into()),
+        // Some system openers wait for the browser. Do not terminate the user's
+        // browser; keep serving and offer the clickable fallback.
+        Err(_) => Err("system browser opener has not confirmed opening".into()),
     }
 }

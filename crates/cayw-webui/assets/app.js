@@ -395,6 +395,7 @@ function boot() {
     'wb-tasks', 'wb-usage', 'wb-artifacts', 'wb-plannotator', 'wb-editor', 'wb-trace',
   ].map(id => [id, $(id)]));
   let token = '';
+  let connected = false;
   let workspaceId = 'local';
   let workspaceBusy = false;
   const sessionWorkspaces = new Map();
@@ -438,17 +439,17 @@ function boot() {
     try {
       const response = await fetch('/api/rpc', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
+        headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}) },
         body: JSON.stringify({ method, params, workspace_id:scope }),
         signal: controller.signal,
         cache: 'no-store',
-        credentials: 'omit',
+        credentials: 'same-origin',
       });
       let payload;
       try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '网关返回了无效 JSON；当前请求不会自动重发。', !readMethods.has(method), response.status); }
       if (!response.ok || payload?.error) {
         const detail = payload?.error;
-        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '网页访问令牌无效或已失效，请重新连接。' : detail?.message ?? `请求失败（HTTP ${response.status}）。`, typeof detail?.outcome_unknown === 'boolean' ? detail.outcome_unknown : !readMethods.has(method), response.status);
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '本机登录已失效，请重新运行 cayw start 打开页面。' : detail?.message ?? `请求失败（HTTP ${response.status}）。`, typeof detail?.outcome_unknown === 'boolean' ? detail.outcome_unknown : !readMethods.has(method), response.status);
       }
       if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '网关响应缺少 result；当前请求不会自动重发。', !readMethods.has(method), response.status);
       return payload.result;
@@ -476,17 +477,17 @@ function boot() {
     try {
       const response = await fetch('/api/panels', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${requestToken}` },
+        headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}) },
         body: JSON.stringify({ method, params }),
         signal: controller.signal,
         cache: 'no-store',
-        credentials: 'omit',
+        credentials: 'same-origin',
       });
       let payload;
       try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '面板接口返回了无效 JSON。', false, response.status); }
       if (!response.ok || payload?.error) {
         const detail = payload?.error;
-        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '网页访问令牌无效或已失效，请重新连接。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '本机登录已失效，请重新运行 cayw start 打开页面。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
       }
       if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '面板响应缺少 result。', false, response.status);
       return payload.result;
@@ -1205,7 +1206,7 @@ function boot() {
   }
 
   async function syncPanelsForSession(sessionId, generation = selectionGeneration, login = loginGeneration) {
-    if (!token) return;
+    if (!connected) return;
     try {
       const list = await panelsApi('panels.list_open', { session_id: sessionId });
       if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
@@ -1219,7 +1220,7 @@ function boot() {
   }
 
   async function refreshPanels() {
-    if (!token) return;
+    if (!connected) return;
     const login = loginGeneration;
     const generation = selectionGeneration;
     const sessionId = panelSessionId();
@@ -1325,6 +1326,7 @@ function boot() {
     for (const controller of controllers) controller.abort();
     controllers.clear();
     token = '';
+    connected = false;
     selected = null;
     sessions = [];
     // Keep unresolved operation evidence in this page's memory across
@@ -1357,7 +1359,7 @@ function boot() {
     ui['panel-bottom-open'].replaceChildren();
     ui['panel-sidebar-status'].textContent = '连接后显示已注册侧栏面板。';
     ui['panel-bottom'].hidden = true;
-    ui['web-token'].focus();
+    ui['login-button'].focus();
   }
 
   function handleError(error) {
@@ -1429,7 +1431,7 @@ function boot() {
   }
 
   async function selectSession(id) {
-    if (!token || id === selected) return;
+    if (!connected || id === selected) return;
     const generation = ++selectionGeneration;
     const login = loginGeneration;
     clearTimeout(timer);
@@ -1621,13 +1623,13 @@ function boot() {
 
   function schedulePoll(delay, generation = selectionGeneration) {
     clearTimeout(timer);
-    if (token && selected && generation === selectionGeneration) timer = setTimeout(() => poll(generation), delay);
+    if (connected && selected && generation === selectionGeneration) timer = setTimeout(() => poll(generation), delay);
   }
 
   async function poll(generation) {
     const id = selected;
     const login = loginGeneration;
-    if (!id || !token || generation !== selectionGeneration) return;
+    if (!id || !connected || generation !== selectionGeneration) return;
     let delay = 1000;
     try {
       let view = views.get(id);
@@ -1752,8 +1754,7 @@ function boot() {
     }
   }
 
-  ui['login-form'].addEventListener('submit', async event => {
-    event.preventDefault();
+  async function connect() {
     if (ui['login-button'].disabled) return;
     token = ui['web-token'].value;
     ui['web-token'].value = '';
@@ -1765,6 +1766,7 @@ function boot() {
       const health = await rpc('runtime.health');
       if (login !== loginGeneration) return;
       if (health?.status !== 'ok' || health?.protocol_version !== CORE_PROTOCOL_VERSION) throw new Error('本机运行服务的版本不匹配，请同步更新运行服务和网页界面。');
+      connected = true;
       ui['login-panel'].hidden = true;
       ui['workspace'].hidden = false;
       ui['logout'].hidden = false;
@@ -1784,7 +1786,9 @@ function boot() {
       ui['login-button'].disabled = false;
       ui['login-button'].textContent = '连接';
     }
-  });
+  }
+  ui['login-form'].addEventListener('submit', event => { event.preventDefault(); return connect(); });
+  connect();
 
   async function refreshWorkspaceCatalog() {
     const status = $('workspace-switch-status');
@@ -1820,7 +1824,7 @@ function boot() {
     }
   }
   async function switchWorkspace() {
-    if (workspaceBusy || !token) return;
+    if (workspaceBusy || !connected) return;
     workspaceBusy = true; $('switch-workspace').disabled = true;
     const login = loginGeneration;
     const status = $('workspace-switch-status');
@@ -1851,7 +1855,13 @@ function boot() {
   $('refresh-optional-tools').addEventListener('click', refreshOptionalTools);
 
   mountSettings(rpc, () => selected);
-  ui['logout'].addEventListener('click', () => disconnect());
+  ui['logout'].addEventListener('click', async () => {
+    try {
+      const response = await fetch('/api/browser/logout', { method:'POST', credentials:'same-origin' });
+      if (!response.ok) throw new Error('无法注销本机会话，请重试。');
+      disconnect('已断开。重新运行 cayw start 即可打开并连接。');
+    } catch (error) { report(error); }
+  });
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
   ui['refresh-panels'].addEventListener('click', refreshPanels);
   ui['create-form'].addEventListener('submit', async event => {
@@ -2038,9 +2048,9 @@ function boot() {
   setupWbButton('wb-trace', 'trace', 'sidebar');
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && token && selected) schedulePoll(0);
+    if (!document.hidden && connected && selected) schedulePoll(0);
   });
-  window.addEventListener('online', () => { if (token && selected) schedulePoll(0); });
+  window.addEventListener('online', () => { if (connected && selected) schedulePoll(0); });
   window.addEventListener('pagehide', () => { token = ''; for (const controller of controllers) controller.abort(); });
 }
 

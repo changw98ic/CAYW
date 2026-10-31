@@ -39,7 +39,7 @@ def cli(*args, input=None, good=True):
 
 def launch(*args, work=workspace):
     stderr = open(evidence/f'process-{len(processes)}.stderr', 'w')
-    child = subprocess.Popen([str(binaries/'cayw'), 'start', '--workspace', str(work), *args],
+    child = subprocess.Popen([str(binaries/'cayw'), 'start', '--no-open', '--workspace', str(work), *args],
                              cwd=workspace, env=env, stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=stderr, text=True, start_new_session=True)
     processes.append(child)
@@ -48,9 +48,10 @@ def launch(*args, work=workspace):
     assert line, f'launcher exited: {child.poll()}; inspect stderr'
     ready = json.loads(line)
     assert 'url' in ready, ready
-    token = Path(ready['web_token_file']).read_text()
+    private = next(json.loads(path.read_text()) for path in (root/'cayw'/'workspaces').glob('*/launcher.json') if json.loads(path.read_text()).get('url') == ready['url'])
+    token = Path(private['web_token_file']).read_text()
     assert token not in line
-    assert Path(ready['web_token_file']).stat().st_mode & 0o777 == 0o600
+    assert Path(private['web_token_file']).stat().st_mode & 0o777 == 0o600
     return child, ready, token
 
 def stop(child):

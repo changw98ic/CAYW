@@ -1,6 +1,7 @@
 //! Optional loopback browser gateway. The runtime owns every session, event,
 //! tool invocation and approval decision. This gateway never retries an RPC.
 
+mod browser_session;
 mod ownership;
 mod workbench;
 
@@ -275,6 +276,7 @@ struct Gateway {
     /// Default local IPC plus any registered device endpoints (F13 routing).
     devices: Arc<DeviceRouter>,
     web_token: String,
+    browser: browser_session::BrowserSessions,
     authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
@@ -392,6 +394,7 @@ async fn serve_inner(
     let state = Arc::new(Gateway {
         devices,
         web_token,
+        browser: browser_session::BrowserSessions::new(address.port()),
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
@@ -491,14 +494,19 @@ async fn guarded_request(state: &Gateway, request: Request, next: Next) -> Respo
             false,
         );
     }
+    if let Some(response) = state.browser.handle(&request, &state.web_token) {
+        return response;
+    }
     if request.uri().path() != "/api/rpc" && request.uri().path() != "/api/panels" {
         return next.run(request).await;
     }
-    if !authorized(request.headers(), &state.web_token) {
+    if !authorized(request.headers(), &state.web_token)
+        && !state.browser.authenticated(request.headers())
+    {
         return error_response(
             StatusCode::FORBIDDEN,
             "forbidden",
-            "A valid web Bearer token is required",
+            "Browser session expired; run cayw start again",
             false,
         );
     }

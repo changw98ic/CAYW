@@ -32,6 +32,7 @@ class Element {
 async function page(t, handler) {
   const calls = [];
   const server = createServer(async (req, res) => {
+    if (req.url === '/api/browser/logout') { res.writeHead(204); res.end(); return; }
     let body = '';
     for await (const chunk of req) body += chunk;
     const call = JSON.parse(body);
@@ -67,8 +68,12 @@ async function page(t, handler) {
     clearTimeout: id => timers.delete(id),
   });
   vm.runInContext(source.replaceAll('export ', ''), context, { filename: 'app.js' });
-  elements['web-token'].value = '0123456789abcdef0123456789abcdef';
-  await elements['login-form'].dispatch('submit');
+  // The shipped page now connects automatically with its browser session.
+  const connectedBy = Date.now() + 5000;
+  while (elements['login-button'].disabled) {
+    assert(Date.now() < connectedBy, 'automatic login did not settle');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
   assert.equal(elements['login-error'].textContent, '', 'fixture must connect to the real fetch endpoint');
   assert.equal(elements.workspace.hidden, false);
   const poll = async () => {

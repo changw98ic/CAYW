@@ -5,7 +5,7 @@ use std::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT] [--ownership PATH]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供网关使用\n  CAYW_WEB_TOKEN  独立的网页访问令牌，打开网页后手动输入\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_OWNERSHIP_PATH  持久所有权存储路径，默认 ownership.json\n\n只接受 loopback 地址；令牌不支持 URL 或命令行参数。两枚令牌必须独立随机生成，至少包含 128 bit 随机数据（例如 16 个随机字节编码为 32 位十六进制）；统一接受 32..4096 个不含空白或控制字符的 ASCII 字节，长度校验不代替随机生成。Ctrl+C 停止网关。\n";
+const HELP: &str = "CAYW 本机网页界面\n\n推荐：cayw start 自动启动并打开浏览器，无需手输令牌。\n以下是独立部署网关的高级配置。\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT] [--ownership PATH]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供网关使用\n  CAYW_WEB_TOKEN  独立的网页访问令牌，打开网页后手动输入\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n  CAYW_OWNERSHIP_PATH  持久所有权存储路径，默认 ownership.json\n\n只接受 loopback 地址；令牌不支持 URL 或命令行参数。两枚令牌必须独立随机生成，至少包含 128 bit 随机数据（例如 16 个随机字节编码为 32 位十六进制）；统一接受 32..4096 个不含空白或控制字符的 ASCII 字节，长度校验不代替随机生成。Ctrl+C 停止网关。\n";
 
 struct Config {
     ipc_addr: SocketAddr,

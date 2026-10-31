@@ -1841,3 +1841,97 @@ async fn unified_artifacts_and_observability_rpc_allowlist_enforced() {
 
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn browser_handoff_cookie_refresh_and_logout_keep_control_credential_private() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let base = format!("http://{}/", fixture.addr);
+    let http = HttpClient::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let mint = || http.post(format!("{base}api/browser/launch"));
+    assert_eq!(mint().send().await.unwrap().status(), StatusCode::FORBIDDEN);
+    let handoff: Value = mint()
+        .bearer_auth(WEB_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let link = handoff["launch_url"].as_str().unwrap();
+    assert!(!link.contains(WEB_TOKEN));
+    let landing = http.get(link).send().await.unwrap();
+    assert_eq!(landing.status(), StatusCode::SEE_OTHER);
+    assert_eq!(landing.headers()["location"], "/");
+    assert_eq!(landing.headers()["cache-control"], "no-store");
+    assert_eq!(landing.headers()["referrer-policy"], "no-referrer");
+    let cookie = landing.headers()["set-cookie"].to_str().unwrap();
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+    let cookie = cookie.split(';').next().unwrap();
+    assert_eq!(
+        http.get(link).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    for _ in 0..2 {
+        let response = http
+            .post(format!("{base}api/rpc"))
+            .header("cookie", cookie)
+            .header("origin", base.trim_end_matches('/'))
+            .json(&json!({"method":"runtime.health","params":{}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["result"]["status"],
+            "ok"
+        );
+    }
+    assert_eq!(
+        http.post(format!("{base}api/rpc"))
+            .header("cookie", cookie)
+            .header("origin", "https://evil.invalid")
+            .json(&json!({"method":"runtime.health","params":{}}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        http.post(format!("{base}api/browser/launch"))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let logout = http
+        .post(format!("{base}api/browser/logout"))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert!(
+        logout.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert_eq!(
+        http.post(format!("{base}api/rpc"))
+            .header("cookie", cookie)
+            .json(&json!({"method":"runtime.health","params":{}}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    fixture.close().await;
+}
