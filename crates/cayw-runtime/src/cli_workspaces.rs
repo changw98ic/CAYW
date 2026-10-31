@@ -17,6 +17,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 pub struct Workspaces {
     paths: LocalPaths,
     offline: bool,
+    discoverable: bool,
     children: BTreeMap<String, Child>,
 }
 #[derive(Deserialize)]
@@ -28,10 +29,11 @@ struct Open {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 impl Workspaces {
-    pub fn new(paths: LocalPaths, offline: bool) -> Self {
+    pub fn new(paths: LocalPaths, offline: bool, discoverable: bool) -> Self {
         Self {
             paths,
             offline,
+            discoverable,
             children: BTreeMap::new(),
         }
     }
@@ -51,6 +53,9 @@ impl Workspaces {
         params: Value,
         cancel: CancellationToken,
     ) -> Result<Value> {
+        if !self.discoverable {
+            return Err("workspace switching requires the default local database and IPC discovery; use cayw start for registered local workspaces".into());
+        }
         let mut exited = Vec::new();
         for (id, child) in &mut self.children {
             if child.try_wait()?.is_some() {

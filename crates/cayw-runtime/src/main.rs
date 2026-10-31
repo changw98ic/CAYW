@@ -292,7 +292,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mut settings = cli_settings::Settings {
         #[cfg(feature = "plugins")]
         plugins: cli_plugins::Plugins::new(settings_paths.state_file("plugins.json")),
-        workspaces: cli_workspaces::Workspaces::new(settings_paths.clone(), offline),
+        workspaces: cli_workspaces::Workspaces::new(settings_paths.clone(), offline, discoverable),
         pi_enabled: false,
         paths: settings_paths,
         offline,
