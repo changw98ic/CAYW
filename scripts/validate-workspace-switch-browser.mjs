@@ -73,7 +73,7 @@ try {
   const reusedB=await rpc('settings.workspaces.open',{id:id('B')});
   assert.equal(reusedB.reused,true);assert.equal(reusedB.managed,true);assert(!('ipc_addr' in reusedB));
   checks.push('switch A to managed B keeps original running Task/Attempt/fence and request; repeat open reuses runtime; cross-owner requests rejected');
-  await page.locator('#session-label').fill('B isolated');await page.locator('#create-button').click();
+  await page.locator('#session-label').fill('B isolated');await page.locator('#session-device').fill('local');await page.locator('#create-button').click();
   await page.locator('#session-title').filter({hasText:'B isolated'}).waitFor();
   assert.equal((await rpc('session.list',{},id('B'))).length,1);
   assert.equal((await rpc('session.list')).length,1);

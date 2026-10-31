@@ -1865,7 +1865,7 @@ function boot() {
     try {
       const params = { label: ui['session-label'].value.trim() };
       const deviceVal = ui['session-device']?.value?.trim();
-      if (deviceVal) params.device_id = deviceVal;
+      if (deviceVal && deviceVal !== 'local') params.device_id = deviceVal;
       const snapshot = await rpc('session.create', params);
       sessionWorkspaces.set(snapshot.id, scope);
       if (login !== loginGeneration || scope !== workspaceId) return;
