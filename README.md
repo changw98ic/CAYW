@@ -73,7 +73,7 @@ return { files = files, matches = matches }
 
 macOS Apple Silicon 发行包解压后，在包目录运行 `sh install.sh` 即可安装 `cayw`、`cayw-tui`、`cayw-webui` 和 `cayw-client`，默认位置为 `~/.local/bin`。用 `--prefix DIR` 改到 `DIR/bin`；目标已有不同程序时需加 `--force`。脚本会核对 `SHA256SUMS`，不联网、不使用 sudo、不修改 shell 配置。`scripts/install-cli.sh` 是发行包安装入口，发布时位于包根目录并命名为 `install.sh`；从源码构建仍需下面的 Cargo 命令。
 
-安装完整发行包后，在项目目录直接运行 `cayw` 即可启动或复用 Runtime 并进入 TUI；`cayw start` 是同一入口。网页是可选界面，使用 `cayw --ui web` 显式启动，本地默认免登录。显式 `--lan IP:PORT` 开放局域网访问，未配置账号时直接放行；可通过 `cayw account --username NAME` 配置可选账户，重启网页服务后启用账号密码登录。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立会话和模型方案。网页“工作区 / 模型 / 插件”可管理模型方案和本地 External 插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再经显式批准启动，普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
+安装完整发行包后，在项目目录直接运行 `cayw` 即可启动或复用 Runtime 并进入 TUI；`cayw start` 是同一入口。网页是可选界面，使用 `cayw --ui web` 显式启动，本地默认免登录。显式 `--lan IP:PORT` 开放局域网访问，未配置账号时直接放行；在本机网页“设置 → 局域网访问账号”中可配置或修改可选账号，保存后立即应用于当前局域网入口；本地访问仍免登录。局域网启动同时提供仅回环可达的本机管理地址，普通远端访客不能配置账号。CLI 账户命令保留为备用。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立会话和模型方案。网页“设置”可管理模型方案和本地 External 插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再经显式批准启动，普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
 
 
 需要 **Rust 1.95+** 从源码运行离线示例：

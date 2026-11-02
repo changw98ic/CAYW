@@ -6,12 +6,18 @@ mod ownership;
 mod workbench;
 
 pub use access::{LanAccount, WebAccess};
+
+/// Host-selected account path and optional paired loopback management listener.
+pub struct AccountSettings {
+    pub path: std::path::PathBuf,
+    pub local_listener: Option<tokio::net::TcpListener>,
+}
 pub use ownership::OwnershipStore;
 
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
+    extract::{ConnectInfo, DefaultBodyLimit, Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -279,6 +285,7 @@ struct Gateway {
     web_token: String,
     browser: access::BrowserAccess,
     authorities: Vec<String>,
+    management_authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
     pending_prompts: Semaphore,
@@ -327,6 +334,7 @@ pub async fn serve_with_limits(
         WebAccess::LegacyBearer(web_token.into()),
         limits,
         None,
+        None,
         cancel,
     )
     .await
@@ -352,6 +360,7 @@ pub async fn serve_with_ownership(
         WebAccess::LegacyBearer(web_token.into()),
         limits,
         Some(ownership),
+        None,
         cancel,
     )
     .await
@@ -368,7 +377,30 @@ pub async fn serve_configured(
     ownership: Option<Arc<OwnershipStore>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
-    serve_inner(listener, devices, access, limits, ownership, cancel).await
+    serve_inner(listener, devices, access, limits, ownership, None, cancel).await
+}
+
+/// Serve a browser with local-only account settings. LAN listeners can share
+/// the same gateway with a paired loopback listener, without exposing management.
+pub async fn serve_with_account_settings(
+    listener: TcpListener,
+    devices: Arc<DeviceRouter>,
+    access: WebAccess,
+    limits: GatewayLimits,
+    ownership: Option<Arc<OwnershipStore>>,
+    settings: AccountSettings,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    serve_inner(
+        listener,
+        devices,
+        access,
+        limits,
+        ownership,
+        Some(settings),
+        cancel,
+    )
+    .await
 }
 
 async fn serve_inner(
@@ -377,6 +409,7 @@ async fn serve_inner(
     access: WebAccess,
     limits: GatewayLimits,
     ownership: Option<Arc<OwnershipStore>>,
+    settings: Option<AccountSettings>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     let address = listener.local_addr()?;
@@ -405,11 +438,34 @@ async fn serve_inner(
             format!("failed to seed WebUI panel workbench: {error}"),
         )
     })?);
+    let mut authorities = vec![address.to_string()];
+    if address.ip().is_loopback() {
+        authorities.push(format!("localhost:{}", address.port()));
+    }
+    let mut management_authorities = Vec::new();
+    let (account_path, local_listener) = match settings {
+        Some(settings) => (Some(settings.path), settings.local_listener),
+        None => (None, None),
+    };
+    if account_path.is_some() && matches!(access, WebAccess::Local) {
+        management_authorities = authorities.clone();
+    }
+    if let Some(listener) = &local_listener {
+        let address = listener.local_addr()?;
+        if !address.ip().is_loopback() {
+            return Err(io::Error::other(
+                "Account management listener must bind loopback",
+            ));
+        }
+        management_authorities = vec![address.to_string(), format!("localhost:{}", address.port())];
+        authorities.extend(management_authorities.clone());
+    }
     let state = Arc::new(Gateway {
         devices,
         web_token,
-        browser: access::BrowserAccess::new(access, address.port()),
-        authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
+        browser: access::BrowserAccess::new(access, address.port(), account_path),
+        authorities,
+        management_authorities,
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
         pending_prompts: Semaphore::new(limits.max_pending_requests.saturating_sub(1).max(1)),
@@ -432,9 +488,37 @@ async fn serve_inner(
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await
+    // Cancellation also stops the paired listener when this serving future is
+    // dropped; an admin request can never outlive the gateway's owned lifecycle.
+    let _stop_on_drop = cancel.clone().drop_guard();
+    let admin = local_listener.map(|listener| {
+        let app = app.clone();
+        let stop = cancel.clone();
+        let shutdown = cancel.clone();
+        tokio::spawn(async move {
+            let result = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await;
+            if result.is_err() {
+                stop.cancel();
+            }
+            result
+        })
+    });
+    let result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(cancel.clone().cancelled_owned())
+    .await;
+    cancel.cancel();
+    if let Some(admin) = admin {
+        admin.await.map_err(io::Error::other)??;
+    }
+    result
 }
 
 /// One policy for IPC and web credentials. The host must generate independent
@@ -516,13 +600,25 @@ async fn guarded_request(state: &Gateway, mut request: Request, next: Next) -> R
             false,
         );
     }
-    if let Some(response) = state.browser.handle(&mut request).await {
+    // Only the accepted socket peer establishes locality; forwarded headers
+    // and client-supplied Host alone never grant account administration.
+    let manager = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|peer| peer.0.ip().is_loopback())
+        && one_header(request.headers(), "host").is_some_and(|host| {
+            state
+                .management_authorities
+                .iter()
+                .any(|allowed| allowed == host)
+        });
+    if let Some(response) = state.browser.handle(&mut request, manager).await {
         return response;
     }
     if request.uri().path() != "/api/rpc" && request.uri().path() != "/api/panels" {
         return next.run(request).await;
     }
-    if !state.browser.authenticated(request.headers()) {
+    if !state.browser.authenticated(request.headers(), manager) {
         return error_response(
             if state.web_token.is_empty() {
                 StatusCode::UNAUTHORIZED

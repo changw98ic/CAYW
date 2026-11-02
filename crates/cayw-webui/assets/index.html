@@ -43,7 +43,7 @@
         <p id="workspace-switch-status" class="small muted" role="status">连接后读取已登记工作区。</p>
       </section>
       <details id="optional-tools"><summary>可选工具状态与安装</summary><button id="refresh-optional-tools" type="button" class="quiet">刷新安装状态</button><div id="optional-tools-status" class="small muted">连接后读取本机安装状态。</div></details>
-      <button id="open-settings" type="button">工作区 / 模型 / 插件</button>
+      <button id="open-settings" type="button">设置（模型 / 插件 / 账号）</button>
       <div class="section-heading"><h2 id="sessions-heading">会话</h2><button id="refresh-sessions" class="quiet" type="button">刷新</button></div>
       <form id="create-form" class="create-form">
         <label for="session-label" class="small">新会话名称</label>
@@ -111,10 +111,20 @@
     <form id="fork-form"><label for="fork-label">新会话名称</label><input id="fork-label" maxlength="160" required><label class="confirm-label"><input id="fork-confirm" type="checkbox" required>我确认新建普通聊天分支，并理解原会话仍被冻结。</label><p id="fork-error" class="error" role="alert"></p><div class="dialog-actions"><button id="close-fork" class="secondary" type="button">返回</button><button id="fork-button" type="submit">确认 Fork</button></div></form>
   </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-heading">
-    <div class="section-heading"><h2 id="settings-heading">工作区设置</h2><button id="close-settings" type="button" class="quiet">关闭</button></div>
+    <div class="section-heading"><h2 id="settings-heading">设置</h2><button id="close-settings" type="button" class="quiet">关闭</button></div>
     <p id="settings-workspace" class="small muted"></p>
     <p class="small muted">每个工作区固定自己的目录和会话数据库。使用侧栏的工作区选择器切换；旧工作区的任务继续运行。新目录先通过本机 cayw init --workspace DIR 登记。</p>
     <p id="settings-status" role="status" aria-live="polite"></p>
+    <h3>局域网访问账号（可选）</h3>
+    <p class="small muted">此账号保护本网页服务中的所有工作区。本地访问始终免登录，未配置账号时局域网直接放行。只有运行 CAYW 的电脑上的本机管理入口可以保存或修改账号。有局域网入口时保存立即生效，并要求局域网页面重新登录；仅本地模式时，账号供下次局域网启动使用。</p>
+    <p id="account-settings-status" role="status" aria-live="polite">正在读取账号状态…</p>
+    <form id="account-settings-form">
+      <label for="account-username">账号</label><input id="account-username" autocomplete="username" maxlength="80" required disabled>
+      <label for="account-password">新密码</label><input id="account-password" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required disabled>
+      <label for="account-confirm">确认新密码</label><input id="account-confirm" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required disabled>
+      <button id="save-account" type="submit" disabled>保存账号</button>
+    </form>
+    <button id="refresh-account" type="button" class="secondary">刷新账号状态</button>
     <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。只保存密钥环境变量名称；服务启动时需已有该变量。保存不发送模型请求。</p>
     <div id="model-profiles"></div>
     <form id="model-settings-form">

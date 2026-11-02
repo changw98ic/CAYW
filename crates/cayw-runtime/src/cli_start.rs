@@ -48,9 +48,6 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     if (lan.is_some() || account_file.is_some()) && ui != "web" {
         return Err("--lan and --account-file require explicit --ui web".into());
     }
-    if account_file.is_some() && lan.is_none() {
-        return Err("--account-file requires --lan".into());
-    }
     let paths = LocalPaths::from_environment(workspace)?;
     paths.initialize()?;
     let executable = std::env::current_exe()?;
@@ -91,16 +88,14 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
                             paths.workspace.to_string_lossy().into_owned(),
                         ]);
                     }
-                    let ready: Value = serde_json::from_slice(&ready)?;
-                    if ready["access"]
-                        != if options.lan.is_some() {
-                            "lan"
-                        } else {
-                            "local"
-                        }
-                        && ui == "web"
-                    {
-                        return Err("existing WebUI uses another access mode; stop its owning launcher before changing mode".into());
+                    let mut ready: Value = serde_json::from_slice(&ready)?;
+                    if ui == "web" && options.lan.is_none() && ready["access"] == "lan" {
+                        ready["lan_url"] = ready["url"].clone();
+                        ready["url"] = ready["local_url"].clone();
+                        ready["access"] = json!("local");
+                        ready["login_required"] = json!(false);
+                    } else if ui == "web" && options.lan.is_some() && ready["access"] != "lan" {
+                        return Err("existing WebUI is local-only; stop its owning launcher before enabling LAN".into());
                     }
                     present(ready, no_open).await?;
                     return Ok(());
@@ -229,12 +224,9 @@ async fn start(
                 .env("CAYW_WEB_ADDR", "127.0.0.1:0")
                 .stdout(Stdio::piped())
                 .stdin(Stdio::null());
+            command.arg("--account-file").arg(&options.account_file);
             if let Some(lan) = &options.lan {
-                command
-                    .arg("--lan")
-                    .arg(lan)
-                    .arg("--account-file")
-                    .arg(&options.account_file);
+                command.arg("--lan").arg(lan);
             }
             children.push(command.spawn()?);
             let child = children.last_mut().expect("owned web UI");
@@ -248,6 +240,7 @@ async fn start(
             ready["url"] = web["url"].clone();
             ready["access"] = web["access"].clone();
             ready["login_required"] = web["login_required"].clone();
+            ready["local_url"] = web["local_url"].clone();
         } else {
             children.push(command.spawn()?);
         }
@@ -293,8 +286,40 @@ async fn present(mut ready: Value, no_open: bool) -> Result<()> {
         return Ok(());
     }
     if ready["ui"] == "web" {
-        let url = ready["url"]
+        // Account settings can change the shared LAN policy while this launcher
+        // is running. Report live state rather than the private startup snapshot.
+        let status_url = format!(
+            "{}api/auth/status",
+            ready["url"].as_str().ok_or("missing browser URL")?
+        );
+        let current: Result<Value> = async {
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
+                .build()?
+                .get(status_url)
+                .send()
+                .await?
+                .error_for_status()?;
+            Ok(response.json().await?)
+        }
+        .await;
+        match current {
+            Ok(status) => {
+                ready["login_required"] = status["login_required"].clone();
+                ready["lan_login_enabled"] = status["lan_login_enabled"].clone();
+            }
+            Err(error) => {
+                ready["login_required"] = Value::Null;
+                eprintln!(
+                    "Browser login state could not be confirmed: {error}; inspect the page status."
+                );
+            }
+        }
+        let url = ready["local_url"]
             .as_str()
+            .or_else(|| ready["url"].as_str())
             .ok_or("missing browser URL")?
             .to_owned();
         if let Some(reason) = open_skip_reason(no_open) {

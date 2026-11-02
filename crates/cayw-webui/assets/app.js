@@ -12,6 +12,13 @@ const safeCursor = value => Number.isSafeInteger(value) && value >= 0;
 const array = value => Array.isArray(value) ? value : [];
 const recordText = value => clip(JSON.stringify(value, null, 2) ?? '', MAX_RECORD);
 
+function renderLanNotice(open) {
+  const target = document.getElementById('network-notice');
+  if (!target) return;
+  target.replaceChildren();
+  if (open) { const note = document.createElement('p'); note.className = 'notice'; note.textContent = '局域网访问已开放，未配置账号，网络内可直接访问。请在运行 CAYW 的电脑上打开本机管理页面，在设置中配置可选账号。'; target.append(note); }
+}
+
 function localServiceUrl(baseUrl) {
   let url;
   try { url = new URL(baseUrl); } catch { throw new Error('请填写服务启动时输出的完整本机地址。'); }
@@ -1336,6 +1343,7 @@ function boot() {
     ui['workspace'].hidden = true;
     ui['logout'].hidden = true;
     ui['login-panel'].hidden = false;
+    if (authMode === 'lan') { loginRequired = true; ui['account-fields'].hidden = false; }
     ui['login-error'].textContent = reason;
     ui['connection-status'].textContent = '尚未连接';
     ui['password'].value = '';
@@ -1809,7 +1817,7 @@ function boot() {
       const access = await response.json();
       if (!['local','lan'].includes(access.mode)) throw new Error('网页与网关版本不匹配。');
       authMode = access.mode; loginRequired = Boolean(access.login_required); ui['account-fields'].hidden = !loginRequired;
-      if (authMode === 'lan' && !loginRequired) { const note = document.createElement('p'); note.className = 'notice'; note.textContent = '局域网访问已开放，未配置账号，网络内可直接访问。可使用 cayw account 配置账户，重启网页服务后启用登录。'; document.getElementById('network-notice').replaceChildren(note); }
+      renderLanNotice(access.lan_active === true && access.lan_login_enabled !== true);
       ui['login-button'].disabled = false;
       if (access.authenticated || authMode === 'local') await connect();
       else { ui['login-error'].textContent = '请使用账号密码登录'; ui.username.focus(); }
@@ -2102,6 +2110,47 @@ function mountSettings(rpc, selectedSession) {
     catch (error) { status(error.message || String(error)); }
     finally { busy = false; dialog.removeAttribute('aria-busy'); }
   }
+  let accountRevision = null;
+  let accountCanManage = false;
+  let accountBusy = false;
+  const clearAccountPasswords = () => { $('account-password').value = ''; $('account-confirm').value = ''; };
+  function accountControls() {
+    for (const id of ['account-username','account-password','account-confirm','save-account']) $(id).disabled = !accountCanManage || accountBusy;
+  }
+  function showAccount(state) {
+    accountRevision = state.revision ?? null; accountCanManage = state.can_manage === true;
+    if (!$('account-username').value || !accountBusy) $('account-username').value = state.username || '';
+    $('account-settings-status').textContent = state.message || '账号状态已读取。';
+    renderLanNotice(state.lan_active === true && state.login_required !== true);
+    accountControls();
+  }
+  async function refreshAccount() {
+    try {
+      const response = await fetch('/api/settings/account', {credentials:'same-origin',cache:'no-store'});
+      const state = await response.json();
+      if (!response.ok) throw new Error(state.error?.message || '无法读取账号状态');
+      showAccount(state);
+    } catch (error) { accountCanManage = false; accountControls(); $('account-settings-status').textContent = error.message || '账号状态未确认，请刷新重试。'; }
+  }
+  $('account-settings-form').addEventListener('submit', async event => {
+    event.preventDefault(); if (accountBusy || !accountCanManage) return;
+    const values = {username:$('account-username').value,password:$('account-password').value,confirm_password:$('account-confirm').value,expected_revision:accountRevision};
+    clearAccountPasswords();
+    if (values.password !== values.confirm_password) { $('account-settings-status').textContent = '两次密码不一致，未保存。'; return; }
+    accountBusy = true; accountControls(); $('account-settings-status').textContent = '正在保存账号…';
+    try {
+      const response = await fetch('/api/settings/account', {method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});
+      const state = await response.json();
+      if (!response.ok) { if (state.error?.outcome_unknown) accountCanManage = false; throw new Error(state.error?.message || '保存未完成，请刷新账号状态核对。'); }
+      showAccount(state);
+      // The server's current status distinguishes immediate LAN activation
+      // from a local-only gateway saving an account for its next LAN launch.
+    } catch (error) { const unconfirmed = error instanceof TypeError || error instanceof SyntaxError; if (unconfirmed) accountCanManage = false; $('account-settings-status').textContent = unconfirmed ? '保存回执未确认，请刷新账号状态核对；不会自动重试。' : error.message; }
+    finally { accountBusy = false; accountControls(); clearAccountPasswords(); }
+  });
+  $('refresh-account').addEventListener('click', () => { if (!accountBusy) refreshAccount(); });
+  dialog.addEventListener('close', clearAccountPasswords);
+  window.addEventListener('pagehide', clearAccountPasswords);
   const modelForm = $('model-settings-form');
   const serviceDefaults = {
     openai: ['https://api.openai.com/v1', 'OPENAI_API_KEY', ['chat_completions', 'responses']],
@@ -2125,6 +2174,7 @@ function mountSettings(rpc, selectedSession) {
   }
 
   async function refresh() {
+    await refreshAccount();
     const workspace = await rpc('settings.workspace');
     $('settings-workspace').textContent = `当前目录：${workspace.workspace}${workspace.offline ? ' · 离线演示' : ''}\n已登记工作区：${(workspace.known_workspaces || []).join('、')}`;
     const models = await rpc('settings.models.list');

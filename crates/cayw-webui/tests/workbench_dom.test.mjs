@@ -66,6 +66,7 @@ async function setupApp(t, handler) {
   const calls = [];
   const openedWindows = [];
   const server = createServer(async (req, res) => {
+    if (req.url === '/api/settings/account') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({can_manage:false,configured:false,message:'仅本机管理入口可配置账号'})); return; }
     if (req.url === '/api/auth/status') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({mode:'local',authenticated:true})); return; }
     if (req.url === '/api/auth/logout') { res.writeHead(204); res.end(); return; }
     let body = '';
