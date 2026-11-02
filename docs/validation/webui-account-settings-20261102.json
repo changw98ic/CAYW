@@ -1,0 +1,261 @@
+{
+  "code_commit": "73ffd3fce384026dad6c204749c7451703820b51",
+  "baseline": "0e2b2596a67b98ab5c048974b08523413eaf33c5",
+  "previous_delivery": "49d3f69c2d20a8e27566b288da6346884716dc8e",
+  "branch": "feat/product-workflows-20261031",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "binaries": {
+    "cayw": {
+      "path": "/tmp/cayw-account-ui-frozen-binaries/cayw",
+      "sha256": "0f5ddbdf25c36e574043aff6a51c136ed8c6a155a589d56fb0303a7b05380a83"
+    },
+    "cayw-webui": {
+      "path": "/tmp/cayw-account-ui-frozen-binaries/cayw-webui",
+      "sha256": "bdd1054129e3d8fa0f3acd1181710d9fcc577359f04ae93a07f31e258c7f661d"
+    },
+    "cayw-tui": {
+      "path": "/tmp/cayw-account-ui-frozen-binaries/cayw-tui",
+      "sha256": "f0a091fa038357d92ca88402b7bc439db7e0bd85781342105163060710b03a03",
+      "unchanged_reused_fixture_or_ui": true
+    },
+    "cayw-runtime-plugin-fixture": {
+      "path": "/tmp/cayw-account-ui-frozen-binaries/cayw-runtime-plugin-fixture",
+      "sha256": "179f44be0e9e9fb8cd58a87462a13af3176a7c6154b574f2c83b6944674db527",
+      "unchanged_reused_fixture_or_ui": true
+    }
+  },
+  "checks": {
+    "build-frozen": {
+      "argv": [
+        "cargo",
+        "build",
+        "-p",
+        "cayw-runtime",
+        "-p",
+        "cayw-webui",
+        "--features",
+        "plugins",
+        "--bin",
+        "cayw",
+        "--bin",
+        "cayw-webui",
+        "--locked",
+        "--offline"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:01:27.880004+00:00",
+      "finished_utc": "2026-11-02T03:01:32.573292+00:00",
+      "exit_code": 0,
+      "log_sha256": "9aac75009924df8a322344efa677749d576a0ca5825e064dcf39e0cc8e3bb77b"
+    },
+    "fmt": {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:01:30.420198+00:00",
+      "finished_utc": "2026-11-02T03:01:34.045132+00:00",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "focused-check": {
+      "argv": [
+        "cargo",
+        "check",
+        "-p",
+        "cayw-runtime",
+        "-p",
+        "cayw-webui",
+        "--features",
+        "plugins",
+        "--locked",
+        "--offline"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:01:34.077211+00:00",
+      "finished_utc": "2026-11-02T03:01:35.486282+00:00",
+      "exit_code": 0,
+      "log_sha256": "862dc8d9d1c6981ec6efe89facc6588974541b105ac438f5a7c1b474e0722d07"
+    },
+    "gateway": {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "cayw-webui",
+        "--locked",
+        "--offline"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:01:29.130690+00:00",
+      "finished_utc": "2026-11-02T03:01:42.826730+00:00",
+      "exit_code": 0,
+      "log_sha256": "7295983ff6cd3fd53049873398485264046fbb1e3b7999e774391b3848814c86"
+    },
+    "product-clippy": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "cayw-runtime",
+        "-p",
+        "cayw-webui",
+        "--features",
+        "cayw-runtime/plugins,cayw-runtime/pi-compat,cayw-runtime/strongflow",
+        "--lib",
+        "--bin",
+        "cayw",
+        "--bin",
+        "cayw-webui",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "dead_code",
+        "-A",
+        "unused_mut",
+        "-A",
+        "unreachable_code",
+        "-A",
+        "clippy::useless_conversion"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T02:58:31.523003+00:00",
+      "finished_utc": "2026-11-02T02:58:33.934515+00:00",
+      "exit_code": 0,
+      "log_sha256": "098dd5ffcb5a4501d49ff982570ddcc9e263a111006256ea0f90d35861b47ea9"
+    },
+    "webui-strict-clippy": {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "cayw-webui",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T02:58:29.534006+00:00",
+      "finished_utc": "2026-11-02T02:58:31.343021+00:00",
+      "exit_code": 0,
+      "log_sha256": "759e782f518c2a1fd4e754d8b61c8ad20950653df7bf986548c93addcfea9187"
+    },
+    "ui-state": {
+      "argv": [
+        "node",
+        "--test",
+        "crates/cayw-webui/tests/core-protocol.mjs",
+        "crates/cayw-webui/tests/state.test.mjs",
+        "crates/cayw-webui/tests/ui.test.mjs",
+        "crates/cayw-webui/tests/workbench.test.mjs",
+        "crates/cayw-webui/tests/dom.test.mjs",
+        "crates/cayw-webui/tests/workbench_dom.test.mjs"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T02:58:30.805407+00:00",
+      "finished_utc": "2026-11-02T02:58:36.573451+00:00",
+      "exit_code": 0,
+      "log_sha256": "a53d6d235a44892ae14360af460f7b601f2945a2bc9970bc62ab6a196e76a13d"
+    },
+    "account-settings-browser": {
+      "argv": [
+        "node",
+        "scripts/validate-account-settings-browser.mjs",
+        "/tmp/cayw-account-ui-frozen-binaries",
+        "/tmp/cayw-account-ui-browser-frozen"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:03:20.627999+00:00",
+      "finished_utc": "2026-11-02T03:03:33.601046+00:00",
+      "exit_code": 0,
+      "log_sha256": "5399e44b23469d7d8950d46ab99307d5b1a25eb1e5de86e498be5b3f3ecdb772"
+    },
+    "product-settings-browser": {
+      "argv": [
+        "node",
+        "scripts/validate-product-settings-browser.mjs",
+        "/tmp/cayw-account-ui-frozen-binaries",
+        "/tmp/cayw-account-ui-product-browser-frozen"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:03:20.635244+00:00",
+      "finished_utc": "2026-11-02T03:03:34.896191+00:00",
+      "exit_code": 0,
+      "log_sha256": "9818b33e2a0957da34836e8dd11a7d28f34c4d42e5a2c7b91bf5cd14f20dd7a5"
+    },
+    "workspace-browser": {
+      "argv": [
+        "node",
+        "scripts/validate-workspace-switch-browser.mjs",
+        "/tmp/cayw-account-ui-frozen-binaries",
+        "/tmp/cayw-account-ui-workspaces-frozen"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:03:20.654504+00:00",
+      "finished_utc": "2026-11-02T03:03:26.456477+00:00",
+      "exit_code": 0,
+      "log_sha256": "92ec433f1b557dffca622db5c0882cb767b5253ea9538a621527322c427483c3"
+    },
+    "product-cli": {
+      "argv": [
+        "python3",
+        "scripts/validate-product-workflows.py",
+        "/tmp/cayw-account-ui-frozen-binaries",
+        "/tmp/cayw-account-ui-product-cli-frozen"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:03:20.677313+00:00",
+      "finished_utc": "2026-11-02T03:03:47.155210+00:00",
+      "exit_code": 0,
+      "log_sha256": "dcbb883f7dee1f467faa2876b91270e3438a87710f133eaa075fe3799e44d797"
+    },
+    "default-tui": {
+      "argv": [
+        "python3",
+        "scripts/validate-default-entry.py",
+        "/tmp/cayw-account-ui-frozen-binaries",
+        "/tmp/cayw-account-ui-default-frozen"
+      ],
+      "cwd": "/workspace/CAYW",
+      "started_utc": "2026-11-02T03:03:20.652877+00:00",
+      "finished_utc": "2026-11-02T03:03:22.675023+00:00",
+      "exit_code": 0,
+      "log_sha256": "ba5b3bf6162e686c677a77fd3d0cf654d5c27cd400782d74fe2e19f21a9c70c9"
+    }
+  },
+  "account_settings": {
+    "passed": true,
+    "platform": "linux",
+    "checks": [
+      "unconfigured LAN still opens; actual non-loopback browser and forged Host/forwarded headers cannot claim local account management",
+      "settings entry reports account state; mismatched passwords never post; real save failure is explicit and leaves LAN unconfigured/open; password inputs clear",
+      "browser settings save atomically stores only a 0600 Argon2id digest and immediately enables LAN login; double submit posts once; stale duplicate is 409 without overwrite; Host/Origin restrictions remain",
+      "configured LAN rejects bad login, accepts saved password and refreshes; remote logged-in users still cannot alter account; local password update revokes old sessions; logout and local exemption work",
+      "repeated local WebUI command reaches paired management; both listeners shut down; local-only mode explains future LAN activation; saved account survives restart"
+    ],
+    "errors": [],
+    "peer_validation": "same cloud container private interface, real non-loopback TCP peer",
+    "macos": "not run"
+  },
+  "operation": "cayw --ui web -> Settings -> Optional LAN account -> username, new password, confirm -> Save. LAN launch provides a paired loopback local_url; cayw --ui web while LAN is active opens that management address.",
+  "activation": "With an active LAN listener, save immediately enables/updates password login and revokes existing login sessions. With local-only mode, the UI explicitly reports that the saved account applies to the next LAN launch. Local management remains unauthenticated.",
+  "security": "Only a real loopback accepted TCP peer with an allowed management Host can mutate account settings. Forwarded headers, forged Host from a non-loopback TCP peer and authenticated remote sessions cannot grant management. Writes use opaque revision comparison, atomic replacement and a private lock. Write and live-state application complete in the owned blocking operation even if the HTTP receipt is lost.",
+  "limits": [
+    "macOS native terminal/browser and installer not run",
+    "Network proof uses the cloud container own private interface and real non-loopback TCP, not separate physical LAN hardware",
+    "LAN HTTP remains without TLS termination",
+    "Unrelated full workspace builds deliberately not repeated. Prior full test disk exhaustion and baseline non-macOS strict Clippy failures remain documented in previous evidence",
+    "Directory-fsync failure and actual network-loss receipt recovery are implemented but were not fault-injected in this run"
+  ],
+  "authorization": "Only synthetic temporary accounts, local provider fixtures and ephemeral browser state used. No real credentials or paid model calls; no push, PR, merge, deployment or release."
+}
