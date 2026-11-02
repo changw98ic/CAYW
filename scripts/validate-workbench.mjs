@@ -198,12 +198,12 @@ try {
   }, JSON.parse);
   assert.equal(providerRequests, 0, 'Starting Runtime must not call the model');
   const web = await start('cayw-webui', [], {
-    CAYW_IPC_ADDR: runtime.listening, CAYW_IPC_TOKEN: tokens.ipc, CAYW_WEB_TOKEN: tokens.web,
+    CAYW_IPC_ADDR: runtime.listening, CAYW_IPC_TOKEN: tokens.ipc,
     CAYW_OWNERSHIP_PATH: resolve(work, 'ownership.json'),
   }, line => { const match = line.match(/http:\/\/127\.0\.0\.1:\d+\//); assert(match, 'WebUI did not print its actual address'); return {url: match[0]}; });
   async function rpc(method, params = {}, allowError = false) {
     const response = await fetch(`${web.url}api/rpc`, {
-      method: 'POST', headers: {Authorization: `Bearer ${tokens.web}`, 'Content-Type': 'application/json', Origin: new URL(web.url).origin},
+      method: 'POST', headers: {'Content-Type': 'application/json', Origin: new URL(web.url).origin},
       body: JSON.stringify({method, params}), signal: AbortSignal.timeout(180000),
     });
     const body = await response.json();
@@ -223,8 +223,6 @@ try {
   const navigated = await page.goto(web.url);
   const csp = navigated.headers()['content-security-policy'];
   assert.equal(csp, "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'", 'Gateway CSP must remain restrictive');
-  await page.locator('#web-token').fill(tokens.web);
-  await page.locator('#login-button').click();
   await page.locator('#workspace').waitFor({state: 'visible'});
   await page.locator('#session-label').fill('Real workbench acceptance');
   await page.locator('#session-device').fill('local');
@@ -234,7 +232,7 @@ try {
   assert.equal(sessions.length, 1);
   const session = sessions[0].id;
   summary.session_id = session;
-  checks('WebUI authenticates, creates and selects a real local Runtime Session');
+  checks('Local WebUI connects without login, creates and selects a real Runtime Session');
   const editor = await start('cayw-visual-editor', ['--project', workspace, '--page', 'index.html', '--state-dir', resolve(work, 'editor-state'), '--addr', '127.0.0.1:0', '--preview-addr', '127.0.0.1:0'], {CAYW_EDITOR_TOKEN: tokens.editor}, JSON.parse);
   const trace = await start('cayw-trace-debug', ['--store', resolve(work, 'trace.json'), '--workspace', workspace, '--session', session], {
     CAYW_IPC_ADDR: runtime.listening, CAYW_IPC_TOKEN: tokens.ipc, CAYW_TRACE_WEB_TOKEN: tokens.trace,
