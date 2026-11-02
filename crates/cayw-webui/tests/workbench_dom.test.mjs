@@ -66,7 +66,8 @@ async function setupApp(t, handler) {
   const calls = [];
   const openedWindows = [];
   const server = createServer(async (req, res) => {
-    if (req.url === '/api/browser/logout') { res.writeHead(204); res.end(); return; }
+    if (req.url === '/api/auth/status') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({mode:'local',authenticated:true})); return; }
+    if (req.url === '/api/auth/logout') { res.writeHead(204); res.end(); return; }
     let body = '';
     for await (const chunk of req) body += chunk;
     const call = JSON.parse(body);
@@ -857,7 +858,7 @@ test('workbench_dom: tasks panel handles RPC errors with explicit failure displa
 
   assert.equal(app.ui.workspace.hidden, true, 'auth error hides workspace');
   assert.equal(app.ui['login-panel'].hidden, false, 'auth error shows login panel');
-  assert.ok(app.ui['login-error'].textContent.includes('cayw start'), 'expired login explains automatic command recovery');
+  assert.ok(app.ui['login-error'].textContent.includes('账号密码'), 'expired login explains account recovery');
 });
 
 test('workbench_dom: session switching synchronizes panel ownership and isolates per-session panel instances', async t => {

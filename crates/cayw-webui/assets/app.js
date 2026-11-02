@@ -384,7 +384,7 @@ if (typeof document !== 'undefined') boot();
 function boot() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
-    'login-panel', 'login-form', 'login-error', 'login-button', 'web-token', 'workspace', 'logout', 'connection-status',
+    'login-panel', 'login-form', 'login-error', 'login-button', 'username', 'password', 'account-fields', 'workspace', 'logout', 'connection-status',
     'create-form', 'session-label', 'session-device', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
@@ -394,7 +394,8 @@ function boot() {
     'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
     'wb-tasks', 'wb-usage', 'wb-artifacts', 'wb-plannotator', 'wb-editor', 'wb-trace',
   ].map(id => [id, $(id)]));
-  let token = '';
+  let authMode = 'local';
+  let loginRequired = false;
   let connected = false;
   let workspaceId = 'local';
   let workspaceBusy = false;
@@ -433,13 +434,12 @@ function boot() {
   async function rpc(method, params = {}, scope = sessionWorkspaces.get(params.session_id) || workspaceId) {
     const controller = new AbortController();
     controllers.add(controller);
-    const requestToken = token;
     let timeout;
     if (!['session.prompt', 'task.resume'].includes(method)) timeout = setTimeout(() => controller.abort(), method === 'settings.workspaces.open' ? 45000 : 15000);
     try {
       const response = await fetch('/api/rpc', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}) },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ method, params, workspace_id:scope }),
         signal: controller.signal,
         cache: 'no-store',
@@ -449,7 +449,7 @@ function boot() {
       try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '网关返回了无效 JSON；当前请求不会自动重发。', !readMethods.has(method), response.status); }
       if (!response.ok || payload?.error) {
         const detail = payload?.error;
-        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '本机登录已失效，请重新运行 cayw start 打开页面。' : detail?.message ?? `请求失败（HTTP ${response.status}）。`, typeof detail?.outcome_unknown === 'boolean' ? detail.outcome_unknown : !readMethods.has(method), response.status);
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '登录已失效，请重新输入账号密码。' : detail?.message ?? `请求失败（HTTP ${response.status}）。`, typeof detail?.outcome_unknown === 'boolean' ? detail.outcome_unknown : !readMethods.has(method), response.status);
       }
       if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '网关响应缺少 result；当前请求不会自动重发。', !readMethods.has(method), response.status);
       return payload.result;
@@ -472,12 +472,11 @@ function boot() {
   async function panelsApi(method, params = {}) {
     const controller = new AbortController();
     controllers.add(controller);
-    const requestToken = token;
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch('/api/panels', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}) },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ method, params }),
         signal: controller.signal,
         cache: 'no-store',
@@ -487,7 +486,7 @@ function boot() {
       try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '面板接口返回了无效 JSON。', false, response.status); }
       if (!response.ok || payload?.error) {
         const detail = payload?.error;
-        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '本机登录已失效，请重新运行 cayw start 打开页面。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
+        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '登录已失效，请重新输入账号密码。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
       }
       if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '面板响应缺少 result。', false, response.status);
       return payload.result;
@@ -1325,7 +1324,6 @@ function boot() {
     clearTimeout(timer);
     for (const controller of controllers) controller.abort();
     controllers.clear();
-    token = '';
     connected = false;
     selected = null;
     sessions = [];
@@ -1340,7 +1338,7 @@ function boot() {
     ui['login-panel'].hidden = false;
     ui['login-error'].textContent = reason;
     ui['connection-status'].textContent = '尚未连接';
-    ui['web-token'].value = '';
+    ui['password'].value = '';
     ui['messages'].replaceChildren();
     ui['event-log'].replaceChildren();
     ui['approvals'].replaceChildren();
@@ -1756,8 +1754,7 @@ function boot() {
 
   async function connect() {
     if (ui['login-button'].disabled) return;
-    token = ui['web-token'].value;
-    ui['web-token'].value = '';
+    ui['password'].value = '';
     ui['login-button'].disabled = true;
     ui['login-button'].textContent = '连接中…';
     ui['login-error'].textContent = '';
@@ -1769,7 +1766,7 @@ function boot() {
       connected = true;
       ui['login-panel'].hidden = true;
       ui['workspace'].hidden = false;
-      ui['logout'].hidden = false;
+      ui['logout'].hidden = !loginRequired;
       ui['connection-status'].textContent = '已连接本机';
       report(null);
       renderView();
@@ -1787,8 +1784,39 @@ function boot() {
       ui['login-button'].textContent = '连接';
     }
   }
-  ui['login-form'].addEventListener('submit', event => { event.preventDefault(); return connect(); });
-  connect();
+  ui['login-form'].addEventListener('submit', async event => {
+    event.preventDefault();
+    if (ui['login-button'].disabled) return;
+    if (loginRequired) {
+      ui['login-button'].disabled = true;
+      try {
+        const response = await fetch('/api/auth/login', {
+          method:'POST', credentials:'same-origin', cache:'no-store',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({username:ui.username.value,password:ui.password.value}),
+        });
+        if (!response.ok) { const payload = await response.json(); throw new Error(payload.error?.message || '登录失败'); }
+      } catch (error) { ui['login-error'].textContent = error.message; return; }
+      finally { ui.password.value = ''; ui['login-button'].disabled = false; }
+    }
+    return connect();
+  });
+  async function initializeAccess() {
+    ui['login-button'].disabled = true;
+    try {
+      const response = await fetch('/api/auth/status', {credentials:'same-origin',cache:'no-store'});
+      if (!response.ok) throw new Error('无法读取连接模式，请刷新重试。');
+      const access = await response.json();
+      if (!['local','lan'].includes(access.mode)) throw new Error('网页与网关版本不匹配。');
+      authMode = access.mode; loginRequired = Boolean(access.login_required); ui['account-fields'].hidden = !loginRequired;
+      if (authMode === 'lan' && !loginRequired) { const note = document.createElement('p'); note.className = 'notice'; note.textContent = '局域网访问已开放，未配置账号，网络内可直接访问。可使用 cayw account 配置账户，重启网页服务后启用登录。'; document.getElementById('network-notice').replaceChildren(note); }
+      ui['login-button'].disabled = false;
+      if (access.authenticated || authMode === 'local') await connect();
+      else { ui['login-error'].textContent = '请使用账号密码登录'; ui.username.focus(); }
+    } catch (error) { ui['login-error'].textContent = error.message; }
+    finally { ui['login-button'].disabled = false; }
+  }
+  initializeAccess();
 
   async function refreshWorkspaceCatalog() {
     const status = $('workspace-switch-status');
@@ -1857,9 +1885,9 @@ function boot() {
   mountSettings(rpc, () => selected);
   ui['logout'].addEventListener('click', async () => {
     try {
-      const response = await fetch('/api/browser/logout', { method:'POST', credentials:'same-origin' });
+      const response = await fetch('/api/auth/logout', { method:'POST', credentials:'same-origin' });
       if (!response.ok) throw new Error('无法注销本机会话，请重试。');
-      disconnect('已断开。重新运行 cayw start 即可打开并连接。');
+      disconnect('已退出，请重新登录。');
     } catch (error) { report(error); }
   });
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
@@ -2051,7 +2079,7 @@ function boot() {
     if (!document.hidden && connected && selected) schedulePoll(0);
   });
   window.addEventListener('online', () => { if (connected && selected) schedulePoll(0); });
-  window.addEventListener('pagehide', () => { token = ''; for (const controller of controllers) controller.abort(); });
+  window.addEventListener('pagehide', () => { ui.password.value = ''; for (const controller of controllers) controller.abort(); });
 }
 
 // Host settings share the existing authenticated RPC and its cancellation/error

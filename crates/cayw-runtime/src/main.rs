@@ -23,7 +23,7 @@ use cayw_sources::{InstalledServer, install_mcp_servers_file};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
 
-const USAGE: &str = "cayw start [--workspace DIR] [--ui web|tui|none] [--offline]\ncayw models --help\ncayw plugins --help\ncayw init [--workspace DIR]\ncayw configure [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nFirst use automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nThe workspace defaults to the current directory. Each workspace has its own SQLite database.\ninit creates private configuration, an IPC token and the database without starting a service. Existing files are kept.\nserve also initializes automatically; cayw-client discovers its local connection from the same workspace.\nRun `cayw tui` in another terminal in that workspace for the interactive terminal interface.\nRun `cayw configure` to set up a model in ~/.cayw/config.json (or use --config PATH).\nWithout a model, a terminal serve offers guided setup; noninteractive use prints the next step.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nWithout a model, serve accepts queries but rejects task execution with model_not_configured before admission.\nStarting a server and creating sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
+const USAGE: &str = "cayw [--workspace DIR] [--offline]                 # defaults to TUI\ncayw --ui web [--workspace DIR] [--no-open]       # optional local WebUI\ncayw --ui web --lan IP:PORT [--account-file FILE] # LAN access; account optional\ncayw account --username NAME [--workspace DIR]\ncayw start [--workspace DIR] [--ui web|tui|none] [--offline]\ncayw models --help\ncayw plugins --help\ncayw init [--workspace DIR]\ncayw configure [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nFirst use automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nThe workspace defaults to the current directory. Each workspace has its own SQLite database.\ninit creates private configuration, an IPC token and the database without starting a service. Existing files are kept.\nserve also initializes automatically; cayw-client discovers its local connection from the same workspace.\nRun `cayw` to start or reuse the Runtime and open TUI in the current directory. `cayw tui` remains an attach-only command. WebUI starts only with --ui web. Local browser access has no login; explicit --lan allows network access without login unless an optional password account is configured.\nRun `cayw configure` to set up a model in ~/.cayw/config.json (or use --config PATH).\nWithout a model, a terminal serve offers guided setup; noninteractive use prints the next step.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens and api_key_env. Only that credential environment variable is read.\nWithout a model, serve accepts queries but rejects task execution with model_not_configured before admission.\nStarting a server and creating sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nThe server binds loopback only. Disconnects cancel that connection's in-flight prompts.";
 
 struct ServeBridgePolicy;
 #[async_trait]
@@ -112,12 +112,17 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args().skip(1);
     let Some(command) = arguments.next() else {
-        println!("{USAGE}");
-        return Ok(());
+        return cli_start::run(std::iter::empty()).await;
     };
-    if command == "--help" || command == "help" {
+    if command == "--help" || command == "-h" || command == "help" {
         println!("{USAGE}");
         return Ok(());
+    }
+    if command.starts_with("--") {
+        return cli_start::run(std::iter::once(command).chain(arguments)).await;
+    }
+    if command == "account" {
+        return cli_start::account(arguments).await;
     }
     if command == "start" {
         return cli_start::run(arguments).await;

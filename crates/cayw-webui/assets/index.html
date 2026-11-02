@@ -12,22 +12,23 @@
   <a class="skip" href="#conversation">跳到会话内容</a>
   <header class="topbar">
     <div class="identity"><span class="mark" aria-hidden="true">C</span><div><strong>CAYW</strong><span class="muted">本机会话</span></div></div>
-    <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="logout" class="quiet" hidden>断开</button></div>
+    <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="logout" class="quiet" hidden>退出登录</button></div>
   </header>
 
+  <div id="network-notice" role="status"></div>
   <section id="login-panel" class="login-panel" aria-labelledby="login-heading">
     <p class="eyebrow">从这里开始</p>
     <h1 id="login-heading">连接本机会话</h1>
-    <p class="muted">正在连接本机会话。登录过期时，在项目目录重新运行 <code>cayw start</code>，浏览器会自动打开并连接，无需输入密码或令牌。</p>
+    <p id="login-description" class="muted">本地模式自动连接，无需登录。局域网配置账号后，使用账号密码登录；未配置时直接连接。</p>
     <form id="login-form">
-      <button id="login-button" type="submit">重新连接</button>
-      <details><summary>独立网关高级连接</summary>
-        <label for="web-token">独立部署的网页访问令牌</label>
-        <input id="web-token" type="password" autocomplete="off" spellcheck="false" placeholder="仅独立网关需要">
-      </details>
+      <div id="account-fields" hidden>
+        <label for="username">账号</label><input id="username" type="text" autocomplete="username" maxlength="80">
+        <label for="password">密码</label><input id="password" type="password" autocomplete="current-password" maxlength="1024">
+      </div>
+      <button id="login-button" type="submit">连接</button>
     </form>
     <p id="login-error" class="error" role="alert"></p>
-    <p class="small muted">使用 --no-open 或 SSH 时，点击终端给出的短期启动链接。链接过期后重新运行 start 获取新链接。</p>
+
   </section>
 
   <div id="workspace" class="workspace" hidden>

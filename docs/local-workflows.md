@@ -2,32 +2,48 @@
 
 完整发行包包含同一源码版本构建的 `cayw`、`cayw-client`、`cayw-tui`、`cayw-webui`。首发范围仍为 macOS arm64。Core Only 可单独安装 Runtime，UI 和 plugins 不是 Core 依赖。
 
-```sh
-cayw start --workspace /你的项目          # 默认网页
-cayw start --workspace /你的项目 --ui tui
-cayw start --workspace /你的项目 --ui none # 仅服务
-```
-
-`start` 在前台管理自己启动的进程。默认在服务就绪后自动打开系统默认浏览器，直接进入可用页面，无需输入密码或内部 token。macOS 使用系统 `/usr/bin/open`。刷新通过本机 HttpOnly、SameSite=Strict cookie 恢复登录，并读取已有会话，不自动重发任务。点击“断开”撤销当前浏览器会话；再次运行 `cayw start` 自动重新连接。
+## 启动与访问
 
 ```sh
-cayw start --workspace /你的项目             # 自动打开默认浏览器
-cayw start --workspace /你的项目 --no-open   # 保持前台服务，只输出可点击入口
-cayw start --workspace /你的项目 --ui tui    # 终端界面
-cayw start --workspace /你的项目 --ui none   # 仅 Runtime
+cd /你的项目
+cayw                                  # 默认 TUI，当前目录是 workspace
+cayw --workspace /另一个项目           # 显式覆盖目录
+cayw start                            # 与裸命令相同，默认 TUI
+cayw --ui web                         # 可选网页，自动打开浏览器
+cayw --ui web --no-open               # 只输出普通 URL
+cayw --ui none                        # 仅 Runtime
+cayw --ui web --lan 192.168.1.10:3080  # 显式局域网，无账号时直接放行
 ```
 
-`--no-open`、继承非空 `SSH_CONNECTION` / `SSH_TTY` 或无桌面环境时不会尝试打开浏览器，输出 JSON 中的 `launch_url` 可直接点击。打开系统浏览器失败也保留服务并输出该入口。链接有效期 60 秒、仅能使用一次；过期、重复使用或无效链接会被拒绝，重新运行同一条 `cayw start` 获取新入口。重复启动复用原实例并自动打开新入口，不重新启动或停止原有服务；并发初始化时第二条命令等候就绪。
+`cayw` 自动启动或复用 Runtime，不要求先开 `serve`，不默认启动网页或浏览器。TUI、WebUI 是独立程序，TUI 不要求安装 WebUI。兼容命令 `cayw tui` 仍只连接已有 Runtime；`serve`、`init`、`configure`、模型和插件命令保留。启动不发送模型请求。
 
-SSH 场景仍仅监听远端 loopback。用户需先通过自己的 SSH 客户端转发同一端口（例如 `ssh -L PORT:127.0.0.1:PORT HOST`），再点击入口；启动器不猜测客户端的转发地址。网关校验精确 Host/Origin，不开放任意远程地址或目录。
+本地网页只监听回环地址，无登录、网页 token、launch ticket 或认证 cookie 的门槛。直接打开普通 URL 即可使用，刷新读取已有会话，不自动重发任务。`--no-open`、SSH_CONNECTION / SSH_TTY 非空或无桌面环境会跳过打开浏览器；系统打开失败仍保留服务和可用地址。SSH 转发保持相同端口，启动器不猜测客户端地址。macOS 使用 `/usr/bin/open` 打开默认浏览器。
 
-内部网页控制凭据与 IPC 凭据独立，只在私有文件和本机进程之间传递。启动器用该凭据向网关申请短期票据，浏览器入口验证后以 303 跳转清除 URL 票据，并签发 8 小时本机会话 cookie。票据与会话限定当前网关实例、接收地址，网关退出后均失效；重启通过新的自动交接恢复，不保存长期签名密钥。cookie 不可由 JavaScript 读取，不存入 localStorage/sessionStorage。独立部署 `cayw-webui` 的高级 Bearer 接口仍保留，常规 `start` 不要求找私有文件或输入凭据。
+`--lan IP:PORT` 必须明确选择 WebUI，并指定本机私有 IP（也接受回环 IP，便于隔离测试），不从环境变量隐式开启。账户文件不存在时正常启动、允许访问，终端和页面显示“局域网访问已开放，未配置账号，网络内可直接访问”。不会强迫初次配置或登录。Host/Origin/Sec-Fetch-Site 继续校验，RPC 参数和凭据不接受 URL 传递。
+
+账户是可选配置：
+
+```sh
+cayw account --username admin                  # 隐藏输入密码两次
+cayw account --username admin --workspace DIR  # 指定工作区
+# 退出原网页启动器，再运行以加载账户：
+cayw --ui web --lan 192.168.1.10:3080
+# 也可以创建并明确选择另一账户文件：
+cayw account --username admin --file /私有目录/account.json
+cayw --ui web --lan 192.168.1.10:3080 --account-file /私有目录/account.json
+```
+
+默认文件为当前工作区状态目录中的 `web-account.json`。只保存用户名与加盐 Argon2id 摘要，以 0600 权限原子创建，不覆盖已有账户。密码不接受命令行参数，不回显，不进入日志、URL 或前端存储。缺少文件表示未配置并允许访问；已有文件损坏或权限错误会明确报错，避免把用户配置的账户悄悄当作未配置。创建或更换账户后需重启网页服务生效；本地回环模式始终免登录。
+
+配置账户后的局域网页面使用账号密码登录，匿名 RPC 和错误密码被拒绝；成功签发当前网关实例的 HttpOnly、SameSite=Strict cookie，刷新保持登录，退出登录撤销会话。网关重启后重新登录。没有 token 粘贴入口或启动票据。局域网当前使用 HTTP，仅用于可信网络；本轮未增加 TLS 终止或远程账号系统。更换密码时显式创建另一账户文件并以 `--account-file` 选择，不覆盖原文件。
+
+TUI、WebUI 各有启动锁，可同时连接同一 Runtime。重复 `cayw` 在另一终端打开 TUI；重复网页启动复用原网页实例。每个启动器只停止自己创建的进程，复用的外部 Runtime 保留。退出最初拥有 Runtime 的启动器会停止它自己创建的 Runtime；其他页面显示真实连接错误，不自动重发任务。
 
 工作区由规范化后的目录路径确定，数据库位于 `CAYW_HOME/workspaces/<目录摘要>/`。网页侧栏的工作区选择器显示已登记目录。选择后点击“连接 / 切换”，网关会复用该目录的现有服务，或由本机宿主启动独立 Runtime。切换不会把已有会话或执行器换根，也不停止旧工作区的任务。浏览器提交的是登记标识，不接受任意目录路径；添加新目录先在本机执行 `cayw init --workspace DIR`，再在网页刷新目录。移动项目目录后会产生另一工作区身份，不自动搬迁数据库。 每个页面保留自己的选择，其他页面的请求不随之改路由。已提交任务的 enqueue/resume 捕获原工作区，切换不取消连接、不重发任务；返回原工作区继续读取同一 Task/Attempt 的事件和审批。
 
 网关保留会话与任务归属，工作区标识不匹配的请求在转发前被拒绝。目录管理请求固定交给最初宿主；目标 IPC 地址只在宿主与网关之间传递，不返回浏览器。宿主最多持有 16 个由本次启动创建的 Runtime；正常退出清理这些实例，复用的外部服务由原所有者管理。新实例不复制原工作区命令行中的演示授权、权限或自定义配置路径。
 
-重复运行同一工作区的 `start` 会复用实例并重新打开浏览器；初始化时等待就绪，超时明确报错。若 `serve` 已独立启动，`start` 复用该服务，退出界面保留它。已有服务不能通过第二条启动命令修改 `--offline`、`--config` 等启动参数。Ctrl+C / SIGTERM 停止本次拥有的 UI 与 Runtime，并等待原有任务取消和持久化清理；若清理未确认会报错，不自动重放任务。
+重复网页启动复用同一实例；初始化时等待就绪，超时明确报错。若 `serve` 已独立启动，`start` 复用该服务，退出界面保留它。已有服务不能通过第二条启动命令修改 `--offline`、`--config` 等启动参数。Ctrl+C / SIGTERM 停止本次拥有的 UI 与 Runtime，并等待原有任务取消和持久化清理；若清理未确认会报错，不自动重放任务。
 
 工作区和工具状态通过认证的 CLI 宿主控制接口提供，均未注册成模型工具。网页请求在 `/api/rpc` 的顶层携带 `workspace_id`；省略时保留原有网关路由。`settings.workspaces.list` 返回登记标识与路径，`settings.workspaces.open` 只接收 `{ "id": "登记标识" }`，管理请求固定转发给初始宿主。网关根据握手回执登记目标连接，再移除内部 IPC 地址后返回给浏览器。`settings.tools` 只读取已知同目录程序的安装元数据与宿主编译/启用状态；侧栏的“刷新安装状态”可重新读取。
 

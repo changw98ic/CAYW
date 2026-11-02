@@ -12,7 +12,7 @@ await mkdir(out); const workspace = join(out,'workspace'); await mkdir(workspace
 const home = join(out,'home'); await mkdir(home, {mode:0o700});
 const module = process.env.CAYW_PLAYWRIGHT_MODULE || 'playwright';
 const {chromium} = await import(module);
-const child = spawn(join(bin,'cayw'), ['start','--no-open','--workspace',workspace,'--offline','--demo-authorized'], {
+const child = spawn(join(bin,'cayw'), ['start','--ui','web','--no-open','--workspace',workspace,'--offline','--demo-authorized'], {
   env:{PATH:process.env.PATH,HOME:home,CAYW_HOME:join(home,'cayw')}, stdio:['ignore','pipe','pipe'], detached:true,
 });
 let stderr = ''; child.stderr.on('data', bytes => { stderr += bytes; });
@@ -24,7 +24,7 @@ try {
   browser = await chromium.launch({headless:true,...(process.env.CAYW_CHROMIUM ? {executablePath:process.env.CAYW_CHROMIUM} : {})});
   const page = await browser.newPage({viewport:{width:1280,height:900}});
   const errors = []; page.on('pageerror', error=>errors.push(error.message));
-  await page.goto(ready.launch_url);
+  await page.goto(ready.url);
   await page.locator('#workspace').waitFor({state:'visible'});
   await page.locator('#open-settings').click();
   await page.locator('#settings-workspace').filter({hasText:workspace}).waitFor();

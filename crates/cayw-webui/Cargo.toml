@@ -1,6 +1,6 @@
 [package]
 name = "cayw-webui"
-description = "Optional loopback browser interface for the CAYW runtime"
+description = "Optional browser interface for the CAYW runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+argon2 = "=0.5.3"
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+rpassword = "=7.5.4"
+tempfile = "3"
 axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "tokio"] }
 cayw-ipc = { path = "../cayw-ipc" }
 cayw-panel = { workspace = true }
@@ -18,7 +22,6 @@ tokio-util.workspace = true
 uuid = { version = "=1.27.0", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3"
 async-trait.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

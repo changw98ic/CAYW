@@ -1,10 +1,11 @@
 //! Optional loopback browser gateway. The runtime owns every session, event,
 //! tool invocation and approval decision. This gateway never retries an RPC.
 
-mod browser_session;
+mod access;
 mod ownership;
 mod workbench;
 
+pub use access::{LanAccount, WebAccess};
 pub use ownership::OwnershipStore;
 
 use axum::{
@@ -276,7 +277,7 @@ struct Gateway {
     /// Default local IPC plus any registered device endpoints (F13 routing).
     devices: Arc<DeviceRouter>,
     web_token: String,
-    browser: browser_session::BrowserSessions,
+    browser: access::BrowserAccess,
     authorities: Vec<String>,
     limits: GatewayLimits,
     pending: Semaphore,
@@ -323,7 +324,7 @@ pub async fn serve_with_limits(
     serve_inner(
         listener,
         Arc::new(DeviceRouter::new(ipc_client)),
-        web_token,
+        WebAccess::LegacyBearer(web_token.into()),
         limits,
         None,
         cancel,
@@ -348,7 +349,7 @@ pub async fn serve_with_ownership(
     serve_inner(
         listener,
         devices,
-        web_token,
+        WebAccess::LegacyBearer(web_token.into()),
         limits,
         Some(ownership),
         cancel,
@@ -356,34 +357,47 @@ pub async fn serve_with_ownership(
     .await
 }
 
+/// Serve an explicit local or LAN browser mode. Local mode requires loopback;
+/// LAN mode allows access without an account and enables password sessions when
+/// an account is explicitly configured.
+pub async fn serve_configured(
+    listener: TcpListener,
+    devices: Arc<DeviceRouter>,
+    access: WebAccess,
+    limits: GatewayLimits,
+    ownership: Option<Arc<OwnershipStore>>,
+    cancel: CancellationToken,
+) -> io::Result<()> {
+    serve_inner(listener, devices, access, limits, ownership, cancel).await
+}
+
 async fn serve_inner(
     listener: TcpListener,
     devices: Arc<DeviceRouter>,
-    web_token: impl Into<String>,
+    access: WebAccess,
     limits: GatewayLimits,
     ownership: Option<Arc<OwnershipStore>>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     let address = listener.local_addr()?;
-    if !address.ip().is_loopback() {
+    if !address.ip().is_loopback() && !matches!(access, WebAccess::Lan(_)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "WebUI must bind to a loopback address",
+            "Non-loopback WebUI requires explicit LAN access mode",
         ));
     }
-    let web_token = web_token.into();
-    if !valid_token(&web_token) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Web token must contain 32..4096 ASCII bytes without whitespace",
-        ));
-    }
-    if web_token == devices.default.token {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Web and IPC access tokens must differ",
-        ));
-    }
+    let web_token = match &access {
+        WebAccess::LegacyBearer(token) => {
+            if !valid_token(token) || token == &devices.default.token {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid or shared legacy web credential",
+                ));
+            }
+            token.clone()
+        }
+        _ => String::new(),
+    };
     limits.validate()?;
     let workbench = Arc::new(Workbench::with_builtin_panels().map_err(|error| {
         io::Error::new(
@@ -394,7 +408,7 @@ async fn serve_inner(
     let state = Arc::new(Gateway {
         devices,
         web_token,
-        browser: browser_session::BrowserSessions::new(address.port()),
+        browser: access::BrowserAccess::new(access, address.port()),
         authorities: vec![address.to_string(), format!("localhost:{}", address.port())],
         pending: Semaphore::new(limits.max_pending_requests),
         // Reserve a pending slot as well as execution slots for control RPCs.
@@ -485,7 +499,7 @@ async fn guard(State(state): State<Arc<Gateway>>, request: Request, next: Next) 
     secure_headers(guarded_request(&state, request, next).await)
 }
 
-async fn guarded_request(state: &Gateway, request: Request, next: Next) -> Response {
+async fn guarded_request(state: &Gateway, mut request: Request, next: Next) -> Response {
     if !same_origin(request.headers(), state) {
         return error_response(
             StatusCode::FORBIDDEN,
@@ -494,19 +508,29 @@ async fn guarded_request(state: &Gateway, request: Request, next: Next) -> Respo
             false,
         );
     }
-    if let Some(response) = state.browser.handle(&request, &state.web_token) {
+    if request.uri().query().is_some() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Credentials and RPC parameters must not appear in URLs",
+            false,
+        );
+    }
+    if let Some(response) = state.browser.handle(&mut request).await {
         return response;
     }
     if request.uri().path() != "/api/rpc" && request.uri().path() != "/api/panels" {
         return next.run(request).await;
     }
-    if !authorized(request.headers(), &state.web_token)
-        && !state.browser.authenticated(request.headers())
-    {
+    if !state.browser.authenticated(request.headers()) {
         return error_response(
-            StatusCode::FORBIDDEN,
+            if state.web_token.is_empty() {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            },
             "forbidden",
-            "Browser session expired; run cayw start again",
+            "请使用账号密码登录",
             false,
         );
     }
@@ -906,14 +930,17 @@ fn side_effecting(method: &str) -> bool {
 }
 
 fn redact(text: &str, state: &Gateway) -> String {
-    state
-        .devices
-        .redact_ipc_tokens(text)
-        .replace(&state.web_token, "[redacted]")
+    let text = state.devices.redact_ipc_tokens(text);
+    if state.web_token.is_empty() {
+        text
+    } else {
+        text.replace(&state.web_token, "[redacted]")
+    }
 }
 
 fn contains_token(text: &str, state: &Gateway) -> bool {
-    state.devices.contains_ipc_token(text) || text.contains(&state.web_token)
+    state.devices.contains_ipc_token(text)
+        || (!state.web_token.is_empty() && text.contains(&state.web_token))
 }
 
 fn contains_credential(value: &Value, state: &Gateway) -> bool {

@@ -314,7 +314,7 @@ Server 负责远程绑定、认证吊销和路由；Device 使用自己主动建
 
 TUI 是可选终端消费者，WebUI 是可选浏览器消费者；WebUI 的本地轻网关通过公开接口连接 Runtime，不强制使用远程 Server。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。各自交付范围与验收以对应 Issue 和 `docs/validation/` 记录为准。
 
-本地浏览器轻网关明确监听、来源与鉴权；回环不替代身份校验。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
+本地浏览器轻网关默认只监听回环地址并免登录，仍严格校验 Host、Origin 与跨站请求。只有显式 `--lan IP:PORT` 才开放局域网；账户可选，未配置时允许访问并给出非阻塞提示，配置后使用账号密码与 HttpOnly 会话。Runtime IPC 保留独立内部认证，不向浏览器暴露。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
 
 VerifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [VerifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
 

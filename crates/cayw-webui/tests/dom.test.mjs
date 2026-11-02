@@ -32,7 +32,8 @@ class Element {
 async function page(t, handler) {
   const calls = [];
   const server = createServer(async (req, res) => {
-    if (req.url === '/api/browser/logout') { res.writeHead(204); res.end(); return; }
+    if (req.url === '/api/auth/status') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({mode:'local',authenticated:true})); return; }
+    if (req.url === '/api/auth/logout') { res.writeHead(204); res.end(); return; }
     let body = '';
     for await (const chunk of req) body += chunk;
     const call = JSON.parse(body);
@@ -226,7 +227,6 @@ test('a dropped HTTP write retains an uncertain lock even after disconnect and r
   assert.equal(app.ui.prompt.disabled,true);
   assert.match(app.ui['prompt-status'].textContent,/确认/);
   await app.ui.logout.dispatch('click');
-  app.ui['web-token'].value = '0123456789abcdef0123456789abcdef';
   await app.ui['login-form'].dispatch('submit');
   assert.equal(app.ui.prompt.disabled,true,'reauthentication is not settlement');
   await app.poll();

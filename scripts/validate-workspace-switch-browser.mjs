@@ -29,14 +29,9 @@ const {chromium} = await import(process.env.CAYW_PLAYWRIGHT_MODULE || 'playwrigh
 let browser; const checks=[]; const receipts={};
 try {
   const external = await launch(['serve','--offline','--workspace',roots.C]);
-  const app = await launch(['start','--no-open','--offline','--workspace',roots.A]);
-  const {readdir} = await import('node:fs/promises');
-  const states=await readdir(join(home,'cayw','workspaces'));
-  let token;
-  for(const state of states) { try { const info=JSON.parse(await readFile(join(home,'cayw','workspaces',state,'launcher.json'),'utf8')); if(info.url===app.ready.url) token=await readFile(info.web_token_file,'utf8'); } catch{} }
-  assert(token);
+  const app = await launch(['start','--ui','web','--no-open','--offline','--workspace',roots.A]);
   async function rpc(method,params={},workspace_id='local',good=true) {
-    const response=await fetch(app.ready.url+'api/rpc',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},body:JSON.stringify({method,params,workspace_id})});
+    const response=await fetch(app.ready.url+'api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,params,workspace_id})});
     const body=await response.json();
     if(good){assert(response.ok,JSON.stringify(body));assert('result' in body);return body.result;}
     assert(body.error,JSON.stringify(body));return body.error;
@@ -51,7 +46,7 @@ try {
   const page=await browser.newPage({viewport:{width:1280,height:900}});const errors=[];const requests=[];
   page.on('pageerror',e=>errors.push(e.message));
   page.on('request',request=>{if(request.url().endsWith('/api/rpc')){const body=request.postDataJSON();requests.push({method:body.method,workspace_id:body.workspace_id,session_id:body.params.session_id,task_id:body.params.task_id});}});
-  await page.goto(app.ready.launch_url);
+  await page.goto(app.ready.url);
   await page.locator('#workspace-choice option').filter({hasText:roots.B}).waitFor({state:'attached'});
   await until(async()=>await page.locator('#wb-editor').isDisabled());
   assert(await page.locator('#wb-trace').isDisabled());

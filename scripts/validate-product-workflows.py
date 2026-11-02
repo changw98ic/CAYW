@@ -39,7 +39,7 @@ def cli(*args, input=None, good=True):
 
 def launch(*args, work=workspace):
     stderr = open(evidence/f'process-{len(processes)}.stderr', 'w')
-    child = subprocess.Popen([str(binaries/'cayw'), 'start', '--no-open', '--workspace', str(work), *args],
+    child = subprocess.Popen([str(binaries/'cayw'), 'start', '--ui', 'web', '--no-open', '--workspace', str(work), *args],
                              cwd=workspace, env=env, stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=stderr, text=True, start_new_session=True)
     processes.append(child)
@@ -48,11 +48,9 @@ def launch(*args, work=workspace):
     assert line, f'launcher exited: {child.poll()}; inspect stderr'
     ready = json.loads(line)
     assert 'url' in ready, ready
-    private = next(json.loads(path.read_text()) for path in (root/'cayw'/'workspaces').glob('*/launcher.json') if json.loads(path.read_text()).get('url') == ready['url'])
-    token = Path(private['web_token_file']).read_text()
-    assert token not in line
-    assert Path(private['web_token_file']).stat().st_mode & 0o777 == 0o600
-    return child, ready, token
+    assert ready['access'] == 'local'
+    assert 'web_token_file' not in ready and 'launch_url' not in ready
+    return child, ready, None
 
 def stop(child):
     if child.poll() is None:
@@ -62,7 +60,7 @@ def stop(child):
 def rpc(ready, token, method, params=None, good=True):
     request = urllib.request.Request(ready['url']+'api/rpc',
         data=json.dumps({'method':method, 'params':params or {}}).encode(),
-        headers={'Authorization':'Bearer '+token, 'Content-Type':'application/json'})
+        headers={'Content-Type':'application/json'})
     try:
         with urllib.request.urlopen(request, timeout=40) as response:
             body = json.load(response)
@@ -76,11 +74,11 @@ def rpc(ready, token, method, params=None, good=True):
 
 try:
     child, ready, token = launch('--offline', '--demo-authorized')
-    repeated = json.loads(cli('start', '--workspace', str(workspace)).stdout)
+    repeated = json.loads(cli('start', '--ui', 'web', '--no-open', '--workspace', str(workspace)).stdout)
     assert repeated['url'] == ready['url']
-    checks.append('unified Web startup, private token, duplicate start reuse')
+    checks.append('explicit optional local Web startup without login or ticket, duplicate start reuse')
     assert rpc(ready, token, 'settings.workspace')['workspace'] == str(workspace)
-    assert rpc(ready, 'wrong-token', 'runtime.health', good=False)['code']
+    assert rpc(ready, None, 'runtime.health')['status'] == 'ok'
     session = rpc(ready, token, 'session.create', {'label':'offline end-to-end'})
     session_id = session['id']
     rpc(ready, token, 'session.prompt', {'session_id':session_id, 'text':'offline fixture'})
