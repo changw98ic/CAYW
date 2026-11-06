@@ -310,6 +310,7 @@ fn observe_supervisor() -> Result<cayw_host::ProcessIdentity, RuntimeError> {
     ))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn require_stopped_with(
     identity: cayw_host::ProcessIdentity,
     probe: impl FnOnce(cayw_host::ProcessIdentity) -> std::io::Result<bool>,
@@ -1121,20 +1122,20 @@ impl BackgroundRegistry {
                     )));
                 }
             }
+            connection.execute(
+                "INSERT INTO runtime_background_cancels(task_id, requested_ms) VALUES(?1, ?2)
+                 ON CONFLICT(task_id) DO UPDATE SET requested_ms=excluded.requested_ms",
+                params![id, now_ms()],
+            )?;
+            Ok(view)
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = executor_id;
-            return Err(RuntimeError::Worker(
+            Err(RuntimeError::Worker(
                 "background task executor cannot be verified on this platform".into(),
-            ));
+            ))
         }
-        connection.execute(
-            "INSERT INTO runtime_background_cancels(task_id, requested_ms) VALUES(?1, ?2)
-             ON CONFLICT(task_id) DO UPDATE SET requested_ms=excluded.requested_ms",
-            params![id, now_ms()],
-        )?;
-        Ok(view)
     }
 
     fn recovery_lock(&self, id: &str) -> Result<Arc<BackgroundLock>, RuntimeError> {

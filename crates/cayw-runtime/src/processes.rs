@@ -109,6 +109,7 @@ impl ProcessJournal {
         )?)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn inspect_lost(
         &self,
         target: &crate::CancelTarget,
@@ -179,6 +180,7 @@ impl ProcessJournal {
         })
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn confirm_lost(
         &self,
         inspection: &ProcessCleanupInspection,
@@ -373,6 +375,7 @@ impl ProcessJournal {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn process_identity(
     row: &rusqlite::Row<'_>,
     offset: usize,
@@ -393,6 +396,7 @@ fn process_identity(
     Ok(identity)
 }
 
+#[cfg(target_os = "macos")]
 fn original_supervisor(
     connection: &Connection,
     task: &str,
