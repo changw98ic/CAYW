@@ -3968,6 +3968,8 @@ mod unix {
                 if libc::fchdir(cwd_fd) == -1 {
                     return Err(io::Error::last_os_error());
                 }
+                // Pty takeover only exists on macOS; Linux keeps terminal_fd None.
+                #[cfg(target_os = "macos")]
                 if let Some(fd) = terminal_fd {
                     if libc::setsid() == -1 || libc::ioctl(fd, libc::TIOCSCTTY.into(), 0) == -1 {
                         return Err(io::Error::last_os_error());
@@ -4009,12 +4011,15 @@ mod unix {
         drop(launch_pause);
         // Close every parent-side replica before another Device launch can fork.
         drop(command);
-        let mut terminal_primary: Option<fs::File> = None;
         #[cfg(target_os = "macos")]
-        if let Some(Terminal { primary, replica }) = terminal {
+        let terminal_primary = if let Some(Terminal { primary, replica }) = terminal {
             drop(replica);
-            terminal_primary = Some(primary);
-        }
+            Some(primary)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "macos"))]
+        let terminal_primary: Option<fs::File> = None;
         #[cfg(target_os = "macos")]
         drop(launch_lock);
         let child = match spawned {
