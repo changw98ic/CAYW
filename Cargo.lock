@@ -72,6 +72,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures 0.2.17",
+ "password-hash",
+]
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -216,6 +228,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -235,6 +253,15 @@ name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "blake3"
@@ -396,6 +423,7 @@ name = "cayw-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cayw-agent-types",
  "cayw-ai",
  "futures",
  "serde",
@@ -403,6 +431,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-agent-types"
+version = "0.1.0"
+dependencies = [
+ "cayw-ai",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -419,6 +456,16 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-artifacts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -461,6 +508,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-codeintel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-codemode"
 version = "0.1.0"
 dependencies = [
@@ -481,6 +538,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext 3.4.6",
  "cap-std 3.4.6",
+ "cayw-ai",
  "chacha20poly1305",
  "fs2",
  "rand_core 0.6.4",
@@ -493,10 +551,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-context"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-core"
 version = "0.1.0"
 dependencies = [
  "cayw-agent",
+ "cayw-agent-types",
  "cayw-ai",
  "futures",
  "rusqlite",
@@ -542,12 +610,18 @@ name = "cayw-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "cap-fs-ext 4.0.3",
  "cap-std 4.0.3",
  "cayw-ai",
+ "cayw-codeintel",
  "cayw-codemode",
+ "cayw-content",
  "cayw-data",
  "cayw-device",
+ "cayw-output-filter",
+ "cayw-vision",
+ "cayw-web-access",
  "cayw-workspace",
  "futures",
  "serde",
@@ -567,6 +641,51 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-output-filter"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "cayw-panel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "cayw-pi-compat"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cayw-ai",
+ "cayw-bridge",
+ "cayw-codemode",
+ "cayw-plugins",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "cayw-plannotator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -602,6 +721,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-queue"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cayw-ai",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "cayw-remote"
 version = "0.1.0"
 dependencies = [
@@ -629,6 +762,7 @@ dependencies = [
  "cayw-ai",
  "cayw-codemode",
  "cayw-host",
+ "cayw-queue",
  "rusqlite",
  "serde",
  "serde_json",
@@ -640,6 +774,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-run-inspector"
+version = "0.1.0"
+dependencies = [
+ "cayw-agent",
+ "cayw-ai",
+ "cayw-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-runtime"
 version = "0.1.0"
 dependencies = [
@@ -648,22 +795,32 @@ dependencies = [
  "base64 0.22.1",
  "cayw-agent",
  "cayw-ai",
+ "cayw-artifacts",
  "cayw-bridge",
  "cayw-cells",
  "cayw-codemode",
+ "cayw-content",
+ "cayw-context",
  "cayw-core",
  "cayw-host",
  "cayw-ipc",
+ "cayw-pi-compat",
+ "cayw-plannotator",
  "cayw-plugins",
  "cayw-providers",
+ "cayw-queue",
  "cayw-remote",
  "cayw-requests",
+ "cayw-run-inspector",
  "cayw-sources",
+ "cayw-vision",
+ "cayw-web-access",
  "futures",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -685,6 +842,33 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cayw-trace-debug"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "cayw-agent",
+ "cayw-ai",
+ "cayw-cells",
+ "cayw-codeintel",
+ "cayw-codemode",
+ "cayw-core",
+ "cayw-ipc",
+ "cayw-run-inspector",
+ "cayw-runtime",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -731,17 +915,78 @@ dependencies = [
 ]
 
 [[package]]
-name = "cayw-webui"
+name = "cayw-vision"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cayw-ai",
+ "cayw-codemode",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "cayw-visual-editor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "cayw-ipc",
+ "cap-fs-ext 4.0.3",
+ "cap-std 4.0.3",
+ "cayw-ai",
+ "cayw-codeintel",
+ "cayw-codemode",
+ "cayw-host",
+ "html5gum",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "cayw-web-access"
+version = "0.1.0"
+dependencies = [
+ "cayw-ai",
+ "html5gum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "cayw-webui"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "axum",
+ "cayw-ipc",
+ "cayw-panel",
+ "rand_core 0.6.4",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -1101,6 +1346,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1493,6 +1739,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "html5gum"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12d29324a6ba370667998f63c6dd2b2511e2297f07e827f69026684907adc3b5"
+dependencies = [
+ "jetscii",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1817,6 +2072,12 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "jetscii"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47f142fe24a9c9944451e8349de0a56af5f3e7226dc46f3ed4d4ecc0b85af75e"
 
 [[package]]
 name = "jni"
@@ -2320,6 +2581,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2732,6 +3004,27 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

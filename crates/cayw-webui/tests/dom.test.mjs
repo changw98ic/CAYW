@@ -32,6 +32,9 @@ class Element {
 async function page(t, handler) {
   const calls = [];
   const server = createServer(async (req, res) => {
+    if (req.url === '/api/settings/account') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({can_manage:false,configured:false,message:'仅本机管理入口可配置账号'})); return; }
+    if (req.url === '/api/auth/status') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({mode:'local',authenticated:true})); return; }
+    if (req.url === '/api/auth/logout') { res.writeHead(204); res.end(); return; }
     let body = '';
     for await (const chunk of req) body += chunk;
     const call = JSON.parse(body);
@@ -67,8 +70,12 @@ async function page(t, handler) {
     clearTimeout: id => timers.delete(id),
   });
   vm.runInContext(source.replaceAll('export ', ''), context, { filename: 'app.js' });
-  elements['web-token'].value = '0123456789abcdef0123456789abcdef';
-  await elements['login-form'].dispatch('submit');
+  // The shipped page now connects automatically with its browser session.
+  const connectedBy = Date.now() + 5000;
+  while (elements['login-button'].disabled) {
+    assert(Date.now() < connectedBy, 'automatic login did not settle');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
   assert.equal(elements['login-error'].textContent, '', 'fixture must connect to the real fetch endpoint');
   assert.equal(elements.workspace.hidden, false);
   const poll = async () => {
@@ -221,7 +228,6 @@ test('a dropped HTTP write retains an uncertain lock even after disconnect and r
   assert.equal(app.ui.prompt.disabled,true);
   assert.match(app.ui['prompt-status'].textContent,/确认/);
   await app.ui.logout.dispatch('click');
-  app.ui['web-token'].value = '0123456789abcdef0123456789abcdef';
   await app.ui['login-form'].dispatch('submit');
   assert.equal(app.ui.prompt.disabled,true,'reauthentication is not settlement');
   await app.poll();

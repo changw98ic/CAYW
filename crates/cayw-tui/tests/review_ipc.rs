@@ -67,13 +67,13 @@ fn attached(value: Value) -> App {
 
 #[tokio::test]
 async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
-    // One held run is enough: filling default concurrency=4 races with admit
-    // between "task appears" and "attempt still none" on loaded CI runners.
+    // An active model stream holds the only slot until cancellation. Approval
+    // waits release their slot and cannot keep the next task in the queue.
     let config = RuntimeConfig {
         max_concurrent_runs: 1,
         ..Default::default()
     };
-    let fixture = support::OfflineRuntime::with_config(config, None);
+    let fixture = support::OfflineRuntime::with_config(config, Some(CancellationToken::new()));
     let runtime = fixture.runtime.clone();
     assert!(runtime.get(&fixture.frozen_id).unwrap().frozen);
     assert!(!fixture.directory.path().join("fixture-output.txt").exists());
@@ -94,18 +94,19 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
             .request("task.resume", json!({"task_id":admitted.id}))
             .await
     }));
-    timeout(Duration::from_secs(8), async {
-        while runtime
+    wait_partial(&owner, &blocker_id, "streamed fixture 你好").await;
+    let blocker = runtime.task(&ids[0]).unwrap();
+    assert_eq!(blocker.state, TaskState::Running);
+    assert!(blocker.holds_slot);
+    assert!(blocker.attempt_id.is_some());
+    assert!(
+        runtime
             .get(&blocker_id)
             .unwrap()
             .pending_approvals
             .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    );
+    assert!(!fixture.directory.path().join("fixture-output.txt").exists());
     assert_eq!(runtime.health().unwrap().running, 1);
     let session = runtime.create(Some("queued TUI".into())).unwrap();
     let id = session.id.clone();

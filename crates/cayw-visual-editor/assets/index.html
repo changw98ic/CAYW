@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>CAYW 可视化编辑器</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/editor.css">
+</head>
+<body>
+  <div id="app" class="app" data-testid="editor-app">
+
+    <section id="connect-view" class="connect-view" data-testid="editor-connect-view" aria-labelledby="connect-title">
+      <div class="connect-card">
+        <div class="connect-brand">
+          <span class="brand-mark" aria-hidden="true">CAYW</span>
+          <span class="brand-sub">可视化编辑器</span>
+        </div>
+        <h1 id="connect-title">连接本机编辑服务</h1>
+        <p class="connect-lead">
+          在已有的项目页面上直接拖拽、插入组件和修改样式，保存后写回当前项目源码。
+        </p>
+        <form id="connect-form" class="connect-form" data-testid="editor-connect-form" autocomplete="off" novalidate>
+          <label class="field-label" for="token-input">编辑器令牌</label>
+          <div class="token-row">
+            <input
+              id="token-input"
+              data-testid="editor-token-input"
+              class="text-input token-input"
+              type="password"
+              name="token"
+              spellcheck="false"
+              autocapitalize="off"
+              autocomplete="off"
+              placeholder="粘贴设置在 CAYW_EDITOR_TOKEN 中的令牌"
+              aria-describedby="token-hint connect-error">
+            <button type="button" id="token-toggle" data-testid="editor-token-toggle" class="btn ghost token-toggle" aria-pressed="false" aria-label="显示令牌">显示</button>
+          </div>
+          <p id="token-hint" class="field-hint">至少 32 个 ASCII 字符。令牌只保存在当前页面内存中，不写入浏览器存储。</p>
+          <button type="submit" id="connect-submit" data-testid="editor-connect-submit" class="btn primary connect-submit">连接</button>
+          <p id="connect-error" class="form-error" data-testid="editor-connect-error" role="alert" hidden></p>
+        </form>
+        <dl class="connect-facts">
+          <div><dt>源码写入</dt><dd>保存前校验源码摘要，外部改动会阻止覆盖</dd></div>
+          <div><dt>预览隔离</dt><dd>编辑令牌不会发送到项目预览页面</dd></div>
+          <div><dt>保存范围</dt><dd>只允许已知的结构化操作，不接受整文件任意写入</dd></div>
+        </dl>
+        <p class="connect-scope">支持 HTML/CSS 与 Vite React、Vue 3 项目。动态或重复区域保持只读，其他区域可以继续编辑。</p>
+      </div>
+    </section>
+
+    <div id="workspace" class="workspace" data-testid="editor-workspace" hidden>
+      <header class="topbar">
+        <button type="button" id="toggle-palette" class="btn ghost panel-toggle" data-testid="editor-toggle-palette" aria-label="打开或关闭组件库" aria-expanded="true">组件</button>
+
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">CAYW</span>
+          <span class="brand-sub">可视化编辑</span>
+        </div>
+
+        <div class="page-meta">
+          <span class="page-path" id="page-path" data-testid="editor-page-path" title="当前页面">index.html</span>
+          <span class="dirty-dot" id="dirty-indicator" data-testid="editor-dirty-indicator" title="有未保存修改" hidden></span>
+          <span class="save-state" id="save-state" data-testid="editor-save-state">已保存</span>
+        </div>
+
+        <div class="mode-switch" role="group" aria-label="编辑模式">
+          <button type="button" id="enter-edit" class="seg-btn" data-testid="editor-enter-edit" aria-pressed="false">可视化编辑</button>
+          <button type="button" id="preview-mode" class="seg-btn" data-testid="editor-preview-mode" aria-pressed="true">交互预览</button>
+        </div>
+
+        <div class="device-switch" role="group" aria-label="预览宽度">
+          <button type="button" class="seg-btn device-btn" data-device="desktop" data-testid="editor-device-desktop" aria-pressed="true">桌面</button>
+          <button type="button" class="seg-btn device-btn" data-device="mobile" data-testid="editor-device-mobile" aria-pressed="false">移动</button>
+        </div>
+
+        <div class="topbar-actions">
+          <button type="button" id="undo" class="btn" data-testid="editor-undo" disabled title="撤销（Ctrl/Cmd+Z）">撤销</button>
+          <button type="button" id="redo" class="btn" data-testid="editor-redo" disabled title="重做（Ctrl/Cmd+Shift+Z）">重做</button>
+          <button type="button" id="reload" class="btn" data-testid="editor-reload" title="重新读取项目源码，未保存修改会丢失">重新加载</button>
+          <button type="button" id="save" class="btn primary" data-testid="editor-save" disabled title="保存到项目源码（Ctrl/Cmd+S）">保存</button>
+          <button type="button" id="toggle-inspector" class="btn ghost panel-toggle" data-testid="editor-toggle-inspector" aria-label="打开或关闭属性面板" aria-expanded="true">属性</button>
+        </div>
+      </header>
+
+      <div id="conflict-banner" class="banner warn" data-testid="editor-conflict-banner" role="alert" hidden>
+        <div class="banner-text">
+          <strong>项目源码已在编辑器外更新，保存已被阻止。</strong>
+          <span>你的未保存修改仍保留在编辑器中。重新加载会读取最新源码，并丢弃这些修改。</span>
+        </div>
+        <div class="banner-actions">
+          <button type="button" id="conflict-reload" class="btn warn-action" data-testid="editor-conflict-reload">重新加载项目</button>
+          <button type="button" id="conflict-dismiss" class="btn ghost" data-testid="editor-conflict-dismiss">保留草稿，稍后处理</button>
+        </div>
+      </div>
+
+      <div id="unknown-banner" class="banner danger" data-testid="editor-unknown-banner" role="alert" hidden>
+        <div class="banner-text">
+          <strong>上一次操作结果未知，编辑器已停止写入。</strong>
+          <span>服务会拒绝本会话的后续写入。请查看最后已知草稿并核对持久审计记录，确认实际结果后再恢复会话。</span>
+          <span id="unknown-reason" class="banner-detail" hidden></span>
+        </div>
+        <div class="banner-actions">
+          <button type="button" id="unknown-inspect" class="btn danger-action" data-testid="editor-unknown-inspect">查看最后已知草稿</button>
+        </div>
+      </div>
+
+      <div class="main">
+        <aside id="palette" class="palette panel" data-testid="editor-palette" aria-label="组件库">
+          <div class="panel-head">
+            <h2>组件库</h2>
+            <span class="panel-note">插入当前选区</span>
+          </div>
+          <div class="placement-row">
+            <span class="placement-label">位置</span>
+            <div class="segmented compact" role="group" aria-label="插入位置">
+              <button type="button" class="seg-btn" data-placement="before" data-testid="editor-placement-before">前</button>
+              <button type="button" class="seg-btn active" data-placement="inside" data-testid="editor-placement-inside">内部</button>
+              <button type="button" class="seg-btn" data-placement="after" data-testid="editor-placement-after">后</button>
+            </div>
+          </div>
+          <input
+            id="palette-search"
+            class="text-input search-input"
+            data-testid="editor-palette-search"
+            type="search"
+            placeholder="搜索组件，例如卡片或 Hero"
+            aria-label="搜索组件">
+          <div id="palette-list" class="palette-list" data-testid="editor-palette-list"></div>
+          <div class="panel-foot">
+            <p>组件按项目的 HTML、JSX 或 Vue 模板语法插入，继承当前页面主题；Hero 与 CTA 使用 CSS 动效。</p>
+            <p>首版支持文字、图片、按钮、输入框、卡片、容器、网格与常见区块。动态模板区域只读。</p>
+          </div>
+        </aside>
+
+        <section class="canvas-area" aria-label="项目预览画布">
+          <div class="canvas-head">
+            <span id="canvas-title" class="canvas-title">项目预览</span>
+            <span id="canvas-hint" class="canvas-hint" data-testid="editor-canvas-hint">进入“可视化编辑”后，悬停查看边界，点击选择元素</span>
+          </div>
+          <div class="canvas-scroll">
+            <div id="canvas" class="canvas" data-testid="editor-canvas" data-device="desktop">
+              <iframe
+                id="preview-frame"
+                data-testid="editor-preview-frame"
+                title="项目页面预览"
+                referrerpolicy="no-referrer"></iframe>
+            </div>
+          </div>
+        </section>
+
+        <aside id="inspector" class="inspector panel" data-testid="editor-sidebar" aria-label="属性面板">
+          <div class="panel-head">
+            <h2>属性</h2>
+            <span id="inspector-scope" class="panel-note">未选择</span>
+          </div>
+          <div id="inspector-body" class="inspector-body" data-testid="editor-inspector-body"></div>
+        </aside>
+      </div>
+
+      <div id="overlay-layer" class="overlay-layer">
+        <div id="selection-label" class="selection-label" data-testid="editor-selection-label" hidden>
+          <span id="selection-tag" class="selection-tag">元素</span>
+          <button type="button" id="selection-add" class="selection-btn add" data-testid="editor-insert-plus" aria-label="在选区附近插入组件" title="插入组件">+</button>
+          <button type="button" id="selection-parent" class="selection-btn" data-testid="editor-selection-parent" aria-label="选择父级" title="选择父级">父级</button>
+          <button type="button" id="selection-duplicate" class="selection-btn" data-testid="editor-selection-duplicate" aria-label="复制元素" title="复制">复制</button>
+          <button type="button" id="selection-delete" class="selection-btn danger" data-testid="editor-selection-delete" aria-label="删除元素" title="删除">删除</button>
+        </div>
+      </div>
+
+      <div id="toasts" class="toasts" data-testid="editor-toasts" role="status" aria-live="polite"></div>
+    </div>
+
+    <div id="context-menu" class="context-menu" data-testid="editor-context-menu" role="dialog" aria-label="快捷编辑菜单" hidden></div>
+
+    <div id="palette-popover" class="palette-popover" data-testid="editor-palette-popover" role="dialog" aria-label="插入组件" hidden>
+      <div class="popover-head">
+        <span class="popover-title">插入组件</span>
+        <button type="button" id="popover-close" class="icon-btn" aria-label="关闭插入面板" title="关闭">×</button>
+      </div>
+      <div class="placement-row">
+        <span class="placement-label">位置</span>
+        <div class="segmented compact" role="group" aria-label="插入位置">
+          <button type="button" class="seg-btn" data-popover-placement="before" data-testid="editor-popover-placement-before">前</button>
+          <button type="button" class="seg-btn active" data-popover-placement="inside" data-testid="editor-popover-placement-inside">内部</button>
+          <button type="button" class="seg-btn" data-popover-placement="after" data-testid="editor-popover-placement-after">后</button>
+        </div>
+      </div>
+      <input
+        id="popover-search"
+        class="text-input search-input"
+        data-testid="editor-popover-search"
+        type="search"
+        placeholder="搜索组件"
+        aria-label="搜索要插入的组件">
+      <div id="popover-list" class="popover-list" data-testid="editor-popover-list"></div>
+      <p class="popover-note">组件会插入到当前选区。动态只读区域不能作为插入目标。</p>
+    </div>
+
+    <div id="source-viewer" class="source-viewer" data-testid="editor-source-viewer" role="dialog" aria-modal="true" aria-labelledby="source-title" hidden>
+      <div class="source-card">
+        <div class="source-head">
+          <h2 id="source-title">最后已知草稿</h2>
+          <span id="source-target" class="source-target"></span>
+          <select id="source-file" class="text-input" aria-label="选择草稿源文件" hidden></select>
+          <button type="button" id="source-close" class="btn ghost" data-testid="editor-source-close">关闭</button>
+        </div>
+        <p class="source-note">只读。这是编辑器最后一次读取到的原始草稿，不是注入后的预览 HTML，也不证明未知操作已经写入；请同时核对持久审计记录。</p>
+        <pre id="source-code" class="source-code" tabindex="0"></pre>
+      </div>
+    </div>
+
+    <div id="palette-drag-ghost" class="palette-drag-ghost" hidden aria-hidden="true"></div>
+  </div>
+
+  <script src="/editor.js"></script>
+</body>
+</html>

@@ -15,8 +15,14 @@ async-trait.workspace = true
 cayw-ai.workspace = true
 cayw-codemode = { path = "../cayw-codemode", version = "0.1.0" }
 cayw-device = { path = "../cayw-device", version = "0.1.0" }
+cayw-content = { path = "../cayw-content", version = "0.1.0", default-features = false }
 cayw-data = { path = "../cayw-data", version = "0.1.0" }
 cayw-workspace = { path = "../cayw-workspace", version = "0.1.0" }
+cayw-codeintel = { workspace = true }
+cayw-output-filter = { workspace = true }
+cayw-web-access = { path = "../cayw-web-access", version = "0.1.0" }
+cayw-vision = { path = "../cayw-vision", version = "0.1.0" }
+base64.workspace = true
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 serde.workspace = true

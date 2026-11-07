@@ -4,8 +4,7 @@ use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_requests::{
     AuthorizationReceipt, EvaluationTicket, HostActor, HostIdentity, OperationCatalog,
-    OperationScope, RequestEvent, RequestRecord, RequestTools, TaskIdentity, TaskIntent,
-    TaskOutcome,
+    OperationScope, RequestEvent, RequestRecord, RequestTools, TaskIdentity, TaskOutcome,
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -91,10 +90,23 @@ pub(crate) fn definitions(inner: &Inner) -> Vec<ToolDefinition> {
 /// advertised catalog and the task request binding, or a policy could name an
 /// operation that execution cannot resolve (or bind a weaker schema).
 pub(crate) fn operation_definitions(inner: &Inner, host: &cayw_host::Host) -> Vec<ToolDefinition> {
+    operation_definitions_for_config(&inner.config, host)
+}
+
+pub(crate) fn operation_definitions_for_config(
+    config: &crate::RuntimeConfig,
+    host: &cayw_host::Host,
+) -> Vec<ToolDefinition> {
     let mut definitions = host.capabilities();
     definitions.extend(crate::values::definitions());
     definitions.extend(crate::collaboration::definitions());
-    definitions.extend(crate::children::definitions(inner));
+    definitions.extend(crate::children::definitions(config));
+    definitions.extend(crate::content::definitions(config.content.as_ref()));
+    definitions.extend(crate::background::definitions(
+        config.background.as_ref(),
+        &config.host.profiles,
+    ));
+    definitions.extend(crate::results::definitions(config.content.as_ref()));
     definitions
 }
 fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {
@@ -140,6 +152,11 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
     let identity = json!({
         "base_policy": base_policy,
         "local_agents": local_agents,
+        "background": inner.config.background.as_ref().map(|c| json!({
+            "max_tasks": c.max_tasks,
+            "max_log_bytes": c.max_log_bytes,
+            "max_retained_finished": c.max_retained_finished,
+        })),
         "cells": {
             "max_cells": cells.max_cells,
             "max_running": cells.max_running,
@@ -156,6 +173,8 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
             "cache_entries": cells.cache_entries,
         },
         "permissions": permission_list(&runtime.permissions),
+        "content": crate::content::policy_identity(inner)?,
+        "resources": runtime.resources,
         "runtime": {
             "max_concurrent_runs": runtime.max_concurrent_runs,
             "max_queued_runs": runtime.max_queued_runs,
@@ -393,6 +412,15 @@ pub(crate) fn closing(inner: &Inner, task_id: &str) -> Result<(), RuntimeError> 
     };
     close_identity(inner, &identity)
 }
+/// One decision supplies both the queue terminal and its authority/audit outcome.
+pub(crate) fn outcome(terminal: crate::queue::TaskTerminal) -> TaskOutcome {
+    use crate::queue::TaskTerminal;
+    match terminal {
+        TaskTerminal::Completed => TaskOutcome::Completed,
+        TaskTerminal::Cancelled => TaskOutcome::Cancelled,
+        TaskTerminal::Failed | TaskTerminal::OutcomeUnknown => TaskOutcome::Failed,
+    }
+}
 /// Called with lifecycle coordination and the original task record. Queue may
 /// hold its terminal transaction, so authority settlement must not reread Queue.
 pub(crate) fn finish(
@@ -490,21 +518,6 @@ pub(crate) fn finish_session(inner: &Inner, session: &str) -> Result<(), Runtime
     Ok(())
 }
 
-pub(crate) fn validate_intent(intent: &TaskIntent) -> Result<(), RuntimeError> {
-    if let TaskIntent::ExplicitProjectTestOrScript { user_instruction } = intent
-        && (user_instruction.trim().is_empty()
-            || user_instruction.len() > 2048
-            || user_instruction
-                .chars()
-                .any(|c| c.is_control() && c != '\n' && c != '\t'))
-    {
-        return Err(RuntimeError::InvalidInput(
-            "explicit task instruction must contain 1..2048 ordinary bytes".into(),
-        ));
-    }
-    Ok(())
-}
-
 impl Runtime {
     fn request_identity(&self, task_id: &str) -> Result<TaskIdentity, RuntimeError> {
         let task = self.task(task_id)?;
@@ -513,7 +526,17 @@ impl Runtime {
     }
     fn active_request(&self, task_id: &str) -> Result<TaskIdentity, RuntimeError> {
         let task = self.task(task_id)?;
-        if task.state != TaskState::Running || task.cancel_requested {
+        // A live original Attempt owns its request authority while it is
+        // running, parked as WaitingApproval for an ordinary host permission,
+        // or queued again for re-admission of that same worker and attempt.
+        // A queued entry without an attempt is dormant accepted work and owns
+        // no active request authority.
+        let active = match task.state {
+            TaskState::Running | TaskState::WaitingApproval => true,
+            TaskState::Queued => task.attempt_id.is_some(),
+            _ => false,
+        };
+        if !active || task.cancel_requested {
             return Err(RuntimeError::StaleApproval);
         }
         let view = self.get(&task.session_id)?;
@@ -531,6 +554,39 @@ impl Runtime {
     }
     pub fn request_operations(&self) -> Result<Vec<OperationScope>, RuntimeError> {
         Ok(catalog(&self.inner, &self.inner.host_root)?.operations())
+    }
+    /// Current durable operational limits. Finished tasks no longer consume the
+    /// active task count or state reservation; these limits bound unfinished
+    /// work, not lifetime audit history.
+    pub fn request_limits(&self) -> cayw_requests::RequestConfig {
+        self.inner.requests.config()
+    }
+    /// Trusted host-only adjustment of the operational request limits. The new
+    /// value is persisted with an immutable history row before this handle uses
+    /// it. Another independent Runtime must close before the adjustment; clones
+    /// of this Runtime share the updated limits. Active tasks may continue, but
+    /// lowering below their current usage is rejected. This does not grant any
+    /// capability or change a request decision.
+    pub fn request_limits_adjust(
+        &self,
+        next: cayw_requests::RequestConfig,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        next.validate()?;
+        let actor = HostActor::new(actor)?;
+        let _coordinate = self.inner.coordination.enter()?;
+        self.inner.coordination.amend_policy(|| {
+            self.inner.requests.adjust_config(next, &actor, reason)?;
+            Ok(Some(()))
+        })?;
+        Ok(())
+    }
+    /// Host-only immutable operational-limit adjustment history.
+    pub fn request_config_history(
+        &self,
+    ) -> Result<Vec<cayw_requests::ConfigAdjustment>, RuntimeError> {
+        Ok(self.inner.requests.config_history()?)
     }
     pub fn request_status(
         &self,

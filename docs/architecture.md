@@ -2,23 +2,13 @@
 
 [项目说明](../README.md) · [开发路线图](development-map.md) · [SDK / IPC 契约](issue1-sdk-ipc-contract.md)
 
-## 文档范围与当前状态
+## 文档范围与职责
 
 CAYW 定位为 Rust 原生、模块化的 **Agent OS kernel**：这是用户空间的 Agent 运行基础设施，负责模型循环、工具编排、会话状态、执行归属和恢复。这里的 kernel 描述 Agent 的共同运行底座，不包含操作系统内核、驱动或硬件虚拟化承诺。
 
-本文根据 `main` 的 [6627334](https://github.com/changw98ic/CAYW/commit/66273344d904477a589e314c32311fe5c7b0d4f8)、当前 [AGENTS.md](../AGENTS.md)、19 个 Issues 及相关评论编写。它连接已有实现与目标架构，不是新的验收报告。本次只补文档，没有重新运行产品或模型测试。
+本文描述组件职责、依赖方向与架构约束。各任务的交付进度、阶段划分与 Issue 状态由[开发路线图](development-map.md)和对应 GitHub Issue 维护；验收命令、源码差异与通过范围留在 `docs/validation/`。本文不重复路线图状态，也不以文档描述代替验收。
 
-“当前/已有”表示已核对的源码或历史证据；“目标/必须/不能”等描述架构约束，不自动表示对应实现已完成。尚未完整验收的能力以表中缺口和对应 Issue 为准。
-
-| 领域 | 已有实现或证据 | 尚未据此完成的交付 |
-| --- | --- | --- |
-| 模型与 Agent 循环 | `cayw-ai`、`cayw-agent` 有内存循环、离线/本地 HTTP 用例及早期有限真实模型记录 | 早期真实模型记录不覆盖当前持久化 Runtime 全链；[#6](https://github.com/changw98ic/CAYW/issues/6) 仍未验收 |
-| Core、公开 SDK、本地 IPC | [#1](https://github.com/changw98ic/CAYW/issues/1) 已完成 macOS ARM64、固定离线模型的本地功能验收并关闭，实现已合入主树 | 不等于全部 feature、其他 macOS 架构或真实 Provider 全链验收 |
-| Luau、Cells、Host、Device、Requests、Bridge | 已有代码和局部离线集成；共享读取与 Device 交互进程有各自验证记录 | 预置能力全集、组合故障和各 Issue 的完整验收仍需补齐 |
-| UI、plugin、远程与内容库 | 已有包和局部实现，不是空架构 | External plugin 统一进程清理的独立交付仍有失败；远程两机、完整资源硬限制和真实加密同步等未完整验收 |
-| 平台 | 当前首发仅面向 macOS，已有执行证据覆盖 macOS ARM64 | Linux/Windows 由 [#19](https://github.com/changw98ic/CAYW/issues/19) 后续跟踪；现在不开展适配、探针或验证，也不阻塞首发 |
-
-最新验收范围以 [Issue #1 验收记录](validation/issue1-sdk-ipc.md)、[路线图](development-map.md) 与对应任务为准。已有代码不能继续写成“全部未实现”，包名、示例或历史测试也不能作为全部功能通过的证据。
+“当前/已有”表示已核对的源码或历史证据；“目标/必须/不能”等描述架构约束，不自动表示对应实现已完成。尚未完整验收的能力以对应 GitHub Issue 为准。已有代码不能写成“全部未实现”，包名、示例或历史测试也不能作为全部功能通过的证据。
 
 ## 目标与非目标
 
@@ -35,7 +25,9 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | 组件 | 职责 | 依赖与边界 |
 | --- | --- | --- |
 | `cayw-ai` / `cayw-providers` | 消息、模型请求/流事件、参数声明与协议适配 | 不负责设备权限、Session 权威状态或 UI |
+| `cayw-agent-types` | 跨组件的 Agent 事件与工具结果 | 只保存已有数据类型和构造器；依赖 `cayw-ai`，不是独立磁盘格式；Agent 原路径重导出同一类型 |
 | `cayw-agent` | AgentLoop：历史、模型流、工具批次、steering/follow-up、取消 | 消费 Provider 与宿主注册工具；自身历史在内存中，不冒充持久化 Runtime |
+| `cayw-queue` | 持久 Task 身份、状态、优先级、公平顺序、取消目标和资源准入 | 不依赖 Runtime、Host、Device 或 Agent 执行实现；跨组件锁、授权和清理仍由 Runtime 协调 |
 | `cayw-core` | Session、Attempt lease、事件日志、执行/调用/审批事实与核对 | 对执行写入检查完整 lease；不加载 UI、Server 或外部代码索引 |
 | `cayw-runtime` / `cayw-ipc` | 公开 Rust 入口、调度与生命周期协调；本地传输 | 复用同一 Runtime 分派，不另建 IPC 专用执行器 |
 | `cayw-codemode` / `cayw-cells` | Luau 编排、分段 cell、输出、会话值、执行记录与共享读协调 | 通过宿主能力接口调用 Rust，不自带环境文件/进程/网络权限 |
@@ -45,10 +37,20 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-bridge` | 宿主已有 MCP/Skills/搜索能力的目录、来源快照和调用桥接 | 不在 Core 再创建连接或 loader |
 | `cayw-plugins` / `cayw-content` / `cayw-remote` | plugin、Device 内容存放/备份、远程绑定路由 | 各自边界与局部实现分开验收；不成为普通 Chat 的强依赖 |
 | `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | 客户端、浏览器轻网关与验证消费者 | 依赖公开接口；Runtime 不反向依赖这些消费者 |
+| `cayw-visual-editor` | HTML/CSS、Vite React 与 Vue 3 页面的可选编辑应用；源码映射、预览和直接操作 | Rust 持有草稿与源码权威，保存通过 Host 公开接口执行文件权限、调用记录和摘要核对；可选 Node 进程解析 JSX/TSX/SFC 并启动 Vite，Core 不依赖编辑器 |
+| `cayw-codeintel` | 工作区相对路径、内容摘要、文件版本与符号位置 | Host、Editor 与 Trace 可注入同一个进程内共享实例；轻量大纲不等于完整跨文件语义索引 |
+| `cayw-output-filter` | 固定进程 profile 的显示过滤与原文引用 | 原文通过宿主注入的内容接口保存；过滤不改变进程实际终态 |
+| `cayw-context` / `cayw-run-inspector` | 从模型请求账本、Core 事件生成上下文和运行过程视图 | 派生展示，不另建执行权威或伪造缺失费用 |
+| `cayw-trace-debug` | 可选本机调试插件应用：按 Session 游标消费认证 IPC 事件，维护自己的追踪文件与网页，并对捕获的 Luau 节点本地重新求值 | 经认证 IPC 消费 Runtime 事件，不直接读写 Core 或 Cells 数据库；复用 `cayw-codemode` 求值，但重放执行器不持有真实 Host/Runtime 写接口；Runtime 与普通无界面任务不依赖它 |
+| `cayw-panel` / `cayw-plannotator` / `cayw-artifacts` | 面板登记、带来源的批注与产物动作 | 界面通过公开 Runtime 接口提交动作；批注不成为授权 |
+| `cayw-web-access` / `cayw-vision` | 宿主显式启用的网页与图像能力 | 调用沿原 Host 权限和预算执行；存储由宿主注入，不反向依赖 Runtime |
+| `cayw-pi-compat` | 可选外部扩展适配 | 与 Runtime 共用 plugin 目录和 Bridge；Node 只用于显式启用的适配器，当前 npm 范围限于固定版本的 hello 工具 |
 
 依赖从接入方指向公开接口，再由 Runtime 组合运行底座。Host 实现 CodeMode 的能力接口，Runtime 注入实际实现；接口调用不要求 CodeMode 反向依赖具体 UI 或某个 MCP 客户端。可选 Native plugin 由 Cargo feature 决定编译组合，External plugin 由宿主通过 IPC 注入。模型响应中的工具或 plugin 名称不能新增依赖或授予权限。
 
 本地 Agent 循环依赖 Provider，并不依赖 TUI、Server 或 VerifyTool。VerifyTool 可以依赖真实 Runtime 做验证，这不形成 Runtime 对 VerifyTool 的反向依赖。运行数据会往返流动，但不改变这些软件依赖方向。
+
+可视化编辑器按 `--framework` 显式选择 HTML、React 或 Vue。HTML 使用 Rust 解析与静态预览；React/Vue 的 Node 进程保留项目 Vite 配置和插件，分别提供磁盘原页面与内存草稿预览。Node 只返回有界的源码补丁，Rust 校验文件、UTF-8 字节位置和旧文本后提交草稿。普通编辑不调用模型，也不向模型增加通用 Node 工具。项目 Vite 配置以本机用户身份执行，进程隔离不是沙箱。多文件保存逐个核对文件摘要，不承诺跨文件事务；中途仅保存部分文件时，保留持久未知状态并停止后续写入。
 
 ## 部署形态
 
@@ -104,7 +106,7 @@ Session 当前有 idle、running、awaiting_approval、needs_reconciliation 等�
 
 Task 队列区分 queued、running、draining 与 completed/failed/cancelled/interrupted/outcome_unknown。draining 表示工作已停止准入，但清理或持久化仍需核对；不能提前释放执行容量。运行身份和完整 lease 在与执行写入相同的事务内核对。恢复要先确认原执行者停止并取得独占归属，不能只凭一次“进程不在”的观察接管。
 
-依据：[Core 类型](../crates/cayw-core/src/types.rs)、[Runtime 队列](../crates/cayw-runtime/src/queue.rs)、[SDK/IPC 身份契约](issue1-sdk-ipc-contract.md)。
+依据：[Core 类型](../crates/cayw-core/src/types.rs)、[持久任务队列](../crates/cayw-queue/src/queue.rs)、[SDK/IPC 身份契约](issue1-sdk-ipc-contract.md)。
 
 ## AgentLoop、ModelPort 与上下文
 
@@ -112,9 +114,9 @@ AgentLoop 是模型请求、流式响应、工具执行和下一轮请求的共�
 
 Provider 接收明确的模型请求和取消令牌，返回文本、思考、工具调用等流事件以及确定的结束或错误。当前 OpenAI 适配及其他适配器的实际范围以源码/各包说明为准；“兼容接口”不能替代逐项能力验证。流截断、参数无效、重复调用编号或错误结束不能被当成可执行工具意图。
 
-工具声明和 Schema 由宿主注入。Agent 对参数严格校验，工具结果按原调用配对，批次历史保持调用顺序；并行执行策略不能破坏这一历史。宿主可排入 steering/follow-up，但不能因此跳过尚未结算的调用。最终工具结果进入下一次 Provider 请求，过程输出则通过带来源的事件供客户端消费。
+工具声明和 Schema 由宿主注入。Agent 对参数严格校验，工具结果按原调用配对，批次历史保持调用顺序；并行执行策略不能破坏这一历史。Messages 适配器在响应完整、调用编号唯一且工具已声明时，将参数错误交给 Agent 生成“未执行”的错误结果，允许模型在原轮数、取消和预算限制内修正。原始无效参数仍保留在历史与协议元数据中；下一轮只为传输生成明确标记无效参数的对象，必须与同一调用的已知错误结果配对。断流、截断、身份错误及未知效果仍停止，不自动重放业务调用。宿主可排入 steering/follow-up，但不能因此跳过尚未结算的调用。最终工具结果进入下一次 Provider 请求，过程输出则通过带来源的事件供客户端消费。
 
-Agent 的内存历史由 Runtime 与持久记录衔接。上下文包含消息、已配对工具结果、显式系统/能力说明及本轮选取的技能内容；不默认把所有 Skills、Schema 或代码库灌入每轮。长会话读取优化、裁剪/摘要策略仍需验证，不得为缩短上下文丢弃调用配对、原始执行证据或未知状态。依赖快照冻结的是执行读取依据，不等同完整对话快照或冻结外部文件系统。
+Agent 的内存历史由 Runtime 与持久记录衔接。上下文包含消息、已配对工具结果、显式系统/能力说明及本轮选取的技能内容；不默认把所有 Skills、Schema 或代码库灌入每轮。Runtime 在共享预算准入通过后，才构造本次 Provider 输入；旧用量未知时，必须先有绑定新 Task 的宿主有限额度授权，原未知预留继续保留。失败的 assistant 和因输出截断而未执行的工具提议，以明确的 Runtime 失败说明发送；原消息、参数错误、配对结果和事件均保留。截断调用须有同序、已知且未执行的错误结果，并核对 Core 的 `ToolStarted`，包括 Fork 原历史中的执行事实；发生过执行或结果未知时拒绝省略。已经执行的工具调用和结果完整保留，这条输入投影不重放旧 Task，也不释放未知模型预留。长会话读取优化、裁剪/摘要策略仍需验证，不得为缩短上下文丢弃调用配对、原始执行证据或未知状态。依赖快照冻结的是执行读取依据，不等同完整对话快照或冻结外部文件系统。
 
 早期有限 Magpie 记录仅证明原始 Agent 循环的相应场景；当前持久化模型全链、协议兼容矩阵与模型真实任务成本分别按 [#6](https://github.com/changw98ic/CAYW/issues/6)、[#10](https://github.com/changw98ic/CAYW/issues/10) 验收。参见[原始内核说明](rust-pi-core.md)、[Provider 代码](../crates/cayw-ai/src/providers/openai.rs)和[适配器边界](../crates/cayw-providers/README.md)。
 
@@ -155,6 +157,8 @@ sequenceDiagram
 
 执行前拒绝、确定未执行、已知失败、成功、结果未知是不同事实。输出转换/展示失败不能抹去已发生的 Host 成功；预算耗尽也不能把未知效果改成普通失败。需要核对时，主链停止新副作用，保留原调用、执行身份和可用回执。
 
+`agent.run` 只编排子任务，工作区操作仍由子任务各自经过 Host 授权、记录与结算。它通过可信 Rust 服务声明 `delegates_workspace_calls`，在自身准入后释放 Host 执行队列，并且不持有工作区写入围栏等待子任务。实际文件、进程等调用继续持有各自的围栏；否则前台父调用等待子任务时，子任务会反过来等待父调用的写锁。普通外部服务仍按可能直接修改工作区处理。编排调用的响应丢失或终态落盘失败仍保留未知状态。
+
 ## CodeMode：Luau 优先与 Rust 能力底座
 
 Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较，不阻塞 [#3](https://github.com/changw98ic/CAYW/issues/3) 与 [#5](https://github.com/changw98ic/CAYW/issues/5) 主线。不存在凭语言选择给出的“最快”保证。常规编码需求优先由预置、受控的 Rust 能力覆盖。
@@ -187,6 +191,18 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 依据：[共享读取验证](validation/shared-read-runtime.md)、[Cells 缓存](../crates/cayw-cells/src/cache.rs)、[Bridge 来源快照](../crates/cayw-bridge/src/model.rs)。
 
+### 统一结果与原文读取
+
+`result.store/get/batch_get/search/release` 是 Runtime 的统一结果入口。内容由 Device 的 `cayw-content` 保存，引用同时携带会话、可选任务、内容摘要、大小与编码。读取继续核对原作用域和权限。释放只改变可读状态，目前不回收物理内容，也不返还内容配额。
+
+进程过滤保留 stdout、stderr 的正式原文引用。结果外置与显示转换发生在原 Host 调用结算之后。转换失败不能把实际成功改写成未执行，也不能成为自动重放理由。
+
+### 共享文件版本与观测
+
+`cayw-codeintel` 以工作区相对路径和内容摘要发布单调文件版本，符号位置绑定对应版本。Host、Editor 与 Trace 可注入同一进程内的实例。Editor 成功保存后发布新版本；索引失败不会反向改写已完成的磁盘保存。独立进程需要自己的明确接入，不能把 `Arc` 描述为跨进程共享。
+
+上下文视图复用模型请求账本。运行过程视图复用 Core 与 Agent 事件。缺少价格依据时费用显示未知。不同入口的分页游标各有作用域，Trace 本地记录位置不等于 Session 事件游标。
+
 ### 预置能力与受控进程
 
 [#5](https://github.com/changw98ic/CAYW/issues/5) 的目标能力集包括文件与变更批次、检索/结构化定位、数据处理与编码、结构化 Git、构建/测试/检查/格式化、交互进程、人机澄清与宿主协作。它是交付范围，不意味着这些能力已经全部注册或验收。
@@ -199,13 +215,13 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 普通已配置能力经原 Host gate 执行。真实长尾缺口才进入 [#8](https://github.com/changw98ic/CAYW/issues/8) 的按需 ReAct 申请：说明用途、能力缺口、操作和确切范围；可信宿主核对，不接受模型自报的批准、actor 或有效权限。
 
-持续有效申请可以触发评估，不能按次数自动授权。当前 Requests 默认两次的配置仅为可验证的资格参数，不是安全或效果保证。宿主记录的明确项目测试/脚本意图可使首轮有效申请进入评估；模型自己声明同样意图不能代替。评估不可用、拒绝或超时不应阻塞无关的普通已授权工具。
+首次有效申请即可由可信宿主评估。重复次数只提示同一能力缺口是否反复出现，不决定评估资格，也不自动授权。宿主可记录用户明确的项目测试或脚本意图，模型自己声明不能代替。普通任务不因没有提交申请而消耗终身申请额度；申请任务已知结束后释放活动准入额度，保留原审计和授权失效记录。可信宿主可以调整申请运行限额，不能借调额清除历史未知。当前 Runtime 的调额会持久记录并更新该实例共用的申请句柄；该实例的克隆可以继续使用同一份额度，活动任务也可继续。另一个独立 Runtime 打开时，调额在写入前拒绝，防止其继续使用旧额度。全部 Runtime 关闭后，宿主也可通过管理入口或下次启动配置调整，原任务、事件和决定保持不变。评估不可用、拒绝或超时不应阻塞无关的普通已授权工具。
 
 授权限定于 Session/Task/Attempt、目标能力、参数、profile、权限策略与期限。它只能使用底层已经允许的资源，不能增加文件根、程序、参数、服务连接或 Device 权限。审批针对精确父工具调用或子能力调用，记录可信决策者和依据，迟到许可不能复活已取消任务。详见 [Requests](../crates/cayw-requests/README.md)与[Runtime 权限](../crates/cayw-runtime/src/permissions.rs)。
 
 取消沿 Task、Agent、cell、Host、Device/External 传播。取消请求、停止准入、实际停止、记录终态和清理完成是不同事实。未来新调用必须被围栏，已开始效果仍需结算/核对。清理失败时保持 draining 与原容量，持久化失败时不承认相冲突的完成；取消不能清空 unknown。完成和取消按持久队列事务定序：先提交的完成不能被之后的取消改写，先提交的取消不能被迟到成功覆盖。
 
-预算贯穿轮次、并发/队列、调用次数、时间、输出、内存和进程生命周期。yield/wait、重连、重新审批或能力申请不能重新获得整份预算。作用域以真实 Task 和执行归属为准，UI 不能凭展示状态释放名额。复杂 CPU/GPU 硬治理按 #18 后续推进，不以尚未完成的机制冒充当前硬限制。
+预算贯穿轮次、并发/队列、调用次数、时间、输出、内存和进程生命周期。yield/wait、重连、重新审批或能力申请不能重新获得整份预算。可信宿主可以明确提高会话树的模型额度；已消费和未知预留继续占用，新 Task、子会话、Fork 或重开本身不增加额度。确定尚未派发的取消，可在持久记录确认后释放该请求未用预留；可能已派发的未知费用继续保留。作用域以真实 Task 和执行归属为准，UI 不能凭展示状态释放名额。安全停止且无活动或清理待核对任务后，可信宿主可以调整调度和资源配置，并存实例不能按不一致策略准入。复杂 CPU/GPU 硬治理按 #18 后续推进，不以尚未完成的机制冒充当前硬限制。
 
 ## MCP、Skills 与外部检索
 
@@ -232,7 +248,13 @@ Session 事件追加记录并与其状态投影一起提交，保存原 lease �
 | VM 已消失 | 保留 interrupted/核对状态与输出，不自动重跑源码 |
 | 执行已停但进程清理/状态提交失败 | 保留 draining/容量与原归属，显式恢复后再释放 |
 
+后台任务独立保存原执行者、根进程和已观察后代身份，以及自己的 Device 清理记录。父任务清理不能代替后台任务清理。失去执行者或持久化失败后保持未知结果，不自动重新执行。可信 Rust 宿主先通过 `background_confirm_cleanup` 用独立记录核对原身份，再通过 `background_recover` 显式结算结果；清理确认本身不证明命令成功或失败。
+
 核对追加证据，不改写旧模型工具结果或原日志；对未知效果的核对不能用一个新调用伪装成原调用的成功。取消、重开、reset 或 Fork 都不能把 unknown 自动变成已知。具体协议、边界与复跑场景见 [SDK/IPC 契约](issue1-sdk-ipc-contract.md)、[Core 存储](../crates/cayw-core/src/store.rs)及 [#7](https://github.com/changw98ic/CAYW/issues/7)。
+
+模型用量通过同一公开 Rust `reconcile_model_request` 入口显式核对。可信宿主可证明精确请求未发出，或提供完整响应捕获对应的最终用量报告；默认没有验证器，也没有模型可调用的核对入口。Runtime 核对原请求身份与游标、共享预算树的停止状态、原执行者锁、响应身份、先前观察和额度，再追加一条控制记录。完整报告还须由宿主核对请求/响应关联、原内容事件前缀和协议计数转换。原 Failed/Cancelled/Dropped、Task、消息和观察保持不变，只派生已结算 token 与剩余预留；费用仍未知。缺失、部分或矛盾报告继续占用额度，取消的本地零值不作为证据。核对不执行旧工具，也不自动创建下一任务。
+
+存在历史未结用量（unknown hold）时，可信 Rust 宿主可通过 `authorize_model_budget_continuation` 入口为确切的新排队 Task 显式授权延续预算（`ModelBudgetContinuation` / `ModelBudgetContinuationRecord`），不提供模型工具或 IPC 授权端点。该延续授权必须在预算互斥锁与进程共享生命周期围栏（`stopped_model_budget`）下提交，要求会话树中所有执行者已停止，目标任务为真正未开始排队的新任务（无 worker、attempt、dispatch 或 slot 占用），且其任务 ID 与所有历史任务不同。授权声明的 `expected` 必须精确匹配会话树当前全部未结预留（原请求身份、原始游标与完整占用），且非空唯一有界。延续授权单独持久化，原记录、unknown 标志和被占用的预留保持不变，不阻塞后续旧请求的正当核对。请求准入时，仅对持有该授权的目标任务放行历史 unknown；若会话树出现任何未在授权名单中的新 unknown（包括该任务后续轮次产生的未结请求），则再次阻塞。该任务每轮请求的实际预留额度严格受限于会话树可用预算、授权上限扣除总占用、以及额外授予额度扣除该任务已结算与在途消费三者的最小值；旧占用释放或后续配置调大均不能扩大该任务已确定的额外额度。已完成请求结算后，后续轮次可继续复用该授权未用尽的额度；未来其他任务若仍面临历史 unknown，必须重新显式授予独立授权。仅调大配置、重新打开或 Fork 均不构成延续授权。
 
 ## Device、内容权威与资源
 
@@ -240,7 +262,7 @@ Device 管理执行进程、派生进程和交互会话，归属至少关联 Tas
 
 当前有进程/PTY 和资源记账实现，macOS 交互进程验证有单独范围。统一 External plugin 进程清理仍有独立失败，不能将 Device 局部通过外推到所有启动路径。进程组不等同安全沙箱；复杂 CPU/内存/GPU 准入和硬限制尚按 [#18](https://github.com/changw98ic/CAYW/issues/18) 推进。当前不开展 Linux/Windows 适配。
 
-Device 持有会话、工作区与内容的权威事实。已有 `cayw-content` 提供本地内容和可选加密备份对象，但不等于远程同步已经验收。存放档位按需实现：本地独立运行先成立，再验证可选同步的密钥持有者、版本/冲突、撤销、读回校验与恢复。Server 不因保存中转对象而成为内容权威；远端失败不阻断本地权威读取。参见 [内容库边界](../crates/cayw-content/README.md)。
+Device 持有会话、工作区与内容的权威事实。可信宿主可在安全停止后启用原先未启用的内容库，也可为同一原目录和 Device 增加配额；旧句柄和并存实例不能按冲突配置继续写入。目录身份、版本冲突和未知效果仍需核对。已有 `cayw-content` 提供本地内容和可选加密备份对象，但不等于远程同步已经验收。存放档位按需实现：本地独立运行先成立，再验证可选同步的密钥持有者、版本/冲突、撤销、读回校验与恢复。Server 不因保存中转对象而成为内容权威；远端失败不阻断本地权威读取。参见 [内容库边界](../crates/cayw-content/README.md)。
 
 ## 公开 SDK、版本 IPC 与消费者
 
@@ -264,6 +286,20 @@ Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。�
 
 参见[plugin 边界](../crates/cayw-plugins/README.md)、[#12](https://github.com/changw98ic/CAYW/issues/12)与[#16](https://github.com/changw98ic/CAYW/issues/16)。
 
+## Trace Debug：实时节点图与本地重新求值
+
+`cayw-trace-debug` 是可独立启停的本机插件应用。它经认证 IPC 按 Session 游标消费事件，维护自己的追踪文件和网页，不直接读写 Core 或 Cells 数据库。Runtime 和普通无界面任务不依赖该包；没有安装插件时仍可正常执行。该接入不依赖 #30 的页面编辑器，也不要求启用其他 plugin feature。
+
+节点适配用 `GraphPlan` 描述输入、初始状态、上下文、Luau 节点和分支边。实际 Runtime 执行通过普通有界输出产生带 `cayw.trace.v1` 标识的节点事实。Cells 保存输出后调用 `CellBackend::output`；Runtime 仅将这类输出发布为 `Host { kind: "trace_node" }`，保留原 execution、Task、父调用、源码摘要和输出游标。它是观测记录，不授予执行权限。原能力调用仍经过原有审批、预算、取消和结算。未提供节点适配的普通执行只显示已观察的调用事实，并列明不能局部求值的上下文缺口。
+
+插件核对 `GraphPlan` 生成脚本与 Core 保存的源码校验值一致，并逐步核对节点顺序、分支、输入和进入前状态。节点代码不能自行发出保留格式的追踪事件；格式或路径不符时隔离该图，原始事件继续保存。网页只在原始运行中根据尚未结算的节点调用显示“等待响应”，不把历史结果或本地重放显示成等待。
+
+编辑仅保存到插件内容版本。节点保存后，插件复用 `cayw-codemode::CodeMode`，从修改点进入前捕获的输入、状态和上下文继续求值。捕获数据保留共享表之间的引用关系。上游节点标为复用，不再次执行；修改点和受影响的下游节点重新执行，结果列出实际执行的节点。缺少进入前上下文的历史记录会报告缺口并阻止局部求值。撤销生成新版本，并从该版本入口完整重放。
+
+重放执行器只持有准确的捕获响应，没有真实 Host 或 Runtime 写接口。未知效果不被清除，缺失响应不回退到真实调用。旧版本和旧结果保持原状。页面区分实际 Runtime 记录与本地求值；此能力限于捕获的 Luau 节点，原生源码修改后的新二进制仍须对应编译。
+
+每个节点保存后的快速路径不运行整项目编译检查、构建或测试。插件开发时的 Cargo 验证是开发步骤，不在产品的节点保存路径中。首版支持有界无环分支图和 Luau 节点；详细契约、启动与复跑入口见 [Trace Debug](../crates/cayw-trace-debug/README.md)。
+
 ## 可选 Server：绑定、重连、TLS 与吊销
 
 Server 负责远程绑定、认证吊销和路由；Device 使用自己主动建立的连接接收请求，执行仍落在 Device 的 Runtime/Host 上。当前 `cayw-remote` 有出站 WebSocket 中转与回显/取消示例，不能据此宣称独立两机、真实 Runtime 工具流或部署 TLS 代理已经验收。
@@ -276,29 +312,26 @@ Server 负责远程绑定、认证吊销和路由；Device 使用自己主动建
 
 ## TUI、WebUI 与 VerifyTool
 
-TUI 是可选终端消费者，WebUI 是可选浏览器消费者；WebUI 的本地轻网关通过公开接口连接 Runtime，不强制使用远程 Server。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。当前已有各自实现和部分验证，完整场景仍分别归 [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14)。
+TUI 是可选终端消费者，WebUI 是可选浏览器消费者；WebUI 的本地轻网关通过公开接口连接 Runtime，不强制使用远程 Server。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。各自交付范围与验收以对应 Issue 和 `docs/validation/` 记录为准。
 
-本地浏览器轻网关明确监听、来源与鉴权；回环不替代身份校验。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
+本地浏览器轻网关默认只监听回环地址并免登录，仍严格校验 Host、Origin 与跨站请求。只有显式 `--lan IP:PORT` 才开放局域网；账户可选，未配置时允许访问并给出非阻塞提示，配置后使用账号密码与 HttpOnly 会话。账号配置以 WebUI 设置为主，仅允许真实回环连接且 Host 匹配本机管理地址的请求修改；不信任转发头。LAN 模式配对一个仅回环管理入口，与局域网入口共享状态，保存时立即应用并撤销旧登录。Runtime IPC 保留独立内部认证，不向浏览器暴露。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
 
 VerifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [VerifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
 
-## 测试验收与阶段映射
+## 当前页面的可视化编辑
 
-每份证据只证明自己的源码、依赖、配置、输入、权限、平台和场景。macOS ARM64 已有记录不能外推到其他架构；历史 Linux 结果只作历史，当前不重新开展 Linux/Windows 工作。真实模型/付费测试需要当次明确授权，本次文档任务不运行。性能保存原始样本，不用固定毫秒级 CI 断言，不从微基准推断模型任务收益。
+[Issue #30](https://github.com/changw98ic/CAYW/issues/30) 由独立可选应用 `cayw-visual-editor` 承接。支持 HTML/CSS 与原生 JavaScript 页面，也支持显式选择的 Vite React 和 Vue 工程，使用源码位置映射和页面操作覆盖层。它不把页面先转成预注册组件模板，也不在 Core 中增加页面解析器。
 
-| 阶段 / Issues | 架构验收重点 | 当前范围 |
-| --- | --- | --- |
-| Rust pi 前置内核 | 消息、流事件、工具循环、取消与配对 | 已有早期离线和有限真实记录；见[原始内核](rust-pi-core.md) |
-| A：[#1](https://github.com/changw98ic/CAYW/issues/1)–[#5](https://github.com/changw98ic/CAYW/issues/5) | 公开接口、macOS 基线、Luau 优先测量、最小 Device、预置能力 | #1 已按 macOS ARM64 离线范围关闭；#2–#5 继续完整验收，Monty 不阻塞 |
-| B：[#6](https://github.com/changw98ic/CAYW/issues/6) | 无 UI/Server/VerifyTool 的真实 Provider 流式多轮、权限、工具、持久化、取消全链 | Stage A 稳固后完成，当前尚未验收 |
-| C：[#7](https://github.com/changw98ic/CAYW/issues/7)–[#11](https://github.com/changw98ic/CAYW/issues/11) | 崩溃窗口/unknown、能力申请、宿主桥接、协议与多 Session 队列 | 已有实现与局部用例；不因 #1 完成而结项 |
-| D：[#12](https://github.com/changw98ic/CAYW/issues/12)–[#17](https://github.com/changw98ic/CAYW/issues/17) | plugin 生命周期、UI 消费、远程两机、StrongFlow 冻结/Fork、诊断非阻塞 | 保留统一进程清理等缺口，各项单独验收 |
-| C 补充：[#22](https://github.com/changw98ic/CAYW/issues/22)、[#23](https://github.com/changw98ic/CAYW/issues/23) | 上下文压缩（不拆开调用与结果、不改写原始记录和 unknown）；补齐 Session 分叉、模型配置、工具授权、上下文、预算等公开 API | 新增任务，依赖 #6 |
-| E：[#18](https://github.com/changw98ic/CAYW/issues/18) | 资源策略、权威存放档位、可选加密同步 | 本地内容与备份切片不代替硬治理或真实同步 |
-| 后续：[#19](https://github.com/changw98ic/CAYW/issues/19) | Linux/Windows 原生适配与平台证据 | 不属于当前首发，不作为上述 macOS 任务前置条件 |
+项目预览和编辑器分别使用本机地址。项目脚本不能取得编辑器访问令牌。预览消息必须校验来源、发送窗口和消息结构，不能借消息获得任意文件或进程能力。
+
+源码读取和保存通过 `cayw-host` 的公开 Rust 接口执行。编辑器为当前项目提供精确权限和持久调用记录。保存带原文件摘要，过期映射不能覆盖外部改动；未确认保存结果时保留未知状态，不能通过重启自动恢复写入。页面资源读取保持固定目录句柄，不能因路径替换而换根。
+
+确定性样式、文本与结构操作不需要模型。HTML 以单文件为保存单位；React/Vue 按实际源文件保存，跨文件保存仍受部分完成与未知结果规则约束。无法映射的动态区域保持渲染并标明操作范围。预览刷新不承诺保留脚本内存中的临时状态。使用范围与真实验收入口见[可视化编辑说明](visual-editor.md)。
+
+## 测试与验收约束
+
+每份证据只证明自己的源码、依赖、配置、输入、权限、平台和场景。macOS ARM64 已有记录不能外推到其他架构；历史 Linux 结果只作历史，当前不重新开展 Linux/Windows 工作。真实模型/付费测试需要当次明确授权；普通测试保持离线或本地 HTTP。性能保存原始样本，不用固定毫秒级 CI 断言，不从微基准推断模型任务收益。
 
 关键故障覆盖包括：副作用前后崩溃、终态提交失败、审批/撤销竞态、跨实例取消、旧 lease/迟到结果、cell 输出分页、共享读取失效、进程清理失败、plugin 卸载与显式 Fork、绑定回执丢失和吊销。语义与状态收敛是断言对象，历史通过数量不是当前新组合的结论。
 
-硬依赖与 Mermaid 图继续由[路线图](development-map.md)维护。本架构不更改 Issue 范围或依赖，不把 TUI、VerifyTool、可选 Server、Monty 对照或后续平台反向加为 Core Only 前置条件。
-
-状态、接口细节或平台范围变化时，同步更新本文件、README 与路线图；实现细节继续链接到源码和专门契约，验收事实留在对应记录和 Issue 中。
+阶段划分、硬依赖、Mermaid 图与各 Issue 状态由[路线图](development-map.md)维护；本架构不更改 Issue 范围或依赖，不把 TUI、VerifyTool、可选 Server、Monty 对照或后续平台反向加为 Core Only 前置条件。接口、平台范围或约束变化时，同步更新本文件、README 与路线图；实现细节继续链接到源码和专门契约，验收事实留在对应记录和 Issue 中。

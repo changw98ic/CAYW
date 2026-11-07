@@ -176,7 +176,7 @@ async fn cancelled_store_settles_the_original_service_future() {
     });
     let cancel = CancellationToken::new();
     let mut execution =
-        Box::pin(mode.execute_with_services("store('k',{count=1},0)", cancel.clone(), services));
+        Box::pin(mode.execute_with_services("pcall(function() xpcall(function() store('k',{count=1},0) end,function() return 'handled' end) end); store('next',1,0)", cancel.clone(), services));
     tokio::select! {
         _ = wait_started(&counters) => {}
         result = &mut execution => panic!("execution ended before cancellation: {result:?}"),
@@ -186,6 +186,7 @@ async fn cancelled_store_settles_the_original_service_future() {
         .await
         .expect_err("the cancelled execution must stop");
     assert_eq!(error.kind, ErrorKind::Cancelled);
+    assert_eq!(counters.started.load(Ordering::SeqCst), 1);
     assert_eq!(counters.settled.load(Ordering::SeqCst), 1);
     assert_eq!(counters.dropped.load(Ordering::SeqCst), 0);
     assert!(error.report.outcome_unknown);

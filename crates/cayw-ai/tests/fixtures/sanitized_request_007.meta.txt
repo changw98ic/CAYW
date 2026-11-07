@@ -1,0 +1,8 @@
+# Source SHA-256: a27e49904c88516dff6c4dab3a9a7a6cb1317a25915c19c3ffd2dd09f4cb5023
+# Fixture SHA-256: 4442a2f4967de4e7a915097bb8b2b174fbc41a339549132385773d77bc7a1af7
+# Captured from: /tmp/cayw-f01-f20-repair-20261028/chat-baseline-capture-02/http-capture/request-007/response.sse
+# Scope: A new capture using the original reg01 prompt and the frozen baseline binary. This is not a historical failed request from the original seven cases.
+# Description: Upstream returned finish_reason tool_calls without tool calls, followed by usage (total: 5429) and [DONE]. The fixture retains the protocol error.
+# Normalization: Replace the top-level response id and model in all 55 JSON frames with stable fixture values. JSON comparison confirmed these are the only changed fields.
+# Preserved: 55 JSON frames and one [DONE] frame, frame order, text/reasoning, null tool_calls, finish_reason, usage fields and values. No tool call is invented.
+# Privacy limit: This normalization replaces identifiers. It is not a general text-secret redactor. No HTTP request headers or credentials are part of this SSE fixture.

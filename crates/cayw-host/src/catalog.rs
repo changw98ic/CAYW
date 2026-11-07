@@ -78,6 +78,58 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
                 .map(|definition| (definition, Executor::Workspace)),
         );
     }
+    if config.codeintel.is_some() {
+        definitions.extend([
+            (
+                definition(
+                    "codeintel.refresh",
+                    "Read one workspace file, publish its digest and outline into the shared symbol/version bridge (prefers code.outline; lightweight Rust scan otherwise).",
+                    json!({"path":path(),"language":{"type":"string","minLength":1,"maxLength":64}}),
+                    &["path"],
+                ),
+                Executor::CodeIntel,
+            ),
+            (
+                definition(
+                    "codeintel.definitions",
+                    "Query same-index symbol definitions from the shared F04 bridge.",
+                    json!({
+                        "name":string(256),
+                        "path":path(),
+                        "kind":string(64),
+                        "file_version":{"type":"integer","minimum":1}
+                    }),
+                    &["name"],
+                ),
+                Executor::CodeIntel,
+            ),
+            (
+                definition(
+                    "codeintel.file_version",
+                    "Return the indexed file version and content digest for a path.",
+                    json!({"path":path()}),
+                    &["path"],
+                ),
+                Executor::CodeIntel,
+            ),
+            (
+                definition(
+                    "codeintel.symbols",
+                    "List symbols currently indexed for one path in the shared F04 bridge.",
+                    json!({"path":path()}),
+                    &["path"],
+                ),
+                Executor::CodeIntel,
+            ),
+        ]);
+    }
+    if config.vision.is_some() {
+        definitions.extend(
+            cayw_vision::definitions()
+                .into_iter()
+                .map(|definition| (definition, Executor::Vision)),
+        );
+    }
     definitions.extend(
         git::definitions(config)
             .into_iter()
@@ -112,6 +164,13 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
                 .map(|definition| (definition, Executor::Terminal)),
         );
     }
+    if config.web_access.is_some() {
+        definitions.extend(
+            cayw_web_access::definitions()
+                .into_iter()
+                .map(|definition| (definition, Executor::WebAccess)),
+        );
+    }
     if config.external.is_some() {
         definitions.extend([
             definition("search.query", "Query the application's existing bounded search service.", json!({
@@ -124,6 +183,10 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             }), &["server","tool","arguments"]),
             definition("mcp.resources.list", "List resource metadata pinned by the host's existing MCP sources.", json!({"server":string(256)}), &[]),
             definition("mcp.resources.read", "Read one manifest-pinned resource through the host's existing MCP source.", json!({"server":string(256),"uri":string(2048)}), &["server","uri"]),
+            definition("mcp.prompts.list", "List prompt templates pinned by the host's existing MCP sources.", json!({"server":string(256)}), &[]),
+            definition("mcp.prompts.get", "Fetch one prompt template through the host's existing MCP source.", json!({
+                "server":string(256),"name":string(256),"arguments":{"type":"object"}
+            }), &["server","name"]),
             definition("skills.list", "List skills from the application's existing skill source.", json!({}), &[]),
             definition("skills.read", "Read one named skill from the application's existing skill source.", json!({"name":string(256)}), &["name"]),
         ].into_iter().map(|definition| (definition, Executor::External)));

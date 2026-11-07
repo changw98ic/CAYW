@@ -1,7 +1,7 @@
 //! Explicit host connection settings. No local model credentials are read.
 use std::{fmt, net::SocketAddr};
 
-pub const USAGE: &str = "cayw-tui [--addr IP:PORT]\n\nConnect to a running host using CAYW_IPC_ADDR and CAYW_IPC_TOKEN.\n--addr overrides CAYW_IPC_ADDR. The token is accepted only from the environment.\n\nCtrl+N new session | Tab focus | Enter send | Alt+Enter newline\nCtrl+X cancel | Alt+O once | Alt+T task | Alt+D deny | Ctrl+F fork\nPgUp/PgDn history | Ctrl+R reconnect | Ctrl+Q quit";
+pub const USAGE: &str = "cayw-tui [--addr IP:PORT]\n\nConnect to a running host using CAYW_IPC_ADDR and CAYW_IPC_TOKEN.\n--addr overrides CAYW_IPC_ADDR. The token is accepted only from the environment.\n\nCtrl+N new session | Tab focus | Alt+1..4 Chat/Files/Diff/Logs | Enter send | Alt+Enter newline\nCtrl+X cancel | Alt+O once | Alt+T task | Alt+D deny | Ctrl+F fork\nPgUp/PgDn history | Ctrl+R reconnect | Ctrl+Q quit";
 
 pub struct Config {
     pub address: SocketAddr,

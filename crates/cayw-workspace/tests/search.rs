@@ -44,7 +44,13 @@ fn paths(result: &Value) -> Vec<&str> {
 #[tokio::test]
 async fn glob_honors_nested_gitignore_negation_parent_and_root_rules() {
     let temp = tempfile::tempdir().unwrap();
-    for dir in ["src/deep", "blocked", "hidden", ".git", ".cayw-private"] {
+    for dir in [
+        "src/deep",
+        "blocked",
+        "hidden",
+        ".git",
+        ".cayw-host-tmp-private",
+    ] {
         fs::create_dir_all(temp.path().join(dir)).unwrap();
     }
     fs::write(
@@ -70,7 +76,7 @@ async fn glob_honors_nested_gitignore_negation_parent_and_root_rules() {
         "hidden/drop.rs",
         "hidden/keep.rs",
         ".git/secret.rs",
-        ".cayw-private/secret.rs",
+        ".cayw-host-tmp-private/secret.rs",
     ] {
         fs::write(temp.path().join(file), "match").unwrap();
     }

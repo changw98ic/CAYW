@@ -50,7 +50,7 @@ impl RequestTools {
         vec![
             ToolDefinition {
                 name: "capability.request".into(),
-                description: "Record a task-scoped capability gap for host evaluation. Repetition may request evaluation; it never grants permission or runs work.".into(),
+                description: "Record a task-scoped capability gap for host evaluation. The first valid request is evaluable; repetition only changes the informational state. This never grants permission or runs work.".into(),
                 parameters: json!({
                     "type":"object","additionalProperties":false,
                     "required":["purpose","gap","operation_id","capability","arguments"],

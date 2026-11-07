@@ -1,0 +1,103 @@
+--- a/crates/cayw-core/src/store.rs
++++ b/crates/cayw-core/src/store.rs
+@@ -1,5 +1,5 @@
+ use crate::*;
+-use cayw_agent::{AgentEvent, ToolResult};
++use cayw_agent_types::{AgentEvent, ToolResult};
+ use cayw_ai::{
+     AssistantMessage, Content, Message, StopReason, ToolCall, ToolResultMessage, timestamp_ms,
+ };
+@@ -1459,9 +1459,18 @@
+             .lock()
+             .map_err(|_| CoreError::StorePoisoned)?;
+         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+-        let mut session = load(&transaction, session_id)?;
+-        let (result, lease, event) = change(&mut session)?;
+-        let record = persist(&transaction, &mut session, lease, event)?;
++        // Reuse the projection only when the complete persisted value still
++        // matches the cached one; otherwise reload and validate from SQLite.
++        let mut session = self.cached_projection(&transaction, session_id)?;
++        // Move the cached value into this transaction. If anything below fails,
++        // the cache stays empty and a later reader reloads the committed value.
++        self.projection_cache
++            .lock()
++            .map_err(|_| CoreError::StorePoisoned)?
++            .take();
++        let state = Arc::make_mut(&mut session);
++        let (result, lease, event) = change(state)?;
++        let record = persist(&transaction, state, lease, event)?;
+         #[cfg(feature = "fault-injection")]
+         let crash_point = match &record.event {
+             CoreEvent::Agent { event } => match event.as_ref() {
+@@ -1487,11 +1496,18 @@
+         if let Some((before, _, data)) = &crash_point {
+             cayw_ai::faults::hit(before, data.clone());
+         }
++        // Read back the projection written in this transaction instead of
++        // encoding it again. It is published only after a successful commit.
++        let json = projection_json(&transaction, session_id)?;
+         transaction.commit()?;
+         #[cfg(feature = "fault-injection")]
+         if let Some((_, committed, data)) = crash_point {
+             cayw_ai::faults::hit(committed, data);
+         }
++        *self
++            .projection_cache
++            .lock()
++            .map_err(|_| CoreError::StorePoisoned)? = Some(CachedProjection { json, session });
+         Ok((result, record))
+     }
+ }
+@@ -2387,6 +2403,52 @@
+     }
+ 
+     #[test]
++    fn ordinary_write_commit_failure_preserves_history_and_allows_retry() {
++        let directory = std::env::temp_dir().join(format!("cayw-commit-retry-{}", Uuid::new_v4()));
++        std::fs::create_dir(&directory).unwrap();
++        let store = SessionStore::open(directory.join("session.db")).unwrap();
++        let session = store.create_session("commit retry").unwrap();
++        let lease = store.begin_attempt(&session.id, "worker").unwrap();
++        let before = store.snapshot(&session.id).unwrap();
++        let events = store.events(&session.id, 0, 100).unwrap();
++        store
++            .connection
++            .lock()
++            .unwrap()
++            .execute_batch(
++                "CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY);
++                 CREATE TABLE fixture_deferred(parent INTEGER REFERENCES fixture_parent(id) DEFERRABLE INITIALLY DEFERRED);
++                 CREATE TRIGGER fail_host_commit AFTER INSERT ON core_events
++                 WHEN json_extract(NEW.record, '$.event.type')='host'
++                 BEGIN INSERT INTO fixture_deferred VALUES(1); END;",
++            )
++            .unwrap();
++        assert!(matches!(
++            store.append_host_event(&lease, "commit_fixture", serde_json::json!({"value": 1})),
++            Err(CoreError::Database(_))
++        ));
++        assert_eq!(store.snapshot(&session.id).unwrap(), before);
++        assert_eq!(store.events(&session.id, 0, 100).unwrap(), events);
++        store
++            .connection
++            .lock()
++            .unwrap()
++            .execute_batch("DROP TRIGGER fail_host_commit")
++            .unwrap();
++        let committed = store
++            .append_host_event(&lease, "commit_fixture", serde_json::json!({"value": 1}))
++            .unwrap();
++        assert_eq!(committed.cursor, before.cursor + 1);
++        assert_eq!(
++            store.events(&session.id, before.cursor, 100).unwrap(),
++            [committed]
++        );
++        store.finish_attempt(&lease).unwrap();
++        drop(store);
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++
++    #[test]
+     fn counter_exhaustion_cannot_wrap_or_cross_sqlite_integer_range() {
+         assert_eq!(increment(0).unwrap(), 1);
+         assert!(matches!(

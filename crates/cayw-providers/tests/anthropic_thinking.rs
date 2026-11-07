@@ -674,6 +674,145 @@ async fn cancellation_and_drop_after_signed_blocks_release_the_socket() {
 }
 
 #[tokio::test]
+async fn invalid_arguments_do_not_hide_missing_terminal_or_reused_call_identity() {
+    let call = |id: &str| {
+        vec![
+            block_start(
+                0,
+                json!({"type":"tool_use","id":id,"name":"weather","input":{}}),
+            ),
+            delta(
+                0,
+                json!({"type":"input_json_delta","partial_json":"\"invalid object\""}),
+            ),
+            block_stop(0),
+        ]
+    };
+    let mut incomplete = vec![start()];
+    incomplete.extend(call("call-incomplete"));
+    incomplete.push(json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":11}}));
+    let mut duplicate = vec![start()];
+    duplicate.extend(call("call-duplicate"));
+    duplicate.push(block_start(
+        1,
+        json!({"type":"tool_use","id":"call-duplicate","name":"weather","input":{}}),
+    ));
+    let mut undeclared = vec![start()];
+    undeclared.push(block_start(
+        0,
+        json!({"type":"tool_use","id":"call-other","name":"unregistered","input":{}}),
+    ));
+    let mut truncated = vec![start()];
+    truncated.extend(call("call-truncated"));
+    truncated.extend(finish("max_tokens"));
+    for (name, wire) in [
+        ("invalid-incomplete", incomplete),
+        ("invalid-duplicate", duplicate),
+        ("invalid-undeclared", undeclared),
+        ("invalid-truncated", truncated),
+    ] {
+        let (base, rx, task) = server(name, wire).await;
+        let events = collect(&AnthropicProvider::new(base, KEY).unwrap(), request()).await;
+        save(name, "events.json", &events);
+        assert_error(&events);
+        rx.await.unwrap();
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn signed_thinking_survives_invalid_tool_arguments_and_round_trips_an_error_result() {
+    // Signed thinking must replay unchanged when the same complete reply also
+    // carries a tool call whose arguments are invalid. The call is marked and
+    // the model gets a paired error result; thinking never becomes answer text.
+    let raw = "{\"city\":\"Paris\"";
+    let mut wire = signed_prefix();
+    wire.extend([
+        block_start(
+            1,
+            json!({"type":"tool_use","id":"call-invalid","name":"weather","input":{}}),
+        ),
+        delta(1, json!({"type":"input_json_delta","partial_json":raw})),
+        block_stop(1),
+    ]);
+    wire.extend(finish("tool_use"));
+    let (base, rx, task) = server("invalid-tool-thinking", wire).await;
+    let events = collect(&AnthropicProvider::new(base, KEY).unwrap(), request()).await;
+    save("invalid-tool-thinking", "events.json", &events);
+    let message = terminal(&events);
+    assert_eq!(message.stop_reason, StopReason::ToolUse, "{events:?}");
+    assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
+    assert_eq!(message.usage_status, UsageStatus::Reported);
+    assert_eq!(message.usage.total_tokens, 18);
+    assert!(
+        message
+            .content
+            .iter()
+            .all(|part| matches!(part, Content::ToolCall(_)))
+    );
+    let calls = message.tool_calls();
+    let call = &calls[0];
+    assert_eq!(call.id, "call-invalid");
+    assert!(
+        call.arguments_error
+            .as_deref()
+            .is_some_and(|error| !error.trim().is_empty())
+    );
+    let metadata = serde_json::to_string(&message.provider_metadata).unwrap();
+    assert!(
+        metadata.contains(raw) || metadata.contains(&serde_json::to_string(raw).unwrap()),
+        "original invalid input must stay in provider metadata: {metadata}"
+    );
+    assert!(events.iter().all(|event| {
+        !event
+            .message()
+            .content
+            .iter()
+            .any(|part| matches!(part, Content::Thinking { .. }))
+    }));
+    let restored: AssistantMessage =
+        serde_json::from_slice(&serde_json::to_vec(message).unwrap()).unwrap();
+    rx.await.unwrap();
+    task.await.unwrap();
+
+    let mut req = request();
+    let mut error_result = result("call-invalid", "Paris");
+    if let Message::ToolResult(result) = &mut error_result {
+        result.is_error = true;
+    }
+    req.messages
+        .extend([Message::Assistant(restored), error_result]);
+    let (base, rx, task) = server("invalid-tool-thinking-replay", answer()).await;
+    let events = collect(&AnthropicProvider::new(base, KEY).unwrap(), req).await;
+    save("invalid-tool-thinking-replay", "events.json", &events);
+    assert_eq!(
+        terminal(&events).stop_reason,
+        StopReason::Stop,
+        "{events:?}"
+    );
+    let sent = rx.await.unwrap();
+    assert_eq!(
+        sent["body"]["messages"][1]["content"][0]["signature"],
+        "opaque-synthetic-signature+/="
+    );
+    let call_block = &sent["body"]["messages"][1]["content"][1];
+    assert_eq!(call_block["id"], "call-invalid");
+    assert_eq!(call_block["name"], "weather");
+    assert!(
+        call_block["input"].as_str() == Some(raw)
+            || call_block["input"]
+                .to_string()
+                .contains(&serde_json::to_string(raw).unwrap()),
+        "replayed tool_use lost the invalid original: {call_block}"
+    );
+    let result_block = &sent["body"]["messages"][2]["content"][0];
+    assert_eq!(result_block["type"], "tool_result");
+    assert_eq!(result_block["tool_use_id"], "call-invalid");
+    assert_eq!(result_block["is_error"], true);
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn empty_thinking_deltas_still_obey_the_shared_fragment_limit() {
     let mut wire = vec![
         start(),

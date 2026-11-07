@@ -10,30 +10,32 @@ use std::collections::{BTreeMap, BTreeSet};
 // A single tool argument string may arrive as many bounded deltas. This cap is
 // independent of the stream-wide byte limit and is checked before appending.
 const MAX_ARGUMENT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_REPLAY_DEPTH: usize = 128;
 
 pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
-    common::validate_request(request, Format::Responses)?;
+    let mut prepared = common::prepare_request(request, Format::Responses)?;
     let system = current_system(&request.messages);
     let mut input = Vec::new();
-    for message in &request.messages {
+    for (idx, message) in request.messages.iter().enumerate() {
         match message {
             Message::System(_) | Message::Custom { .. } => {}
-            Message::User { content, .. } => input.push(json!({
-                "role": "user",
-                "content": common::input_parts(content, request.model.supports_images, Format::Responses)?,
-            })),
+            Message::User { .. } => {
+                let parts = prepared
+                    .user_parts
+                    .remove(&idx)
+                    .expect("validated user parts");
+                input.push(json!({
+                    "role": "user",
+                    "content": parts,
+                }));
+            }
             // The original output items are required replay material. Normalized
             // text or calls alone cannot reconstruct reasoning identities.
             Message::Assistant(assistant) => input.extend(history_items(assistant)?),
             Message::ToolResult(result) => {
-                let output = common::tool_output(result)?
-                    .into_iter()
-                    .map(|part| {
-                        let text = part.get("text").and_then(Value::as_str).unwrap_or("");
-                        json!({"type":"input_text","text":text})
-                    })
-                    .collect::<Vec<_>>();
+                let output = prepared
+                    .tool_outputs
+                    .remove(&idx)
+                    .expect("validated tool output");
                 input.push(json!({
                     "type": "function_call_output",
                     "call_id": result.tool_call_id,
@@ -181,6 +183,7 @@ enum ItemKind {
         buffer: String,
         content_index: usize,
         arguments_done: bool,
+        call: Option<ToolCall>,
     },
     Reasoning {
         parts: Vec<ReasoningPart>,
@@ -422,6 +425,7 @@ impl State {
                         buffer: String::new(),
                         content_index,
                         arguments_done: false,
+                        call: None,
                     },
                 });
             }
@@ -802,7 +806,7 @@ impl State {
             return Err("Duplicate Responses output item done event".into());
         }
         let mut ended_call = None;
-        match (&item.kind, item_type) {
+        match (&mut item.kind, item_type) {
             (ItemKind::Message { parts }, "message") => {
                 if common::string(item_value, "role")? != "assistant" {
                     return Err("Invalid Responses done message role".into());
@@ -835,6 +839,7 @@ impl State {
                     buffer,
                     content_index,
                     arguments_done,
+                    call,
                 },
                 "function_call",
             ) => {
@@ -848,9 +853,10 @@ impl State {
                     return Err("Responses done call does not match its deltas".into());
                 }
                 let arguments = parse_arguments(buffer)?;
-                let call = ToolCall::new(call_id.clone(), name.clone(), arguments);
-                common::validate_call(&call, &self.tools)?;
-                ended_call = Some((*content_index, call));
+                let validated_call = ToolCall::new(call_id.clone(), name.clone(), arguments);
+                common::validate_call(&validated_call, &self.tools)?;
+                ended_call = Some((*content_index, validated_call.clone()));
+                *call = Some(validated_call);
             }
             (ItemKind::Reasoning { parts, .. }, "reasoning") => {
                 item_value
@@ -972,20 +978,17 @@ impl State {
                     }
                 }
                 ItemKind::FunctionCall {
-                    call_id,
-                    name,
-                    buffer,
                     arguments_done,
+                    call,
                     ..
                 } => {
                     if !arguments_done {
                         return Err("Responses call has no argument done event".into());
                     }
-                    normalized.push(Content::ToolCall(ToolCall::new(
-                        call_id.clone(),
-                        name.clone(),
-                        parse_arguments(buffer)?,
-                    )));
+                    let call = call
+                        .as_ref()
+                        .ok_or("Responses call has no validated tool call")?;
+                    normalized.push(Content::ToolCall(call.clone()));
                 }
                 ItemKind::Reasoning { .. } => {}
             }
@@ -1141,210 +1144,19 @@ fn detail_counter(
 }
 
 fn parse_arguments(text: &str) -> Result<Value> {
-    let value: Value = serde_json::from_str(text)
-        .map_err(|_| "Invalid JSON in Responses tool arguments".to_owned())?;
-    ensure_no_duplicate_keys(text.as_bytes())?;
-    if !value.is_object() {
-        return Err("Responses tool arguments must be a JSON object".into());
-    }
-    Ok(value)
-}
-
-// serde_json keeps the last duplicate field instead of rejecting it. This
-// bounded scanner checks object keys after syntax validation, including escaped
-// keys and nested objects, without adding another dependency.
-fn ensure_no_duplicate_keys(input: &[u8]) -> Result<()> {
-    let mut index = 0;
-    skip_ws(input, &mut index);
-    scan_json_value(input, &mut index, 0)?;
-    skip_ws(input, &mut index);
-    if index != input.len() {
+    if text.trim().is_empty() {
         return Err("Invalid JSON in Responses tool arguments".into());
     }
-    Ok(())
-}
-
-fn skip_ws(input: &[u8], index: &mut usize) {
-    while let Some(byte) = input.get(*index)
-        && matches!(*byte, b' ' | b'\t' | b'\n' | b'\r')
-    {
-        *index += 1;
-    }
-}
-
-fn scan_json_value(input: &[u8], index: &mut usize, depth: usize) -> Result<()> {
-    if depth > MAX_REPLAY_DEPTH {
-        return Err("Responses tool arguments exceed the nesting limit".into());
-    }
-    skip_ws(input, index);
-    match input.get(*index) {
-        Some(b'{') => {
-            *index += 1;
-            skip_ws(input, index);
-            if input.get(*index) == Some(&b'}') {
-                *index += 1;
-                return Ok(());
-            }
-            let mut keys = BTreeSet::new();
-            loop {
-                skip_ws(input, index);
-                if input.get(*index) != Some(&b'"') {
-                    return Err("Invalid JSON in Responses tool arguments".into());
-                }
-                let key = scan_json_string(input, index)?;
-                if !keys.insert(key) {
-                    return Err("Duplicate JSON key in Responses tool arguments".into());
-                }
-                skip_ws(input, index);
-                if input.get(*index) != Some(&b':') {
-                    return Err("Invalid JSON in Responses tool arguments".into());
-                }
-                *index += 1;
-                scan_json_value(input, index, depth + 1)?;
-                skip_ws(input, index);
-                match input.get(*index) {
-                    Some(b',') => *index += 1,
-                    Some(b'}') => {
-                        *index += 1;
-                        break;
-                    }
-                    _ => return Err("Invalid JSON in Responses tool arguments".into()),
-                }
-            }
+    cayw_ai::parse_tool_arguments(text).map_err(|error| {
+        let msg = &error.0;
+        if msg.contains("duplicate JSON object field") {
+            "Duplicate JSON key in Responses tool arguments".into()
+        } else if msg.contains("must be a JSON object") {
+            "Responses tool arguments must be a JSON object".into()
+        } else if msg.contains("recursion limit") {
+            "Responses tool arguments exceed the nesting limit".into()
+        } else {
+            "Invalid JSON in Responses tool arguments".into()
         }
-        Some(b'[') => {
-            *index += 1;
-            skip_ws(input, index);
-            if input.get(*index) == Some(&b']') {
-                *index += 1;
-                return Ok(());
-            }
-            loop {
-                scan_json_value(input, index, depth + 1)?;
-                skip_ws(input, index);
-                match input.get(*index) {
-                    Some(b',') => *index += 1,
-                    Some(b']') => {
-                        *index += 1;
-                        break;
-                    }
-                    _ => return Err("Invalid JSON in Responses tool arguments".into()),
-                }
-            }
-        }
-        Some(b'"') => {
-            scan_json_string(input, index)?;
-        }
-        Some(_) => {
-            let start = *index;
-            while let Some(byte) = input.get(*index) {
-                if matches!(*byte, b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r') {
-                    break;
-                }
-                *index += 1;
-            }
-            if *index == start {
-                return Err("Invalid JSON in Responses tool arguments".into());
-            }
-        }
-        None => return Err("Invalid JSON in Responses tool arguments".into()),
-    }
-    Ok(())
-}
-
-fn scan_json_string(input: &[u8], index: &mut usize) -> Result<String> {
-    if input.get(*index) != Some(&b'"') {
-        return Err("Invalid JSON in Responses tool arguments".into());
-    }
-    *index += 1;
-    let mut out = String::new();
-    let mut chunk = *index;
-    while let Some(&byte) = input.get(*index) {
-        match byte {
-            b'"' => {
-                out.push_str(
-                    std::str::from_utf8(&input[chunk..*index])
-                        .map_err(|_| "Invalid UTF-8 in Responses tool arguments")?,
-                );
-                *index += 1;
-                return Ok(out);
-            }
-            b'\\' => {
-                out.push_str(
-                    std::str::from_utf8(&input[chunk..*index])
-                        .map_err(|_| "Invalid UTF-8 in Responses tool arguments")?,
-                );
-                *index += 1;
-                let escape = *input
-                    .get(*index)
-                    .ok_or("Invalid JSON escape in Responses tool arguments")?;
-                *index += 1;
-                match escape {
-                    b'"' => out.push('"'),
-                    b'\\' => out.push('\\'),
-                    b'/' => out.push('/'),
-                    b'b' => out.push('\u{0008}'),
-                    b'f' => out.push('\u{000c}'),
-                    b'n' => out.push('\n'),
-                    b'r' => out.push('\r'),
-                    b't' => out.push('\t'),
-                    b'u' => {
-                        let code = scan_hex4(input, index)?;
-                        if (0xD800..=0xDBFF).contains(&code) {
-                            if input.get(*index) != Some(&b'\\')
-                                || input.get(*index + 1) != Some(&b'u')
-                            {
-                                return Err(
-                                    "Invalid JSON surrogate pair in Responses tool arguments"
-                                        .into(),
-                                );
-                            }
-                            *index += 2;
-                            let low = scan_hex4(input, index)?;
-                            if !(0xDC00..=0xDFFF).contains(&low) {
-                                return Err(
-                                    "Invalid JSON surrogate pair in Responses tool arguments"
-                                        .into(),
-                                );
-                            }
-                            let code =
-                                0x10000 + (((code - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
-                            out.push(
-                                char::from_u32(code)
-                                    .ok_or("Invalid JSON code point in Responses tool arguments")?,
-                            );
-                        } else if (0xDC00..=0xDFFF).contains(&code) {
-                            return Err(
-                                "Invalid JSON surrogate pair in Responses tool arguments".into()
-                            );
-                        } else {
-                            out.push(
-                                char::from_u32(code as u32)
-                                    .ok_or("Invalid JSON code point in Responses tool arguments")?,
-                            );
-                        }
-                    }
-                    _ => return Err("Invalid JSON escape in Responses tool arguments".into()),
-                }
-                chunk = *index;
-            }
-            _ => *index += 1,
-        }
-    }
-    Err("Invalid JSON in Responses tool arguments".into())
-}
-
-fn scan_hex4(input: &[u8], index: &mut usize) -> Result<u16> {
-    let end = index
-        .checked_add(4)
-        .ok_or("Invalid JSON escape in Responses tool arguments")?;
-    let digits = input
-        .get(*index..end)
-        .ok_or("Invalid JSON escape in Responses tool arguments")?;
-    let digits = std::str::from_utf8(digits)
-        .map_err(|_| "Invalid JSON escape in Responses tool arguments")?;
-    let value = u16::from_str_radix(digits, 16)
-        .map_err(|_| "Invalid JSON escape in Responses tool arguments")?;
-    *index = end;
-    Ok(value)
+    })
 }

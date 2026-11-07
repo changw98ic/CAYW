@@ -119,6 +119,18 @@ pub(crate) fn name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
+pub(crate) fn source_name(value: &str) -> bool {
+    if name(value) {
+        return true;
+    }
+    value.len() <= 128
+        && value.strip_prefix('@').is_some_and(|scoped| {
+            scoped
+                .split_once('/')
+                .is_some_and(|(scope, package)| name(scope) && name(package))
+        })
+}
+
 pub(crate) fn sha256(value: &str) -> bool {
     value.len() == 64
         && value

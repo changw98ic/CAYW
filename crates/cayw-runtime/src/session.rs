@@ -364,12 +364,14 @@ impl Runtime {
                     Err(error) => return Err(error),
                 }
             }
+            let pending_storage = crate::results::has_pending_storage(self, id, snapshot.cursor)?;
             let mut view = SessionView::from_snapshot(snapshot, binding);
-            if self
-                .inner
-                .cells
-                .is_frozen(id)
-                .map_err(|error| RuntimeError::Workspace(error.to_string()))?
+            if pending_storage
+                || self
+                    .inner
+                    .cells
+                    .is_frozen(id)
+                    .map_err(|error| RuntimeError::Workspace(error.to_string()))?
             {
                 // A Core commit alone cannot make a partially repaired Cells
                 // projection ready for another prompt in either SDK or UI.

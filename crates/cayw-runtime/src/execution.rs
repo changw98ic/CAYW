@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cayw_agent::{Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolContext, ToolResult};
 use cayw_ai::{CancellationToken, Message, ToolDefinition};
 use cayw_cells::{CellManager, CellTool};
-use cayw_codemode::CapabilityError;
+use cayw_codemode::{CapabilityError, CapabilityStop};
 use cayw_core::{ApprovalDecision, AttemptLease};
 use futures::FutureExt;
 use serde_json::Value;
@@ -22,17 +22,19 @@ use std::{
 
 pub(crate) struct RunContext {
     pub inner: Arc<Inner>,
+    pub selection: crate::ConfiguredProvider,
     pub lease: AttemptLease,
     pub task: TaskLease,
     pub cancel: CancellationToken,
     pub scope: Arc<crate::children::RunScope>,
+    pub(crate) activity: crate::scheduler::Activity,
     turns: AtomicUsize,
     pub unknown: Arc<AtomicBool>,
-    /// A model turn failed without cancellation or uncertainty explaining it.
-    /// The run still returns the session view, but the durable task must not
-    /// claim Completed.
+    /// A model turn or trusted capability stopped the execution with a known
+    /// failure. The durable task must not claim Completed.
     pub failed: Arc<AtomicBool>,
     pub failed_reason: Arc<Mutex<Option<String>>>,
+    cells_stopping: AtomicBool,
     persistence_error: Mutex<Option<String>>,
     pub(crate) model_recording_error: Mutex<Option<String>>,
 }
@@ -40,16 +42,20 @@ pub(crate) struct RunContext {
 #[cfg(test)]
 impl RunContext {
     pub(crate) fn model_fixture(inner: Arc<Inner>, lease: AttemptLease, task: TaskLease) -> Self {
+        let selection = lock(&inner.selection).clone();
         Self {
+            selection,
             scope: Arc::new(crate::children::RunScope::root(&inner)),
             inner,
             lease,
             task,
             cancel: CancellationToken::new(),
+            activity: Default::default(),
             turns: AtomicUsize::new(0),
             unknown: Arc::new(AtomicBool::new(false)),
             failed: Arc::new(AtomicBool::new(false)),
             failed_reason: Arc::new(Mutex::new(None)),
+            cells_stopping: AtomicBool::new(false),
             persistence_error: Mutex::new(None),
             model_recording_error: Mutex::new(None),
         }
@@ -76,6 +82,13 @@ impl RunContext {
         }
         if self.unknown.load(Ordering::Acquire) {
             return Err(RuntimeError::NeedsReconciliation);
+        }
+        if self.failed.load(Ordering::Acquire) {
+            return Err(RuntimeError::Worker(
+                lock(&self.failed_reason)
+                    .clone()
+                    .unwrap_or_else(|| "execution stopped with a known failure".into()),
+            ));
         }
         if lock(&self.model_recording_error).is_some() {
             return Err(RuntimeError::Worker(
@@ -118,6 +131,20 @@ impl RunContext {
         lock(&self.failed_reason).get_or_insert_with(|| reason.into());
         self.failed.store(true, Ordering::Release);
     }
+    pub(crate) fn capability_stopped(&self, error: &CapabilityError) {
+        if let Some(stop) = error.stop {
+            // Runtime may stop cells for a deadline or after the run has its
+            // outcome. Their cancellation must not replace that original cause.
+            if stop == CapabilityStop::Cancelled && self.cells_stopping.load(Ordering::Acquire) {
+                return;
+            }
+            lock(&self.failed_reason).get_or_insert_with(|| error.message.clone());
+            self.failed.store(true, Ordering::Release);
+            if stop == CapabilityStop::Cancelled {
+                self.cancel.cancel();
+            }
+        }
+    }
     pub(crate) fn host_event(&self, kind: &str, data: Value) -> Result<(), CapabilityError> {
         self.inner
             .store
@@ -127,8 +154,17 @@ impl RunContext {
         Ok(())
     }
 }
-fn capability_error(error: RuntimeError) -> CapabilityError {
-    CapabilityError::new(error.to_string())
+pub(crate) fn capability_error(error: RuntimeError) -> CapabilityError {
+    match error {
+        RuntimeError::Cancelled => {
+            CapabilityError::stopped(CapabilityStop::Cancelled, error.to_string())
+        }
+        RuntimeError::Budget(_) => {
+            CapabilityError::stopped(CapabilityStop::Budget, error.to_string())
+        }
+        RuntimeError::NeedsReconciliation => CapabilityError::unknown(error.to_string()),
+        _ => CapabilityError::new(error.to_string()),
+    }
 }
 #[async_trait]
 impl cayw_host::PermissionGate for Gate {
@@ -178,6 +214,12 @@ impl AgentTool for DurableTool {
         self.inner.shutdown_grace()
     }
     async fn execute(&self, input: ToolContext) -> Result<ToolResult, String> {
+        let mut activity = crate::scheduler::Activity::model(&self.context, &input.cancel)
+            .await
+            .map_err(|error| error.to_string())?;
+        if input.arguments.get("action").and_then(Value::as_str) == Some("wait") {
+            activity.finish().map_err(|error| error.to_string())?;
+        }
         self.context
             .check(&input.cancel)
             .map_err(|e| e.to_string())?;
@@ -260,26 +302,34 @@ impl AgentTool for DurableTool {
                             .ok()
                         })
                         .flatten();
-                    snapshot.unresolved_capabilities.iter().any(|call| {
-                        let unknown = matches!(
-                            call.outcome,
-                            Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
-                        );
-                        // Only a verified canonical dispatch can make an
-                        // unfinished child the sole owner of its uncertainty.
-                        // Consumer presence alone conveys no execution fact.
-                        let bridge_child =
-                            dispatches.as_ref().is_some_and(|log| log.tracks_call(call));
-                        call.lease == self.context.lease
-                            && call.task_id == self.context.task.id
-                            && (call.parent_call_id == parent_call_id
-                                || waited_execution.as_deref()
-                                    == Some(call.key.execution_id.as_str()))
-                            && ((!recording_failed && unknown)
-                                || bridge_child
-                                    && (unknown
-                                        || call.stage == cayw_core::CapabilityStage::Started))
-                    })
+                    let storage_unknown = crate::results::owns_storage_uncertainty(
+                        &self.context,
+                        &snapshot,
+                        &parent_call_id,
+                        waited_execution.as_deref(),
+                    )
+                    .unwrap_or(false);
+                    storage_unknown
+                        || snapshot.unresolved_capabilities.iter().any(|call| {
+                            let unknown = matches!(
+                                call.outcome,
+                                Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
+                            );
+                            // Only a verified canonical dispatch can make an
+                            // unfinished child the sole owner of its uncertainty.
+                            // Consumer presence alone conveys no execution fact.
+                            let bridge_child =
+                                dispatches.as_ref().is_some_and(|log| log.tracks_call(call));
+                            call.lease == self.context.lease
+                                && call.task_id == self.context.task.id
+                                && (call.parent_call_id == parent_call_id
+                                    || waited_execution.as_deref()
+                                        == Some(call.key.execution_id.as_str()))
+                                && ((!recording_failed && unknown)
+                                    || bridge_child
+                                        && (unknown
+                                            || call.stage == cayw_core::CapabilityStage::Started))
+                        })
                 });
             result.outcome_unknown = !child_unknown;
         }
@@ -357,14 +407,48 @@ impl Runtime {
         input: crate::TaskInput,
         intent: cayw_requests::TaskIntent,
     ) -> Result<TaskRecord, RuntimeError> {
-        crate::requests::validate_intent(&intent)?;
-        input.validate(&self.inner.model, self.inner.config.max_prompt_bytes)?;
+        self.enqueue_scheduled(session, input, intent, crate::TaskPriority::Normal)
+    }
+    /// Trusted host priority is fixed when the task is accepted. It is never
+    /// inferred from model output, tool arguments or the prompt text.
+    pub fn enqueue_scheduled(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        intent: cayw_requests::TaskIntent,
+        priority: crate::TaskPriority,
+    ) -> Result<TaskRecord, RuntimeError> {
+        self.enqueue_with_resources(
+            session,
+            input,
+            intent,
+            priority,
+            crate::TaskResources::default(),
+        )
+    }
+    /// Host-declared execution resources are fixed before acceptance. A model
+    /// cannot change this task's declaration or require unsupported guarantees.
+    pub fn enqueue_with_resources(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        intent: cayw_requests::TaskIntent,
+        priority: crate::TaskPriority,
+        resources: crate::TaskResources,
+    ) -> Result<TaskRecord, RuntimeError> {
+        resources.validate(&self.inner.config.resources)?;
+        input.validate(
+            &lock(&self.inner.selection).model,
+            self.inner.config.max_prompt_bytes,
+        )?;
         let _coordinate = self.inner.coordination.enter()?;
         self.check_ready(session)?;
-        let task = self.inner.queue.enqueue_input(
+        let task = self.inner.queue.enqueue_with_resources(
             session,
             &input,
             &intent,
+            priority,
+            &resources,
             self.inner.config.max_queued_runs,
         )?;
         self.inner.changed.notify_waiters();
@@ -478,13 +562,18 @@ async fn launch_worker(
         .await;
         let outcome = match outcome {
             Ok(result) => result,
-            Err(_) => {
+            Err(payload) => {
                 worker_cancel.cancel();
+                let reason = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("non-string panic payload");
                 // Ownership may already have changed in another connection.
                 // Only explicit host recovery can invalidate an unfinished lease.
                 Err(RuntimeError::RecoveryRequired {
-                    cause: Box::new(RuntimeError::Worker(
-                        "worker panicked; explicitly recover and inspect persisted effects".into(),
+                    cause: Box::new(RuntimeError::WorkerPanicked(
+                        reason.escape_debug().to_string(),
                     )),
                     cleanup: None,
                     outcome_unknown: true,
@@ -519,7 +608,11 @@ async fn launch_worker(
             // Keep durable admission until an explicit recovery settles the
             // unfinished bookkeeping. A failed block write also leaves the
             // existing queued/running row occupying its original slot.
-            if let Err(cleanup) = inner.queue.block(&lease, &error.to_string()) {
+            if let Err(cleanup) = inner
+                .queue
+                .block(&lease, &error.to_string())
+                .map_err(RuntimeError::from)
+            {
                 return Err(RuntimeError::RecoveryRequired {
                     outcome_unknown: matches!(
                         &error,
@@ -561,7 +654,9 @@ async fn launch_worker(
                     .err()
                     .map(ToString::to_string)
                     .or_else(|| lock(&flags.reason).clone()),
-                |terminal| crate::requests::finish(&inner, &original, terminal.request_outcome()),
+                |terminal| {
+                    crate::requests::finish(&inner, &original, crate::requests::outcome(terminal))
+                },
             )
         })();
         // A fenced owner cannot free another owner's slot or replace a terminal.
@@ -571,7 +666,11 @@ async fn launch_worker(
                 cleanup: None,
                 outcome_unknown: unresolved,
             };
-            if let Err(cleanup) = inner.queue.block(&lease, &error.to_string()) {
+            if let Err(cleanup) = inner
+                .queue
+                .block(&lease, &error.to_string())
+                .map_err(RuntimeError::from)
+            {
                 return Err(RuntimeError::RecoveryRequired {
                     cause: Box::new(error),
                     cleanup: Some(Box::new(cleanup)),
@@ -585,7 +684,11 @@ async fn launch_worker(
     let _cancel_on_drop = PromptGuard(child);
     worker
         .await
-        .map_err(|e| RuntimeError::Worker(e.to_string()))?
+        .map_err(|error| RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::WorkerLost(error)),
+            cleanup: None,
+            outcome_unknown: true,
+        })?
 }
 
 pub(crate) async fn resume_child(
@@ -695,20 +798,23 @@ async fn run_worker(
             .begin_attempt(&task.session_id, &worker.worker)?;
         if let Err(error) = inner.queue.attach(worker, &lease.attempt_id) {
             let _ = inner.store.finish_attempt(&lease);
-            return Err(error);
+            return Err(error.into());
         }
         lease
     };
     let context = Arc::new(RunContext {
+        selection: lock(&inner.selection).clone(),
         inner: inner.clone(),
         lease: lease.clone(),
         task: worker.clone(),
         cancel: cancel.clone(),
         scope: scope.unwrap_or_else(|| Arc::new(crate::children::RunScope::root(&inner))),
+        activity: Default::default(),
         turns: AtomicUsize::new(0),
         unknown: flags.unknown,
         failed: flags.failed,
         failed_reason: flags.reason,
+        cells_stopping: AtomicBool::new(false),
         persistence_error: Mutex::new(None),
         model_recording_error: Mutex::new(None),
     });
@@ -863,6 +969,7 @@ async fn execute_agent(
     let closing = crate::requests::closing(inner, &context.task.id).inspect_err(|error| {
         context.persistence_failed(error);
     });
+    context.cells_stopping.store(true, Ordering::Release);
     let closed = manager.close().await;
     if closed.outcome_unknown {
         context.unknown.store(true, Ordering::Release);
@@ -889,8 +996,12 @@ async fn execute_with_cells(
         Arc::new(crate::model_requests::AccountedProvider::new(
             context.clone(),
         )),
-        inner.model.clone(),
+        context.selection.model.clone(),
     );
+    // FleetView intervention: steer/stop need the live Agent control.
+    inner
+        .fleet
+        .attach_control(&context.lease.session_id, agent.control());
     let mut messages = Runtime {
         inner: inner.clone(),
     }
@@ -919,10 +1030,13 @@ async fn execute_with_cells(
     agent.set_max_turns(inner.config.max_turns)?;
     agent.set_stream_options(cayw_ai::StreamOptions {
         max_tokens: Some(
-            context
-                .scope
-                .token_limit()
-                .min(inner.model.max_output_tokens.unwrap_or(u64::MAX)),
+            context.scope.token_limit().min(
+                context
+                    .selection
+                    .model
+                    .max_output_tokens
+                    .unwrap_or(u64::MAX),
+            ),
         ),
         ..Default::default()
     })?;
@@ -960,13 +1074,26 @@ async fn execute_with_cells(
             sections: [("cayw-runtime-codemode".into(), Some(INSTRUCTION.into()))].into(),
             ..Default::default()
         });
-        let result = agent
-            .prompt_messages(vec![instruction, input.message()])
-            .await?;
+        // F08: fold Applied plannotator feedback into the next Agent attempt.
+        let mut prompt = vec![instruction];
+        prompt.extend(crate::plannotator::feedback_messages_for_attempt(
+            inner,
+            &context.lease.session_id,
+        )?);
+        prompt.push(input.message());
+        let result = agent.prompt_messages(prompt).await?;
         // The Agent reports hook rejections as failed model turns. Restore the
         // completion decision the hook actually made.
         if let Some(error) = lock(&rejection).take() {
             return Err(error);
+        }
+        // A terminating tool can make the Agent finish before the lifecycle
+        // check observes its known failure. Keep the same cause in either order.
+        if context.failed.load(Ordering::Acquire)
+            && !context.cancel.is_cancelled()
+            && !context.unknown.load(Ordering::Acquire)
+        {
+            context.check(&context.cancel)?;
         }
         // A failed model turn is not a completion claim. Cancellation, budget
         // and uncertain effects settle through the worker and durable queue;
@@ -988,14 +1115,19 @@ async fn execute_with_cells(
         context.check(&context.cancel)?;
         completion.check()
     };
-    supervise_run(
+    let result = supervise_run(
         run,
         &context.cancel,
         tokio::time::Instant::from_std(context.scope.deadline()),
         || async { context.check(&context.cancel) },
-        || agent.control().abort(),
+        || {
+            context.cells_stopping.store(true, Ordering::Release);
+            agent.control().abort();
+        },
     )
-    .await
+    .await;
+    inner.fleet.clear_control(&context.lease.session_id);
+    result
 }
 
 async fn supervise_run<F, C, CF, A>(
@@ -1040,8 +1172,16 @@ where
                     if matches!(error, RuntimeError::Budget("time")) {
                         expired = true;
                         abort();
-                    } else {
+                    } else if matches!(error, RuntimeError::Cancelled) {
                         cancel.cancel();
+                    } else {
+                        // A known stop must keep its cause after the Agent has
+                        // joined. The user cancellation token is a separate fact.
+                        abort();
+                        return match run.await {
+                            Err(cleanup @ RuntimeError::RecoveryRequired { .. }) => Err(cleanup),
+                            _ => Err(error),
+                        };
                     }
                 }
                 // A slow persistent check must not queue catch-up work ahead of
@@ -1124,6 +1264,36 @@ mod tests {
         .unwrap();
         assert!(finished.is_cancelled());
         assert_eq!(checks.get(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn known_lifecycle_failure_joins_without_becoming_user_cancellation() {
+        for failure in [
+            RuntimeError::Budget("turn"),
+            RuntimeError::Worker("host call or total byte budget exhausted".into()),
+        ] {
+            let expected = failure.to_string();
+            let mut failure = Some(failure);
+            let cancel = CancellationToken::new();
+            let stopped = CancellationToken::new();
+            let joined = Cell::new(false);
+            let error = supervise_run(
+                async {
+                    stopped.cancelled().await;
+                    joined.set(true);
+                    Ok(())
+                },
+                &cancel,
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                || std::future::ready(Err(failure.take().unwrap())),
+                || stopped.cancel(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert!(joined.get());
+            assert!(!cancel.is_cancelled());
+        }
     }
 
     #[tokio::test(start_paused = true)]

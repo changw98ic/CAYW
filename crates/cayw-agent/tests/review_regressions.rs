@@ -186,3 +186,307 @@ async fn unknown_effect_must_stop_current_run_before_another_request() {
         AgentError::UnresolvedToolEffects
     );
 }
+
+struct SequentialTwoToolProvider(AtomicUsize);
+impl Provider for SequentialTwoToolProvider {
+    fn stream(&self, _: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let mut message = AssistantMessage::new(&Model::new("fixture", "test"));
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            message.content = vec![
+                Content::ToolCall(ToolCall::new("first", "first", json!({}))),
+                Content::ToolCall(ToolCall::new("second", "second", json!({}))),
+            ];
+            message.stop_reason = StopReason::ToolUse;
+        } else {
+            message.content = vec![Content::text("unexpected retry")];
+            message.stop_reason = StopReason::Stop;
+        }
+        stream::iter([AssistantEvent::Done { message }]).boxed()
+    }
+}
+
+struct FirstUnknownTool;
+#[async_trait]
+impl AgentTool for FirstUnknownTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "first".into(),
+            description: String::new(),
+            parameters: json!({"type":"object"}),
+        }
+    }
+    async fn execute(&self, _: ToolContext) -> Result<ToolResult, String> {
+        Ok(ToolResult {
+            is_error: true,
+            outcome_unknown: true,
+            ..ToolResult::text("first unknown effect")
+        })
+    }
+}
+
+struct FirstPanicTool;
+#[async_trait]
+impl AgentTool for FirstPanicTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "first".into(),
+            description: String::new(),
+            parameters: json!({"type":"object"}),
+        }
+    }
+    async fn execute(&self, _: ToolContext) -> Result<ToolResult, String> {
+        panic!("first natural panic");
+    }
+}
+
+struct SecondSideEffectTool(Arc<AtomicUsize>);
+#[async_trait]
+impl AgentTool for SecondSideEffectTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "second".into(),
+            description: String::new(),
+            parameters: json!({"type":"object"}),
+        }
+    }
+    async fn execute(&self, _: ToolContext) -> Result<ToolResult, String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::text("side effect occurred"))
+    }
+}
+
+struct FirstDelayedUnknownTool {
+    wait_for_second: Arc<Notify>,
+}
+#[async_trait]
+impl AgentTool for FirstDelayedUnknownTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "first".into(),
+            description: String::new(),
+            parameters: json!({"type":"object"}),
+        }
+    }
+    async fn execute(&self, _: ToolContext) -> Result<ToolResult, String> {
+        self.wait_for_second.notified().await;
+        Ok(ToolResult {
+            is_error: true,
+            outcome_unknown: true,
+            ..ToolResult::text("first delayed unknown effect")
+        })
+    }
+}
+
+struct SiblingCleanupTool {
+    started: Arc<Notify>,
+    cleaned_up: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl AgentTool for SiblingCleanupTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "second".into(),
+            description: String::new(),
+            parameters: json!({"type":"object"}),
+        }
+    }
+    fn shutdown_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(500)
+    }
+    async fn execute(&self, context: ToolContext) -> Result<ToolResult, String> {
+        self.started.notify_one();
+        context.cancel.cancelled().await;
+        self.cleaned_up.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::text("cleaned up during grace"))
+    }
+}
+
+#[tokio::test]
+async fn natural_unknown_in_sequential_batch_stops_subsequent_tools_without_second_model_request() {
+    let provider = Arc::new(SequentialTwoToolProvider(AtomicUsize::new(0)));
+    let second_count = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(provider.clone(), Model::new("fixture", "test"));
+    agent.set_execution_mode(ExecutionMode::Sequential).unwrap();
+    agent
+        .set_tools(vec![
+            Arc::new(FirstUnknownTool),
+            Arc::new(SecondSideEffectTool(second_count.clone())),
+        ])
+        .unwrap();
+
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events = recorded.clone();
+    agent.subscribe(move |event, _| {
+        let events = events.clone();
+        async move {
+            events.lock().unwrap().push(event);
+            Ok(())
+        }
+    });
+
+    let result = agent.prompt(Message::user("start")).await.unwrap();
+    assert_eq!(second_count.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert!(agent.snapshot().needs_reconciliation);
+    assert_eq!(result.last_message.stop_reason, StopReason::Error);
+
+    let messages = agent.snapshot().messages;
+    let tool_results: Vec<&ToolResultMessage> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    assert_eq!(tool_results[0].tool_call_id, "first");
+    assert!(tool_results[0].outcome_unknown);
+    assert!(tool_results[0].is_error);
+    assert_eq!(tool_results[1].tool_call_id, "second");
+    assert!(!tool_results[1].outcome_unknown);
+    assert!(tool_results[1].is_error);
+
+    let events = recorded.lock().unwrap();
+    let starts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionStart { call } => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let ends: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionEnd { call, .. } => Some(call.id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, ["first", "second"]);
+    assert_eq!(ends, ["first", "second"]);
+    assert_eq!(
+        agent.reset().unwrap_err(),
+        AgentError::UnresolvedToolEffects
+    );
+}
+
+#[tokio::test]
+async fn panic_in_sequential_batch_stops_subsequent_tools_without_second_model_request() {
+    let provider = Arc::new(SequentialTwoToolProvider(AtomicUsize::new(0)));
+    let second_count = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(provider.clone(), Model::new("fixture", "test"));
+    agent.set_execution_mode(ExecutionMode::Sequential).unwrap();
+    agent
+        .set_tools(vec![
+            Arc::new(FirstPanicTool),
+            Arc::new(SecondSideEffectTool(second_count.clone())),
+        ])
+        .unwrap();
+
+    let result = agent.prompt(Message::user("start")).await.unwrap();
+    assert_eq!(second_count.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert!(agent.snapshot().needs_reconciliation);
+    assert_eq!(result.last_message.stop_reason, StopReason::Error);
+
+    let messages = agent.snapshot().messages;
+    let tool_results: Vec<&ToolResultMessage> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    assert_eq!(tool_results[0].tool_call_id, "first");
+    assert!(tool_results[0].outcome_unknown);
+    assert_eq!(tool_results[1].tool_call_id, "second");
+    assert!(!tool_results[1].outcome_unknown);
+    assert!(tool_results[1].is_error);
+    assert_eq!(
+        agent.reset().unwrap_err(),
+        AgentError::UnresolvedToolEffects
+    );
+}
+
+#[tokio::test]
+async fn natural_unknown_in_parallel_batch_cleans_up_running_sibling_with_grace() {
+    let provider = Arc::new(SequentialTwoToolProvider(AtomicUsize::new(0)));
+    let started = Arc::new(Notify::new());
+    let cleaned_up = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(provider.clone(), Model::new("fixture", "test"));
+    agent.set_execution_mode(ExecutionMode::Parallel).unwrap();
+    agent
+        .set_tools(vec![
+            Arc::new(FirstDelayedUnknownTool {
+                wait_for_second: started.clone(),
+            }),
+            Arc::new(SiblingCleanupTool {
+                started: started.clone(),
+                cleaned_up: cleaned_up.clone(),
+            }),
+        ])
+        .unwrap();
+
+    let result = agent.prompt(Message::user("start")).await.unwrap();
+    assert_eq!(cleaned_up.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert!(agent.snapshot().needs_reconciliation);
+    assert_eq!(result.last_message.stop_reason, StopReason::Error);
+
+    let messages = agent.snapshot().messages;
+    let tool_results: Vec<&ToolResultMessage> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    assert_eq!(tool_results[0].tool_call_id, "first");
+    assert!(tool_results[0].outcome_unknown);
+    assert_eq!(tool_results[1].tool_call_id, "second");
+    assert!(!tool_results[1].outcome_unknown);
+    assert_eq!(
+        agent.reset().unwrap_err(),
+        AgentError::UnresolvedToolEffects
+    );
+}
+
+#[tokio::test]
+async fn natural_unknown_in_parallel_batch_leaves_unstarted_sibling_unexecuted() {
+    let provider = Arc::new(SequentialTwoToolProvider(AtomicUsize::new(0)));
+    let second_count = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(provider.clone(), Model::new("fixture", "test"));
+    agent.set_execution_mode(ExecutionMode::Parallel).unwrap();
+    agent
+        .set_tools(vec![
+            Arc::new(FirstUnknownTool),
+            Arc::new(SecondSideEffectTool(second_count.clone())),
+        ])
+        .unwrap();
+
+    let result = agent.prompt(Message::user("start")).await.unwrap();
+    assert_eq!(second_count.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert!(agent.snapshot().needs_reconciliation);
+    assert_eq!(result.last_message.stop_reason, StopReason::Error);
+
+    let messages = agent.snapshot().messages;
+    let tool_results: Vec<&ToolResultMessage> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    assert_eq!(tool_results[0].tool_call_id, "first");
+    assert!(tool_results[0].outcome_unknown);
+    assert_eq!(tool_results[1].tool_call_id, "second");
+    assert!(!tool_results[1].outcome_unknown);
+    assert!(tool_results[1].is_error);
+    assert_eq!(
+        agent.reset().unwrap_err(),
+        AgentError::UnresolvedToolEffects
+    );
+}

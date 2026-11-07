@@ -2,12 +2,14 @@
 //! exercise the real RPC adapter and Runtime queue; no model is called by
 //! `task.enqueue`.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
     ModelRequest, Provider, StopReason,
 };
 use cayw_ipc::RpcHandler;
-use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, TaskInput};
+use cayw_queue::QueueError;
+use cayw_runtime::{ImageInput, Runtime, RuntimeConfig, RuntimeError, StorageFailure, TaskInput};
 use futures::stream;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -49,6 +51,69 @@ fn runtime(temp: &tempfile::TempDir, supports_images: bool) -> (Runtime, Arc<Fix
 
 async fn rpc(runtime: &Runtime, method: &str, params: Value) -> Result<Value, cayw_ipc::RpcError> {
     runtime.call(method, params, CancellationToken::new()).await
+}
+
+#[tokio::test]
+async fn corrupt_queue_json_keeps_its_typed_cause_and_rpc_classification() {
+    for (column, index) in [("input_json", 2), ("intent", 10)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, provider) = runtime(&temp, false);
+        let session = runtime.create(None).unwrap().id;
+        let task = runtime
+            .enqueue(&session, "queued corruption fixture")
+            .unwrap();
+        let db = rusqlite::Connection::open(temp.path().join("sessions.db")).unwrap();
+        assert_eq!(
+            db.execute(
+                &format!("UPDATE runtime_tasks SET {column}=?1 WHERE id=?2"),
+                rusqlite::params!["{", task.id],
+            )
+            .unwrap(),
+            1,
+        );
+
+        for error in [
+            runtime.task(&task.id).unwrap_err(),
+            runtime.tasks(&session).unwrap_err(),
+        ] {
+            let RuntimeError::Journal(rusqlite::Error::FromSqlConversionFailure(
+                actual_index,
+                rusqlite::types::Type::Text,
+                source,
+            )) = &error
+            else {
+                panic!("queue must preserve its JSON conversion error: {error:?}");
+            };
+            assert_eq!(*actual_index, index);
+            let json_error = source.downcast_ref::<serde_json::Error>().unwrap();
+            assert!(error.to_string().contains(&json_error.to_string()));
+            assert_eq!(error.storage_failure(), Some(StorageFailure::Corrupt));
+            assert_eq!(error.code(), "storage_corrupt");
+            assert!(!error.outcome_unknown());
+        }
+
+        for (method, params) in [
+            ("task.get", json!({"task_id": task.id})),
+            ("session.tasks", json!({"session_id": session})),
+        ] {
+            let error = rpc(&runtime, method, params).await.unwrap_err();
+            assert_eq!(error.code, "storage_corrupt");
+            assert!(error.message.contains(&format!("method={method}")));
+            assert!(error.message.contains("EOF while parsing an object"));
+            assert!(!cayw_ipc::ClientError::from(error).outcome_unknown);
+        }
+        assert!(provider.seen.lock().unwrap().is_empty());
+        assert_eq!(runtime.health().unwrap().queued, 1);
+        assert_eq!(
+            db.query_row(
+                &format!("SELECT {column} FROM runtime_tasks WHERE id=?1"),
+                [&task.id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "{",
+        );
+    }
 }
 
 #[tokio::test]
@@ -265,4 +330,236 @@ fn task_input_message_keeps_text_and_images_in_order() {
             },
         ]
     );
+}
+
+#[test]
+fn task_input_budget_checked_before_decoding_or_mime_validation() {
+    let mut model = Model::new("fixture", "typed-image-fixture");
+    model.supports_images = true;
+
+    // Construct image with invalid MIME and non-base64 characters.
+    let invalid_image = ImageInput {
+        mime_type: "invalid/unsupported-mime".into(),
+        data: "!@#$%^&*()_+~`{}|[]\\:\";'<>?,./".into(),
+    };
+    let input = TaskInput {
+        text: "prompt text".into(),
+        images: vec![invalid_image.clone()],
+    };
+    let total_bytes =
+        "prompt text".len() + invalid_image.mime_type.len() + invalid_image.data.len();
+
+    // With budget strictly smaller than total_bytes, validation fails with byte budget error,
+    // not MIME type or base64 decoding error.
+    let err_under_budget = input.validate(&model, total_bytes - 1).unwrap_err();
+    assert!(
+        matches!(err_under_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        "expected byte budget error before mime/decode validation, got: {err_under_budget}"
+    );
+
+    // With budget sufficient for total_bytes, validation proceeds past budget check
+    // and catches the invalid MIME type.
+    let err_sufficient_budget = input.validate(&model, total_bytes).unwrap_err();
+    assert!(
+        matches!(err_sufficient_budget, QueueError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
+        "expected mime type error when budget is sufficient, got: {err_sufficient_budget}"
+    );
+
+    // Construct image with valid MIME but non-base64 data.
+    let invalid_b64_image = ImageInput {
+        mime_type: "image/png".into(),
+        data: "not valid base64!!!".into(),
+    };
+    let input_b64 = TaskInput {
+        text: "prompt text".into(),
+        images: vec![invalid_b64_image.clone()],
+    };
+    let total_b64_bytes =
+        "prompt text".len() + invalid_b64_image.mime_type.len() + invalid_b64_image.data.len();
+
+    let err_b64_under_budget = input_b64.validate(&model, total_b64_bytes - 1).unwrap_err();
+    assert!(
+        matches!(err_b64_under_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        "expected byte budget error before base64 decode, got: {err_b64_under_budget}"
+    );
+
+    let err_b64_sufficient = input_b64.validate(&model, total_b64_bytes).unwrap_err();
+    assert!(
+        matches!(err_b64_sufficient, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
+        "expected base64 error when budget is sufficient, got: {err_b64_sufficient}"
+    );
+}
+
+#[tokio::test]
+async fn task_enqueue_rejects_oversized_invalid_image_on_budget_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, true);
+    let session = runtime.create(None).unwrap().id;
+
+    // Construct oversized input (> default 256KiB prompt budget) with invalid base64 data.
+    let oversized_data = "x".repeat(300 * 1024);
+    let error = rpc(
+        &runtime,
+        "task.enqueue",
+        json!({
+            "session_id": session,
+            "text": "oversized payload",
+            "images": [{"mime_type": "image/png", "data": oversized_data}]
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "invalid_params");
+    assert!(
+        error.message.contains("byte budget"),
+        "expected prompt budget error, got: {}",
+        error.message
+    );
+    assert!(runtime.tasks(&session).unwrap().is_empty());
+}
+
+#[test]
+fn task_input_multi_image_cumulative_budget_checked_before_decoding() {
+    let mut model = Model::new("fixture", "typed-image-fixture");
+    model.supports_images = true;
+
+    let img1 = ImageInput {
+        mime_type: "image/png".into(),
+        data: "!@#$%^&*()_+~`{}|[]\\:\";'<>?,./".into(),
+    };
+    let img2 = ImageInput {
+        mime_type: "image/jpeg".into(),
+        data: "!@#$%^&*()_+~`{}|[]\\:\";'<>?,./".into(),
+    };
+    let input = TaskInput {
+        text: "prompt".into(),
+        images: vec![img1, img2],
+    };
+    let total_bytes = input.text.len()
+        + input
+            .images
+            .iter()
+            .map(|image| image.mime_type.len() + image.data.len())
+            .sum::<usize>();
+    let individual_budget = input.text.len()
+        + input
+            .images
+            .iter()
+            .map(|image| image.mime_type.len() + image.data.len())
+            .max()
+            .unwrap();
+    assert!(individual_budget < total_bytes);
+
+    // Either image fits alone, but both exceed the cumulative budget.
+    let err_individual = input.validate(&model, individual_budget).unwrap_err();
+    assert!(
+        matches!(err_individual, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        "multi-image cumulative budget must reject before decoding: {err_individual}"
+    );
+
+    let err_under = input.validate(&model, total_bytes - 1).unwrap_err();
+    assert!(
+        matches!(err_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        "expected byte budget error at total - 1: {err_under}"
+    );
+
+    let err_exact = input.validate(&model, total_bytes).unwrap_err();
+    assert!(
+        matches!(err_exact, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
+        "expected base64 error once exact budget is met: {err_exact}"
+    );
+
+    let valid_img1 = ImageInput {
+        mime_type: "image/png".into(),
+        data: STANDARD.encode(b"img1"),
+    };
+    let valid_img2 = ImageInput {
+        mime_type: "image/jpeg".into(),
+        data: STANDARD.encode(b"img2"),
+    };
+    let valid_total = "prompt".len()
+        + (valid_img1.mime_type.len() + valid_img1.data.len())
+        + (valid_img2.mime_type.len() + valid_img2.data.len());
+    let valid_input = TaskInput {
+        text: "prompt".into(),
+        images: vec![valid_img1, valid_img2],
+    };
+    assert!(valid_input.validate(&model, valid_total).is_ok());
+    let err_valid_under = valid_input.validate(&model, valid_total - 1).unwrap_err();
+    assert!(
+        matches!(err_valid_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
+        "expected byte budget error for valid images at total - 1: {err_valid_under}"
+    );
+}
+
+#[tokio::test]
+async fn task_enqueue_rejects_multi_image_cumulative_oversized_on_budget_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, true);
+    let session = runtime.create(None).unwrap().id;
+
+    // Two images, each 150KiB (< 256KiB default prompt budget), cumulatively 300KiB (> 256KiB).
+    let oversized_part = "x".repeat(150 * 1024);
+    let error = rpc(
+        &runtime,
+        "task.enqueue",
+        json!({
+            "session_id": session,
+            "text": "multi-image payload",
+            "images": [
+                {"mime_type": "image/png", "data": oversized_part},
+                {"mime_type": "image/jpeg", "data": oversized_part}
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "invalid_params");
+    assert!(
+        error.message.contains("byte budget"),
+        "expected prompt budget error for multi-image cumulative overflow, got: {}",
+        error.message
+    );
+    assert!(runtime.tasks(&session).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rpc_invalid_intent_reports_operation_context_and_inserts_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let (runtime, _) = runtime(&temp, false);
+    let session = runtime.create(None).unwrap().id;
+    let error = rpc(
+        &runtime,
+        "task.enqueue_with_intent",
+        json!({
+            "session_id": session,
+            "text": "run the project tests",
+            "intent": {
+                "kind": "explicit_project_test_or_script",
+                "user_instruction": "   "
+            }
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "invalid_params");
+    assert!(
+        error.message.contains("method=task.enqueue_with_intent"),
+        "missing method context: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains(&format!("session_id={session}")),
+        "missing session context: {}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("run the project tests"),
+        "prompt text must not appear in operation context: {}",
+        error.message
+    );
+    assert!(runtime.tasks(&session).unwrap().is_empty());
 }

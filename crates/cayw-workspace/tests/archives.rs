@@ -102,20 +102,16 @@ async fn zip_and_tar_list_and_read_mark_utf8_and_binary_without_extraction() {
     assert!(!temp.path().join("bin").exists());
 }
 #[tokio::test]
-async fn both_formats_reject_traversal_windows_paths_and_duplicate_entries() {
+async fn both_formats_reject_traversal_protected_and_duplicate_entries() {
     let temp = tempfile::tempdir().unwrap();
     let workspace =
         Workspace::open(temp.path().canonicalize().unwrap(), Limits::default()).unwrap();
     for path in [
         "../outside",
         "/absolute",
-        "C:/windows",
-        "a\\b",
         "a/../b",
         ".git/config",
-        ".cayw-stuff/file",
-        "CON",
-        "trailing.",
+        ".cayw-workspace/file",
         "a//b",
     ] {
         fs::write(
@@ -136,6 +132,37 @@ async fn both_formats_reject_traversal_windows_paths_and_duplicate_entries() {
             )
             .await;
             assert!(result.is_err(), "accepted {format} {path}");
+        }
+    }
+    // Names macOS accepts, including UTF-8, characters only Windows forbids
+    // and user `.cayw-*` names, are ordinary archive entries.
+    for path in [
+        "C:/windows",
+        "a\\b",
+        ".cayw-stuff/file",
+        "CON",
+        "trailing.",
+        "说明.txt",
+    ] {
+        fs::write(
+            temp.path().join("ordinary.tar"),
+            tar(&[(path, b"payload", b'0')]),
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("ordinary.zip"),
+            zip(&[(path, b"payload")], false),
+        )
+        .unwrap();
+        for format in ["tar", "zip"] {
+            let result = run(
+                &workspace,
+                "archive.list",
+                json!({"path":format!("ordinary.{format}"),"format":format}),
+            )
+            .await;
+            assert!(result.is_ok(), "rejected {format} {path}: {result:?}");
+            assert_eq!(result.unwrap()["entries"][0]["path"], path);
         }
     }
     // ZIP writers reject duplicate names, so mutate equal-length central/local
@@ -167,20 +194,32 @@ async fn both_formats_reject_traversal_windows_paths_and_duplicate_entries() {
             .is_err()
         );
     }
-    fs::write(
-        temp.path().join("dup.tar"),
-        tar(&[("one", b"1", b'0'), ("ONE", b"2", b'0')]),
-    )
-    .unwrap();
-    assert!(
-        run(
+    // Distinct case names are distinct archive entries, not aliases, on every
+    // volume and for both listing-only and read paths.
+    for format in ["tar", "zip"] {
+        let bytes = if format == "tar" {
+            tar(&[("one", b"1", b'0'), ("ONE", b"2", b'0')])
+        } else {
+            zip(&[("one", b"1"), ("ONE", b"2")], false)
+        };
+        fs::write(temp.path().join(format!("case.{format}")), bytes).unwrap();
+        let listed = run(
             &workspace,
             "archive.list",
-            json!({"path":"dup.tar","format":"tar"})
+            json!({"path":format!("case.{format}"),"format":format}),
         )
         .await
-        .is_err()
-    );
+        .unwrap();
+        assert_eq!(listed["entries"].as_array().unwrap().len(), 2);
+        let upper = run(
+            &workspace,
+            "archive.read",
+            json!({"path":format!("case.{format}"),"format":format,"entry":"ONE"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(upper["data"]["content"], "2");
+    }
 }
 #[tokio::test]
 async fn reject_links_special_entries_extensions_and_ancestor_collisions() {

@@ -21,6 +21,7 @@ impl ProcessIdentity {
 
     /// A process can change groups without changing its PID and startup time.
     /// Group membership and parentage describe topology, not a new incarnation.
+    #[cfg(target_os = "macos")]
     pub(super) fn same_process(self, other: Self) -> bool {
         self.pid == other.pid
             && self.started_seconds == other.started_seconds

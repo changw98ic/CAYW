@@ -19,7 +19,6 @@ await mkdir(evidence); // Refuse to overwrite earlier evidence.
 const workspace = join(evidence, 'workspace');
 await mkdir(workspace);
 const ipcToken = randomBytes(24).toString('hex');
-const webToken = randomBytes(24).toString('hex');
 const processes = [];
 let mode = 'normal';
 let held = null;
@@ -47,10 +46,10 @@ function launch(binary, args, env, pattern, log) {
 }
 
 const ipcAddress = await launch(runtimeBinary, ['serve','--db',join(evidence, 'runtime.sqlite'),'--workspace',workspace,'--listen','127.0.0.1:0','--token-env','CAYW_WEBUI_TEST_IPC','--offline',...(approvalGated ? [] : ['--demo-authorized'])], {CAYW_WEBUI_TEST_IPC:ipcToken}, /"listening":"([^"]+)"/, 'runtime.log');
-const webAddress = await launch(webBinary, [], {CAYW_IPC_ADDR:ipcAddress,CAYW_IPC_TOKEN:ipcToken,CAYW_WEB_TOKEN:webToken,CAYW_WEB_ADDR:'127.0.0.1:0'}, /http:\/\/([^/\s]+)/, 'gateway.log');
+const webAddress = await launch(webBinary, [], {CAYW_IPC_ADDR:ipcAddress,CAYW_IPC_TOKEN:ipcToken,CAYW_WEB_ADDR:'127.0.0.1:0'}, /http:\/\/([^/\s]+)/, 'gateway.log');
 
 async function rpc(method, params={}) {
-  const response = await fetch(`http://${webAddress}/api/rpc`, {method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${webToken}`},body:JSON.stringify({method,params})});
+  const response = await fetch(`http://${webAddress}/api/rpc`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,params})});
   const body = await response.json();
   await trace({client:'independent',method,params,status:response.status,body});
   if (body.error) throw new Error(JSON.stringify(body.error));
@@ -59,10 +58,6 @@ async function rpc(method, params={}) {
 
 const proxy = createServer(async (req, res) => {
   try {
-    if (req.url === '/__test__/login') {
-      res.writeHead(200,{'Content-Type':'application/json'});
-      res.end(JSON.stringify({token:webToken})); return;
-    }
     if (req.url === '/__test__/manifest') {
       res.writeHead(200,{'Content-Type':'application/json'});
       res.end(JSON.stringify(manifest)); return;

@@ -222,7 +222,7 @@ async fn sha256_repository_is_rejected_instead_of_misread_as_sha1() {
 }
 
 #[tokio::test]
-async fn tracked_reserved_cayw_path_is_rejected() {
+async fn tracked_user_cayw_named_file_is_readable_by_history_and_status() {
     let root = Dir::new();
     init(root.path(), &[]);
     std::fs::write(root.path().join("a.txt"), "a\n").unwrap();
@@ -234,34 +234,57 @@ async fn tracked_reserved_cayw_path_is_rejected() {
         "fixture must be clean for real Git"
     );
 
-    let error = status(&host(root.path()))
+    let host = host(root.path());
+    let result = status(&host)
         .await
-        .expect_err("tracked reserved paths cannot be represented");
-    assert!(!error.outcome_unknown);
+        .expect("an ordinary tracked .cayw-note.md must not block status");
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(stdout(&result), "", "status must match real Git");
+
+    let log = host
+        .call("git.log", json!({"limit": 5}), CancellationToken::new())
+        .await
+        .expect("history must remain readable with an ordinary .cayw- user name");
+    assert_eq!(log["success"], true, "{log}");
     assert!(
-        error.message.contains(".cayw-") || error.message.contains("reserved"),
-        "rejection must name the reserved path: {}",
-        error.message
+        stdout(&log).contains("fixture"),
+        "history must include the commit: {log}"
     );
 }
 
 #[tokio::test]
-async fn untracked_internal_cayw_lock_is_skipped_without_false_deletion() {
+async fn untracked_internal_lock_is_hidden_but_user_cayw_names_are_not() {
     let root = Dir::new();
     init(root.path(), &[]);
     std::fs::write(root.path().join("a.txt"), "a\n").unwrap();
     commit_all(root.path());
-    std::fs::write(root.path().join(".cayw-host-lock-123"), "lock\n").unwrap();
-    assert_eq!(real_status(root.path()), "?? .cayw-host-lock-123\n");
+    for name in [
+        ".cayw-host-lock",
+        ".cayw-host-tmp-short",
+        ".cayw-host-read-state-short",
+    ] {
+        std::fs::write(root.path().join(name), "internal\n").unwrap();
+    }
+    std::fs::write(root.path().join(".cayw-note.md"), "notes\n").unwrap();
 
     let result = status(&host(root.path()))
         .await
-        .expect("an untracked internal lock file must not break reads");
+        .expect("an untracked internal lock must not break reads");
     assert_eq!(result["success"], true, "{result}");
     let output = stdout(&result);
+    for name in [
+        ".cayw-host-lock",
+        ".cayw-host-tmp-short",
+        ".cayw-host-read-state-short",
+    ] {
+        assert!(
+            !output.contains(name),
+            "real internal Host state {name} stays out of status: {output}"
+        );
+    }
     assert!(
-        !output.contains(".cayw"),
-        "reserved internal files stay unaddressable: {output}"
+        output.contains(".cayw-note.md"),
+        "an ordinary user file must remain visible: {output}"
     );
 }
 

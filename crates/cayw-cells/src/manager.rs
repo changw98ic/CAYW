@@ -1,6 +1,6 @@
 use crate::{bridge::Bridge, *};
 use cayw_ai::CancellationToken;
-use cayw_codemode::{CapabilityHost, CodeMode, ExecutionReport, Limits};
+use cayw_codemode::{CapabilityHost, CapabilityStop, CodeMode, ExecutionReport, Limits};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -189,11 +189,15 @@ impl CellManager {
             let session_vm_lock = self
                 .journal
                 .claim_session(&self.identity.session_id, false)?;
-            let permit = self
-                .capacity
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CellError::Capacity)?;
+            let permit = self.capacity.clone().try_acquire_owned().map_err(|_| {
+                CellError::capacity(
+                    CapacityKind::MaxRunning,
+                    None,
+                    None,
+                    self.limits.max_running,
+                    self.limits.max_running,
+                )
+            })?;
             let record = CellRecord {
                 cell_id: Uuid::new_v4().to_string(),
                 identity: self.identity.clone(),
@@ -205,6 +209,7 @@ impl CellManager {
                 outputs: Vec::new(),
                 output_bytes: 0,
                 error: None,
+                stop: None,
                 backend_error: None,
                 reconciliation: Vec::new(),
                 host_settlements: Vec::new(),
@@ -276,7 +281,14 @@ impl CellManager {
                 {
                     Ok(report) => task_run.complete_report(report, None),
                     Err(error) => {
+                        let stop = error.kind.stop();
                         let message = error.to_string();
+                        if let Err(fault) = task_run.update(|record| {
+                            record.stop = stop;
+                            Ok(())
+                        }) {
+                            task_run.hook_failed(&fault);
+                        }
                         task_run.complete_report(*error.report, Some(message));
                     }
                 }
@@ -321,9 +333,22 @@ impl CellManager {
         if request.cursor > run.record.lock().expect("cell lock poisoned").outputs.len() as u64 {
             return Err(CellError::Invalid("cursor exceeds published output".into()));
         }
-        if request.continue_execution && !cancel.is_cancelled() {
+        // After an explicit continuation, pre-existing outputs must not satisfy
+        // this wait. Resume from yield_control, then require new progress (new
+        // output, another yield, or VM teardown). Otherwise a cursor behind the
+        // current tip returns immediately while the VM is still Running — the
+        // model can finalize early and hit "cell still requires wait".
+        let progress_after = if request.continue_execution && !cancel.is_cancelled() {
+            let baseline = {
+                let record = run.record.lock().expect("cell lock poisoned");
+                (record.status == CellStatus::Yielded && run.live.load(Ordering::Acquire))
+                    .then_some(record.outputs.len() as u64)
+            };
             run.resume()?;
-        }
+            baseline
+        } else {
+            None
+        };
         let mut guard = InvocationGuard {
             run: run.clone(),
             armed: true,
@@ -333,9 +358,13 @@ impl CellManager {
         loop {
             let ready = {
                 let record = run.record.lock().expect("cell lock poisoned");
-                record.outputs.len() as u64 > request.cursor
-                    || record.status == CellStatus::Yielded
-                    || !run.live.load(Ordering::Acquire)
+                let outputs = record.outputs.len() as u64;
+                let yielded = record.status == CellStatus::Yielded;
+                let dead = !run.live.load(Ordering::Acquire);
+                match progress_after {
+                    Some(baseline) => outputs > baseline || yielded || dead,
+                    None => outputs > request.cursor || yielded || dead,
+                }
             };
             let publishing_terminal = run
                 .record
@@ -424,6 +453,7 @@ impl CellManager {
                     terminal: CellTerminal {
                         status: record.status,
                         error: record.error.clone(),
+                        stop: record.stop,
                         outcome_unknown: record.status == CellStatus::OutcomeUnknown
                             || record.unresolved()
                             || record.backend_error.is_some(),
@@ -643,8 +673,11 @@ impl Run {
         self.execution.identity.clone()
     }
     pub(crate) fn check(&self) -> Result<(), CellError> {
-        if self.cancel.is_cancelled() || self.exited.load(Ordering::Acquire) {
+        if self.cancel.is_cancelled() {
             return Err(CellError::Closed);
+        }
+        if self.exited.load(Ordering::Acquire) {
+            return Err(CellError::Exited);
         }
         let identity = self.identity();
         if self.journal.is_frozen(&identity.session_id)?
@@ -676,19 +709,39 @@ impl Run {
     }
     pub(crate) fn emit(&self, output: CellOutput) -> Result<(), CellError> {
         let bytes = output.validate(&self.limits)?;
+        let mut entry = None;
         self.update(|record| {
-            if record.outputs.len() >= self.limits.output_items
-                || record.output_bytes.saturating_add(bytes) > self.limits.output_bytes
-            {
-                return Err(CellError::Capacity);
+            if record.outputs.len() >= self.limits.output_items {
+                return Err(CellError::capacity(
+                    CapacityKind::OutputItems,
+                    Some(record.cell_id.clone()),
+                    Some(record.status),
+                    record.outputs.len(),
+                    self.limits.output_items,
+                ));
             }
-            record.outputs.push(OutputEntry {
+            if record.output_bytes.saturating_add(bytes) > self.limits.output_bytes {
+                return Err(CellError::capacity(
+                    CapacityKind::OutputBytes,
+                    Some(record.cell_id.clone()),
+                    Some(record.status),
+                    record.output_bytes.saturating_add(bytes),
+                    self.limits.output_bytes,
+                ));
+            }
+            let committed = OutputEntry {
                 cursor: record.outputs.len() as u64 + 1,
                 output,
-            });
+            };
+            entry = Some(committed.clone());
+            record.outputs.push(committed);
             record.output_bytes += bytes;
             Ok(())
-        })
+        })?;
+        self.backend.output(
+            &self.execution,
+            &entry.expect("successful output commit retained its entry"),
+        )
     }
     fn resume(&self) -> Result<(), CellError> {
         {
@@ -766,11 +819,27 @@ impl Run {
         if !self.exited.load(Ordering::Acquire)
             && error.is_none()
             && report.return_value != Value::Null
-            && let Err(fault) = self.emit(CellOutput::Json {
+            && let Err(mut fault) = self.emit(CellOutput::Json {
                 value: report.return_value,
             })
         {
-            error = Some(fault.to_string());
+            if let CellError::Capacity(diag) = &mut fault {
+                if diag.cell_id.is_none() {
+                    diag.cell_id = Some(self.id());
+                }
+                if diag.status.is_none() {
+                    diag.status = Some(CellStatus::Running);
+                }
+            }
+            let message = fault.to_string();
+            let stop = fault.capability_error().stop;
+            if let Err(fault) = self.update(|record| {
+                record.stop = stop;
+                Ok(())
+            }) {
+                self.hook_failed(&fault);
+            }
+            error = Some(message);
         }
         self.finish(error, true);
     }
@@ -799,6 +868,11 @@ impl Run {
                 }
             }
             let unknown = failed || record.unresolved();
+            if exited {
+                record.stop.get_or_insert(CapabilityStop::Exited);
+            } else if cancelled || !completed {
+                record.stop.get_or_insert(CapabilityStop::Cancelled);
+            }
             if unknown {
                 self.reads.freeze(&record.identity.session_id);
             }
@@ -831,6 +905,7 @@ impl Run {
                     status: record.status,
                     error: record.error.clone(),
                     outcome_unknown: record.status == CellStatus::OutcomeUnknown,
+                    stop: record.stop,
                 }
             };
             #[cfg(feature = "fault-injection")]
@@ -855,6 +930,7 @@ impl Run {
             has_more: cursor < record.outputs.len() as u64,
             required_budget: None,
             outcome_unknown: record.status == CellStatus::OutcomeUnknown,
+            stop: record.stop,
             error: record.error.as_ref().map(|error| {
                 let mut end = error.len().min(64);
                 while !error.is_char_boundary(end) {

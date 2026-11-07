@@ -103,6 +103,36 @@ async fn run_script(
     let view = prompt_once(&rt, &id).await.expect("prompt failed");
     (rt, id, view)
 }
+async fn run_budget_script(
+    temp: &tempfile::TempDir,
+    config: RuntimeConfig,
+    script: impl Into<String>,
+) -> (Runtime, String, SessionView) {
+    let (rt, id, outcome) = run_script_outcome(temp, config, script).await;
+    assert!(matches!(
+        outcome,
+        Err(RuntimeError::Worker(ref reason)) if reason == "host call or total byte budget exhausted"
+    ));
+    let view = rt.get(&id).unwrap();
+    assert_idle(&view);
+    assert!(view.unresolved_calls.is_empty());
+    assert!(view.unresolved_capabilities.is_empty());
+    let tasks = rt.tasks(&id).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, TaskState::Failed);
+    assert!(!tasks[0].cancel_requested);
+    let terminals = rt
+        .audit(&id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.task_id.as_deref() == Some(tasks[0].id.as_str()) && event.kind.starts_with("run_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, "run_failed");
+    (rt, id, view)
+}
 /// An unknown outcome cancels the run, so the prompt may surface either the
 /// settled session view or the cancellation error. Durable Core state is the
 /// authority and is read with `Runtime::get`.
@@ -433,7 +463,7 @@ async fn write_byte_limit_and_host_call_budget_are_known_failures() {
         "fs.write",
         json!({"path":"b.txt","content":"two"}),
     );
-    let (rt, id, view) = run_script(
+    let (rt, id, view) = run_budget_script(
         &temp,
         cfg,
         "local a=cayw.call('fs.write',{path='a.txt',content='one'})\n\
@@ -943,7 +973,7 @@ async fn search_permission_denial_and_call_budget_are_enforced() {
         "fs.glob",
         json!({"path":".","pattern":"**/*.txt"}),
     );
-    let (rt, id, view) = run_script(
+    let (rt, id, view) = run_budget_script(
         &temp,
         cfg,
         "local g=cayw.call('fs.grep',{path='src',pattern='alpha'})\n\
@@ -1194,7 +1224,7 @@ async fn data_permission_denial_and_call_budget_are_enforced() {
     cfg.host.max_calls = 1;
     allow(&mut cfg, "data.parse", json!({"format":"json","text":"1"}));
     allow(&mut cfg, "data.parse", json!({"format":"json","text":"2"}));
-    let (rt, id, view) = run_script(
+    let (rt, id, view) = run_budget_script(
         &temp,
         cfg,
         "local a=cayw.call('data.parse',{format='json',text='1'})\n\

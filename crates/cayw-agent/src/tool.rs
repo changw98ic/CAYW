@@ -1,7 +1,6 @@
 use crate::ExecutionMode;
 use async_trait::async_trait;
-use cayw_ai::{CancellationToken, Content, ToolDefinition, Usage};
-use serde::{Deserialize, Serialize};
+use cayw_ai::{CancellationToken, ToolDefinition};
 use serde_json::Value;
 use std::{
     sync::{
@@ -12,46 +11,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub content: Vec<Content>,
-    pub details: Option<Value>,
-    pub structured_content: Option<Value>,
-    pub usage: Option<Usage>,
-    pub is_error: bool,
-    pub terminate: bool,
-    pub outcome_unknown: bool,
-}
-
-impl ToolResult {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            content: vec![Content::text(text)],
-            ..Default::default()
-        }
-    }
-    pub fn error(error: impl Into<String>) -> Self {
-        Self {
-            is_error: true,
-            ..Self::text(error)
-        }
-    }
-    pub(crate) fn cancelled(started: bool) -> Self {
-        Self {
-            outcome_unknown: started,
-            ..Self::error(if started {
-                "Tool execution cancelled; its effects may have occurred. Reconcile before retrying."
-            } else {
-                "Tool call cancelled before execution"
-            })
-        }
-    }
-    pub(crate) fn valid_content(&self) -> bool {
-        self.content
-            .iter()
-            .all(|part| matches!(part, Content::Text { .. } | Content::Image { .. }))
-    }
-}
+pub use cayw_agent_types::ToolResult;
 
 #[derive(Clone)]
 pub struct ToolProgress {

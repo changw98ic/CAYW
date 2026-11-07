@@ -1,6 +1,6 @@
 # cayw-content
 
-Device 持有的本地内容库，以及可选加密备份对象。这个 crate 不依赖正在开发的 Core、Device、Runtime、Server，也不建立网络连接。它交付 #18 的内容存放与备份切片，不代表 #18 的 CPU/内存/GPU 策略或两机同步已经验收。
+Device 持有的本地内容库，以及可选加密备份对象。这个 crate 不依赖 Core、Device、Runtime 或 Server，也不建立网络连接。当前 #18 本机交付由 Runtime 接入同一个本地库；可选加密、备份和远端 trait 不属于此次本机主线的验收范围。
 
 ## 可调用接口
 
@@ -8,6 +8,10 @@ Device 持有的本地内容库，以及可选加密备份对象。这个 crate 
 - `ContentStore::open(absolute_directory, device_id, limits)`：创建或打开本地库；设备标识和限额写入持久状态，重新打开时必须一致。路径的每一层都拒绝软链接。macOS 的 `/tmp` 通常是软链接，请使用 `std::env::temp_dir().canonicalize()?` 得到父目录，再创建新的库目录。
 - `put(&name, expected, bytes) -> Result<Record>`：`ExpectedRevision::Absent` 表示新建；更新使用已读记录的 `record.expected()`。同时核对 `version` 和 `revision`，更新成功后本地版本加一。相同版本号、不同分支也冲突。
 - `read(&name) -> Result<Option<(Record, Vec<u8>)>>`：本地读取并校验内容 SHA-256，不依赖备份端或网络。
+- `try_read` / `try_put`：与对应阻塞操作共用锁、完整性检查、版本比较和提交；锁忙时返回 `Error::Busy`，不修改内容。取得锁后同步完成；取消等待由宿主处理。
+- macOS `open_private(directory, device_id, limits, expected_root)`：在同一个不跟随符号链接的目录句柄上检查组/其他用户写权限及可选原 `(device, inode)`，再初始化库。已有绑定的根必须存在；身份或权限错误在创建库文件前返回。未绑定的新路径仍可按私有权限创建。
+- macOS `open_private_amending_limits(directory, device_id, limits, expected_root)`：受信宿主的显式配额调整入口。仍核对原 `(device, inode)`，保留设备、记录、key/nonce 和对象；只有全部保留记录与对象仍满足新限额时才写入新限额，否则返回配额错误且不修改状态。旧的 `ContentStore` 句柄在磁盘限额变化后继续以 `StoreConfigurationMismatch` 失败，不会静默使用旧限额。
+- `root_metadata()`：读取已持目录句柄的设备、inode 和当前权限，不按外部路径重开。`validate_configuration()` 在同一目录句柄和内容锁内核对持久设备与配额，不修改状态，也不重新解析配置目录。`ContentHash::from_hex` 解析固定的小写 64 位摘要，`Limits::validate` 可在打开文件前验证限额。
 - `KeyHandle::from_bytes(key_id, [u8; 32])`：宿主显式提供密钥，每次加密、解密、上传都要传入。该类型没有序列化或克隆接口；`Debug` 只输出 id，Drop 清理自身的密钥副本。调用方负责清理输入副本及外部密钥生命周期。
 - `register_key(&handle)` / `revoke_key(&key_id)`：只保存允许/永久撤销的 id，不保存密钥或自动找密钥。未知 id 拒绝；撤销后不能重新注册相同 id。撤销检查用于导出、恢复和上传；普通本地读取仍可用。
 - `export_snapshot(&name, &handle) -> Result<EncryptedSnapshot>`：导出当前本地版本。随机 24 字节 nonce，每个导出对象唯一；本地持久保存已用 nonce 标识。
@@ -26,11 +30,11 @@ Device 持有的本地内容库，以及可选加密备份对象。这个 crate 
 
 `.lock` 同时持有初始化标记。已有库丢失/损坏 `state.json` 会报错，避免静默清空记录或撤销表。首次创建中断后若已有内容对象却没有状态，也拒绝自动初始化。已提交内容对象不会因远端故障而被替换。
 
-路径操作使用 `cap-std` 目录句柄和 `cap-fs-ext` 的 nofollow 打开方式；所有生成的相对文件名固定或来自验证过的 hash。拒绝根目录/祖先、对象、状态、临时文件和锁文件的软链接，不只做字符串前缀检查。Unix 新目录按 `0700`、新文件按 `0600` 创建；已有目录权限不自动修改，Windows ACL 由宿主配置。
+路径操作使用 `cap-std` 目录句柄和 `cap-fs-ext` 的 nofollow 打开方式；所有生成的相对文件名固定或来自验证过的 hash。拒绝根目录/祖先、对象、状态、临时文件和锁文件的软链接，不只做字符串前缀检查。Unix 新目录按 `0700`、新文件按 `0600` 创建；已有目录权限不自动修改。当前首发只验收 macOS。
 
 宿主必须提供可信、私有、稳定的本地目录。本库不抵抗可直接修改目录的同一用户、管理员、恶意硬链接、整库回滚/删除、损坏硬盘或忽略文件锁的程序。SHA-256 检查内容一致性，不能对这类本机攻击提供真实性保证。不要把底层锁、替换和同步语义未验证的网络文件系统当作已支持平台。
 
-`Limits` 默认限制单条内容 16 MiB、所有保留内容对象合计 256 MiB、1024 条记录、16384 个 key/nonce 表项。构造时限制配置范围，持久状态编码最多 32 MiB。总内容限额按去重后的不可变对象字节计费，包括旧版本和中断后留下的孤立对象；不会无限替换旧对象后漏计配额。临时内容最多另占单条上限，临时状态另占 32 MiB；文件系统块、目录项、锁和日志空间不属于内容字节限额。没有自动垃圾回收、删除记录、配额迁移或历史回滚接口。
+`Limits` 默认限制单条内容 16 MiB、所有保留内容对象合计 256 MiB、1024 条记录、16384 个 key/nonce 表项。构造时限制配置范围，持久状态编码最多 32 MiB。总内容限额按去重后的不可变对象字节计费，包括旧版本和中断后留下的孤立对象；不会无限替换旧对象后漏计配额。临时内容最多另占单条上限，临时状态另占 32 MiB；文件系统块、目录项、锁和日志空间不属于内容字节限额。没有自动垃圾回收、删除记录或历史回滚接口；配额调整只经显式 `open_private_amending_limits` 进行。
 
 ## 加密和恢复模型
 
@@ -75,6 +79,6 @@ key id 是宿主命名的外部密钥身份；宿主必须对同一个秘密使�
 
 测试覆盖本地重启读、独立进程退出后读、6 个进程竞争 CAS、同整数版本不同分支、非法 ID/JSON、软链接逃逸、大小与配额、损坏对象、丢失/损坏权威文件、半写临时文件、加密往返、错误密钥、密文/AAD 替换、撤销重开、nonce 重放、旧远端与分支冲突、直接续接与跳版拒绝、半上传、提交成功但响应丢失后的同 id 重试、远端 head CAS、读回校验后提交。
 
-`tests/encrypted.rs` 的 `MemoryRemote` 明确是宿主 trait 的内存 fixture，用于证明库的对象传输顺序和重试约束。它不证明真实 Server、网络故障、两机加密同步或真实远端持久性。Windows、Linux、GPU/CPU/内存准入、真实两机同步、进程在每个磁盘同步点被强杀、断电/硬件持久性均未验证；#18 保持未完整验收。
+`tests/encrypted.rs` 的 `MemoryRemote` 明确是宿主 trait 的内存 fixture，用于证明库的对象传输顺序和重试约束。它不证明真实 Server、网络故障、两机加密同步或真实远端持久性。上述 2026-10-18 记录没有验收资源准入或逐点强杀；当前 Runtime 的资源与内容检查须使用各自绑定源码的新证据。断电/硬件持久性、其他 macOS 架构仍未验证；Windows、Linux 和真实两机同步不属当前本机交付范围。
 
 依赖许可证通过实际 `cargo metadata --locked` 核对：直接依赖选用 Apache-2.0 或 MIT 许可分支；其余包含 BSD-3-Clause、Unicode-3.0 和 Apache-2.0 WITH LLVM-exception，均可与项目 Apache-2.0 使用。没有复制旧项目代码，也没有 Codex 依赖。主要实际版本：cap-std/cap-fs-ext 3.4.6、fs2 0.4.3、chacha20poly1305 0.10.1、sha2 0.10.9、rand_core 0.6.4、zeroize 1.9.1、tempfile 3.27.0。

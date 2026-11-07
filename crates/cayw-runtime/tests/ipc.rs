@@ -295,8 +295,13 @@ async fn killed_binary_before_approval_is_recovered_as_not_executed_without_repl
         .await
         .unwrap();
     assert_eq!(tasks[0]["id"], task_id);
-    assert_eq!(tasks[0]["state"], "running");
-    // Durable Running/approval rows survive the owner. They cannot authorize a
+    assert_eq!(tasks[0]["state"], before[0]["state"]);
+    assert_eq!(tasks[0]["holds_slot"], before[0]["holds_slot"]);
+    assert!(matches!(
+        tasks[0]["state"].as_str(),
+        Some("running" | "waiting_approval")
+    ));
+    // Durable execution/approval rows survive the owner. They cannot authorize a
     // new effect once the original process has released its task lock.
     assert!(
         client
@@ -318,7 +323,10 @@ async fn killed_binary_before_approval_is_recovered_as_not_executed_without_repl
     );
     assert!(!dir.path().join("workspace/cayw-demo.txt").exists());
     let health = client.request("runtime.health", json!({})).await.unwrap();
-    assert_eq!(health["running"], 1);
+    assert_eq!(
+        health["running"],
+        usize::from(tasks[0]["holds_slot"].as_bool().unwrap())
+    );
     assert!(
         client
             .request("task.resume", json!({"task_id":task_id}))

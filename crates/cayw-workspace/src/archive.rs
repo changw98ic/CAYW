@@ -52,9 +52,11 @@ impl Names {
         if parts.len() > workspace.limits.max_depth {
             return Err(failure("archive entry depth limit exceeded"));
         }
-        let key = name.to_lowercase();
-        if self.kinds.insert(key, directory).is_some() {
-            return Err(failure("duplicate or case-alias archive entry"));
+        // Archive entries are names inside the archive, not paths on this
+        // volume. Only an exact duplicate denotes the same entry; `a.txt` and
+        // `A.txt` are distinct and must remain listable/readable.
+        if self.kinds.insert(name.into(), directory).is_some() {
+            return Err(failure("duplicate archive entry"));
         }
         Ok(name.into())
     }

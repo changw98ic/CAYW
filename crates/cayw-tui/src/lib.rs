@@ -11,4 +11,6 @@ pub mod transport;
 
 pub use input::{Editor, sanitize};
 pub use render::draw;
-pub use state::{App, Command, Decision, Dialog, Focus, SessionView};
+pub use state::{
+    App, Command, Decision, Dialog, DiffEntry, FileEntry, Focus, SessionView, ViewTab,
+};

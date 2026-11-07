@@ -1520,7 +1520,7 @@ fn lost_vm_without_unknown_children_interrupts_without_a_duplicate_parent_unknow
     let fixture = Fixture::new(json!({"script":"return 1"}));
     fixture.begin("vm");
     fixture.store.yield_execution(&fixture.lease, "vm").unwrap();
-    fixture.plan(0);
+    let planned = fixture.plan(0);
     let recovered = fixture.store.recover(&fixture.lease.session_id).unwrap();
     assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(recovered.executions[0].state, ExecutionState::Interrupted);
@@ -1530,6 +1530,26 @@ fn lost_vm_without_unknown_children_interrupts_without_a_duplicate_parent_unknow
     ));
     assert!(recovered.unresolved_calls.is_empty());
     assert!(recovered.unresolved_capabilities.is_empty());
+    // The never-started capability is a durable known non-execution, not an
+    // unresolved effect. The parent's own interruption is separate from it.
+    let events = fixture.store.events(&recovered.id, 0, 100).unwrap();
+    let recovered_capabilities = events
+        .iter()
+        .find_map(|event| match &event.event {
+            CoreEvent::AttemptRecovered { capabilities, .. } => Some(capabilities),
+            _ => None,
+        })
+        .expect("recovery must record the recovered capabilities");
+    assert_eq!(recovered_capabilities.len(), 1);
+    assert_eq!(recovered_capabilities[0].key, planned);
+    assert_eq!(recovered_capabilities[0].stage, CapabilityStage::Settled);
+    assert!(
+        matches!(
+            recovered_capabilities[0].outcome,
+            Some(CapabilityOutcome::NotExecuted { .. })
+        ),
+        "an unstarted capability must be recorded as NotExecuted, not left unresolved"
+    );
     let parent_result = recovered
         .messages
         .iter()
@@ -1571,6 +1591,101 @@ fn lost_vm_without_unknown_children_interrupts_without_a_duplicate_parent_unknow
             .executions
             .len(),
         1
+    );
+}
+
+// A tracked VM parent that crossed the execution boundary with no capability
+// and no registered wait has no independent effect to reconcile. `recover`
+// must therefore settle it as a known interruption through the existing public
+// Core API: the parent observation is an ordinary error (not unknown), the old
+// attempt lease is fenced, and a replacement attempt receives a higher fence.
+// This reuses the existing fixture and adds no production rule or proof type.
+#[test]
+fn started_tracked_vm_without_capabilities_or_wait_recovers_without_parent_unknown() {
+    let fixture = Fixture::new(json!({"script":"return 1"}));
+    fixture.begin("vm");
+    let before = fixture.store.snapshot(&fixture.lease.session_id).unwrap();
+    assert_eq!(before.executions.len(), 1);
+    assert_eq!(before.executions[0].state, ExecutionState::Running);
+    assert_eq!(before.executions[0].parent_call_id, fixture.parent.id);
+    assert!(before.executions[0].terminal.is_none());
+    // Zero capabilities and no register_execution_wait: the tracked parent is
+    // the only Core record that could have started work.
+    assert!(before.unresolved_capabilities.is_empty());
+    assert_eq!(before.unresolved_calls.len(), 1);
+    assert_eq!(before.unresolved_calls[0].call, fixture.parent);
+    assert_eq!(
+        before.unresolved_calls[0].state,
+        cayw_core::CallState::Started
+    );
+    assert!(before.unresolved_calls[0].execution_started);
+    assert!(before.unresolved_calls[0].result.is_none());
+    let events = fixture.store.events(&before.id, 0, 100).unwrap();
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        CoreEvent::CapabilityPlanned { .. } | CoreEvent::CapabilityStarted { .. }
+    )));
+    let recovered = fixture.store.recover(&before.id).unwrap();
+    assert_eq!(recovered.state, SessionState::Idle);
+    assert!(recovered.attempt.is_none());
+    assert_eq!(recovered.executions.len(), 1);
+    assert_eq!(recovered.executions[0].state, ExecutionState::Interrupted);
+    assert!(matches!(
+        recovered.executions[0].terminal,
+        Some(ExecutionOutcome::Interrupted { .. })
+    ));
+    assert!(recovered.unresolved_calls.is_empty());
+    assert!(recovered.unresolved_capabilities.is_empty());
+    let parent_result = recovered
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .expect("the tracked parent must receive a recovery observation");
+    assert_eq!(parent_result.tool_call_id, "original-parent");
+    assert!(parent_result.is_error);
+    assert!(
+        !parent_result.outcome_unknown,
+        "a tracked VM without independent effects must not report an unknown parent"
+    );
+    // The original event prefix is retained and exactly one recovery event is
+    // appended.
+    let after_events = fixture.store.events(&before.id, 0, 1000).unwrap();
+    assert!(after_events.starts_with(&events));
+    let tail = &after_events[events.len()..];
+    assert_eq!(tail.len(), 1);
+    assert!(matches!(&tail[0].event, CoreEvent::AttemptRecovered { .. }));
+    // The old attempt lease cannot write again, and a replacement is fenced.
+    assert!(matches!(
+        fixture.store.finish_execution(
+            &fixture.lease,
+            "vm",
+            ExecutionOutcome::Completed { result: json!(1) }
+        ),
+        Err(CoreError::StaleLease)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .begin_execution(&fixture.lease, fixture.input("later")),
+        Err(CoreError::StaleLease)
+    ));
+    let next = fixture
+        .store
+        .begin_attempt(&recovered.id, "replacement-worker")
+        .unwrap();
+    assert!(next.fence > fixture.lease.fence);
+    assert_eq!(
+        fixture
+            .store
+            .snapshot(&recovered.id)
+            .unwrap()
+            .executions
+            .len(),
+        1,
+        "recovery must not invent another tracked execution"
     );
 }
 

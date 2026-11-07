@@ -1,4 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
+use cayw_codemode::{CapabilityError, CapabilityStop};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, time::Duration};
@@ -52,6 +53,8 @@ pub struct CellTerminal {
     pub status: CellStatus,
     pub error: Option<String>,
     pub outcome_unknown: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<CapabilityStop>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +157,68 @@ impl CellLimits {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityKind {
+    MaxCells,
+    MaxRunning,
+    OutputItems,
+    OutputBytes,
+    ItemBytes,
+    JsonBytes,
+    MediaBytes,
+    StoreKeys,
+    StoreBytes,
+    JsonDepth,
+    HostCalls,
+    HostSettlements,
+}
+
+impl std::fmt::Display for CapacityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxCells => write!(f, "max_cells"),
+            Self::MaxRunning => write!(f, "max_running"),
+            Self::OutputItems => write!(f, "output_items"),
+            Self::OutputBytes => write!(f, "output_bytes"),
+            Self::ItemBytes => write!(f, "item_bytes"),
+            Self::JsonBytes => write!(f, "json_bytes"),
+            Self::MediaBytes => write!(f, "media_bytes"),
+            Self::StoreKeys => write!(f, "store_keys"),
+            Self::StoreBytes => write!(f, "store_bytes"),
+            Self::JsonDepth => write!(f, "json_depth"),
+            Self::HostCalls => write!(f, "host_calls"),
+            Self::HostSettlements => write!(f, "host_settlements"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapacityExhausted {
+    pub kind: CapacityKind,
+    pub cell_id: Option<CellId>,
+    pub status: Option<CellStatus>,
+    pub current: usize,
+    pub limit: usize,
+}
+
+impl std::fmt::Display for CapacityExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: current={}, limit={}",
+            self.kind, self.current, self.limit
+        )?;
+        if let Some(cell_id) = &self.cell_id {
+            write!(f, ", cell_id={cell_id}")?;
+        }
+        if let Some(status) = self.status {
+            write!(f, ", status={status:?}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CellError {
     #[error("invalid request: {0}")]
@@ -162,14 +227,43 @@ pub enum CellError {
     NotFound,
     #[error("cell manager is closed")]
     Closed,
-    #[error("cell capacity exhausted")]
-    Capacity,
+    #[error("cell exited")]
+    Exited,
+    #[error("cell capacity exhausted: {0}")]
+    Capacity(CapacityExhausted),
     #[error("cell state requires evidence before more execution")]
     Frozen,
     #[error("session value version does not match")]
     Conflict,
     #[error("journal: {0}")]
     Journal(String),
+}
+impl CellError {
+    pub fn capacity(
+        kind: CapacityKind,
+        cell_id: Option<CellId>,
+        status: Option<CellStatus>,
+        current: usize,
+        limit: usize,
+    ) -> Self {
+        Self::Capacity(CapacityExhausted {
+            kind,
+            cell_id,
+            status,
+            current,
+            limit,
+        })
+    }
+    pub(crate) fn capability_error(self) -> CapabilityError {
+        let message = self.to_string();
+        match self {
+            Self::Closed => CapabilityError::stopped(CapabilityStop::Cancelled, message),
+            Self::Exited => CapabilityError::stopped(CapabilityStop::Exited, message),
+            Self::Capacity(_) => CapabilityError::stopped(CapabilityStop::Budget, message),
+            Self::Frozen | Self::Journal(_) => CapabilityError::unknown(message),
+            Self::Invalid(_) | Self::NotFound | Self::Conflict => CapabilityError::new(message),
+        }
+    }
 }
 impl From<rusqlite::Error> for CellError {
     fn from(value: rusqlite::Error) -> Self {
@@ -298,17 +392,31 @@ impl CellOutput {
     }
 }
 fn media(data: &str, limit: usize) -> Result<(), CellError> {
-    if data.len() > limit.saturating_add(2) / 3 * 4 || data.is_empty() {
-        return Err(CellError::Invalid(
-            "media byte limit exceeded or empty media".into(),
+    if data.is_empty() {
+        return Err(CellError::Invalid("empty media".into()));
+    }
+    if data.len() > limit.saturating_add(2) / 3 * 4 {
+        return Err(CellError::capacity(
+            CapacityKind::MediaBytes,
+            None,
+            None,
+            data.len(),
+            limit,
         ));
     }
     let bytes = STANDARD
         .decode(data)
         .map_err(|_| CellError::Invalid("media requires canonical padded base64".into()))?;
-    if bytes.len() > limit || STANDARD.encode(&bytes) != data {
-        return Err(CellError::Invalid(
-            "invalid or oversized base64 media".into(),
+    if STANDARD.encode(&bytes) != data {
+        return Err(CellError::Invalid("invalid base64 media".into()));
+    }
+    if bytes.len() > limit {
+        return Err(CellError::capacity(
+            CapacityKind::MediaBytes,
+            None,
+            None,
+            bytes.len(),
+            limit,
         ));
     }
     Ok(())
@@ -357,6 +465,9 @@ pub struct CellRecord {
     pub outputs: Vec<OutputEntry>,
     pub output_bytes: usize,
     pub error: Option<String>,
+    /// Explicit VM stop; missing historical values do not infer a stop from text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<CapabilityStop>,
     /// A failed trusted lifecycle hook freezes the session until the host repairs
     /// its records. Capability evidence alone cannot clear this failure.
     pub backend_error: Option<String>,
@@ -401,6 +512,8 @@ pub struct CellPage {
     pub required_budget: Option<usize>,
     pub outcome_unknown: bool,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<CapabilityStop>,
 }
 
 #[derive(Clone, Debug)]
@@ -502,6 +615,16 @@ pub struct HostSettlementEvidence {
 }
 
 pub(crate) fn validate_json(value: &Value, depth: usize, bytes: usize) -> Result<(), CellError> {
+    validate_json_with(value, depth, bytes, None, None)
+}
+
+pub(crate) fn validate_json_with(
+    value: &Value,
+    depth: usize,
+    bytes: usize,
+    cell_id: Option<&str>,
+    status: Option<CellStatus>,
+) -> Result<(), CellError> {
     fn visit(value: &Value, remaining: usize) -> bool {
         if remaining == 0 {
             return false;
@@ -528,18 +651,26 @@ pub(crate) fn validate_json(value: &Value, depth: usize, bytes: usize) -> Result
             Ok(())
         }
     }
-    if !visit(value, depth)
-        || serde_json::to_writer(
-            Counter {
-                size: 0,
-                limit: bytes,
-            },
-            value,
-        )
-        .is_err()
-    {
-        return Err(CellError::Invalid(
-            "JSON depth or byte limit exceeded".into(),
+    if !visit(value, depth) {
+        return Err(CellError::capacity(
+            CapacityKind::JsonDepth,
+            cell_id.map(str::to_owned),
+            status,
+            depth + 1,
+            depth,
+        ));
+    }
+    let mut counter = Counter {
+        size: 0,
+        limit: bytes,
+    };
+    if serde_json::to_writer(&mut counter, value).is_err() {
+        return Err(CellError::capacity(
+            CapacityKind::ItemBytes,
+            cell_id.map(str::to_owned),
+            status,
+            counter.size,
+            bytes,
         ));
     }
     Ok(())

@@ -1,0 +1,23 @@
+{
+  "name": "issue30-vue-vite-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Synthetic from-scratch Vue 3 + Vite 7 fixture for Issue 30 visual editor acceptance. Contains no third-party project code.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "vue": "3.5.22"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.2",
+    "@vue/compiler-sfc": "3.5.22",
+    "vite": "7.3.5"
+  }
+}

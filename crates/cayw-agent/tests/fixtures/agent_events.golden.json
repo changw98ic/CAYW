@@ -1,0 +1,325 @@
+{
+  "events": [
+    {
+      "type": "agent_start"
+    },
+    {
+      "type": "agent_end",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ],
+          "timestamp": 1700000000000
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "done"
+            }
+          ],
+          "provider": "fixture",
+          "model": "fixture-model",
+          "response_id": "response-1",
+          "response_model": "fixture-model-2026-01-01",
+          "usage": {
+            "input": 11,
+            "output": 7,
+            "cache_read": 2,
+            "cache_write": 1,
+            "reasoning": 3,
+            "total_tokens": 21
+          },
+          "usage_status": "reported",
+          "usage_fields": {},
+          "stop_reason": "stop",
+          "error_message": null,
+          "timestamp": 1700000000000,
+          "duration_ms": 5
+        }
+      ]
+    },
+    {
+      "type": "turn_start"
+    },
+    {
+      "type": "turn_end",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ],
+        "provider": "fixture",
+        "model": "fixture-model",
+        "response_id": "response-1",
+        "response_model": "fixture-model-2026-01-01",
+        "usage": {
+          "input": 11,
+          "output": 7,
+          "cache_read": 2,
+          "cache_write": 1,
+          "reasoning": 3,
+          "total_tokens": 21
+        },
+        "usage_status": "reported",
+        "usage_fields": {},
+        "stop_reason": "toolUse",
+        "error_message": null,
+        "timestamp": 1700000000000,
+        "duration_ms": 5
+      },
+      "tool_results": [
+        {
+          "tool_call_id": "call-1",
+          "tool_name": "echo",
+          "content": [
+            {
+              "type": "text",
+              "text": "hi"
+            }
+          ],
+          "details": {
+            "trace": "abc123"
+          },
+          "structured_content": {
+            "value": 1
+          },
+          "usage": {
+            "input": 11,
+            "output": 7,
+            "cache_read": 2,
+            "cache_write": 1,
+            "reasoning": 3,
+            "total_tokens": 21
+          },
+          "is_error": false,
+          "outcome_unknown": false,
+          "timestamp": 1700000000001,
+          "duration_ms": 4
+        }
+      ]
+    },
+    {
+      "type": "message_start",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "hello"
+          }
+        ],
+        "timestamp": 1700000000000
+      }
+    },
+    {
+      "type": "message_update",
+      "message": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ],
+        "provider": "fixture",
+        "model": "fixture-model",
+        "response_id": "response-1",
+        "response_model": "fixture-model-2026-01-01",
+        "usage": {
+          "input": 11,
+          "output": 7,
+          "cache_read": 2,
+          "cache_write": 1,
+          "reasoning": 3,
+          "total_tokens": 21
+        },
+        "usage_status": "reported",
+        "usage_fields": {},
+        "stop_reason": "toolUse",
+        "error_message": null,
+        "timestamp": 1700000000000,
+        "duration_ms": 5
+      },
+      "event": {
+        "type": "text_delta",
+        "index": 0,
+        "delta": "hi",
+        "partial": {
+          "content": [
+            {
+              "type": "text",
+              "text": "hi"
+            }
+          ],
+          "provider": "fixture",
+          "model": "fixture-model",
+          "response_id": "response-1",
+          "response_model": "fixture-model-2026-01-01",
+          "usage": {
+            "input": 11,
+            "output": 7,
+            "cache_read": 2,
+            "cache_write": 1,
+            "reasoning": 3,
+            "total_tokens": 21
+          },
+          "usage_status": "reported",
+          "usage_fields": {},
+          "stop_reason": "toolUse",
+          "error_message": null,
+          "timestamp": 1700000000000,
+          "duration_ms": 5
+        }
+      }
+    },
+    {
+      "type": "message_end",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ],
+        "provider": "fixture",
+        "model": "fixture-model",
+        "response_id": "response-1",
+        "response_model": "fixture-model-2026-01-01",
+        "usage": {
+          "input": 11,
+          "output": 7,
+          "cache_read": 2,
+          "cache_write": 1,
+          "reasoning": 3,
+          "total_tokens": 21
+        },
+        "usage_status": "reported",
+        "usage_fields": {},
+        "stop_reason": "toolUse",
+        "error_message": null,
+        "timestamp": 1700000000000,
+        "duration_ms": 5
+      }
+    },
+    {
+      "type": "tool_execution_start",
+      "call": {
+        "id": "call-1",
+        "name": "echo",
+        "arguments": {
+          "text": "hi"
+        }
+      }
+    },
+    {
+      "type": "tool_execution_update",
+      "call": {
+        "id": "call-1",
+        "name": "echo",
+        "arguments": {
+          "text": "hi"
+        }
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "hi"
+          }
+        ],
+        "details": {
+          "trace": "abc123"
+        },
+        "structured_content": {
+          "value": 1
+        },
+        "usage": {
+          "input": 11,
+          "output": 7,
+          "cache_read": 2,
+          "cache_write": 1,
+          "reasoning": 3,
+          "total_tokens": 21
+        },
+        "is_error": false,
+        "terminate": true,
+        "outcome_unknown": false
+      }
+    },
+    {
+      "type": "tool_execution_end",
+      "call": {
+        "id": "call-1",
+        "name": "echo",
+        "arguments": {
+          "text": "hi"
+        }
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "effect may have occurred"
+          }
+        ],
+        "details": null,
+        "structured_content": null,
+        "usage": null,
+        "is_error": true,
+        "terminate": false,
+        "outcome_unknown": true
+      },
+      "duration_ms": 4
+    }
+  ],
+  "tool_results": [
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "hi"
+        }
+      ],
+      "details": {
+        "trace": "abc123"
+      },
+      "structured_content": {
+        "value": 1
+      },
+      "usage": {
+        "input": 11,
+        "output": 7,
+        "cache_read": 2,
+        "cache_write": 1,
+        "reasoning": 3,
+        "total_tokens": 21
+      },
+      "is_error": false,
+      "terminate": true,
+      "outcome_unknown": false
+    },
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "effect may have occurred"
+        }
+      ],
+      "details": null,
+      "structured_content": null,
+      "usage": null,
+      "is_error": true,
+      "terminate": false,
+      "outcome_unknown": true
+    }
+  ]
+}

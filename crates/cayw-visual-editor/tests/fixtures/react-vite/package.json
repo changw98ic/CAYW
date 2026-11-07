@@ -1,0 +1,23 @@
+{
+  "name": "issue30-react-vite-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Synthetic from-scratch React 19 + Vite 7 fixture for Issue 30 visual editor acceptance. Contains no third-party project code.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "5.1.0",
+    "vite": "7.3.5"
+  }
+}

@@ -1,0 +1,25 @@
+[package]
+name = "cayw-queue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable task identity, priority and fairness admission, resource reservations and cancellation"
+
+[features]
+default = []
+fault-injection = ["cayw-ai/fault-injection"]
+test-support = []
+
+[dependencies]
+base64.workspace = true
+cayw-ai.workspace = true
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { version = "=1.27.0", features = ["v4"] }
+
+[dev-dependencies]
+tempfile.workspace = true

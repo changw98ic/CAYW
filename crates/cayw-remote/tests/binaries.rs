@@ -160,3 +160,40 @@ async fn server_binary_device_example_and_operator_commands_work_on_loopback() {
     assert_eq!(output(revoke).await["revoked"], true);
     assert!(operator.device_status(&id).await.unwrap().revoked);
 }
+
+#[tokio::test]
+async fn server_cli_invoke_rejects_oversized_payload_file_before_invoking() {
+    let server_binary = PathBuf::from(env!("CARGO_BIN_EXE_cayw-remote-server"));
+    let dir = tempfile::tempdir().unwrap();
+    let oversized = dir.path().join("oversized.json");
+    std::fs::write(&oversized, vec![b'x'; 65 * 1024]).unwrap();
+
+    let token = Secret::generate().unwrap();
+    let url = ServerUrl::new("ws://127.0.0.1:8787", false).unwrap();
+    let mut invoke = command(&server_binary, &token, &url);
+    invoke.args(["invoke", "dev-1", "req-1"]).arg(&oversized);
+
+    let output = invoke.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("message exceeds configured bound"),
+        "stderr: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn server_cli_invoke_rejects_non_regular_payload_file_before_invoking() {
+    let server_binary = PathBuf::from(env!("CARGO_BIN_EXE_cayw-remote-server"));
+    let dir = tempfile::tempdir().unwrap();
+
+    let token = Secret::generate().unwrap();
+    let url = ServerUrl::new("ws://127.0.0.1:8787", false).unwrap();
+    let mut invoke = command(&server_binary, &token, &url);
+    invoke.args(["invoke", "dev-1", "req-1"]).arg(dir.path());
+
+    let output = invoke.output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("configuration invalid"), "stderr: {stderr}");
+}

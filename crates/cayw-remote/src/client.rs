@@ -370,9 +370,12 @@ impl RemoteDevice {
         for token in tokens.values() {
             token.cancel();
         }
-        // Allow cooperative handlers to observe their cancelled tokens before
-        // aborting any that do not yield. This is bounded by one scheduling turn.
-        tokio::task::yield_now().await;
+        // Give cancelled handlers a bounded opportunity to finish before aborting
+        // any remaining work.
+        let _ = timeout(Duration::from_millis(50), async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await;
         tasks.shutdown().await;
         result
     }

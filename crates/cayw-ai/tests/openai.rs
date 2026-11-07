@@ -1,7 +1,7 @@
 use cayw_ai::providers::OpenAiProvider;
 use cayw_ai::{
     AssistantEvent, CancellationToken, Content, Message, Model, ModelRequest, Provider, StopReason,
-    StreamOptions,
+    StreamOptions, UsageStatus,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -1128,4 +1128,414 @@ async fn invalid_unpaired_tool_history_is_rejected_before_network_io() {
             .unwrap()
             .contains("tool result")
     );
+}
+
+#[tokio::test]
+async fn offline_regression_live04_fragmented_arguments_finish_with_usage() {
+    let body = include_str!("fixtures/sanitized_live04_snapshot.sse");
+    let expected_arguments = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|value| serde_json::from_str::<Value>(value).ok())
+        .filter_map(|value| {
+            value["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    let expected: Value = serde_json::from_str(&expected_arguments).unwrap();
+    for fragment_size in [7, 4096, 65536] {
+        let (provider, _) = fixture(body.to_owned(), "200 OK", fragment_size).await;
+        let mut input = request();
+        input.model = Model::new("magpie", "opencode-go/deepseek-v4.1-flash");
+        let mut stream = provider.stream(input, CancellationToken::new());
+        let mut terminal = None;
+        let mut starts = 0;
+        let mut ends = 0;
+        let mut argument_fragments = 0;
+        let mut argument_bytes = 0;
+        let mut emitted_arguments = String::new();
+        while let Some(event) = stream.next().await {
+            match &event {
+                AssistantEvent::ToolCallStart { .. } => starts += 1,
+                AssistantEvent::ToolCallDelta { delta, .. } => {
+                    argument_fragments += 1;
+                    argument_bytes += delta.len();
+                    emitted_arguments.push_str(delta);
+                }
+                AssistantEvent::ToolCallEnd { .. } => ends += 1,
+                _ => {}
+            }
+            if event.is_terminal() {
+                assert!(terminal.is_none(), "duplicate terminal event");
+                terminal = Some(event);
+            }
+        }
+        let Some(AssistantEvent::Done { message }) = terminal else {
+            let failure = terminal.as_ref().map(|event| {
+                let message = event.message();
+                (message.stop_reason, message.error_message.as_deref())
+            });
+            panic!(
+                "fragment_size={fragment_size}, arguments={argument_fragments}/{argument_bytes}, terminal={failure:?}"
+            );
+        };
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!((starts, argument_bytes, ends), (1, 7938, 1));
+        assert_eq!(emitted_arguments, expected_arguments);
+        assert!((1..=32).contains(&argument_fragments));
+        assert_eq!(message.usage_status, UsageStatus::Reported);
+        assert_eq!(message.usage.total_tokens, 32300);
+        assert_eq!(message.usage.output, 7832);
+        assert_eq!(message.usage.reasoning, 5788);
+        assert_eq!(message.usage_fields["prompt_tokens"], 24468);
+        let calls = message.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "execute_code");
+        assert_eq!(calls[0].arguments, expected);
+        assert_eq!(calls[0].arguments["script"].as_str().unwrap().len(), 7517);
+        println!(
+            "live04 fragment_size={fragment_size}, raw_argument_fragments=1954, emitted_argument_events={argument_fragments}, argument_bytes={argument_bytes}"
+        );
+        assert_eq!(cayw_ai::content_text(&message.content).len(), 157);
+        let thinking_bytes: usize = message
+            .content
+            .iter()
+            .map(|part| match part {
+                Content::Thinking { thinking, .. } => thinking.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(thinking_bytes, 23141);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_interrupts_small_buffered_tool_arguments_before_completion() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider =
+        OpenAiProvider::new(format!("http://{}/v1", listener.local_addr().unwrap()), "").unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_request(&mut stream).await;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+        let body = data(chunk(
+            json!({"tool_calls":[{"index":0,"id":"buffered-call","function":{"name":"sum","arguments":"{\"a\":"}}]}),
+            Value::Null,
+        )) + &data(chunk(json!({"content":"waiting"}), Value::Null));
+        stream
+            .write_all(format!("{:x}\r\n{body}\r\n", body.len()).as_bytes())
+            .await
+            .unwrap();
+        let mut byte = [0];
+        stream.read(&mut byte).await.unwrap_or(0)
+    });
+    let cancel = CancellationToken::new();
+    let mut stream = provider.stream(request(), cancel.clone());
+    let mut tool_started = false;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!event.is_terminal());
+        assert!(!matches!(&event, AssistantEvent::ToolCallDelta { .. }));
+        if matches!(&event, AssistantEvent::ToolCallStart { .. }) {
+            tool_started = true;
+        }
+        if matches!(&event, AssistantEvent::TextDelta { delta, .. } if delta == "waiting") {
+            assert!(tool_started);
+            break;
+        }
+    }
+    cancel.cancel();
+    let events = tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>())
+        .await
+        .unwrap();
+    assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+    let Some(AssistantEvent::Error { message }) = events.last() else {
+        panic!("missing error")
+    };
+    assert_eq!(message.stop_reason, StopReason::Aborted);
+    assert_eq!(message.usage_status, UsageStatus::Unknown);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AssistantEvent::ToolCallEnd { .. } | AssistantEvent::Done { .. }
+    )));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn offline_regression_sanitized_request_007_tool_calls_without_calls_retains_usage() {
+    // Source: /tmp/cayw-f01-f20-repair-20261028/chat-baseline-capture-02/http-capture/request-007/response.sse
+    // Source SHA-256: a27e49904c88516dff6c4dab3a9a7a6cb1317a25915c19c3ffd2dd09f4cb5023
+    let sse_body = include_str!("fixtures/sanitized_request_007.sse");
+    for fragment_size in [1, 7, 64, 4096] {
+        let (provider, _) = fixture(sse_body.to_string(), "200 OK", fragment_size).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let last = events.last().expect("must yield terminal event");
+        let Some(AssistantEvent::Error { message }) = events.last() else {
+            panic!(
+                "Expected AssistantEvent::Error for fragment size {fragment_size}, got: {last:?}"
+            );
+        };
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("tool_calls finish_reason without tool calls")
+        );
+        // Trailing usage in frame 109 following invalid finish_reason frame 107 must NOT be lost!
+        assert_eq!(message.usage_status, UsageStatus::Reported);
+        assert_eq!(message.usage.total_tokens, 5429);
+        assert_eq!(message.usage.input, 394); // 5258 prompt - 4864 cached
+        assert_eq!(message.usage.output, 171);
+        assert_eq!(message.usage.cache_read, 4864);
+        assert_eq!(message.usage.reasoning, 53);
+        assert_eq!(message.usage_fields["prompt_tokens"], 5258);
+        assert_eq!(message.usage_fields["completion_tokens"], 171);
+        assert_eq!(message.usage_fields["total_tokens"], 5429);
+        // Tool calls must be empty; no tool call should be emitted or executable.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AssistantEvent::ToolCallStart { .. }))
+        );
+        assert!(
+            !message
+                .content
+                .iter()
+                .any(|c| matches!(c, Content::ToolCall(_)))
+        );
+    }
+}
+
+#[tokio::test]
+async fn offline_regression_sanitized_request_001_streaming_tool_call_concatenation() {
+    // Source: /tmp/cayw-f01-f20-repair-20261028/chat-baseline-capture-02/http-capture/request-001/response.sse
+    // Source SHA-256: 846fa3da681c46f84429175a816712235ea487f5d326b1f14350a0daabd85b29
+    let sse_body = include_str!("fixtures/sanitized_request_001.sse");
+    for fragment_size in [1, 7, 64, 4096] {
+        let (provider, _) = fixture(sse_body.to_string(), "200 OK", fragment_size).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(AssistantEvent::Done { message }) = events.last() else {
+            panic!("Expected Done for fragment size {fragment_size}, got: {events:?}");
+        };
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!(message.usage_status, UsageStatus::Reported);
+        assert_eq!(message.usage.input, 1156);
+        assert_eq!(message.usage.output, 117);
+        assert_eq!(message.usage.total_tokens, 1273);
+        assert_eq!(message.usage.reasoning, 5);
+        let calls = message.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call-tool-001");
+        assert_eq!(calls[0].name, "execute_code");
+        assert_eq!(calls[0].arguments["action"], "exec");
+        assert_eq!(
+            calls[0].arguments["script"],
+            "return {tools = ALL_TOOLS, matches = tool_search(\"test.run\", 10)}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fragmented_tool_arguments_and_trailing_usage_across_network_splits() {
+    let chunks = [
+        chunk(
+            json!({"role": "assistant", "tool_calls": [{"index": 0, "id": "call-probe", "type": "function", "function": {"name": "test_run", "arguments": ""}}]}),
+            Value::Null,
+        ),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "{\"profile\":"}}]}),
+            Value::Null,
+        ),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": " \"probe\","}}]}),
+            Value::Null,
+        ),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": " \"limit\": 60}"}}]}),
+            Value::Null,
+        ),
+        chunk(json!({}), json!("tool_calls")),
+        json!({"choices": [], "usage": {"prompt_tokens": 512, "completion_tokens": 48, "total_tokens": 560}}),
+    ];
+    let mut body = String::new();
+    for c in chunks {
+        body.push_str(&data(c));
+    }
+    body.push_str("data: [DONE]\r\n\r\n");
+
+    for fragment_size in [1, 5, 23, 2048] {
+        let (provider, _) = fixture(body.clone(), "200 OK", fragment_size).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(AssistantEvent::Done { message }) = events.last() else {
+            panic!("Expected Done for fragment size {fragment_size}, got: {events:?}");
+        };
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!(message.usage_status, UsageStatus::Reported);
+        assert_eq!(message.usage.input, 512);
+        assert_eq!(message.usage.output, 48);
+        assert_eq!(message.usage.total_tokens, 560);
+        assert_eq!(message.content.len(), 1);
+        let Content::ToolCall(call) = &message.content[0] else {
+            panic!("expected ToolCall content");
+        };
+        assert_eq!(call.id, "call-probe");
+        assert_eq!(call.name, "test_run");
+        assert_eq!(call.arguments, json!({"profile": "probe", "limit": 60}));
+    }
+}
+
+#[tokio::test]
+async fn invalid_stop_finish_with_calls_retains_trailing_usage_and_rejects() {
+    let chunks = [
+        chunk(
+            json!({"role": "assistant", "tool_calls": [{"index": 0, "id": "call-1", "type": "function", "function": {"name": "test_run", "arguments": "{}"}}]}),
+            Value::Null,
+        ),
+        chunk(json!({}), json!("stop")),
+        json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}}),
+    ];
+    let mut body = String::new();
+    for c in chunks {
+        body.push_str(&data(c));
+    }
+    body.push_str("data: [DONE]\r\n\r\n");
+
+    let (provider, _) = fixture(body, "200 OK", 1).await;
+    let events = provider
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
+    let Some(AssistantEvent::Error { message }) = events.last() else {
+        panic!("Expected Error, got: {events:?}");
+    };
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Tool calls require a tool_calls or length finish_reason")
+    );
+    assert_eq!(message.usage_status, UsageStatus::Reported);
+    assert_eq!(message.usage.input, 100);
+    assert_eq!(message.usage.output, 20);
+    assert_eq!(message.usage.total_tokens, 120);
+}
+
+#[tokio::test]
+async fn drain_rejects_foreign_id_and_does_not_settle_unknown_usage() {
+    let chunks = [
+        json!({"id": "chatcmpl-valid", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}}]}),
+        json!({"id": "chatcmpl-valid", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        json!({"id": "chatcmpl-foreign", "choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}}),
+    ];
+    let mut body = String::new();
+    for c in chunks {
+        body.push_str(&data(c));
+    }
+    body.push_str("data: [DONE]\r\n\r\n");
+    let (provider, _) = fixture(body, "200 OK", 64).await;
+    let events = provider
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
+    let Some(AssistantEvent::Error { message }) = events.last() else {
+        panic!("Expected Error, got: {events:?}");
+    };
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("tool_calls finish_reason without tool calls")
+    );
+    // Foreign ID must NOT settle the request! Usage status must remain Unknown, total tokens 0.
+    assert_eq!(message.usage_status, UsageStatus::Unknown);
+    assert_eq!(message.usage.total_tokens, 0);
+}
+
+#[tokio::test]
+async fn drain_rejects_contradictory_usage_and_marks_invalid() {
+    let chunks = [
+        json!({"id": "chatcmpl-valid", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}}]}),
+        json!({"id": "chatcmpl-valid", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        json!({"id": "chatcmpl-valid", "choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 99999}}),
+    ];
+    let mut body = String::new();
+    for c in chunks {
+        body.push_str(&data(c));
+    }
+    body.push_str("data: [DONE]\r\n\r\n");
+    let (provider, _) = fixture(body, "200 OK", 64).await;
+    let events = provider
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
+    let Some(AssistantEvent::Error { message }) = events.last() else {
+        panic!("Expected Error, got: {events:?}");
+    };
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("tool_calls finish_reason without tool calls")
+    );
+    // Contradictory usage in drain must be marked Invalid, NOT Reported!
+    assert_eq!(message.usage_status, UsageStatus::Invalid);
+}
+
+#[tokio::test]
+async fn drain_stalling_after_error_can_be_cancelled() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider =
+        OpenAiProvider::new(format!("http://{}/v1", listener.local_addr().unwrap()), "").unwrap();
+    let (error_chunk_sent_tx, error_chunk_sent_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let chunk1 = json!({"id": "chatcmpl-1", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]});
+        let data1 = data(chunk1);
+        socket
+            .write_all(format!("{:x}\r\n{}\r\n", data1.len(), data1).as_bytes())
+            .await
+            .unwrap();
+        let _ = error_chunk_sent_tx.send(());
+        // Stall without sending trailing usage or [DONE], until client disconnects or closes
+        let mut buf = [0; 64];
+        let _ = socket.read(&mut buf).await;
+    });
+    let cancel = CancellationToken::new();
+    let cancel_for_task = cancel.clone();
+    let stream = provider.stream(request(), cancel_for_task);
+    tokio::spawn(async move {
+        error_chunk_sent_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    let events = tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
+        .await
+        .expect("stalling drain stream must terminate promptly on cancel");
+    let Some(AssistantEvent::Error { message }) = events.last() else {
+        panic!("Expected Error event, got: {events:?}");
+    };
+    assert_eq!(message.stop_reason, StopReason::Aborted);
+    server.abort();
 }

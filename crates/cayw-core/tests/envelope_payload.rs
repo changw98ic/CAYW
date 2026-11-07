@@ -164,6 +164,36 @@ fn provider_usage_fields_obey_the_existing_json_leaf_limits() {
 }
 
 #[test]
+fn provider_metadata_obeys_the_existing_json_leaf_limits() {
+    for value in [
+        nested(33),
+        Value::Array(vec![Value::Null; 4096]),
+        Value::String("x".repeat(65537)),
+    ] {
+        let mut message =
+            cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "metadata"));
+        message.provider_metadata.insert("replay".into(), value);
+        assert!(
+            ProtocolEnvelope::new("metadata", message).is_err(),
+            "provider_metadata must not bypass Core payload limits"
+        );
+    }
+}
+
+#[test]
+fn provider_metadata_preserves_valid_replay_data_across_roundtrip() {
+    let mut message = cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "metadata"));
+    message.provider_metadata.insert(
+        "replay_signature".into(),
+        json!({"item_id": "item-123", "opaque_hash": "sha256-abcdef", "valid": true}),
+    );
+    let envelope = ProtocolEnvelope::new("metadata", message.clone()).unwrap();
+    let wire = serde_json::to_string(&envelope).unwrap();
+    let decoded = ProtocolEnvelope::<cayw_ai::AssistantMessage>::decode(&wire).unwrap();
+    assert_eq!(decoded.payload.provider_metadata, message.provider_metadata);
+}
+
+#[test]
 fn decode_and_new_apply_the_same_json_leaf_limits() {
     for data in [
         nested(33),

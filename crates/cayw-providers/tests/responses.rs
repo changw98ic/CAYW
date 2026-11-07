@@ -631,19 +631,67 @@ async fn failed_incomplete_and_missing_completion_never_succeed_with_complete_ca
 
 #[tokio::test]
 async fn malformed_identity_arguments_and_final_output_are_rejected() {
-    for case in [
-        "item-id",
-        "call-id",
-        "duplicate-call",
-        "undeclared",
-        "done-args",
-        "final-output",
-        "response-id",
-        "model",
-        "duplicate-json",
-        "schema",
-        "missing-item-done",
-        "event-type",
+    for (case, expected) in [
+        (
+            "item-id",
+            "Responses argument delta item ID does not match its output index",
+        ),
+        ("call-id", "Responses done call does not match its deltas"),
+        (
+            "duplicate-call",
+            "Invalid or duplicate Responses function call ID",
+        ),
+        ("undeclared", "Response calls an undeclared tool"),
+        (
+            "done-args",
+            "Responses argument done does not match its deltas",
+        ),
+        (
+            "final-output",
+            "Responses completed output does not match item done events",
+        ),
+        ("response-id", "Response identity changed during a stream"),
+        ("model", "Response identity changed during a stream"),
+        (
+            "duplicate-json",
+            "Duplicate JSON key in Responses tool arguments",
+        ),
+        (
+            "nested-duplicate-json",
+            "Duplicate JSON key in Responses tool arguments",
+        ),
+        (
+            "escaped-duplicate-json",
+            "Duplicate JSON key in Responses tool arguments",
+        ),
+        (
+            "nesting-limit-json",
+            "Responses tool arguments exceed the nesting limit",
+        ),
+        (
+            "non-object-arguments",
+            "Responses tool arguments must be a JSON object",
+        ),
+        (
+            "empty-arguments",
+            "Invalid JSON in Responses tool arguments",
+        ),
+        (
+            "schema",
+            "Tool arguments do not satisfy the declared schema",
+        ),
+        (
+            "missing-item-done",
+            "Responses output item has no done event",
+        ),
+        (
+            "event-type",
+            "Responses text delta belongs to a non-message item",
+        ),
+        (
+            "event-type-reasoning",
+            "Responses text delta belongs to a non-message item",
+        ),
     ] {
         let mut wire = calls_wire();
         match case {
@@ -658,20 +706,143 @@ async fn malformed_identity_arguments_and_final_output_are_rejected() {
             "response-id" => wire.last_mut().unwrap()["response"]["id"] = json!("other-response"),
             "model" => wire.last_mut().unwrap()["response"]["model"] = json!("other-model"),
             "duplicate-json" => {
-                wire[3]["delta"] = json!(r#"{"city":"x","city":"#);
+                let dup = r#"{"city":"x","city":"北京"}"#;
+                wire[3]["delta"] = json!(dup);
+                wire[5]["delta"] = json!("");
+                wire[7]["arguments"] = json!(dup);
+                wire[8]["item"]["arguments"] = json!(dup);
+            }
+            "nested-duplicate-json" => {
+                let dup = r#"{"city":"x","dup":{"a":1,"a":2}}"#;
+                wire[3]["delta"] = json!(dup);
+                wire[5]["delta"] = json!("");
+                wire[7]["arguments"] = json!(dup);
+                wire[8]["item"]["arguments"] = json!(dup);
+            }
+            "escaped-duplicate-json" => {
+                let dup = "{\"city\":\"x\",\"a\":1,\"\\u0061\":2}";
+                wire[3]["delta"] = json!(dup);
+                wire[5]["delta"] = json!("");
+                wire[7]["arguments"] = json!(dup);
+                wire[8]["item"]["arguments"] = json!(dup);
+            }
+            "nesting-limit-json" => {
+                let deep = format!("{}{}{}", "{\"a\":".repeat(130), "1", "}".repeat(130));
+                wire[3]["delta"] = json!(deep);
+                wire[5]["delta"] = json!("");
+                wire[7]["arguments"] = json!(deep);
+                wire[8]["item"]["arguments"] = json!(deep);
+            }
+            "non-object-arguments" => {
+                let non_obj = r#"[1, 2]"#;
+                wire[3]["delta"] = json!(non_obj);
+                wire[5]["delta"] = json!("");
+                wire[7]["arguments"] = json!(non_obj);
+                wire[8]["item"]["arguments"] = json!(non_obj);
+            }
+            "empty-arguments" => {
+                wire[3]["delta"] = json!("");
+                wire[5]["delta"] = json!("");
+                wire[7]["arguments"] = json!("");
+                wire[8]["item"]["arguments"] = json!("");
             }
             "schema" => {
+                let bad_schema = r#"{"number":"北京"}"#;
                 wire[3]["delta"] = json!(r#"{"number":"#);
-                wire[7]["arguments"] = json!(r#"{"number":"北京"}"#);
+                wire[5]["delta"] = json!("\"北京\"}");
+                wire[7]["arguments"] = json!(bad_schema);
+                wire[8]["item"]["arguments"] = json!(bad_schema);
             }
             "missing-item-done" => {
                 wire.remove(8);
             }
-            "event-type" => wire[3]["type"] = json!("response.output_text.delta"),
+            "event-type" => {
+                wire[3]["type"] = json!("response.output_text.delta");
+                wire[3]["content_index"] = json!(0);
+            }
+            "event-type-reasoning" => {
+                wire[1] = reasoning_added(0);
+                wire[3]["type"] = json!("response.output_text.delta");
+                wire[3]["output_index"] = json!(0);
+                wire[3]["item_id"] = json!("rs-native");
+                wire[3]["content_index"] = json!(0);
+            }
             _ => unreachable!(),
         }
         let (events, _) = run(&format!("reject-{case}"), wire).await;
-        assert_error(&events);
+        assert_error_contains(&events, expected);
+    }
+}
+
+#[tokio::test]
+async fn delta_events_to_mismatched_item_kinds_are_rejected() {
+    for (case, wire, expected) in [
+        (
+            "output-text-delta-on-reasoning",
+            {
+                let mut wire = reasoning_wire();
+                wire[2] = json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "item_id": "rs-native",
+                    "content_index": 0,
+                    "delta": "text"
+                });
+                wire
+            },
+            "Responses text delta belongs to a non-message item",
+        ),
+        (
+            "function-call-arguments-delta-on-message",
+            {
+                let mut wire = text_wire();
+                wire[2] = argument_delta(0, "msg-native", "{}");
+                wire
+            },
+            "Responses argument delta belongs to a non-call item",
+        ),
+        (
+            "function-call-arguments-delta-on-reasoning",
+            {
+                let mut wire = reasoning_wire();
+                wire[2] = argument_delta(0, "rs-native", "{}");
+                wire
+            },
+            "Responses argument delta belongs to a non-call item",
+        ),
+        (
+            "reasoning-text-delta-on-message",
+            {
+                let mut wire = text_wire();
+                wire[2] = json!({
+                    "type": "response.reasoning_text.delta",
+                    "output_index": 0,
+                    "item_id": "msg-native",
+                    "content_index": 0,
+                    "delta": "thought"
+                });
+                wire
+            },
+            "Responses reasoning text delta belongs to a non-reasoning item",
+        ),
+        (
+            "reasoning-text-delta-on-call",
+            {
+                let mut wire = calls_wire();
+                wire[3] = json!({
+                    "type": "response.reasoning_text.delta",
+                    "output_index": 1,
+                    "item_id": "fc-second",
+                    "content_index": 0,
+                    "delta": "thought"
+                });
+                wire
+            },
+            "Responses reasoning text delta belongs to a non-reasoning item",
+        ),
+    ] {
+        let (events, _) = run(&format!("mismatch-{case}"), wire).await;
+        assert_error_contains(&events, expected);
     }
 }
 

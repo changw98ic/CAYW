@@ -95,8 +95,10 @@ pub(crate) fn decide(
         .find(|approval| approval.id == id && approval.attempt_id == lease.attempt_id)
         .ok_or(RuntimeError::StaleApproval)?;
     let record = inner.queue.get(&approval.input.task_id)?;
-    if record.state != crate::TaskState::Running
-        || record.cancel_requested
+    if !matches!(
+        record.state,
+        crate::TaskState::Running | crate::TaskState::WaitingApproval | crate::TaskState::Queued
+    ) || record.cancel_requested
         || record.session_id != session
         || record.attempt_id.as_deref() != Some(lease.attempt_id.as_str())
         || record.worker_id.as_deref() != Some(lease.worker_id.as_str())
@@ -178,7 +180,7 @@ pub(crate) fn decide(
             .err();
         RuntimeError::RecoveryRequired {
             cause: Box::new(cause),
-            cleanup: cleanup.map(Box::new),
+            cleanup: cleanup.map(|error| Box::new(RuntimeError::from(error))),
             outcome_unknown: true,
         }
     });
@@ -224,6 +226,17 @@ impl Gate {
         {
             return self.accept(decision, None, &cancel);
         }
+        if !inner
+            .journal
+            .blocks_session_result_read(&context.lease.session_id, name, &scope)?
+            && crate::results::is_session_result_read(inner, &context.lease.session_id, name, args)
+        {
+            self.scope.authorize(Authorization {
+                proof: self.scope.proof("session-results".into(), None),
+                grant: None,
+            })?;
+            return context.check(&cancel);
+        }
         let request = inner.store.request_approval(
             &context.lease,
             ApprovalInput {
@@ -239,6 +252,14 @@ impl Gate {
                 ),
             },
         )?;
+        if self.scope.has_started() {
+            return Err(RuntimeError::Worker(
+                "approval cannot release a started capability".into(),
+            ));
+        }
+        context
+            .activity
+            .waiting(context, &self.scope.key.execution_id)?;
         inner.changed.notify_waiters();
         loop {
             let notified = inner.approvals.notified();
@@ -248,6 +269,10 @@ impl Gate {
                     .journal
                     .consume_grant(&context.lease, name, &scope, Some(&request.id))?
             {
+                context
+                    .activity
+                    .resume_cell(context, &self.scope.key.execution_id, &cancel)
+                    .await?;
                 return self.accept(decision, Some(request.id.clone()), &cancel);
             }
             let recorded = inner
@@ -259,6 +284,10 @@ impl Gate {
                         u64::try_from(inner.config.grant_lifetime.as_millis()).unwrap_or(u64::MAX),
                     );
                 if decision.decision == ApprovalDecision::Deny || expired {
+                    context
+                        .activity
+                        .resume_cell(context, &self.scope.key.execution_id, &cancel)
+                        .await?;
                     return Err(RuntimeError::InvalidInput(
                         "capability permission denied or expired".into(),
                     ));

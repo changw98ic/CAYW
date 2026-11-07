@@ -150,6 +150,72 @@ async fn terminal(cells: &CellManager, mut page: CellPage) -> CellPage {
     .unwrap()
 }
 
+#[tokio::test]
+async fn host_settlement_preserves_the_original_known_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let backend = Backend::new(false);
+    let cells = manager(
+        identity("stop"),
+        journal.clone(),
+        backend,
+        ReadCoordinator::new(vec![], CellLimits::default()).unwrap(),
+    );
+    let page = terminal(
+        &cells,
+        cells
+            .exec(
+                request("pcall(function() text(string.rep('x',300000)) end)"),
+                "parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.status, CellStatus::Failed);
+    assert_eq!(page.stop, Some(cayw_codemode::CapabilityStop::Budget));
+    let record = cells.record(&page.cell_id).unwrap();
+    cells.close().await;
+    drop(cells);
+    let scope = journal
+        .stopped_scope(
+            ExecutorStopped {
+                identity: record.identity.clone(),
+                evidence: "original VM joined".into(),
+            },
+            CellLimits::default(),
+        )
+        .unwrap();
+    let mut settlement = HostSettlement {
+        execution: record.execution(),
+        calls: vec![],
+        execution_terminal: Some(HostExecutionSettlement {
+            expected_backend_error: None,
+            terminal: CellTerminal {
+                status: record.status,
+                error: record.error.clone(),
+                stop: None,
+                outcome_unknown: false,
+            },
+            evidence: "original known terminal".into(),
+        }),
+        evidence: "original stop remains authoritative".into(),
+    };
+    assert!(matches!(
+        scope.settle(settlement.clone()),
+        Err(CellError::Conflict)
+    ));
+    settlement
+        .execution_terminal
+        .as_mut()
+        .unwrap()
+        .terminal
+        .stop = record.stop;
+    assert_eq!(scope.settle(settlement).unwrap().stop, record.stop);
+    scope.finish().unwrap();
+}
+
 // Break caught: the capability is known in Core, but a lost lifecycle reply
 // permanently freezes Cells even after the old VM and manager have stopped.
 #[tokio::test]
@@ -215,6 +281,7 @@ async fn host_settlement_after_close_allows_a_new_task_without_replaying() {
         terminal: CellTerminal {
             status: CellStatus::Reconciled,
             error: None,
+            stop: None,
             outcome_unknown: false,
         },
         evidence: "Core durable execution settlement after explicit host observation".into(),
@@ -407,6 +474,7 @@ fn stopped_crash_windows_accept_host_facts_and_preserve_known_terminals() {
         outputs: vec![],
         output_bytes: 0,
         error: None,
+        stop: None,
         backend_error: None,
         reconciliation: vec![],
         host_settlements: vec![],
@@ -475,6 +543,7 @@ fn stopped_crash_windows_accept_host_facts_and_preserve_known_terminals() {
             terminal: CellTerminal {
                 status: CellStatus::Reconciled,
                 error: None,
+                stop: None,
                 outcome_unknown: false,
             },
             evidence: "Core stopped execution and parent pairing are durable".into(),
@@ -898,6 +967,7 @@ async fn session_stays_frozen_until_every_task_record_has_host_settlement() {
                     terminal: CellTerminal {
                         status: CellStatus::Cancelled,
                         error: None,
+                        stop: None,
                         outcome_unknown: false,
                     },
                     evidence: "Core execution durably cancelled with no dispatched capabilities"
@@ -1007,6 +1077,38 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
             let record = cells.record(&page.cell_id).unwrap();
             cells.close().await;
             drop(cells);
+
+            let multi_identity = CellIdentity {
+                session_id: "session-multi".into(),
+                task_id: "multi".into(),
+                attempt_id: "original-attempt".into(),
+                permission_context: "authorized".into(),
+            };
+            let multi_cells = manager(
+                multi_identity.clone(),
+                journal.clone(),
+                Backend::new(false),
+                ReadCoordinator::new(vec![], CellLimits::default()).unwrap(),
+            );
+            let multi_page = terminal(
+                &multi_cells,
+                multi_cells
+                    .exec(
+                        request("cayw.call('write',{k='v'}); cayw.call('unknown',{})"),
+                        "parent",
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let multi_record = multi_cells.record(&multi_page.cell_id).unwrap();
+            multi_cells.close().await;
+            drop(multi_cells);
+
+            assert!(journal.is_frozen("session").unwrap());
+            assert!(journal.is_frozen("session-multi").unwrap());
+
             let scope = journal
                 .stopped_scope(
                     ExecutorStopped {
@@ -1049,6 +1151,78 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
                 assert_eq!(
                     scope.record(&record.execution()).unwrap().revision,
                     record.revision
+                );
+            }
+            let multi_scope = journal
+                .stopped_scope(
+                    ExecutorStopped {
+                        identity: multi_identity,
+                        evidence: "executor stopped multi".into(),
+                    },
+                    CellLimits::default(),
+                )
+                .unwrap();
+            for shape in [
+                "multi-arguments",
+                "multi-result",
+                "multi-first-arguments",
+                "multi-first-result",
+            ] {
+                let mut deep = Value::Null;
+                for _ in 0..10_000 {
+                    deep = Value::Array(vec![deep]);
+                }
+                let mut settlement = HostSettlement {
+                    execution: multi_record.execution(),
+                    calls: vec![
+                        HostCallSettlement {
+                            sequence: 1,
+                            name: "write".into(),
+                            arguments: json!({"k": "v"}),
+                            dependencies: None,
+                            terminal: HostCallTerminal::Succeeded {
+                                result: HostResult::Value(json!(true)),
+                            },
+                        },
+                        HostCallSettlement {
+                            sequence: 2,
+                            name: "unknown".into(),
+                            arguments: json!({}),
+                            dependencies: None,
+                            terminal: HostCallTerminal::Succeeded {
+                                result: HostResult::Value(json!(true)),
+                            },
+                        },
+                    ],
+                    execution_terminal: None,
+                    evidence: "Core record multi".into(),
+                };
+                match shape {
+                    "multi-arguments" => {
+                        settlement.calls[1].arguments = deep;
+                    }
+                    "multi-result" => {
+                        settlement.calls[1].terminal = HostCallTerminal::Succeeded {
+                            result: HostResult::Value(deep),
+                        };
+                    }
+                    "multi-first-arguments" => {
+                        settlement.calls[0].arguments = deep;
+                    }
+                    "multi-first-result" => {
+                        settlement.calls[0].terminal = HostCallTerminal::Succeeded {
+                            result: HostResult::Value(deep),
+                        };
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(multi_scope.settle(settlement).is_err());
+                assert_eq!(
+                    multi_scope
+                        .record(&multi_record.execution())
+                        .unwrap()
+                        .revision,
+                    multi_record.revision
                 );
             }
         });
@@ -1101,6 +1275,7 @@ fn existing_omitted_success_can_add_evidence_without_replacing_known_success() {
         outputs: vec![],
         output_bytes: 0,
         error: None,
+        stop: None,
         backend_error: Some("old lifecycle reply lost".into()),
         reconciliation: vec![],
         host_settlements: vec![],
@@ -1140,6 +1315,7 @@ fn existing_omitted_success_can_add_evidence_without_replacing_known_success() {
             terminal: CellTerminal {
                 status: CellStatus::Reconciled,
                 error: None,
+                stop: None,
                 outcome_unknown: false,
             },
             evidence: "Core known success and execution durably verified".into(),

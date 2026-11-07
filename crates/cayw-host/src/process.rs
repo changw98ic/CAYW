@@ -23,13 +23,15 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
+/// A test filter is one literal argv item: it is never split or passed to a
+/// shell. Only the ambiguity that a leading `-` would become an option is
+/// rejected, plus control characters and the catalog's length bound. Ordinary
+/// test names may use any Unicode, spaces, parentheses or a leading underscore.
 pub(crate) fn valid_filter(filter: &str) -> bool {
     !filter.is_empty()
-        && filter.len() <= 256
-        && filter.as_bytes()[0].is_ascii_alphanumeric()
-        && filter.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'.' | b'-' | b'/')
-        })
+        && filter.chars().count() <= 256
+        && !filter.starts_with('-')
+        && !filter.chars().any(char::is_control)
 }
 pub(crate) fn validate_program(program: &Path) -> Result<(), CapabilityError> {
     if !program.is_absolute() || !program.is_file() {
@@ -39,7 +41,7 @@ pub(crate) fn validate_program(program: &Path) -> Result<(), CapabilityError> {
     }
     Ok(())
 }
-pub(crate) fn runner(config: &HostConfig) -> Result<ProcessRunner, CapabilityError> {
+pub fn runner(config: &HostConfig) -> Result<ProcessRunner, CapabilityError> {
     let programs = config
         .git_program
         .iter()
@@ -84,9 +86,14 @@ pub(crate) fn git_environment() -> BTreeMap<String, String> {
         ("LC_ALL".into(), "C".into()),
     ])
 }
-/// Fixed global flags and command-scope overrides shared by snapshot reads and
+/// Fixed global flags and command-scope overrides shared by metadata-view reads and
 /// real-repository writes. The caller appends the subcommand and its arguments.
 pub(crate) fn git_base_args() -> Vec<String> {
+    git_base_args_with_excludes(null_device())
+}
+/// Reads use a private excludes file that names only real Host state; writes
+/// keep the system null device. No ambient exclude file is consulted.
+fn git_base_args_with_excludes(excludes_file: &str) -> Vec<String> {
     let mut args = vec![
         "--no-pager".into(),
         "--no-optional-locks".into(),
@@ -96,7 +103,7 @@ pub(crate) fn git_base_args() -> Vec<String> {
         ("core.hooksPath", null_device()),
         ("core.fsmonitor", "false"),
         ("core.attributesFile", null_device()),
-        ("core.excludesFile", null_device()),
+        ("core.excludesFile", excludes_file),
         ("core.pager", ""),
         ("core.askPass", ""),
         ("diff.external", ""),
@@ -117,8 +124,8 @@ pub(crate) fn git_base_args() -> Vec<String> {
     }
     args
 }
-fn git_args(name: &str, arguments: &Value) -> Vec<String> {
-    let mut args = git_base_args();
+fn git_args(name: &str, arguments: &Value, excludes_file: &str) -> Vec<String> {
+    let mut args = git_base_args_with_excludes(excludes_file);
     match name {
         "git.status" => args.extend(
             [
@@ -229,13 +236,13 @@ impl ProcessCleanup for GitView {
     fn cleanup(&mut self) -> io::Result<()> {
         #[cfg(not(unix))]
         return Err(io::Error::other(
-            "Git snapshot cleanup is unsupported on this platform",
+            "Git metadata view cleanup is unsupported on this platform",
         ));
         #[cfg(unix)]
         {
             let changed = || {
                 io::Error::other(format!(
-                    "Git snapshot ownership changed; retained opened directory for {}",
+                    "Git metadata view ownership changed; retained opened directory for {}",
                     self.name
                 ))
             };
@@ -266,7 +273,7 @@ impl ProcessCleanup for GitView {
                 // A source-name swap raced the rename. Keep the moved candidate
                 // untouched and report its location; do not guess a restoration.
                 return Err(io::Error::other(format!(
-                    "Git snapshot ownership changed during cleanup; retained candidate in {quarantine_name}/owned"
+                    "Git metadata view ownership changed during cleanup; retained candidate in {quarantine_name}/owned"
                 )));
             }
             // Recursive deletion is rooted in the opened, checked handle inside
@@ -342,7 +349,7 @@ fn confirm_directory_removed(dir: &Dir, parent: &Dir, name: impl AsRef<Path>) ->
     #[cfg(not(target_os = "macos"))]
     let _ = (parent, name);
     Err(io::Error::other(
-        "Git snapshot directory removal is unconfirmed",
+        "Git metadata view directory removal is unconfirmed",
     ))
 }
 
@@ -362,13 +369,15 @@ fn clear_open_directory(dir: &Dir) -> io::Result<()> {
             let opened = child.dir_metadata()?;
             if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
                 return Err(io::Error::other(
-                    "Git snapshot child changed during cleanup",
+                    "Git metadata view child changed during cleanup",
                 ));
             }
             clear_open_directory(&child)?;
             let current = dir.open_dir_nofollow(&name)?;
             if !same_directory(&current, &child)? {
-                return Err(io::Error::other("Git snapshot child moved during cleanup"));
+                return Err(io::Error::other(
+                    "Git metadata view child moved during cleanup",
+                ));
             }
             dir.remove_dir(&name)?;
             confirm_directory_removed(&child, dir, &name)?;
@@ -419,6 +428,100 @@ impl GitView {
 struct MetadataBudget {
     bytes: usize,
     entries: usize,
+}
+/// Returns the current pathname of an already-open directory or file handle.
+/// The query tracks renames without reopening the path; the caller still treats
+/// the handle, not this string, as the authority.
+#[cfg(target_os = "macos")]
+fn handle_path(descriptor: std::os::fd::RawFd) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    unsafe extern "C" {
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    let mut bytes = [0u8; 1024];
+    // SAFETY: the caller owns this live descriptor; F_GETPATH writes at most
+    // MAXPATHLEN bytes into this output buffer and does not reopen any path.
+    if unsafe { fcntl(descriptor, 50, bytes.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| io::Error::other("invalid handle path"))?;
+    Ok(std::ffi::OsString::from_vec(bytes[..end].to_vec()).into())
+}
+#[cfg(target_os = "macos")]
+fn directory_handle_path(dir: &Dir) -> Result<std::path::PathBuf, CapabilityError> {
+    use std::os::fd::AsRawFd;
+    handle_path(dir.as_raw_fd()).map_err(|_| failure("Git directory handle path is unavailable"))
+}
+#[cfg(not(target_os = "macos"))]
+fn directory_handle_path(_: &Dir) -> Result<std::path::PathBuf, CapabilityError> {
+    Err(failure(
+        "Git read capabilities require a macOS directory handle path",
+    ))
+}
+#[cfg(unix)]
+fn directory_identity(dir: &Dir) -> Result<(u64, u64), CapabilityError> {
+    use cap_std::fs::MetadataExt;
+    let metadata = dir.dir_metadata().map_err(io_error)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+#[cfg(not(unix))]
+fn directory_identity(_: &Dir) -> Result<(u64, u64), CapabilityError> {
+    Err(failure(
+        "Git read capabilities require Unix directory identity",
+    ))
+}
+/// Object stores linked from elsewhere would let a read consult ambient paths.
+/// The real object store is used read-only, so refuse any alternate list
+/// instead of following it.
+fn check_object_alternates(objects: &Dir) -> Result<(), CapabilityError> {
+    let info = match objects.open_dir_nofollow("info") {
+        Ok(info) => info,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(error)),
+    };
+    for name in ["alternates", "http-alternates"] {
+        match info.symlink_metadata(name) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                let mut options = OpenOptions::new();
+                options.read(true).follow(FollowSymlinks::No).nonblock(true);
+                let file = info.open_with(name, &options).map_err(io_error)?;
+                let mut bytes = vec![];
+                file.take(4096).read_to_end(&mut bytes).map_err(io_error)?;
+                if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                    return Err(failure(
+                        "Git object alternates are not supported by read capabilities",
+                    ));
+                }
+            }
+            Ok(_) => {
+                return Err(failure(
+                    "Git objects/info must contain only regular files for read capabilities",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    Ok(())
+}
+fn read_environment(
+    objects: &Path,
+    index: Option<&Path>,
+) -> Result<BTreeMap<String, String>, CapabilityError> {
+    let as_text = |path: &Path| {
+        path.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| failure("Git repository path is not UTF-8"))
+    };
+    let mut env = git_environment();
+    env.insert("GIT_OBJECT_DIRECTORY".into(), as_text(objects)?);
+    if let Some(index) = index {
+        env.insert("GIT_INDEX_FILE".into(), as_text(index)?);
+    }
+    Ok(env)
 }
 fn copy_metadata(
     source: &Dir,
@@ -495,81 +598,6 @@ fn copy_refs(
     }
     Ok(())
 }
-// Snapshot only passive repository data and worktree bytes. Each directory and
-// file is opened without following links and copied from that actual handle.
-// Rename/replacement of any source ancestor after open cannot redirect a read.
-// This is a bounded observational snapshot, not an atomic repository transaction;
-// concurrent in-place edits can produce an ordinary Git error or mixed revision.
-fn copy_tree(
-    source: &Dir,
-    target: &Dir,
-    worktree: bool,
-    budget: &mut MetadataBudget,
-    cancel: &CancellationToken,
-    deadline: Instant,
-    depth: usize,
-) -> Result<(), CapabilityError> {
-    if depth > 64 {
-        return Err(failure("Git snapshot directory depth exceeded"));
-    }
-    for entry in source.entries().map_err(io_error)? {
-        check(cancel, deadline)?;
-        if budget.entries == 0 {
-            return Err(failure("Git snapshot entry budget exceeded"));
-        }
-        budget.entries -= 1;
-        let entry = entry.map_err(io_error)?;
-        let filename = entry.file_name();
-        let filename = filename
-            .to_str()
-            .ok_or_else(|| failure("Git snapshot names must be UTF-8"))?;
-        if worktree
-            && (filename.eq_ignore_ascii_case(".git")
-                || filename.to_ascii_lowercase().starts_with(".cayw-"))
-        {
-            continue;
-        }
-        // Object info/alternates and http-alternates name ambient paths/URLs.
-        // Pack and loose data need no objects/info files for these commands.
-        if !worktree && depth == 0 && filename == "info" {
-            continue;
-        }
-        filesystem::components(filename, false)?;
-        let metadata = source.symlink_metadata(filename).map_err(io_error)?;
-        if metadata.is_dir() {
-            let child = source.open_dir_nofollow(filename).map_err(io_error)?;
-            target.create_dir(filename).map_err(io_error)?;
-            let target_child = target.open_dir_nofollow(filename).map_err(io_error)?;
-            copy_tree(
-                &child,
-                &target_child,
-                worktree,
-                budget,
-                cancel,
-                deadline,
-                depth + 1,
-            )?;
-        } else if metadata.is_file() {
-            copy_metadata(source, target, filename, true, budget, cancel, deadline)?;
-            // Preserve the executable bit used by Git's mode comparison, but no
-            // setuid/setgid/sticky bits. No snapshot file is executed by Host.
-            #[cfg(unix)]
-            {
-                use cap_std::fs::PermissionsExt;
-                let permissions = metadata.permissions().mode() & 0o777;
-                target
-                    .set_permissions(filename, cap_std::fs::Permissions::from_mode(permissions))
-                    .map_err(io_error)?;
-            }
-        } else {
-            return Err(failure(
-                "Git snapshot refuses symbolic links and special files",
-            ));
-        }
-    }
-    Ok(())
-}
-
 // Only these local settings affect a read without executing anything. The real
 // config is parsed by Git itself from the private copy; every other key,
 // including includes, filters, hooks and remotes, is never carried over.
@@ -615,8 +643,8 @@ fn parse_git_eol(value: Option<&str>) -> Result<&'static str, CapabilityError> {
     }
 }
 /// Parses `git config --file <private> --no-includes --list -z` output. Formats
-/// and semantics that a SHA-1 full-worktree snapshot cannot represent are
-/// refused by name instead of being silently treated as defaults.
+/// and semantics unsupported by this SHA-1 metadata view are refused by name
+/// instead of being silently treated as defaults.
 fn parse_private_git_config(bytes: &[u8]) -> Result<SafeGitConfig, CapabilityError> {
     let mut config = SafeGitConfig::default();
     for record in bytes.split(|byte| *byte == 0) {
@@ -675,7 +703,7 @@ fn parse_private_git_config(bytes: &[u8]) -> Result<SafeGitConfig, CapabilityErr
     }
     Ok(config)
 }
-fn snapshot_git_config(config: &SafeGitConfig) -> String {
+fn sanitized_git_config(config: &SafeGitConfig) -> String {
     let mut text = String::from("[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
     for (key, value) in [
         ("filemode", config.filemode.map(|value| value.to_string())),
@@ -697,24 +725,6 @@ fn snapshot_git_config(config: &SafeGitConfig) -> String {
     }
     text
 }
-/// A tracked path in the reserved `.cayw-*` namespace cannot be copied into the
-/// snapshot or addressed by any capability. Refuse it by name instead of either
-/// copying reserved content or reporting a false deletion.
-fn tracked_reserved_path(listed: &[u8]) -> Option<String> {
-    for path in listed.split(|byte| *byte == 0) {
-        if path.is_empty() {
-            continue;
-        }
-        if path
-            .split(|byte| *byte == b'/')
-            .any(|part| part.len() >= 6 && part[..6].eq_ignore_ascii_case(b".cayw-"))
-        {
-            let display = String::from_utf8_lossy(path);
-            return Some(display.chars().take(160).collect());
-        }
-    }
-    None
-}
 /// Runs one fixed Git inspection command inside the private view through the
 /// original Device runner. The caller supplies a literal argv; no ambient path,
 /// shell or repository is consulted.
@@ -732,7 +742,7 @@ async fn run_git_probe(
         .min(deadline.saturating_duration_since(Instant::now()));
     if timeout.is_zero() {
         return Err(failure(
-            "capability deadline reached before Git snapshot inspection",
+            "capability deadline reached before Git metadata view inspection",
         ));
     }
     let spec = DirectoryProcessSpec {
@@ -755,24 +765,95 @@ async fn run_git_probe(
         .map_err(device_error)?;
     if result.termination != TerminationReason::Exited || !result.output_complete {
         return Err(failure(
-            "Git snapshot inspection stopped before a complete result",
+            "Git metadata view inspection stopped before a complete result",
         ));
     }
     if !result.status.success() {
         return Err(failure(format!(
-            "Git snapshot inspection failed with exit {:?}",
+            "Git metadata view inspection failed with exit {:?}",
             result.status.code()
         )));
     }
     Ok(result.stdout)
 }
+/// Read capabilities use a private, sanitized Git directory over the held root.
+/// Only bounded passive metadata (config, HEAD, refs, packed refs, shallow
+/// state and shared index segments) is copied. Object data and ordinary
+/// worktree files are read in place relative to the held cwd, so repository
+/// size and ignored build data do not gate a read. Original repository, object
+/// and index identities stay open and are checked after the process returns.
+/// A sanitized config prevents hooks, filters, credentials, external diff and
+/// fsmonitor from running. Replaced identities discard the result.
+struct GitReadIdentity {
+    git: Dir,
+    objects: Dir,
+    index: Option<cap_std::fs::File>,
+}
+
+impl GitReadIdentity {
+    fn verify(&self, host: &Host) -> Result<(), CapabilityError> {
+        let git = host
+            .root
+            .open_dir_nofollow(".git")
+            .map_err(|_| failure("Git repository disappeared during a read; result discarded"))?;
+        if !same_directory(&git, &self.git).map_err(io_error)? {
+            return Err(failure(
+                "Git repository identity changed during a read; result discarded",
+            ));
+        }
+        let objects = git
+            .open_dir_nofollow("objects")
+            .map_err(|_| failure("Git object store disappeared during a read; result discarded"))?;
+        if directory_identity(&objects)? != directory_identity(&self.objects)? {
+            return Err(failure(
+                "Git object store identity changed during a read; result discarded",
+            ));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No).nonblock(true);
+        let current = match git.open_with("index", &options) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => return Err(failure("Git index changed during a read; result discarded")),
+        };
+        match (&self.index, current) {
+            (None, None) => Ok(()),
+            (Some(original), Some(current)) => {
+                use cap_std::fs::MetadataExt;
+                let original = original.metadata().map_err(io_error)?;
+                let current = current.metadata().map_err(io_error)?;
+                if current.is_file()
+                    && original.dev() == current.dev()
+                    && original.ino() == current.ino()
+                {
+                    Ok(())
+                } else {
+                    Err(failure(
+                        "Git index identity changed during a read; result discarded",
+                    ))
+                }
+            }
+            _ => Err(failure(
+                "Git index presence changed during a read; result discarded",
+            )),
+        }
+    }
+}
+
 async fn git_spec(
     host: &Host,
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
     deadline: Instant,
-) -> Result<(DirectoryProcessSpec, CleanupResource<GitView>), CapabilityError> {
+) -> Result<
+    (
+        DirectoryProcessSpec,
+        CleanupResource<GitView>,
+        GitReadIdentity,
+    ),
+    CapabilityError,
+> {
     // Git's local config can run clean filters even for status/diff. Copy it into
     // the private view, parse it with Git itself from that fixed private file
     // without includes, and carry over only explicitly passive keys. The real
@@ -781,14 +862,40 @@ async fn git_spec(
         failure("git capabilities require a direct .git directory in the workspace")
     })?;
     let objects = source.open_dir_nofollow("objects").map_err(io_error)?;
+    check_object_alternates(&objects)?;
     if let Some(path) = arguments.get("path").and_then(Value::as_str) {
         filesystem::validate_git_path(&host.root, path)?;
     }
+    // Relative paths resolve from Device's held cwd even if its ambient name
+    // is replaced. Keep opened identities until after Git returns; optional
+    // locks prevent this read from refreshing the real index.
+    let index = {
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No).nonblock(true);
+        match source.open_with("index", &options) {
+            Ok(file) => {
+                if !file.metadata().map_err(io_error)?.is_file() {
+                    return Err(failure("Git index must be a regular file"));
+                }
+                Some(file)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(io_error(error)),
+        }
+    };
+    let identity = GitReadIdentity {
+        git: source.try_clone().map_err(io_error)?,
+        objects,
+        index,
+    };
     let view = GitView::new(&host.runner)?;
     view.dir.create_dir(".git").map_err(io_error)?;
     let git_dir = view.dir.open_dir_nofollow(".git").map_err(io_error)?;
-    git_dir.create_dir("objects").map_err(io_error)?;
     git_dir.create_dir("refs").map_err(io_error)?;
+    // Git checks that its private git-dir contains an objects entry before
+    // consulting GIT_OBJECT_DIRECTORY, even though the actual objects live in
+    // the held repository.
+    git_dir.create_dir("objects").map_err(io_error)?;
     let mut budget = MetadataBudget {
         bytes: host.config.max_file_bytes,
         entries: host.config.max_list_entries,
@@ -826,7 +933,7 @@ async fn git_spec(
         Err(error) => return Err(io_error(error)),
     };
     git_dir
-        .write("config", snapshot_git_config(&config).into_bytes())
+        .write("config", sanitized_git_config(&config).into_bytes())
         .map_err(io_error)?;
     copy_metadata(
         &source,
@@ -837,7 +944,7 @@ async fn git_spec(
         cancel,
         deadline,
     )?;
-    for name in ["index", "packed-refs", "shallow"] {
+    for name in ["packed-refs", "shallow"] {
         copy_metadata(
             &source,
             &git_dir,
@@ -876,35 +983,20 @@ async fn git_spec(
             )?;
         }
     }
-    // The copied index is the authority for tracked reserved paths. Refuse them
-    // before any worktree copy so reserved content never enters the snapshot and
-    // no false deletion is reported. Untracked internal `.cayw-*` files are
-    // skipped as before and cannot trigger this refusal.
-    match git_dir.symlink_metadata("index") {
-        Ok(metadata) if metadata.is_file() => {
-            let listed = run_git_probe(
-                host,
-                &view,
-                vec![
-                    "--git-dir=.git".into(),
-                    "ls-files".into(),
-                    "-z".into(),
-                    "--cached".into(),
-                ],
-                cancel,
-                deadline,
-            )
-            .await?;
-            if let Some(path) = tracked_reserved_path(&listed) {
-                return Err(failure(format!(
-                    "Git snapshot cannot represent tracked reserved path {path}; committed .cayw-* entries are not addressable"
-                )));
-            }
-        }
-        Ok(_) => return Err(failure("Git index must be a regular file")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(io_error(error)),
-    }
+    // Only real Host state is hidden from Git's view of the worktree. Ordinary
+    // user names that merely start with `.cayw-` (such as `.cayw-note.md`) are
+    // ordinary tracked or untracked files and never block a read.
+    git_dir
+        .write(
+            "cayw-excludes",
+            filesystem::git_internal_excludes().as_bytes(),
+        )
+        .map_err(io_error)?;
+    let excludes_path = directory_handle_path(&git_dir)?.join("cayw-excludes");
+    let excludes = excludes_path
+        .to_str()
+        .ok_or_else(|| failure("Git excludes path is not UTF-8"))?
+        .to_string();
     match source.open_dir_nofollow("info") {
         Ok(info) => {
             git_dir.create_dir("info").map_err(io_error)?;
@@ -925,28 +1017,18 @@ async fn git_spec(
     let refs = source.open_dir_nofollow("refs").map_err(io_error)?;
     let target_refs = git_dir.open_dir_nofollow("refs").map_err(io_error)?;
     copy_refs(&refs, &target_refs, &mut budget, cancel, deadline, 0)?;
-    let target_objects = git_dir.open_dir_nofollow("objects").map_err(io_error)?;
-    copy_tree(
-        &objects,
-        &target_objects,
-        false,
-        &mut budget,
-        cancel,
-        deadline,
-        0,
-    )?;
-    copy_tree(
-        &host.root,
-        &view.dir,
-        true,
-        &mut budget,
-        cancel,
-        deadline,
-        0,
-    )?;
-    let mut args = git_args(name, arguments);
+    let git_dir_path = directory_handle_path(&git_dir)?;
+    let mut args = git_args(name, arguments, &excludes);
     args.insert(0, "--work-tree=.".into());
-    args.insert(0, "--git-dir=.git".into());
+    args.insert(
+        0,
+        format!(
+            "--git-dir={}",
+            git_dir_path
+                .to_str()
+                .ok_or_else(|| failure("Git view path is not UTF-8"))?
+        ),
+    );
     Ok((
         DirectoryProcessSpec {
             program: host
@@ -955,13 +1037,14 @@ async fn git_spec(
                 .clone()
                 .expect("git catalog configured"),
             args,
-            cwd: view.dir.try_clone().map_err(io_error)?.into_std_file(),
-            env: git_environment(),
+            cwd: host.root.try_clone().map_err(io_error)?.into_std_file(),
+            env: read_environment(Path::new(".git/objects"), Some(Path::new(".git/index")))?,
             timeout: host.config.process_timeout,
             max_output_bytes: host.config.max_process_output_bytes,
             io: cayw_device::ProcessIo::Pipes,
         },
         view,
+        identity,
     ))
 }
 fn profile_spec(
@@ -1052,15 +1135,20 @@ pub(crate) async fn execute(
                 .run_in_directory_with_resources(spec, cancel.clone(), None::<()>)
                 .await
                 .map_err(device_error)?;
-            process_value(result)
+            process_value(
+                result,
+                output_filter_options(host, name),
+                host.config.content_store.as_deref(),
+            )
         }
         _ => Err(failure("unknown process capability")),
     }
 }
 
-/// Read-only Git always observes a bounded private snapshot. The real repository
-/// is never the working directory for these commands, so local config, hooks,
-/// filters and object alternates cannot run or redirect a read.
+/// Read-only Git uses a bounded private metadata view and runs in the held root.
+/// Objects and the index are read in place relative to the held cwd; opened
+/// identities are retained and rechecked. Local config, hooks, filters and
+/// object alternates cannot run or redirect a read.
 pub(crate) async fn execute_git_read(
     host: &Host,
     name: &str,
@@ -1072,7 +1160,7 @@ pub(crate) async fn execute_git_read(
     if host.runner.is_closed() {
         return Err(failure("process runner is closed"));
     }
-    let (mut spec, git_view) = git_spec(host, name, arguments, cancel, deadline).await?;
+    let (mut spec, git_view, identity) = git_spec(host, name, arguments, cancel, deadline).await?;
     check(cancel, deadline)?;
     spec.timeout = spec
         .timeout
@@ -1085,10 +1173,114 @@ pub(crate) async fn execute_git_read(
         .run_in_directory_with_resources(spec, cancel.clone(), git_view)
         .await
         .map_err(device_error)?;
-    process_value(result)
+    // Preserve an uncertain process terminal before reporting a read conflict.
+    // A completed read with a replaced repository or index discards its data.
+    let result = process_value(
+        result,
+        output_filter_options(host, name),
+        host.config.content_store.as_deref(),
+    )?;
+    identity.verify(host)?;
+    Ok(result)
 }
 
-fn process_value(result: cayw_device::ProcessResult) -> Result<Value, CapabilityError> {
+/// Resolve host filter options for one capability. Profile auto-selects for
+/// known process/git shapes; other fields come from `HostConfig::output_filter`.
+///
+/// Structured git records (`blame` / `log` / `show`) use Passthrough with no
+/// line cap so Generic head/tail selection cannot split porcelain records.
+fn output_filter_options(
+    host: &Host,
+    capability: &str,
+) -> Option<cayw_output_filter::FilterOptions> {
+    let mut options = host.config.output_filter.clone()?;
+    if options.enabled {
+        match capability {
+            "build.run" | "test.run" | "check.run" | "lint.run" | "format.run" => {
+                options.profile = cayw_output_filter::FilterProfile::CargoLike;
+            }
+            "git.status" => {
+                options.profile = cayw_output_filter::FilterProfile::GitStatusLike;
+            }
+            // Line-porcelain blame and commit-oriented log/show must stay
+            // parseable; destructive Generic selection drops mid-record lines
+            // (e.g. first blamed content line) and breaks Runtime git tests.
+            "git.blame" | "git.log" | "git.show" => {
+                options.profile = cayw_output_filter::FilterProfile::Passthrough;
+                options.max_lines = 0;
+            }
+            _ => {}
+        }
+    }
+    Some(options)
+}
+
+/// Store the full filtered original without changing the store's failure semantics.
+fn externalize_original(
+    store: Option<&dyn crate::FilteredOriginalStore>,
+    stream: &str,
+    digest: &str,
+    original: &str,
+) -> Result<Value, CapabilityError> {
+    let Some(store) = store else {
+        return Err(failure(format!(
+            "output filter reduced {stream} but ContentStore is not configured; refusing to discard the only copy of the original"
+        )));
+    };
+    let bytes = original.as_bytes();
+    store.put_original(digest, bytes).map_err(|mut error| {
+        error.message = format!(
+            "output filter reduced {stream} but failed to externalize original: {}",
+            error.message
+        );
+        error
+    })
+}
+
+fn stream_filter_fields(
+    stream: &str,
+    original: &str,
+    options: &cayw_output_filter::FilterOptions,
+    store: Option<&dyn crate::FilteredOriginalStore>,
+) -> Result<(String, Value), CapabilityError> {
+    let filtered = cayw_output_filter::apply_filter(original, options.clone())
+        .map_err(|error| failure(format!("output filter failed: {error}")))?;
+    let dual = cayw_output_filter::dual_entry(&filtered);
+    let mut meta = json!({
+        "original_digest": dual.original_digest,
+        "filter_enabled": dual.filter_enabled,
+        "applied_profile": dual.applied_profile,
+        "original_inline": false,
+        "reduction": {
+            "original_bytes": filtered.reduction.original_bytes,
+            "filtered_bytes": filtered.reduction.filtered_bytes,
+            "original_lines": filtered.reduction.original_lines,
+            "filtered_lines": filtered.reduction.filtered_lines,
+            "changed": filtered.reduction.changed,
+        },
+    });
+    // When filtering drops bytes, externalize the full original first so the
+    // agent still has a retrieval path. Unchanged streams need no handle —
+    // the summary already is the complete capture.
+    if filtered.reduction.changed {
+        if original.is_empty() {
+            return Err(failure(format!(
+                "output filter reported a reduction on empty {stream}; refusing inconsistent state"
+            )));
+        }
+        let handle = externalize_original(store, stream, &dual.original_digest, original)?;
+        meta.as_object_mut()
+            .expect("object")
+            .insert("original_handle".into(), handle);
+    }
+    Ok((dual.summary, meta))
+}
+
+fn process_value(
+    result: cayw_device::ProcessResult,
+    filter: Option<cayw_output_filter::FilterOptions>,
+    store: Option<&dyn crate::FilteredOriginalStore>,
+) -> Result<Value, CapabilityError> {
     if result.termination != TerminationReason::Exited || !result.output_complete {
         return Err(CapabilityError::unknown(format!(
             "process stopped with {:?}; exit={:?}, stdout_bytes={}, stderr_bytes={}, complete={}",
@@ -1101,16 +1293,31 @@ fn process_value(result: cayw_device::ProcessResult) -> Result<Value, Capability
     }
     // Text is lossy only at this JSON presentation boundary. Device byte budgets
     // are checked before allocation; the JSON result budget is checked afterward.
-    let value = json!({
-        "success":result.status.success(), "exit_code":result.status.code(),
-        "stdout":String::from_utf8_lossy(&result.stdout), "stderr":String::from_utf8_lossy(&result.stderr),
-        "termination":"exited", "output_complete":result.output_complete,
+    let stdout_raw = String::from_utf8_lossy(&result.stdout).into_owned();
+    let stderr_raw = String::from_utf8_lossy(&result.stderr).into_owned();
+    let mut value = json!({
+        "success": result.status.success(),
+        "exit_code": result.status.code(),
+        "stdout": stdout_raw.clone(),
+        "stderr": stderr_raw.clone(),
+        "termination": "exited",
+        "output_complete": result.output_complete,
     });
-    if !result.status.success() {
-        // A normal nonzero exit is a confirmed terminal result, not an unknown
-        // effect and not an assertion that a build has rolled back its outputs.
-        return Ok(value);
+    if let Some(options) = filter.filter(|options| options.enabled) {
+        let (stdout, stdout_meta) = stream_filter_fields("stdout", &stdout_raw, &options, store)?;
+        let (stderr, stderr_meta) = stream_filter_fields("stderr", &stderr_raw, &options, store)?;
+        value["stdout"] = json!(stdout);
+        value["stderr"] = json!(stderr);
+        // Deliberately omit stdout_original/stderr_original from the capability
+        // result so the model context receives only the filtered summary (+ handle).
+        value["output_filter"] = json!({
+            "protocol_version": cayw_output_filter::OUTPUT_FILTER_PROTOCOL_VERSION,
+            "stdout": stdout_meta,
+            "stderr": stderr_meta,
+        });
     }
+    // A normal nonzero exit is a confirmed terminal result, not an unknown
+    // effect and not an assertion that a build has rolled back its outputs.
     Ok(value)
 }
 
@@ -1239,7 +1446,7 @@ mod tests {
     impl Tree {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "cayw-host-snapshot-{}-{}",
+                "cayw-host-metadata-view-{}-{}",
                 std::process::id(),
                 NEXT_VIEW.fetch_add(1, Ordering::Relaxed)
             ));
@@ -1283,6 +1490,41 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn structured_git_reads_select_passthrough_without_line_cap() {
+        let host = Host::new(
+            std::env::temp_dir(),
+            Arc::new(Boundary),
+            Arc::new(Boundary),
+            HostConfig {
+                git_program: Some("/usr/bin/git".into()),
+                output_filter: Some(cayw_output_filter::FilterOptions {
+                    enabled: true,
+                    profile: cayw_output_filter::FilterProfile::Generic,
+                    head_lines: 1,
+                    tail_lines: 1,
+                    max_lines: 2,
+                }),
+                ..Default::default()
+            },
+        );
+        // Host::new needs an existing directory; temp_dir is fine for options only.
+        let host = host.expect("host");
+        for name in ["git.blame", "git.log", "git.show"] {
+            let options = output_filter_options(&host, name).expect("filter enabled");
+            assert_eq!(
+                options.profile,
+                cayw_output_filter::FilterProfile::Passthrough
+            );
+            assert_eq!(options.max_lines, 0);
+        }
+        let status = output_filter_options(&host, "git.status").unwrap();
+        assert_eq!(
+            status.profile,
+            cayw_output_filter::FilterProfile::GitStatusLike
+        );
     }
 
     #[tokio::test]
@@ -1336,12 +1578,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renamed_private_snapshot_is_retained_and_cleanup_stays_unconfirmed() {
+    async fn renamed_private_metadata_view_is_retained_and_cleanup_stays_unconfirmed() {
         let container = Tree::new();
         git(&container.0, &["init", "--quiet"]);
         let host = host(&container.0);
         let cancel = CancellationToken::new();
-        let (spec, view) = git_spec(
+        let (spec, view, _) = git_spec(
             &host,
             "git.status",
             &json!({}),
@@ -1367,49 +1609,12 @@ mod tests {
                 .open_dir_nofollow(".git")
                 .is_ok()
         );
-        // Explicit test reconciliation; production retains the opened snapshot.
+        // Explicit test reconciliation; production retains the opened metadata view.
         owner.remove_dir_all(&moved).unwrap();
     }
 
-    #[test]
-    fn snapshot_copy_uses_opened_worktree_and_objects_after_source_name_replacement() {
-        let container = Tree::new();
-        let root = container.0.join("root");
-        let outside = container.0.join("outside");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(&outside).unwrap();
-        for name in ["worktree", "objects"] {
-            std::fs::create_dir(root.join(name)).unwrap();
-            std::fs::write(root.join(name).join("marker"), b"opened").unwrap();
-        }
-        std::fs::write(outside.join("marker"), b"replacement").unwrap();
-        let parent = Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
-        for (name, worktree) in [("worktree", true), ("objects", false)] {
-            let opened = parent.open_dir_nofollow(name).unwrap();
-            std::fs::rename(root.join(name), container.0.join(name)).unwrap();
-            std::os::unix::fs::symlink(&outside, root.join(name)).unwrap();
-            let runner = ProcessRunner::new([]).unwrap();
-            let view = GitView::new(&runner).unwrap();
-            let mut budget = MetadataBudget {
-                bytes: 1024,
-                entries: 10,
-            };
-            copy_tree(
-                &opened,
-                &view.dir,
-                worktree,
-                &mut budget,
-                &CancellationToken::new(),
-                Instant::now() + Duration::from_secs(10),
-                0,
-            )
-            .unwrap();
-            assert_eq!(view.dir.read("marker").unwrap(), b"opened");
-        }
-    }
-
     #[tokio::test]
-    async fn prepared_git_uses_snapshot_after_root_subtree_and_objects_replacement() {
+    async fn prepared_git_read_never_redirects_to_replacement_root_subtree_or_object_store() {
         for replacement in ["root", "subtree", "objects"] {
             let container = Tree::new();
             let root = container.0.join("root");
@@ -1425,7 +1630,7 @@ mod tests {
             let host = host(&root);
             let cancel = CancellationToken::new();
             let deadline = Instant::now() + Duration::from_secs(10);
-            let (diff_spec, diff_view) = git_spec(
+            let (diff_spec, diff_view, identity) = git_spec(
                 &host,
                 "git.diff",
                 &json!({"path":"sub/note"}),
@@ -1434,7 +1639,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let (show_spec, show_view) = git_spec(
+            let (show_spec, show_view, _) = git_spec(
                 &host,
                 "git.show",
                 &json!({"commit":commit,"path":"sub/note"}),
@@ -1467,25 +1672,38 @@ mod tests {
             let diff = host
                 .runner
                 .run_in_directory_with_resources(diff_spec, cancel.clone(), diff_view)
-                .await
-                .unwrap();
-            assert!(
-                diff.status.success(),
-                "{replacement}: {}",
-                String::from_utf8_lossy(&diff.stderr)
-            );
-            assert!(String::from_utf8(diff.stdout).unwrap().contains("+opened"));
+                .await;
+            if let Ok(result) = &diff {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert!(
+                    !text.contains("replacement") && !text.contains("wrong-root"),
+                    "{replacement}: read crossed into replacement content: {text}"
+                );
+            }
             let shown = host
                 .runner
                 .run_in_directory_with_resources(show_spec, cancel, show_view)
-                .await
-                .unwrap();
-            assert!(
-                shown.status.success(),
-                "{replacement}: {}",
-                String::from_utf8_lossy(&shown.stderr)
-            );
-            assert_eq!(shown.stdout, b"before\n");
+                .await;
+            if let Ok(result) = &shown {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert!(
+                    !text.contains("replacement") && !text.contains("wrong-root"),
+                    "{replacement}: history crossed into replacement content: {text}"
+                );
+            }
+            if replacement == "objects" {
+                // The object path was replaced after preparation; the result must
+                // be discarded rather than reported as this repository's history.
+                assert!(identity.verify(&host).is_err());
+            }
         }
     }
 }

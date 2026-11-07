@@ -63,11 +63,23 @@ pub trait VmServices: Send + Sync {
     ) -> Result<Value, CapabilityError>;
 }
 
+/// A trusted execution stop is distinct from an ordinary known capability failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStop {
+    Cancelled,
+    Timeout,
+    Budget,
+    Exited,
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
 pub struct CapabilityError {
     pub message: String,
     pub outcome_unknown: bool,
+    /// Present only when the enclosing execution must stop, even through pcall.
+    pub stop: Option<CapabilityStop>,
 }
 
 impl CapabilityError {
@@ -75,12 +87,21 @@ impl CapabilityError {
         Self {
             message: message.into(),
             outcome_unknown: false,
+            stop: None,
         }
     }
     pub fn unknown(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             outcome_unknown: true,
+            stop: None,
+        }
+    }
+    pub fn stopped(reason: CapabilityStop, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome_unknown: false,
+            stop: Some(reason),
         }
     }
 }
@@ -166,12 +187,31 @@ pub enum ErrorKind {
     InstructionLimit,
     Timeout,
     Cancelled,
+    Exited,
     HostCallLimit,
+    Budget,
     OutputLimit,
     UnknownCapability,
     Arguments,
     Capability,
     OutcomeUnknown,
+}
+
+impl ErrorKind {
+    /// Stops the current execution, unlike an ordinary recoverable script error.
+    pub fn stop(self) -> Option<CapabilityStop> {
+        match self {
+            Self::Cancelled => Some(CapabilityStop::Cancelled),
+            Self::Timeout => Some(CapabilityStop::Timeout),
+            Self::Exited => Some(CapabilityStop::Exited),
+            Self::MemoryLimit
+            | Self::InstructionLimit
+            | Self::HostCallLimit
+            | Self::Budget
+            | Self::OutputLimit => Some(CapabilityStop::Budget),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -268,6 +308,30 @@ impl CodeMode {
             limits,
             catalog: Arc::new(catalog),
         })
+    }
+
+    /// Checks a standalone source body without executing it or calling the Host.
+    /// Embedders use this before placing that body inside a generated function,
+    /// so unmatched delimiters cannot escape the generated function boundary.
+    pub fn validate_source(&self, source: &str) -> Result<(), CodeModeError> {
+        if source.len() > self.limits.memory_bytes / 4 {
+            return Err(CodeModeError::empty(
+                ErrorKind::MemoryLimit,
+                "Script source exceeds one quarter of the VM memory budget",
+                self.limits.output_bytes,
+            ));
+        }
+        let lua = mlua::Lua::new();
+        lua.load(source)
+            .into_function()
+            .map(|_| ())
+            .map_err(|error| {
+                CodeModeError::empty(
+                    ErrorKind::Script,
+                    error.to_string(),
+                    self.limits.output_bytes,
+                )
+            })
     }
 
     /// Returns the complete report on success, or the same audit in `error.report`.

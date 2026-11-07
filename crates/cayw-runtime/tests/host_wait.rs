@@ -240,4 +240,14 @@ async fn runtime_absolute_deadline_still_ends_a_paused_human_wait() {
         tasks[0].error.as_deref(),
         Some("task exceeded its time budget")
     );
+    let terminals = rt
+        .audit(&id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.task_id.as_deref() == Some(tasks[0].id.as_str()) && event.kind.starts_with("run_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, "run_failed");
 }

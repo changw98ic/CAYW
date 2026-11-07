@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 640 420" role="img" aria-labelledby="title desc">
+  <title id="title">Alternate synthetic Northstar image</title>
+  <desc id="desc">A simple original indigo and rose composition used to verify image source replacement.</desc>
+  <rect width="640" height="420" rx="28" fill="#eef2ff"/>
+  <circle cx="500" cy="112" r="58" fill="#fb7185"/>
+  <circle cx="500" cy="112" r="78" fill="none" stroke="#f43f5e" stroke-opacity="0.25" stroke-width="2"/>
+  <path d="M0 318 C96 246 174 268 252 310 C330 352 420 354 640 272 L640 420 L0 420 Z" fill="#a5b4fc" opacity="0.85"/>
+  <path d="M0 354 C120 294 216 310 306 348 C392 384 502 376 640 330 L640 420 L0 420 Z" fill="#4338ca"/>
+  <path d="M318 420 C346 366 364 342 406 318 C446 294 486 282 524 278" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" opacity="0.9"/>
+  <g fill="#ffffff" opacity="0.85">
+    <circle cx="158" cy="126" r="5"/>
+    <circle cx="194" cy="96" r="3"/>
+    <circle cx="228" cy="134" r="4"/>
+  </g>
+  <rect x="70" y="76" width="196" height="112" rx="28" fill="#ffffff" opacity="0.78"/>
+  <path d="M110 154 V112 H126 L168 146 V112 H184 V154 H168 L126 120 V154 Z" fill="#4338ca"/>
+</svg>

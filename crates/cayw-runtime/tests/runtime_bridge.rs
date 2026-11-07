@@ -14,8 +14,8 @@ use cayw_core::{
     SessionState,
 };
 use cayw_runtime::{
-    ApprovalChoice, BridgeDispatchEvent, RequestPolicy, Runtime, RuntimeConfig, ScopedPermission,
-    TaskState,
+    ApprovalChoice, BridgeDispatchEvent, RequestPolicy, Runtime, RuntimeConfig, RuntimeError,
+    ScopedPermission, TaskState,
 };
 use serde_json::{Value, json};
 use std::{
@@ -101,6 +101,9 @@ impl SourceHandle for Source {
                     json!({"uri":uri,"mime_type":"text/markdown","text":"fixture resource body"})
                 }
                 SourceOperation::Search { arguments } => json!({"hits":[arguments["query"]]}),
+                SourceOperation::GetPrompt { name, arguments } => {
+                    json!({"name": name, "description": "fixture prompt", "arguments": arguments, "messages": []})
+                }
             }
         };
         Ok(SourceReply {
@@ -126,6 +129,7 @@ fn manifest() -> Manifest {
             content_sha256: cayw_bridge::content_sha256(SKILL),
         }],
         resources: Vec::new(),
+        prompts: Vec::new(),
         search: true,
     }
 }
@@ -430,13 +434,28 @@ async fn all_scopes_share_host_call_budget() {
         ),
     );
     let id = rt.create(None).unwrap().id;
-    assert_eq!(
-        rt.prompt(&id, "bounded fixture", CancellationToken::new())
-            .await
-            .unwrap()
-            .state,
-        SessionState::Idle
-    );
+    assert!(matches!(
+        rt.prompt(&id, "bounded fixture", CancellationToken::new()).await,
+        Err(RuntimeError::Worker(ref reason)) if reason == "host call or total byte budget exhausted"
+    ));
+    let view = rt.get(&id).unwrap();
+    assert_eq!(view.state, SessionState::Idle);
+    assert!(view.unresolved_calls.is_empty());
+    assert!(view.unresolved_capabilities.is_empty());
+    let tasks = rt.tasks(&id).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, TaskState::Failed);
+    assert!(!tasks[0].cancel_requested);
+    let terminals = rt
+        .audit(&id, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .filter(|event| {
+            event.task_id.as_deref() == Some(tasks[0].id.as_str()) && event.kind.starts_with("run_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(terminals[0].kind, "run_failed");
     assert!(state.calls.lock().unwrap().is_empty());
     let calls = settled(&rt, &id);
     assert_eq!(calls.len(), 2);
@@ -822,7 +841,7 @@ async fn requests_bind_bridge_incarnation_and_revalidate_the_original_host_catal
 
 struct InterleavedProvider {
     step: AtomicUsize,
-    cells: Mutex<Vec<String>>,
+    cells: Mutex<Vec<(String, u64)>>,
 }
 impl Provider for InterleavedProvider {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
@@ -832,8 +851,10 @@ impl Provider for InterleavedProvider {
             && let Ok(page) = serde_json::from_value::<cayw_cells::CellPage>(value.clone())
         {
             let mut cells = self.cells.lock().unwrap();
-            if !cells.contains(&page.cell_id) {
-                cells.push(page.cell_id);
+            if let Some(entry) = cells.iter_mut().find(|(id, _)| id == &page.cell_id) {
+                entry.1 = page.next_cursor;
+            } else {
+                cells.push((page.cell_id, page.next_cursor));
             }
         }
         let args = match step {
@@ -843,9 +864,13 @@ impl Provider for InterleavedProvider {
             1 => Some(
                 json!({"action":"exec","script":"cayw.call('mcp.call',{server='local',tool='echo',arguments={value=2}})\nyield_control()\nreturn cayw.call('mcp.call',{server='local',tool='echo',arguments={value=4}})","yield_time_ms":30000,"max_output_tokens":131072}),
             ),
-            2 | 3 => Some(
-                json!({"action":"wait","cell_id":self.cells.lock().unwrap()[step-2],"cursor":0,"yield_time_ms":30000,"max_output_tokens":131072}),
-            ),
+            2 | 3 => {
+                let cells = self.cells.lock().unwrap();
+                let (cell_id, cursor) = &cells[step - 2];
+                Some(
+                    json!({"action":"wait","cell_id":cell_id,"cursor":cursor,"yield_time_ms":30000,"max_output_tokens":131072}),
+                )
+            }
             _ => None,
         };
         let mut message = AssistantMessage::new(&request.model);
@@ -899,7 +924,13 @@ async fn two_interleaved_cells_retain_distinct_origins_on_one_physical_handle() 
         .filter(|event| event.outcome.is_some())
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 4);
-    let cells = model.cells.lock().unwrap().clone();
+    let cells = model
+        .cells
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
     assert_eq!(cells.len(), 2);
     assert_eq!(events[0].origin.key.execution_id, cells[0]);
     assert_eq!(events[1].origin.key.execution_id, cells[1]);

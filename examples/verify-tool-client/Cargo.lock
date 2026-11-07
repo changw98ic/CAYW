@@ -223,14 +223,44 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cap-fs-ext"
+version = "3.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "476f0d0003a760918ed4b1e039a59e11769030416f79c8222551d22785f7f70d"
+dependencies = [
+ "cap-primitives 3.4.6",
+ "cap-std 3.4.6",
+ "io-lifetimes 2.0.4",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "cap-fs-ext"
 version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f"
 dependencies = [
- "cap-primitives",
- "cap-std",
+ "cap-primitives 4.0.3",
+ "cap-std 4.0.3",
  "io-lifetimes 3.0.1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "cap-primitives"
+version = "3.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e0bf07d379916947be6c4a07f43684153d710a2896c31f9e97781362895596c"
+dependencies = [
+ "ambient-authority",
+ "fs-set-times",
+ "io-extras 0.18.4",
+ "io-lifetimes 2.0.4",
+ "ipnet",
+ "maybe-owned",
+ "rustix",
+ "rustix-linux-procfs",
+ "windows-sys 0.52.0",
+ "winx",
 ]
 
 [[package]]
@@ -241,7 +271,7 @@ checksum = "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18"
 dependencies = [
  "ambient-authority",
  "fs-set-times",
- "io-extras",
+ "io-extras 0.19.0",
  "io-lifetimes 3.0.1",
  "ipnet",
  "maybe-owned",
@@ -253,12 +283,24 @@ dependencies = [
 
 [[package]]
 name = "cap-std"
+version = "3.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a59e59fa26472d29680ece6a9f8ee8b0551a719a33df2f5240bde065ecbddfd7"
+dependencies = [
+ "cap-primitives 3.4.6",
+ "io-extras 0.18.4",
+ "io-lifetimes 2.0.4",
+ "rustix",
+]
+
+[[package]]
+name = "cap-std"
 version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8"
 dependencies = [
- "cap-primitives",
- "io-extras",
+ "cap-primitives 4.0.3",
+ "io-extras 0.19.0",
  "io-lifetimes 3.0.1",
  "rustix",
 ]
@@ -282,6 +324,7 @@ name = "cayw-ai"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "base64 0.22.1",
  "futures",
  "jsonschema",
  "reqwest",
@@ -340,6 +383,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-content"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext 3.4.6",
+ "cap-std 3.4.6",
+ "fs2",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cayw-core"
 version = "0.1.0"
 dependencies = [
@@ -386,8 +443,8 @@ name = "cayw-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "cap-fs-ext",
- "cap-std",
+ "cap-fs-ext 4.0.3",
+ "cap-std 4.0.3",
  "cayw-ai",
  "cayw-codemode",
  "cayw-data",
@@ -413,6 +470,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cayw-providers"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "base64 0.22.1",
+ "cayw-ai",
+ "futures",
+ "reqwest",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "cayw-requests"
 version = "0.1.0"
 dependencies = [
@@ -434,16 +505,20 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "cayw-agent",
  "cayw-ai",
  "cayw-bridge",
  "cayw-cells",
  "cayw-codemode",
+ "cayw-content",
  "cayw-core",
  "cayw-host",
  "cayw-ipc",
+ "cayw-providers",
  "cayw-requests",
  "futures",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -477,8 +552,8 @@ name = "cayw-workspace"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "cap-fs-ext",
- "cap-std",
+ "cap-fs-ext 4.0.3",
+ "cap-std 4.0.3",
  "cayw-ai",
  "cayw-codemode",
  "globset",
@@ -527,7 +602,7 @@ checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -839,7 +914,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes 2.0.4",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -993,7 +1068,7 @@ dependencies = [
  "js-sys",
  "libc",
  "r-efi 6.0.0",
- "rand_core",
+ "rand_core 0.10.1",
  "wasm-bindgen",
 ]
 
@@ -1286,12 +1361,22 @@ dependencies = [
 
 [[package]]
 name = "io-extras"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
+dependencies = [
+ "io-lifetimes 2.0.4",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "io-extras"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
 dependencies = [
  "io-lifetimes 3.0.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1830,7 +1915,16 @@ checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
- "rand_core",
+ "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+dependencies = [
+ "getrandom 0.2.17",
 ]
 
 [[package]]
@@ -1845,7 +1939,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
- "rand_core",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2865,15 +2959,6 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -2958,7 +3043,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

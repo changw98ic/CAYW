@@ -145,7 +145,7 @@ hello 响应之后，如果握手读取器已缓冲其他字节（包括未结�
 | `response_queue_capacity` | 64 | 每连接等待写出的响应数上限 |
 | `request_timeout` | 30 s | 单个处理器运行期限，不含取消清理时间 |
 | `handshake_timeout` | 5 s | 完整 hello 收发期限 |
-| `frame_timeout` | 60 s | 收齐下一帧的期限，包含两帧之间的空闲时间 |
+| `frame_timeout` | 60 s | 从读到首字节起收齐该帧的期限；等待下一帧不会中断正在处理的请求 |
 | `write_timeout` | 5 s | 从响应入队到完整写出的一次期限 |
 | `cancellation_grace` | 250 ms | 取消后继续轮询处理器的最长时间 |
 

@@ -99,7 +99,17 @@ fn request_script(tail: &str) -> String {
         "local input = {{purpose='write the requested result',gap='exact write is unavailable',operation_id='write-result',capability='fs.write',arguments={{path='result.txt',content='approved'}}}}\nlocal first = cayw.call('capability.request', input)\nlocal second = cayw.call('capability.request', input)\ncayw.emit(second)\nyield_control()\n{tail}"
     )
 }
+/// A single general request. Its persisted state stays `requested` below the
+/// repeat threshold, but a trusted host may still evaluate it.
+fn first_request_script(tail: &str) -> String {
+    format!(
+        "local input = {{purpose='write the requested result',gap='exact write is unavailable',operation_id='write-result',capability='fs.write',arguments={{path='result.txt',content='approved'}}}}\nlocal first = cayw.call('capability.request', input)\ncayw.emit(first)\nyield_control()\n{tail}"
+    )
+}
 async fn request(rt: &Runtime, task: &str) -> RequestRecord {
+    request_in_state(rt, task, RequestState::AwaitingEvaluation).await
+}
+async fn request_in_state(rt: &Runtime, task: &str, expected: RequestState) -> RequestRecord {
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             match rt.request_events(task, 0, 64) {
@@ -107,7 +117,7 @@ async fn request(rt: &Runtime, task: &str) -> RequestRecord {
                     for event in events.into_iter().rev() {
                         if let Some(id) = event.request_id {
                             let record = rt.request_status(task, &id).unwrap();
-                            if record.state == RequestState::AwaitingEvaluation {
+                            if record.state == expected {
                                 return record;
                             }
                         }
@@ -125,7 +135,7 @@ async fn request(rt: &Runtime, task: &str) -> RequestRecord {
         let task_record = rt.task(task);
         let view = task_record.as_ref().ok().map(|task| rt.get(&task.session_id));
         let events = task_record.as_ref().ok().map(|task| rt.events(&task.session_id, 0, 1000));
-        panic!("request did not reach evaluation: {error}; task={task_record:?}; view={view:?}; events={events:?}")
+        panic!("request did not reach {expected:?}: {error}; task={task_record:?}; view={view:?}; events={events:?}")
     })
 }
 fn input_events(rt: &Runtime, session: &str) -> Vec<cayw_core::CapabilityCallRecord> {
@@ -242,6 +252,73 @@ async fn repeated_requests_only_enable_evaluation_and_all_calls_retain_core_orig
             .request_evaluate(&task.id, &record.id, "late-host")
             .is_err()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_general_request_is_evaluable_and_grants_through_the_runtime() {
+    let temp = setup();
+    let mut config = settings();
+    config.permissions.push(ScopedPermission::exact(
+        "fs.write",
+        json!({"path":"result.txt","content":"approved"}),
+    ));
+    let pause = Arc::new(Semaphore::new(0));
+    let rt = open_paused(
+        &temp,
+        config.clone(),
+        &first_request_script(
+            "return cayw.call('fs.write', {path='result.txt',content='approved'})",
+        ),
+        Some(pause.clone()),
+    );
+    let session = rt.create(None).unwrap().id;
+    let task = rt.enqueue(&session, "produce result").unwrap();
+    let worker_rt = rt.clone();
+    let task_id = task.id.clone();
+    let worker =
+        tokio::spawn(async move { worker_rt.resume(&task_id, CancellationToken::new()).await });
+    // One valid general request stays at the below-threshold hint.
+    let record = request_in_state(&rt, &task.id, RequestState::Requested).await;
+    assert_eq!(record.valid_request_count, 1);
+    assert!(!temp.path().join("workspace/result.txt").exists());
+    // The trusted host evaluates the first request; the threshold does not
+    // withhold the ticket and evaluation still does not grant by itself.
+    let ticket = rt
+        .request_evaluate(&task.id, &record.id, "fixture-host")
+        .unwrap();
+    rt.request_approve(
+        &task.id,
+        &ticket,
+        Duration::from_secs(5),
+        "host verified the first exact need",
+    )
+    .unwrap();
+    pause.add_permits(1);
+    assert_eq!(worker.await.unwrap().unwrap().state, SessionState::Idle);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("workspace/result.txt")).unwrap(),
+        "approved"
+    );
+    let calls = input_events(&rt, &session);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.name == "capability.request")
+            .count(),
+        1
+    );
+    let write = calls.iter().find(|call| call.name == "fs.write").unwrap();
+    assert!(matches!(
+        write.outcome,
+        Some(CapabilityOutcome::Completed { .. })
+    ));
+    assert!(matches!(
+        rt.request_task_state(&task.id).unwrap(),
+        cayw_requests::TaskState::Ended {
+            outcome: TaskOutcome::Completed,
+            ..
+        }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

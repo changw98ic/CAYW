@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
-    ModelRequest, Provider, StopReason, ToolCall,
+    ModelRequest, Provider, StopReason, ToolCall, Usage, UsageStatus,
 };
 use cayw_plugins::{Plugin, PluginContext, PluginError, PluginKind, PluginManifest};
 use cayw_runtime::{Runtime, RuntimeConfig};
@@ -15,6 +15,17 @@ use std::{
     },
     time::Duration,
 };
+
+fn report_fixture_usage(message: &mut AssistantMessage) {
+    // Fixed offline counters exercise settlement without claiming model billing.
+    message.usage = Usage {
+        input: 2,
+        output: 2,
+        total_tokens: 4,
+        ..Usage::default()
+    };
+    message.usage_status = UsageStatus::Reported;
+}
 
 #[derive(Default)]
 pub struct OfflineProvider {
@@ -43,6 +54,7 @@ impl Provider for OfflineProvider {
                 message.content = vec![Content::text("fixture completed")];
                 message.stop_reason = StopReason::Stop;
             }
+            report_fixture_usage(&mut message);
             return Box::pin(futures::stream::iter(vec![AssistantEvent::Done {
                 message,
             }]));
@@ -70,6 +82,7 @@ impl Provider for OfflineProvider {
                 json!({"action":"exec", "script":"return cayw.call('fs.write', {path='fixture-output.txt', content='offline terminal verification'})", "yield_time_ms":1000, "max_output_tokens":65536}),
             )));
             message.stop_reason = StopReason::ToolUse;
+            report_fixture_usage(&mut message);
             yield AssistantEvent::Done { message };
         })
     }

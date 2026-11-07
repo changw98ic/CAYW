@@ -101,6 +101,16 @@ impl ResourceContent {
     }
 }
 
+/// Explicit prompt template metadata. Arguments schemas are descriptive only;
+/// they never grant Host or model execution rights by themselves.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptSpec {
+    pub name: String,
+    pub description: String,
+    pub arguments_schema: Option<Value>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -108,6 +118,9 @@ pub struct Manifest {
     pub skills: Vec<SkillSpec>,
     /// Explicit resource metadata whose URIs stay opaque to the bridge.
     pub resources: Vec<ResourceSpec>,
+    /// Prompt templates advertised by an MCP source. Listing is metadata-only.
+    #[serde(default)]
+    pub prompts: Vec<PromptSpec>,
     /// At most one source can own the host's unqualified `search.query` entry.
     pub search: bool,
 }
@@ -122,6 +135,8 @@ pub enum Visibility {
     Search,
     ResourceUri,
     ResourceContent,
+    PromptName,
+    PromptContent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +150,8 @@ pub enum Operation {
     Search,
     ListResources,
     ReadResource,
+    ListPrompts,
+    GetPrompt,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,6 +288,11 @@ pub enum SourceOperation {
     ReadResource {
         uri: String,
     },
+    /// Fetch one prompt template. Arguments are prompt parameters, not Host grants.
+    GetPrompt {
+        name: String,
+        arguments: Value,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +346,7 @@ pub struct Limits {
     pub max_tools_per_source: usize,
     pub max_skills_per_source: usize,
     pub max_resources_per_source: usize,
+    pub max_prompts_per_source: usize,
     pub max_metadata_bytes: usize,
     pub max_all_metadata_bytes: usize,
     pub max_argument_bytes: usize,
@@ -351,6 +374,7 @@ impl Default for Limits {
             max_tools_per_source: 128,
             max_skills_per_source: 128,
             max_resources_per_source: 128,
+            max_prompts_per_source: 128,
             max_metadata_bytes: 256 * 1024,
             max_all_metadata_bytes: 2 * 1024 * 1024,
             max_argument_bytes: 64 * 1024,

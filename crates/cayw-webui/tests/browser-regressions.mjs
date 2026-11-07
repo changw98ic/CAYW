@@ -19,10 +19,7 @@ async (page) => {
   };
   const status = async () => (await page.request.get(new URL('/__test__/status',page.url()).href)).json();
   const reconnect = async () => {
-    if(await page.locator('#logout').isVisible()) await page.locator('#logout').click();
-    const {token}=await (await page.request.get(new URL('/__test__/login',page.url()).href)).json();
-    await page.locator('#web-token').fill(token);
-    await page.locator('#login-button').click();
+    await page.reload();
     await until(()=>page.locator('#workspace').isVisible(),'login failed');
   };
   const select = async id => {

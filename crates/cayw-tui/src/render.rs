@@ -1,6 +1,6 @@
 //! Responsive rendering using the same App projection as the interactive client.
 use crate::{
-    App, Dialog, Focus, sanitize,
+    App, Dialog, Focus, ViewTab, sanitize,
     state::{message_text, string},
 };
 use ratatui::{
@@ -25,10 +25,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(2),
         ])
         .split(area);
+    let files_count = app.selected().map_or(0, |s| s.files.len());
+    let diffs_count = app.selected().map_or(0, |s| s.diffs.len());
+    let logs_count = app.selected().map_or(0, |s| s.logs.len());
+    let tab = |target: ViewTab, label: String| {
+        if app.view == target {
+            format!("[{label}]")
+        } else {
+            format!(" {label} ")
+        }
+    };
+    let tabs = format!(
+        "{} {} {} {}",
+        tab(ViewTab::Chat, "1:Chat".into()),
+        tab(ViewTab::Files, format!("2:Files({files_count})")),
+        tab(ViewTab::Diff, format!("3:Diff({diffs_count})")),
+        tab(ViewTab::Logs, format!("4:Logs({logs_count})")),
+    );
     let title = if app.connected {
-        "CAYW  •  connected"
+        format!("CAYW  •  connected   {tabs}")
     } else {
-        "CAYW  •  disconnected — Ctrl+R reconnect"
+        format!("CAYW  •  disconnected — Ctrl+R reconnect   {tabs}")
     };
     frame.render_widget(
         Paragraph::new(title).style(Style::default().fg(if app.connected {
@@ -56,7 +73,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     draw_history(frame, app, panes[0]);
     draw_composer(frame, app, panes[1]);
     let status = format!(
-        "{}\nTab focus · Ctrl+N new · Enter send · Alt+Enter newline · Ctrl+X cancel · Ctrl+F fork · Ctrl+Q quit",
+        "{}\nF1/? help · Tab focus · Alt+1..4 views · Ctrl+N new · Enter send · Ctrl+Q quit",
         sanitize(&app.status)
     );
     frame.render_widget(
@@ -79,6 +96,27 @@ fn pane(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
         }))
 }
 
+fn session_display_label(session: &crate::SessionView) -> String {
+    let raw = sanitize(&session.label).replace('\n', " ");
+    let trimmed = raw.trim();
+    if trimmed == "新会话" || trimmed.starts_with("新会话 ") {
+        for msg in &session.messages {
+            if string(msg, "role") == "user" {
+                let text = message_text(msg).replace('\n', " ");
+                let clean = text.trim();
+                if !clean.is_empty() {
+                    let graphemes: Vec<&str> = clean.graphemes(true).collect();
+                    if graphemes.len() > 22 {
+                        return format!("{}…", graphemes[..22].concat());
+                    }
+                    return clean.to_owned();
+                }
+            }
+        }
+    }
+    raw
+}
+
 fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let items: Vec<_> = app
         .sessions
@@ -89,11 +127,7 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 &session.state
             };
-            ListItem::new(format!(
-                "{}\n{}",
-                sanitize(&session.label).replace('\n', " "),
-                state
-            ))
+            ListItem::new(format!("{}\n{}", session_display_label(session), state))
         })
         .collect();
     let selected = app
@@ -103,10 +137,7 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
         List::new(items)
-            .block(pane(
-                "Sessions  Ctrl+L refresh",
-                app.focus == Focus::Sessions,
-            ))
+            .block(pane("Sessions", app.focus == Focus::Sessions))
             .highlight_symbol("› ")
             .highlight_style(
                 Style::default()
@@ -119,8 +150,14 @@ fn draw_sessions(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let view_label = match app.view {
+        ViewTab::Chat => "Chat".to_owned(),
+        ViewTab::Files => format!("Files ({})", app.selected().map_or(0, |s| s.files.len())),
+        ViewTab::Diff => format!("Diff ({})", app.selected().map_or(0, |s| s.diffs.len())),
+        ViewTab::Logs => format!("Logs ({})", app.selected().map_or(0, |s| s.logs.len())),
+    };
     let title = app.selected().map_or_else(
-        || "History".into(),
+        || format!("History · {view_label}"),
         |session| {
             let flag = if session.frozen {
                 " · frozen"
@@ -130,8 +167,8 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ""
             };
             format!(
-                "{} · {}{flag}  PgUp/PgDn",
-                sanitize(&session.label).replace('\n', " "),
+                "{} · {}{flag} · {view_label}",
+                session_display_label(session),
                 session.state
             )
         },
@@ -146,7 +183,11 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
     let Some(session) = app.selected() else {
-        frame.render_widget(Paragraph::new("Connect to a running host. Ctrl+N creates a session.\nTab selects a pane; use ↑/↓ to select sessions.\nIPC address and token come from the host environment.").wrap(Wrap { trim: false }), inner);
+        frame.render_widget(
+            Paragraph::new("No session selected · Ctrl+N new · F1/? help")
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
         return;
     };
     let mut lines = Vec::new();
@@ -173,92 +214,169 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
         lines.push(Line::default());
     }
     if session.frozen {
-        append(
-            &mut lines,
-            "Session frozen: its bound plugin is unavailable. Ctrl+F opens an explicit chat Fork confirmation.",
-            inner.width,
-            Color::Yellow,
-        );
-        if let Some(binding) = &session.binding {
-            append(
-                &mut lines,
-                &format!("Binding: {binding}"),
-                inner.width,
-                Color::Gray,
-            );
-        }
-    }
-    for message in &session.messages {
-        let role = string(message, "role");
-        let label = if role == "toolResult" {
-            format!("tool · {}", string(message, "tool_name"))
-        } else {
-            role.to_owned()
+        let plugin_name = session
+            .binding
+            .as_ref()
+            .map(|b| string(b, "plugin"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or("plugin");
+        let reason = session
+            .binding
+            .as_ref()
+            .map(|b| string(b, "reason"))
+            .filter(|s| !s.is_empty());
+        let summary = match reason {
+            Some(r) => format!("Session frozen ({plugin_name}: {r}) · Ctrl+F fork · F1/? help"),
+            None => format!("Session frozen ({plugin_name}) · Ctrl+F fork · F1/? help"),
         };
-        append(&mut lines, &label, inner.width, Color::Cyan);
-        append(
-            &mut lines,
-            &message_text(message),
-            inner.width,
-            Color::Reset,
-        );
-        if let Some(error) = message["error_message"].as_str() {
-            append(&mut lines, error, inner.width, Color::Red);
+        append(&mut lines, &summary, inner.width, Color::Yellow);
+    }
+    match app.view {
+        ViewTab::Chat => {
+            for message in &session.messages {
+                let role = string(message, "role");
+                if role == "system" {
+                    continue;
+                }
+                let body = chat_message_summary(message);
+                if body.trim().is_empty() && message["error_message"].is_null() {
+                    continue;
+                }
+                let label = if role == "toolResult" {
+                    format!("tool · {}", string(message, "tool_name"))
+                } else {
+                    role.to_owned()
+                };
+                append(&mut lines, &label, inner.width, Color::Cyan);
+                append(&mut lines, &body, inner.width, Color::Reset);
+                if let Some(error) = message["error_message"].as_str() {
+                    append(&mut lines, error, inner.width, Color::Red);
+                }
+                lines.push(Line::default());
+            }
+            if let Some(text) = &session.streaming_text {
+                append(
+                    &mut lines,
+                    "assistant · streaming",
+                    inner.width,
+                    Color::Green,
+                );
+                append(&mut lines, text, inner.width, Color::Reset);
+            }
+            if let Some(status) = &session.tool_status {
+                append(&mut lines, status, inner.width, Color::Gray);
+            }
+            for approval in &session.approvals {
+                let details = if approval["input"].is_object() {
+                    &approval["input"]
+                } else {
+                    approval
+                };
+                append(
+                    &mut lines,
+                    &format!(
+                        "Approval {} · {}",
+                        string(approval, "id"),
+                        string(details, "capability")
+                    ),
+                    inner.width,
+                    Color::Yellow,
+                );
+                append(
+                    &mut lines,
+                    &format!(
+                        "Scope: {}\nReason: {}",
+                        string(details, "scope"),
+                        string(details, "reason")
+                    ),
+                    inner.width,
+                    Color::Reset,
+                );
+                append(
+                    &mut lines,
+                    "Alt+O allow once · Alt+T allow this task · Alt+D deny",
+                    inner.width,
+                    Color::Yellow,
+                );
+            }
+            if lines.is_empty() {
+                append(
+                    &mut lines,
+                    "Empty session · Enter prompt below (F1/? help)",
+                    inner.width,
+                    Color::Gray,
+                );
+            }
         }
-        lines.push(Line::default());
-    }
-    if let Some(text) = &session.streaming_text {
-        append(
-            &mut lines,
-            "assistant · streaming",
-            inner.width,
-            Color::Green,
-        );
-        append(&mut lines, text, inner.width, Color::Reset);
-    }
-    if let Some(status) = &session.tool_status {
-        append(&mut lines, status, inner.width, Color::Gray);
-    }
-    for approval in &session.approvals {
-        let details = if approval["input"].is_object() {
-            &approval["input"]
-        } else {
-            approval
-        };
-        append(
-            &mut lines,
-            &format!(
-                "Approval {} · {}",
-                string(approval, "id"),
-                string(details, "capability")
-            ),
-            inner.width,
-            Color::Yellow,
-        );
-        append(
-            &mut lines,
-            &format!(
-                "Scope: {}\nReason: {}",
-                string(details, "scope"),
-                string(details, "reason")
-            ),
-            inner.width,
-            Color::Reset,
-        );
-        append(
-            &mut lines,
-            "Alt+O allow once · Alt+T allow this task · Alt+D deny",
-            inner.width,
-            Color::Yellow,
-        );
-    }
-    if lines.is_empty() {
-        append(
-            &mut lines,
-            "No messages yet. Enter a prompt below.",
-            inner.width,
-            Color::Gray,
-        );
+        ViewTab::Files => {
+            if session.files.is_empty() {
+                append(&mut lines, "No file records yet.", inner.width, Color::Gray);
+            } else {
+                for file in &session.files {
+                    let color = if file.status == "outcome_unknown" || file.status == "failed" {
+                        Color::Red
+                    } else if file.status == "awaiting_approval" {
+                        Color::Yellow
+                    } else {
+                        Color::Cyan
+                    };
+                    append(
+                        &mut lines,
+                        &format!("{} [{} · {}]", file.path, file.action, file.status),
+                        inner.width,
+                        color,
+                    );
+                    append(&mut lines, &file.preview, inner.width, Color::Reset);
+                    lines.push(Line::default());
+                }
+            }
+        }
+        ViewTab::Diff => {
+            if session.diffs.is_empty() {
+                append(&mut lines, "No diff records yet.", inner.width, Color::Gray);
+            } else {
+                for entry in &session.diffs {
+                    append(
+                        &mut lines,
+                        &format!("diff · {} [{}]", entry.path, entry.status),
+                        inner.width,
+                        Color::Cyan,
+                    );
+                    for raw_line in entry.diff.lines() {
+                        let color = if raw_line.starts_with('+') && !raw_line.starts_with("+++") {
+                            Color::Green
+                        } else if raw_line.starts_with('-') && !raw_line.starts_with("---") {
+                            Color::Red
+                        } else if raw_line.starts_with("@@") {
+                            Color::Yellow
+                        } else {
+                            Color::Reset
+                        };
+                        append(&mut lines, raw_line, inner.width, color);
+                    }
+                    lines.push(Line::default());
+                }
+            }
+        }
+        ViewTab::Logs => {
+            if session.logs.is_empty() {
+                append(&mut lines, "No log entries yet.", inner.width, Color::Gray);
+            } else {
+                for entry in &session.logs {
+                    let color = if entry.contains("outcome_unknown")
+                        || entry.contains("failed")
+                        || entry.contains("error")
+                    {
+                        Color::Red
+                    } else if entry.contains("approval") || entry.contains("recovered") {
+                        Color::Yellow
+                    } else {
+                        Color::Reset
+                    };
+                    append(&mut lines, entry, inner.width, color);
+                }
+            }
+        }
     }
     let bottom = lines.len().saturating_sub(inner.height as usize);
     let top = bottom.saturating_sub(session.scroll as usize);
@@ -317,8 +435,12 @@ fn draw_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
-    let width = area.width.min(68);
-    let height = area.height.min(9);
+    let (max_w, max_h) = match dialog {
+        Dialog::Help => (74, 13),
+        _ => (68, 9),
+    };
+    let width = area.width.min(max_w);
+    let height = area.height.min(max_h);
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,
@@ -329,13 +451,29 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
     let (title, text) = match dialog {
         Dialog::Create(editor) => (
             "Create session",
-            format!("Label:\n{}\n\nEnter create · Esc back", editor.text()),
+            format!(
+                "Label (optional, Enter for default):\n{}\n\nEnter create · Esc back",
+                editor.text()
+            ),
         ),
         Dialog::Fork { label, .. } => (
             "Confirm chat Fork",
             format!(
                 "The source session stays frozen.\nCreate “{label}” as a separate chat session without its workflow binding?\n\ny confirms · n / Esc back"
             ),
+        ),
+        Dialog::Help => (
+            "Help & Shortcuts",
+            concat!(
+                "Views:      Alt+1 Chat · Alt+2 Files · Alt+3 Diff · Alt+4 Logs\n",
+                "            Left/Right or [/] switches tabs when History is focused\n",
+                "Navigation: Tab/Shift+Tab switch pane · ↑/↓ select or scroll · PgUp/PgDn\n",
+                "Sessions:   Ctrl+N new · Ctrl+L refresh · Ctrl+R reconnect · Ctrl+F fork\n",
+                "Execution:  Enter send · Shift/Alt+Enter newline · Ctrl+X cancel\n",
+                "Approvals:  Alt+O allow once · Alt+T allow task · Alt+D deny\n\n",
+                "Esc / Enter / ? close"
+            )
+            .to_owned(),
         ),
     };
     frame.render_widget(
@@ -344,6 +482,33 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn chat_message_summary(message: &serde_json::Value) -> String {
+    if string(message, "role") == "toolResult" {
+        let status = message["structured_content"]["status"]
+            .as_str()
+            .filter(|s| !s.is_empty());
+        if let Some(status) = status {
+            return format!("{status} · see Alt+2 Files / Alt+3 Diff / Alt+4 Logs");
+        }
+        let raw = message_text(message);
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw)
+            && let Some(status) = parsed["status"].as_str().filter(|s| !s.is_empty())
+        {
+            return format!("{status} · see Alt+2 Files / Alt+3 Diff / Alt+4 Logs");
+        }
+        return raw;
+    }
+    let raw = message_text(message);
+    if let Some(json_part) = raw.strip_prefix("Offline fixture: ")
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_part.trim())
+        && parsed["cell_id"].is_string()
+        && let Some(status) = parsed["status"].as_str().filter(|s| !s.is_empty())
+    {
+        return format!("Offline fixture ({status}) · see Alt+2 Files / Alt+3 Diff / Alt+4 Logs");
+    }
+    raw
 }
 
 fn append(lines: &mut Vec<Line<'static>>, text: &str, width: u16, color: Color) {

@@ -205,7 +205,8 @@ async fn cli_selects_each_protocol_and_only_the_configured_fake_credential() {
     }).await.expect("configuration protocol watchdog");
 }
 
-// Break caught: removed environment settings still launch a live server.
+// Break caught: removed environment settings still select a model, or an
+// unconfigured server admits task execution.
 #[tokio::test]
 async fn legacy_environment_cannot_replace_the_model_configuration() {
     let root = tempfile::tempdir().unwrap();
@@ -218,18 +219,60 @@ async fn legacy_environment_cannot_replace_the_model_configuration() {
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let ready = tokio::time::timeout(WATCHDOG, lines.next_line())
         .await
-        .unwrap()
+        .expect("serve must report readiness within the watchdog")
+        .expect("serve stdout is readable")
+        .expect("a serve without a model object must still start");
+    let ready: Value = serde_json::from_str(&ready).unwrap();
+
+    // Startup succeeds, but the removed variables cannot choose a model.
+    assert_eq!(ready["provider"], "unconfigured");
+    assert_eq!(ready["model"], "unconfigured");
+    assert!(!ready["model_configured"].as_bool().unwrap());
+    let banner = ready.to_string();
+    assert!(!banner.contains("synthetic-old-key"));
+    assert!(!banner.contains("synthetic-old-model"));
+    assert!(!banner.contains("http://127.0.0.1:9/v1"));
+
+    let client = Client::connect(ready["listening"].as_str().unwrap().parse().unwrap(), TOKEN)
+        .await
         .unwrap();
-    if ready.is_some() {
-        child.kill().await.unwrap();
-        child.wait().await.unwrap();
-        panic!("legacy environment unexpectedly launched a model server");
-    }
-    let output = child.wait_with_output().await.unwrap();
-    assert!(!output.status.success());
-    assert!(!root.path().join("session.db").exists());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("model configuration"));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-old-key"));
+
+    // Queries and session creation work without a model.
+    let session = client.request("session.create", json!({})).await.unwrap();
+    let id = session["id"].as_str().unwrap().to_owned();
+    let sessions = client.request("session.list", json!({})).await.unwrap();
+    assert!(
+        sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"].as_str() == Some(id.as_str()))
+    );
+    let fetched = client
+        .request("session.get", json!({"session_id": id.as_str()}))
+        .await
+        .unwrap();
+    assert_eq!(fetched["id"].as_str(), Some(id.as_str()));
+
+    // Execution is refused before admission and leaves no task behind.
+    let error = client
+        .request(
+            "task.enqueue",
+            json!({"session_id": id.as_str(), "text": "must not run"}),
+        )
+        .await
+        .expect_err("an unconfigured model must refuse task execution");
+    assert_eq!(error.code, "model_not_configured");
+    assert!(!error.outcome_unknown);
+    let tasks = client
+        .request("session.tasks", json!({"session_id": id.as_str()}))
+        .await
+        .unwrap();
+    assert_eq!(tasks, json!([]));
+
+    client.close().await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
 }
 
 // Break caught: --offline silently ignores an explicitly selected real service.

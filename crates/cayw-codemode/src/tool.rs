@@ -1,4 +1,4 @@
-use crate::{CodeMode, ErrorKind};
+use crate::{CapabilityStop, CodeMode};
 use async_trait::async_trait;
 use cayw_agent::{AgentTool, ExecutionMode, ToolContext, ToolResult};
 use cayw_ai::ToolDefinition;
@@ -45,11 +45,12 @@ impl AgentTool for CodeModeTool {
                 "execute_code requires exactly one string field: script",
             ));
         };
-        let (report, error) = match self.code.execute(script, context.cancel).await {
-            Ok(report) => (report, None),
+        let (report, error, stop) = match self.code.execute(script, context.cancel).await {
+            Ok(report) => (report, None, None),
             Err(error) => (
                 *error.report,
                 Some(json!({"kind":error.kind,"message":error.message})),
+                error.kind.stop(),
             ),
         };
         let is_error = error.is_some();
@@ -59,10 +60,7 @@ impl AgentTool for CodeModeTool {
         Ok(ToolResult {
             is_error,
             outcome_unknown,
-            terminate: outcome_unknown
-                || error
-                    .as_ref()
-                    .is_some_and(|error| error["kind"] == json!(ErrorKind::Cancelled)),
+            terminate: outcome_unknown || stop.is_some_and(|stop| stop != CapabilityStop::Exited),
             structured_content: Some(content),
             ..ToolResult::text(text)
         })

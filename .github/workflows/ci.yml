@@ -5,8 +5,7 @@ on:
     branches: [main]
   pull_request:
 
-# First ship is macOS (see AGENTS.md). Workspace builds on Linux, but some
-# Device/bridge integration tests currently fail there (EBADF); keep CI on macOS.
+# First ship targets macOS (see AGENTS.md); run the required checks on macOS.
 jobs:
   rust:
     name: fmt / check / test / clippy
@@ -18,6 +17,21 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            crates/cayw-visual-editor/framework/package-lock.json
+            crates/cayw-pi-compat/npm/package-lock.json
+
+      - name: Install editor companion dependencies
+        run: npm ci --prefix crates/cayw-visual-editor/framework --no-fund --no-audit
+
+      - name: Install Pi adapter dependencies
+        run: npm ci --prefix crates/cayw-pi-compat/npm --omit=dev --no-fund --no-audit
 
       - name: cargo fmt
         run: cargo fmt --all -- --check

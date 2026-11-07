@@ -195,7 +195,6 @@ fn apply_input(
         if !seen.insert(incoming.sequence) {
             return Err(CellError::Conflict);
         }
-        validate_json(&incoming.arguments, limits.json_depth, limits.item_bytes)?;
         let index = incoming
             .sequence
             .checked_sub(1)
@@ -243,7 +242,9 @@ fn apply_input(
         if record.backend_error.is_none()
             && record.status.is_terminal()
             && record.status != CellStatus::OutcomeUnknown
-            && (record.status != execution.terminal.status || record.error != terminal_error)
+            && (record.status != execution.terminal.status
+                || record.error != terminal_error
+                || record.stop != execution.terminal.stop)
             && !already_applied
         {
             return Err(CellError::Conflict);
@@ -251,6 +252,7 @@ fn apply_input(
         record.backend_error = None;
         record.status = execution.terminal.status;
         record.error = terminal_error;
+        record.stop = execution.terminal.stop;
     } else if !record.unresolved()
         && record.backend_error.is_none()
         && matches!(
@@ -264,15 +266,30 @@ fn apply_input(
     if already_applied {
         return Ok((record, false));
     }
-    if record.host_settlements.len() >= record.calls.len().saturating_mul(2).saturating_add(8) {
-        return Err(CellError::Capacity);
+    let limit = record.calls.len().saturating_mul(2).saturating_add(8);
+    if record.host_settlements.len() >= limit {
+        return Err(CellError::capacity(
+            CapacityKind::HostSettlements,
+            Some(record.cell_id.clone()),
+            Some(record.status),
+            record.host_settlements.len(),
+            limit,
+        ));
     }
     record.host_settlements.push(HostSettlementEvidence {
         stopped: stopped.clone(),
         settlement: settlement.clone(),
     });
     let previous = record.revision;
-    record.revision = previous.checked_add(1).ok_or(CellError::Capacity)?;
+    record.revision = previous.checked_add(1).ok_or_else(|| {
+        CellError::capacity(
+            CapacityKind::HostSettlements,
+            Some(record.cell_id.clone()),
+            Some(record.status),
+            usize::MAX,
+            usize::MAX,
+        )
+    })?;
     Ok((record, true))
 }
 
@@ -321,16 +338,13 @@ fn settle_call(
     let (status, result, omitted, hash, error) = match terminal {
         HostCallTerminal::Succeeded {
             result: HostResult::Value(value),
-        } => {
-            validate_json(value, limits.json_depth, limits.item_bytes)?;
-            (
-                IntentStatus::Succeeded,
-                Some(value.clone()),
-                false,
-                Some(HostResult::value_hash(value)),
-                None,
-            )
-        }
+        } => (
+            IntentStatus::Succeeded,
+            Some(value.clone()),
+            false,
+            Some(HostResult::value_hash(value)),
+            None,
+        ),
         HostCallTerminal::Succeeded {
             result: HostResult::Omitted { sha256 },
         } => {

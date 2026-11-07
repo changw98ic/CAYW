@@ -1,4 +1,4 @@
-use cayw_agent::{AgentEvent, ToolResult};
+use cayw_agent_types::{AgentEvent, ToolResult};
 use cayw_ai::{Message, ToolCall, ToolResultMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

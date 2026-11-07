@@ -11,7 +11,7 @@
 //! rebuilt from those events on every read, including reads through another
 //! Runtime connection. No in-memory question or plan table exists.
 
-use crate::{Inner, Runtime, RuntimeError, TaskState};
+use crate::{Inner, Runtime, RuntimeError, TaskState, queue::TaskLease};
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_codemode::CapabilityError;
@@ -61,7 +61,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: PLAN.into(),
-            description: "Replace the current task plan with compare-and-swap on expected_version. Version starts at 0 for each task; a successful update returns the previous version, the new version and source=model. At most one step may be in_progress and ids must be unique.".into(),
+            description: "Replace the current task plan with compare-and-swap on expected_version. Version starts at 0 for each task; a successful update returns the previous version, the new version and source=model. Multiple distinct steps may be in_progress; ids must be unique.".into(),
             parameters: json!({
                 "type":"object","additionalProperties":false,"required":["expected_version","steps"],
                 "properties":{
@@ -135,6 +135,7 @@ pub struct PlanView {
     pub attempt_id: String,
     pub version: u64,
     pub previous_version: u64,
+    pub content_sha256: String,
     pub source: String,
     pub steps: Vec<PlanStep>,
     pub updated_at: u64,
@@ -150,6 +151,8 @@ struct Asked {
     call: CapabilityCallKey,
     question: String,
     options: Vec<String>,
+    #[serde(default)]
+    task_fence: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +189,11 @@ struct PlanInput {
     steps: Vec<PlanStep>,
 }
 
+enum PreparedCollaboration {
+    Ask(AskInput),
+    Plan(PlanInput),
+}
+
 fn known(error: impl std::fmt::Display) -> CapabilityError {
     CapabilityError::new(error.to_string())
 }
@@ -205,21 +213,23 @@ pub(crate) async fn invoke(
         .into_iter()
         .find(|definition| definition.name == scope.name)
         .ok_or_else(|| CapabilityError::new("collaboration capability is unknown"))?;
-    match scope.name.as_str() {
+    let prepared = match scope.name.as_str() {
         ASK => {
             let input: AskInput = serde_json::from_value(arguments.clone()).map_err(|error| {
                 CapabilityError::new(format!("user.ask arguments are invalid: {error}"))
             })?;
             validate_ask(&input)?;
+            PreparedCollaboration::Ask(input)
         }
         PLAN => {
             let input: PlanInput = serde_json::from_value(arguments.clone()).map_err(|error| {
                 CapabilityError::new(format!("plan.update arguments are invalid: {error}"))
             })?;
             check_steps(&input.steps).map_err(CapabilityError::new)?;
+            PreparedCollaboration::Plan(input)
         }
         _ => return Err(CapabilityError::new("collaboration capability is unknown")),
-    }
+    };
     let host = crate::bridge::scoped_host(base, scope)?;
     // The Host's external executor maps its own cancellation and deadline to
     // `outcome_unknown`. Collaboration calls keep their caller token outside the
@@ -234,6 +244,7 @@ pub(crate) async fn invoke(
         scope,
         caller_cancel: cancel.clone(),
         stop_at,
+        prepared,
     };
     host.call_service(&definition, arguments, CancellationToken::new(), &service)
         .await
@@ -243,27 +254,30 @@ struct Service<'a> {
     scope: &'a Arc<crate::cells::CallScope>,
     caller_cancel: CancellationToken,
     stop_at: Instant,
+    prepared: PreparedCollaboration,
 }
 #[async_trait]
 impl cayw_host::ExternalHost for Service<'_> {
     async fn call(
         &self,
         name: &str,
-        arguments: Value,
+        _arguments: Value,
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
-        match name {
-            ASK => {
+        match (&self.prepared, name) {
+            (PreparedCollaboration::Ask(input), ASK) => {
                 ask(
                     self.scope,
-                    arguments,
+                    input,
                     &self.caller_cancel,
                     &cancel,
                     self.stop_at,
                 )
                 .await
             }
-            PLAN => plan(self.scope, arguments, &self.caller_cancel, &cancel),
+            (PreparedCollaboration::Plan(input), PLAN) => {
+                plan(self.scope, input, &self.caller_cancel, &cancel)
+            }
             _ => Err(CapabilityError::new("collaboration capability is unknown")),
         }
     }
@@ -274,15 +288,11 @@ impl cayw_host::ExternalHost for Service<'_> {
 /// returns a known failure; the question fact stays in the append-only log.
 async fn ask(
     scope: &Arc<crate::cells::CallScope>,
-    arguments: Value,
+    input: &AskInput,
     caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
     stop_at: Instant,
 ) -> Result<Value, CapabilityError> {
-    let input: AskInput = serde_json::from_value(arguments).map_err(|error| {
-        CapabilityError::new(format!("user.ask arguments are invalid: {error}"))
-    })?;
-    validate_ask(&input)?;
     let context = &scope.context;
     context.check(host_cancel).map_err(known)?;
     if caller_cancel.is_cancelled() {
@@ -310,8 +320,9 @@ async fn ask(
         task_id: context.task.id.clone(),
         lease: context.lease.clone(),
         call: scope.key.clone(),
-        question: input.question,
-        options: input.options,
+        question: input.question.clone(),
+        options: input.options.clone(),
+        task_fence: Some(context.task.fence),
     };
     let data = serde_json::to_value(&asked).map_err(|error| {
         known(format!(
@@ -492,14 +503,10 @@ fn read_answer(
 /// so two Runtime connections cannot both accept the same expected_version.
 fn plan(
     scope: &Arc<crate::cells::CallScope>,
-    arguments: Value,
+    input: &PlanInput,
     caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
 ) -> Result<Value, CapabilityError> {
-    let input: PlanInput = serde_json::from_value(arguments).map_err(|error| {
-        CapabilityError::new(format!("plan.update arguments are invalid: {error}"))
-    })?;
-    check_steps(&input.steps).map_err(CapabilityError::new)?;
     let context = &scope.context;
     context.check(host_cancel).map_err(known)?;
     if caller_cancel.is_cancelled() {
@@ -538,7 +545,7 @@ fn plan(
         previous_version: previous,
         version,
         source: "model".into(),
-        steps: input.steps,
+        steps: input.steps.clone(),
     };
     let data = serde_json::to_value(&update)
         .map_err(|error| known(format!("plan update serialization failed: {error}")))?;
@@ -602,19 +609,12 @@ fn check_steps(steps: &[PlanStep]) -> Result<(), String> {
         ));
     }
     let mut ids = BTreeSet::new();
-    let mut in_progress = 0usize;
     for step in steps {
         check_identifier(&step.id, "plan step id", MAX_STEP_ID_BYTES)?;
         if !ids.insert(step.id.as_str()) {
             return Err(format!("plan step id {} is duplicated", step.id));
         }
         check_text(&step.text, "plan step text", MAX_STEP_TEXT_BYTES, true)?;
-        if step.status == PlanStepStatus::InProgress {
-            in_progress += 1;
-        }
-    }
-    if in_progress > 1 {
-        return Err("plan may contain at most one in_progress step".into());
     }
     Ok(())
 }
@@ -629,7 +629,7 @@ fn validate_request(request: &str) -> Result<(), RuntimeError> {
         .map_err(RuntimeError::InvalidInput)
 }
 
-fn read_log(inner: &Inner, session: &str) -> Result<Vec<EventRecord>, RuntimeError> {
+pub(crate) fn read_log(inner: &Inner, session: &str) -> Result<Vec<EventRecord>, RuntimeError> {
     let snapshot = inner.store.snapshot(session)?;
     let mut cursor = 0u64;
     let mut events = Vec::new();
@@ -793,8 +793,20 @@ fn question_active(
         || task.cancel_requested
         || task.worker_id.as_deref() != Some(&lease.worker_id)
         || task.attempt_id.as_deref() != Some(&lease.attempt_id)
-        || task.fence != lease.fence
     {
+        return Ok(false);
+    }
+    if let Some(expected_task_fence) = asked.task_fence
+        && task.fence != expected_task_fence
+    {
+        return Ok(false);
+    }
+    let task_lease = TaskLease {
+        id: task.id.clone(),
+        worker: lease.worker_id.clone(),
+        fence: task.fence,
+    };
+    if inner.queue.check(&task_lease).is_err() {
         return Ok(false);
     }
     Ok(inner.store.validate_lease(lease).is_ok())
@@ -916,6 +928,26 @@ impl Runtime {
         if !active {
             return Err(RuntimeError::StaleApproval);
         }
+        let task_fence = ask.asked.task_fence.unwrap_or_else(|| {
+            tasks
+                .iter()
+                .find(|t| t.id == ask.asked.task_id)
+                .map_or(0, |t| t.fence)
+        });
+        let task_lease = TaskLease {
+            id: ask.asked.task_id.clone(),
+            worker: ask.asked.lease.worker_id.clone(),
+            fence: task_fence,
+        };
+        self.inner
+            .queue
+            .check(&task_lease)
+            .map_err(|error| match error {
+                cayw_queue::QueueError::Cancelled | cayw_queue::QueueError::Worker(_) => {
+                    RuntimeError::StaleApproval
+                }
+                other => other.into(),
+            })?;
         let answered = Answered {
             question_id: request.into(),
             task_id: ask.asked.task_id.clone(),
@@ -991,16 +1023,21 @@ impl Runtime {
             Some(task_id) => latest_plan(&events, &task_id)?,
             None => latest_any_plan(&events)?,
         };
-        Ok(stored.map(|stored| PlanView {
-            session_id: session.into(),
-            task_id: stored.update.task_id,
-            attempt_id: stored.update.attempt_id,
-            version: stored.update.version,
-            previous_version: stored.update.previous_version,
-            source: stored.update.source,
-            steps: stored.update.steps,
-            updated_at: stored.timestamp,
-            cursor: stored.cursor,
-        }))
+        stored
+            .map(|stored| {
+                Ok(PlanView {
+                    session_id: session.into(),
+                    task_id: stored.update.task_id,
+                    attempt_id: stored.update.attempt_id,
+                    version: stored.update.version,
+                    previous_version: stored.update.previous_version,
+                    content_sha256: crate::plannotator::plan_content_sha(&stored.update.steps)?,
+                    source: stored.update.source,
+                    steps: stored.update.steps,
+                    updated_at: stored.timestamp,
+                    cursor: stored.cursor,
+                })
+            })
+            .transpose()
     }
 }

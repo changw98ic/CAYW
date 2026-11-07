@@ -54,7 +54,7 @@ pub fn script_response(request: &ModelRequest, script: &str, call_id: &str) -> A
                             page.status,
                             CellStatus::OutcomeUnknown | CellStatus::Cancelled
                         )
-                        && (!page.status.is_terminal() || page.has_more) =>
+                        && (page.vm_alive || !page.status.is_terminal() || page.has_more) =>
                 {
                     json!({
                         "action":"wait", "cell_id":page.cell_id, "cursor":page.next_cursor,

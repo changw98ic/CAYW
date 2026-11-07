@@ -4,11 +4,13 @@
 //! and optional external services. Catalog membership never grants permission.
 
 mod catalog;
+mod codeintel;
 mod filesystem;
 mod git;
 mod process;
 mod read_fence;
 pub mod terminal;
+pub use cayw_output_filter::{FilterOptions, FilterProfile};
 pub use git::GitWritePolicy;
 pub use read_fence::{
     FenceRecovery, FrozenReadStamp, FrozenReadTicket, FrozenReadValue, PendingMutation,
@@ -19,8 +21,13 @@ pub use terminal::{TerminalConfig, TerminalLimits};
 use async_trait::async_trait;
 use cap_std::fs::Dir;
 use cayw_ai::{ArgumentValidator, CancellationToken, ToolDefinition};
-use cayw_codemode::{CapabilityError, CapabilityHost};
-pub use cayw_device::{DeviceError, ProcessIdentity, ProcessIo, ProcessObserver};
+use cayw_codeintel::SymbolVersionBridge;
+use cayw_codemode::{CapabilityError, CapabilityHost, CapabilityStop};
+pub use cayw_device::{
+    DeviceError, DirectoryProcessSpec, ProcessIdentity, ProcessIo, ProcessObserver, ProcessResult,
+    ProcessRunner, ProcessSpec, TerminationReason,
+};
+pub use process::runner;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -67,13 +74,20 @@ pub trait AuditSink: Send + Sync {
 
 /// Existing application services, injected without creating a loader or connection.
 ///
-/// Names are `search.query`, `mcp.discover`, `mcp.describe`, `mcp.call`,
+/// Names are `search.query`, `mcp.discover`, `mcp.describe`, `mcp.call`, `mcp.prompts.*`,
 /// `skills.list`, and `skills.read`. Their schemas are in `Host::capabilities`.
 /// The child cancellation token is cancelled on timeout, cancellation, or drop.
 /// Dropping a future must not silently detach work. If completion cannot be
 /// established, return `CapabilityError::unknown` and retain reconciliation data.
 #[async_trait]
 pub trait ExternalHost: Send + Sync {
+    /// Trusted orchestration services may delegate every workspace operation to
+    /// another Host call. They do not hold the workspace fence or execution lane
+    /// while awaiting those calls; authorization, audit and budgets still apply.
+    fn delegates_workspace_calls(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         capability: &str,
@@ -105,6 +119,383 @@ pub struct Profile {
     pub io: cayw_device::ProcessIo,
 }
 
+/// Durable sink for F02 originals that were removed from the agent-facing summary.
+///
+/// Runtime wires the Device [`cayw_content::ContentStore`]; tests may use an
+/// in-memory implementation. When filtering reduces a stream, Host **must** put
+/// the original here before returning — absence fails closed.
+pub trait FilteredOriginalStore: Send + Sync {
+    fn put_original(&self, digest: &str, bytes: &[u8]) -> Result<Value, CapabilityError>;
+    fn get_original(&self, digest: &str) -> Result<Option<Vec<u8>>, CapabilityError>;
+}
+
+pub fn result_body_key(
+    device: &str,
+    session: &str,
+    task: Option<&str>,
+    handle: &str,
+) -> Result<cayw_content::Id, CapabilityError> {
+    let bytes = serde_json::to_vec(&("cayw-runtime-result-body-v1", device, session, task, handle))
+        .map_err(|e| failure(e.to_string()))?;
+    cayw_content::Id::new(cayw_content::ContentHash::of(&bytes).to_string())
+        .map_err(|e| failure(e.to_string()))
+}
+
+pub fn result_meta_key(
+    device: &str,
+    session: &str,
+    task: Option<&str>,
+    handle: &str,
+) -> Result<cayw_content::Id, CapabilityError> {
+    let bytes = serde_json::to_vec(&("cayw-runtime-result-meta-v1", device, session, task, handle))
+        .map_err(|e| failure(e.to_string()))?;
+    cayw_content::Id::new(cayw_content::ContentHash::of(&bytes).to_string())
+        .map_err(|e| failure(e.to_string()))
+}
+
+/// ContentStore-backed [`FilteredOriginalStore`] (content-addressed and session-scoped).
+pub struct ContentFilteredOriginalStore {
+    store: Arc<cayw_content::ContentStore>,
+    session_id: String,
+}
+
+impl ContentFilteredOriginalStore {
+    pub fn new(store: Arc<cayw_content::ContentStore>) -> Self {
+        Self {
+            store,
+            session_id: "default".into(),
+        }
+    }
+
+    pub fn with_session(
+        store: Arc<cayw_content::ContentStore>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            store,
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn store(&self) -> &cayw_content::ContentStore {
+        &self.store
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredResultMeta {
+    v: u32,
+    handle: String,
+    content_hash: String,
+    bytes: u64,
+    encoding: String,
+    released: bool,
+    scope: String,
+    session_id: String,
+    task_id: Option<String>,
+}
+
+fn result_storage_error(error: cayw_content::Error) -> CapabilityError {
+    if matches!(error, cayw_content::Error::CommitOutcomeUnknown(_)) {
+        CapabilityError::unknown(error.to_string())
+    } else {
+        failure(error.to_string())
+    }
+}
+
+fn fresh_result_handle() -> Result<String, CapabilityError> {
+    use std::io::Read;
+    let mut bytes = [0; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(io_error)?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn produced_result_handle(
+    source: &str,
+    key: &str,
+    encoding: &str,
+    bytes: &[u8],
+) -> Result<String, CapabilityError> {
+    let identity = serde_json::to_vec(&(
+        "cayw-produced-result-v1",
+        source,
+        key,
+        encoding,
+        cayw_content::ContentHash::of(bytes).to_string(),
+    ))
+    .map_err(|error| failure(error.to_string()))?;
+    Ok(cayw_content::ContentHash::of(&identity).to_string())
+}
+
+fn read_result_meta(
+    store: &cayw_content::ContentStore,
+    session: &str,
+    handle: &str,
+) -> Result<Option<StoredResultMeta>, CapabilityError> {
+    cayw_content::Id::new(handle).map_err(result_storage_error)?;
+    let id = result_meta_key(store.device_id().as_str(), session, None, handle)?;
+    let Some((_, bytes)) = store.try_read(&id).map_err(result_storage_error)? else {
+        return Ok(None);
+    };
+    let meta: StoredResultMeta =
+        serde_json::from_slice(&bytes).map_err(|_| failure("result metadata is corrupt"))?;
+    if meta.v != 1
+        || meta.handle != handle
+        || meta.session_id != session
+        || meta.task_id.is_some()
+        || meta.scope != "session"
+        || !matches!(meta.encoding.as_str(), "utf8" | "json" | "base64")
+    {
+        return Err(failure(
+            "result metadata differs from its owner or encoding",
+        ));
+    }
+    Ok(Some(meta))
+}
+
+fn put_session_result(
+    store: &cayw_content::ContentStore,
+    session: &str,
+    initial_handle: &str,
+    bytes: &[u8],
+    encoding: &str,
+) -> Result<Value, CapabilityError> {
+    let mut handle = initial_handle.to_owned();
+    let hash = cayw_content::ContentHash::of(bytes).to_string();
+    loop {
+        let meta = StoredResultMeta {
+            v: 1,
+            handle: handle.clone(),
+            content_hash: hash.clone(),
+            bytes: bytes.len() as u64,
+            encoding: encoding.into(),
+            released: false,
+            scope: "session".into(),
+            session_id: session.into(),
+            task_id: None,
+        };
+        if let Some(existing) = read_result_meta(store, session, &handle)? {
+            let mut live = existing.clone();
+            live.released = false;
+            if live != meta {
+                return Err(failure(
+                    "result metadata conflicts with the produced content",
+                ));
+            }
+            // Release remains permanent for that reference. A new production
+            // creates a new reference instead of silently reviving the old one.
+            if existing.released {
+                handle = fresh_result_handle()?;
+                continue;
+            }
+        }
+        let body = result_body_key(store.device_id().as_str(), session, None, &handle)?;
+        match store.try_put(&body, cayw_content::ExpectedRevision::Absent, bytes) {
+            Ok(_) => {}
+            Err(cayw_content::Error::Conflict { .. }) => {
+                let existing = store.try_read(&body).map_err(result_storage_error)?;
+                if existing.is_none_or(|(_, existing)| existing != bytes) {
+                    return Err(failure("result body conflicts with the produced content"));
+                }
+            }
+            Err(error) => return Err(result_storage_error(error)),
+        }
+        let id = result_meta_key(store.device_id().as_str(), session, None, &handle)?;
+        let metadata = serde_json::to_vec(&meta).map_err(|error| failure(error.to_string()))?;
+        match store.try_put(&id, cayw_content::ExpectedRevision::Absent, &metadata) {
+            Ok(_) => {}
+            Err(cayw_content::Error::Conflict { .. }) => {
+                let existing = read_result_meta(store, session, &handle)?
+                    .ok_or_else(|| failure("result metadata disappeared after a conflict"))?;
+                let mut live = existing.clone();
+                live.released = false;
+                if live != meta {
+                    return Err(failure(
+                        "result metadata conflicts with the produced content",
+                    ));
+                }
+                if existing.released {
+                    handle = fresh_result_handle()?;
+                    continue;
+                }
+            }
+            Err(error) => return Err(result_storage_error(error)),
+        }
+        let mut view = serde_json::to_value(meta).map_err(|error| failure(error.to_string()))?;
+        view.as_object_mut()
+            .expect("result metadata is an object")
+            .remove("v");
+        view["stored"] = Value::Bool(true);
+        return Ok(view);
+    }
+}
+
+fn get_session_result(
+    store: &cayw_content::ContentStore,
+    session: &str,
+    handle: &str,
+) -> Result<Option<(StoredResultMeta, Vec<u8>)>, CapabilityError> {
+    let Some(meta) = read_result_meta(store, session, handle)? else {
+        return Ok(None);
+    };
+    if meta.released {
+        return Err(failure("result handle has been released"));
+    }
+    let body = result_body_key(store.device_id().as_str(), session, None, handle)?;
+    let Some((_, bytes)) = store.try_read(&body).map_err(result_storage_error)? else {
+        return Err(failure("result body not found"));
+    };
+    if cayw_content::ContentHash::of(&bytes).to_string() != meta.content_hash
+        || bytes.len() as u64 != meta.bytes
+    {
+        return Err(failure("result body differs from its metadata"));
+    }
+    Ok(Some((meta, bytes)))
+}
+
+impl FilteredOriginalStore for ContentFilteredOriginalStore {
+    fn put_original(&self, digest: &str, bytes: &[u8]) -> Result<Value, CapabilityError> {
+        if cayw_content::ContentHash::of(bytes).to_string() != digest
+            || std::str::from_utf8(bytes).is_err()
+        {
+            return Err(failure("filtered original must match its UTF-8 digest"));
+        }
+        put_session_result(&self.store, &self.session_id, digest, bytes, "utf8")
+    }
+
+    fn get_original(&self, handle: &str) -> Result<Option<Vec<u8>>, CapabilityError> {
+        get_session_result(&self.store, &self.session_id, handle).and_then(|result| {
+            result
+                .map(|(meta, bytes)| {
+                    if meta.encoding != "utf8" {
+                        return Err(failure("filtered original is not UTF-8 text"));
+                    }
+                    Ok(bytes)
+                })
+                .transpose()
+        })
+    }
+}
+
+pub struct ContentWebSink {
+    store: Arc<cayw_content::ContentStore>,
+    session_id: String,
+}
+
+impl ContentWebSink {
+    pub fn new(store: Arc<cayw_content::ContentStore>, session_id: impl Into<String>) -> Self {
+        Self {
+            store,
+            session_id: session_id.into(),
+        }
+    }
+}
+
+impl cayw_web_access::ContentSink for ContentWebSink {
+    fn put(
+        &self,
+        id: &str,
+        bytes: &[u8],
+        mime_type: Option<&str>,
+    ) -> Result<Value, cayw_web_access::WebAccessError> {
+        let text_mime = mime_type.is_none_or(|mime| {
+            let mime = mime.to_ascii_lowercase();
+            mime.starts_with("text/") || mime.contains("json") || mime.contains("xml")
+        });
+        let (stored, encoding) = if text_mime && std::str::from_utf8(bytes).is_ok() {
+            (bytes.to_vec(), "utf8")
+        } else {
+            use base64::Engine;
+            (
+                base64::engine::general_purpose::STANDARD
+                    .encode(bytes)
+                    .into_bytes(),
+                "base64",
+            )
+        };
+        produced_result_handle("web", id, encoding, &stored)
+            .and_then(|handle| {
+                put_session_result(&self.store, &self.session_id, &handle, &stored, encoding)
+            })
+            .map_err(web_storage_error)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<Vec<u8>>, cayw_web_access::WebAccessError> {
+        get_session_result(&self.store, &self.session_id, id)
+            .and_then(|result| {
+                result
+                    .map(|(meta, bytes)| decode_result_body(&meta, bytes))
+                    .transpose()
+            })
+            .map_err(web_storage_error)
+    }
+}
+
+fn web_storage_error(error: CapabilityError) -> cayw_web_access::WebAccessError {
+    let mut result = cayw_web_access::WebAccessError::new(
+        cayw_web_access::FailureClass::ContentStorage,
+        error.message,
+    );
+    result.outcome_unknown = error.outcome_unknown;
+    result
+}
+
+fn decode_result_body(meta: &StoredResultMeta, bytes: Vec<u8>) -> Result<Vec<u8>, CapabilityError> {
+    if meta.encoding == "base64" {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(bytes)
+            .map_err(|_| failure("result body is not valid base64"))
+    } else {
+        Ok(bytes)
+    }
+}
+
+pub struct ContentVisionSink {
+    store: Arc<cayw_content::ContentStore>,
+    session_id: String,
+}
+
+impl ContentVisionSink {
+    pub fn new(store: Arc<cayw_content::ContentStore>, session_id: impl Into<String>) -> Self {
+        Self {
+            store,
+            session_id: session_id.into(),
+        }
+    }
+}
+
+impl cayw_vision::ImageSink for ContentVisionSink {
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        _mime_type: Option<&str>,
+    ) -> Result<Value, CapabilityError> {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes();
+        let handle = produced_result_handle("vision", key, "base64", &encoded)?;
+        put_session_result(&self.store, &self.session_id, &handle, &encoded, "base64")
+    }
+
+    fn get(&self, handle: &str) -> Result<Option<Vec<u8>>, CapabilityError> {
+        get_session_result(&self.store, &self.session_id, handle).and_then(|result| {
+            result
+                .map(|(meta, bytes)| decode_result_body(&meta, bytes))
+                .transpose()
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct HostConfig {
     /// Trusted opt-in to a cooperating, explicitly frozen fs.read view. Outside
@@ -115,19 +506,21 @@ pub struct HostConfig {
     /// Combined serialized argument and result bytes across this host instance.
     pub max_total_bytes: usize,
     pub max_calls: usize,
-    /// Per-file bound. Git reads additionally share this total byte allowance
-    /// across metadata, objects and the worktree snapshot. Larger repositories
-    /// are refused before launch; no ambient-path fallback is used.
+    /// Per-file bound for ordinary file reads and for each copied Git metadata
+    /// file. Git reads no longer copy object data or the worktree, so repository
+    /// size and ignored build data do not gate a read. Directory listings remain
+    /// bounded by `max_list_entries`.
     pub max_file_bytes: usize,
-    /// Directory listing bound and total Git snapshot entry allowance.
+    /// Directory listing bound and copied Git metadata entry allowance.
     pub max_list_entries: usize,
     /// Includes permission waiting and execution. Durable audit writes are awaited
     /// even after cancellation so a caller cannot mistake an uncommitted result.
     pub call_timeout: Duration,
     /// Absolute application-selected git executable; absent means no git catalog.
-    /// Read commands use a bounded passive snapshot, excluding repository config,
-    /// hooks and object alternates. Worktree symlinks/special files are refused.
-    /// Concurrent in-place source edits do not have transaction snapshot semantics.
+    /// Read commands use a sanitized private metadata directory and the held root
+    /// in place. Worktree symlinks are not followed; a changed object-store
+    /// identity discards the result. Concurrent in-place source edits do not have
+    /// transaction snapshot semantics.
     pub git_program: Option<PathBuf>,
     /// Opt-in for real-repository Git writes. Absent means no write capability.
     /// The identity is host-owned; capabilities are individually policy-gated.
@@ -143,6 +536,39 @@ pub struct HostConfig {
     /// authorized, audited execution; catalog inspection never creates a store.
     /// Pending batches fence ordinary writes and profiles even when this is None.
     pub workspace: Option<cayw_workspace::Limits>,
+    /// Shared F04 symbol/version bridge for Agent tools, editor, and Trace.
+    /// `None` (the default) omits `codeintel.*` from the ordinary Host catalog.
+    pub codeintel: Option<SymbolVersionBridge>,
+    /// Optional F02 command-output filter applied when presenting process/git
+    /// results to agents/UI. `None` (the default) returns stdout/stderr directly.
+    /// Runtime can enable filtering when a [`Self::content_store`] is available.
+    /// When `Some` and enabled, `stdout`/`stderr` contain filtered summaries; the
+    /// full original is stored before return and `original_handle` under
+    /// `output_filter` contains its formal session result reference. Structured
+    /// git reads (`blame`/`log`/`show`) use Passthrough so porcelain records stay
+    /// intact. Task wall/cost are not measured here; callers pass those to
+    /// compare APIs.
+    pub output_filter: Option<FilterOptions>,
+    /// Store used to retain full process/git captures when F02 filtering
+    /// reduces them. Required whenever filtering would drop bytes; absence
+    /// fails closed instead of silently discarding the only copy. Runtime
+    /// injects a ContentStore adapter when available, so filtering can be
+    /// configured. Tests that exercise reduction must wire a
+    /// [`FilteredOriginalStore`].
+    pub content_store: Option<Arc<dyn FilteredOriginalStore>>,
+    /// Web search / fetch / extract (`web.*`).
+    /// `None` (the default) omits them from the ordinary Host catalog.
+    /// When set, DuckDuckGo HTML search (no API key) + live HTTP fetch are available.
+    /// Runtime binds bodies to session result handles; standalone services may
+    /// retain bodies in their own process-local store.
+    pub web_access: Option<cayw_web_access::WebAccessOptions>,
+    /// Optional external sink for web content reference bodies (e.g. Device storage).
+    pub web_access_sink: Option<Arc<dyn cayw_web_access::ContentSink>>,
+    /// Vision tools (crop / pixel_diff / colors / ocr / describe).
+    /// `None` (the default) omits them from the ordinary Host catalog.
+    pub vision: Option<cayw_vision::Limits>,
+    /// Optional external sink for cropped vision images (e.g. Device storage).
+    pub vision_sink: Option<Arc<dyn cayw_vision::ImageSink>>,
     pub external: Option<Arc<dyn ExternalHost>>,
 }
 impl Default for HostConfig {
@@ -164,6 +590,13 @@ impl Default for HostConfig {
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
             workspace: Some(cayw_workspace::Limits::default()),
+            codeintel: None,
+            output_filter: None,
+            content_store: None,
+            web_access: None,
+            web_access_sink: None,
+            vision: None,
+            vision_sink: None,
             external: None,
         }
     }
@@ -192,6 +625,9 @@ impl HostConfig {
             limits.validate()?;
         }
         if let Some(limits) = &self.workspace {
+            limits.validate()?;
+        }
+        if let Some(limits) = self.vision {
             limits.validate()?;
         }
         if let Some(program) = &self.git_program {
@@ -257,6 +693,9 @@ pub(crate) enum Executor {
     Terminal,
     Data,
     Workspace,
+    CodeIntel,
+    WebAccess,
+    Vision,
     External,
 }
 
@@ -290,6 +729,8 @@ pub struct Host {
     safety: Arc<Safety>,
     runner: Arc<cayw_device::ProcessRunner>,
     terminal: Option<Arc<terminal::TerminalManager>>,
+    web_access: Option<Arc<cayw_web_access::WebAccess>>,
+    vision: Option<Arc<cayw_vision::VisionService>>,
     external: Option<Arc<dyn ExternalHost>>,
 }
 impl Host {
@@ -353,6 +794,23 @@ impl Host {
             .transpose()?
             .map(Arc::new);
         let external = config.external.clone();
+        let web_access = match &config.web_access {
+            Some(opts) => Some(Arc::new(
+                opts.build_with_sink(config.web_access_sink.clone())
+                    .map_err(|e| failure(cayw_web_access::host_error_message(&e)))?,
+            )),
+            None => None,
+        };
+        let vision = match config.vision {
+            Some(limits) => {
+                let mut svc = cayw_vision::VisionService::from_env(limits)?;
+                if let Some(sink) = &config.vision_sink {
+                    svc = svc.with_sink(Arc::clone(sink));
+                }
+                Some(Arc::new(svc))
+            }
+            None => None,
+        };
         Ok(Self {
             root: Arc::new(root),
             gate,
@@ -364,9 +822,27 @@ impl Host {
             safety: Arc::default(),
             runner: Arc::new(runner),
             terminal,
+            web_access,
+            vision,
             external,
         })
     }
+    /// Shared F04 bridge handle (same instance as editor/Trace when they clone it).
+    pub fn codeintel_bridge(&self) -> Option<SymbolVersionBridge> {
+        self.config.codeintel.clone()
+    }
+
+    /// Read an externalized original using `original_handle.handle`.
+    /// Returns `Ok(None)` when the store is configured but the handle is absent.
+    pub fn read_output_original(&self, handle_id: &str) -> Result<Option<String>, CapabilityError> {
+        let store = self.config.content_store.as_ref().ok_or_else(|| {
+            failure("filtered-original store is not configured; originals cannot be retrieved")
+        })?;
+        Ok(store
+            .get_original(handle_id)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
     /// Identity of the directory actually held open by this host. Independent
     /// opens of the same live directory agree; renaming/replacing its pathname
     /// cannot change this identity or redirect the metadata lookup.
@@ -442,6 +918,8 @@ impl Host {
             safety: self.safety.clone(),
             runner: self.runner.clone(),
             terminal: self.terminal.clone(),
+            web_access: self.web_access.clone(),
+            vision: self.vision.clone(),
             external: self.external.clone(),
         })
     }
@@ -451,6 +929,51 @@ impl Host {
     pub fn with_process_observer(&self, observer: Arc<dyn ProcessObserver>) -> Self {
         let mut scope = self.clone();
         scope.runner = Arc::new(self.runner.observed(observer));
+        scope
+    }
+
+    /// Access the underlying managed ProcessRunner for process lifecycle and group supervision.
+    pub fn process_runner(&self) -> Arc<cayw_device::ProcessRunner> {
+        self.runner.clone()
+    }
+
+    /// Injects an active filtered-original store into this host scope.
+    pub fn with_content_store(&self, store: Arc<dyn FilteredOriginalStore>) -> Self {
+        let mut scope = self.clone();
+        let mut config = (*self.config).clone();
+        config.content_store = Some(store);
+        scope.config = Arc::new(config);
+        scope
+    }
+
+    /// Injects session-scoped content store, web access sink, and vision sink.
+    pub fn with_session_content(
+        &self,
+        store: Arc<cayw_content::ContentStore>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        let session_id = session_id.into();
+        let mut scope = self.clone();
+        let mut config = (*self.config).clone();
+        let orig_store = Arc::new(ContentFilteredOriginalStore::with_session(
+            store.clone(),
+            session_id.clone(),
+        ));
+        let web_sink = Arc::new(ContentWebSink::new(store.clone(), session_id.clone()));
+        let vision_sink = Arc::new(ContentVisionSink::new(store.clone(), session_id.clone()));
+
+        config.content_store = Some(orig_store);
+        config.web_access_sink = Some(web_sink.clone());
+        config.vision_sink = Some(vision_sink.clone());
+        scope.config = Arc::new(config);
+
+        if let Some(wa) = &self.web_access {
+            scope.web_access = Some(Arc::new(wa.with_sink(web_sink)));
+        }
+        if let Some(v) = &self.vision {
+            scope.vision = Some(Arc::new(v.as_ref().clone().with_sink(vision_sink)));
+        }
+
         scope
     }
 
@@ -580,7 +1103,10 @@ impl Host {
         }
         check(cancel, deadline)?;
         if lock(&self.budget).exhausted {
-            return Err(failure("host total byte budget exhausted"));
+            return Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "host total byte budget exhausted",
+            ));
         }
         Ok(())
     }
@@ -598,7 +1124,10 @@ impl Host {
             || bytes > available.saturating_sub(4)
             || available < 4
         {
-            return Err(failure("host call or total byte budget exhausted"));
+            return Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "host call or total byte budget exhausted",
+            ));
         }
         budget.calls += 1;
         budget.bytes += bytes;
@@ -668,8 +1197,8 @@ impl Host {
                     .ok_or_else(|| failure("data capabilities are disabled"))?;
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(failure("data capability cancelled")),
-                    _ = tokio::time::sleep_until(deadline.into()) => Err(failure("data capability deadline reached")),
+                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "data capability cancelled")),
+                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "data capability deadline reached")),
                     result = cayw_data::execute(name, args, cancel.clone(), limits) => result,
                 }
             }
@@ -678,6 +1207,39 @@ impl Host {
                 workspace
                     .execute_until(name, &args, cancel.clone(), workspace_deadline)
                     .await
+            }
+            Executor::CodeIntel => codeintel::execute(self, name, &args, cancel, deadline).await,
+            Executor::WebAccess => {
+                let access = self
+                    .web_access
+                    .as_ref()
+                    .ok_or_else(|| failure("web-access capabilities are disabled"))?;
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "web-access capability cancelled")),
+                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "web-access capability deadline reached")),
+                    result = access.call(name, args) => result.map_err(|error| {
+                        let message = cayw_web_access::host_error_message(&error);
+                        if error.outcome_unknown {
+                            CapabilityError::unknown(message)
+                        } else {
+                            failure(message)
+                        }
+                    }),
+                }
+            }
+            Executor::Vision => {
+                let service = self
+                    .vision
+                    .as_ref()
+                    .ok_or_else(|| failure("vision capabilities are disabled"))?
+                    .clone();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "vision capability cancelled")),
+                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "vision capability deadline reached")),
+                    result = cayw_vision::execute(service, name, args, cancel.clone()) => result,
+                }
             }
             Executor::External => {
                 let external = service
@@ -693,7 +1255,7 @@ impl Host {
         }
     }
 
-    async fn open_workspace(
+    pub(crate) async fn open_workspace(
         &self,
         cancel: &CancellationToken,
         deadline: Instant,
@@ -725,8 +1287,8 @@ impl Host {
                     // admission, without extending the original call deadline.
                     tokio::select! {
                         biased;
-                        _ = cancel.cancelled() => return Err(failure("cancelled while opening workspace")),
-                        _ = tokio::time::sleep_until(deadline.into()) => return Err(failure("workspace opening deadline reached")),
+                        _ = cancel.cancelled() => return Err(CapabilityError::stopped(CapabilityStop::Cancelled, "cancelled while opening workspace")),
+                        _ = tokio::time::sleep_until(deadline.into()) => return Err(CapabilityError::stopped(CapabilityStop::Timeout, "workspace opening deadline reached")),
                         _ = tokio::time::sleep(Duration::from_millis(5)) => {},
                     }
                 }
@@ -804,19 +1366,20 @@ impl Host {
             .ok_or_else(|| self.diagnostic(failure("invalid deadline")))?;
         // Ordinary calls retain ordered permission/audit admission. Frozen reads
         // never need this lane to settle or acknowledge their original ticket.
-        let lane = tokio::select! { biased;
-            _ = cancel.cancelled() => return Err(self.diagnostic(failure("capability cancelled while queued"))),
-            _ = tokio::time::sleep_until(deadline.into()) => return Err(self.diagnostic(failure("capability queue deadline reached"))),
+        let mut lane = Some(tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
+            _ = tokio::time::sleep_until(deadline.into()) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
             guard = self.execution.lock() => guard,
-        };
+        });
         let mut call = self
             .admit_owned(capability, arguments, cancel, service.is_some(), deadline)
             .await?;
         let name = capability.definition.name.as_str();
-        let mutation = if service.is_some()
+        let delegated = service.is_some_and(ExternalHost::delegates_workspace_calls);
+        let may_mutate = service.is_some()
             || catalog::may_mutate(name)
-            || matches!(capability.executor, Executor::External)
-        {
+            || matches!(capability.executor, Executor::External);
+        let mutation = if may_mutate && !delegated {
             match self
                 .mutation(
                     name,
@@ -835,6 +1398,9 @@ impl Host {
         } else {
             None
         };
+        if delegated {
+            drop(lane.take());
+        }
         let result = match self.check(&call.child, call.deadline) {
             Ok(()) => {
                 self.execute(
@@ -855,7 +1421,7 @@ impl Host {
             ))),
             None => result,
         };
-        let result = call.settle(result, mutation.is_some()).await;
+        let result = call.settle(result, may_mutate).await;
         if !result.as_ref().is_err_and(|error| error.outcome_unknown)
             && let Some(mutation) = mutation
         {
@@ -886,6 +1452,7 @@ impl Host {
                     .workspace
                     .as_ref()
                     .map(|limits| limits.max_argument_bytes),
+                Executor::Vision => self.config.vision.map(|limits| limits.input_bytes),
                 _ => None,
             }
             .unwrap_or(self.config.max_argument_bytes)
@@ -910,8 +1477,8 @@ impl Host {
             .map_err(|error| response.error(error))?;
         tokio::select! {
             biased;
-            _ = child.cancelled() => return Err(response.error(failure("capability cancelled before permission"))),
-            _ = tokio::time::sleep_until(deadline.into()) => return Err(response.error(failure("capability permission deadline reached"))),
+            _ = child.cancelled() => return Err(response.error(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled before permission"))),
+            _ = tokio::time::sleep_until(deadline.into()) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability permission deadline reached"))),
             result = self.gate.authorize(name, &arguments.0, child.clone()) => {
                 if let Err(error) = result {
                     if error.outcome_unknown { self.safety.unknown.store(true, Ordering::Release); }
@@ -1054,6 +1621,7 @@ impl ResponseBudget {
         // encodable diagnostics below are charged at their full serialized size.
         if available < 2 {
             budget.exhausted = true;
+            error.stop.get_or_insert(CapabilityStop::Budget);
             error.message.clear();
             self.release(&mut budget, keep);
             return error;
@@ -1066,6 +1634,7 @@ impl ResponseBudget {
             .len();
         if size > available {
             budget.exhausted = true;
+            error.stop.get_or_insert(CapabilityStop::Budget);
             error.message = fit_message(error.message, limit);
         }
         let size = serde_json::to_vec(&error.message)
@@ -1215,10 +1784,16 @@ pub(crate) fn io_error(error: io::Error) -> CapabilityError {
 }
 pub(crate) fn check(cancel: &CancellationToken, deadline: Instant) -> Result<(), CapabilityError> {
     if cancel.is_cancelled() {
-        return Err(failure("capability cancelled"));
+        return Err(CapabilityError::stopped(
+            CapabilityStop::Cancelled,
+            "capability cancelled",
+        ));
     }
     if Instant::now() >= deadline {
-        return Err(failure("capability deadline reached"));
+        return Err(CapabilityError::stopped(
+            CapabilityStop::Timeout,
+            "capability deadline reached",
+        ));
     }
     Ok(())
 }
@@ -1236,7 +1811,10 @@ fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
         }
         *used = used.saturating_add(1);
         if *used > limit {
-            return Err(failure("JSON byte budget exceeded"));
+            return Err(CapabilityError::stopped(
+                CapabilityStop::Budget,
+                "JSON byte budget exceeded",
+            ));
         }
         match value {
             Value::Array(values) => {
@@ -1253,7 +1831,10 @@ fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
             Value::String(text) => {
                 *used = used.saturating_add(text.len());
                 if *used > limit {
-                    return Err(failure("JSON byte budget exceeded"));
+                    return Err(CapabilityError::stopped(
+                        CapabilityStop::Budget,
+                        "JSON byte budget exceeded",
+                    ));
                 }
             }
             _ => {}
@@ -1278,6 +1859,7 @@ fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
         }
     }
     let mut counter = Counter { used: 0, limit };
-    serde_json::to_writer(&mut counter, value).map_err(|error| failure(error.to_string()))?;
+    serde_json::to_writer(&mut counter, value)
+        .map_err(|error| CapabilityError::stopped(CapabilityStop::Budget, error.to_string()))?;
     Ok(counter.used)
 }

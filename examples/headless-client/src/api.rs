@@ -1,5 +1,8 @@
 use crate::{Failure, Result, options::Connection};
-use cayw_ai::CancellationToken;
+use cayw_ai::{
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Model, ModelRequest,
+    Provider, StopReason,
+};
 use cayw_core::EventRecord;
 use cayw_ipc::{Client, ClientConfig};
 use cayw_runtime::{
@@ -7,7 +10,28 @@ use cayw_runtime::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+const UNCONFIGURED_PROVIDER: &str = "unconfigured";
+const UNCONFIGURED_MODEL: &str = "unconfigured";
+
+/// The Runtime contract always needs a provider. Query and control commands
+/// never stream it. Streaming fails explicitly instead of inventing model output.
+struct UnconfiguredProvider;
+
+impl Provider for UnconfiguredProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let start = AssistantMessage::new(&request.model);
+        let error = start.clone().failure(
+            StopReason::Error,
+            "model configuration is required for model execution",
+        );
+        Box::pin(futures::stream::iter([
+            AssistantEvent::Start { message: start },
+            AssistantEvent::Error { message: error },
+        ]))
+    }
+}
 
 pub enum Api {
     Sdk(Runtime),
@@ -19,68 +43,143 @@ pub struct Connections {
     pub metadata: Value,
 }
 impl Connections {
-    pub async fn open(connection: &Connection) -> Result<Self> {
+    /// `needs_model` is true only for commands that can execute a model turn.
+    /// Query and control commands open the same persisted Runtime without
+    /// requiring a model object or reading the selected credential.
+    pub async fn open(connection: &Connection, needs_model: bool) -> Result<Self> {
         match connection {
+            Connection::Local { workspace } => {
+                let paths = cayw_runtime::local_cli::LocalPaths::from_environment(workspace)?;
+                let (address, token) = paths.connect()?;
+                Self::ipc(address, token).await
+            }
             Connection::Sdk {
                 db,
                 workspace,
                 config,
             } => {
-                let path = config.as_ref().ok_or_else(|| {
-                    Failure::invalid("model configuration is required in --config")
-                })?;
-                let headless = HeadlessConfig::load(path)?;
-                let selected = headless.model().cloned().ok_or_else(|| {
-                    Failure::invalid("model configuration is required in --config")
-                })?;
-                let config = headless.into_runtime_config()?;
-                let configured = selected.build()?;
-                let model_configuration = serde_json::to_value(&selected)?;
-                let model = configured.model;
-                let provider = configured.provider;
+                let headless = match config {
+                    Some(path) => HeadlessConfig::load(path)?,
+                    None => HeadlessConfig::default(),
+                };
+                let selected = headless.model().cloned();
+                let runtime = headless.into_runtime_config()?;
+                let (provider, model, model_configuration, requested_model, model_execution) =
+                    if needs_model {
+                        let selected = selected.ok_or_else(|| Failure {
+                            code: "model_not_configured".into(),
+                            message: cayw_runtime::local_cli::model_setup_hint(config.as_deref()),
+                            outcome_unknown: false,
+                        })?;
+                        let configured = selected.build()?;
+                        (
+                            configured.provider,
+                            configured.model,
+                            serde_json::to_value(&selected)?,
+                            Some(selected.id().to_owned()),
+                            "configured",
+                        )
+                    } else {
+                        let configuration = selected
+                            .as_ref()
+                            .map(serde_json::to_value)
+                            .transpose()?
+                            .unwrap_or(Value::Null);
+                        (
+                            Arc::new(UnconfiguredProvider) as Arc<dyn Provider>,
+                            Model::new(UNCONFIGURED_PROVIDER, UNCONFIGURED_MODEL),
+                            configuration,
+                            selected.as_ref().map(|config| config.id().to_owned()),
+                            "not_requested",
+                        )
+                    };
                 let execute = Runtime::open(
                     db,
                     workspace,
                     provider.clone(),
                     model.clone(),
-                    config.clone(),
+                    runtime.clone(),
                 )?;
-                let observe = Runtime::open(db, workspace, provider, model.clone(), config)?;
+                let observe = Runtime::open(db, workspace, provider, model, runtime)?;
                 Ok(Self {
                     execute: Api::Sdk(execute),
                     observe: Api::Sdk(observe),
-                    metadata: json!({"type":"runtime","mode":"sdk","model_configuration":model_configuration,"requested_model":model.id}),
+                    metadata: json!({
+                        "type":"runtime",
+                        "mode":"sdk",
+                        "model_configuration":model_configuration,
+                        "requested_model":requested_model,
+                        "model_execution":model_execution
+                    }),
                 })
             }
             Connection::Ipc { address, token_env } => {
-                let token = environment(token_env)?;
-                let config = ClientConfig {
-                    request_timeout: Duration::from_secs(360),
-                    ..ClientConfig::default()
-                };
-                let execute =
-                    Client::connect_with_config(*address, token.clone(), config.clone()).await?;
-                let observe = match Client::connect_with_config(*address, token, config).await {
-                    Ok(client) => client,
-                    Err(error) => {
-                        execute.close().await;
-                        return Err(error.into());
-                    }
-                };
-                let api = Api::Ipc(observe);
-                let health = api.health().await?;
-                Ok(Self {
-                    execute: Api::Ipc(execute),
-                    observe: api,
-                    metadata: json!({"type":"runtime","mode":"ipc","health":health,"requested_model":health["model"]}),
-                })
+                Self::ipc(*address, environment(token_env)?).await
             }
         }
     }
+
+    async fn ipc(address: std::net::SocketAddr, token: String) -> Result<Self> {
+        let probe = Client::connect(address, token.clone()).await?;
+        let probe_api = Api::Ipc(probe);
+        let health = probe_api.health().await?;
+        probe_api.close().await;
+        let config = client_config_from_health(&health)?;
+        let timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap_or(0);
+        let execute = Client::connect_with_config(address, token.clone(), config.clone()).await?;
+        let observe = match Client::connect_with_config(address, token, config).await {
+            Ok(client) => client,
+            Err(error) => {
+                execute.close().await;
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            execute: Api::Ipc(execute),
+            observe: Api::Ipc(observe),
+            metadata: json!({
+                "type": "runtime", "mode": "ipc", "health": health,
+                "requested_model": health["model"], "request_timeout_ms": timeout_ms,
+            }),
+        })
+    }
+
     pub async fn close(&self) {
         self.execute.close().await;
         self.observe.close().await;
     }
+}
+pub(crate) fn parse_server_request_timeout(health: &Value) -> Result<Duration> {
+    let timeout_ms = health
+        .get("request_timeout_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            Failure::invalid("server health response missing valid integer request_timeout_ms")
+        })?;
+    if timeout_ms == 0 {
+        return Err(Failure::invalid(
+            "server request_timeout_ms must be non-zero",
+        ));
+    }
+    let request_timeout = Duration::from_millis(timeout_ms);
+    if request_timeout.is_zero()
+        || std::time::Instant::now()
+            .checked_add(request_timeout)
+            .is_none()
+    {
+        return Err(Failure::invalid(
+            "server request_timeout_ms is invalid or non-representable",
+        ));
+    }
+    Ok(request_timeout)
+}
+
+pub(crate) fn client_config_from_health(health: &Value) -> Result<ClientConfig> {
+    let request_timeout = parse_server_request_timeout(health)?;
+    Ok(ClientConfig {
+        request_timeout,
+        ..ClientConfig::default()
+    })
 }
 fn environment(name: &str) -> Result<String> {
     std::env::var(name)
@@ -144,12 +243,25 @@ impl Api {
                 )
                 .await?),
             Self::Ipc(c) => {
-                rpc(
-                    c,
-                    "session.events",
-                    json!({"session_id":id,"after":after,"limit":limit,"wait_ms":wait_ms}),
-                )
-                .await
+                let mut limit = limit;
+                loop {
+                    match c
+                        .request(
+                            "session.events",
+                            json!({"session_id":id,"after":after,"limit":limit,"wait_ms":wait_ms}),
+                        )
+                        .await
+                    {
+                        Ok(page) => return Ok(serde_json::from_value(page)?),
+                        // Only this read may repeat, at the same unconsumed cursor.
+                        Err(error)
+                            if error.code == "response_too_large_outcome_unknown" && limit > 1 =>
+                        {
+                            limit /= 2;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
             }
         }
     }
@@ -219,4 +331,58 @@ async fn rpc<T: DeserializeOwned>(client: &Client, method: &str, params: Value) 
     Ok(serde_json::from_value(
         client.request(method, params).await?,
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_server_request_timeout_valid() {
+        let health = json!({
+            "status": "ok",
+            "request_timeout_ms": 5000,
+        });
+        let timeout = parse_server_request_timeout(&health)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(timeout, Duration::from_millis(5000));
+        let config =
+            client_config_from_health(&health).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(config.request_timeout, Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn parse_server_request_timeout_missing() {
+        let health = json!({ "status": "ok" });
+        let err = parse_server_request_timeout(&health).unwrap_err();
+        assert_eq!(
+            err.message,
+            "server health response missing valid integer request_timeout_ms"
+        );
+    }
+
+    #[test]
+    fn parse_server_request_timeout_zero() {
+        let health = json!({
+            "status": "ok",
+            "request_timeout_ms": 0,
+        });
+        let err = parse_server_request_timeout(&health).unwrap_err();
+        assert_eq!(err.message, "server request_timeout_ms must be non-zero");
+    }
+
+    #[test]
+    fn parse_server_request_timeout_negative_or_string() {
+        let health = json!({
+            "status": "ok",
+            "request_timeout_ms": -100,
+        });
+        assert!(parse_server_request_timeout(&health).is_err());
+
+        let health_str = json!({
+            "status": "ok",
+            "request_timeout_ms": "5000",
+        });
+        assert!(parse_server_request_timeout(&health_str).is_err());
+    }
 }

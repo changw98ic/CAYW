@@ -193,7 +193,7 @@ impl SessionStore {
             ));
         }
         session.execution_waits.push(binding.clone());
-        let event = persist(
+        let (event, _) = persist(
             &transaction,
             &mut session,
             Some(lease.clone()),

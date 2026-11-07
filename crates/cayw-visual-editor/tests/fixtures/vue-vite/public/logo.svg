@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 640 420" role="img" aria-labelledby="title desc">
+  <title id="title">Synthetic Northstar Studio logo</title>
+  <desc id="desc">An original abstract logo mark with a stylized N, a sun, and layered hills.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e7f3ef"/>
+      <stop offset="1" stop-color="#f8faf7"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#134e4a"/>
+    </linearGradient>
+    <linearGradient id="hillLight" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="420" rx="28" fill="url(#sky)"/>
+  <circle cx="516" cy="96" r="42" fill="#fbbf24"/>
+  <circle cx="516" cy="96" r="62" fill="none" stroke="#f59e0b" stroke-opacity="0.28" stroke-width="2"/>
+  <rect x="70" y="70" width="252" height="252" rx="62" fill="url(#mark)"/>
+  <path d="M126 258 V132 H158 L232 220 V132 H266 V258 H234 L160 170 V258 Z" fill="#f8faf7"/>
+  <circle cx="196" cy="282" r="5" fill="#5eead4"/>
+  <path d="M0 318 C92 258 170 270 248 308 C326 346 418 350 640 276 L640 420 L0 420 Z" fill="url(#hillLight)" opacity="0.78"/>
+  <path d="M0 352 C118 292 214 304 306 342 C390 376 500 372 640 326 L640 420 L0 420 Z" fill="#0f766e"/>
+  <path d="M334 420 C360 372 376 348 416 324 C454 302 494 290 528 286" fill="none" stroke="#f8faf7" stroke-width="9" stroke-linecap="round" opacity="0.9"/>
+  <g fill="#f8faf7" opacity="0.8">
+    <circle cx="354" cy="140" r="4"/>
+    <circle cx="382" cy="118" r="3"/>
+    <circle cx="410" cy="152" r="5"/>
+  </g>
+</svg>

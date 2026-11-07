@@ -408,9 +408,12 @@ async fn invalid_or_unregistered_calls_never_reach_the_host() {
 async fn sandbox_has_no_ambient_execution_and_each_run_has_fresh_globals() {
     let code = mode(Arc::new(Host::default()), Limits::default());
     let report = code.execute(r#"
-        for _, name in {"os", "io", "package", "require", "load", "loadstring", "loadfile", "dofile", "process", "debug", "getfenv", "setfenv", "print", "coroutine", "pcall", "xpcall"} do
+        for _, name in {"os", "io", "package", "require", "load", "loadstring", "loadfile", "dofile", "process", "debug", "getfenv", "setfenv", "print"} do
             assert(_G[name] == nil, name)
         end
+        assert(type(coroutine) == 'table')
+        assert(type(pcall) == 'function' and type(xpcall) == 'function')
+        saved = 'only this execution'
         return true
     "#, CancellationToken::new()).await.unwrap();
     assert_eq!(report.return_value, json!(true));

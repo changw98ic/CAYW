@@ -167,11 +167,28 @@ async fn syntax_validation_and_strict_arguments_are_real() {
         call(
             &workspace,
             "fs.prepare_change_batch",
-            json!({"operations":[write("a.json","null"),write("A.json","null")]})
+            json!({"operations":[write("dup.json","null"),write("dup.json","null")]})
         )
         .await
         .is_err()
     );
+    // Case variants are distinct names on a case-sensitive volume and the
+    // same target on a case-insensitive one.
+    let case = call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[write("a.json","1"),write("A.json","2")]}),
+    )
+    .await;
+    if temp.path().join(".CAYW-WORKSPACE").exists() {
+        assert!(case.is_err());
+    } else {
+        call(&workspace, "fs.submit_change_batch", submit(&case.unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(temp.path().join("a.json")).unwrap(), b"1");
+        assert_eq!(fs::read(temp.path().join("A.json")).unwrap(), b"2");
+    }
     assert!(
         call(
             &workspace,
@@ -386,14 +403,9 @@ async fn nofollow_reserved_names_special_files_and_root_links() {
         "/tmp/bad",
         "a//b",
         "a/./b",
-        "C:/escape",
-        "a\\b",
         ".git/config",
-        ".cayw-other/x",
-        "CON",
-        "a.",
-        "a ",
-        "a:b",
+        ".cayw-workspace/x",
+        ".cayw-host-lock",
         "a\u{0}b",
     ] {
         assert!(
@@ -407,6 +419,27 @@ async fn nofollow_reserved_names_special_files_and_root_links() {
             "{path:?}"
         );
     }
+    // macOS accepts UTF-8 and names that Windows forbids, and only the actual
+    // internal objects above are reserved. User `.cayw-*` names stay ordinary.
+    for path in [
+        "CON",
+        "a.",
+        "a ",
+        "a:b",
+        "a\\b",
+        ".cayw-note.md",
+        "说明.txt",
+    ] {
+        call(
+            &workspace,
+            "fs.mkdir",
+            json!({"path":path,"expected_absent":true}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{path:?}: {error}"));
+    }
+    assert!(temp.path().join("说明.txt").is_dir());
+    assert!(temp.path().join(".cayw-note.md").is_dir());
     symlink(outside.path(), temp.path().join("escape")).unwrap();
     symlink(outside.path().join("secret"), temp.path().join("link")).unwrap();
     for path in ["escape/secret", "link"] {
@@ -585,15 +618,14 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
             .await
             .is_err()
     );
-    assert!(
-        call(
-            &small,
-            "fs.mkdir",
-            json!({"path":"é","expected_absent":true})
-        )
-        .await
-        .is_err()
-    );
+    call(
+        &small,
+        "fs.mkdir",
+        json!({"path":"é","expected_absent":true}),
+    )
+    .await
+    .unwrap();
+    assert!(temp.path().join("é").is_dir());
     assert!(
         Workspace::open(
             temp.path().canonicalize().unwrap(),

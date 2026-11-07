@@ -584,6 +584,88 @@ fn listed_source_hashes_do_not_prove_complete_build_inputs() {
     assert_eq!(value["status"], "pending");
 }
 
+/// A known failed task adds no missing-evidence reason. This fixture has no
+/// build receipts, so its independent provenance gaps remain the same as the
+/// passing control. Failure facts and measurements remain intact.
+#[test]
+fn known_failed_task_adds_no_comparison_gate_and_keeps_failure_evidence() {
+    let failed = directory().join("known-failed");
+    copy_tree(baseline(), &failed);
+    let mut samples = index(&failed);
+    let sample = &mut samples[0];
+    let checks = sample["checks"].as_array_mut().unwrap();
+    let check = checks
+        .iter_mut()
+        .find(|check| check["passed"] == true)
+        .expect("baseline sample has a passing check");
+    check["passed"] = false.into();
+    let checks = sample["checks"].clone();
+    sample["status"] = "failed".into();
+    let terminal = sample["observations"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap();
+    assert_eq!(terminal["kind"], "scenario_terminal");
+    terminal["value"]["status"] = "failed".into();
+    terminal["value"]["checks"] = checks;
+    refresh_sample(&failed, sample);
+    write_index(&failed, &samples);
+    let mut summary = read_json(&failed.join("summary.json"));
+    summary["statuses"] = json!(
+        samples
+            .iter()
+            .map(|sample| json!({
+                "sample_id": sample["sample_id"],
+                "status": sample["status"],
+                "timing_ns": sample["timing_ns"],
+                "failed_checks": sample["checks"].as_array().unwrap().iter()
+                    .filter(|check| check["passed"] != true).collect::<Vec<_>>()
+            }))
+            .collect::<Vec<_>>()
+    );
+    summary["failed_samples"] = samples
+        .iter()
+        .filter(|sample| sample["status"] == "failed")
+        .count()
+        .into();
+    summary["semantic_passed"] = false.into();
+    write_json(&failed.join("summary.json"), &summary);
+    let read = cli(&["read"], &[&failed]);
+    assert!(
+        read.status.success(),
+        "known failure must remain structurally valid: {}",
+        String::from_utf8_lossy(&read.stdout)
+    );
+
+    let passing_output = cli(&["compare"], &[baseline(), baseline()]);
+    let passing: Value = serde_json::from_slice(&passing_output.stdout).unwrap();
+    let output = cli(&["compare"], &[baseline(), &failed]);
+    let comparison: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(passing["status"], "pending");
+    assert_eq!(output.status.success(), passing_output.status.success());
+    assert_eq!(comparison["status"], passing["status"]);
+    assert_eq!(comparison["reasons"], passing["reasons"]);
+    assert_eq!(comparison["measurements"], passing["measurements"]);
+    assert!(
+        comparison["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reason| {
+                !reason
+                    .as_str()
+                    .unwrap()
+                    .contains("task has no passing result")
+            })
+    );
+    let kept = read_json(&failed.join("summary.json"));
+    assert_eq!(kept["failed_samples"], 1);
+    assert_eq!(kept["semantic_passed"], false);
+    assert!(comparison["measurements"]["left"].as_array().is_some());
+    assert!(comparison["measurements"]["right"].as_array().is_some());
+}
+
 fn replace_binding(root: &Path, binding: &Value) {
     let mut meta = read_json(&root.join("meta.json"));
     meta["binding"] = binding.clone();

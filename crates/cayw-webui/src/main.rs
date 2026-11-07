@@ -1,70 +1,156 @@
-use cayw_webui::IpcEndpoint;
-use std::{collections::HashMap, env, net::SocketAddr, process::ExitCode};
+use cayw_webui::{
+    AccountSettings, DeviceRouter, GatewayLimits, IpcEndpoint, LanAccount, OwnershipStore,
+    WebAccess,
+};
+use std::{
+    collections::HashMap,
+    env,
+    io::{self, IsTerminal},
+    net::SocketAddr,
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "CAYW 本机网页界面\n\n运行：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT]\n\n必需环境变量：\n  CAYW_IPC_ADDR   本机 Runtime IPC 地址；--ipc-addr 可覆盖\n  CAYW_IPC_TOKEN  宿主配置的 IPC 令牌，仅供网关使用\n  CAYW_WEB_TOKEN  独立的网页访问令牌，打开网页后手动输入\n可选环境变量：\n  CAYW_WEB_ADDR   本机 HTTP 地址，默认 127.0.0.1:0（系统分配端口）\n\n只接受 loopback 地址；令牌不支持 URL 或命令行参数。两枚令牌必须独立随机生成，至少包含 128 bit 随机数据（例如 16 个随机字节编码为 32 位十六进制）；统一接受 32..4096 个不含空白或控制字符的 ASCII 字节，长度校验不代替随机生成。Ctrl+C 停止网关。\n";
-
+const HELP: &str = "CAYW 可选网页界面\n\n推荐：cayw --ui web [--workspace DIR] [--no-open]\n本地默认仅监听回环地址，无登录。局域网须显式 --lan IP:PORT；账户可选，未配置时允许访问，配置后使用账号密码登录。\n配置账户：网页设置 → 局域网账号；本机入口保存后立即生效。备用 CLI：cayw account --username NAME [--workspace DIR]\n独立网关：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT] [--ownership PATH]\n  cayw-webui --lan IP:PORT --account-file FILE\n  cayw-webui account --username NAME --file FILE\n必需环境变量 CAYW_IPC_ADDR / CAYW_IPC_TOKEN 仅用于本机 Runtime 连接，不需要在浏览器中输入。\nCAYW_WEB_ADDR 默认为 127.0.0.1:0，不能通过此变量开放局域网。\n局域网地址须为本机明确的私有或回环 IP；不接受通配地址。账户配置交互式输入密码两次，不回显。\n";
 struct Config {
     ipc_addr: SocketAddr,
     web_addr: SocketAddr,
     ipc_token: String,
-    web_token: String,
+    ownership_path: PathBuf,
+    account_path: PathBuf,
+    access: WebAccess,
 }
-
 impl Config {
     fn parse(
         args: impl IntoIterator<Item = String>,
         mut values: HashMap<String, String>,
     ) -> Result<Self, String> {
         let mut args = args.into_iter();
-        while let Some(argument) = args.next() {
-            let name = match argument.as_str() {
-                "--ipc-addr" => "CAYW_IPC_ADDR",
-                "--web-addr" => "CAYW_WEB_ADDR",
-                _ => return Err("不支持的参数；使用 --help 查看运行方式".to_owned()),
-            };
-            values.insert(name.to_owned(), args.next().ok_or("地址参数缺少值")?);
+        let mut lan = None;
+        let mut account = None;
+        let mut web_override = false;
+        while let Some(arg) = args.next() {
+            let value = args.next().ok_or("参数缺少值")?;
+            match arg.as_str() {
+                "--ipc-addr" => {
+                    values.insert("CAYW_IPC_ADDR".into(), value);
+                }
+                "--web-addr" => {
+                    values.insert("CAYW_WEB_ADDR".into(), value);
+                    web_override = true;
+                }
+                "--ownership" | "--ownership-path" => {
+                    values.insert("CAYW_OWNERSHIP_PATH".into(), value);
+                }
+                "--lan" if lan.is_none() => lan = Some(value),
+                "--account-file" if account.is_none() => account = Some(PathBuf::from(value)),
+                _ => return Err("不支持或重复的参数；使用 --help 查看运行方式".into()),
+            }
         }
-        let address = |name: &str, default: Option<&str>| -> Result<SocketAddr, String> {
-            let value = values
-                .get(name)
+        let parse = |value: &str| {
+            value
+                .parse::<SocketAddr>()
+                .map_err(|_| "地址必须是 IP:端口".to_string())
+        };
+        let ipc_addr = parse(values.get("CAYW_IPC_ADDR").ok_or("缺少 CAYW_IPC_ADDR")?)?;
+        if !ipc_addr.ip().is_loopback() {
+            return Err("Runtime IPC 只接受 loopback 地址".into());
+        }
+        let ownership_path = PathBuf::from(
+            values
+                .get("CAYW_OWNERSHIP_PATH")
                 .map(String::as_str)
-                .or(default)
-                .ok_or_else(|| format!("缺少 {name}"))?;
-            let address: SocketAddr = value
-                .parse()
-                .map_err(|_| format!("{name} 必须是 IP:端口"))?;
-            if !address.ip().is_loopback() {
-                return Err(format!("{name} 只接受 loopback 地址"));
+                .unwrap_or("ownership.json"),
+        );
+        let account_path = account.unwrap_or_else(|| {
+            ownership_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("web-account.json")
+        });
+        let (web_addr, access) = if let Some(lan) = lan {
+            if web_override {
+                return Err("--lan 与 --web-addr 不能同时指定".into());
             }
-            Ok(address)
-        };
-        let ipc_addr = address("CAYW_IPC_ADDR", None)?;
-        let web_addr = address("CAYW_WEB_ADDR", Some("127.0.0.1:0"))?;
-        let mut token = |name: &str| -> Result<String, String> {
-            let value = values.remove(name).ok_or_else(|| format!("缺少 {name}"))?;
-            if !cayw_webui::valid_token(&value) {
-                return Err(format!(
-                    "{name} 必须是 32..4096 字节且不含空格的 ASCII 字符串"
-                ));
+            let addr = parse(&lan)?;
+            let private = match addr.ip() {
+                std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
+                std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_loopback(),
+            };
+            if !private {
+                return Err("--lan 必须指定本机私有或回环 IP，不能使用通配或公网地址".into());
             }
-            Ok(value)
+            let account = match LanAccount::read(&account_path) {
+                Ok(account) => Some(account),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(format!("账户文件无效或无法读取：{error}")),
+            };
+            (addr, WebAccess::Lan(account))
+        } else {
+            let addr = parse(
+                values
+                    .get("CAYW_WEB_ADDR")
+                    .map(String::as_str)
+                    .unwrap_or("127.0.0.1:0"),
+            )?;
+            if !addr.ip().is_loopback() {
+                return Err("本地模式仅监听回环地址；局域网访问必须显式 --lan".into());
+            }
+            (addr, WebAccess::Local)
         };
-        let ipc_token = token("CAYW_IPC_TOKEN")?;
-        let web_token = token("CAYW_WEB_TOKEN")?;
-        if ipc_token == web_token {
-            return Err("CAYW_WEB_TOKEN 必须与 CAYW_IPC_TOKEN 不同".to_owned());
+        let ipc_token = values
+            .remove("CAYW_IPC_TOKEN")
+            .ok_or("缺少 CAYW_IPC_TOKEN")?;
+        if !cayw_webui::valid_token(&ipc_token) {
+            return Err("CAYW_IPC_TOKEN 格式无效".into());
         }
         Ok(Self {
             ipc_addr,
             web_addr,
             ipc_token,
-            web_token,
+            ownership_path,
+            account_path,
+            access,
         })
     }
 }
-
+fn account(args: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let mut args = args.into_iter();
+    let mut username = None;
+    let mut path = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--username" if username.is_none() => username = Some(args.next().ok_or("缺少用户名")?),
+            "--file" if path.is_none() => {
+                path = Some(PathBuf::from(args.next().ok_or("缺少账户文件路径")?))
+            }
+            _ => return Err("account --username NAME --file FILE".into()),
+        }
+    }
+    let path = path.ok_or("需要 --file FILE")?;
+    let username = username.ok_or("需要 --username NAME")?;
+    if path.exists() {
+        return Err("账户文件已存在，未覆盖；请选择新的 --file 路径".into());
+    }
+    if !io::stdin().is_terminal() {
+        return Err("请在交互终端配置账户；密码不接受命令行参数".into());
+    }
+    let password = rpassword::prompt_password("Password (hidden): ").map_err(|e| e.to_string())?;
+    let confirm =
+        rpassword::prompt_password("Confirm password (hidden): ").map_err(|e| e.to_string())?;
+    if password != confirm {
+        return Err("两次密码不一致，未保存".into());
+    }
+    let account = LanAccount::from_password(&username, &password).map_err(|e| e.to_string())?;
+    account
+        .create(&path)
+        .map_err(|e| format!("账户未能保存：{e}"))?;
+    println!("账户已保存。局域网模式使用该账户文件；未启动网络服务。");
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -72,7 +158,12 @@ async fn main() -> ExitCode {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
-    match run(args).await {
+    let result = if args.first().is_some_and(|arg| arg == "account") {
+        account(args.into_iter().skip(1))
+    } else {
+        run(args).await
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("网页界面未能运行：{error}");
@@ -80,86 +171,128 @@ async fn main() -> ExitCode {
         }
     }
 }
-
 async fn run(args: Vec<String>) -> Result<(), String> {
     let config = Config::parse(
         args,
         env::vars()
-            .filter(|(name, _)| name.starts_with("CAYW_"))
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "CAYW_IPC_ADDR" | "CAYW_IPC_TOKEN" | "CAYW_WEB_ADDR" | "CAYW_OWNERSHIP_PATH"
+                )
+            })
             .collect(),
     )?;
     let client = IpcEndpoint::new(config.ipc_addr, config.ipc_token)
-        .map_err(|_| "本机 IPC 地址或令牌无效".to_owned())?;
+        .map_err(|_| "本机 IPC 地址或令牌无效")?;
+    let devices = Arc::new(DeviceRouter::new(client));
+    let ownership = OwnershipStore::open(&config.ownership_path)
+        .map_err(|e| format!("无法打开持久所有权存储：{e}"))?;
     let listener = TcpListener::bind(config.web_addr)
         .await
-        .map_err(|_| "无法监听本机网页地址".to_owned())?;
-    let address = listener
-        .local_addr()
-        .map_err(|_| "无法读取网页监听地址".to_owned())?;
-    println!("网页界面：http://{address}/");
-    println!("在网页中输入 CAYW_WEB_TOKEN 的值；令牌不会写入网页地址或浏览器存储。");
+        .map_err(|e| format!("无法监听网页地址：{e}"))?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    let local_listener = if matches!(config.access, WebAccess::Lan(_)) {
+        Some(
+            TcpListener::bind("127.0.0.1:0")
+                .await
+                .map_err(|e| format!("无法监听本机管理入口：{e}"))?,
+        )
+    } else {
+        None
+    };
+    let local_address = local_listener
+        .as_ref()
+        .map(TcpListener::local_addr)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(address);
+    let login_required = matches!(config.access, WebAccess::Lan(Some(_)));
+    if matches!(config.access, WebAccess::Lan(None)) {
+        eprintln!(
+            "局域网访问已开放，未配置账号，网络内可直接访问。请在本机管理页面的设置中配置可选账号，保存后立即启用局域网登录。"
+        );
+    }
+    let mode = if matches!(config.access, WebAccess::Lan(_)) {
+        "lan"
+    } else {
+        "local"
+    };
+    if env::var_os("CAYW_LAUNCHER").is_some() {
+        println!(
+            "{}",
+            serde_json::json!({"url":format!("http://{address}/"),"access":mode,"login_required":login_required,"local_url":format!("http://{local_address}/")})
+        );
+    } else {
+        println!("网页界面：http://{address}/");
+        if local_listener.is_some() {
+            println!("本机管理：http://{local_address}/（设置 → 局域网账号）");
+        }
+    }
     let cancel = CancellationToken::new();
-    let signal_cancel = cancel.clone();
+    let stop = cancel.clone();
     let signal = tokio::spawn(async move {
-        let result = tokio::signal::ctrl_c().await;
-        signal_cancel.cancel();
-        result
+        let _ = tokio::signal::ctrl_c().await;
+        stop.cancel();
     });
-    let result = cayw_webui::serve(listener, client, config.web_token, cancel)
-        .await
-        .map_err(|_| "本机 HTTP 服务停止并返回错误".to_owned());
+    let result = cayw_webui::serve_with_account_settings(
+        listener,
+        devices,
+        config.access,
+        GatewayLimits::default(),
+        Some(Arc::new(ownership)),
+        AccountSettings {
+            path: config.account_path,
+            local_listener,
+        },
+        cancel,
+    )
+    .await
+    .map_err(|e| format!("HTTP 服务错误：{e}"));
     signal.abort();
     result
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn environment() -> HashMap<String, String> {
         [
             ("CAYW_IPC_ADDR", "127.0.0.1:4100"),
             ("CAYW_IPC_TOKEN", "fedcba9876543210fedcba9876543210"),
-            ("CAYW_WEB_TOKEN", "0123456789abcdef0123456789abcdef"),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .map(|(k, v)| (k.into(), v.into()))
         .collect()
     }
-
     #[test]
-    fn defaults_and_explicit_loopback_overrides() {
+    fn local_default_is_loopback_and_explicit_lan_can_have_no_account() {
         let config = Config::parse([], environment()).unwrap();
         assert_eq!(config.web_addr, "127.0.0.1:0".parse().unwrap());
-        let config = Config::parse(
-            ["--web-addr".to_owned(), "[::1]:7000".to_owned()],
+        assert!(matches!(config.access, WebAccess::Local));
+        let lan = Config::parse(
+            ["--lan", "192.168.1.10:1234"].into_iter().map(String::from),
             environment(),
         )
         .unwrap();
-        assert_eq!(config.web_addr, "[::1]:7000".parse().unwrap());
-    }
-
-    #[test]
-    fn bad_configuration_errors_never_echo_values() {
-        for (key, value) in [
-            ("CAYW_WEB_ADDR", "0.0.0.0:9999"),
-            ("CAYW_IPC_ADDR", "10.0.0.1:10"),
-            ("CAYW_WEB_TOKEN", "secret token"),
-            ("CAYW_WEB_TOKEN", "ok"),
-            ("CAYW_IPC_TOKEN", "id"),
-            ("CAYW_WEB_TOKEN", "fedcba9876543210fedcba9876543210"),
+        assert!(matches!(lan.access, WebAccess::Lan(None)));
+        let missing = Config::parse(
+            [
+                "--lan",
+                "127.0.0.1:0",
+                "--account-file",
+                "/definitely/missing/cayw-account.json",
+            ]
+            .into_iter()
+            .map(String::from),
+            environment(),
+        )
+        .unwrap();
+        assert!(matches!(missing.access, WebAccess::Lan(None)));
+        for args in [
+            vec!["--web-addr", "0.0.0.0:1234"],
+            vec!["--lan", "0.0.0.0:1234"],
         ] {
-            let mut values = environment();
-            values.insert(key.to_owned(), value.to_owned());
-            let error = Config::parse([], values).err().unwrap();
-            assert!(!error.contains(value));
+            assert!(Config::parse(args.into_iter().map(String::from), environment()).is_err());
         }
-        assert!(
-            Config::parse(
-                ["--web-token".to_owned(), "private".to_owned()],
-                environment()
-            )
-            .is_err()
-        );
     }
 }

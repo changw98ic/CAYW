@@ -150,6 +150,7 @@ impl FileSkills {
                 tools: Vec::new(),
                 skills: specs,
                 resources: Vec::new(),
+                prompts: Vec::new(),
                 search: false,
             },
             entries: loaded,

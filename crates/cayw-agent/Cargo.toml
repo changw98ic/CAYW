@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 cayw-ai.workspace = true
+cayw-agent-types.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true

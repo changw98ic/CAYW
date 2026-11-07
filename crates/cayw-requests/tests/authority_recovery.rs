@@ -129,6 +129,15 @@ fn repair_request(path: &Path, repair_id: &str) -> AuthorityRepairRequest {
     let inspection = RequestStore::inspect_authority(path, RequestConfig::default()).unwrap();
     AuthorityRepairRequest::new(inspection, repair_id, actor(), "original Worker stopped; all Task locks and Cells ownership held; Device has no pending processes").unwrap()
 }
+fn quota(database: &rusqlite::Connection) -> (i64, i64) {
+    database
+        .query_row(
+            "SELECT task_count,reserved_bytes FROM request_meta WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
 fn events(database: &rusqlite::Connection) -> Vec<(i64, Vec<u8>)> {
     database
         .prepare("SELECT sequence,payload FROM request_events ORDER BY sequence")
@@ -301,6 +310,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
     fail_commit(&path, &store);
     let request = repair_request(&path, "repair-activate");
     let database = rusqlite::Connection::open(&path).unwrap();
+    let original_quota = quota(&database);
     // The table exists before the first administrative recovery opens it.
     database.execute_batch("CREATE TRIGGER fail_activation AFTER UPDATE OF authority_stopped ON request_meta WHEN NEW.authority_stopped=0 AND OLD.authority_stopped=1 BEGIN INSERT INTO broken_commit VALUES(2); END;").unwrap();
     assert!(matches!(
@@ -308,7 +318,16 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         Err(RequestError::Database(_))
     ));
     let prepared_events = events(&database);
+    let prepared_quota = quota(&database);
+    assert_eq!(prepared_quota.0, original_quota.0);
+    assert!(prepared_quota.1 > original_quota.1);
+    let prepared_record: Vec<u8> = database
+        .query_row("SELECT data FROM request_authority_repairs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
     assert!(RequestStore::open(&path, RequestConfig::default()).is_err());
+    assert_eq!(quota(&database), prepared_quota);
     database
         .execute_batch("DROP TRIGGER fail_activation")
         .unwrap();
@@ -316,7 +335,52 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
     assert_eq!(events(&database), prepared_events);
     assert_ne!(result.authority_id, result.previous_authority_id);
+    assert_eq!(quota(&database), original_quota);
+    let retained_record: Vec<u8> = database
+        .query_row("SELECT data FROM request_authority_repairs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(retained_record, prepared_record);
     assert!(RequestStore::open(&path, RequestConfig::default()).is_ok());
+    assert_eq!(quota(&database), original_quota);
+
+    // Migrate an earlier successfully activated repair whose temporary
+    // reservation was retained until reopen. Neither its original evidence nor
+    // its activation receipt may be removed while the counters are rebuilt.
+    let old_repair_reservation = prepared_quota.1 - original_quota.1;
+    database
+        .execute(
+            "UPDATE request_meta SET reserved_bytes=reserved_bytes+?1 WHERE singleton=1",
+            [old_repair_reservation],
+        )
+        .unwrap();
+    assert_eq!(quota(&database), prepared_quota);
+    let reopened = RequestStore::open(&path, RequestConfig::default()).unwrap();
+    assert_eq!(quota(&database), original_quota);
+    let migrated_record: Vec<u8> = database
+        .query_row("SELECT data FROM request_authority_repairs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(migrated_record, prepared_record);
+    assert_eq!(
+        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap(),
+        result
+    );
+    assert_eq!(quota(&database), original_quota);
+    reopened
+        .end_task(
+            &identity(),
+            TaskOutcome::Completed,
+            &actor(),
+            "the host settled the retained task after repair",
+        )
+        .unwrap();
+    assert_eq!(quota(&database), (0, 0));
+    drop(reopened);
+    assert!(RequestStore::open(&path, RequestConfig::default()).is_ok());
+    assert_eq!(quota(&database), (0, 0));
 }
 
 #[test]

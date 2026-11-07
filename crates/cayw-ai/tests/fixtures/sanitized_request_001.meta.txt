@@ -1,0 +1,8 @@
+# Source SHA-256: 846fa3da681c46f84429175a816712235ea487f5d326b1f14350a0daabd85b29
+# Fixture SHA-256: d2ae3d50043cff448c09f9033403bce949f45bd2924537ca7e9e90a25d67ab0d
+# Captured from: /tmp/cayw-f01-f20-repair-20261028/chat-baseline-capture-02/http-capture/request-001/response.sse
+# Scope: The successful first tool request in a new capture using the original reg01 prompt and frozen baseline binary. This is not a historical failed request.
+# Description: A streamed tool call with empty argument fragments, one nonempty argument fragment and trailing usage. Separate regression cases test splitting arguments across multiple nonempty fragments.
+# Normalization: Replace the top-level response id and model in all 28 JSON frames and the single tool-call id with stable fixture values. JSON comparison confirmed these are the only changed fields.
+# Preserved: 28 JSON frames and one [DONE] frame, frame order, text/reasoning, tool names, every argument fragment, finish_reason, usage fields and values.
+# Privacy limit: This normalization replaces identifiers. It is not a general text-secret redactor. No HTTP request headers or credentials are part of this SSE fixture.

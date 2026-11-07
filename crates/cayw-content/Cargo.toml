@@ -10,8 +10,10 @@ description = "Device-owned local content with explicit encrypted backup and res
 [features]
 default = ["encryption"]
 encryption = ["dep:chacha20poly1305", "dep:zeroize"]
+fault-injection = ["dep:cayw-ai", "cayw-ai/fault-injection"]
 
 [dependencies]
+cayw-ai = { workspace = true, optional = true }
 cap-std = "3.4.5"
 cap-fs-ext = "3.4.5"
 fs2 = "0.4.3"

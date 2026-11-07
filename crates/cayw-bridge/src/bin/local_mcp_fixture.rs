@@ -180,6 +180,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id,
                 json!({"contents":[{"uri":"fixture://local/addition","mimeType":"text/markdown","text":TEXT}]}),
             )?,
+            "prompts/list" => result(
+                id,
+                json!({"resultType":"complete","prompts":[{
+                    "name":"add-help",
+                    "description":"Explain the local add tool",
+                    "argumentsSchema":{"type":"object","properties":{"topic":{"type":"string"}},"additionalProperties":false}
+                }]}),
+            )?,
+            "prompts/get" if params["name"] == "add-help" => {
+                let topic = params["arguments"]["topic"].as_str().unwrap_or("addition");
+                result(
+                    id,
+                    json!({
+                        "description":"Explain the local add tool",
+                        "messages":[{"role":"user","content":{"type":"text","text":format!("Help with {topic}")}}]
+                    }),
+                )?;
+            }
             _ => error(id, -32601, "method not found")?,
         }
     }

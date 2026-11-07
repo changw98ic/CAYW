@@ -43,6 +43,13 @@ pub struct PluginManifest {
     pub permissions: BTreeMap<String, BTreeSet<String>>,
 }
 
+impl PluginManifest {
+    /// Validate compatibility and capability schemas without executing code.
+    pub fn validate(&self) -> Result<(), PluginError> {
+        registry::validate_manifest(self).map(|_| ())
+    }
+}
+
 /// The host constructs this context. It is never taken from a plugin response.
 #[derive(Debug, Clone, Default)]
 pub struct PluginContext {
@@ -149,9 +156,11 @@ impl Drop for CancelOnDrop {
 }
 
 pub(crate) fn valid_name(value: &str) -> bool {
+    // Allow npm scoped package names (`@scope/name`) so F15 can load real Pi
+    // packages under their published identity without renaming.
     !value.is_empty()
         && value.len() <= 128
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@' | b'/'))
 }

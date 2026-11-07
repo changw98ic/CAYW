@@ -144,20 +144,18 @@ fn setup(
     (dir, journal, host, manager)
 }
 
-// Break caught: scripts can reach the bootstrap/raw API or create writable globals.
+// Break caught: scripts can reach the bootstrap/raw API or replace the Host API
+// binding. Ordinary per-execution globals are allowed by the language contract.
 #[tokio::test]
-async fn helpers_raw_catalog_and_fresh_global_spoofs_cannot_start_effects() {
+async fn helpers_raw_catalog_and_globals_cannot_start_unauthorized_effects() {
     let (_dir, journal, host, manager) = setup(CellLimits::default(), Limits::default());
     for script in [
-        "new_global=42; new_global=43; cayw.call('write',{})",
-        "_G.new_global=42; cayw.call('write',{})",
-        "rawset(_G,'new_global',42); cayw.call('write',{})",
         "__cells_call('__cells_store',{key='bypass',value=1,expected_version=0}); cayw.call('write',{})",
         "_G.cayw.describe('__cells_store'); cayw.call('write',{})",
         "_G.cayw.call('__cells_store',{key='bypass',value=1,expected_version=0}); cayw.call('write',{})",
         "cayw.call('__cells_yield',{}); cayw.call('write',{})",
         "ALL_TOOLS[1]='fake'; cayw.call('write',{})",
-        "yield_control=function() end; cayw.call('write',{})",
+        "rawset(_G,'cayw',{}); cayw.call('write',{})",
     ] {
         let page = done(
             &manager,
@@ -171,7 +169,41 @@ async fn helpers_raw_catalog_and_fresh_global_spoofs_cannot_start_effects() {
     }
     assert_eq!(host.writes.load(Ordering::SeqCst), 0);
     assert!(journal.load("s", "bypass").unwrap().is_none());
-    let page=done(&manager,manager.exec(request("assert(_G.cayw==cayw); assert(#ALL_TOOLS==7); assert(#cayw.discover()==7); for _,name in ALL_TOOLS do assert(string.sub(name,1,8)~='__cells_') end; assert(not pcall and not xpcall and not coroutine and not debug and type(load)=='function' and not io)"),"trusted-parent",CancellationToken::new()).await.unwrap()).await;
+    // A fresh execution owns its globals; writing them is ordinary language use
+    // and does not grant a bypass of the Host catalog.
+    let page = done(
+        &manager,
+        manager
+            .exec(
+                request("new_global=42; _G.other=43; function add() return new_global + _G.other end; assert(add()==85); cayw.call('write',{})"),
+                "trusted-parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.status, CellStatus::Completed, "{page:?}");
+    assert_eq!(host.writes.load(Ordering::SeqCst), 1);
+    // Async cell helpers cannot run inside a script-created coroutine: a
+    // synchronous resume cannot drive the async bridge, so the call is refused
+    // before dispatch and the script can handle the known failure.
+    let page = done(
+        &manager,
+        manager
+            .exec(
+                request("local co=coroutine.create(function() local ok=pcall(function() return store('inside',1,0) end); assert(not ok) end); local resumed=coroutine.resume(co); assert(resumed); cayw.call('write',{})"),
+                "trusted-parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.status, CellStatus::Completed, "{page:?}");
+    assert_eq!(host.writes.load(Ordering::SeqCst), 2);
+    assert!(journal.load("s", "inside").unwrap().is_none());
+    let page=done(&manager,manager.exec(request("assert(_G.cayw==cayw); assert(#ALL_TOOLS==7); assert(#cayw.discover()==7); for _,name in ALL_TOOLS do assert(string.sub(name,1,8)~='__cells_') end; assert(type(pcall)=='function' and type(xpcall)=='function' and type(coroutine)=='table'); assert(not debug and not io and not os and not require)"),"trusted-parent",CancellationToken::new()).await.unwrap()).await;
     assert_eq!(
         page.status,
         CellStatus::Completed,
@@ -285,6 +317,130 @@ async fn raw_emit_item_and_total_byte_limits_stop_following_effects() {
         assert_eq!(host.writes.load(Ordering::SeqCst), 0);
         manager.close().await;
     }
+}
+
+#[tokio::test]
+async fn protected_output_budgets_and_exit_stop_before_another_effect() {
+    for (limits, script, expected) in [
+        (
+            CellLimits {
+                output_items: 1,
+                ..CellLimits::default()
+            },
+            "text('one'); pcall(function() pcall(function() text('two') end) end); cayw.call('write',{})",
+            CellStatus::Failed,
+        ),
+        (
+            CellLimits {
+                output_bytes: 45,
+                ..CellLimits::default()
+            },
+            "pcall(function() cayw.emit(string.rep('x',80)) end); cayw.call('write',{})",
+            CellStatus::Failed,
+        ),
+        (
+            CellLimits {
+                item_bytes: 100,
+                ..CellLimits::default()
+            },
+            "pcall(function() text(string.rep('x',200)) end); cayw.call('write',{})",
+            CellStatus::Failed,
+        ),
+        (
+            CellLimits {
+                store_keys: 1,
+                ..CellLimits::default()
+            },
+            "store('first',1,0); pcall(function() store('second',2,0) end); cayw.call('write',{})",
+            CellStatus::Failed,
+        ),
+        (
+            CellLimits {
+                media_bytes: 1,
+                ..CellLimits::default()
+            },
+            "pcall(function() image('image/png','YWJj') end); cayw.call('write',{})",
+            CellStatus::Failed,
+        ),
+        (
+            CellLimits::default(),
+            "pcall(function() xpcall(function() exit(0) end,function() return 'handled' end) end); cayw.call('write',{})",
+            CellStatus::Exited,
+        ),
+    ] {
+        let (_dir, _journal, host, manager) = setup(limits, Limits::default());
+        let page = done(
+            &manager,
+            manager
+                .exec(
+                    request(script),
+                    "protected-parent",
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(page.status, expected, "{script}: {page:?}");
+        assert!(!page.outcome_unknown, "known stops must stay known");
+        assert_eq!(host.writes.load(Ordering::SeqCst), 0, "{script}");
+        let expected_stop = Some(if expected == CellStatus::Exited {
+            cayw_codemode::CapabilityStop::Exited
+        } else {
+            cayw_codemode::CapabilityStop::Budget
+        });
+        assert_eq!(page.stop, expected_stop);
+        assert_eq!(manager.record(&page.cell_id).unwrap().stop, expected_stop);
+        let closed = manager.close().await;
+        let terminal = &closed
+            .cells
+            .iter()
+            .find(|cell| cell.execution.cell_id == page.cell_id)
+            .unwrap()
+            .terminal;
+        assert_eq!(terminal.stop, expected_stop);
+        let record = manager.record(&page.cell_id).unwrap();
+        let serialized = serde_json::to_string(&record).unwrap();
+        let restored: CellRecord = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.stop, expected_stop);
+        let mut historical = serde_json::to_value(&record).unwrap();
+        historical.as_object_mut().unwrap().remove("stop");
+        let historical: CellRecord = serde_json::from_value(historical).unwrap();
+        assert_eq!(historical.stop, None);
+    }
+}
+
+#[tokio::test]
+async fn protected_invalid_output_and_store_conflict_remain_recoverable() {
+    let (_dir, journal, host, manager) = setup(CellLimits::default(), Limits::default());
+    let page = done(
+        &manager,
+        manager
+            .exec(
+                request(
+                    r#"
+        store('same',1,0)
+        local conflict = pcall(function() store('same',2,0) end)
+        local invalid = pcall(function() image('unsupported/mime','abcd') end)
+        local malformed = pcall(function() image('image/png','bad base64') end)
+        local empty = pcall(function() image('image/png','') end)
+        assert(not conflict and not invalid and not malformed and not empty)
+        assert(load('same').value == 1)
+        cayw.call('write',{})
+    "#,
+                ),
+                "ordinary-parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.status, CellStatus::Completed, "{page:?}");
+    assert_eq!(host.writes.load(Ordering::SeqCst), 1);
+    assert_eq!(journal.load("s", "same").unwrap().unwrap().value, json!(1));
+    assert!(!page.outcome_unknown);
+    manager.close().await;
 }
 
 // Break caught: load counts the fixed snapshot envelope against logical value depth.

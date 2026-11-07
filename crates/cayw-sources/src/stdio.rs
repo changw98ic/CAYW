@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use cayw_ai::CancellationToken;
 use cayw_bridge::{
-    Manifest, ResourceSpec, SourceHandle, SourceOperation, SourceReply, SourceRequest, ToolSpec,
+    Manifest, PromptSpec, ResourceSpec, SourceHandle, SourceOperation, SourceReply, SourceRequest,
+    ToolSpec,
 };
 use cayw_codemode::CapabilityError;
 use serde::{Deserialize, Serialize};
@@ -394,7 +395,7 @@ impl StdioSource {
                 })
                 .collect::<Result<Vec<_>, CapabilityError>>()?;
             let resources = client
-                .request("resources/list", json!({}), cancel, false)
+                .request("resources/list", json!({}), cancel.clone(), false)
                 .await?;
             if server_info != self::server_info(&resources)?
                 || resources.get("nextCursor").is_some()
@@ -419,10 +420,45 @@ impl StdioSource {
                     })
                 })
                 .collect::<Result<Vec<_>, CapabilityError>>()?;
+            let prompts = client
+                .request("prompts/list", json!({}), cancel, false)
+                .await?;
+            if server_info != self::server_info(&prompts)?
+                || prompts.get("nextCursor").is_some()
+                || prompts
+                    .get("resultType")
+                    .is_some_and(|value| value != "complete")
+            {
+                return Err(failure(
+                    "stdio server identity changed or prompt pagination unsupported",
+                ));
+            }
+            let prompts = prompts["prompts"]
+                .as_array()
+                .filter(|prompts| prompts.len() <= 128)
+                .ok_or_else(|| failure("stdio prompt catalog missing or too large"))?
+                .iter()
+                .map(|prompt| {
+                    Ok(PromptSpec {
+                        name: text(prompt, "name")?,
+                        description: optional_text(prompt, "description")?,
+                        arguments_schema: prompt.get("argumentsSchema").cloned().or_else(|| {
+                            prompt.get("arguments").and_then(|value| {
+                                if value.is_object() || value.is_array() {
+                                    Some(value.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        }),
+                    })
+                })
+                .collect::<Result<Vec<_>, CapabilityError>>()?;
             Ok((
                 Manifest {
                     tools,
                     resources,
+                    prompts,
                     ..Manifest::default()
                 },
                 server_info,
@@ -499,6 +535,11 @@ impl SourceHandle for StdioHandle {
                 true,
             ),
             SourceOperation::ReadResource { uri } => ("resources/read", json!({"uri":uri}), false),
+            SourceOperation::GetPrompt { name, arguments } => (
+                "prompts/get",
+                json!({"name":name,"arguments":arguments}),
+                false,
+            ),
             _ => return Err(failure("stdio source operation unavailable")),
         };
         let result = self.client.request(method, params, cancel, effect).await?;
@@ -512,7 +553,20 @@ impl SourceHandle for StdioHandle {
                 "stdio result server identity changed; reconnect explicitly",
             ));
         }
-        let value = if effect {
+        let value = if matches!(request.operation, SourceOperation::GetPrompt { .. }) {
+            if !result
+                .get("description")
+                .is_none_or(|value| value.is_string())
+                || !result["messages"].is_array()
+            {
+                return Err(failure("stdio prompt result requires description/messages"));
+            }
+            let mut value = result;
+            if let Some(object) = value.as_object_mut() {
+                object.remove("_meta");
+            }
+            value
+        } else if effect {
             if result
                 .get("isError")
                 .is_some_and(|value| !value.is_boolean())
@@ -600,22 +654,49 @@ fn uncertain(effect: bool, message: &str) -> CapabilityError {
         failure(message)
     }
 }
-async fn send(
-    writer: &mut ChildStdin,
-    value: &Value,
-    shared: &Shared,
-    config: &StdioConfig,
-) -> Result<(), CapabilityError> {
+fn encode_bounded_frame(value: &Value, max_frame_bytes: usize) -> Result<Vec<u8>, CapabilityError> {
     let mut bytes =
         serde_json::to_vec(value).map_err(|_| failure("stdio message serialization failed"))?;
-    if bytes.len() + 1 > config.max_frame_bytes {
+    if bytes.len() + 1 > max_frame_bytes {
         return Err(failure("stdio outgoing frame bound exceeded"));
     }
     bytes.push(b'\n');
+    Ok(bytes)
+}
+async fn write_frame(
+    writer: &mut ChildStdin,
+    bytes: &[u8],
+    shared: &Shared,
+    timeout: Duration,
+) -> Result<(), CapabilityError> {
     tokio::select! { biased;
-        _=shared.close.cancelled()=>Err(CapabilityError::unknown("stdio closed during write")),
-        result=tokio::time::timeout(config.request_timeout,async {writer.write_all(&bytes).await?;writer.flush().await})=>
-            match result { Ok(Ok(()))=>Ok(()),_=>Err(CapabilityError::unknown("stdio write failed or timed out")) }
+        _ = shared.close.cancelled() => Err(CapabilityError::unknown("stdio closed during write")),
+        result = tokio::time::timeout(timeout, async {
+            writer.write_all(bytes).await?;
+            writer.flush().await
+        }) => match result {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(CapabilityError::unknown("stdio write failed or timed out")),
+        }
+    }
+}
+fn parse_response_payload(value: &Value, id: u64, effect: bool) -> Result<Value, CapabilityError> {
+    match (value.get("result"), value.get("error")) {
+        (Some(result), None) if result.is_object() => Ok(result.clone()),
+        (None, Some(error)) => {
+            let code = error["code"]
+                .as_i64()
+                .ok_or_else(|| CapabilityError::unknown("stdio invalid error code"))?;
+            if !error["message"].is_string() {
+                return Err(CapabilityError::unknown("stdio invalid error message"));
+            }
+            let known = matches!(code, -32600 | -32601 | -32602 | -32022);
+            Err(uncertain(
+                effect && !known,
+                &format!("MCP error {code} for original request {id}"),
+            ))
+        }
+        _ => Err(uncertain(effect, "stdio invalid response result/error")),
     }
 }
 async fn run(
@@ -652,16 +733,7 @@ async fn run(
                         if value.get("method").is_some() {return Err(CapabilityError::unknown("stdio server requests are unsupported"));}
                         let id=id.as_u64().ok_or_else(||CapabilityError::unknown("stdio invalid response ID"))?;
                         if let Some(waiter)=pending.remove(&id) {
-                            let response=match(value.get("result"),value.get("error")) {
-                                (Some(result),None) if result.is_object()=>Ok(result.clone()),
-                                (None,Some(error))=> {
-                                    let code=error["code"].as_i64().ok_or_else(||CapabilityError::unknown("stdio invalid error code"))?;
-                                    if !error["message"].is_string() {return Err(CapabilityError::unknown("stdio invalid error message"));}
-                                    let known=matches!(code,-32600|-32601|-32602|-32022);
-                                    Err(uncertain(waiter.effect && !known,&format!("MCP error {code} for original request {id}")))
-                                }
-                                _=>Err(uncertain(waiter.effect,"stdio invalid response result/error")),
-                            };
+                            let response = parse_response_payload(&value, id, waiter.effect);
                             shared.event("response",Some(id),None);
                             let _=waiter.reply.send(response);
                         } else {shared.update(|state|state.ignored_late+=1);shared.event("ignored_late",Some(id),None);}
@@ -678,23 +750,36 @@ async fn run(
                             let _=reply.send(Err(failure("stdio pending-call budget exhausted")));continue;
                         }
                         let value=json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-                        if serde_json::to_vec(&value).map_or(true,|bytes|bytes.len()+1>config.max_frame_bytes) {
-                            let _=reply.send(Err(failure("stdio outgoing frame bound exceeded")));continue;
-                        }
+                        let frame = match encode_bounded_frame(&value, config.max_frame_bytes) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        };
                         pending.insert(id,Pending{reply,effect});
-                        send(&mut writer,&value,&shared,&config).await?;
+                        write_frame(&mut writer, &frame, &shared, config.request_timeout).await?;
                         shared.update(|state| {
                             if state.methods.len()<config.max_observations {state.methods.push(method.into());}
                             else {state.observations_omitted=state.observations_omitted.saturating_add(1);}
                             if method=="tools/call" {state.tool_calls+=1;}
                             if method=="resources/read" {state.resource_reads+=1;}
+                            // prompts/list and prompts/get appear in methods only
                         });
                         shared.event("sent",Some(id),Some(method));
                     }
                     Some(CommandMessage::Cancel(id))=>{
                         if pending.remove(&id).is_some() {
-                            send(&mut writer,&json!({"jsonrpc":"2.0","method":"notifications/cancelled",
-                                "params":{"requestId":id,"reason":"original host call cancelled or dropped"}}),&shared,&config).await?;
+                            let cancel_value = json!({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/cancelled",
+                                "params": {
+                                    "requestId": id,
+                                    "reason": "original host call cancelled or dropped",
+                                }
+                            });
+                            let frame = encode_bounded_frame(&cancel_value, config.max_frame_bytes)?;
+                            write_frame(&mut writer, &frame, &shared, config.request_timeout).await?;
                             shared.update(|state|state.cancellations+=1);shared.event("cancelled",Some(id),None);
                         }
                     }
@@ -748,4 +833,41 @@ async fn run(
         }
     });
     shared.finished.notify_waiters();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_bounded_frame_rejects_oversized_payload() {
+        let value = json!({"hello": "world"});
+        let raw_len = serde_json::to_vec(&value).unwrap().len();
+        // Exact fit: raw_len + 1 newline == max_frame_bytes
+        let frame = encode_bounded_frame(&value, raw_len + 1).expect("exact frame fit");
+        assert_eq!(frame.len(), raw_len + 1);
+        assert_eq!(frame.last(), Some(&b'\n'));
+
+        // Over by 1 byte
+        let err = encode_bounded_frame(&value, raw_len).expect_err("over bound by 1 byte");
+        assert_eq!(err.message, "stdio outgoing frame bound exceeded");
+        assert!(!err.outcome_unknown);
+    }
+
+    #[test]
+    fn parse_response_payload_differentiates_errors() {
+        let ok_resp = json!({"result": {"key": "val"}});
+        assert_eq!(
+            parse_response_payload(&ok_resp, 1, false).unwrap(),
+            json!({"key": "val"})
+        );
+
+        let known_err = json!({"error": {"code": -32601, "message": "Method not found"}});
+        let err = parse_response_payload(&known_err, 1, true).unwrap_err();
+        assert!(!err.outcome_unknown);
+
+        let custom_err = json!({"error": {"code": -1, "message": "Internal error"}});
+        let err = parse_response_payload(&custom_err, 1, true).unwrap_err();
+        assert!(err.outcome_unknown);
+    }
 }

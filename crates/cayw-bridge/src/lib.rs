@@ -34,6 +34,11 @@
 //! Resource URIs are opaque source-scoped keys. They are never resolved, decoded
 //! or opened as local filesystem paths.
 //!
+//! `mcp.prompts.list` is likewise metadata-only. `mcp.prompts.get` fetches one
+//! prompt template through the host-owned source. Prompt text never grants Host
+//! permissions, changes trusted roles, or approves tools. Server-driven
+//! elicitation/forms remain out of this local adapter's scope.
+//!
 //! The `local_mcp` example uses the explicit host-owned `cayw-sources` MCP
 //! **2026-07-28 stdio** adapter. Every request carries version/capabilities;
 //! there is no initialization handshake. Tool/resource discovery, cancellation,
@@ -55,7 +60,7 @@ pub use bounds::content_sha256;
 pub use model::*;
 pub use registry::Registry;
 
-use bounds::{OwnedJson, failure, name, resource_uri};
+use bounds::{OwnedJson, failure, name, resource_uri, source_name};
 use cayw_ai::CancellationToken;
 use cayw_codemode::CapabilityError;
 use cayw_host::ExternalHost;
@@ -131,6 +136,19 @@ struct ResourceReadArgs {
     server: String,
     uri: String,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptList {
+    server: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromptGetArgs {
+    server: String,
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
 
 fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, CapabilityError> {
     serde_json::from_value(value).map_err(|_| failure("invalid bridge capability arguments"))
@@ -160,6 +178,8 @@ impl Bridge {
                 | "search.query"
                 | "mcp.resources.list"
                 | "mcp.resources.read"
+                | "mcp.prompts.list"
+                | "mcp.prompts.get"
         ) {
             return Err(failure("unknown external capability"));
         }
@@ -313,7 +333,7 @@ impl ScopedBridge {
         match capability {
             "mcp.discover" => {
                 let args: Discover = parse(arguments)?;
-                if args.server.as_ref().is_some_and(|s| !name(s)) {
+                if args.server.as_ref().is_some_and(|s| !source_name(s)) {
                     return Err(failure("invalid source name"));
                 }
                 self.bridge
@@ -329,7 +349,7 @@ impl ScopedBridge {
             }
             "mcp.describe" => {
                 let args: Describe = parse(arguments)?;
-                if !name(&args.server) || !name(&args.tool) {
+                if !source_name(&args.server) || !name(&args.tool) {
                     return Err(failure("invalid source or tool name"));
                 }
                 self.run(
@@ -344,7 +364,7 @@ impl ScopedBridge {
             }
             "mcp.call" => {
                 let args: Invoke = parse(arguments)?;
-                if !name(&args.server) || !name(&args.tool) {
+                if !source_name(&args.server) || !name(&args.tool) {
                     return Err(failure("invalid source or tool name"));
                 }
                 if !args.arguments.is_object() {
@@ -377,9 +397,9 @@ impl ScopedBridge {
                 let args: SkillRead = parse(arguments)?;
                 let (id, target) = args
                     .name
-                    .split_once('/')
+                    .rsplit_once('/')
                     .ok_or_else(|| failure("skill name must be source_id/name"))?;
-                if args.name.len() > 256 || !name(id) || !name(target) {
+                if args.name.len() > 256 || !source_name(id) || !name(target) {
                     return Err(failure("invalid qualified skill name"));
                 }
                 self.run(
@@ -394,7 +414,7 @@ impl ScopedBridge {
             }
             "mcp.resources.list" => {
                 let args: ResourceList = parse(arguments)?;
-                if args.server.as_ref().is_some_and(|s| !name(s)) {
+                if args.server.as_ref().is_some_and(|s| !source_name(s)) {
                     return Err(failure("invalid source name"));
                 }
                 self.bridge
@@ -410,7 +430,7 @@ impl ScopedBridge {
             }
             "mcp.resources.read" => {
                 let args: ResourceReadArgs = parse(arguments)?;
-                if !name(&args.server) || !resource_uri(&args.uri) {
+                if !source_name(&args.server) || !resource_uri(&args.uri) {
                     return Err(failure("invalid source name or resource URI"));
                 }
                 self.run(
@@ -418,6 +438,40 @@ impl ScopedBridge {
                     Operation::ReadResource,
                     &args.uri,
                     json!({}),
+                    cancel,
+                    deadline,
+                )
+                .await
+            }
+            "mcp.prompts.list" => {
+                let args: PromptList = parse(arguments)?;
+                if args.server.as_ref().is_some_and(|s| !source_name(s)) {
+                    return Err(failure("invalid source name"));
+                }
+                self.bridge
+                    .collect(
+                        self,
+                        args.server.as_deref(),
+                        Operation::ListPrompts,
+                        "prompts",
+                        cancel,
+                        deadline,
+                    )
+                    .await
+            }
+            "mcp.prompts.get" => {
+                let args: PromptGetArgs = parse(arguments)?;
+                if !source_name(&args.server) || !name(&args.name) {
+                    return Err(failure("invalid source or prompt name"));
+                }
+                if !args.arguments.is_object() {
+                    return Err(failure("prompt arguments must be an object"));
+                }
+                self.run(
+                    &args.server,
+                    Operation::GetPrompt,
+                    &args.name,
+                    args.arguments,
                     cancel,
                     deadline,
                 )

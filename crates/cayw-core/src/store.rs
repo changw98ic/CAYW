@@ -1,5 +1,5 @@
 use crate::*;
-use cayw_agent::{AgentEvent, ToolResult};
+use cayw_agent_types::{AgentEvent, ToolResult};
 use cayw_ai::{
     AssistantMessage, Content, Message, StopReason, ToolCall, ToolResultMessage, timestamp_ms,
 };
@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
+    io::Write,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -16,6 +17,9 @@ use uuid::Uuid;
 
 const APPLICATION_ID: u32 = 0x43415957;
 const STORAGE_FORMAT: &str = "cayw-core/3";
+const PROJECTION_CACHE_ENTRIES: usize = 32;
+// Limits retained JSON, not the decoded sessions' allocator overhead.
+const PROJECTION_CACHE_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 mod capabilities;
 mod migration;
@@ -30,10 +34,52 @@ use validation::{check_values, checked_input, encode_readable};
 #[derive(Clone)]
 pub struct SessionStore {
     connection: Arc<Mutex<Connection>>,
+    projection_cache: Arc<Mutex<ProjectionCache>>,
     reconciliation_verifier: Option<Arc<dyn ReconciliationVerifier>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+struct CachedProjection {
+    json: String,
+    session: Arc<StoredSession>,
+}
+
+#[derive(Default)]
+struct ProjectionCache {
+    // Most recently used at the back. The entry limit keeps linear lookup small.
+    entries: VecDeque<CachedProjection>,
+    json_bytes: usize,
+}
+
+impl ProjectionCache {
+    fn take(&mut self, id: &str) -> Option<CachedProjection> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.session.id == id)?;
+        let entry = self.entries.remove(index)?;
+        self.json_bytes -= entry.json.len();
+        Some(entry)
+    }
+
+    fn insert(&mut self, entry: CachedProjection) {
+        self.take(&entry.session.id);
+        if entry.json.len() > PROJECTION_CACHE_JSON_BYTES {
+            return;
+        }
+        while self.entries.len() >= PROJECTION_CACHE_ENTRIES
+            || self.json_bytes + entry.json.len() > PROJECTION_CACHE_JSON_BYTES
+        {
+            let Some(oldest) = self.entries.pop_front() else {
+                break;
+            };
+            self.json_bytes -= oldest.json.len();
+        }
+        self.json_bytes += entry.json.len();
+        self.entries.push_back(entry);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredSession {
     id: String,
@@ -57,7 +103,7 @@ enum HistoryEntry {
     ToolSlot { call_id: String },
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Lifecycle {
     started: bool,
@@ -220,6 +266,30 @@ fn identifier(value: &str, field: &str) -> Result<(), CoreError> {
     }
     Ok(())
 }
+struct ByteCountWriter {
+    written: usize,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl Write for ByteCountWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.written = self.written.saturating_add(buf.len());
+        if self.written > self.limit {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Metadata byte limit exceeded",
+            ));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn bounded_value(value: &Value) -> Result<(), CoreError> {
     let mut pending = vec![(value, 0)];
     let mut nodes = 0;
@@ -243,7 +313,20 @@ fn bounded_value(value: &Value) -> Result<(), CoreError> {
             _ => {}
         }
     }
-    if serde_json::to_vec(value)?.len() > MAX_METADATA_BYTES {
+    let mut writer = ByteCountWriter {
+        written: 0,
+        limit: MAX_METADATA_BYTES,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(CoreError::InvalidInput(
+                "Metadata byte limit exceeded".into(),
+            ));
+        }
+        return Err(error.into());
+    }
+    if writer.written > MAX_METADATA_BYTES {
         return Err(CoreError::InvalidInput(
             "Metadata byte limit exceeded".into(),
         ));
@@ -398,6 +481,17 @@ impl SessionStore {
                  WHEN EXISTS (SELECT 1 FROM core_events WHERE session_id=NEW.session_id AND cursor=NEW.cursor)
                  BEGIN SELECT RAISE(ABORT, 'core events are append-only'); END;"
             )?;
+            // Every load verifies wait registrations. Index just those events so
+            // streaming updates do not reparse all previous message snapshots.
+            transaction.execute_batch(
+                "CREATE INDEX IF NOT EXISTS core_execution_wait_log ON core_events(session_id, cursor)
+                 WHERE json_extract(record, '$.event.type')='execution_wait_registered';
+                 CREATE INDEX IF NOT EXISTS core_events_by_type ON core_events(
+                     session_id, json_extract(record, '$.event.type'), cursor);
+                 CREATE INDEX IF NOT EXISTS core_host_events_by_kind ON core_events(
+                     session_id, json_extract(record, '$.event.kind'), cursor)
+                 WHERE json_extract(record, '$.event.type')='host';"
+            )?;
             transaction.commit()?;
         }
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -412,6 +506,7 @@ impl SessionStore {
         connection.pragma_update(None, "foreign_keys", true)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            projection_cache: Arc::new(Mutex::new(ProjectionCache::default())),
             reconciliation_verifier: None,
         })
     }
@@ -569,7 +664,35 @@ impl SessionStore {
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        Ok(load(&connection, session_id)?.snapshot())
+        Ok(self.cached_projection(&connection, session_id)?.snapshot())
+    }
+
+    // Compare the complete persisted value, including within write transactions.
+    // Equal cursors alone cannot detect a peer change or a damaged projection.
+    fn cached_projection(
+        &self,
+        connection: &Connection,
+        id: &str,
+    ) -> Result<Arc<StoredSession>, CoreError> {
+        let json = projection_json(connection, id)?;
+        let mut cache = self
+            .projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        if let Some(cached) = cache.take(id)
+            && cached.json == json
+        {
+            waits::validate_wait_log(connection, &cached.session)?;
+            let session = cached.session.clone();
+            cache.insert(cached);
+            return Ok(session);
+        }
+        let session = Arc::new(decode_projection(connection, id, &json)?);
+        cache.insert(CachedProjection {
+            json,
+            session: session.clone(),
+        });
+        Ok(session)
     }
 
     /// Includes resolved requests so a waiting runtime can observe a durable decision.
@@ -578,7 +701,10 @@ impl SessionStore {
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        Ok(load(&connection, session_id)?.approvals)
+        Ok(self
+            .cached_projection(&connection, session_id)?
+            .approvals
+            .clone())
     }
 
     pub fn approval(
@@ -609,7 +735,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
         let transaction = connection.transaction()?;
-        let session = load(&transaction, session_id)?;
+        let session = self.cached_projection(&transaction, session_id)?;
         if after > session.cursor {
             return Err(CoreError::FutureCursor {
                 after,
@@ -638,6 +764,81 @@ impl SessionStore {
             return Err(CoreError::CorruptStore(
                 "The event log has missing entries".into(),
             ));
+        }
+        transaction.commit()?;
+        Ok(records)
+    }
+
+    /// Read selected durable events without decoding unrelated message snapshots.
+    /// Cursors remain those of the original log and need not be consecutive.
+    pub fn events_by_kind(
+        &self,
+        session_id: &str,
+        after: u64,
+        limit: usize,
+        event_type: &str,
+        host_kind: Option<&str>,
+    ) -> Result<Vec<EventRecord>, CoreError> {
+        if limit == 0 || limit > MAX_EVENT_PAGE {
+            return Err(CoreError::InvalidLimit {
+                limit,
+                max: MAX_EVENT_PAGE,
+            });
+        }
+        if event_type.is_empty() || (host_kind.is_some() && event_type != "host") {
+            return Err(CoreError::InvalidInput("Invalid event selection".into()));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction()?;
+        let session = self.cached_projection(&transaction, session_id)?;
+        if after > session.cursor {
+            return Err(CoreError::FutureCursor {
+                after,
+                current: session.cursor,
+            });
+        }
+        // Check the complete prefix through its covering primary-key index.
+        // This retains gap detection without reading unrelated event payloads.
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM core_events WHERE session_id=?1 AND cursor<=?2",
+            params![session_id, session.cursor as i64],
+            |row| row.get(0),
+        )?;
+        if count != session.cursor as i64 {
+            return Err(CoreError::CorruptStore(
+                "The event log has missing entries".into(),
+            ));
+        }
+        let (sql, kind) = match host_kind {
+            Some(kind) => (HOST_EVENTS_BY_KIND, kind),
+            None => (EVENTS_BY_TYPE, event_type),
+        };
+        let mut records = Vec::new();
+        {
+            let mut query = transaction.prepare(sql)?;
+            let mut rows = query.query(params![session_id, kind, after as i64, limit as i64])?;
+            let mut previous = after;
+            while let Some(row) = rows.next()? {
+                let cursor: i64 = row.get(0)?;
+                let json: String = row.get(1)?;
+                let record = checked_input(serde_json::from_str::<EventRecord>(&json)?)?;
+                if record.protocol_version != PROTOCOL_VERSION
+                    || record.session_id != session_id
+                    || cursor <= 0
+                    || record.cursor != cursor as u64
+                    || record.cursor <= previous
+                    || record.cursor > session.cursor
+                {
+                    return Err(CoreError::CorruptStore(
+                        "Selected event envelope or cursor is inconsistent".into(),
+                    ));
+                }
+                previous = record.cursor;
+                records.push(record);
+            }
         }
         transaction.commit()?;
         Ok(records)
@@ -690,7 +891,8 @@ impl SessionStore {
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        load(&connection, &lease.session_id)?.verify_lease(lease)
+        self.cached_projection(&connection, &lease.session_id)?
+            .verify_lease(lease)
     }
 
     pub fn append_host_event(
@@ -701,18 +903,10 @@ impl SessionStore {
     ) -> Result<EventRecord, CoreError> {
         let data = checked_input(data)?;
         validate_host_kind(kind)?;
-        self.mutate(&lease.session_id, |session| {
+        self.append_cursor_event(&lease.session_id, kind, data, |session| {
             session.verify_lease(lease)?;
-            Ok((
-                (),
-                Some(lease.clone()),
-                CoreEvent::Host {
-                    kind: kind.into(),
-                    data,
-                },
-            ))
+            Ok(Some(lease.clone()))
         })
-        .map(|(_, record)| record)
     }
 
     /// Records a trusted host decision against the exact observed session state.
@@ -730,23 +924,72 @@ impl SessionStore {
         let data = checked_input(data)?;
         nonempty(actor, "actor")?;
         validate_host_kind(kind)?;
-        self.mutate(session_id, |session| {
-            if session.attempt.as_ref() != expected_attempt {
-                return Err(CoreError::StaleLease);
-            }
-            if session.cursor != expected_cursor {
-                return Err(invalid("Host decision requires the current session cursor"));
-            }
-            Ok((
-                (),
-                session.attempt.clone(),
-                CoreEvent::Host {
-                    kind: kind.into(),
-                    data: serde_json::json!({"actor": actor, "decision": data}),
-                },
-            ))
-        })
-        .map(|(_, record)| record)
+        self.append_cursor_event(
+            session_id,
+            kind,
+            serde_json::json!({"actor": actor, "decision": data}),
+            |session| {
+                if session.attempt.as_ref() != expected_attempt {
+                    return Err(CoreError::StaleLease);
+                }
+                if session.cursor != expected_cursor {
+                    return Err(invalid("Host decision requires the current session cursor"));
+                }
+                Ok(session.attempt.clone())
+            },
+        )
+    }
+
+    fn append_cursor_event(
+        &self,
+        session_id: &str,
+        kind: &str,
+        data: Value,
+        check: impl FnOnce(&StoredSession) -> Result<Option<AttemptLease>, CoreError>,
+    ) -> Result<EventRecord, CoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = self.cached_projection(&transaction, session_id)?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take(session_id);
+        let state = Arc::make_mut(&mut session);
+        let attempt = check(state)?;
+        state.cursor = increment(state.cursor)?;
+        state.validate_wait_bindings()?;
+        let record = EventRecord {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: state.id.clone(),
+            cursor: state.cursor,
+            timestamp: timestamp_ms(),
+            attempt,
+            event: CoreEvent::Host {
+                kind: kind.into(),
+                data,
+            },
+        };
+        let record_json = encode_readable(&record)?;
+        transaction.execute(
+            "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+            params![state.id, state.cursor as i64, record_json],
+        )?;
+        // Host records change only the cursor. SQLite still processes the JSON,
+        // but Rust does not validate and encode the retained history again.
+        let json = transaction.query_row(
+            "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2) WHERE id=?1 RETURNING projection",
+            params![state.id, state.cursor as i64],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .insert(CachedProjection { json, session });
+        Ok(record)
     }
 
     pub fn append_agent_event(
@@ -755,6 +998,9 @@ impl SessionStore {
         event: &AgentEvent,
     ) -> Result<EventRecord, CoreError> {
         check_values(event)?;
+        if matches!(event, AgentEvent::MessageUpdate { .. }) {
+            return self.append_message_update(lease, event);
+        }
         self.mutate(&lease.session_id, |session| {
             session.verify_lease(lease)?;
             apply_agent_event(session, lease, event)?;
@@ -767,6 +1013,60 @@ impl SessionStore {
             ))
         })
         .map(|(_, record)| record)
+    }
+
+    fn append_message_update(
+        &self,
+        lease: &AttemptLease,
+        event: &AgentEvent,
+    ) -> Result<EventRecord, CoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = self.cached_projection(&transaction, &lease.session_id)?;
+        // Remove only this session before mutation. On error its next read
+        // reloads the committed projection; other sessions remain cached.
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take(&lease.session_id);
+        let state = Arc::make_mut(&mut session);
+        state.verify_lease(lease)?;
+        apply_agent_event(state, lease, event)?;
+        state.cursor = increment(state.cursor)?;
+        let record = EventRecord {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: state.id.clone(),
+            cursor: state.cursor,
+            timestamp: timestamp_ms(),
+            attempt: Some(lease.clone()),
+            event: CoreEvent::Agent {
+                event: Box::new(event.clone()),
+            },
+        };
+        // The event contains the same message at a greater envelope depth than
+        // the projection. Its readable encoding checks every changed JSON value.
+        let record_json = encode_readable(&record)?;
+        let lifecycle = serde_json::to_string(&state.lifecycle)?;
+        transaction.execute(
+            "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+            params![state.id, state.cursor as i64, record_json],
+        )?;
+        // A stream update changes only these two fields. Keep the already
+        // validated history in SQLite instead of decoding and encoding it again.
+        let json = transaction.query_row(
+            "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2, '$.lifecycle', json(?3)) WHERE id=?1 RETURNING projection",
+            params![state.id, state.cursor as i64, lifecycle],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .insert(CachedProjection { json, session });
+        Ok(record)
     }
 
     /// Commit immediately before invoking the executor. ToolExecutionStart only
@@ -1106,7 +1406,7 @@ impl SessionStore {
                 "Tool origin differs from its original approval Task",
             ));
         }
-        let record = persist(
+        let (record, _) = persist(
             &transaction,
             &mut session,
             Some(lease.clone()),
@@ -1240,9 +1540,18 @@ impl SessionStore {
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut session = load(&transaction, session_id)?;
-        let (result, lease, event) = change(&mut session)?;
-        let record = persist(&transaction, &mut session, lease, event)?;
+        // Reuse the projection only when the complete persisted value still
+        // matches the cached one; otherwise reload and validate from SQLite.
+        let mut session = self.cached_projection(&transaction, session_id)?;
+        // Remove only this session before mutation. On error its next read
+        // reloads the committed projection; other sessions remain cached.
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take(session_id);
+        let state = Arc::make_mut(&mut session);
+        let (result, lease, event) = change(state)?;
+        let (record, json) = persist(&transaction, state, lease, event)?;
         #[cfg(feature = "fault-injection")]
         let crash_point = match &record.event {
             CoreEvent::Agent { event } => match event.as_ref() {
@@ -1273,9 +1582,21 @@ impl SessionStore {
         if let Some((_, committed, data)) = crash_point {
             cayw_ai::faults::hit(committed, data);
         }
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .insert(CachedProjection { json, session });
         Ok((result, record))
     }
 }
+
+const EVENTS_BY_TYPE: &str = "SELECT cursor, record FROM core_events
+    WHERE session_id=?1 AND json_extract(record, '$.event.type')=?2 AND cursor>?3
+    ORDER BY cursor LIMIT ?4";
+const HOST_EVENTS_BY_KIND: &str = "SELECT cursor, record FROM core_events
+    WHERE session_id=?1 AND json_extract(record, '$.event.type')='host'
+    AND json_extract(record, '$.event.kind')=?2 AND cursor>?3
+    ORDER BY cursor LIMIT ?4";
 
 fn recorded_events(
     connection: &Connection,
@@ -1526,17 +1847,25 @@ fn increment(value: u64) -> Result<u64, CoreError> {
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or(CoreError::CounterExhausted)
 }
-fn load(connection: &Connection, id: &str) -> Result<StoredSession, CoreError> {
-    let data: Option<String> = connection
+fn projection_json(connection: &Connection, id: &str) -> Result<String, CoreError> {
+    connection
         .query_row(
             "SELECT projection FROM core_sessions WHERE id=?1",
             [id],
             |row| row.get(0),
         )
-        .optional()?;
-    let session = checked_input(serde_json::from_str::<StoredSession>(
-        &data.ok_or_else(|| CoreError::SessionNotFound(id.into()))?,
-    )?)?;
+        .optional()?
+        .ok_or_else(|| CoreError::SessionNotFound(id.into()))
+}
+fn load(connection: &Connection, id: &str) -> Result<StoredSession, CoreError> {
+    decode_projection(connection, id, &projection_json(connection, id)?)
+}
+fn decode_projection(
+    connection: &Connection,
+    id: &str,
+    json: &str,
+) -> Result<StoredSession, CoreError> {
+    let session = checked_input(serde_json::from_str::<StoredSession>(json)?)?;
     if session.id != id || session.cursor > i64::MAX as u64 || session.fence > i64::MAX as u64 {
         return Err(CoreError::CorruptStore(
             "The session identity or counter is inconsistent".into(),
@@ -1558,7 +1887,7 @@ fn persist(
     session: &mut StoredSession,
     lease: Option<AttemptLease>,
     event: CoreEvent,
-) -> Result<EventRecord, CoreError> {
+) -> Result<(EventRecord, String), CoreError> {
     session.cursor = increment(session.cursor)?;
     let record = EventRecord {
         protocol_version: PROTOCOL_VERSION,
@@ -1568,8 +1897,6 @@ fn persist(
         attempt: lease,
         event,
     };
-    check_values(&record)?;
-    check_values(session)?;
     session.validate_wait_bindings()?;
     let record_json = encode_readable(&record)?;
     let projection_json = encode_readable(session)?;
@@ -1581,7 +1908,7 @@ fn persist(
         "UPDATE core_sessions SET projection=?2 WHERE id=?1",
         params![session.id, projection_json],
     )?;
-    Ok(record)
+    Ok((record, projection_json))
 }
 
 fn validate_result(result: &ToolResult) -> Result<(), CoreError> {
@@ -2002,6 +2329,311 @@ fn validate_paired_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_events_use_indexes_and_preserve_the_original_log() {
+        let directory =
+            std::env::temp_dir().join(format!("cayw-selected-events-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.db");
+        let store = SessionStore::open(&path).unwrap();
+        let session = store.create_session("selected event fixture").unwrap();
+        let lease = store.begin_attempt(&session.id, "worker").unwrap();
+        for event in [
+            AgentEvent::AgentStart,
+            AgentEvent::TurnStart,
+            AgentEvent::MessageStart {
+                message: Message::Assistant(AssistantMessage::new(&cayw_ai::Model::new(
+                    "fixture", "stream",
+                ))),
+            },
+        ] {
+            store.append_agent_event(&lease, &event).unwrap();
+        }
+        let first = store
+            .append_host_event(&lease, "ledger_fixture", serde_json::json!({"entry": 1}))
+            .unwrap();
+        let mut message = AssistantMessage::new(&cayw_ai::Model::new("fixture", "stream"));
+        for fragment in 0..512 {
+            message.content = vec![Content::text("x".repeat(fragment * 8 + 1))];
+            store
+                .append_agent_event(
+                    &lease,
+                    &AgentEvent::MessageUpdate {
+                        message: message.clone(),
+                        event: Box::new(cayw_ai::AssistantEvent::TextDelta {
+                            index: 0,
+                            delta: "x".into(),
+                            partial: message.clone(),
+                        }),
+                    },
+                )
+                .unwrap();
+        }
+        let peer = SessionStore::open(&path).unwrap();
+        let second = peer
+            .append_host_event(&lease, "ledger_fixture", serde_json::json!({"entry": 2}))
+            .unwrap();
+        peer.append_host_event(&lease, "other_fixture", serde_json::json!({"entry": 3}))
+            .unwrap();
+        let original = store.events(&session.id, 0, 1000).unwrap();
+        assert_eq!(original.iter().filter(|record| matches!(record.event, CoreEvent::Agent { ref event } if matches!(event.as_ref(), AgentEvent::MessageUpdate { .. }))).count(), 512);
+        assert_eq!(
+            store
+                .events_by_kind(&session.id, 0, 1, "host", Some("ledger_fixture"))
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&first)
+        );
+        assert_eq!(
+            store
+                .events_by_kind(&session.id, first.cursor, 1, "host", Some("ledger_fixture"))
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&second)
+        );
+        assert!(
+            store
+                .events_by_kind(
+                    &session.id,
+                    second.cursor,
+                    1,
+                    "host",
+                    Some("ledger_fixture")
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .events_by_kind(&session.id, 0, 1000, "agent", None)
+                .unwrap()
+                .len(),
+            515
+        );
+        assert!(matches!(
+            store.events_by_kind(&session.id, u64::MAX, 1, "host", Some("ledger_fixture")),
+            Err(CoreError::FutureCursor { .. })
+        ));
+        {
+            let connection = store.connection.lock().unwrap();
+            for (sql, kind, index) in [
+                (EVENTS_BY_TYPE, "session_forked", "core_events_by_type"),
+                (
+                    HOST_EVENTS_BY_KIND,
+                    "ledger_fixture",
+                    "core_host_events_by_kind",
+                ),
+            ] {
+                let mut statement = connection
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap();
+                let plan = statement
+                    .query_map(params![session.id, kind, 0_i64, 1000_i64], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert!(plan.iter().any(|step| step.contains(index)), "{plan:?}");
+                assert!(
+                    !plan
+                        .iter()
+                        .any(|step| step.contains("SCAN") || step.contains("TEMP B-TREE")),
+                    "{plan:?}"
+                );
+            }
+        }
+        drop(peer);
+        drop(store);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP INDEX core_events_by_type; DROP INDEX core_host_events_by_kind;")
+            .unwrap();
+        drop(connection);
+        let reopened = SessionStore::open(&path).unwrap();
+        assert_eq!(reopened.events(&session.id, 0, 1000).unwrap(), original);
+        assert_eq!(
+            reopened
+                .events_by_kind(&session.id, 0, 1000, "host", Some("ledger_fixture"))
+                .unwrap(),
+            [first, second]
+        );
+        // The selected reader must still refuse a damaged prefix, including a
+        // missing unrelated message. Only this synthetic database loses guards.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER core_events_no_delete")
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM core_events WHERE session_id=?1 AND cursor=?2",
+                params![session.id, original[10].cursor as i64],
+            )
+            .unwrap();
+        assert!(matches!(
+            reopened.events_by_kind(&session.id, 0, 1000, "host", Some("ledger_fixture")),
+            Err(CoreError::CorruptStore(_))
+        ));
+        drop(connection);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cached_sessions_survive_rotation_and_evict_the_least_recently_used() {
+        let directory =
+            std::env::temp_dir().join(format!("cayw-cache-rotation-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let store = SessionStore::open(directory.join("session.db")).unwrap();
+        let mut sessions = Vec::new();
+        let mut originals = Vec::new();
+        for index in 0..PROJECTION_CACHE_ENTRIES {
+            let session = store.create_session(format!("session {index}")).unwrap();
+            let lease = store.begin_attempt(&session.id, "worker").unwrap();
+            store
+                .append_host_event(&lease, "cache_fixture", serde_json::json!({"index": index}))
+                .unwrap();
+            let connection = store.connection.lock().unwrap();
+            originals.push(store.cached_projection(&connection, &session.id).unwrap());
+            sessions.push(session.id);
+        }
+        for (id, original) in sessions.iter().zip(&originals) {
+            let connection = store.connection.lock().unwrap();
+            let cached = store.cached_projection(&connection, id).unwrap();
+            assert!(Arc::ptr_eq(&cached, original));
+        }
+        // Refresh the oldest, so the next insertion must evict the second.
+        store.snapshot(&sessions[0]).unwrap();
+        let extra = store.create_session("one more").unwrap();
+        store.begin_attempt(&extra.id, "worker").unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            assert!(Arc::ptr_eq(
+                &store.cached_projection(&connection, &sessions[0]).unwrap(),
+                &originals[0]
+            ));
+            let reloaded = store.cached_projection(&connection, &sessions[1]).unwrap();
+            assert!(!Arc::ptr_eq(&reloaded, &originals[1]));
+            assert_eq!(reloaded.snapshot(), originals[1].snapshot());
+        }
+        let cache = store.projection_cache.lock().unwrap();
+        assert_eq!(cache.entries.len(), PROJECTION_CACHE_ENTRIES);
+        assert_eq!(
+            cache.json_bytes,
+            cache
+                .entries
+                .iter()
+                .map(|entry| entry.json.len())
+                .sum::<usize>()
+        );
+        drop(cache);
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cache_json_budget_evicts_old_entries_and_skips_oversized_projections() {
+        let entry = |id: &str, bytes| CachedProjection {
+            json: "x".repeat(bytes),
+            session: Arc::new(StoredSession::new(id.into(), id.into())),
+        };
+        let mut cache = ProjectionCache::default();
+        let half = PROJECTION_CACHE_JSON_BYTES / 2;
+        cache.insert(entry("first", half));
+        cache.insert(entry("second", half));
+        cache.insert(entry("third", half));
+        assert!(cache.take("first").is_none());
+        assert_eq!(cache.json_bytes, PROJECTION_CACHE_JSON_BYTES);
+        cache.insert(entry("third", PROJECTION_CACHE_JSON_BYTES + 1));
+        assert!(cache.take("third").is_none());
+        assert_eq!(cache.json_bytes, half);
+        assert!(cache.take("second").is_some());
+        assert_eq!(cache.json_bytes, 0);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn ordinary_write_commit_failure_preserves_history_and_allows_retry() {
+        let directory = std::env::temp_dir().join(format!("cayw-commit-retry-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let store = SessionStore::open(directory.join("session.db")).unwrap();
+        let session = store.create_session("commit retry").unwrap();
+        let lease = store.begin_attempt(&session.id, "worker").unwrap();
+        let before = store.snapshot(&session.id).unwrap();
+        let events = store.events(&session.id, 0, 100).unwrap();
+        let peer = store.create_session("unrelated cached session").unwrap();
+        store.begin_attempt(&peer.id, "peer-worker").unwrap();
+        let peer_cached = {
+            let connection = store.connection.lock().unwrap();
+            store.cached_projection(&connection, &peer.id).unwrap()
+        };
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY);
+                 CREATE TABLE fixture_deferred(parent INTEGER REFERENCES fixture_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER fail_host_commit AFTER INSERT ON core_events
+                 WHEN json_extract(NEW.record, '$.event.type') IN ('host','attempt_finished')
+                 BEGIN INSERT INTO fixture_deferred VALUES(1); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            store.append_host_event(&lease, "commit_fixture", serde_json::json!({"value": 1})),
+            Err(CoreError::Database(_))
+        ));
+        {
+            let cache = store.projection_cache.lock().unwrap();
+            assert!(
+                !cache
+                    .entries
+                    .iter()
+                    .any(|entry| entry.session.id == session.id)
+            );
+            assert!(
+                cache
+                    .entries
+                    .iter()
+                    .any(|entry| Arc::ptr_eq(&entry.session, &peer_cached))
+            );
+        }
+        assert_eq!(store.snapshot(&session.id).unwrap(), before);
+        assert_eq!(store.events(&session.id, 0, 100).unwrap(), events);
+        assert!(matches!(
+            store.finish_attempt(&lease),
+            Err(CoreError::Database(_))
+        ));
+        assert!(
+            !store
+                .projection_cache
+                .lock()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.session.id == session.id)
+        );
+        assert_eq!(store.snapshot(&session.id).unwrap(), before);
+        assert_eq!(store.events(&session.id, 0, 100).unwrap(), events);
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_host_commit")
+            .unwrap();
+        let committed = store
+            .append_host_event(&lease, "commit_fixture", serde_json::json!({"value": 1}))
+            .unwrap();
+        assert_eq!(committed.cursor, before.cursor + 1);
+        assert_eq!(
+            store.events(&session.id, before.cursor, 100).unwrap(),
+            [committed]
+        );
+        store.finish_attempt(&lease).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn counter_exhaustion_cannot_wrap_or_cross_sqlite_integer_range() {

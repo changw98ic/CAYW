@@ -1,4 +1,8 @@
-use crate::{RuntimeError, execution::RunContext, lock};
+use crate::{
+    RuntimeError,
+    execution::{RunContext, capability_error},
+    lock,
+};
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_cells::{CellBackend, CellError, CellExecution, CellIdentity, CellStatus, CellTerminal};
@@ -75,7 +79,7 @@ impl CallScope {
         &self,
         cancel: &CancellationToken,
     ) -> Result<(), CapabilityError> {
-        self.context.check(cancel).map_err(known)?;
+        self.context.check(cancel).map_err(capability_error)?;
         self.request.check(&self.context)?;
         if let Some(authorization) = &lock(&self.state).authorization
             && let Some(grant) = &authorization.grant
@@ -102,7 +106,9 @@ impl CallScope {
         lock(&self.state).started
     }
     pub(crate) fn start(&self) -> Result<(), CapabilityError> {
-        self.context.check(&self.context.cancel).map_err(known)?;
+        self.context
+            .check(&self.context.cancel)
+            .map_err(capability_error)?;
         let mut state = lock(&self.state);
         if state.started || state.settled {
             return Err(CapabilityError::new(
@@ -195,6 +201,9 @@ impl CallScope {
             self.fault_origin.clone(),
         );
         self.context.inner.changed.notify_waiters();
+        if let Err(error) = result {
+            self.context.capability_stopped(error);
+        }
         if result.as_ref().is_err_and(|error| error.outcome_unknown) && state.started {
             self.context.unknown.store(true, Ordering::Release);
             self.context.cancel.cancel();
@@ -371,13 +380,15 @@ pub(crate) struct Backend {
 }
 impl Backend {
     pub(crate) fn new(context: Arc<RunContext>) -> Result<Self, RuntimeError> {
-        let base = Arc::new(
-            context
-                .inner
-                .host_root
-                .task_host(Arc::new(CatalogGate), Arc::new(CatalogAudit))
-                .map_err(|error| RuntimeError::Workspace(error.to_string()))?,
-        );
+        let mut host = context
+            .inner
+            .host_root
+            .task_host(Arc::new(CatalogGate), Arc::new(CatalogAudit))
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        if let Some(content) = &context.inner.content {
+            host = host.with_session_content(content.clone(), &context.lease.session_id);
+        }
+        let base = Arc::new(host);
         let requests = crate::requests::start(&context, &base)?;
         let mut catalog = crate::requests::operation_definitions(&context.inner, &base);
         catalog.extend(crate::requests::definitions(&context.inner));
@@ -429,6 +440,12 @@ impl CellBackend for Backend {
             .map_err(|error| {
                 CellError::Journal(self.context.persistence_failed(error).to_string())
             })?;
+        self.context
+            .activity
+            .cell_created(&self.context, &execution.cell_id)
+            .map_err(|error| {
+                CellError::Journal(self.context.persistence_failed(error).to_string())
+            })?;
         self.context.inner.changed.notify_waiters();
         Ok(())
     }
@@ -441,6 +458,11 @@ impl CellBackend for Backend {
         cancel: CancellationToken,
     ) -> Result<cayw_cells::BackendResponse, CapabilityError> {
         self.verify(execution).map_err(known)?;
+        self.context
+            .activity
+            .resume_cell(&self.context, &execution.cell_id, &cancel)
+            .await
+            .map_err(capability_error)?;
         let cells_sequence = sequence;
         // Cells uses one-based journal intent positions; Core uses zero-based
         // capability keys. The checked mapping is fixed for the entire lifetime.
@@ -505,7 +527,7 @@ impl CellBackend for Backend {
             self.context.admit_call(&arguments)
         })();
         let result = match admission {
-            Err(error) => Err(known(error)),
+            Err(error) => Err(capability_error(error)),
             Ok(()) if crate::requests::is_tool(name) && self.requests.is_some() => {
                 crate::requests::invoke_tool(
                     self.requests.as_ref().expect("request task checked"),
@@ -522,12 +544,21 @@ impl CellBackend for Backend {
             Ok(()) if crate::collaboration::is_tool(name) => {
                 crate::collaboration::invoke(&scope, &self.base, arguments, cancel).await
             }
+            Ok(()) if crate::content::is_tool(name) => {
+                crate::content::invoke(&scope, &self.base, arguments, cancel).await
+            }
+            Ok(()) if crate::background::is_tool(name) => {
+                crate::background::invoke(&scope, &self.base, arguments, cancel).await
+            }
+            Ok(()) if crate::results::is_tool(name) => {
+                crate::results::invoke(&scope, &self.base, arguments, cancel).await
+            }
             Ok(())
                 if crate::children::is_capability(name)
                     && self.context.inner.config.local_agents.is_some() =>
             {
                 match crate::bridge::scoped_host(&self.base, &scope) {
-                    Ok(host) => crate::children::call(host, &scope, arguments, cancel).await,
+                    Ok(host) => crate::children::call(host, &scope, name, arguments, cancel).await,
                     Err(error) => Err(error),
                 }
             }
@@ -542,10 +573,7 @@ impl CellBackend for Backend {
                 )
                 .await
                 {
-                    Ok(response) => {
-                        scope.settle(response.result())?;
-                        Ok(response)
-                    }
+                    Ok(response) => Ok(response),
                     Err(error) => {
                         let result = Err(error);
                         scope.settle(&result)?;
@@ -580,16 +608,58 @@ impl CellBackend for Backend {
         };
         // Core requires a nonempty bounded error. Return that same canonical
         // error to Cells, including refusals before Host audit start.
-        let result = result.map_err(|mut error| {
+        // Settle original host execution result first so display/externalization
+        // failure cannot erase an already committed Host success.
+        let host_result = result.map_err(|mut error| {
             error.message = bounded(&error.message);
             error
         });
-        scope.settle(&result)?;
+        scope.settle(&host_result)?;
+        let presentation = match &host_result {
+            Ok(value) => crate::results::maybe_externalize(&scope, value.clone()).await,
+            Err(error) => Err(error.clone()),
+        };
+        let storage_error = presentation
+            .as_ref()
+            .err()
+            .filter(|error| error.outcome_unknown && host_result.is_ok())
+            .map(|error| error.message.clone());
         Ok(cayw_cells::BackendResponse::owned(
-            result,
+            host_result,
             None,
-            Box::new(crate::shared_read::Completion::ordinary(scope.clone())),
-        ))
+            Box::new(
+                crate::shared_read::Completion::ordinary(scope.clone())
+                    .with_storage_error(storage_error),
+            ),
+        )
+        .with_presentation(presentation))
+    }
+    fn output(
+        &self,
+        execution: &CellExecution,
+        entry: &cayw_cells::OutputEntry,
+    ) -> Result<(), CellError> {
+        // A structured trace is ordinary bounded output, never host authority.
+        // Publish after the Cells commit so observers can follow the live path.
+        let cayw_cells::CellOutput::Json { value } = &entry.output else {
+            return Ok(());
+        };
+        if value.get("schema").and_then(Value::as_str) != Some("cayw.trace.v1") {
+            return Ok(());
+        }
+        self.verify(execution)?;
+        self.context
+            .host_event(
+                "trace_node",
+                json!({
+                    "execution_id":execution.cell_id,
+                    "parent_call_id":execution.parent_call_id,
+                    "source_hash":execution.source_hash,
+                    "task_id":self.context.task.id,
+                    "entry":entry,
+                }),
+            )
+            .map_err(|error| CellError::Journal(error.to_string()))
     }
     fn finished(
         &self,
@@ -650,6 +720,24 @@ impl CellBackend for Backend {
                 "terminal": terminal,
             }),
         );
+        self.context
+            .activity
+            .cell_finished(&self.context, &execution.cell_id)
+            .map_err(|error| {
+                CellError::Journal(self.context.persistence_failed(error).to_string())
+            })?;
+        if let Some(stop) = terminal
+            .stop
+            .filter(|stop| *stop != cayw_codemode::CapabilityStop::Exited)
+        {
+            self.context.capability_stopped(&CapabilityError::stopped(
+                stop,
+                terminal
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "cell execution stopped".into()),
+            ));
+        }
         self.context.inner.changed.notify_waiters();
         Ok(())
     }
