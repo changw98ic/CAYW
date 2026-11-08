@@ -30,6 +30,7 @@ class Element {
   replaceChildren(...children) { this.ownText = ''; this.children = []; this.append(...children); }
   get classList() { return { add: (...names) => { this.className = [...new Set([...(this.className ?? '').split(/\s+/).filter(Boolean), ...names])].join(' '); } }; }
   setAttribute(name, value) { this[name] = value; }
+  removeAttribute(name) { delete this[name]; }
   addEventListener(name, fn) { const list = this.listeners.get(name) ?? []; list.push(fn); this.listeners.set(name, list); }
   async dispatch(name) { for (const fn of this.listeners.get(name) ?? []) await fn({ preventDefault() {} }); }
   showModal() { this.open = true; }

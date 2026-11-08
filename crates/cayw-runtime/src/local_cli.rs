@@ -9,7 +9,7 @@ use std::{
         ffi::OsStrExt,
         fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 #[derive(Clone)]
@@ -54,6 +54,7 @@ impl LocalPaths {
         if !data_dir.is_absolute() {
             return Err(invalid("CAYW_HOME and HOME must be absolute paths"));
         }
+        check_workspace_separation(&workspace, &data_dir)?;
         let key = format!("{:x}", Sha256::digest(workspace.as_os_str().as_bytes()));
         let state_dir = data_dir.join("workspaces").join(key);
         Ok(Self {
@@ -69,7 +70,9 @@ impl LocalPaths {
 
     /// Create only missing files. Existing invalid or public state is never replaced.
     pub fn initialize(&self) -> io::Result<()> {
+        check_workspace_separation(&self.workspace, &self.data_dir)?;
         private_directory(&self.data_dir)?;
+        check_workspace_separation(&self.workspace, &self.data_dir)?;
         let initialization = private_lock(&self.data_dir.join("init.lock"))?;
         initialization.lock()?;
         private_directory(&self.data_dir.join("workspaces"))?;
@@ -97,6 +100,7 @@ impl LocalPaths {
 
     /// Read-only validation used by `cayw doctor`. It never creates or replaces state.
     pub fn validate_existing(&self) -> io::Result<()> {
+        check_workspace_separation(&self.workspace, &self.data_dir)?;
         check_directory(&self.data_dir)?;
         check_directory(&self.data_dir.join("workspaces"))?;
         check_directory(&self.state_dir)?;
@@ -274,6 +278,34 @@ impl Drop for LocalServer {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// Resolve existing ancestors as well as the root itself. The state directory
+/// may not exist yet; a symlink in its parent must not hide workspace overlap.
+fn check_workspace_separation(workspace: &Path, data_dir: &Path) -> io::Result<()> {
+    let mut resolved = PathBuf::new();
+    for component in data_dir.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                match fs::symlink_metadata(&resolved) {
+                    Ok(_) => resolved = resolved.canonicalize()?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            _ => resolved.push(component.as_os_str()),
+        }
+    }
+    if resolved.starts_with(workspace) || workspace.starts_with(&resolved) {
+        return Err(invalid(
+            "workspace and local CLI state directory must not overlap; choose a project directory outside CAYW_HOME, or set CAYW_HOME outside the workspace",
+        ));
+    }
+    Ok(())
 }
 
 fn check_directory(path: &Path) -> io::Result<()> {

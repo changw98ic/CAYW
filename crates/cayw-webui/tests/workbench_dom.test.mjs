@@ -35,6 +35,7 @@ class Element {
     };
   }
   setAttribute(name, value) { this[name] = value; }
+  removeAttribute(name) { delete this[name]; }
   addEventListener(name, fn) {
     const list = this.listeners.get(name) ?? [];
     list.push(fn);

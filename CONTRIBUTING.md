@@ -13,6 +13,8 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
+PR CI 另有 macOS 显式产品 feature/故障恢复及真实发行包安装升级门禁，命令和证据范围见 [PR55 发布准备门禁](docs/validation/pr55-release-gates-20261108.md)。
+
 单个包或示例见 [AGENTS.md](AGENTS.md)。Luau（`mlua-sys`）需要本机 C++ 编译器（如 `g++` / Xcode CLI）。
 
 真实模型示例 `cargo run -p cayw-agent --example magpie --locked` 需当次授权与环境变量，默认不要跑。
