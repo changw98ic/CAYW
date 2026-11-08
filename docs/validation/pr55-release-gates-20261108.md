@@ -25,7 +25,7 @@ cargo test -p cayw-runtime --locked \
 cargo clippy -p cayw-runtime --all-targets --locked --features plugins,strongflow,pi-compat,remote,fault-injection -- -D warnings
 ```
 
-显式启用 Pi 所需 feature 后，`pi_compat_runtime`、`pi_mcp_combo`、`optional_service_cleanup`、`workspace_optional_services` 不再依赖默认 feature 或其他 crate 的 dev-dependency 偶然启用。故障注入仅用于测试，发行包不启用它。
+显式启用 Pi 所需 feature 后，`pi_compat_runtime`、`pi_mcp_combo`、`optional_service_cleanup`、`workspace_optional_services` 不再依赖默认 feature 或其他 crate 的 dev-dependency 偶然启用。故障注入仅用于测试，发行包不启用它。产品编译检查通过后，lint 和恢复门禁即使普通产品测试失败也继续执行，以便收集独立结果；任何失败仍使 job 失败。
 
 ## 发行包安装和升级
 

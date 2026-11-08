@@ -133,17 +133,20 @@ jobs:
       # This is an explicit optional-product combination, not the shipped
       # four-binary bundle (which intentionally enables only plugins).
       - name: Check optional product features
+        id: product-check
         run: cargo check -p cayw-runtime --all-targets --locked --features plugins,strongflow,pi-compat,remote
 
       - name: Test optional product features
         run: cargo test -p cayw-runtime --locked --features plugins,strongflow,pi-compat,remote
 
       - name: Lint optional product features
+        if: ${{ !cancelled() && steps.product-check.outcome == 'success' }}
         run: cargo clippy -p cayw-runtime --all-targets --locked --features plugins,strongflow,pi-compat,remote -- -D warnings
 
       # These suites must not silently run zero tests under default features.
       # All fixtures are local/offline; no real model credentials are supplied.
       - name: Test crash and persistence recovery
+        if: ${{ !cancelled() && steps.product-check.outcome == 'success' }}
         run: >-
           cargo test -p cayw-runtime --locked
           --features plugins,strongflow,pi-compat,remote,fault-injection
@@ -152,6 +155,7 @@ jobs:
           --test content_recovery --test result_externalization --test result_sources
 
       - name: Lint fault-injection targets
+        if: ${{ !cancelled() && steps.product-check.outcome == 'success' }}
         run: cargo clippy -p cayw-runtime --all-targets --locked --features plugins,strongflow,pi-compat,remote,fault-injection -- -D warnings
 
   release-install:
