@@ -153,17 +153,21 @@ def main():
             processes.append((child, log))
             output = bytearray()
 
-            def read_terminal():
-                if select.select([master], [], [], 0.1)[0]:
-                    try:
-                        chunk = os.read(master, 65536)
-                    except OSError:
-                        return
-                    output.extend(chunk)
-                    log.write(chunk)
-                    log.flush()
-                    if b'\x1b[6n' in chunk:
-                        os.write(master, b'\x1b[1;1R')
+            def read_terminal(wait=0.1):
+                if not select.select([master], [], [], wait)[0]:
+                    return False
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    return False
+                if not chunk:
+                    return False
+                output.extend(chunk)
+                log.write(chunk)
+                log.flush()
+                if b'\x1b[6n' in chunk and child.poll() is None:
+                    os.write(master, b'\x1b[1;1R')
+                return True
 
             deadline = time.monotonic() + WATCHDOG
             while not re.search(r'CAYW\s+•\s+connected', output.decode(errors='replace')):
@@ -176,7 +180,18 @@ def main():
             while child.poll() is None:
                 assert time.monotonic() < deadline, 'TUI shutdown watchdog expired'
                 read_terminal()
-            assert child.returncode == 0, 'TUI quit did not finish cleanly'
+            # Reaping can win the last PTY read. Drain already buffered output
+            # so a short-lived failure retains its real diagnostic, not just an
+            # opaque exit assertion. Keep the immediate Ctrl+Q above: it covers
+            # the real user-visible quit-before-Client-adoption race.
+            while read_terminal(wait=0):
+                pass
+            (evidence / 'tui-exit.json').write_text(json.dumps({
+                'returncode': child.returncode, 'quit_sent_after_connected': True,
+                'output_bytes': len(output)}, indent=2) + '\n')
+            assert child.returncode == 0, (
+                f'TUI quit did not finish cleanly: returncode={child.returncode}; '
+                f'PTY tail:\n{output[-4000:].decode(errors="replace")}')
             assert not (state / 'client.json').exists(), 'TUI launcher left Client discovery behind'
 
         def stop(child):
