@@ -22,6 +22,7 @@ use cayw_core::{
     SessionState,
 };
 use cayw_host::ExternalHost;
+use cayw_ipc::RpcHandler;
 use cayw_runtime::{
     ModelBudgetContinuation, ModelRequestOrigin, ModelRequestReconciledOutcome,
     ModelRequestReconciliation, ModelRequestReconciliationVerifier, ModelRequestTerminal, Runtime,
@@ -496,6 +497,92 @@ async fn test_continuation_grant_allows_new_queued_task_and_preserves_old_hold()
     assert_eq!(rt.task(&task3.id).unwrap().state, TaskState::Failed);
 }
 
+#[tokio::test]
+async fn explicit_continuation_adds_finite_room_after_a_real_full_tree_hold() {
+    let root = root();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ScriptStep::UnknownError,
+        ScriptStep::Success {
+            input_tokens: 4,
+            output_tokens: 4,
+            content: "continued after explicit confirmation".into(),
+        },
+    ]));
+    let rt = open(root.path(), provider, 1000);
+    let session = rt.create(None).unwrap();
+
+    let failed = rt.enqueue(&session.id, "unknown model outcome").unwrap();
+    let _ = rt.resume(&failed.id, CancellationToken::new()).await;
+    let held = rt.model_requests(&session.id).unwrap();
+    assert_eq!(held.reserved_tokens, 1000);
+    assert_eq!(held.remaining_tokens, 0);
+    assert!(held.budget_unknown);
+
+    let status = RpcHandler::call(
+        &rt,
+        "model.budget.status",
+        json!({"session_id":session.id}),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["budget_unknown"], true);
+    assert_eq!(status["continuation"]["additional_tokens"], 1000);
+    assert_eq!(status["continuation"]["token_limit"], 2000);
+
+    let next = rt.enqueue(&session.id, "continue explicitly").unwrap();
+    let expected = status["continuation"]["expected"].clone();
+    let denied = RpcHandler::call(
+        &rt,
+        "model.budget.continue",
+        json!({
+            "session_id": session.id,
+            "task_id": next.id,
+            "expected": expected,
+            "additional_tokens": 128,
+            "token_limit": 1128,
+            "confirm": false,
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.code, "confirmation_required");
+
+    let record = RpcHandler::call(
+        &rt,
+        "model.budget.continue",
+        json!({
+            "session_id": session.id,
+            "task_id": next.id,
+            "expected": expected,
+            "additional_tokens": 128,
+            "token_limit": 1128,
+            "confirm": true,
+        }),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(record["continuation"]["token_limit"], 1128);
+    assert_eq!(record["continuation"]["actor"], "rpc-user");
+
+    rt.resume(&next.id, CancellationToken::new()).await.unwrap();
+    let ledger = rt.model_requests(&session.id).unwrap();
+    assert_eq!(ledger.token_limit, 1000);
+    assert_eq!(ledger.reserved_tokens, 1000);
+    assert_eq!(ledger.settled_tokens, 8);
+    assert!(ledger.budget_unknown);
+    let continued = ledger
+        .requests
+        .iter()
+        .find(|request| request.identity.task_id == next.id)
+        .unwrap();
+    assert_eq!(continued.token_limit, 1128);
+    assert_eq!(continued.reservation_tokens, 128);
+    assert_eq!(continued.settled_tokens, Some(8));
+}
+
 // ---------------------------------------------------------------------------
 // 2. Rejection of implicit allowance from config increase alone, reopen,
 //    fork, or ungranted task.
@@ -702,23 +789,7 @@ async fn test_continuation_grant_validation_and_idempotence() {
         Err(RuntimeError::InvalidInput(_))
     ));
 
-    // 8. token_limit > trusted current tree token limit rejected
-    // tree limit is 2000; grant specifies token_limit: 2500
-    let bad_grant_tree_limit = ModelBudgetContinuation {
-        task_id: new_task.id.clone(),
-        expected: vec![valid_origin.clone()],
-        additional_tokens: 100,
-        token_limit: 2500,
-        actor: "host".into(),
-        evidence: "evidence".into(),
-    };
-    assert!(matches!(
-        rt.authorize_model_budget_continuation(bad_grant_tree_limit)
-            .await,
-        Err(RuntimeError::Budget(_))
-    ));
-
-    // 9. checked(occupied + additional) > token_limit rejected (missing headroom)
+    // 8. checked(occupied + additional) > token_limit rejected (missing headroom)
     // occupied is 1000, additional is 600, token_limit is 1500 (1000 + 600 = 1600 > 1500)
     let bad_grant_headroom = ModelBudgetContinuation {
         task_id: new_task.id.clone(),

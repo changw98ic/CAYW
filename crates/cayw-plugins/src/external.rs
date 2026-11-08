@@ -121,7 +121,9 @@ pub struct ExternalPlugin {
     stop: CancellationToken,
     process: Arc<Mutex<Option<ProcessGuard>>>,
     supervisor: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), PluginError>>>>,
+    shutdown_wait: tokio::sync::Mutex<()>,
     cleanup: Mutex<Option<Result<(), PluginError>>>,
+    identity: Option<PluginProcessIdentity>,
 }
 
 impl ExternalPlugin {
@@ -152,6 +154,11 @@ impl ExternalPlugin {
         command.process_group(0);
         let child = command.spawn().map_err(io_error)?;
         let mut process = ProcessGuard::new(child);
+        let executable = config.executable.to_string_lossy().into_owned();
+        let identity = process
+            .child
+            .id()
+            .and_then(|pid| capture_process_identity(pid, &executable));
         let mut stdin = process.child.stdin.take().expect("piped stdin");
         let mut stdout = BufReader::new(process.child.stdout.take().expect("piped stdout"));
         let mut stderr = process.child.stderr.take().expect("piped stderr");
@@ -211,12 +218,17 @@ impl ExternalPlugin {
                     .terminate();
                 let wait = wait_for_exit(&mut watcher, &process, config.shutdown_timeout).await;
                 process.lock().expect("plugin process poisoned").take();
-                if let Err(cleanup) = terminate.and(wait) {
-                    return Err(PluginError::OutcomeUnknown(format!(
-                        "{error}; plugin handshake cleanup was not confirmed: {cleanup}"
-                    )));
+                match terminate.and(wait) {
+                    Ok(()) => return Err(error),
+                    Err(cleanup) => {
+                        return Err(PluginError::OutcomeUnknownProcess {
+                            message: format!(
+                                "{error}; plugin handshake cleanup was not confirmed: {cleanup}"
+                            ),
+                            process: identity.clone(),
+                        });
+                    }
                 }
-                return Err(error);
             }
         };
         let (sender, receiver) = mpsc::channel(16);
@@ -230,6 +242,7 @@ impl ExternalPlugin {
                 budget,
                 _stderr_task: stderr_task,
                 config,
+                identity: identity.clone(),
             },
             receiver,
             stop.clone(),
@@ -240,7 +253,9 @@ impl ExternalPlugin {
             stop,
             process,
             supervisor: tokio::sync::Mutex::new(Some(supervisor)),
+            shutdown_wait: tokio::sync::Mutex::new(()),
             cleanup: Mutex::new(None),
+            identity,
         })
     }
 }
@@ -312,21 +327,32 @@ impl Plugin for ExternalPlugin {
     }
 
     async fn wait_shutdown(&self) -> Result<(), PluginError> {
-        if let Some(result) = self
+        // The supervisor handle, process slot and published cleanup result form
+        // one lifecycle transition. Concurrent waiters must observe it in order.
+        let _wait = self.shutdown_wait.lock().await;
+        let cached = self
             .cleanup
             .lock()
             .expect("plugin cleanup poisoned")
-            .clone()
-        {
-            return result;
+            .clone();
+        if matches!(cached, Some(Ok(()))) {
+            return Ok(());
+        }
+        if cached.is_some() {
+            // A previous wait failed. Re-observe the same owned process instead
+            // of returning the cached error or treating a missing handle as success.
+            return self.reobserve_cleanup();
         }
         let supervisor = self.supervisor.lock().await.take();
         let result = match supervisor {
             Some(supervisor) => match supervisor.await {
                 Ok(result) => result,
-                Err(error) => Err(PluginError::OutcomeUnknown(format!(
-                    "plugin supervisor stopped without cleanup confirmation: {error}"
-                ))),
+                Err(error) => Err(PluginError::OutcomeUnknownProcess {
+                    message: format!(
+                        "plugin supervisor stopped without cleanup confirmation: {error}"
+                    ),
+                    process: self.identity.clone(),
+                }),
             },
             None => {
                 if self
@@ -337,14 +363,48 @@ impl Plugin for ExternalPlugin {
                 {
                     Ok(())
                 } else {
-                    Err(PluginError::OutcomeUnknown(
-                        "plugin cleanup is still unconfirmed".into(),
-                    ))
+                    Err(PluginError::OutcomeUnknownProcess {
+                        message: "plugin cleanup is still unconfirmed".into(),
+                        process: self.identity.clone(),
+                    })
                 }
             }
         };
         *self.cleanup.lock().expect("plugin cleanup poisoned") = Some(result.clone());
         result
+    }
+}
+
+impl ExternalPlugin {
+    /// Confirm cleanup only from the exact process identity observed at spawn.
+    /// Text, a missing registry entry or a reused PID is never enough.
+    fn reobserve_cleanup(&self) -> Result<(), PluginError> {
+        let Some(identity) = self.identity.as_ref() else {
+            return Err(PluginError::OutcomeUnknown(
+                "plugin cleanup is still unconfirmed and the exact process identity is unavailable"
+                    .into(),
+            ));
+        };
+        match process_identity_stopped(identity) {
+            Ok(true) => {
+                *self.cleanup.lock().expect("plugin cleanup poisoned") = Some(Ok(()));
+                Ok(())
+            }
+            Ok(false) => Err(PluginError::OutcomeUnknownProcess {
+                message: format!(
+                    "plugin process {} is still running after cleanup failed; stop that exact process before retrying",
+                    identity.pid
+                ),
+                process: Some(identity.clone()),
+            }),
+            Err(error) => Err(PluginError::OutcomeUnknownProcess {
+                message: format!(
+                    "could not re-check plugin process {} after cleanup failed: {error}",
+                    identity.pid
+                ),
+                process: Some(identity.clone()),
+            }),
+        }
     }
 }
 
@@ -362,6 +422,7 @@ struct ProcessSession {
     budget: Arc<OutputBudget>,
     _stderr_task: AbortOnDrop,
     config: ExternalConfig,
+    identity: Option<PluginProcessIdentity>,
 }
 
 impl Drop for ProcessSession {
@@ -484,17 +545,23 @@ async fn run_process(
         .lock()
         .expect("plugin process poisoned")
         .take();
+    let identity = session.identity.clone();
     match (terminate, wait) {
         (Ok(()), Ok(())) => Ok(()),
-        (Err(terminate), Ok(())) => Err(PluginError::OutcomeUnknown(format!(
-            "failed to terminate plugin process group: {terminate}"
-        ))),
-        (Ok(()), Err(wait)) => Err(PluginError::OutcomeUnknown(format!(
-            "failed to confirm plugin process exit: {wait}"
-        ))),
-        (Err(terminate), Err(wait)) => Err(PluginError::OutcomeUnknown(format!(
-            "failed to terminate plugin process group: {terminate}; failed to confirm exit: {wait}"
-        ))),
+        (Err(terminate), Ok(())) => Err(PluginError::OutcomeUnknownProcess {
+            message: format!("failed to terminate plugin process group: {terminate}"),
+            process: identity,
+        }),
+        (Ok(()), Err(wait)) => Err(PluginError::OutcomeUnknownProcess {
+            message: format!("failed to confirm plugin process exit: {wait}"),
+            process: identity,
+        }),
+        (Err(terminate), Err(wait)) => Err(PluginError::OutcomeUnknownProcess {
+            message: format!(
+                "failed to terminate plugin process group: {terminate}; failed to confirm exit: {wait}"
+            ),
+            process: identity,
+        }),
     }
 }
 
@@ -688,6 +755,32 @@ impl ProcessWatcher {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn capture_process_identity(pid: u32, command: &str) -> Option<PluginProcessIdentity> {
+    PluginProcessIdentity::observe(pid, command).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_process_identity(_pid: u32, _command: &str) -> Option<PluginProcessIdentity> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity_stopped(identity: &PluginProcessIdentity) -> std::io::Result<bool> {
+    if identity.is_running()? || identity.process_group_running()? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_identity_stopped(_identity: &PluginProcessIdentity) -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "plugin process identity checks are unsupported on this platform",
+    ))
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -765,4 +858,141 @@ fn io_error(error: std::io::Error) -> PluginError {
 }
 fn output_limit() -> PluginError {
     PluginError::Protocol("plugin output budget exceeded".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PluginKind, PluginManifest, PluginRole};
+
+    fn manifest() -> PluginManifest {
+        PluginManifest {
+            name: "fixture".into(),
+            version: "1.0.0".into(),
+            protocol_version: PLUGIN_PROTOCOL_VERSION,
+            role: PluginRole::WorkspaceArchitecture,
+            kind: PluginKind::External,
+            capabilities: Vec::new(),
+            permissions: BTreeMap::new(),
+        }
+    }
+
+    fn plugin_with(
+        identity: Option<PluginProcessIdentity>,
+        cleanup: Result<(), PluginError>,
+    ) -> ExternalPlugin {
+        let (sender, _receiver) = mpsc::channel(1);
+        ExternalPlugin {
+            manifest: manifest(),
+            sender,
+            stop: CancellationToken::new(),
+            process: Arc::new(Mutex::new(None)),
+            supervisor: tokio::sync::Mutex::new(None),
+            shutdown_wait: tokio::sync::Mutex::new(()),
+            cleanup: Mutex::new(Some(cleanup)),
+            identity,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn dead_identity() -> PluginProcessIdentity {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("0")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let identity =
+            capture_process_identity(child.id(), "/bin/sleep").expect("fixture identity");
+        child.wait().unwrap();
+        identity
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn failed_cleanup_is_reobserved_instead_of_returning_the_cached_error() {
+        let identity = dead_identity();
+        let plugin = plugin_with(
+            Some(identity),
+            Err(PluginError::OutcomeUnknown(
+                "first cleanup observation was inconclusive".into(),
+            )),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match plugin.wait_shutdown().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        assert!(error.outcome_unknown(), "{error}");
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("retry must observe the stopped process");
+        plugin.wait_shutdown().await.unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn cleanup_retry_keeps_the_block_while_the_exact_process_is_alive() {
+        let identity = PluginProcessIdentity::observe(std::process::id(), "test process").unwrap();
+        let plugin = plugin_with(
+            Some(identity),
+            Err(PluginError::OutcomeUnknown(
+                "first cleanup observation was inconclusive".into(),
+            )),
+        );
+        let error = tokio::time::timeout(Duration::from_secs(2), plugin.wait_shutdown())
+            .await
+            .expect("retry must settle")
+            .unwrap_err();
+        assert!(error.outcome_unknown());
+        assert!(error.to_string().contains("still running"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_cleanup_waiters_cannot_skip_an_unpublished_failure() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_entered = entered.clone();
+        let task_release = release.clone();
+        let supervisor = tokio::spawn(async move {
+            task_entered.notify_one();
+            task_release.notified().await;
+            Err(PluginError::OutcomeUnknown(
+                "synthetic cleanup remained unconfirmed".into(),
+            ))
+        });
+        let (sender, _receiver) = mpsc::channel(1);
+        let plugin = Arc::new(ExternalPlugin {
+            manifest: manifest(),
+            sender,
+            stop: CancellationToken::new(),
+            process: Arc::new(Mutex::new(None)),
+            supervisor: tokio::sync::Mutex::new(Some(supervisor)),
+            shutdown_wait: tokio::sync::Mutex::new(()),
+            cleanup: Mutex::new(None),
+            identity: None,
+        });
+
+        let first_plugin = plugin.clone();
+        let first = tokio::spawn(async move { first_plugin.wait_shutdown().await });
+        entered.notified().await;
+        let second_plugin = plugin.clone();
+        let second = tokio::spawn(async move { second_plugin.wait_shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "a second waiter must wait for the supervisor result to be published"
+        );
+
+        release.notify_one();
+        let first_error = first.await.unwrap().unwrap_err();
+        let second_error = second.await.unwrap().unwrap_err();
+        assert!(first_error.outcome_unknown());
+        assert!(second_error.outcome_unknown());
+    }
 }

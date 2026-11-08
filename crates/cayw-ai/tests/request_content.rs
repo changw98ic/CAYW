@@ -242,33 +242,25 @@ async fn reasoning_history(service: &str) {
         input.messages.push(Message::Assistant(assistant));
         input.messages.push(Message::user("continue"));
         let (events, sent) = exchange(input).await;
-        if service == "openai" {
-            assert!(
-                matches!(events.last(), Some(AssistantEvent::Error { .. })),
-                "official Chat Completions has no configured unsigned reasoning replay contract"
-            );
-            assert!(sent.is_none());
-        } else {
-            assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
-            let body = sent.unwrap();
-            let history = body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|message| message["role"] == "assistant")
-                .unwrap();
-            assert_eq!(
-                history["reasoning_content"],
-                "original unsigned reasoning 你好"
-            );
-            assert_eq!(history["content"], "previous answer");
-            assert_eq!(body.get("tools").is_some(), tools);
-        }
+        assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
+        let body = sent.unwrap();
+        let history = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap();
+        assert_eq!(
+            history["reasoning_content"],
+            "original unsigned reasoning 你好"
+        );
+        assert_eq!(history["content"], "previous answer");
+        assert_eq!(body.get("tools").is_some(), tools);
     }
 }
 
 #[tokio::test]
-async fn openai_rejects_unsigned_reasoning_history_before_network() {
+async fn openai_preserves_unsigned_reasoning_history_with_and_without_tools() {
     reasoning_history("openai").await;
 }
 

@@ -1,4 +1,4 @@
-use crate::execution::{EventSink, execute_batch};
+use crate::execution::{EventSink, execute_batch_with_limit};
 use crate::*;
 use cayw_ai::{
     AssistantEvent, AssistantMessage, CancellationToken, Message, Model, ModelRequest, Provider,
@@ -33,6 +33,7 @@ struct Runtime {
     execution: ExecutionMode,
     max_turns: usize,
     hooks: Arc<dyn AgentHooks>,
+    tool_argument_limit: Option<ToolArgumentLimit>,
 }
 
 struct Shared {
@@ -216,6 +217,7 @@ impl Agent {
                     execution: ExecutionMode::Parallel,
                     max_turns: 64,
                     hooks: Arc::new(NoHooks),
+                    tool_argument_limit: None,
                 }),
                 listeners: Mutex::new(vec![]),
                 next_listener: std::sync::atomic::AtomicUsize::new(1),
@@ -320,6 +322,23 @@ impl Agent {
             state.max_turns = max_turns;
             Ok(())
         })
+    }
+    /// Applies the optional argument bound supplied by the host. The Agent
+    /// itself imposes no product limit by default.
+    pub fn set_tool_argument_limit(
+        &self,
+        limit: Option<ToolArgumentLimit>,
+    ) -> Result<(), AgentError> {
+        self.configure(|state| {
+            state.tool_argument_limit = limit;
+            Ok(())
+        })
+    }
+    /// Builder form used by a host that creates an Agent before running it.
+    pub fn with_tool_argument_limit(self, limit: Option<ToolArgumentLimit>) -> Self {
+        self.set_tool_argument_limit(limit)
+            .expect("the tool argument limit must be configured before the agent runs");
+        self
     }
     pub fn reset(&self) -> Result<(), AgentError> {
         self.configure(|state| {
@@ -555,6 +574,7 @@ impl Agent {
         max_turns: usize,
         cancel: CancellationToken,
     ) -> RunResult {
+        let tool_argument_limit = lock(&self.shared.runtime).tool_argument_limit;
         let mut new_messages = Vec::new();
         let mut turn_number = 0;
         loop {
@@ -616,7 +636,7 @@ impl Agent {
             } else {
                 prepared
             };
-            let assistant = match prepared {
+            let mut assistant = match prepared {
                 Ok(()) => self.stream_assistant(&context, &cancel).await,
                 Err(error) => {
                     let reason = if cancel.is_cancelled() {
@@ -635,6 +655,10 @@ impl Agent {
                     message
                 }
             };
+            // Bound tool arguments before the assistant message or any execution
+            // event can reach durable storage. Oversized arguments become a
+            // small digest summary and are never executed.
+            crate::execution::bound_tool_arguments(&mut assistant, tool_argument_limit);
             context.messages.push(Message::Assistant(assistant.clone()));
             new_messages.push(Message::Assistant(assistant.clone()));
             self.sync_context(&context);
@@ -655,13 +679,14 @@ impl Agent {
                     let signal = signal.clone();
                     async move { agent.emit(event, &signal).await }.boxed()
                 });
-                let outcomes = execute_batch(
+                let outcomes = execute_batch_with_limit(
                     &assistant,
                     &context,
                     execution,
                     hooks.clone(),
                     cancel.clone(),
                     sink,
+                    tool_argument_limit,
                 )
                 .await;
                 all_terminate =
@@ -864,6 +889,7 @@ impl Agent {
         context: &AgentContext,
         cancel: &CancellationToken,
     ) -> AssistantMessage {
+        let tool_argument_limit = lock(&self.shared.runtime).tool_argument_limit;
         let mut partial = AssistantMessage::new(&context.model);
         let started = std::time::Instant::now();
         self.emit(
@@ -974,10 +1000,14 @@ impl Agent {
                 }
                 return with_duration(partial, started);
             }
+            let mut update = event.clone();
+            crate::execution::bound_event_arguments(&mut update, tool_argument_limit);
+            let mut snapshot = partial.clone();
+            crate::execution::bound_tool_arguments(&mut snapshot, tool_argument_limit);
             self.emit(
                 AgentEvent::MessageUpdate {
-                    message: partial.clone(),
-                    event: Box::new(event),
+                    message: snapshot,
+                    event: Box::new(update),
                 },
                 cancel,
             )

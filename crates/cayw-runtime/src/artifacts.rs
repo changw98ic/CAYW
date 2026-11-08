@@ -176,33 +176,25 @@ impl HostActionDispatch for RuntimeHostDispatch {
                 .coordination
                 .enter()
                 .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
+            // Reuse the same readiness contract as prompts and resumes: frozen
+            // cells/bindings, reconciliation, active attempts and history limits.
+            runtime
+                .check_ready(req.session_id)
+                .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
             let executor = runtime
                 .artifact_executor(req.session_id)
                 .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
-            let session = runtime
-                .get(req.session_id)
-                .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
-            if session.attempt.is_some()
-                || runtime
-                    .inner
-                    .queue
-                    .list(req.session_id)
-                    .map_err(|error| HostDispatchError::rejected(error.to_string()))?
-                    .iter()
-                    .any(|task| task_is_active(task.state))
+            if runtime
+                .inner
+                .queue
+                .list(req.session_id)
+                .map_err(|error| HostDispatchError::rejected(error.to_string()))?
+                .iter()
+                .any(|task| task_is_active(task.state))
             {
                 return Err(HostDispatchError::rejected(
                     "session already has active work",
                 ));
-            }
-            if runtime
-                .artifact_unknown(req.session_id, true)
-                .map_err(|error| HostDispatchError::rejected(error.to_string()))?
-            {
-                return Err(HostDispatchError::rejected(format!(
-                    "session {} requires reconciliation before invoking tools",
-                    req.session_id
-                )));
             }
             if runtime
                 .artifact_audit(req.session_id)
@@ -214,6 +206,12 @@ impl HostActionDispatch for RuntimeHostDispatch {
                     "artifact action was already dispatched",
                 ));
             }
+            // Close the gap between the admission check and taking the exact
+            // executor lock. The caller owns the executor now, so observe
+            // artifact state without re-acquiring it.
+            runtime
+                .check_ready_locked(req.session_id)
+                .map_err(|error| HostDispatchError::rejected(error.to_string()))?;
             executor
         };
         let args: Value = serde_json::from_str(req.args_json).map_err(|error| {
@@ -251,11 +249,17 @@ impl HostActionDispatch for RuntimeHostDispatch {
             },
         );
         let inner = runtime.inner.clone();
+        let session_runtime = runtime.clone();
         let session_id = req.session_id.to_owned();
         let action_id = req.action_id.to_owned();
         let artifact_id = req.artifact_id.to_owned();
         let result = block_on_host(async move {
             let _executor = executor;
+            // Actual execution may begin after an async hand-off. Recheck the
+            // same readiness contract while the exact executor lock is held.
+            session_runtime
+                .check_ready_locked(&session_id)
+                .map_err(|error| CapabilityError::new(error.to_string()))?;
             let result = host.call(&tool, args, cancel).await;
             host.close_processes();
             if let Err(error) = host.drain_processes().await {
@@ -997,7 +1001,7 @@ impl Runtime {
         .ok_or(RuntimeError::Busy)
     }
 
-    fn artifact_unknown(
+    pub(crate) fn artifact_unknown(
         &self,
         session_id: &str,
         executor_idle: bool,
@@ -1302,11 +1306,7 @@ impl Runtime {
     ) -> Result<ActionOutcome, RuntimeError> {
         {
             let _coordinate = self.inner.coordination.enter()?;
-            self.get(&request.session_id)?;
-            self.ensure_artifact_executor_idle(&request.session_id)?;
-            if self.has_artifact_unknown(&request.session_id)? {
-                return Err(RuntimeError::NeedsReconciliation);
-            }
+            self.check_ready(&request.session_id)?;
         }
         let session_id = request.session_id.clone();
         let actions = self.artifact_actions();

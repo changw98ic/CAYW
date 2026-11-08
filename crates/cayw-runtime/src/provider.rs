@@ -152,6 +152,34 @@ impl ProviderConfig {
         self.api_key.is_some()
     }
 
+    /// Apply an explicit settings update without exposing a stored credential to the caller.
+    /// Omitting a key preserves it only while the credential destination is unchanged.
+    pub fn merge_saved_api_key(
+        &mut self,
+        previous: Option<&Self>,
+        clear_api_key: bool,
+    ) -> Result<(), RuntimeError> {
+        if clear_api_key {
+            if self.api_key.is_some() {
+                return Err(invalid("cannot set and clear api_key in the same update"));
+            }
+            return Ok(());
+        }
+        if self.api_key.is_some() {
+            return Ok(());
+        }
+        let Some(previous) = previous.filter(|config| config.api_key.is_some()) else {
+            return Ok(());
+        };
+        if self.service != previous.service || self.base_url != previous.base_url {
+            return Err(invalid(
+                "changed the credential destination; provide a new api_key or explicitly clear the saved key",
+            ));
+        }
+        self.api_key.clone_from(&previous.api_key);
+        Ok(())
+    }
+
     /// A diagnostic/settings view that never returns the stored credential.
     pub fn public_view(&self) -> Value {
         json!({
@@ -225,5 +253,57 @@ impl ProviderConfig {
         let mut model = Model::new(name, &self.id);
         model.max_output_tokens = Some(self.max_output_tokens);
         Ok(ConfiguredProvider { provider, model })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(base_url: &str, api_key: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            service: ProviderService::Openai,
+            api: ProviderApi::ChatCompletions,
+            id: "example-model".into(),
+            base_url: base_url.into(),
+            api_version: "v1".into(),
+            max_output_tokens: 4096,
+            api_key: api_key.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn omitted_api_key_preserves_the_same_credential_destination() {
+        let previous = profile("https://api.example/v1", Some("saved-secret"));
+        let mut update = profile("https://api.example/v1", None);
+        update.merge_saved_api_key(Some(&previous), false).unwrap();
+        assert!(update.has_api_key());
+        assert_eq!(update.public_view()["authentication"], "plain_file");
+    }
+
+    #[test]
+    fn clearing_api_key_is_explicit_and_cannot_set_a_replacement() {
+        let previous = profile("https://api.example/v1", Some("saved-secret"));
+        let mut cleared = profile("https://api.example/v1", None);
+        cleared.merge_saved_api_key(Some(&previous), true).unwrap();
+        assert!(!cleared.has_api_key());
+
+        let mut contradictory = profile("https://api.example/v1", Some("replacement"));
+        assert!(
+            contradictory
+                .merge_saved_api_key(Some(&previous), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn omitted_api_key_cannot_move_a_saved_secret_to_another_endpoint() {
+        let previous = profile("https://api.example/v1", Some("saved-secret"));
+        let mut update = profile("https://other.example/v1", None);
+        let error = update
+            .merge_saved_api_key(Some(&previous), false)
+            .unwrap_err();
+        assert!(error.to_string().contains("credential destination"));
+        assert!(!update.has_api_key());
     }
 }

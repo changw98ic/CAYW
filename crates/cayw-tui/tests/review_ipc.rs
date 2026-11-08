@@ -119,7 +119,26 @@ async fn queued_cancelled_rpc_unblocks_only_after_authoritative_idle_get() {
         Update::Connected
     ) {}
     let commands = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
     driver.dispatch(&mut app, &transport, commands);
+    loop {
+        let update = next(&mut transport, "check queued session budget").await;
+        let budget_status = matches!(
+            &update,
+            Update::Response { request, result: Ok(_) }
+                if request.method == "model.budget.prepare_prompt"
+        );
+        let commands = driver.update(&mut app, update);
+        if budget_status {
+            assert!(matches!(commands.as_slice(), [Command::Prompt { .. }]));
+            driver.dispatch(&mut app, &transport, commands);
+            break;
+        }
+        driver.dispatch(&mut app, &transport, commands);
+    }
     timeout(Duration::from_secs(8), async {
         loop {
             let tasks = runtime.tasks(&id).unwrap();

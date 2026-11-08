@@ -2,10 +2,18 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
+use std::time::Duration;
+
+use url::Url;
 
 use crate::error::WebAccessError;
 use crate::types::{FailureClass, SearchEmptyReason, SearchEvidence, SearchHit, SearchResponse};
+
+/// Maximum number of redirects followed for one fetch.
+const MAX_REDIRECTS: usize = 5;
+const USER_AGENT: &str = "cayw-web-access/0.1 (F10 first cut)";
 
 /// Async result alias used by provider futures.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -218,26 +226,60 @@ impl SearchProvider for FixtureSearch {
 }
 
 /// Live `reqwest` transport (used when the host opts into network).
+///
+/// Target policy: the initial URL and every redirect must resolve to a public
+/// address. Hostnames are resolved before the request and pinned into the
+/// per-request client so a later DNS answer cannot redirect the connection to
+/// a private address. Redirects are followed manually, at most
+/// [`MAX_REDIRECTS`] times.
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
-    client: reqwest::Client,
+    timeout: Duration,
+    strict_targets: bool,
 }
 
 impl ReqwestTransport {
     pub fn new() -> Result<Self, WebAccessError> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("cayw-web-access/0.1 (F10 first cut)")
-            .build()
-            .map_err(|e| {
-                WebAccessError::new(
-                    FailureClass::ProviderUnavailable,
-                    format!("failed to build HTTP client: {e}"),
-                )
-                .with_provider("reqwest")
-            })?;
-        Ok(Self { client })
+        Ok(Self {
+            timeout: Duration::from_secs(30),
+            strict_targets: true,
+        })
+    }
+
+    /// Local-fixture constructor for integration tests that must connect to a
+    /// loopback HTTP server. It skips public-target checks and must never be
+    /// used by the Host; production code uses [`ReqwestTransport::new`]. It is
+    /// absent from release builds (`debug_assertions` off).
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn for_local_tests() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            strict_targets: false,
+        }
+    }
+
+    fn build_client(
+        &self,
+        pin: Option<(&str, &[SocketAddr])>,
+    ) -> Result<reqwest::Client, WebAccessError> {
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            // A system proxy would resolve the hostname outside this process and
+            // bypass the public-address pin that enforces the SSRF boundary.
+            .no_proxy()
+            .timeout(self.timeout)
+            .user_agent(USER_AGENT);
+        if let Some((host, addrs)) = pin {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+        builder.build().map_err(|e| {
+            WebAccessError::new(
+                FailureClass::ProviderUnavailable,
+                format!("failed to build HTTP client: {e}"),
+            )
+            .with_provider("reqwest")
+        })
     }
 }
 
@@ -254,56 +296,304 @@ impl HttpTransport for ReqwestTransport {
         max_bytes: usize,
     ) -> BoxFuture<'a, Result<RawResponse, WebAccessError>> {
         Box::pin(async move {
-            let parsed = url::Url::parse(url).map_err(|e| {
-                WebAccessError::new(FailureClass::InvalidUrl, format!("invalid URL: {e}"))
-                    .with_url(url)
-            })?;
-            if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                return Err(WebAccessError::new(
-                    FailureClass::UnsupportedScheme,
-                    format!("unsupported URL scheme {}", parsed.scheme()),
-                )
-                .with_url(url));
-            }
-            let response = self.client.get(parsed.clone()).send().await.map_err(|e| {
-                let class = if e.is_timeout() {
-                    FailureClass::Timeout
-                } else if e.is_connect() {
-                    FailureClass::Dns
-                } else if e.is_request() {
-                    FailureClass::InvalidUrl
+            let mut current =
+                Url::parse(url).map_err(|e| invalid_url(url, format!("invalid URL: {e}")))?;
+            let mut redirects = 0usize;
+            loop {
+                if !matches!(current.scheme(), "http" | "https") {
+                    return Err(unsupported_scheme(&current));
+                }
+                let pin = if self.strict_targets {
+                    validate_public_url(&current)?;
+                    resolve_public_addrs(&current).await?.pin
                 } else {
-                    FailureClass::Offline
+                    None
                 };
-                WebAccessError::new(class, format!("HTTP GET failed: {e}"))
-                    .with_url(url)
-                    .with_provider("reqwest")
-            })?;
-            let final_url = response.url().to_string();
-            let mime_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
-            let (status, body) =
-                read_bounded_body(response, max_bytes, Some(url), "reqwest").await?;
-            if !(200..300).contains(&status) {
-                return Err(WebAccessError::new(
-                    FailureClass::HttpStatus,
-                    format!("HTTP status {status}"),
-                )
-                .with_url(final_url)
-                .with_status(status)
-                .with_provider("reqwest"));
+                let client = self.build_client(
+                    pin.as_ref()
+                        .map(|(host, addrs)| (host.as_str(), addrs.as_slice())),
+                )?;
+                let response = client.get(current.clone()).send().await.map_err(|e| {
+                    let class = if e.is_timeout() {
+                        FailureClass::Timeout
+                    } else if e.is_connect() {
+                        FailureClass::Dns
+                    } else if e.is_request() {
+                        FailureClass::InvalidUrl
+                    } else {
+                        FailureClass::Offline
+                    };
+                    WebAccessError::new(class, format!("HTTP GET failed: {e}"))
+                        .with_url(display_url(&current))
+                        .with_provider("reqwest")
+                })?;
+                let status = response.status().as_u16();
+                if is_redirect(status) {
+                    if redirects >= MAX_REDIRECTS {
+                        return Err(WebAccessError::new(
+                            FailureClass::InvalidUrl,
+                            format!("too many redirects (maximum {MAX_REDIRECTS})"),
+                        )
+                        .with_url(display_url(&current))
+                        .with_provider("reqwest"));
+                    }
+                    redirects += 1;
+                    let location = response
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            WebAccessError::new(
+                                FailureClass::InvalidUrl,
+                                "redirect response is missing a valid Location header",
+                            )
+                            .with_url(display_url(&current))
+                            .with_provider("reqwest")
+                        })?;
+                    current = redirect_target(&current, location, self.strict_targets)?;
+                    continue;
+                }
+                let mime_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                // With redirects disabled, the response URL is the URL that was
+                // requested. Re-resolve happened above for this exact hop.
+                let final_url = current.to_string();
+                let (status, body) =
+                    read_bounded_body(response, max_bytes, Some(&final_url), "reqwest").await?;
+                if !(200..300).contains(&status) {
+                    return Err(WebAccessError::new(
+                        FailureClass::HttpStatus,
+                        format!("HTTP status {status}"),
+                    )
+                    .with_url(final_url)
+                    .with_status(status)
+                    .with_provider("reqwest"));
+                }
+                return Ok(RawResponse {
+                    status,
+                    final_url,
+                    mime_type,
+                    body,
+                });
             }
-            Ok(RawResponse {
-                status,
-                final_url,
-                mime_type,
-                body,
-            })
         })
     }
+}
+
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// A URL that passed host/scheme checks and, for hostnames, has pinned
+/// addresses. IP literals need no pin because the URL already names the IP.
+#[derive(Debug)]
+struct ResolvedTarget {
+    pin: Option<(String, Vec<SocketAddr>)>,
+}
+
+fn validate_public_url(url: &Url) -> Result<(), WebAccessError> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(unsupported_scheme(url));
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) if !ipv4_is_public(ip) => {
+            Err(blocked_target(url, ip.to_string()))
+        }
+        Some(url::Host::Ipv6(ip)) if !ipv6_is_public(ip) => {
+            Err(blocked_target(url, ip.to_string()))
+        }
+        Some(url::Host::Domain(domain)) if is_obviously_local_domain(domain) => {
+            Err(blocked_target(url, domain.to_string()))
+        }
+        Some(_) => Ok(()),
+        None => Err(
+            WebAccessError::new(FailureClass::InvalidUrl, "URL has no host")
+                .with_url(display_url(url)),
+        ),
+    }
+}
+
+/// Resolve a hostname and require every answer to be public. The returned
+/// addresses are pinned into the request's client to prevent DNS rebinding.
+async fn resolve_public_addrs(url: &Url) -> Result<ResolvedTarget, WebAccessError> {
+    let port = url.port_or_known_default().ok_or_else(|| {
+        WebAccessError::new(FailureClass::InvalidUrl, "URL has no usable port")
+            .with_url(display_url(url))
+    })?;
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => {
+            if !ipv4_is_public(ip) {
+                return Err(blocked_target(url, ip.to_string()));
+            }
+            Ok(ResolvedTarget { pin: None })
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if !ipv6_is_public(ip) {
+                return Err(blocked_target(url, ip.to_string()));
+            }
+            Ok(ResolvedTarget { pin: None })
+        }
+        Some(url::Host::Domain(domain)) => {
+            let host = domain.to_string();
+            let lookup = host.clone();
+            let addrs = tokio::task::spawn_blocking(move || {
+                (lookup.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|iter| iter.collect::<Vec<_>>())
+            })
+            .await
+            .map_err(|e| {
+                WebAccessError::new(
+                    FailureClass::Dns,
+                    format!("resolve {host}: resolver task failed: {e}"),
+                )
+                .with_url(display_url(url))
+                .with_provider("reqwest")
+            })?
+            .map_err(|e| {
+                WebAccessError::new(FailureClass::Dns, format!("resolve {host}: {e}"))
+                    .with_url(display_url(url))
+                    .with_provider("reqwest")
+            })?;
+            if addrs.is_empty() {
+                return Err(WebAccessError::new(
+                    FailureClass::Dns,
+                    format!("resolve {host}: no addresses"),
+                )
+                .with_url(display_url(url))
+                .with_provider("reqwest"));
+            }
+            if let Some(bad) = addrs.iter().find(|addr| !ip_is_public(addr.ip())) {
+                return Err(blocked_target(
+                    url,
+                    format!("{host} resolves to {}", bad.ip()),
+                ));
+            }
+            Ok(ResolvedTarget {
+                pin: Some((host, addrs)),
+            })
+        }
+        None => Err(
+            WebAccessError::new(FailureClass::InvalidUrl, "URL has no host")
+                .with_url(display_url(url)),
+        ),
+    }
+}
+
+fn redirect_target(current: &Url, location: &str, strict: bool) -> Result<Url, WebAccessError> {
+    let next = current.join(location).map_err(|e| {
+        WebAccessError::new(
+            FailureClass::InvalidUrl,
+            format!("invalid redirect location: {e}"),
+        )
+        .with_url(display_url(current))
+        .with_provider("reqwest")
+    })?;
+    if !matches!(next.scheme(), "http" | "https") {
+        return Err(unsupported_scheme(&next));
+    }
+    if strict {
+        validate_public_url(&next)?;
+    }
+    Ok(next)
+}
+
+fn invalid_url(url: &str, message: impl Into<String>) -> WebAccessError {
+    WebAccessError::new(FailureClass::InvalidUrl, message).with_url(url)
+}
+
+fn unsupported_scheme(url: &Url) -> WebAccessError {
+    WebAccessError::new(
+        FailureClass::UnsupportedScheme,
+        format!("unsupported URL scheme {}", url.scheme()),
+    )
+    .with_url(display_url(url))
+}
+
+fn blocked_target(url: &Url, detail: impl std::fmt::Display) -> WebAccessError {
+    WebAccessError::new(
+        FailureClass::InvalidUrl,
+        format!("refusing non-public web target: {detail}"),
+    )
+    .with_url(display_url(url))
+    .with_provider("reqwest")
+}
+
+/// Strip userinfo before putting a URL into a diagnostic.
+fn display_url(url: &Url) -> String {
+    let mut safe = url.clone();
+    let _ = safe.set_username("");
+    let _ = safe.set_password(None);
+    safe.to_string()
+}
+
+fn is_obviously_local_domain(domain: &str) -> bool {
+    let domain = domain.strip_suffix('.').unwrap_or(domain);
+    domain.eq_ignore_ascii_case("localhost")
+        || domain
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("localhost"))
+}
+
+fn ip_is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ipv4_is_public(ip),
+        IpAddr::V6(ip) => ipv6_is_public(ip),
+    }
+}
+
+fn ipv4_is_public(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    !(ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        || octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+        || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+        || octets[0] >= 240)
+}
+
+fn ipv6_is_public(ip: Ipv6Addr) -> bool {
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || ip.is_multicast()
+        || ip.is_unique_local()
+        || ip.is_unicast_link_local()
+        || ip.to_ipv4_mapped().is_some()
+        || ip.to_ipv4().is_some()
+    {
+        return false;
+    }
+    let segments = ip.segments();
+    // Global unicast is 2000::/3. Everything outside it is special-purpose.
+    if segments[0] & 0xe000 != 0x2000 {
+        return false;
+    }
+    // Documentation 2001:db8::/32 and 3fff::/20.
+    if (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
+    {
+        return false;
+    }
+    // 6to4 2002::/16 and Teredo 2001::/32 can embed private IPv4.
+    if segments[0] == 0x2002 || (segments[0] == 0x2001 && segments[1] == 0) {
+        return false;
+    }
+    // NAT64 64:ff9b::/96 can map private IPv4.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        return false;
+    }
+    true
 }
 
 /// Reads an HTTP response body with streaming byte accumulation bounded by `max_bytes`.
@@ -371,4 +661,249 @@ pub(crate) async fn read_bounded_body(
     }
 
     Ok((status, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn ip_policy_rejects_non_public_targets() {
+        let v4 = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "100.64.0.1",
+            "198.18.0.1",
+            "192.88.99.1",
+            "240.0.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+        ];
+        for raw in v4 {
+            let ip: Ipv4Addr = raw.parse().unwrap();
+            assert!(!ip_is_public(IpAddr::V4(ip)), "{raw} must be rejected");
+        }
+        let v6 = [
+            "::1",
+            "::",
+            "fc00::1",
+            "fd00::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:127.0.0.1",
+            "2001:db8::1",
+            "3fff::1",
+            "2002::1",
+            "2001::1",
+            "64:ff9b::1",
+        ];
+        for raw in v6 {
+            let ip: Ipv6Addr = raw.parse().unwrap();
+            assert!(!ip_is_public(IpAddr::V6(ip)), "{raw} must be rejected");
+        }
+    }
+
+    #[test]
+    fn ip_policy_allows_public_targets() {
+        for raw in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2a00:1450:4001:81b::200e",
+        ] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(ip_is_public(ip), "{raw} must be allowed");
+        }
+    }
+
+    #[test]
+    fn validate_public_url_rejects_local_and_special_hosts() {
+        for raw in [
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://169.254.169.254/",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://0.0.0.0/",
+            "http://224.0.0.1/",
+            "http://[fc00::1]/",
+            "http://[fe80::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://localhost/",
+            "http://LOCALHOST./",
+            "http://foo.localhost/",
+            "file:///etc/passwd",
+            "ftp://example.com/",
+        ] {
+            let url = Url::parse(raw).unwrap();
+            assert!(validate_public_url(&url).is_err(), "{raw} must be rejected");
+        }
+        assert!(validate_public_url(&Url::parse("https://example.com/a?b=c").unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_public_addrs_rejects_localhost() {
+        let url = Url::parse("http://localhost:8080/").unwrap();
+        let error = resolve_public_addrs(&url)
+            .await
+            .expect_err("localhost must not resolve to a public target");
+        assert!(
+            error.diagnostic().message.contains("non-public")
+                || error.diagnostic().class == FailureClass::Dns,
+            "unexpected diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn redirect_target_rejects_non_public_locations() {
+        let base = Url::parse("https://example.com/start").unwrap();
+        for location in [
+            "http://127.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://localhost/",
+            "ftp://example.com/file",
+        ] {
+            assert!(
+                redirect_target(&base, location, true).is_err(),
+                "{location} must be rejected as a redirect target"
+            );
+        }
+        let allowed = redirect_target(&base, "https://example.com/next", true).unwrap();
+        assert_eq!(allowed.as_str(), "https://example.com/next");
+    }
+
+    fn spawn_redirect_server(total: usize, finish: bool) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            for index in 0..total {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = if finish && index + 1 == total {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfinal"
+                } else {
+                    "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}/start"), handle)
+    }
+
+    #[tokio::test]
+    async fn pinned_resolution_connects_to_validated_address() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        });
+
+        let transport = ReqwestTransport::new().unwrap();
+        let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let client = transport
+            .build_client(Some(("pinned.example", &[address])))
+            .unwrap();
+        let response = client
+            .get(format!("http://pinned.example:{port}/"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pinned_resolution_ignores_system_proxy() {
+        const CHILD: &str = "CAYW_WEB_ACCESS_PROXY_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("child") {
+            let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+            let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "provider::tests::pinned_resolution_ignores_system_proxy",
+                    "--nocapture",
+                ])
+                .env(CHILD, "child")
+                .env("HTTP_PROXY", &proxy_url)
+                .env("HTTPS_PROXY", &proxy_url)
+                .env("ALL_PROXY", &proxy_url)
+                .env("http_proxy", &proxy_url)
+                .env("https_proxy", &proxy_url)
+                .env("all_proxy", &proxy_url)
+                .env("NO_PROXY", "")
+                .env("no_proxy", "")
+                .status()
+                .unwrap();
+            assert!(status.success(), "system proxy bypassed the pinned target");
+            return;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndirect",
+            );
+        });
+        let transport = ReqwestTransport {
+            timeout: Duration::from_secs(2),
+            strict_targets: true,
+        };
+        let client = transport
+            .build_client(Some(("proxy-proof.example", &[address])))
+            .unwrap();
+        let response = client
+            .get(format!("http://proxy-proof.example:{}/", address.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "direct");
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn follows_redirects_and_enforces_limit() {
+        let transport = ReqwestTransport::for_local_tests();
+
+        let (url, handle) = spawn_redirect_server(3, true);
+        let response = transport.get(&url, 1024).await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"final");
+        assert!(response.final_url.ends_with("/next"));
+        handle.join().unwrap();
+
+        let (url, handle) = spawn_redirect_server(6, false);
+        let error = transport.get(&url, 1024).await.unwrap_err();
+        assert!(
+            error.diagnostic().message.contains("too many redirects"),
+            "unexpected error: {error}"
+        );
+        handle.join().unwrap();
+    }
 }

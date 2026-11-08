@@ -102,7 +102,7 @@ cayw-client create
 cayw-client prompt --session SESSION_ID --text 'Run the offline demo'
 ```
 
-演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。本地产品只通过 `cayw conf` 首次配置模型。它把当前工作区的 `configured` 方案写入私有 `models.json`，并允许把可选密钥作为普通明文字段 `api_key` 保存；留空表示模型服务不需要认证。启动不会弹出配置向导。旧 `config.json.model` 只在迁移时读取，迁移后删除。只有完整显式 Headless 的 `--config` 继续以 `config.model` 为权威来源。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
+演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。本地产品只通过 `cayw conf` 首次配置模型。它把当前工作区的 `configured` 方案写入私有 `models.json`，并允许把可选密钥作为普通明文字段 `api_key` 保存；新建方案时留空表示模型服务不需要认证。编辑已有方案时，密钥留空会保留同一服务地址的原值，删除密钥需要明确选择清除；更换服务地址时必须提供新密钥或明确清除，旧密钥不会自动转移。启动不会弹出配置向导。旧 `config.json.model` 只在迁移时读取，迁移后删除。只有完整显式 Headless 的 `--config` 继续以 `config.model` 为权威来源。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
 
 ## 文档与参与
 
@@ -116,4 +116,4 @@ cayw-client prompt --session SESSION_ID --text 'Run the offline demo'
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)
+项目源码使用 [Apache License 2.0](LICENSE)。macOS 发行包另外包含按锁定依赖生成的 `THIRD-PARTY-NOTICES` 和所需第三方许可文本；这些文件也列入包内 `SHA256SUMS`。

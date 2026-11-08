@@ -219,6 +219,8 @@ pub enum FailureClass {
     Cancelled,
     NotFound,
     ContentStorage,
+    /// Invalid host-owned configuration, rejected before any request.
+    Configuration,
 }
 
 /// Structured diagnostic returned on failure (never silent).

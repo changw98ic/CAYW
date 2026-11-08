@@ -34,6 +34,39 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Reject host configuration that would otherwise make `clamp` panic or
+    /// every request fail. This is a known configuration error, not a request
+    /// failure.
+    pub fn validate(&self) -> Result<(), WebAccessError> {
+        if self.max_body_bytes == 0 {
+            return Err(configuration_error("max_body_bytes must be nonzero"));
+        }
+        if self.max_extract_chars == 0 {
+            return Err(configuration_error("max_extract_chars must be nonzero"));
+        }
+        if self.max_search_limit == 0 {
+            return Err(configuration_error("max_search_limit must be nonzero"));
+        }
+        if self.default_search_limit == 0 {
+            return Err(configuration_error("default_search_limit must be nonzero"));
+        }
+        if self.default_search_limit > self.max_search_limit {
+            return Err(configuration_error(
+                "default_search_limit must not exceed max_search_limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn configuration_error(message: impl Into<String>) -> WebAccessError {
+    WebAccessError::new(
+        FailureClass::Configuration,
+        format!("invalid web-access limits: {}", message.into()),
+    )
+}
+
 /// Host-facing web-access facade. Does **not** implement or alias `search.query`.
 pub struct WebAccess {
     transport: Arc<dyn HttpTransport>,
@@ -109,9 +142,14 @@ impl WebAccess {
                 "search query must be 1..=8192 bytes",
             ));
         }
-        let limit = limit
-            .unwrap_or(self.limits.default_search_limit)
-            .clamp(1, self.limits.max_search_limit);
+        let limit = {
+            // Validate first so a host configuration such as
+            // `max_search_limit = 0` is a known error, never a `clamp` panic.
+            self.limits.validate()?;
+            limit
+                .unwrap_or(self.limits.default_search_limit)
+                .clamp(1, self.limits.max_search_limit)
+        };
         let mut response = self.search.search(q, limit).await?;
         let truncated = response.hits.len() as u32 >= limit;
         if response.hits.len() as u32 > limit {
@@ -140,6 +178,7 @@ impl WebAccess {
     }
 
     pub async fn fetch(&self, url: &str) -> Result<FetchResult, WebAccessError> {
+        self.limits.validate()?;
         validate_http_url(url)?;
         let raw = self.transport.get(url, self.limits.max_body_bytes).await?;
         let kind = mime_kind(raw.mime_type.as_deref(), &raw.body);
@@ -184,6 +223,7 @@ impl WebAccess {
 
     /// Fetch a URL and extract readable text from the downloaded body.
     pub async fn extract_url(&self, url: &str) -> Result<ExtractResult, WebAccessError> {
+        self.limits.validate()?;
         validate_http_url(url)?;
         let raw = self.transport.get(url, self.limits.max_body_bytes).await?;
         self.extract_bytes(url, &raw.final_url, raw.mime_type.as_deref(), &raw.body)
@@ -196,6 +236,7 @@ impl WebAccess {
         mime: Option<&str>,
         bytes: &[u8],
     ) -> Result<ExtractResult, WebAccessError> {
+        self.limits.validate()?;
         let (kind, title, text, truncated) =
             extract_auto(mime, bytes, self.limits.max_extract_chars)?;
         let content = self.store.put_text(

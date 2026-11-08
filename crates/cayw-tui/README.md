@@ -4,9 +4,10 @@
 
 ## 职责与边界
 
-- **纯 IPC 消费端**：使用 `session.list`、`session.create`、`session.get`、`session.events`、`session.prompt`、`session.cancel`、`approval.decide`、`session.fork` 完成会话切换、流式回复、审批、取消和冻结会话显式 Fork。
+- **纯 IPC 消费端**：使用 `session.list`、`session.create`、`session.get`、`session.events`、`task.enqueue`、`task.resume`、`session.cancel`、`approval.decide`、`session.fork` 完成会话切换、流式回复、审批、取消和冻结会话显式 Fork。TUI 不直接执行 Runtime 操作。
 - **只读查看视图**：提供对话（`Chat`）、文件（`Files`）、变更对比（`Diff`）和事件与执行日志（`Logs`）四个只读视图。所有内容均投影自权威快照与已消费事件，未知副作用（`outcome_unknown`）不会被当作已确认结果展示，也不会因切换视图隐藏安全提示。
-- **断连不重放**：连接断开时保留本地草稿和已消费事件游标，重连后从保留游标续读并重新读取权威快照，不自动重发未确认的提交。
+- **模型预算确认**：发送前先调用只读的 `model.budget.status`。历史模型用量未知时，TUI 显示原预留、未知费用、新增额度和累计上限。按 `y` 后才创建一个新 Task、调用 `model.budget.continue` 并执行 `task.resume`；按 `n` 或 `Esc` 不创建 Task，并保留草稿。授权失败时只取消刚创建且尚未派发的原 Task。
+- **断连不重放**：连接断开时保留本地草稿和已消费事件游标，重连后从保留游标续读并重新读取权威快照，不自动重发未确认的提交。只读预算查询断线不会被误记成已经创建 Task。
 
 ## 运行方式
 

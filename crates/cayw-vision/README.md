@@ -42,7 +42,7 @@ let router = VisionRouter::new(Arc::new(ocr), describe);
 let text = router.ocr(&img, &OcrRequest { engine_hint: None }, &CancellationToken::new())?;
 ```
 
-生产 Host 侧用 `VisionService::from_env(Limits::default())`：按环境配置选择后端，未配置时诚实报错；测试通过注入 `FixtureOcrEngine` 或 `CountingDescribeBackend` 保证确定性。Host 取消时 `tesseract` / describe 的 `curl` 经 KillOnDrop 杀掉，输出流受字节上限保护，超限立即终止并回收子进程，不留孤儿进程。
+生产 Host 侧用 `VisionService::from_env(Limits::default())`：按环境配置选择后端，未配置时诚实报错；测试通过注入 `FixtureOcrEngine` 或 `CountingDescribeBackend` 保证确定性。describe 的 JSON 请求体和可选认证头写入 0600 临时文件，`curl` 参数只包含文件引用，不包含图片 Base64 或密钥，避免 macOS 参数长度上限和进程参数泄密。密钥中的换行会在启动前拒绝。临时文件由 RAII 在成功、失败、取消和 panic 后清理，错误文本会替换密钥且不回显请求体。Host 取消时 `tesseract` / describe 的 `curl` 经 KillOnDrop 杀掉，输出流受字节上限保护，超限立即终止并回收子进程，不留孤儿进程。
 
 ## 来源与边界
 

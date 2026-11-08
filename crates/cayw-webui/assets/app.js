@@ -151,6 +151,7 @@ const readMethods = new Set([
   'runtime.fleet',
   'session.context_overview',
   'session.run_inspector',
+  'model.budget.status',
   'artifacts.list',
   'artifacts.preview',
   'artifacts.action_list',
@@ -165,6 +166,33 @@ export class RpcError extends Error {
     this.status = status;
     this.auth = status === 403 || status === 401 || (code === 'forbidden' && status === 403);
   }
+}
+
+export function unstartedContinuationCancelTarget(task, sessionId, taskId) {
+  const pristine = object(task)
+    && task.id === taskId
+    && task.session_id === sessionId
+    && task.state === 'queued'
+    && task.worker_id === null
+    && task.attempt_id === null
+    && task.dispatches === 0
+    && task.holds_slot === false
+    && task.cancel_requested === false
+    && safeCursor(task.fence);
+  if (!pristine) {
+    throw new RpcError(
+      'budget_continuation_cleanup_unknown',
+      '新任务已不再是从未领取的 queued 状态；无法证明模型请求未开始。',
+      true
+    );
+  }
+  return {
+    session_id: task.session_id,
+    task_id: task.id,
+    worker_id: task.worker_id,
+    attempt_id: task.attempt_id,
+    fence: task.fence,
+  };
 }
 
 export function beginWrite(view, key, method, params = {}) {
@@ -405,7 +433,9 @@ function boot() {
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
-    'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork', 'refresh-capabilities', 'capability-content',
+    'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork',
+    'model-budget-dialog', 'model-budget-form', 'model-budget-summary', 'model-budget-confirm', 'model-budget-error', 'continue-model-budget', 'close-model-budget',
+    'refresh-capabilities', 'capability-content',
     'panel-sidebar', 'panel-sidebar-status', 'panel-sidebar-guide', 'panel-sidebar-open', 'refresh-panels',
     'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
     'wb-tasks', 'wb-usage', 'wb-artifacts', 'wb-plannotator', 'wb-editor', 'wb-trace',
@@ -424,8 +454,10 @@ function boot() {
   let promptPending = new Set();
   let approvalPending = new Set();
   const taskAdmissions = new Map();
+  let budgetDecision = null;
   let selectionGeneration = 0;
   let listGeneration = 0;
+  let promptRevision = 0;
   let timer;
   let pollFailures = 0;
   const controllers = new Set();
@@ -446,6 +478,52 @@ function boot() {
     ui['global-error'].hidden = !error;
   };
   const activeView = () => selected ? views.get(selected) : undefined;
+  const setPromptValue = value => {
+    const next = String(value);
+    if (ui['prompt'].value !== next) {
+      ui['prompt'].value = next;
+      promptRevision++;
+    }
+  };
+
+  function finishBudgetDecision(approved) {
+    const pending = budgetDecision;
+    budgetDecision = null;
+    if (ui['model-budget-dialog'].open) ui['model-budget-dialog'].close();
+    ui['model-budget-confirm'].checked = false;
+    ui['model-budget-error'].textContent = '';
+    if (pending) pending.resolve(approved ? pending.proposal : null);
+  }
+
+  function confirmModelBudget(status) {
+    const proposal = status?.continuation;
+    if (!status?.budget_unknown || !object(proposal) || !Array.isArray(proposal.expected)
+      || !Number.isSafeInteger(proposal.additional_tokens) || proposal.additional_tokens <= 0
+      || !Number.isSafeInteger(proposal.token_limit) || proposal.token_limit <= 0) {
+      throw new RpcError('invalid_response', 'Runtime 返回的模型预算恢复方案无效；没有创建新任务。');
+    }
+    finishBudgetDecision(false);
+    ui['model-budget-summary'].textContent = `先前有 ${proposal.unknown_request_count} 个模型请求用量未知，保留预留 ${status.reserved_tokens} token。本次只为一个新任务增加最多 ${proposal.additional_tokens} token；累计上限变为 ${proposal.token_limit} token。`;
+    ui['model-budget-confirm'].checked = false;
+    ui['model-budget-error'].textContent = '';
+    ui['model-budget-dialog'].showModal();
+    return new Promise(resolve => { budgetDecision = { proposal, resolve }; });
+  }
+
+  ui['model-budget-form'].addEventListener('submit', event => {
+    event.preventDefault();
+    if (!budgetDecision) return;
+    if (!ui['model-budget-confirm'].checked) {
+      ui['model-budget-error'].textContent = '请先确认保留未知预留并增加列明的有限额度。';
+      return;
+    }
+    finishBudgetDecision(true);
+  });
+  ui['close-model-budget'].addEventListener('click', () => finishBudgetDecision(false));
+  ui['model-budget-dialog'].addEventListener('cancel', event => {
+    event.preventDefault();
+    finishBudgetDecision(false);
+  });
 
   async function rpc(method, params = {}, scope = sessionWorkspaces.get(params.session_id) || workspaceId) {
     const controller = new AbortController();
@@ -1364,8 +1442,9 @@ function boot() {
     ui['live-text'].textContent = '';
     ui['session-list'].replaceChildren();
     ui['session-picker'].open = true;
-    ui['prompt'].value = '';
+    setPromptValue('');
     ui['fork-dialog'].close();
+    finishBudgetDecision(false);
     if ($('settings-dialog')?.open) $('settings-dialog').close();
     panelCatalog = null;
     openedPanels = [];
@@ -1460,7 +1539,7 @@ function boot() {
     syncPanelsForSession(id, generation, login);
     if (!views.has(id)) rememberView(createView(id));
     ui['poll-status'].textContent = '正在读取会话…';
-    ui['prompt'].value = '';
+    setPromptValue('');
     report(null);
     renderSessionList();
     renderView();
@@ -1699,12 +1778,14 @@ function boot() {
   }
 
   let writeSequence = 0;
-  async function writeRpc(id, method, params) {
+  async function writeRpc(id, method, params, budgetProposal = null) {
     const scope = sessionWorkspaces.get(id) || workspaceId;
     sessionWorkspaces.set(id, scope);
     const login = loginGeneration;
     const key = ++writeSequence;
     const view = views.get(id);
+    let admittedTaskId = null;
+    let resumeStarted = false;
     if (view) rememberView(beginWrite(view, key, method, params));
     if (id === selected) renderView();
     try {
@@ -1720,11 +1801,43 @@ function boot() {
         taskAdmissions.set(id, admission);
         if (id === selected) renderComposer();
         const taskId = await admission;
+        admittedTaskId = taskId;
+        if (budgetProposal) {
+          await rpc('model.budget.continue', {
+            session_id: id,
+            task_id: taskId,
+            expected: budgetProposal.expected,
+            additional_tokens: budgetProposal.additional_tokens,
+            token_limit: budgetProposal.token_limit,
+            confirm: true,
+          }, scope);
+        }
+        resumeStarted = true;
         result = await rpc('task.resume', { task_id: taskId }, scope);
       } else result = await rpc(method, params, scope);
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, null, result));
       return result;
     } catch (error) {
+      if (admittedTaskId && !resumeStarted) {
+        const grantError = error;
+        try {
+          const task = await rpc('task.get', { task_id: admittedTaskId }, scope);
+          const target = unstartedContinuationCancelTarget(task, id, admittedTaskId);
+          const cancelled = await rpc('session.cancel', target, scope);
+          if (cancelled?.cancelled !== true) throw new Error('Runtime 未确认取消从未领取的新任务。');
+          error = new RpcError(
+            'budget_continuation_not_executed',
+            `模型预算授权失败；新任务已在从未领取的 queued 状态下取消，模型请求未开始：${grantError.message || String(grantError)}`,
+            false
+          );
+        } catch (cleanup) {
+          error = new RpcError(
+            'budget_continuation_cleanup_unknown',
+            `模型预算授权失败后，无法确认新任务是否已被领取或取消：${cleanup.message || String(cleanup)}`,
+            true
+          );
+        }
+      }
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, error));
       throw error;
     } finally {
@@ -1903,7 +2016,7 @@ function boot() {
         workspaceId = target.id;
         ++selectionGeneration; ++listGeneration; clearTimeout(timer);
         selected = null; sessions = []; openedPanels = []; openedPanelsSession = null;
-        ui['fork-dialog'].close(); ui['prompt'].value = ''; ui['session-picker'].open = true;
+        ui['fork-dialog'].close(); setPromptValue(''); ui['session-picker'].open = true;
         report(null); renderSessionList(); renderView(); renderOpenedPanels();
         await refreshPanels(); await refreshSessions();
         if (sessions.length) await selectSession(sessions[0].id);
@@ -1958,7 +2071,10 @@ function boot() {
     }
   });
 
-  ui['prompt'].addEventListener('input', renderComposer);
+  ui['prompt'].addEventListener('input', () => {
+    promptRevision++;
+    renderComposer();
+  });
   ui['prompt'].addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.isComposing && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
@@ -1969,23 +2085,31 @@ function boot() {
     event.preventDefault();
     if (ui['send-button'].disabled || !selected) return;
     const id = selected;
-    const text = ui['prompt'].value.trim();
+    const draft = ui['prompt'].value;
+    const draftRevision = promptRevision;
+    const text = draft.trim();
     const login = loginGeneration;
     const scope = workspaceId;
     const requestedAfter = views.get(id)?.cursor ?? 0;
     const requestedEpoch = views.get(id)?.proofEpoch ?? 0;
     promptPending.add(id);
     report(null);
-    ui['prompt'].value = '';
     renderComposer();
     try {
+      const budget = await rpc('model.budget.status', { session_id: id }, scope);
+      let budgetProposal = null;
+      if (budget?.budget_unknown) {
+        budgetProposal = await confirmModelBudget(budget);
+        if (!budgetProposal || login !== loginGeneration || id !== selected || scope !== workspaceId) return;
+      }
       // Never await prompt from inside the polling loop. Approval/cancel/events
       // need separate concurrent HTTP and IPC requests while it is pending.
-      const snapshot = await writeRpc(id, 'session.prompt', { session_id: id, text });
+      const snapshot = await writeRpc(id, 'session.prompt', { session_id: id, text }, budgetProposal);
       if (login !== loginGeneration) return;
       const view = views.get(id);
       if (view) rememberView({ ...applySnapshot(view, snapshot, false, requestedAfter, requestedEpoch), liveText: '' });
       updateSessionSummary(snapshot);
+      if (id === selected && scope === workspaceId && promptRevision === draftRevision && ui['prompt'].value === draft) setPromptValue('');
       if (id === selected) renderView();
     } catch (error) {
       if (login !== loginGeneration) return;
@@ -2181,6 +2305,16 @@ function mountSettings(rpc) {
   dialog.addEventListener('close', clearAccountPasswords);
   window.addEventListener('pagehide', clearAccountPasswords);
   const modelForm = $('model-settings-form');
+  function showModelApiKeyState(hasApiKey) {
+    modelForm.elements.clear_api_key.checked = false;
+    modelForm.elements.clear_api_key.disabled = !hasApiKey;
+    modelForm.elements.api_key.placeholder = hasApiKey
+      ? '已保存密钥；留空表示保持不变'
+      : '无认证服务请留空';
+    $('model-api-key-status').textContent = hasApiKey
+      ? '此方案已有密钥。留空会保留原值；只有勾选下方选项才会清除。'
+      : '此方案没有已保存密钥。';
+  }
   const serviceDefaults = {
     openai: ['https://api.openai.com/v1', ['chat_completions', 'responses']],
     anthropic: ['https://api.anthropic.com/v1', ['messages']],
@@ -2198,8 +2332,15 @@ function mountSettings(rpc) {
     if (modelForm.elements.service.value === 'magpie' && /^http:\/\/127\.0\.0\.1:3425\/v1(?:beta)?$/.test(modelForm.elements.base_url.value)) modelForm.elements.base_url.value = api.includes('generate_content') ? 'http://127.0.0.1:3425/v1beta' : 'http://127.0.0.1:3425/v1';
   }
   if (modelForm.elements) {
+    showModelApiKeyState(false);
     modelForm.elements.service.addEventListener('change', () => serviceOptions(modelForm.elements.service.value, true));
     modelForm.elements.api.addEventListener('change', apiVersion);
+    modelForm.elements.api_key.addEventListener('input', () => {
+      if (modelForm.elements.api_key.value) modelForm.elements.clear_api_key.checked = false;
+    });
+    modelForm.elements.clear_api_key.addEventListener('change', () => {
+      if (modelForm.elements.clear_api_key.checked) modelForm.elements.api_key.value = '';
+    });
   }
 
   async function refresh() {
@@ -2220,6 +2361,7 @@ function mountSettings(rpc) {
         for (const [key, value] of Object.entries(model)) {
           if (modelForm.elements[key]) modelForm.elements[key].value = value;
         }
+        showModelApiKeyState(model.authentication === 'plain_file');
       }));
       const use = button('使用', async () => { await rpc('settings.models.use', {name}); await refresh(); }); use.disabled = models.offline; row.append(use);
       const remove = button('删除', async () => { await rpc('settings.models.remove', {name}); await refresh(); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);
@@ -2249,9 +2391,11 @@ function mountSettings(rpc) {
   modelForm.addEventListener('submit', event => {
     event.preventDefault(); action(async () => {
       const values = Object.fromEntries(new FormData(modelForm)); const name = values.name; delete values.name;
+      const clearApiKey = values.clear_api_key === 'on'; delete values.clear_api_key;
       values.max_output_tokens = Number(values.max_output_tokens);
+      if (clearApiKey && values.api_key) throw new Error('不能同时填写新密钥和清除已保存密钥。');
       if (!values.api_key) delete values.api_key;
-      await rpc('settings.models.put', {name, model:values}); await refresh();
+      await rpc('settings.models.put', {name, model:values, clear_api_key:clearApiKey}); await refresh();
     });
   });
   $('plugin-settings-form').addEventListener('submit', event => {

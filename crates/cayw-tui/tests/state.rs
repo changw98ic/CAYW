@@ -69,11 +69,17 @@ fn new_prompt_is_dispatched_once_and_cancel_does_not_claim_a_terminal_state() {
     app.input.insert("你好");
     let send = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(
-        matches!(&send[..], [Command::Prompt { session_id, text }] if session_id == "s1" && text == "你好")
+        matches!(&send[..], [Command::PreparePrompt { session_id, text }] if session_id == "s1" && text == "你好")
     );
     assert!(
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .is_empty()
+    );
+    let send = app
+        .model_budget_status("s1", json!({"budget_unknown":false}))
+        .unwrap();
+    assert!(
+        matches!(&send[..], [Command::Prompt { session_id, text }] if session_id == "s1" && text == "你好")
     );
     let cancel = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert!(

@@ -277,7 +277,7 @@ case ":${PATH:-}:" in
         printf '\nPATH 生效后运行：\n'
         ;;
 esac
-printf '  cayw configure   # 配置模型服务；只保存凭据的环境变量名\n'
-printf '  cayw start       # 统一启动当前工作区及网页界面\n'
-printf '  cayw start --ui tui  # 统一启动终端界面\n'
-printf '\n没有模型配置时，cayw serve 在终端会询问是否运行 cayw configure；非交互环境会打印配置路径和 cayw configure 提示。\n'
+printf '  cayw conf        # 配置当前工作区的模型方案\n'
+printf '  cayw start       # 启动当前工作区并显示终端界面\n'
+printf '  cayw start --ui web  # 启动当前工作区并打开网页界面\n'
+printf '\n没有模型配置时，cayw serve 在终端会询问是否运行 cayw conf；非交互环境会打印配置路径和 cayw conf 提示。\n'

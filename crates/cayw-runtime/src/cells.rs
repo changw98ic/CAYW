@@ -41,6 +41,10 @@ struct CallState {
     authorization: Option<Authorization>,
     started: bool,
     settled: bool,
+    /// The bounded value committed to Core when the original Host result was
+    /// too large for one durable record. Cells and the model reuse it instead
+    /// of externalizing a second copy under a different handle.
+    durable: Option<Value>,
 }
 pub(crate) struct Authorization {
     pub proof: CapabilityAuthorization,
@@ -176,9 +180,16 @@ impl CallScope {
             }
         } else {
             match result {
-                Ok(result) => CapabilityOutcome::Completed {
-                    result: result.clone(),
-                },
+                Ok(result) => {
+                    let durable = if crate::results::exceeds_core_metadata(result) {
+                        let durable = crate::results::durable_core_result(self, result.clone());
+                        state.durable = Some(durable.clone());
+                        durable
+                    } else {
+                        result.clone()
+                    };
+                    CapabilityOutcome::Completed { result: durable }
+                }
                 Err(error) if error.outcome_unknown => CapabilityOutcome::OutcomeUnknown {
                     error: bounded(&error.message),
                 },
@@ -215,6 +226,17 @@ impl CallScope {
             self.context.cancel.cancel();
         }
         Ok(())
+    }
+    /// Returns the same bounded value this scope committed to Core so the Host
+    /// audit and Cells agree on one handle instead of storing two copies.
+    pub(crate) fn durable_result(&self, value: Value) -> Value {
+        if !crate::results::exceeds_core_metadata(&value) {
+            return value;
+        }
+        if let Some(durable) = lock(&self.state).durable.clone() {
+            return durable;
+        }
+        crate::results::durable_core_result(self, value)
     }
     fn dropped(&self) -> Result<(), CapabilityError> {
         let started = lock(&self.state).started;
@@ -614,6 +636,14 @@ impl CellBackend for Backend {
             error.message = bounded(&error.message);
             error
         });
+        // The original Host success must remain a known completion even when its
+        // value cannot fit into one Core metadata record. Reuse the exact
+        // bounded handle or receipt already committed by the Host audit; the
+        // original value stays the accounting basis inside `settle`.
+        let host_result = match host_result {
+            Ok(value) => Ok(scope.durable_result(value)),
+            Err(error) => Err(error),
+        };
         scope.settle(&host_result)?;
         let presentation = match &host_result {
             Ok(value) => crate::results::maybe_externalize(&scope, value.clone()).await,

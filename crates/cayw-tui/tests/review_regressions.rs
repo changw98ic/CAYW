@@ -2,7 +2,7 @@
 use cayw_agent::AgentEvent;
 use cayw_ai::{AssistantEvent, AssistantMessage, Content, Message, Model, StopReason};
 use cayw_tui::{
-    App, Command,
+    App, Command, Dialog,
     driver::Driver,
     transport::{Request, Update},
 };
@@ -37,6 +37,11 @@ fn attached(value: Value) -> App {
 
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Command> {
     app.handle_key(KeyEvent::new(code, modifiers))
+}
+
+fn known_budget(app: &mut App) -> Vec<Command> {
+    app.model_budget_status("s1", json!({"budget_unknown":false}))
+        .unwrap()
 }
 
 fn assistant(timestamp: u64, text: &str) -> Value {
@@ -75,7 +80,14 @@ fn agent(cursor: u64, kind: &str, message: Value) -> Value {
 fn known_queued_cancellation_releases_prompt_only_after_settled_snapshot() {
     let mut app = attached(snapshot("idle", 3));
     app.input.insert("queued draft");
-    assert_eq!(key(&mut app, KeyCode::Enter, KeyModifiers::NONE).len(), 1);
+    assert!(matches!(
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
+    assert!(matches!(
+        known_budget(&mut app).as_slice(),
+        [Command::Prompt { .. }]
+    ));
     assert!(app.task_admitted("s1", "original-queued-task").is_empty());
     assert_eq!(
         key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL),
@@ -117,6 +129,7 @@ fn known_queued_cancellation_releases_prompt_only_after_settled_snapshot() {
 fn cancellation_with_unknown_or_missing_outcome_never_clears_uncertain_prompt() {
     for error in [
         "cancelled: task cancellation uncertain (outcome_unknown=true)",
+        "budget_continuation_cleanup_unknown: task may have been claimed (outcome_unknown=true)",
         "cancelled: missing outcome",
         "runtime_outcome_unknown: unresolved write (outcome_unknown=false)",
         "recovery_required: unfinished bookkeeping (outcome_unknown=false)",
@@ -125,6 +138,10 @@ fn cancellation_with_unknown_or_missing_outcome_never_clears_uncertain_prompt() 
         let mut app = attached(snapshot("idle", 3));
         app.input.insert("submitted");
         key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            known_budget(&mut app).as_slice(),
+            [Command::Prompt { .. }]
+        ));
         app.input.insert(" plus edit");
         app.request_failed("s1", "session.prompt", error);
         app.upsert_snapshot(snapshot("idle", 4), false).unwrap();
@@ -132,6 +149,115 @@ fn cancellation_with_unknown_or_missing_outcome_never_clears_uncertain_prompt() 
         assert!(key(&mut app, KeyCode::Enter, KeyModifiers::NONE).is_empty());
         assert_eq!(app.input.text(), "submitted plus edit");
     }
+}
+
+#[test]
+fn proven_unclaimed_budget_cleanup_releases_only_after_refresh() {
+    let mut app = attached(snapshot("idle", 3));
+    app.input.insert("budgeted draft");
+    assert!(matches!(
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
+    assert!(matches!(
+        known_budget(&mut app).as_slice(),
+        [Command::Prompt { .. }]
+    ));
+    assert!(app.task_admitted("s1", "budget-task").is_empty());
+    app.request_failed(
+        "s1",
+        "session.prompt_with_model_budget",
+        "budget_continuation_not_executed: grant rejected; task stayed queued and unclaimed until cancellation (outcome_unknown=false)",
+    );
+    assert_eq!(app.input.text(), "budgeted draft");
+    assert!(!app.selected().unwrap().can_prompt());
+    app.upsert_snapshot(snapshot("idle", 4), false).unwrap();
+    assert!(app.selected().unwrap().can_prompt());
+    assert_eq!(app.input.text(), "budgeted draft");
+}
+
+#[test]
+fn unknown_model_usage_requires_confirmation_before_task_admission() {
+    let mut app = attached(snapshot("idle", 3));
+    app.input.insert("budgeted draft");
+    assert!(matches!(
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
+    let expected = json!([{
+        "request_id":"unknown-request",
+        "session_id":"s1",
+        "task_id":"old-task"
+    }]);
+    let status = json!({
+        "budget_unknown":true,
+        "settled_tokens":12,
+        "reserved_tokens":1000,
+        "continuation":{
+            "expected":expected,
+            "unknown_request_count":1,
+            "additional_tokens":128,
+            "token_limit":1140
+        }
+    });
+    assert!(
+        app.model_budget_status("s1", status.clone())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        &app.dialog,
+        Some(Dialog::ModelBudget {
+            unknown_request_count: 1,
+            settled_tokens: 12,
+            reserved_tokens: 1000,
+            additional_tokens: 128,
+            token_limit: 1140,
+            ..
+        })
+    ));
+    assert!(key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE).is_empty());
+    assert!(app.dialog.is_none());
+    assert_eq!(app.input.text(), "budgeted draft");
+    assert!(app.selected().unwrap().can_prompt());
+
+    assert!(matches!(
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
+    app.model_budget_status("s1", status).unwrap();
+    assert_eq!(
+        key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE),
+        vec![Command::PromptWithModelBudget {
+            session_id: "s1".into(),
+            text: "budgeted draft".into(),
+            expected,
+            additional_tokens: 128,
+            token_limit: 1140,
+        }]
+    );
+    assert!(!app.selected().unwrap().can_prompt());
+}
+
+#[test]
+fn disconnecting_a_read_only_budget_check_keeps_the_draft_retryable() {
+    let mut app = attached(snapshot("idle", 3));
+    app.input.insert("safe draft");
+    assert!(matches!(
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
+    app.set_disconnected("fixture disconnect");
+    assert_eq!(app.input.text(), "safe draft");
+    assert!(app.dialog.is_none());
+
+    app.set_connected();
+    app.upsert_snapshot(snapshot("idle", 4), false).unwrap();
+    assert!(app.selected().unwrap().can_prompt());
+    assert!(matches!(
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
 }
 
 #[test]

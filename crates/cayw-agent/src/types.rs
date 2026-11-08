@@ -23,6 +23,27 @@ pub enum QueueMode {
     OneAtATime,
 }
 
+/// Optional, host-supplied bound for tool-call arguments.
+///
+/// `None` (the default) applies no argument limit. A host that persists Agent
+/// events into a stricter store supplies its own limit explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToolArgumentLimit {
+    pub bytes: usize,
+    pub depth: usize,
+    pub nodes: usize,
+}
+
+impl ToolArgumentLimit {
+    pub const fn new(bytes: usize, depth: usize, nodes: usize) -> Self {
+        Self {
+            bytes,
+            depth,
+            nodes,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentContext {
     pub model: Model,

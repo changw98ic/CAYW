@@ -64,6 +64,9 @@ pub struct ServerConfig {
     /// Simultaneously executing handler futures per connection; extra calls receive `busy`.
     pub max_in_flight: usize,
     pub request_timeout: Duration,
+    /// Persistent prompt methods have no server deadline by default. Their
+    /// callers own the execution deadline; cancellation still settles them.
+    pub prompt_timeout: Option<Duration>,
     pub max_connections: usize,
     /// All frame IDs, including hello, rejected calls and cancel frames, consume this budget.
     pub max_requests_per_connection: usize,
@@ -85,6 +88,7 @@ impl ServerConfig {
             max_frame_bytes: 1024 * 1024,
             max_in_flight: 64,
             request_timeout: Duration::from_secs(30),
+            prompt_timeout: None,
             max_connections: 128,
             max_requests_per_connection: 65_536,
             max_id_bytes: 128,
@@ -118,6 +122,9 @@ impl ServerConfig {
                 .iter()
                 .any(|&value| value == 0 || value > Semaphore::MAX_PERMITS)
             || durations.iter().any(|&value| !valid_duration(value))
+            || self
+                .prompt_timeout
+                .is_some_and(|value| !valid_duration(value))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -143,6 +150,7 @@ impl fmt::Debug for ServerConfig {
             .field("max_frame_bytes", &self.max_frame_bytes)
             .field("max_in_flight", &self.max_in_flight)
             .field("request_timeout", &self.request_timeout)
+            .field("prompt_timeout", &self.prompt_timeout)
             .field("max_connections", &self.max_connections)
             .field(
                 "max_requests_per_connection",

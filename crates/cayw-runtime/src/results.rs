@@ -271,6 +271,120 @@ impl ResultStorageIdentity {
     }
 }
 
+/// Core rejects any single JSON value that exceeds its canonical metadata
+/// bounds before committing a capability terminal. Check the same bounds here
+/// so a successful Host result is never turned into an outcome-unknown failure
+/// just because it cannot be stored inline.
+pub(crate) fn exceeds_core_metadata(value: &Value) -> bool {
+    if !within_core_node_bounds(value) {
+        return true;
+    }
+    match serde_json::to_vec(value) {
+        Ok(bytes) => bytes.len() > cayw_core::MAX_METADATA_BYTES,
+        Err(_) => true,
+    }
+}
+
+fn within_core_node_bounds(value: &Value) -> bool {
+    let mut pending = vec![(value, 0usize)];
+    let mut nodes = 0usize;
+    while let Some((value, depth)) = pending.pop() {
+        nodes += 1;
+        let children = match value {
+            Value::Array(values) => values.len(),
+            Value::Object(values) => values.len(),
+            _ => 0,
+        };
+        if depth > cayw_core::MAX_METADATA_DEPTH
+            || nodes + pending.len() + children > cayw_core::MAX_METADATA_NODES
+        {
+            return false;
+        }
+        match value {
+            Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
+            Value::Object(values) => {
+                pending.extend(values.values().map(|value| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Keep the Host success fact and the Session usable when the original result
+/// cannot fit in one Core capability record. With a ContentStore, write the
+/// complete JSON body first and settle the small handle view. Without one, or
+/// when the body cannot be stored, settle a small omission receipt that names
+/// the original byte count and digest. Never convert this local storage
+/// limitation into an unknown Host effect.
+pub(crate) fn durable_core_result(scope: &CallScope, value: Value) -> Value {
+    if !exceeds_core_metadata(&value) {
+        return value;
+    }
+    // Keep the exact original hash so recovery can still verify shared-read
+    // Evidence after Core stores only the bounded receipt or handle.
+    let original_sha256 = cayw_cells::HostResult::value_hash(&value);
+    let text = serde_json::to_string(&value).ok();
+    if let Some(text) = &text
+        && let Ok(view) = externalize_core_overflow(scope, text, &original_sha256)
+    {
+        return view;
+    }
+    omission_receipt(&value, text.as_deref(), &original_sha256)
+}
+
+fn externalize_core_overflow(
+    scope: &CallScope,
+    text: &str,
+    original_sha256: &str,
+) -> Result<Value, CapabilityError> {
+    let Some(store) = scope.context.inner.content.as_ref() else {
+        return Err(known("local ContentStore is not configured"));
+    };
+    let maximum = store.limits().max_content_bytes.min(1024 * 1024);
+    if text.len() as u64 > maximum {
+        return Err(known("result exceeds the ContentStore byte limit"));
+    }
+    let mut operation = StoreOperation::prepare(
+        store,
+        &scope.context.lease.session_id,
+        &scope.context.task.id,
+        json!({"text": text, "encoding": "json"}),
+    )?;
+    let mut view = operation.step(store)?;
+    if let Some(object) = view.as_object_mut() {
+        object.insert("externalized".into(), Value::Bool(true));
+        object.insert("core_result_bounded".into(), Value::Bool(true));
+        object.insert(
+            "original_sha256".into(),
+            Value::String(original_sha256.into()),
+        );
+        object.insert(
+            "reason".into(),
+            Value::String(
+                "result exceeded the durable Core metadata limit; read it with result.get".into(),
+            ),
+        );
+    }
+    Ok(view)
+}
+
+fn omission_receipt(value: &Value, text: Option<&str>, original_sha256: &str) -> Value {
+    let bytes = text.map_or_else(
+        || serde_json::to_vec(value).map_or(0, |bytes| bytes.len()),
+        str::len,
+    );
+    json!({
+        "result_omitted": true,
+        "core_result_bounded": true,
+        "reason": "the Host call completed, but its result exceeded the durable Core metadata limit and was not retained",
+        "bytes": bytes,
+        "sha256": original_sha256,
+        "original_sha256": original_sha256,
+        "encoding": "json",
+    })
+}
+
 /// All writes are synchronous after the prepared commit. Cancellation is signaled
 /// by Completion only after Cells has saved the original Host success.
 pub(crate) async fn maybe_externalize(

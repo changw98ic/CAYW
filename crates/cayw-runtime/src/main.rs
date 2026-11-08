@@ -738,20 +738,16 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
-    let mut interrupt =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-            Ok(interrupt) => interrupt,
-            Err(error) => {
-                drop(runtime);
-                return cli_workspaces::cleanup_failed_setup(
-                    workspace_resources,
-                    error.to_string(),
-                )
+    let mut signals = match cli_start::ShutdownSignals::new() {
+        Ok(signals) => signals,
+        Err(error) => {
+            drop(runtime);
+            return cli_workspaces::cleanup_failed_setup(workspace_resources, error.to_string())
                 .await;
-            }
-        };
+        }
+    };
     tokio::spawn(async move {
-        let _ = interrupt.recv().await;
+        signals.recv().await;
         signal.cancel();
     });
     let setup_hint = match local.as_ref() {

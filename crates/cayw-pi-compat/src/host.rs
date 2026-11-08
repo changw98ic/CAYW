@@ -560,6 +560,9 @@ fn map_plugin_err(err: PluginError) -> PiCompatError {
         // Unloaded mid-call: side effects may already have started.
         PluginError::Unloaded => PiCompatError::OutcomeUnknown(err.to_string()),
         PluginError::OutcomeUnknown(msg) => PiCompatError::OutcomeUnknown(msg),
+        PluginError::OutcomeUnknownProcess { message, .. } => {
+            PiCompatError::OutcomeUnknown(message)
+        }
     }
 }
 

@@ -84,9 +84,20 @@ pub enum Command {
     Get {
         session_id: String,
     },
+    PreparePrompt {
+        session_id: String,
+        text: String,
+    },
     Prompt {
         session_id: String,
         text: String,
+    },
+    PromptWithModelBudget {
+        session_id: String,
+        text: String,
+        expected: Value,
+        additional_tokens: u64,
+        token_limit: u64,
     },
     Cancel {
         session_id: String,
@@ -111,9 +122,30 @@ impl Command {
             Self::List => ("session.list", json!({})),
             Self::Create { label } => ("session.create", json!({"label":label})),
             Self::Get { session_id } => ("session.get", json!({"session_id":session_id})),
+            Self::PreparePrompt { session_id, text } => (
+                "model.budget.prepare_prompt",
+                json!({"session_id":session_id,"text":text}),
+            ),
             Self::Prompt { session_id, text } => (
                 "session.prompt",
                 json!({"session_id":session_id,"text":text}),
+            ),
+            Self::PromptWithModelBudget {
+                session_id,
+                text,
+                expected,
+                additional_tokens,
+                token_limit,
+            } => (
+                "session.prompt_with_model_budget",
+                json!({
+                    "session_id":session_id,
+                    "text":text,
+                    "expected":expected,
+                    "additional_tokens":additional_tokens,
+                    "token_limit":token_limit,
+                    "confirm":true,
+                }),
             ),
             // Transport resolves only this retained Task into its full queue identity.
             Self::Cancel {
@@ -143,7 +175,19 @@ impl Command {
 #[derive(Clone, Debug)]
 pub enum Dialog {
     Create(Editor),
-    Fork { session_id: String, label: String },
+    Fork {
+        session_id: String,
+        label: String,
+    },
+    ModelBudget {
+        session_id: String,
+        expected: Value,
+        unknown_request_count: u64,
+        settled_tokens: u64,
+        reserved_tokens: u64,
+        additional_tokens: u64,
+        token_limit: u64,
+    },
     Help,
 }
 
@@ -151,6 +195,7 @@ pub enum Dialog {
 struct PendingPrompt {
     text: String,
     editor_revision: u64,
+    admission_started: bool,
     uncertain: bool,
 }
 
@@ -654,11 +699,24 @@ impl App {
             "{} | Ctrl+R reconnect. Prompts are never replayed.",
             sanitize(reason)
         );
+        if matches!(self.dialog, Some(Dialog::ModelBudget { .. })) {
+            self.dialog = None;
+        }
         for session in &mut self.sessions {
             session.synced = false;
             session.request_pending = false;
-            if let Some(prompt) = &mut session.pending_prompt {
-                prompt.uncertain = true;
+            if session
+                .pending_prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.admission_started)
+            {
+                if let Some(prompt) = &mut session.pending_prompt {
+                    prompt.uncertain = true;
+                }
+            } else {
+                // The budget-status lookup is read-only. Losing that response
+                // cannot have created a Task, so the draft remains safe to retry.
+                session.pending_prompt = None;
             }
             session.cancel_pending = false;
             session.decisions_pending.clear();
@@ -850,11 +908,85 @@ impl App {
         }
     }
 
+    pub fn model_budget_status(&mut self, id: &str, value: Value) -> Result<Vec<Command>, String> {
+        let budget_unknown = value["budget_unknown"]
+            .as_bool()
+            .ok_or("Model budget status is missing budget_unknown")?;
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or("Model budget status references an unknown session")?;
+        let prompt = session
+            .pending_prompt
+            .as_ref()
+            .ok_or("Model budget status has no pending prompt")?;
+        if !budget_unknown {
+            let text = prompt.text.clone();
+            session
+                .pending_prompt
+                .as_mut()
+                .expect("checked above")
+                .admission_started = true;
+            return Ok(vec![Command::Prompt {
+                session_id: id.into(),
+                text,
+            }]);
+        }
+
+        let proposal = value
+            .get("continuation")
+            .filter(|proposal| proposal.is_object())
+            .ok_or("Model budget status is missing a continuation proposal")?;
+        let expected = proposal["expected"]
+            .as_array()
+            .filter(|expected| !expected.is_empty())
+            .ok_or("Model budget continuation has no exact unknown request set")?;
+        let unknown_request_count = proposal["unknown_request_count"]
+            .as_u64()
+            .filter(|count| *count as usize == expected.len())
+            .ok_or("Model budget continuation request count is inconsistent")?;
+        let settled_tokens = value["settled_tokens"]
+            .as_u64()
+            .ok_or("Model budget status is missing settled_tokens")?;
+        let reserved_tokens = value["reserved_tokens"]
+            .as_u64()
+            .ok_or("Model budget status is missing reserved_tokens")?;
+        let additional_tokens = proposal["additional_tokens"]
+            .as_u64()
+            .filter(|tokens| *tokens > 0)
+            .ok_or("Model budget continuation requires a positive finite allowance")?;
+        let minimum_limit = settled_tokens
+            .checked_add(reserved_tokens)
+            .and_then(|occupied| occupied.checked_add(additional_tokens))
+            .ok_or("Model budget continuation cumulative limit overflows")?;
+        let token_limit = proposal["token_limit"]
+            .as_u64()
+            .filter(|limit| *limit == minimum_limit)
+            .ok_or("Model budget continuation cumulative limit is invalid")?;
+
+        session.request_pending = false;
+        self.dialog = Some(Dialog::ModelBudget {
+            session_id: id.into(),
+            expected: Value::Array(expected.clone()),
+            unknown_request_count,
+            settled_tokens,
+            reserved_tokens,
+            additional_tokens,
+            token_limit,
+        });
+        self.status = "Model usage is unknown. Review the finite continuation allowance.".into();
+        Ok(vec![])
+    }
+
     pub fn task_admitted(&mut self, id: &str, task_id: &str) -> Vec<Command> {
         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else {
             return vec![];
         };
         session.original_task_id = Some(task_id.into());
+        if let Some(prompt) = &mut session.pending_prompt {
+            prompt.admission_started = true;
+        }
         if session.cancel_pending {
             vec![Command::Cancel {
                 session_id: id.into(),
@@ -907,16 +1039,22 @@ impl App {
             if method == "session.cancel" {
                 session.cancel_pending = false;
             }
-            if method == "session.prompt" {
+            if method == "model.budget.prepare_prompt" {
+                session.request_pending = false;
+                session.pending_prompt = None;
+            }
+            if matches!(
+                method,
+                "session.prompt" | "session.prompt_with_model_budget"
+            ) {
                 session.request_pending = false;
                 session.synced = false;
                 let code = error.split(':').next().unwrap_or("").trim();
                 if code == "session_frozen" {
                     session.frozen = true;
                 }
-                // Runtime's `cancelled` means execution never started. It is a
-                // known terminal only when the IPC client explicitly confirms
-                // the outcome; a missing/unknown result must keep the lock.
+                // A typed known terminal can release only this local prompt.
+                // A missing or unknown result must keep the lock.
                 let known_cancelled =
                     code == "cancelled" && error.ends_with(" (outcome_unknown=false)");
                 let known_terminal = !error.contains("outcome_unknown=true")
@@ -932,6 +1070,7 @@ impl App {
                                 | "invalid_params"
                                 | "request_too_large"
                                 | "request_cancelled"
+                                | "budget_continuation_not_executed"
                         ));
                 if known_terminal {
                     // The editor still contains the original text unless the user
@@ -1105,7 +1244,7 @@ impl App {
     pub fn paste(&mut self, text: &str) {
         match &mut self.dialog {
             Some(Dialog::Create(editor)) => editor.insert(&text.replace(['\r', '\n'], " ")),
-            Some(Dialog::Fork { .. } | Dialog::Help) => {}
+            Some(Dialog::Fork { .. } | Dialog::ModelBudget { .. } | Dialog::Help) => {}
             None if self.focus == Focus::Composer => self.input.insert(text),
             None => {}
         }
@@ -1138,13 +1277,14 @@ impl App {
             session.pending_prompt = Some(PendingPrompt {
                 text: text.clone(),
                 editor_revision,
+                admission_started: false,
                 uncertain: false,
             });
             session.request_pending = true;
             session.scroll = 0;
         }
-        self.status = "Prompt sent. Ctrl+X requests cancellation.".into();
-        vec![Command::Prompt {
+        self.status = "Checking the durable model budget before task admission…".into();
+        vec![Command::PreparePrompt {
             session_id: id,
             text,
         }]
@@ -1178,6 +1318,17 @@ impl App {
             return vec![];
         };
         if key.code == KeyCode::Esc {
+            if let Dialog::ModelBudget { session_id, .. } = &dialog
+                && let Some(session) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == *session_id)
+            {
+                session.request_pending = false;
+                session.pending_prompt = None;
+                self.status =
+                    "Model budget continuation was not authorized; no task was created.".into();
+            }
             return vec![];
         }
         match dialog {
@@ -1200,6 +1351,67 @@ impl App {
                     }
                 } else if key.code != KeyCode::Char('n') {
                     self.dialog = Some(Dialog::Fork { session_id, label });
+                }
+            }
+            Dialog::ModelBudget {
+                session_id,
+                expected,
+                unknown_request_count,
+                settled_tokens,
+                reserved_tokens,
+                additional_tokens,
+                token_limit,
+            } => {
+                if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
+                    let connected = self.connected;
+                    let command = self
+                        .sessions
+                        .iter_mut()
+                        .find(|session| {
+                            connected && session.id == session_id && session.can_prompt()
+                        })
+                        .and_then(|session| {
+                            let prompt = session.pending_prompt.as_mut()?;
+                            let text = prompt.text.clone();
+                            prompt.admission_started = true;
+                            session.request_pending = true;
+                            Some(Command::PromptWithModelBudget {
+                                session_id: session_id.clone(),
+                                text,
+                                expected: expected.clone(),
+                                additional_tokens,
+                                token_limit,
+                            })
+                        });
+                    if let Some(command) = command {
+                        self.status = format!(
+                            "Confirmed {additional_tokens} additional tokens for one task; {unknown_request_count} unknown hold(s) remain."
+                        );
+                        return vec![command];
+                    }
+                    self.status =
+                        "Model budget continuation is no longer ready; refresh the session.".into();
+                } else if matches!(key.code, KeyCode::Char('n')) {
+                    if let Some(session) = self
+                        .sessions
+                        .iter_mut()
+                        .find(|session| session.id == session_id)
+                    {
+                        session.request_pending = false;
+                        session.pending_prompt = None;
+                    }
+                    self.status =
+                        "Model budget continuation was not authorized; no task was created.".into();
+                } else {
+                    self.dialog = Some(Dialog::ModelBudget {
+                        session_id,
+                        expected,
+                        unknown_request_count,
+                        settled_tokens,
+                        reserved_tokens,
+                        additional_tokens,
+                        token_limit,
+                    });
                 }
             }
             Dialog::Create(mut editor) => {

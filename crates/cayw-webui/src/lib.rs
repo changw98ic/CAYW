@@ -109,7 +109,9 @@ pub struct GatewayLimits {
     pub queue_timeout: Duration,
     pub body_timeout: Duration,
     pub request_timeout: Duration,
-    pub prompt_timeout: Duration,
+    /// Persistent prompt and resume calls have no gateway deadline by default.
+    /// Their own event, cancellation and reconciliation contracts stay in force.
+    pub prompt_timeout: Option<Duration>,
 }
 
 impl Default for GatewayLimits {
@@ -121,7 +123,7 @@ impl Default for GatewayLimits {
             queue_timeout: Duration::from_secs(2),
             body_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
-            prompt_timeout: Duration::from_secs(360),
+            prompt_timeout: None,
         }
     }
 }
@@ -133,18 +135,16 @@ impl GatewayLimits {
             self.max_prompt_in_flight,
             self.max_pending_requests,
         ];
-        let durations = [
-            self.queue_timeout,
-            self.body_timeout,
-            self.request_timeout,
-            self.prompt_timeout,
-        ];
+        let durations = [self.queue_timeout, self.body_timeout, self.request_timeout];
         if self.max_in_flight < 2
             || self.max_prompt_in_flight >= self.max_in_flight
             || counts.iter().any(|&n| n == 0 || n > 4096)
             || durations
                 .iter()
                 .any(|d| d.is_zero() || std::time::Instant::now().checked_add(*d).is_none())
+            || self
+                .prompt_timeout
+                .is_some_and(|d| d.is_zero() || std::time::Instant::now().checked_add(d).is_none())
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -831,7 +831,7 @@ async fn rpc(
     let budget = if prompt {
         state.limits.prompt_timeout
     } else {
-        state.limits.request_timeout
+        Some(state.limits.request_timeout)
     };
     // OwnershipStore restores Session/Task → device; DeviceRouter turns that
     // into the IPC endpoint. Fallback to default only when the store has no entry
@@ -928,17 +928,27 @@ async fn rpc(
     };
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
-        result = endpoint.connect(budget) => match result {
+        result = endpoint.connect(state.limits.request_timeout) => match result {
             Ok(client) => client,
             Err(error) => return upstream_error(&state, error, false),
         }
     };
     // The outer deadline drops this connection's request guard; no other HTTP
     // request shares the connection or can lose its event response as a result.
+    let dispatched = async {
+        match budget {
+            Some(budget) => {
+                timeout(budget, client.request(&upstream_method, upstream_params)).await
+            }
+            None => Ok(client
+                .request_without_timeout(&upstream_method, upstream_params)
+                .await),
+        }
+    };
     tokio::select! {
         biased;
         _ = state.cancel.cancelled() => shutting_down(side_effecting(&request.method)),
-        result = timeout(budget, client.request(&upstream_method, upstream_params)) => match result {
+        result = dispatched => match result {
             Ok(Ok(mut result)) => {
                 if method == "settings.workspaces.open"
                     && let Err(message) = register_workspace(&state, &mut result) {
@@ -1468,5 +1478,17 @@ mod device_router_tests {
             router.endpoint_for(Some("device-missing")).unwrap_err(),
             "unknown_device"
         );
+    }
+}
+
+#[cfg(test)]
+mod gateway_limits_tests {
+    use super::*;
+
+    #[test]
+    fn prompts_are_unbounded_while_control_requests_keep_their_deadline() {
+        let limits = GatewayLimits::default();
+        assert!(limits.prompt_timeout.is_none());
+        assert_eq!(limits.request_timeout, Duration::from_secs(30));
     }
 }

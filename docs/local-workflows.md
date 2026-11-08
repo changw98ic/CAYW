@@ -45,7 +45,7 @@ Client、TUI 和 WebUI 不要求先配置模型。启动不发送模型请求，
 cayw conf --workspace /你的项目
 ```
 
-`cayw conf` 是本地产品唯一的首次模型配置命令。没有 `cayw configure` 兼容入口。它把当前工作区的 `configured` 方案写入私有 `models.json` 并选中该方案。模型字段包括服务、API、模型名称、端点、版本、输出上限和可选 `api_key`。密钥可以留空；留空表示服务不需要认证。填写后，密钥以明文保存在普通本地文件中。CAYW 不使用 Keychain、加密或 OAuth。
+`cayw conf` 是本地产品唯一的首次模型配置命令。没有 `cayw configure` 兼容入口。它把当前工作区的 `configured` 方案写入私有 `models.json` 并选中该方案。模型字段包括服务、API、模型名称、端点、版本、输出上限和可选 `api_key`。新建方案时密钥可以留空，表示服务不需要认证。编辑已有方案时，同一服务地址下留空会保留原密钥；删除必须明确选择清除。更换服务或端点时必须填写新密钥或明确清除，旧密钥不会自动转移。填写后，密钥以明文保存在普通本地文件中。CAYW 不使用 Keychain、加密或 OAuth。
 
 模型方案示例：
 
@@ -71,6 +71,8 @@ cayw models remove unused --workspace /你的项目
 ```
 
 公开模型视图、启动输出、doctor 和 Settings RPC 只显示 `authentication: plain_file` 或 `none`，不返回密钥。切换只影响后续开始的 Task Attempt。运行中的 Attempt 保留原 Provider、模型和输出上限。
+
+如果先前模型请求已经发出，但 Runtime 没有收到完整用量，原 token 预留和未知费用继续保留。TUI 和 WebUI 会在发送下一条消息前显示精确的未知请求数量、原预留、一次性新增额度和累计上限。用户确认前不会创建 Task。确认后才按 `task.enqueue`、`model.budget.continue`、`task.resume` 的顺序执行；拒绝会保留草稿。授权失败时只取消刚创建且尚未派发的 Task，不能把额度转给另一个任务。
 
 本地 `config.json.model` 不是长期配置源。发现旧字段时，Client 把它单向迁移到当前工作区的 `models.json`，然后删除旧字段。已有选中方案优先，损坏的旧字段不会覆盖它。
 
@@ -134,9 +136,9 @@ cayw plugins update my-plugin --file /path/new-local-plugin.json
 cayw plugins remove my-plugin
 ```
 
-安装和更新只校验本地文件并记录可执行文件 SHA256，不运行程序。启用需要明确的进程批准，并核对摘要和真实协议握手。External 进程使用清空的环境，不继承模型密钥。进程隔离不是安全沙箱；它仍以本机用户身份运行。
+安装和更新只校验本地文件并记录可执行文件 SHA256，不运行程序。启用需要明确的进程批准，并核对摘要和真实协议握手。清单中的程序后来缺失时，Client 仍可启动；`plugins list` 和 doctor 把该条标为不可用，其他 plugin 与普通会话继续工作。移除清单不要求缺失程序重新出现。External 进程使用清空的环境，不继承模型密钥。进程隔离不是安全沙箱；它仍以本机用户身份运行。
 
-普通 WorkspaceArchitecture plugin 不绑定普通 Session。它被停用、卸载或崩溃时，普通 Session 不冻结，后续对话仍可继续。进行中的调用若无法确认结果，返回 `outcome_unknown`；Client 不自动拉起 plugin，也不重放旧调用。External plugin 的退出确认有时间上限。终止、等待或超时无法确认清理时，Client 保留精确实例阻断并拒绝同名 plugin 重启，直到清理得到确认。
+普通 WorkspaceArchitecture plugin 不绑定普通 Session。它被停用、卸载或崩溃时，普通 Session 不冻结，后续对话仍可继续。进行中的调用若无法确认结果，返回 `outcome_unknown`；Client 不自动拉起 plugin，也不重放旧调用。External plugin 的退出确认有时间上限。终止、等待或超时无法确认清理时，Client 保存原 PID、启动时间、命令和进程组，阻止同一实例被当成已停止。重试只重新观察原进程，不启动新进程；PID 被复用、任意说明文字或缺少身份都不能清除阻断。只有精确原进程和进程组确认停止后，才允许清除对应记录并再次启用。
 
 StrongFlow 是专用例外。StrongFlow Session 保留版本化 binding、checkpoint、冻结和恢复合同。StrongFlow 缺失时，原 Session 保持冻结。用户只能显式确认 Fork 为新的普通 Session；原 Session 和证据不变。
 
@@ -166,7 +168,7 @@ cayw doctor --workspace /你的项目
 sh scripts/package-cli.sh /新的输出目录
 ```
 
-安装包生成 `BUILD.json`、`SHA256SUMS` 和 `install.sh`。脚本不联网、不使用 sudo、不修改 shell 配置。
+安装包生成 `BUILD.json`、`THIRD-PARTY-NOTICES`、`SHA256SUMS` 和 `install.sh`，并附带需要单独分发的第三方许可文本。许可清单按锁定依赖和实际打包 feature 离线生成；许可证不在允许范围或缺少所需文本时，打包失败。上述文件都进入 `SHA256SUMS`。脚本不联网、不使用 sudo、不修改 shell 配置。
 
 主要复跑入口：
 

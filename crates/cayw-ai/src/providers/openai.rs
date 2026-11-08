@@ -364,8 +364,8 @@ fn build_request(request: &ModelRequest) -> Result<Value, String> {
                             thinking: value,
                             signature,
                         } => {
-                            if signature.is_some() || request.model.provider != "magpie" {
-                                return Err("Thinking history is unsupported by this Chat Completions configuration".into());
+                            if signature.is_some() {
+                                return Err("Signed thinking history is unsupported by this Chat Completions configuration".into());
                             }
                             has_thinking = true;
                             thinking.push_str(value);

@@ -436,7 +436,7 @@ fn draw_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
     let (max_w, max_h) = match dialog {
-        Dialog::Help => (74, 13),
+        Dialog::Help | Dialog::ModelBudget { .. } => (74, 13),
         _ => (68, 9),
     };
     let width = area.width.min(max_w);
@@ -460,6 +460,19 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
             "Confirm chat Fork",
             format!(
                 "The source session stays frozen.\nCreate “{label}” as a separate chat session without its workflow binding?\n\ny confirms · n / Esc back"
+            ),
+        ),
+        Dialog::ModelBudget {
+            unknown_request_count,
+            settled_tokens,
+            reserved_tokens,
+            additional_tokens,
+            token_limit,
+            ..
+        } => (
+            "Confirm model budget continuation",
+            format!(
+                "{unknown_request_count} earlier model request(s) have unknown usage.\nSettled usage is {settled_tokens} tokens. The existing {reserved_tokens} token hold and unknown cost stay unchanged.\nAdd at most {additional_tokens} tokens for this one new task?\nThe cumulative cap becomes {token_limit} tokens.\n\ny confirms · n / Esc creates no task"
             ),
         ),
         Dialog::Help => (

@@ -1,6 +1,9 @@
 //! F09/F19 audit remediation: artifact actions reach Runtime/Host (not Recording-only).
 
+use async_trait::async_trait;
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
+use cayw_codemode::CapabilityError;
+use cayw_host::ExternalHost;
 use cayw_ipc::RpcHandler;
 use cayw_runtime::{
     ActionIntent, ActionKind, ActionRequest, ActionStatus, ArtifactKind, ArtifactReconciledOutcome,
@@ -8,8 +11,11 @@ use cayw_runtime::{
     RuntimeConfig, RuntimeError, RuntimeHostDispatch, ScopedPermission, TaskState,
 };
 use futures::stream;
-use serde_json::json;
-use std::sync::Arc;
+use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 struct IdleProvider;
 impl Provider for IdleProvider {
@@ -130,6 +136,134 @@ fn invoke_tool_action_calls_real_host() {
         "Host fs.read result must appear in outcome: {json}"
     );
     assert!(!json.contains("pending_tool_invoke"));
+}
+
+struct UnknownHost {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ExternalHost for UnknownHost {
+    async fn call(
+        &self,
+        name: &str,
+        _: Value,
+        _: CancellationToken,
+    ) -> Result<Value, CapabilityError> {
+        assert_eq!(name, "search.query");
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(CapabilityError::unknown("synthetic unknown effect"))
+    }
+}
+
+struct UnknownEffectProvider;
+
+impl Provider for UnknownEffectProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let message = cayw_runtime::fixture::script_response(
+            &request,
+            "return cayw.call('search.query',{query='unknown'})",
+            "unknown-effect",
+        );
+        Box::pin(stream::iter(vec![AssistantEvent::Done { message }]))
+    }
+}
+
+#[tokio::test]
+async fn needs_reconciliation_blocks_artifact_invoke_tool_before_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let host = Arc::new(UnknownHost {
+        calls: AtomicUsize::new(0),
+    });
+    let mut config = RuntimeConfig {
+        permissions: vec![ScopedPermission::exact(
+            "search.query",
+            json!({"query":"unknown"}),
+        )],
+        ..Default::default()
+    };
+    config.host.external = Some(host.clone());
+    let rt = Runtime::open(
+        dir.path().join("session.db"),
+        dir.path().join("workspace"),
+        Arc::new(UnknownEffectProvider),
+        Model::new("fixture", "artifact-readiness"),
+        config,
+    )
+    .unwrap();
+    let session = rt.create(None).unwrap().id;
+    put_card(&rt, &session, "card-blocked", "<button>run</button>");
+    let _ = rt
+        .prompt(&session, "unknown effect", CancellationToken::new())
+        .await;
+    assert_eq!(
+        rt.get(&session).unwrap().state,
+        cayw_core::SessionState::NeedsReconciliation
+    );
+    let before = host.calls.load(Ordering::SeqCst);
+
+    let error = rt
+        .dispatch_artifact_action(ActionRequest {
+            action_id: "act-blocked".into(),
+            artifact_id: "card-blocked".into(),
+            session_id: session.clone(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::InvokeTool {
+                tool: "search.query".into(),
+                args_json: "{\"query\":\"artifact\"}".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 20,
+        })
+        .unwrap_err();
+    assert!(matches!(error, RuntimeError::NeedsReconciliation));
+    assert_eq!(
+        host.calls.load(Ordering::SeqCst),
+        before,
+        "the artifact Host call must not dispatch from a session requiring reconciliation"
+    );
+}
+
+#[cfg(feature = "strongflow")]
+#[tokio::test]
+async fn frozen_binding_blocks_artifact_invoke_tool_before_dispatch() {
+    use cayw_plugins::{PluginContext, strongflow::StrongFlow};
+
+    // Break caught: a frozen plugin binding must block artifact Host dispatch
+    // through the same readiness contract as prompts.
+    let (dir, rt) = open(vec![ScopedPermission::exact(
+        "fs.read",
+        json!({"path": "note.txt"}),
+    )]);
+    std::fs::write(dir.path().join("workspace/note.txt"), "must not run").unwrap();
+    rt.load_native(Arc::new(StrongFlow::new()), PluginContext::default())
+        .unwrap();
+    let session = rt.create(None).unwrap().id;
+    rt.bind_strongflow(&session).unwrap();
+    rt.unload_plugin("strongflow").await.unwrap();
+    assert!(rt.get(&session).unwrap().frozen);
+    put_card(&rt, &session, "card-frozen", "<button>run</button>");
+
+    let error = rt
+        .dispatch_artifact_action(ActionRequest {
+            action_id: "act-frozen".into(),
+            artifact_id: "card-frozen".into(),
+            session_id: session.clone(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::InvokeTool {
+                tool: "fs.read".into(),
+                args_json: "{\"path\":\"note.txt\"}".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 21,
+        })
+        .unwrap_err();
+    assert!(matches!(error, RuntimeError::Frozen(_)), "{error:?}");
+    assert!(
+        rt.list_artifact_actions(&session).unwrap().is_empty(),
+        "the artifact action must not be recorded or dispatched while frozen"
+    );
 }
 
 #[test]

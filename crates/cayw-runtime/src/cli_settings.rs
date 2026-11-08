@@ -108,6 +108,8 @@ struct Name {
 struct Put {
     name: String,
     model: ProviderConfig,
+    #[serde(default)]
+    clear_api_key: bool,
 }
 
 fn name(value: &str) -> Result<()> {
@@ -120,6 +122,19 @@ fn name(value: &str) -> Result<()> {
         return Err("profile name must contain 1..80 letters, digits, '.', '_' or '-'".into());
     }
     Ok(())
+}
+
+fn put_model_profile(models: &mut Models, mut put: Put) -> Result<ProviderConfig> {
+    name(&put.name)?;
+    put.model
+        .merge_saved_api_key(models.models.get(&put.name), put.clear_api_key)?;
+    put.model.validate()?;
+    if models.models.len() >= 64 && !models.models.contains_key(&put.name) {
+        return Err("at most 64 model profiles are supported".into());
+    }
+    let selected = put.model.clone();
+    models.models.insert(put.name, put.model);
+    Ok(selected)
 }
 
 fn read_models(paths: &LocalPaths) -> Result<(Option<Vec<u8>>, Models)> {
@@ -358,18 +373,14 @@ impl Settings {
             }
             "settings.models.put" => {
                 let put: Put = parse(params)?;
-                name(&put.name)?;
-                put.model.validate()?;
-                if models.models.len() >= 64 && !models.models.contains_key(&put.name) {
-                    return Err("at most 64 model profiles are supported".into());
-                }
-                if models.selected.as_ref() == Some(&put.name) {
+                let selected_name = put.name.clone();
+                let model = put_model_profile(&mut models, put)?;
+                if models.selected.as_ref() == Some(&selected_name) {
                     if self.offline {
                         return Err("offline fixture cannot select a real model".into());
                     }
-                    selection = Some(put.model.build()?);
+                    selection = Some(model.build()?);
                 }
-                models.models.insert(put.name, put.model);
             }
             "settings.models.use" => {
                 let selected: Name = parse(params)?;
@@ -468,6 +479,117 @@ pub async fn run(mut args: impl Iterator<Item = String>, plugin: bool) -> Result
     client.close().await;
     println!("{}", serde_json::to_string_pretty(&response?)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    fn profile(base_url: &str, api_key: Option<&str>) -> ProviderConfig {
+        let mut value = json!({
+            "service":"openai",
+            "api":"chat_completions",
+            "id":"example-model",
+            "base_url":base_url,
+            "api_version":"v1",
+            "max_output_tokens":4096
+        });
+        if let Some(api_key) = api_key {
+            value["api_key"] = json!(api_key);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn update(model: ProviderConfig, clear_api_key: bool) -> Put {
+        Put {
+            name: "local".into(),
+            model,
+            clear_api_key,
+        }
+    }
+
+    #[test]
+    fn model_put_preserves_or_clears_a_saved_key_only_when_explicit() {
+        let mut models = Models::default();
+        models.models.insert(
+            "local".into(),
+            profile("https://api.example/v1", Some("saved-secret")),
+        );
+
+        put_model_profile(
+            &mut models,
+            update(profile("https://api.example/v1", None), false),
+        )
+        .unwrap();
+        assert!(models.models["local"].has_api_key());
+        let public = public_models(&models);
+        assert_eq!(public["models"]["local"]["authentication"], "plain_file");
+        assert!(!public.to_string().contains("saved-secret"));
+
+        put_model_profile(
+            &mut models,
+            update(profile("https://api.example/v1", None), true),
+        )
+        .unwrap();
+        assert!(!models.models["local"].has_api_key());
+        assert_eq!(
+            public_models(&models)["models"]["local"]["authentication"],
+            "none"
+        );
+    }
+
+    #[test]
+    fn model_put_rejects_contradictory_clear_and_credential_destination_changes() {
+        let mut models = Models::default();
+        models.models.insert(
+            "local".into(),
+            profile("https://api.example/v1", Some("saved-secret")),
+        );
+
+        let error = put_model_profile(
+            &mut models,
+            update(
+                profile("https://api.example/v1", Some("replacement-secret")),
+                true,
+            ),
+        )
+        .err()
+        .expect("setting and clearing a key must be rejected");
+        assert!(error.to_string().contains("set and clear"));
+        assert_eq!(
+            serde_json::to_value(&models.models["local"]).unwrap()["api_key"],
+            "saved-secret"
+        );
+
+        let error = put_model_profile(
+            &mut models,
+            update(profile("https://other.example/v1", None), false),
+        )
+        .err()
+        .expect("moving a saved key without a replacement must be rejected");
+        assert!(error.to_string().contains("credential destination"));
+        assert_eq!(
+            serde_json::to_value(&models.models["local"]).unwrap()["api_key"],
+            "saved-secret"
+        );
+    }
+
+    #[test]
+    fn model_put_clear_flag_defaults_to_false() {
+        let put: Put = parse(json!({
+            "name":"local",
+            "model":{
+                "service":"openai",
+                "api":"chat_completions",
+                "id":"example-model",
+                "base_url":"https://api.example/v1",
+                "api_version":"v1",
+                "max_output_tokens":4096
+            }
+        }))
+        .unwrap();
+        assert!(!put.clear_api_key);
+    }
 }
 
 #[cfg(all(test, feature = "plugins"))]

@@ -13,6 +13,12 @@ const lease = (attempt = 'attempt-1') => ({ session_id: 's1', attempt_id: attemp
 const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 10, state: 'idle', attempt: null, pending_approvals: [], unresolved_calls: [], ...extra });
 const record = (cursor, event, attempt = lease()) => ({ protocol_version: 3, session_id: 's1', cursor, timestamp: 1, attempt, event });
 const failure = (code, outcome_unknown = false) => ({ status: 502, error: { code, message: 'internal diagnostic is not the main user message', outcome_unknown } });
+const continuationProposal = () => ({
+  expected: [{ identity: { request_id: 'request-1' }, reservation_tokens: 128000 }],
+  unknown_request_count: 1,
+  additional_tokens: 128000,
+  token_limit: 256000,
+});
 
 test('shipped HTML pattern attributes compile with browser Unicode Sets rules', () => {
   const patterns = [...html.matchAll(/\spattern="([^"]*)"/g)].map(match => match[1]);
@@ -20,6 +26,21 @@ test('shipped HTML pattern attributes compile with browser Unicode Sets rules', 
   for (const pattern of patterns) {
     assert.doesNotThrow(() => new RegExp(pattern, 'v'), `invalid pattern attribute: ${pattern}`);
   }
+});
+
+test('model credential edits preserve by default and require an explicit clear choice', () => {
+  assert.match(html, /name="clear_api_key" type="checkbox"/);
+  assert.match(source, /model\.authentication === 'plain_file'/);
+  assert.match(source, /clear_api_key:clearApiKey/);
+  assert.match(source, /留空表示保持不变/);
+});
+
+test('unknown model usage requires an explicit finite continuation confirmation', () => {
+  assert.match(html, /id="model-budget-dialog"/);
+  assert.match(html, /不会清除原预留，也不会把未知费用记为零/);
+  assert.match(source, /'model\.budget\.status'/);
+  assert.match(source, /'model\.budget\.continue'/);
+  assert.match(source, /confirm: true/);
 });
 
 class Element {
@@ -48,10 +69,12 @@ async function page(t, handler) {
     const call = JSON.parse(body);
     calls.push(call);
     let result;
-    if (call.method === 'task.enqueue') {
-      result = await handler('task.enqueue', call.params) ?? { id: 'original-task', session_id: call.params.session_id, state: 'queued', worker_id: null, attempt_id: null, fence: 0 };
+    if (call.method === 'model.budget.status') {
+      result = await handler(call.method, call.params) ?? { budget_unknown: false, continuation: null };
+    } else if (call.method === 'task.enqueue') {
+      result = await handler('task.enqueue', call.params) ?? { id: 'original-task', session_id: call.params.session_id, state: 'queued', worker_id: null, attempt_id: null, fence: 0, dispatches: 0, holds_slot: false, cancel_requested: false };
     } else if (call.method === 'task.resume') result = await handler('session.prompt', call.params);
-    else if (call.method === 'task.get') result = { id: 'original-task', session_id: 's1', state: 'running', worker_id: 'worker-1', attempt_id: 'attempt-1', fence: 7 };
+    else if (call.method === 'task.get') result = await handler('task.get', call.params) ?? { id: 'original-task', session_id: 's1', state: 'running', worker_id: 'worker-1', attempt_id: 'attempt-1', fence: 7, dispatches: 1, holds_slot: true, cancel_requested: false };
     else result = await handler(call.method, call.params);
     if (result?.disconnect) { req.socket.destroy(); return; }
     if (call.method === 'runtime.health') result = { status: 'ok', protocol_version: 3 };
@@ -98,6 +121,18 @@ async function page(t, handler) {
     await elements['prompt-form'].dispatch('submit');
   };
   return { ui: elements, calls, poll, send };
+}
+
+async function startConfirmedBudgetSend(app) {
+  const sending = app.send();
+  const openedBy = Date.now() + 1000;
+  while (!app.ui['model-budget-dialog'].open) {
+    assert(Date.now() < openedBy, 'budget confirmation dialog did not open');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  app.ui['model-budget-confirm'].checked = true;
+  await app.ui['model-budget-form'].dispatch('submit');
+  return { sending };
 }
 
 // Regression: finally deleting promptPending after an unknown response allowed
@@ -153,6 +188,165 @@ test('known model_not_configured admission failure keeps the session usable', as
   assert.equal(admissions, 2, 'a known failure must not strand the session');
 });
 
+for (const code of ['busy', 'queue_full']) {
+  test(`${code} before execution preserves the original prompt draft`, async t => {
+    const current = snapshot();
+    const app = await page(t, async method => {
+      if (method === 'session.list') return [current];
+      if (method === 'session.get') return current;
+      if (method === 'session.events') return [];
+      if (method === 'task.enqueue') return failure(code, false);
+    });
+    await app.send();
+    assert.equal(app.ui.prompt.value, '执行任务');
+    assert.equal(app.ui.prompt.disabled, false);
+    assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 0);
+  });
+}
+
+test('unknown model usage is shown before admission and continues only after confirmation', async t => {
+  const current = snapshot();
+  const proposal = {
+    expected: [{ identity: { request_id: 'request-1' }, reservation_tokens: 128000 }],
+    unknown_request_count: 1,
+    additional_tokens: 128000,
+    token_limit: 256000,
+  };
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'model.budget.status') return { budget_unknown: true, reserved_tokens: 128000, continuation: proposal };
+    if (method === 'model.budget.continue') return { continuation: { actor: 'rpc-user' } };
+    if (method === 'session.prompt') return snapshot({ cursor: 13 });
+  });
+
+  const sending = app.send();
+  const openedBy = Date.now() + 1000;
+  while (!app.ui['model-budget-dialog'].open) {
+    assert(Date.now() < openedBy, 'budget confirmation dialog did not open');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  assert.equal(app.calls.filter(call => call.method === 'task.enqueue').length, 0, 'review happens before creating a task');
+  assert.equal(app.ui.prompt.value, '执行任务', 'draft remains until confirmation');
+  assert.match(app.ui['model-budget-summary'].textContent, /128000.*256000/);
+
+  await app.ui['model-budget-form'].dispatch('submit');
+  assert.match(app.ui['model-budget-error'].textContent, /确认/);
+  assert.equal(app.calls.filter(call => call.method === 'task.enqueue').length, 0);
+
+  app.ui['model-budget-confirm'].checked = true;
+  await app.ui['model-budget-form'].dispatch('submit');
+  await sending;
+  const methods = app.calls.map(call => call.method);
+  assert.ok(methods.indexOf('model.budget.status') < methods.indexOf('task.enqueue'));
+  assert.ok(methods.indexOf('task.enqueue') < methods.indexOf('model.budget.continue'));
+  assert.ok(methods.indexOf('model.budget.continue') < methods.indexOf('task.resume'));
+  const continuation = app.calls.find(call => call.method === 'model.budget.continue');
+  assert.deepEqual(continuation.params, {
+    session_id: 's1',
+    task_id: 'original-task',
+    expected: proposal.expected,
+    additional_tokens: 128000,
+    token_limit: 256000,
+    confirm: true,
+  });
+  assert.equal(app.ui.prompt.value, '', 'a successful unchanged draft is cleared once');
+});
+
+test('closing model budget confirmation keeps the draft and creates no task', async t => {
+  const current = snapshot();
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'model.budget.status') return {
+      budget_unknown: true,
+      reserved_tokens: 128000,
+      continuation: { expected: [{}], unknown_request_count: 1, additional_tokens: 128000, token_limit: 256000 },
+    };
+  });
+  const sending = app.send();
+  const openedBy = Date.now() + 1000;
+  while (!app.ui['model-budget-dialog'].open) {
+    assert(Date.now() < openedBy, 'budget confirmation dialog did not open');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  await app.ui['close-model-budget'].dispatch('click');
+  await sending;
+  assert.equal(app.ui.prompt.value, '执行任务');
+  assert.equal(app.ui.prompt.disabled, false);
+  assert.equal(app.calls.filter(call => call.method === 'task.enqueue').length, 0);
+});
+
+test('failed budget grant unlocks only after exact queued task cancellation', async t => {
+  const current = snapshot();
+  const proposal = continuationProposal();
+  const queued = { id: 'original-task', session_id: 's1', state: 'queued', worker_id: null, attempt_id: null, fence: 0, dispatches: 0, holds_slot: false, cancel_requested: false };
+  const app = await page(t, async (method, params) => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'model.budget.status') return { budget_unknown: true, reserved_tokens: 128000, continuation: proposal };
+    if (method === 'model.budget.continue') return failure('invalid_params', false);
+    if (method === 'task.get') return queued;
+    if (method === 'session.cancel') {
+      assert.deepEqual(params, { session_id: 's1', task_id: 'original-task', worker_id: null, attempt_id: null, fence: 0 });
+      return { cancelled: true };
+    }
+  });
+  const { sending } = await startConfirmedBudgetSend(app);
+  await sending;
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 0);
+  assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
+  assert.equal(app.ui.prompt.value, '执行任务');
+  assert.equal(app.ui.prompt.disabled, false, 'proved non-execution must release the local uncertain lock');
+  assert.match(app.ui['global-error'].textContent, /模型请求未开始/);
+});
+
+test('failed budget grant does not cancel or unlock a running task', async t => {
+  const current = snapshot();
+  const proposal = continuationProposal();
+  const running = { id: 'original-task', session_id: 's1', state: 'running', worker_id: 'worker-1', attempt_id: 'attempt-1', fence: 7, dispatches: 1, holds_slot: true, cancel_requested: false };
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'model.budget.status') return { budget_unknown: true, reserved_tokens: 128000, continuation: proposal };
+    if (method === 'model.budget.continue') return failure('invalid_params', false);
+    if (method === 'task.get') return running;
+  });
+  const { sending } = await startConfirmedBudgetSend(app);
+  await sending;
+  assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 0);
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 0);
+  assert.equal(app.ui.prompt.value, '执行任务');
+  assert.equal(app.ui.prompt.disabled, true, 'a possibly claimed task must retain the uncertain lock');
+  assert.match(app.ui['blocked-text'].textContent, /核对|确认/);
+});
+
+test('stale queued-task cancellation after budget failure remains unknown', async t => {
+  const current = snapshot();
+  const proposal = continuationProposal();
+  const queued = { id: 'original-task', session_id: 's1', state: 'queued', worker_id: null, attempt_id: null, fence: 0, dispatches: 0, holds_slot: false, cancel_requested: false };
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'model.budget.status') return { budget_unknown: true, reserved_tokens: 128000, continuation: proposal };
+    if (method === 'model.budget.continue') return failure('invalid_params', false);
+    if (method === 'task.get') return queued;
+    if (method === 'session.cancel') return failure('stale_task', false);
+  });
+  const { sending } = await startConfirmedBudgetSend(app);
+  await sending;
+  assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 0);
+  assert.equal(app.ui.prompt.value, '执行任务');
+  assert.equal(app.ui.prompt.disabled, true, 'a read-then-claim race must remain unknown');
+  assert.match(app.ui['blocked-text'].textContent, /核对|确认/);
+});
+
 test('successful prompt response waits for consumed durable terminal before next send', async t => {
   let current = snapshot();
   let events = [];
@@ -168,6 +362,29 @@ test('successful prompt response waits for consumed durable terminal before next
   events = [record(11, { type: 'attempt_started', lease: lease() }), record(12, { type: 'agent', event: { type: 'agent_end', messages: [] } }), record(13, { type: 'attempt_finished', lease: lease() })];
   await app.poll();
   assert.equal(app.ui.prompt.disabled, false);
+});
+
+test('an older successful prompt never clears a newer editor revision', async t => {
+  const current = snapshot();
+  let release;
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'session.prompt') {
+      entered();
+      return new Promise(resolve => { release = resolve; });
+    }
+  });
+  const sending = app.send();
+  await started;
+  app.ui.prompt.value = '等待期间的新草稿';
+  await app.ui.prompt.dispatch('input');
+  release(snapshot({ cursor: 13 }));
+  await sending;
+  assert.equal(app.ui.prompt.value, '等待期间的新草稿');
 });
 
 test('session_frozen error survives bare Core idle snapshots and offers explicit confirmed fork', async t => {
