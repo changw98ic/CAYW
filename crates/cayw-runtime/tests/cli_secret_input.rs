@@ -8,7 +8,7 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::process::CommandExt,
+        unix::{fs::PermissionsExt, process::CommandExt},
     },
     path::Path,
     process::{Child, Command, ExitStatus, Stdio},
@@ -27,6 +27,9 @@ struct Terminal {
 
 impl Terminal {
     fn start(home: &Path, workspace: &Path, state: &Path, config: Option<&Path>) -> Self {
+        // Local startup requires a private existing CAYW_HOME. tempfile's
+        // directory permissions depend on the caller's umask.
+        std::fs::set_permissions(state, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut master = -1;
         let mut slave = -1;
         // SAFETY: openpty initializes these descriptors; all optional pointers
@@ -105,7 +108,8 @@ impl Terminal {
         while !String::from_utf8_lossy(&self.transcript).contains(marker) {
             assert!(
                 Instant::now() < deadline,
-                "missing terminal prompt: {marker}"
+                "missing terminal prompt: {marker}; {}",
+                self.diagnostics()
             );
             let mut descriptor = libc::pollfd {
                 fd: self.master.as_raw_fd(),
@@ -119,20 +123,39 @@ impl Terminal {
                 if error.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
-                panic!("terminal poll failed: {error}");
+                panic!("terminal poll failed: {error}; {}", self.diagnostics());
             }
             if ready > 0 {
                 let mut bytes = [0; 4096];
-                let count = self.master.read(&mut bytes).unwrap();
-                assert_ne!(count, 0, "terminal closed before prompt: {marker}");
+                let count = self.master.read(&mut bytes).unwrap_or_else(|error| {
+                    panic!(
+                        "terminal read failed before prompt {marker}: {error}; {}",
+                        self.diagnostics()
+                    );
+                });
+                assert_ne!(
+                    count,
+                    0,
+                    "terminal closed before prompt: {marker}; {}",
+                    self.diagnostics()
+                );
                 self.transcript.extend_from_slice(&bytes[..count]);
             } else {
                 assert!(
                     self.child.try_wait().unwrap().is_none(),
-                    "conf exited before prompt: {marker}"
+                    "conf exited before prompt: {marker}; {}",
+                    self.diagnostics()
                 );
             }
         }
+    }
+
+    fn diagnostics(&mut self) -> String {
+        let status = self.child.try_wait();
+        format!(
+            "child status: {status:?}; terminal transcript: {:?}",
+            String::from_utf8_lossy(&self.transcript)
+        )
     }
 
     fn send(&mut self, value: &str) {
