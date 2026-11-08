@@ -39,11 +39,14 @@ try {
   await form.locator('[name=base_url]').fill('http://127.0.0.1:9/v1');
   await form.locator('button[type=submit]').click();
   await page.locator('#model-profiles').filter({hasText:'browser-daily'}).waitFor();
+  await page.locator('#settings-status').filter({hasText:'已完成'}).waitFor();
   assert(await page.locator('#model-profiles button').filter({hasText:'使用'}).isDisabled());
   checks.push('browser model save and provider-specific defaults, offline use disabled');
-  const descriptor = {executable:join(bin,'cayw-runtime-plugin-fixture'),argv:['echo'],manifest:{name:'process',version:'1.0.0',protocol_version:1,kind:'external',capabilities:[{name:'process.echo',description:'Offline process lifecycle fixture',parameters:{type:'object',additionalProperties:false}}],permissions:{}}};
+  const descriptor = {executable:join(bin,'cayw-runtime-plugin-fixture'),argv:['echo'],manifest:{name:'process',version:'1.0.0',protocol_version:1,role:'workspace_architecture',kind:'external',capabilities:[{name:'process.echo',description:'Offline process lifecycle fixture',parameters:{type:'object',additionalProperties:false}}],permissions:{}}};
   await page.locator('#plugin-settings-form textarea').fill(JSON.stringify(descriptor));
   await page.locator('#plugin-settings-form button[type=submit]').click();
+  await page.waitForFunction(()=>!document.querySelector('#settings-dialog').hasAttribute('aria-busy'));
+  assert.equal(await page.locator('#settings-status').textContent(),'已完成。');
   await page.locator('#plugin-profiles').filter({hasText:'process 1.0.0'}).waitFor();
   await page.locator('#plugin-profiles button').filter({hasText:'启用'}).click();
   await page.locator('#settings-status').filter({hasText:'请先审阅'}).waitFor();

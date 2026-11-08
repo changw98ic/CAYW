@@ -1,0 +1,32 @@
+{
+  "schema": "cayw.live-webui-e2e-validation.v1",
+  "started_utc": "2026-11-08T01:46:22.464Z",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "os_release": "27.0.0",
+  "node": "v24.4.1",
+  "base_commit": "cb8599d0fd2e8ce73edb5545e00db57b7049a69d",
+  "working_diff_sha256": "ec22229895bb24e84e5abebe2d1d33b5f14139c4db24b57fff50082312a2c7eb",
+  "binary": {
+    "path": "/Volumes/ORICO/CAYW/target/debug/cayw",
+    "sha256": "3fbb53eea76837a8ef332d8117822d43a495bdb49bd4e28a82dfc128d3d87969"
+  },
+  "model": {
+    "requested": "auto/deepseek-v4.1-flash",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "authentication": "none"
+  },
+  "assertions": [
+    "The live gateway catalog contains the selected model before product startup",
+    "A fresh isolated macOS product start owns one Client and one Client-managed WebUI",
+    "The fresh Client, Runtime and WebUI start without a selected model",
+    "The browser saves and hot-selects a no-auth live model through settings RPC"
+  ],
+  "passed": false,
+  "browser_version": "157.0.8103.38",
+  "session_id": "0c5db350-1b7e-4394-bda7-7b53c4b932f9",
+  "error": "locator.waitFor: Error: strict mode violation: locator('#approvals .approval-card').filter({ hasText: '写入文件' }).getByText('live-e2e.txt') resolved to 2 elements:\n    1) <p class=\"small\">文件：live-e2e.txt</p> aka getByText('文件：live-e2e.txt')\n    2) <pre>{↵  \"attempt_id\": \"797c6701-dd37-48cc-b83e-66a79a…</pre> aka getByLabel('待审批请求').getByText('{ \"attempt_id\": \"797c6701-')\n\nCall log:\n\u001b[2m  - waiting for locator('#approvals .approval-card').filter({ hasText: '写入文件' }).getByText('live-e2e.txt') to be visible\u001b[22m\n\n    at /Volumes/ORICO/CAYW/scripts/validate-live-webui-e2e.mjs:312:60",
+  "changed_sources": [],
+  "binary_changed": false,
+  "finished_utc": "2026-11-08T01:46:28.736Z"
+}

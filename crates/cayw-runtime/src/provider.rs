@@ -4,6 +4,7 @@ use cayw_ai::{Model, Provider, providers::OpenAiProvider};
 use cayw_providers::{AnthropicProvider, GeminiMode, GeminiProvider, ResponsesProvider};
 use reqwest::{Url, header::HeaderValue};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -25,8 +26,8 @@ pub enum ProviderApi {
     GenerateContent,
 }
 
-/// Configuration contains the credential's environment variable name, never its value.
-/// All fields are explicit. Loading and validating this value does not read credentials.
+/// One model-service configuration. An optional credential is stored directly in
+/// the same private local file. Absence explicitly selects a service with no authentication.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -36,7 +37,8 @@ pub struct ProviderConfig {
     base_url: String,
     api_version: String,
     max_output_tokens: u64,
-    api_key_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
 }
 
 /// Host-selected adapter and model, ready for the existing `Runtime::open` interface.
@@ -116,18 +118,12 @@ impl ProviderConfig {
                 return Err(invalid("Gemini model id has unsupported path segments"));
             }
         }
-        if self.api_key_env.len() > 128
-            || !self
-                .api_key_env
-                .bytes()
-                .next()
-                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            || !self
-                .api_key_env
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        if let Some(key) = &self.api_key
+            && (key.trim().is_empty() || key.len() > 4096 || HeaderValue::from_str(key).is_err())
         {
-            return Err(invalid("api_key_env must be an environment variable name"));
+            return Err(invalid(
+                "api_key must be a nonempty HTTP header value of at most 4096 bytes",
+            ));
         }
         let base = Url::parse(&self.base_url).map_err(|_| invalid("base_url is invalid"))?;
         if !matches!(base.scheme(), "http" | "https")
@@ -146,33 +142,33 @@ impl ProviderConfig {
         Ok(())
     }
 
-    /// The explicit model name selected by the host. Reading it never loads a credential.
+    /// The explicit model name selected by the host.
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// Read only the selected credential. This constructs a lazy adapter, without a model request.
-    pub fn build(&self) -> Result<ConfiguredProvider, RuntimeError> {
-        self.build_with_environment(|name| std::env::var(name).ok())
+    /// Whether the private configuration contains a credential value.
+    pub fn has_api_key(&self) -> bool {
+        self.api_key.is_some()
     }
 
-    /// Use a host-owned credential lookup instead of reading the process environment.
-    /// Validation precedes the single lookup; errors never include credential values.
-    pub fn build_with_environment(
-        &self,
-        mut environment: impl FnMut(&str) -> Option<String>,
-    ) -> Result<ConfiguredProvider, RuntimeError> {
+    /// A diagnostic/settings view that never returns the stored credential.
+    pub fn public_view(&self) -> Value {
+        json!({
+            "service": self.service,
+            "api": self.api,
+            "id": self.id,
+            "base_url": self.base_url,
+            "api_version": self.api_version,
+            "max_output_tokens": self.max_output_tokens,
+            "authentication": if self.api_key.is_some() { "plain_file" } else { "none" },
+        })
+    }
+
+    /// Construct a lazy adapter without making a model request. A missing key means
+    /// this configured local service explicitly uses no authentication.
+    pub fn build(&self) -> Result<ConfiguredProvider, RuntimeError> {
         self.validate()?;
-        let key = environment(&self.api_key_env)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                invalid(&format!(
-                    "requires the credential named by {}",
-                    self.api_key_env
-                ))
-            })?;
-        HeaderValue::from_str(&key)
-            .map_err(|_| invalid("credential is not a valid HTTP header value"))?;
         let provider: Arc<dyn Provider> = match self.api {
             ProviderApi::ChatCompletions => {
                 // Keep redirects and automatic retries off. Environment proxy
@@ -182,28 +178,38 @@ impl ProviderConfig {
                     .retry(reqwest::retry::never())
                     .build()
                     .map_err(|_| invalid("cannot create the HTTP client"))?;
-                Arc::new(
-                    OpenAiProvider::new(&self.base_url, key)
-                        .map_err(|_| invalid("cannot construct the selected adapter"))?
-                        .with_client(client),
-                )
+                let adapter = match &self.api_key {
+                    Some(key) => OpenAiProvider::new(&self.base_url, key.clone()),
+                    None => OpenAiProvider::without_auth(&self.base_url),
+                }
+                .map_err(|_| invalid("cannot construct the selected adapter"))?;
+                Arc::new(adapter.with_client(client))
             }
             ProviderApi::Responses => Arc::new(
-                ResponsesProvider::new(&self.base_url, key)
-                    .map_err(|_| invalid("cannot construct the selected adapter"))?,
+                match &self.api_key {
+                    Some(key) => ResponsesProvider::new(&self.base_url, key.clone()),
+                    None => ResponsesProvider::without_auth(&self.base_url),
+                }
+                .map_err(|_| invalid("cannot construct the selected adapter"))?,
             ),
             ProviderApi::Messages => Arc::new(
-                AnthropicProvider::new(&self.base_url, key)
-                    .map_err(|_| invalid("cannot construct the selected adapter"))?,
+                match &self.api_key {
+                    Some(key) => AnthropicProvider::new(&self.base_url, key.clone()),
+                    None => AnthropicProvider::without_auth(&self.base_url),
+                }
+                .map_err(|_| invalid("cannot construct the selected adapter"))?,
             ),
             ProviderApi::StreamGenerateContent | ProviderApi::GenerateContent => {
-                let mut adapter = GeminiProvider::new(&self.base_url, key)
-                    .map_err(|_| invalid("cannot construct the selected adapter"))?
-                    .with_mode(if self.api == ProviderApi::GenerateContent {
-                        GeminiMode::GenerateContent
-                    } else {
-                        GeminiMode::StreamGenerateContent
-                    });
+                let mut adapter = match &self.api_key {
+                    Some(key) => GeminiProvider::new(&self.base_url, key.clone()),
+                    None => GeminiProvider::without_auth(&self.base_url),
+                }
+                .map_err(|_| invalid("cannot construct the selected adapter"))?
+                .with_mode(if self.api == ProviderApi::GenerateContent {
+                    GeminiMode::GenerateContent
+                } else {
+                    GeminiMode::StreamGenerateContent
+                });
                 if self.service == ProviderService::Magpie {
                     adapter = adapter.with_gateway_routes();
                 }

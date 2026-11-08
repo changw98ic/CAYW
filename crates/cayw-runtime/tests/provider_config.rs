@@ -8,8 +8,7 @@ fn provider(service: &str, api: &str, version: &str, base: &str) -> Value {
         "id": "fixture-model",
         "base_url": base,
         "api_version": version,
-        "max_output_tokens": 64,
-        "api_key_env": "CAYW_CONFIG_TEST_KEY"
+        "max_output_tokens": 64
     })
 }
 
@@ -22,7 +21,7 @@ fn load(value: Value) -> Result<HeadlessConfig, cayw_runtime::RuntimeError> {
 
 // Break caught: the host configuration cannot select any of the real adapters.
 #[tokio::test]
-async fn each_service_and_api_can_be_selected_without_loading_credentials() {
+async fn each_service_and_api_can_be_selected_without_authentication() {
     for (service, api, version, base) in [
         (
             "openai",
@@ -61,16 +60,7 @@ async fn each_service_and_api_can_be_selected_without_loading_credentials() {
             "{service}/{api} must load without credentials"
         );
         let config = config.unwrap();
-        let mut reads = Vec::new();
-        let configured = config
-            .model()
-            .unwrap()
-            .build_with_environment(|name| {
-                reads.push(name.to_owned());
-                Some("synthetic-selection-key".into())
-            })
-            .unwrap();
-        assert_eq!(reads, ["CAYW_CONFIG_TEST_KEY"]);
+        let configured = config.model().unwrap().build().unwrap();
         assert_eq!(configured.model.provider, service);
         assert_eq!(configured.model.id, "fixture-model");
         assert_eq!(configured.model.max_output_tokens, Some(64));
@@ -116,19 +106,39 @@ async fn magpie_selects_all_native_protocols_with_exact_routed_models() {
         let mut model = provider("magpie", api, version, base);
         model["id"] = json!(id);
         let config = load(json!({"model":model})).unwrap_or_else(|error| panic!("{api}: {error}"));
-        let mut reads = Vec::new();
-        let configured = config
-            .model()
-            .unwrap()
-            .build_with_environment(|name| {
-                reads.push(name.to_owned());
-                Some("synthetic-selection-key".into())
-            })
-            .unwrap();
+        let configured = config.model().unwrap().build().unwrap();
         assert_eq!(configured.model.provider, "magpie");
         assert_eq!(configured.model.id, id);
-        assert_eq!(reads, ["CAYW_CONFIG_TEST_KEY"]);
     }
+}
+
+#[test]
+fn optional_plain_file_key_is_used_but_never_exposed_by_public_view() {
+    let mut model = provider("openai", "chat_completions", "v1", "http://127.0.0.1:9/v1");
+    model["api_key"] = json!("synthetic-selection-key");
+    let config = load(json!({"model":model})).unwrap();
+    let model = config.model().unwrap();
+    assert!(model.has_api_key());
+    assert_eq!(model.public_view()["authentication"], "plain_file");
+    assert!(
+        !model
+            .public_view()
+            .to_string()
+            .contains("synthetic-selection-key")
+    );
+    assert!(model.build().is_ok());
+
+    let config = load(json!({"model":provider(
+        "openai",
+        "chat_completions",
+        "v1",
+        "http://127.0.0.1:9/v1",
+    )}))
+    .unwrap();
+    let model = config.model().unwrap();
+    assert!(!model.has_api_key());
+    assert_eq!(model.public_view()["authentication"], "none");
+    assert!(model.build().is_ok());
 }
 
 #[test]
@@ -196,23 +206,14 @@ fn invalid_provider_configuration_fails_during_load_without_echoing_values() {
         ("base_url", json!("file:///v1")),
         ("id", json!("secret model\n")),
         ("max_output_tokens", json!(0)),
-        ("api_key_env", json!("secret-invalid=name")),
-        ("api_key", json!("secret-inline-key")),
+        ("api_key_env", json!("secret-obsolete-name")),
+        ("api_key", json!("secret-invalid\nkey")),
     ] {
         let mut config = valid.clone();
         config[field] = value;
         let parsed = serde_json::from_value::<HeadlessConfig>(json!({"model": config.clone()}));
         if let Ok(parsed) = parsed {
-            let mut looked_up = false;
-            let result = parsed.model().unwrap().build_with_environment(|_| {
-                looked_up = true;
-                Some("synthetic-selection-key".into())
-            });
-            assert!(result.is_err());
-            assert!(
-                !looked_up,
-                "invalid settings must fail before credential lookup"
-            );
+            assert!(parsed.model().unwrap().build().is_err());
         }
         let error = load(json!({"model": config}))
             .err()
@@ -226,7 +227,6 @@ fn invalid_provider_configuration_fails_during_load_without_echoing_values() {
         "base_url",
         "api_version",
         "max_output_tokens",
-        "api_key_env",
     ] {
         let mut config = valid.clone();
         config.as_object_mut().unwrap().remove(field);
@@ -278,16 +278,7 @@ async fn host_selected_deployments_accept_prefix_host_and_port() {
     ] {
         let config = load(json!({"model": provider(service, api, version, base)}))
             .unwrap_or_else(|error| panic!("{service}/{api} {base}: {error}"));
-        let mut reads = Vec::new();
-        let configured = config
-            .model()
-            .unwrap()
-            .build_with_environment(|name| {
-                reads.push(name.to_owned());
-                Some("synthetic-selection-key".into())
-            })
-            .unwrap();
-        assert_eq!(reads, ["CAYW_CONFIG_TEST_KEY"]);
+        let configured = config.model().unwrap().build().unwrap();
         assert_eq!(configured.model.provider, service);
         assert_eq!(configured.model.id, "fixture-model");
         assert_eq!(configured.model.max_output_tokens, Some(64));

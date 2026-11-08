@@ -92,9 +92,17 @@ pub struct Transport {
 
 impl Transport {
     pub fn start(address: SocketAddr, token: String) -> Self {
+        Self::start_for_workspace(address, token, None)
+    }
+
+    pub fn start_for_workspace(
+        address: SocketAddr,
+        token: String,
+        workspace_id: Option<String>,
+    ) -> Self {
         let (control, controls) = mpsc::channel(64);
         let (updates, receiver) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run(address, token, controls, updates));
+        let task = tokio::spawn(run(address, token, workspace_id, controls, updates));
         Self {
             control,
             updates: receiver,
@@ -152,6 +160,7 @@ impl Drop for Transport {
 async fn run(
     address: SocketAddr,
     token: String,
+    workspace_id: Option<String>,
     mut controls: mpsc::Receiver<Control>,
     updates: mpsc::UnboundedSender<Update>,
 ) {
@@ -200,11 +209,25 @@ async fn run(
                         continue;
                     }
                     let admissions = admissions.clone();
+                    let workspace_id = workspace_id.clone();
                     jobs.spawn(async move {
                         let result = if request.method == "session.prompt" {
-                            prompt_task(&connection, request.params.clone(), epoch, &admissions).await
+                            prompt_task(
+                                &connection,
+                                workspace_id.as_deref(),
+                                request.params.clone(),
+                                epoch,
+                                &admissions,
+                            )
+                            .await
                         } else {
-                            request_value(&connection, request.method, request.params.clone()).await
+                            request_value(
+                                &connection,
+                                workspace_id.as_deref(),
+                                request.method,
+                                request.params.clone(),
+                            )
+                            .await
                         };
                         Finished::Call { epoch, request, result }
                     });
@@ -227,9 +250,16 @@ async fn run(
             _ = sleep_until(next_poll), if client.is_some() && watch.is_some() && !polling && !awaiting_consumption => {
                 let connection = client.as_ref().expect("guarded connection").clone();
                 let current = watch.as_ref().expect("guarded watch").clone();
+                let workspace_id = workspace_id.clone();
                 polling = true;
                 jobs.spawn(async move {
-                    let result = request_value(&connection, "session.events", json!({"session_id":current.session_id,"after":current.after,"limit":100})).await;
+                    let result = request_value(
+                        &connection,
+                        workspace_id.as_deref(),
+                        "session.events",
+                        json!({"session_id":current.session_id,"after":current.after,"limit":100}),
+                    )
+                    .await;
                     Finished::Poll { epoch, watch: current, result }
                 });
             }
@@ -307,15 +337,37 @@ fn close_connection(client: Option<Client>, jobs: &mut JoinSet<Finished>) {
     }
 }
 
+async fn routed_request(
+    client: &Client,
+    workspace_id: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<Value, ClientError> {
+    match workspace_id {
+        Some(workspace_id) => {
+            client
+                .request(
+                    "client.workspace.call",
+                    json!({
+                        "workspace_id":workspace_id,
+                        "rpc":{"method":method,"params":params}
+                    }),
+                )
+                .await
+        }
+        None => client.request(method, params).await,
+    }
+}
+
 async fn prompt_task(
     client: &Client,
+    workspace_id: Option<&str>,
     params: Value,
     epoch: u64,
     admissions: &mpsc::UnboundedSender<TaskAdmission>,
 ) -> Reply {
     let session_id = params["session_id"].as_str().unwrap_or("").to_owned();
-    let task = client
-        .request("task.enqueue", params)
+    let task = routed_request(client, workspace_id, "task.enqueue", params)
         .await
         .map_err(failure)?;
     let task_id = task["id"]
@@ -346,19 +398,26 @@ async fn prompt_task(
             disconnected: true,
         });
     }
-    client
-        .request("task.resume", json!({"task_id":task_id}))
-        .await
-        .map_err(failure)
+    routed_request(
+        client,
+        workspace_id,
+        "task.resume",
+        json!({"task_id":task_id}),
+    )
+    .await
+    .map_err(failure)
 }
 
-async fn cancel_original_task(client: &Client, params: &Value) -> Reply {
+async fn cancel_original_task(
+    client: &Client,
+    workspace_id: Option<&str>,
+    params: &Value,
+) -> Reply {
     let task_id = params["task_id"].as_str().ok_or_else(|| Failure {
         message: "Cancellation requires the original Task ID".into(),
         disconnected: false,
     })?;
-    let task = client
-        .request("task.get", json!({"task_id":task_id}))
+    let task = routed_request(client, workspace_id, "task.get", json!({"task_id":task_id}))
         .await
         .map_err(failure)?;
     if task["id"].as_str() != Some(task_id) || task["session_id"] != params["session_id"] {
@@ -369,18 +428,29 @@ async fn cancel_original_task(client: &Client, params: &Value) -> Reply {
     }
     let target = json!({"session_id":task["session_id"],"task_id":task["id"],
         "worker_id":task["worker_id"],"attempt_id":task["attempt_id"],"fence":task["fence"]});
-    client
-        .request("session.cancel", target)
+    routed_request(client, workspace_id, "session.cancel", target)
         .await
         .map_err(failure)
 }
 
-async fn request_value(client: &Client, method: &str, params: Value) -> Reply {
+async fn request_value(
+    client: &Client,
+    workspace_id: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Reply {
     if method == "session.prompt" {
-        return client.request(method, params).await.map_err(failure);
+        return routed_request(client, workspace_id, method, params)
+            .await
+            .map_err(failure);
     }
     if method == "session.cancel" {
-        return match timeout(REQUEST_TIMEOUT, cancel_original_task(client, &params)).await {
+        return match timeout(
+            REQUEST_TIMEOUT,
+            cancel_original_task(client, workspace_id, &params),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(_) => Err(Failure {
                 message: "Original Task cancellation observation timed out; inspect that Task"
@@ -389,7 +459,12 @@ async fn request_value(client: &Client, method: &str, params: Value) -> Reply {
             }),
         };
     }
-    match timeout(REQUEST_TIMEOUT, client.request(method, params)).await {
+    match timeout(
+        REQUEST_TIMEOUT,
+        routed_request(client, workspace_id, method, params),
+    )
+    .await
+    {
         Ok(result) => result.map_err(failure),
         Err(_) => Err(Failure {
             message: format!("{method} timed out; the request may have reached the runtime"),

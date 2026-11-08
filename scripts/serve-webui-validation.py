@@ -71,6 +71,7 @@ def main() -> int:
     logs = []
     environment = os.environ.copy()
     environment["CAYW_BROWSER_FIXTURE_IPC"] = IPC_TOKEN
+    environment["CAYW_HOME"] = str(output / "cayw-home")
     evidence = {"started_utc": datetime.now(timezone.utc).isoformat(),
                 "source": "synthetic provider; actual Runtime, Luau, Host and WebUI binaries",
                 "permissions": "no configured grants; browser must explicitly approve each capability",

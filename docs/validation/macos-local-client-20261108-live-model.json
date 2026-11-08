@@ -1,0 +1,219 @@
+{
+  "schema": "cayw.macos-local-client-live-model.v1",
+  "validation_date_local": "2026-11-08",
+  "passed": true,
+  "authorization": "The user explicitly authorized this live model run in the active session.",
+  "platform": {
+    "product": "macOS",
+    "product_version": "27.0.1",
+    "architecture": "arm64",
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)"
+  },
+  "source": {
+    "branch": "workflow/macos-startup-20261020T012416Z-8f7112",
+    "base_commit": "cb8599d0fd2e8ce73edb5545e00db57b7049a69d",
+    "dirty_worktree": true,
+    "tracked_working_diff_sha256": "ec22229895bb24e84e5abebe2d1d33b5f14139c4db24b57fff50082312a2c7eb",
+    "receipt": "docs/validation/macos-local-client-20261108-live-model-sources.sha256",
+    "receipt_sha256": "11899ced61d8a9a7cfab56e5882f67faa48863f41b85207c2d33267770bb54f8"
+  },
+  "gateway": {
+    "name": "Magpie",
+    "version": "0.1.2777",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "catalog_entries": 23,
+    "authentication": "none",
+    "credentials_logged": false,
+    "requested_model": "auto/deepseek-v4.1-flash",
+    "response_model": "group/auto-deepseek-v4-1-flash",
+    "old_requested_model_absent": "group/auto-deepseek-v4-1-flash"
+  },
+  "requests": {
+    "real_generation_requests": 7,
+    "core_agent_requests": 5,
+    "runtime_sdk_requests": 1,
+    "runtime_ipc_requests": 1,
+    "failed_pre_provider_attempts": 2,
+    "failed_pre_provider_requests": 0,
+    "billing_status": "unknown",
+    "automatic_example_retries": 0
+  },
+  "core_agent_acceptance": {
+    "passed": true,
+    "command": "MAGPIE_API_KEY=<non-secret local no-auth placeholder> MAGPIE_BASE_URL=http://127.0.0.1:3425/v1 MAGPIE_MODEL=auto/deepseek-v4.1-flash cargo +1.95.0 run -p cayw-agent --example magpie --locked",
+    "started_timestamp_ms": 1794099759580,
+    "finished_timestamp_ms": 1794099769402,
+    "duration_ms": 9822,
+    "cases": {
+      "text_stream": {
+        "passed": true,
+        "text_deltas": 2,
+        "thinking_deltas": 9,
+        "terminals": 1,
+        "exact_text": "CAYW_MAGPIE_STREAM_OK",
+        "stop_reason": "stop",
+        "usage": {
+          "input": 46,
+          "output": 35,
+          "reasoning": 24,
+          "total_tokens": 81
+        }
+      },
+      "tool_loop": {
+        "passed": true,
+        "tool": "read_probe",
+        "executions": 1,
+        "call_result_paired": true,
+        "outcome_unknown": false,
+        "needs_reconciliation": false,
+        "request_usage": {
+          "input": 348,
+          "output": 44,
+          "reasoning": 0,
+          "total_tokens": 392
+        },
+        "result_usage": {
+          "input": 435,
+          "output": 46,
+          "reasoning": 31,
+          "total_tokens": 481
+        }
+      },
+      "follow_up": {
+        "passed": true,
+        "same_probe_value": true,
+        "tool_executions_after_follow_up": 1,
+        "usage": {
+          "input": 183,
+          "output": 166,
+          "reasoning": 151,
+          "total_tokens": 349
+        }
+      },
+      "cancel_stream": {
+        "passed": true,
+        "stop_reason": "aborted",
+        "text_deltas_before_abort": 1,
+        "agent_running_after_abort": false,
+        "pending_tool_calls": 0,
+        "needs_reconciliation": false,
+        "usage_status": "unknown; zero fields mean no complete usage was received, not zero cost"
+      }
+    },
+    "completed_request_usage": {
+      "input": 1012,
+      "output": 291,
+      "reasoning_subset_of_output": 206,
+      "total_tokens": 1303,
+      "cancelled_request_excluded": true
+    },
+    "log": {
+      "path": "docs/validation/macos-local-client-20261108-live-model-attempt3.log",
+      "sha256": "6c1c621b03db1c8c6aab1c37d8a8f92be7773bfd3b5363e7f166ef0759da5065"
+    },
+    "binary_sha256": "1545f4ce2d706873706a554329a201e97536b612b613f6dff85d4dbfd5916e31"
+  },
+  "runtime_sdk_acceptance": {
+    "passed": true,
+    "configuration": {
+      "api": "chat_completions",
+      "authentication": "none",
+      "requested_model": "auto/deepseek-v4.1-flash",
+      "max_output_tokens": 1024
+    },
+    "request_ledger": [
+      "reserved",
+      "started",
+      "observed:start",
+      "observed:text_start",
+      "observed:text_delta",
+      "observed:usage_update",
+      "observed:text_end",
+      "observed:done",
+      "finished:completed"
+    ],
+    "exact_text": "CAYW_RUNTIME_REAL_OK",
+    "response_model": "group/auto-deepseek-v4-1-flash",
+    "stop_reason": "stop",
+    "duration_ms": 1609,
+    "usage": {
+      "status": "reported",
+      "input": 1230,
+      "output": 10,
+      "reasoning": 0,
+      "total_tokens": 1240,
+      "settled_tokens": 1240
+    },
+    "task_state": "completed",
+    "session_state": "idle",
+    "pending_approvals": 0,
+    "unresolved_calls": 0,
+    "unresolved_capabilities": 0,
+    "log": {
+      "path": "docs/validation/macos-local-client-20261108-live-runtime.log",
+      "sha256": "c864352b5e244308130c9745dbe313dd41a4f7709e42ab83dfd14d1d6ed0e0fd"
+    },
+    "client_binary_sha256": "c98f532dc819f48c6234589aa634855b694ef96b2c2dca25ef4d7fbca7565df6"
+  },
+  "runtime_ipc_acceptance": {
+    "passed": true,
+    "mode": "authenticated loopback IPC",
+    "protocol_version": 3,
+    "requested_model": "auto/deepseek-v4.1-flash",
+    "exact_text": "CAYW_IPC_REAL_OK",
+    "response_model": "group/auto-deepseek-v4-1-flash",
+    "stop_reason": "stop",
+    "duration_ms": 1273,
+    "usage": {
+      "status": "reported",
+      "input": 1229,
+      "output": 9,
+      "reasoning": 0,
+      "total_tokens": 1238,
+      "settled_tokens": 1238
+    },
+    "request_terminal": "completed",
+    "task_state": "completed",
+    "session_state": "idle",
+    "pending_approvals": 0,
+    "unresolved_calls": 0,
+    "unresolved_capabilities": 0,
+    "server_shutdown_confirmed": true,
+    "log": {
+      "path": "docs/validation/macos-local-client-20261108-live-ipc.log",
+      "sha256": "e97f0c5978087d27a4f9364521556b75f4d5c4336526b7cc302b240fc7443328"
+    },
+    "runtime_binary_sha256": "3fbb53eea76837a8ef332d8117822d43a495bdb49bd4e28a82dfc128d3d87969",
+    "client_binary_sha256": "c98f532dc819f48c6234589aa634855b694ef96b2c2dca25ef4d7fbca7565df6"
+  },
+  "known_completed_usage": {
+    "input": 3471,
+    "output": 310,
+    "reasoning_subset_of_output": 206,
+    "total_tokens": 3781,
+    "excludes_cancelled_request_with_incomplete_usage": true
+  },
+  "pre_provider_attempts": [
+    {
+      "result": "failed before Provider creation",
+      "reason": "background process did not receive MAGPIE_API_KEY",
+      "model_requests": 0,
+      "log": "docs/validation/macos-local-client-20261108-live-model.log",
+      "log_sha256": "006d3a80a116445a6daed018aa93dd805dc8240025b9e854cff3f7768d0b11e5"
+    },
+    {
+      "result": "failed before Provider creation",
+      "reason": "MAGPIE_API_KEY was unset in the foreground session",
+      "model_requests": 0,
+      "log": "docs/validation/macos-local-client-20261108-live-model-attempt2.log",
+      "log_sha256": "820be1fc34511884672404873c3e1a8a9637bfad56f02279d3453c70fa16b13e"
+    }
+  ],
+  "limits": [
+    "The upstream provider route, billing, and cancellation after the local abort were not independently verified.",
+    "The cancelled request returned incomplete zero-valued usage and is not counted as zero consumption or zero cost.",
+    "The Runtime product-path checks covered both SDK mode and authenticated loopback IPC with explicit paths; WebUI did not repeat the same live generation.",
+    "The live prompts and tool value were synthetic and did not contain repository content or credentials."
+  ]
+}

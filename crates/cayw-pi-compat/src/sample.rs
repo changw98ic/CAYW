@@ -1,5 +1,5 @@
 use cayw_ai::ToolDefinition;
-use cayw_plugins::{PLUGIN_PROTOCOL_VERSION, PluginKind, PluginManifest};
+use cayw_plugins::{PLUGIN_PROTOCOL_VERSION, PluginKind, PluginManifest, PluginRole};
 use serde_json::json;
 
 /// Disk / subprocess sample extension identity for the real (non-fixture) path.
@@ -25,6 +25,7 @@ impl PiSampleExtension {
             name: Self::PACKAGE_NAME.into(),
             version: Self::PACKAGE_VERSION.into(),
             protocol_version: PLUGIN_PROTOCOL_VERSION,
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::External,
             capabilities: vec![ToolDefinition {
                 name: Self::TOOL.into(),

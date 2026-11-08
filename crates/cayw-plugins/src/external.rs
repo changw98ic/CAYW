@@ -22,6 +22,8 @@ pub struct ExternalConfig {
     pub expected_manifest: PluginManifest,
     pub handshake_timeout: Duration,
     pub call_timeout: Duration,
+    /// Maximum time to confirm that the process leader exited after termination.
+    pub shutdown_timeout: Duration,
     pub max_line_bytes: usize,
     /// Lifetime stdout + stderr bytes, including handshake and line delimiters.
     pub max_output_bytes: usize,
@@ -37,6 +39,7 @@ impl ExternalConfig {
             working_directory: None,
             handshake_timeout: Duration::from_secs(10),
             call_timeout: Duration::from_secs(30),
+            shutdown_timeout: Duration::from_secs(10),
             max_line_bytes: 64 * 1024,
             max_output_bytes: 4 * 1024 * 1024,
         }
@@ -50,6 +53,7 @@ impl ExternalConfig {
                 .is_some_and(|path| !path.is_absolute())
             || self.handshake_timeout.is_zero()
             || self.call_timeout.is_zero()
+            || self.shutdown_timeout.is_zero()
             || self.max_line_bytes == 0
             || self.max_output_bytes < self.max_line_bytes
         {
@@ -116,6 +120,8 @@ pub struct ExternalPlugin {
     sender: mpsc::Sender<Call>,
     stop: CancellationToken,
     process: Arc<Mutex<Option<ProcessGuard>>>,
+    supervisor: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), PluginError>>>>,
+    cleanup: Mutex<Option<Result<(), PluginError>>>,
 }
 
 impl ExternalPlugin {
@@ -128,7 +134,7 @@ impl ExternalPlugin {
             return Err(PluginError::Cancelled);
         }
         // Subscribe before spawning so an early exit cannot be missed.
-        let watcher = ProcessWatcher::new().map_err(io_error)?;
+        let mut watcher = ProcessWatcher::new().map_err(io_error)?;
         let mut command = Command::new(&config.executable);
         command
             .args(&config.argv)
@@ -149,6 +155,7 @@ impl ExternalPlugin {
         let mut stdin = process.child.stdin.take().expect("piped stdin");
         let mut stdout = BufReader::new(process.child.stdout.take().expect("piped stdout"));
         let mut stderr = process.child.stderr.take().expect("piped stderr");
+        let process = Arc::new(Mutex::new(Some(process)));
         let budget = Arc::new(OutputBudget {
             bytes: AtomicUsize::new(0),
             limit: config.max_output_bytes,
@@ -188,16 +195,33 @@ impl ExternalPlugin {
                 _ => Err(PluginError::Protocol("expected handshake".into())),
             }
         };
-        let manifest = tokio::select! {
+        let manifest = match tokio::select! {
             biased;
             _ = cancel.cancelled() => Err(PluginError::Cancelled),
             _ = budget.exceeded.cancelled() => Err(output_limit()),
             result = tokio::time::timeout(config.handshake_timeout, handshake) => result.unwrap_or(Err(PluginError::Timeout)),
-        }?;
+        } {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let terminate = process
+                    .lock()
+                    .expect("plugin process poisoned")
+                    .as_mut()
+                    .expect("spawned process")
+                    .terminate();
+                let wait = wait_for_exit(&mut watcher, &process, config.shutdown_timeout).await;
+                process.lock().expect("plugin process poisoned").take();
+                if let Err(cleanup) = terminate.and(wait) {
+                    return Err(PluginError::OutcomeUnknown(format!(
+                        "{error}; plugin handshake cleanup was not confirmed: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
         let (sender, receiver) = mpsc::channel(16);
         let stop = CancellationToken::new();
-        let process = Arc::new(Mutex::new(Some(process)));
-        tokio::spawn(run_process(
+        let supervisor = tokio::spawn(run_process(
             ProcessSession {
                 process: process.clone(),
                 watcher,
@@ -215,6 +239,8 @@ impl ExternalPlugin {
             sender,
             stop,
             process,
+            supervisor: tokio::sync::Mutex::new(Some(supervisor)),
+            cleanup: Mutex::new(None),
         })
     }
 }
@@ -281,8 +307,44 @@ impl Plugin for ExternalPlugin {
         }
     }
 
-    fn shutdown(&self) {
+    fn request_shutdown(&self) {
         self.stop.cancel();
+    }
+
+    async fn wait_shutdown(&self) -> Result<(), PluginError> {
+        if let Some(result) = self
+            .cleanup
+            .lock()
+            .expect("plugin cleanup poisoned")
+            .clone()
+        {
+            return result;
+        }
+        let supervisor = self.supervisor.lock().await.take();
+        let result = match supervisor {
+            Some(supervisor) => match supervisor.await {
+                Ok(result) => result,
+                Err(error) => Err(PluginError::OutcomeUnknown(format!(
+                    "plugin supervisor stopped without cleanup confirmation: {error}"
+                ))),
+            },
+            None => {
+                if self
+                    .process
+                    .lock()
+                    .expect("plugin process poisoned")
+                    .is_none()
+                {
+                    Ok(())
+                } else {
+                    Err(PluginError::OutcomeUnknown(
+                        "plugin cleanup is still unconfirmed".into(),
+                    ))
+                }
+            }
+        };
+        *self.cleanup.lock().expect("plugin cleanup poisoned") = Some(result.clone());
+        result
     }
 }
 
@@ -317,7 +379,7 @@ async fn run_process(
     mut session: ProcessSession,
     mut receiver: mpsc::Receiver<Call>,
     stop: CancellationToken,
-) {
+) -> Result<(), PluginError> {
     let _stop_guard = CancelOnDrop(stop.clone());
     let mut request_id = 0_u64;
     loop {
@@ -397,7 +459,7 @@ async fn run_process(
                 .expect("plugin process poisoned")
                 .as_mut()
             {
-                process.terminate();
+                let _ = process.terminate();
             }
         }
         let _ = call.reply.send(result);
@@ -405,15 +467,49 @@ async fn run_process(
             break;
         }
     }
-    if let Some(process) = session
+    let terminate = session
         .process
         .lock()
         .expect("plugin process poisoned")
         .as_mut()
-    {
-        process.terminate();
+        .map_or(Ok(()), ProcessGuard::terminate);
+    let wait = wait_for_exit(
+        &mut session.watcher,
+        &session.process,
+        session.config.shutdown_timeout,
+    )
+    .await;
+    session
+        .process
+        .lock()
+        .expect("plugin process poisoned")
+        .take();
+    match (terminate, wait) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(terminate), Ok(())) => Err(PluginError::OutcomeUnknown(format!(
+            "failed to terminate plugin process group: {terminate}"
+        ))),
+        (Ok(()), Err(wait)) => Err(PluginError::OutcomeUnknown(format!(
+            "failed to confirm plugin process exit: {wait}"
+        ))),
+        (Err(terminate), Err(wait)) => Err(PluginError::OutcomeUnknown(format!(
+            "failed to terminate plugin process group: {terminate}; failed to confirm exit: {wait}"
+        ))),
     }
-    let _ = session.watcher.wait(&session.process).await;
+}
+
+async fn wait_for_exit(
+    watcher: &mut ProcessWatcher,
+    process: &Mutex<Option<ProcessGuard>>,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    match tokio::time::timeout(timeout, watcher.wait(process)).await {
+        Ok(result) => result.map(|_| ()),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "plugin process did not exit before the cleanup timeout",
+        )),
+    }
 }
 
 /// The only owner allowed to inspect, signal or reap this child. On Unix an
@@ -441,7 +537,7 @@ impl ProcessGuard {
         if !self.reaped {
             match self.exit_pending() {
                 Ok(false) => return Ok(None),
-                Ok(true) => self.terminate(),
+                Ok(true) => self.terminate()?,
                 Err(error) => return Err(error),
             }
         }
@@ -498,34 +594,48 @@ impl ProcessGuard {
         Ok(observed != 0)
     }
 
-    fn terminate(&mut self) {
+    fn terminate(&mut self) -> std::io::Result<()> {
         if self.terminated {
-            return;
+            return Ok(());
         }
-        self.terminated = true;
         #[cfg(unix)]
         {
             // Already-reaped or externally reaped children no longer reserve
             // this PID. Never signal an old group ID after that boundary.
-            if self.reaped || self.exit_pending().is_err() {
-                return;
+            if self.reaped {
+                self.terminated = true;
+                return Ok(());
             }
+            self.exit_pending()?;
             if let Some(group) = self
                 .child
                 .id()
                 .and_then(|id| i32::try_from(id).ok())
                 .map(nix::unistd::Pid::from_raw)
             {
-                let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+                match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(error) => return Err(std::io::Error::from_raw_os_error(error as i32)),
+                }
             }
         }
-        let _ = self.child.start_kill();
+        match self.child.start_kill() {
+            Ok(()) => {
+                self.terminated = true;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                self.terminated = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        self.terminate();
+        let _ = self.terminate();
     }
 }
 

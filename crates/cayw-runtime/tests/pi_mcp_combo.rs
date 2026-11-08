@@ -306,7 +306,7 @@ async fn unified_bridge_combines_real_mcp_and_pi_compat_extension() {
     );
 
     // 11. Clean shutdown of both sources.
-    pi_host.unload(&pi_pkg).unwrap();
+    pi_host.unload(&pi_pkg).await.unwrap();
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(5), mcp_control.wait_closed())
         .await

@@ -1,0 +1,28 @@
+{
+  "public": {
+    "health": {
+      "max_concurrent_runs": 4,
+      "model": "auto/deepseek-v4.1-flash",
+      "protocol_version": 3,
+      "provider": "magpie",
+      "queued": 0,
+      "running": 0,
+      "status": "ok"
+    },
+    "models": {
+      "live-browser-e2e": {
+        "api": "chat_completions",
+        "api_version": "v1",
+        "authentication": "none",
+        "base_url": "http://127.0.0.1:3425/v1",
+        "id": "auto/deepseek-v4.1-flash",
+        "max_output_tokens": 2048,
+        "service": "magpie"
+      }
+    },
+    "offline": false,
+    "selected": "live-browser-e2e"
+  },
+  "stored_without_api_key": true,
+  "stored_path": "/private/tmp/cayw-live-webui-e2e-20261108-r5/work/home/cayw/workspaces/2e37446fd72d1a354e45c6281b898ad36f10c8f9c6c800381288d188ae84822f/models.json"
+}

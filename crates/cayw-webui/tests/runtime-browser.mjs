@@ -45,7 +45,7 @@ function launch(binary, args, env, pattern, log) {
   });
 }
 
-const ipcAddress = await launch(runtimeBinary, ['serve','--db',join(evidence, 'runtime.sqlite'),'--workspace',workspace,'--listen','127.0.0.1:0','--token-env','CAYW_WEBUI_TEST_IPC','--offline',...(approvalGated ? [] : ['--demo-authorized'])], {CAYW_WEBUI_TEST_IPC:ipcToken}, /"listening":"([^"]+)"/, 'runtime.log');
+const ipcAddress = await launch(runtimeBinary, ['serve','--db',join(evidence, 'runtime.sqlite'),'--workspace',workspace,'--listen','127.0.0.1:0','--token-env','CAYW_WEBUI_TEST_IPC','--offline',...(approvalGated ? [] : ['--demo-authorized'])], {CAYW_WEBUI_TEST_IPC:ipcToken,CAYW_HOME:join(evidence,'cayw-home')}, /"listening":"([^"]+)"/, 'runtime.log');
 const webAddress = await launch(webBinary, [], {CAYW_IPC_ADDR:ipcAddress,CAYW_IPC_TOKEN:ipcToken,CAYW_WEB_ADDR:'127.0.0.1:0'}, /http:\/\/([^/\s]+)/, 'gateway.log');
 
 async function rpc(method, params={}) {

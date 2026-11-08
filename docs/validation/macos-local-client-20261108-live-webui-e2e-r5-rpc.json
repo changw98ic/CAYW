@@ -1,0 +1,178 @@
+[
+  {
+    "method": "settings.workspaces.list",
+    "status": 200
+  },
+  {
+    "method": "settings.workspaces.open",
+    "status": 200
+  },
+  {
+    "method": "runtime.health",
+    "status": 200
+  },
+  {
+    "method": "settings.workspaces.list",
+    "status": 200
+  },
+  {
+    "method": "settings.workspace",
+    "status": 200
+  },
+  {
+    "method": "settings.tools",
+    "status": 200
+  },
+  {
+    "method": "session.list",
+    "status": 200
+  },
+  {
+    "method": "settings.workspace",
+    "status": 200
+  },
+  {
+    "method": "settings.models.list",
+    "status": 200
+  },
+  {
+    "method": "settings.plugins.list",
+    "status": 200
+  },
+  {
+    "method": "settings.models.put",
+    "status": 200
+  },
+  {
+    "method": "settings.workspace",
+    "status": 200
+  },
+  {
+    "method": "settings.models.list",
+    "status": 200
+  },
+  {
+    "method": "settings.plugins.list",
+    "status": 200
+  },
+  {
+    "method": "settings.models.use",
+    "status": 200
+  },
+  {
+    "method": "settings.workspace",
+    "status": 200
+  },
+  {
+    "method": "settings.models.list",
+    "status": 200
+  },
+  {
+    "method": "settings.plugins.list",
+    "status": 200
+  },
+  {
+    "method": "session.create",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "session.events",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "task.enqueue",
+    "status": 200
+  },
+  {
+    "method": "session.events",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "session.events",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "approval.decide",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "session.events",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "task.resume",
+    "status": 200
+  },
+  {
+    "method": "session.events",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "settings.workspaces.list",
+    "status": 200
+  },
+  {
+    "method": "settings.workspaces.open",
+    "status": 200
+  },
+  {
+    "method": "runtime.health",
+    "status": 200
+  },
+  {
+    "method": "settings.workspaces.list",
+    "status": 200
+  },
+  {
+    "method": "settings.workspace",
+    "status": 200
+  },
+  {
+    "method": "settings.tools",
+    "status": 200
+  },
+  {
+    "method": "session.list",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  },
+  {
+    "method": "session.events",
+    "status": 200
+  },
+  {
+    "method": "session.get",
+    "status": 200
+  }
+]

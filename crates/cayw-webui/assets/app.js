@@ -29,6 +29,17 @@ function localServiceUrl(baseUrl) {
   return url.toString();
 }
 
+export function workspaceIdFromHash(hash) {
+  if (typeof hash !== 'string') throw new Error('工作区链接片段无效。');
+  const params = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash);
+  const values = params.getAll('workspace');
+  if (!values.length) return null;
+  if (values.length !== 1) throw new Error('工作区链接只能包含一个 workspace。');
+  const id = values[0];
+  if (id === 'local' || /^workspace-[0-9a-f]{64}$/.test(id)) return id;
+  throw new Error('工作区链接包含无效的本地工作区 ID。');
+}
+
 export function buildVisualEditorLaunchUrl({ baseUrl } = {}) {
   return localServiceUrl(baseUrl);
 }
@@ -146,8 +157,6 @@ const readMethods = new Set([
   'artifacts.action_get',
   'plannotator.list',
 ]);
-const rejectedCodes = new Set(['forbidden', 'invalid_params', 'invalid_request', 'invalid_json', 'method_not_allowed', 'queue_full', 'queue_timeout', 'body_timeout', 'invalid_body', 'busy', 'session_frozen', 'needs_reconciliation', 'needs_reconciliation_outcome_unknown', 'stale_approval', 'stale_cancellation', 'cancelled']);
-
 export class RpcError extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
     super(clip(message, 2000));
@@ -186,7 +195,7 @@ export function noteSessionError(view, error) {
 }
 
 export function finishWrite(view, key, error = null, result = null) {
-  const rejected = error && rejectedCodes.has(error.code) && (!error.outcome_unknown || error.code === 'needs_reconciliation_outcome_unknown');
+  const rejected = error && (error.outcome_unknown === false || error.code === 'needs_reconciliation_outcome_unknown');
   const next = noteSessionError(view, error ?? {});
   next.writes = next.writes.flatMap(write => {
     if (write.key !== key) return [write];
@@ -404,7 +413,7 @@ function boot() {
   let authMode = 'local';
   let loginRequired = false;
   let connected = false;
-  let workspaceId = 'local';
+  let workspaceId = null;
   let workspaceBusy = false;
   const sessionWorkspaces = new Map();
   let toolAvailability = {};
@@ -444,10 +453,12 @@ function boot() {
     let timeout;
     if (!['session.prompt', 'task.resume'].includes(method)) timeout = setTimeout(() => controller.abort(), method === 'settings.workspaces.open' ? 45000 : 15000);
     try {
+      const requestPayload = { method, params };
+      if (scope) requestPayload.workspace_id = scope;
       const response = await fetch('/api/rpc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method, params, workspace_id:scope }),
+        body: JSON.stringify(requestPayload),
         signal: controller.signal,
         cache: 'no-store',
         credentials: 'same-origin',
@@ -1760,6 +1771,18 @@ function boot() {
     }
   }
 
+  async function activateLaunchWorkspace() {
+    const requested = workspaceIdFromHash(window.location?.hash ?? '');
+    if (!requested) return;
+    const catalog = await rpc('settings.workspaces.list', {}, null);
+    const entry = array(catalog?.workspaces).find(workspace => workspace?.id === requested);
+    if (!entry) throw new RpcError('workspace_unavailable', '链接指定的工作区尚未登记。请先运行 cayw init --workspace DIR。', false);
+    if (entry.state === 'unavailable') throw new RpcError('workspace_unavailable', '链接指定的工作区目录当前不可用。', false);
+    const opened = await rpc('settings.workspaces.open', { id: requested }, null);
+    if (opened?.id !== requested) throw new RpcError('invalid_response', 'Client 返回了不同的工作区；页面未继续。', true);
+    workspaceId = requested;
+  }
+
   async function connect() {
     if (ui['login-button'].disabled) return;
     ui['password'].value = '';
@@ -1768,6 +1791,7 @@ function boot() {
     ui['login-error'].textContent = '';
     const login = ++loginGeneration;
     try {
+      await activateLaunchWorkspace();
       const health = await rpc('runtime.health');
       if (login !== loginGeneration) return;
       if (health?.status !== 'ok' || health?.protocol_version !== CORE_PROTOCOL_VERSION) throw new Error('本机运行服务的版本不匹配，请同步更新运行服务和网页界面。');
@@ -1830,7 +1854,11 @@ function boot() {
     const status = $('workspace-switch-status');
     try {
       const catalog = await rpc('settings.workspaces.list');
-      if (!Array.isArray(catalog?.workspaces)) throw new Error('当前宿主未提供工作区目录。');
+      if (!Array.isArray(catalog?.workspaces)) throw new Error('当前 Client 未提供工作区目录。');
+      const active = await rpc('settings.workspace');
+      const current = catalog.workspaces.find(workspace => workspace.path === active?.workspace);
+      if (!current) throw new Error('当前工作区不在 Client 的登记目录中。');
+      workspaceId = current.id;
       const picker = $('workspace-choice'); picker.replaceChildren();
       for (const workspace of catalog.workspaces) {
         const option = el('option', '', `${workspace.path}${workspace.state === 'unavailable' ? '（目录不可用）' : ''}`);
@@ -1838,8 +1866,8 @@ function boot() {
       }
       picker.value = workspaceId;
       $('switch-workspace').disabled = workspaceBusy;
-      status.textContent = '只连接本机已登记目录。新目录使用 cayw init --workspace DIR 登记后刷新；切换不停止旧任务。';
-    } catch (error) { $('switch-workspace').disabled = true; status.textContent = `工作区目录不可用，请确认使用新版 cayw start 启动。${error.message || String(error)}`; }
+      status.textContent = '所有工作区都通过唯一 Client 打开。新目录使用 cayw init --workspace DIR 登记后刷新；切换不停止旧任务。';
+    } catch (error) { $('switch-workspace').disabled = true; status.textContent = `工作区目录不可用，请确认唯一 Client 正在运行。${error.message || String(error)}`; }
   }
   async function refreshOptionalTools() {
     const container = $('optional-tools-status');
@@ -1864,11 +1892,11 @@ function boot() {
     workspaceBusy = true; $('switch-workspace').disabled = true;
     const login = loginGeneration;
     const status = $('workspace-switch-status');
-    status.textContent = '正在连接工作区；原工作区任务继续运行…';
+    status.textContent = '正在通过唯一 Client 打开工作区；原工作区任务继续运行…';
     try {
       const target = await rpc('settings.workspaces.open', {id:$('workspace-choice').value});
       if (login !== loginGeneration) return;
-      if (typeof target?.id !== 'string' || typeof target?.path !== 'string') throw new Error('工作区连接回执无效，请刷新状态。');
+      if (typeof target?.id !== 'string' || typeof target?.path !== 'string') throw new Error('工作区打开回执无效，请刷新状态。');
       if (target.id !== workspaceId) {
         // In-flight enqueue/resume keeps its captured workspace and transport.
         // Do not disconnect, abort controllers, or cancel another root's task.
@@ -1881,8 +1909,9 @@ function boot() {
         if (sessions.length) await selectSession(sessions[0].id);
       }
       $('workspace-choice').value = target.id;
+      window.history?.replaceState(null, '', `#workspace=${target.id}`);
       await refreshOptionalTools();
-      status.textContent = `当前：${target.path}。${target.reused ? '已复用原服务。' : '已启动独立服务。'}旧工作区任务继续运行。`;
+      status.textContent = `当前：${target.path}。${target.reused ? '已复用 Client 内现有 Runtime。' : '已由唯一 Client 打开 Runtime。'}旧工作区任务继续运行。`;
     } catch (error) { status.textContent = errorText(error); }
     finally { workspaceBusy = false; $('switch-workspace').disabled = false; }
   }
@@ -1890,7 +1919,7 @@ function boot() {
   $('refresh-workspaces').addEventListener('click', refreshWorkspaceCatalog);
   $('refresh-optional-tools').addEventListener('click', refreshOptionalTools);
 
-  mountSettings(rpc, () => selected);
+  mountSettings(rpc);
   ui['logout'].addEventListener('click', async () => {
     try {
       const response = await fetch('/api/auth/logout', { method:'POST', credentials:'same-origin' });
@@ -2092,7 +2121,7 @@ function boot() {
 
 // Host settings share the existing authenticated RPC and its cancellation/error
 // handling. Neither credential values nor plugin code are stored by the browser.
-function mountSettings(rpc, selectedSession) {
+function mountSettings(rpc) {
   const $ = id => document.getElementById(id);
   const open = $('open-settings');
   if (!open) return;
@@ -2153,15 +2182,15 @@ function mountSettings(rpc, selectedSession) {
   window.addEventListener('pagehide', clearAccountPasswords);
   const modelForm = $('model-settings-form');
   const serviceDefaults = {
-    openai: ['https://api.openai.com/v1', 'OPENAI_API_KEY', ['chat_completions', 'responses']],
-    anthropic: ['https://api.anthropic.com/v1', 'ANTHROPIC_API_KEY', ['messages']],
-    gemini: ['https://generativelanguage.googleapis.com/v1beta', 'GEMINI_API_KEY', ['stream_generate_content', 'generate_content']],
-    magpie: ['http://127.0.0.1:3425/v1', 'MAGPIE_API_KEY', ['chat_completions', 'responses', 'messages', 'stream_generate_content', 'generate_content']],
+    openai: ['https://api.openai.com/v1', ['chat_completions', 'responses']],
+    anthropic: ['https://api.anthropic.com/v1', ['messages']],
+    gemini: ['https://generativelanguage.googleapis.com/v1beta', ['stream_generate_content', 'generate_content']],
+    magpie: ['http://127.0.0.1:3425/v1', ['chat_completions', 'responses', 'messages', 'stream_generate_content', 'generate_content']],
   };
   function serviceOptions(service, defaults) {
-    const [base, key, apis] = serviceDefaults[service];
+    const [base, apis] = serviceDefaults[service];
     modelForm.elements.api.replaceChildren(...apis.map(api => { const option = document.createElement('option'); option.value = api; option.textContent = api; return option; }));
-    if (defaults) { modelForm.elements.base_url.value = base; modelForm.elements.api_key_env.value = key; apiVersion(); }
+    if (defaults) { modelForm.elements.base_url.value = base; modelForm.elements.api_key.value = ''; apiVersion(); }
   }
   function apiVersion() {
     const api = modelForm.elements.api.value;
@@ -2183,7 +2212,15 @@ function mountSettings(rpc, selectedSession) {
     for (const [name, model] of Object.entries(models.models || {})) {
       const row = document.createElement('div'); const label = document.createElement('p');
       label.textContent = `${name} · ${model.id}${models.selected === name ? ' · 已保存选择' : ''}`; row.append(label);
-      row.append(button('编辑', async () => { modelForm.elements.name.value = name; serviceOptions(model.service, false); for (const [key, value] of Object.entries(model)) modelForm.elements[key].value = value; }));
+      row.append(button('编辑', async () => {
+        modelForm.reset();
+        modelForm.elements.name.value = name;
+        serviceOptions(model.service, false);
+        modelForm.elements.api_key.value = '';
+        for (const [key, value] of Object.entries(model)) {
+          if (modelForm.elements[key]) modelForm.elements[key].value = value;
+        }
+      }));
       const use = button('使用', async () => { await rpc('settings.models.use', {name}); await refresh(); }); use.disabled = models.offline; row.append(use);
       const remove = button('删除', async () => { await rpc('settings.models.remove', {name}); await refresh(); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);
     }
@@ -2202,10 +2239,6 @@ function mountSettings(rpc, selectedSession) {
           await rpc(`settings.plugins.${loaded ? 'disable' : 'enable'}`, { name: plugin.name, ...(!loaded ? {approve_process:true} : {}) });
           approve.checked = false; await refresh();
         }));
-        const bind = button('绑定到当前会话', async () => {
-          const session_id = selectedSession(); if (!session_id) throw new Error('请先选择一个空闲会话。');
-          await rpc('settings.plugins.bind', {name:plugin.name, session_id}); status('已绑定；原会话绑定不可替换。');
-        }); bind.disabled = !plugin.available; row.append(bind);
         row.append(button('卸载登记', async () => { await rpc('settings.plugins.remove', {name:plugin.name}); await refresh(); })); list.append(row);
       }
     } catch (error) { const message = document.createElement('p'); message.textContent = error.message || String(error); list.append(message); }
@@ -2217,6 +2250,7 @@ function mountSettings(rpc, selectedSession) {
     event.preventDefault(); action(async () => {
       const values = Object.fromEntries(new FormData(modelForm)); const name = values.name; delete values.name;
       values.max_output_tokens = Number(values.max_output_tokens);
+      if (!values.api_key) delete values.api_key;
       await rpc('settings.models.put', {name, model:values}); await refresh();
     });
   });

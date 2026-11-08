@@ -132,6 +132,7 @@ impl Observer {
         let manifest = PluginManifest {
             name: "observer".into(),
             version: env!("CARGO_PKG_VERSION").into(),
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::Native,
             protocol_version: PLUGIN_PROTOCOL_VERSION,
             capabilities: vec![ToolDefinition {
@@ -237,7 +238,7 @@ impl Plugin for Observer {
         }
         serde_json::to_value(self.stats()).map_err(|error| PluginError::Failed(error.to_string()))
     }
-    fn shutdown(&self) {
+    fn request_shutdown(&self) {
         self.stopped.cancel();
     }
 }

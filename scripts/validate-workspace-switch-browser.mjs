@@ -20,7 +20,11 @@ async function launch(args) {
   const child = spawn(join(bin,'cayw'),args,{env,stdio:['ignore','pipe','pipe'],detached:true}); children.push(child);
   let stderr = ''; child.stderr.on('data', bytes=>{stderr+=bytes}); logs.push(()=>stderr);
   const lines = createInterface({input:child.stdout});
-  const [line] = await Promise.race([once(lines,'line'),new Promise((_,reject)=>setTimeout(()=>reject(new Error('readiness timeout')),40000).unref())]);
+  const [line] = await Promise.race([
+    once(lines,'line'),
+    once(child,'exit').then(([code])=>{throw new Error(`startup exited ${code}: ${stderr}`)}),
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error(`readiness timeout: ${stderr}`)),40000).unref()),
+  ]);
   return {child,ready:JSON.parse(line)};
 }
 async function stop(child) { if(child.exitCode===null){ child.kill('SIGINT'); const [code]=await once(child,'exit');assert.equal(code,0); } }
@@ -28,7 +32,6 @@ async function until(fn) { const deadline=Date.now()+30000; while(true){const re
 const {chromium} = await import(process.env.CAYW_PLAYWRIGHT_MODULE || 'playwright');
 let browser; const checks=[]; const receipts={};
 try {
-  const external = await launch(['serve','--offline','--workspace',roots.C]);
   const app = await launch(['start','--ui','web','--no-open','--offline','--workspace',roots.A]);
   async function rpc(method,params={},workspace_id='local',good=true) {
     const response=await fetch(app.ready.url+'api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,params,workspace_id})});
@@ -48,12 +51,16 @@ try {
   page.on('request',request=>{if(request.url().endsWith('/api/rpc')){const body=request.postDataJSON();requests.push({method:body.method,workspace_id:body.workspace_id,session_id:body.params.session_id,task_id:body.params.task_id});}});
   await page.goto(app.ready.url);
   await page.locator('#workspace-choice option').filter({hasText:roots.B}).waitFor({state:'attached'});
-  await until(async()=>await page.locator('#wb-editor').isDisabled());
-  assert(await page.locator('#wb-trace').isDisabled());
-  assert.match(await page.locator('#optional-tools-status').textContent(),/未安装/);
-  assert.match(await page.locator('#optional-tools-status').textContent(),/cayw-visual-editor --help/);
-  assert.match(await page.locator('#optional-tools-status').textContent(),/Pi 兼容/);
-  checks.push('default UI disables absent Editor/Trace and shows install/start paths and Pi build/enable state');
+  await until(async()=>/（(?:需连接|未安装)）/.test(await page.locator('#wb-editor').textContent()));
+  for (const id of ['wb-editor','wb-trace']) {
+    const control=page.locator(`#${id}`);const text=await control.textContent();
+    assert.match(text,await control.isDisabled()?/（未安装）/:/（需连接）/);
+  }
+  const optionalStatus=await page.locator('#optional-tools-status').textContent();
+  assert.match(optionalStatus,/cayw-visual-editor --help/);
+  assert.match(optionalStatus,/cayw-trace-debug/);
+  assert.match(optionalStatus,/Pi 兼容/);
+  checks.push('default UI reports the actual Editor/Trace installation state and always shows start paths and Pi build/enable state');
   await page.locator('#session-label').fill('A in-flight');await page.locator('#create-button').click();
   await page.locator('#session-title').filter({hasText:'A in-flight'}).waitFor();
   await page.locator('#prompt').fill('Wait for exact file approval');await page.locator('#send-button').click();
@@ -70,8 +77,8 @@ try {
   assert.equal((await rpc('session.get',{session_id:aSession},id('B'),false)).code,'workspace_mismatch');
   assert.equal((await rpc('task.resume',{task_id:aTask.id},id('B'),false)).code,'workspace_mismatch');
   const reusedB=await rpc('settings.workspaces.open',{id:id('B')});
-  assert.equal(reusedB.reused,true);assert.equal(reusedB.managed,true);assert(!('ipc_addr' in reusedB));
-  checks.push('switch A to managed B keeps original running Task/Attempt/fence and request; repeat open reuses runtime; cross-owner requests rejected');
+  assert.equal(reusedB.reused,true);assert.equal(reusedB.id,id('B'));assert(!('ipc_addr' in reusedB));
+  checks.push('switch A to Client-routed B keeps original running Task/Attempt/fence and request; repeat open reuses runtime; cross-workspace requests rejected');
   await page.locator('#session-label').fill('B isolated');await page.locator('#session-device').fill('local');await page.locator('#create-button').click();
   await page.locator('#session-title').filter({hasText:'B isolated'}).waitFor();
   assert.equal((await rpc('session.list',{},id('B'))).length,1);
@@ -89,18 +96,17 @@ try {
   checks.push('switch back restores original session/approval; only original task resumes, explicit cancellation prevents file effect');
   await page.locator('#workspace-choice').selectOption(id('C'));await page.locator('#switch-workspace').click();
   await page.locator('#workspace-switch-status').filter({hasText:`当前：${roots.C}`}).waitFor();
-  const reusedC=await rpc('settings.workspaces.open',{id:id('C')});assert(reusedC.reused);assert.equal(reusedC.managed,false);
-  checks.push('browser switches to externally owned C by reusing it');
+  const reusedC=await rpc('settings.workspaces.open',{id:id('C')});assert(reusedC.reused);assert.equal(reusedC.id,id('C'));assert(!('ipc_addr' in reusedC));
+  checks.push('browser switches to Client-routed C and reuses its Runtime without a workspace connection endpoint');
   assert.deepEqual(errors,[]);
   await browser.close();browser=null;await stop(app.child);
-  assert.equal(external.child.exitCode,null,'gateway/host shutdown must not stop external C');
-  execFileSync(join(bin,'cayw'),['models','list','--workspace',roots.C],{env,stdio:'pipe'});
-  // Managed B is cleaned up by the original host; external C is left to its owner.
-  let stoppedB = false;
-  try { execFileSync(join(bin,'cayw'),['models','list','--workspace',roots.B],{env,stdio:'pipe',encoding:'utf8',timeout:30000}); }
-  catch(error) { assert(error.status !== 0); assert.match(String(error.stderr),/no local service for this workspace/); stoppedB=true; }
-  assert(stoppedB,'managed B unexpectedly remained connectable');
-  checks.push('host shutdown removes its managed B; external C stays alive and queryable');
+  for (const name of ['B','C']) {
+    let stopped = false;
+    try { execFileSync(join(bin,'cayw'),['models','list','--workspace',roots[name]],{env,stdio:'pipe',encoding:'utf8',timeout:30000}); }
+    catch(error) { assert(error.status !== 0); assert.match(String(error.stderr),/no local Client is running/); stopped=true; }
+    assert(stopped,`managed ${name} unexpectedly remained connectable`);
+  }
+  checks.push('unique Client shutdown removes every managed workspace Runtime and leaves no per-workspace connection');
   const report={passed:true,platform:process.platform,checks,receipts};
   await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report));
 } finally {

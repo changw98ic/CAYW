@@ -86,6 +86,14 @@ required-features = ["pi-compat"]
 name = "pi_mcp_combo"
 required-features = ["pi-compat"]
 
+[[test]]
+name = "optional_service_cleanup"
+required-features = ["pi-compat"]
+
+[[test]]
+name = "workspace_optional_services"
+required-features = ["pi-compat"]
+
 [[bin]]
 name = "cayw-runtime-recovery-fixture"
 path = "tests/fixtures/recovery.rs"

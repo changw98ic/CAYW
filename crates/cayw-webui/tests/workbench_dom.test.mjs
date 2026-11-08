@@ -62,9 +62,10 @@ class Element {
   }
 }
 
-async function setupApp(t, handler) {
+async function setupApp(t, handler, { hash = '' } = {}) {
   const calls = [];
   const openedWindows = [];
+  const replacedHashes = [];
   const server = createServer(async (req, res) => {
     if (req.url === '/api/settings/account') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({can_manage:false,configured:false,message:'仅本机管理入口可配置账号'})); return; }
     if (req.url === '/api/auth/status') { res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({mode:'local',authenticated:true})); return; }
@@ -105,6 +106,13 @@ async function setupApp(t, handler) {
       hidden: false
     },
     window: {
+      location: { hash },
+      history: {
+        replaceState(_state, _title, nextHash) {
+          replacedHashes.push(nextHash);
+          this.location = nextHash;
+        },
+      },
       addEventListener() {},
       matchMedia: () => ({ matches: false }),
       open: (url, target, features) => {
@@ -115,6 +123,7 @@ async function setupApp(t, handler) {
     AbortController,
     TypeError,
     URL,
+    URLSearchParams,
     fetch: (url, options) => fetch(`http://127.0.0.1:${server.address().port}${url}`, options),
     setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout: id => timers.delete(id),
@@ -133,8 +142,30 @@ async function setupApp(t, handler) {
 
   const waitTick = (ms = 100) => new Promise(resolve => setTimeout(resolve, ms));
 
-  return { ui: elements, calls, openedWindows, WEB_TOKEN, waitTick };
+  return { ui: elements, calls, openedWindows, replacedHashes, WEB_TOKEN, waitTick };
 }
+
+test('workbench_dom: launch hash opens and scopes one workspace before runtime calls', async t => {
+  const workspaceId = `workspace-${'b'.repeat(64)}`;
+  const workspacePath = '/tmp/cayw-hash-workspace';
+  const app = await setupApp(t, async method => {
+    if (method === 'settings.workspaces.list') return { workspaces: [{ id: workspaceId, path: workspacePath, state: 'registered' }] };
+    if (method === 'settings.workspaces.open') return { id: workspaceId, path: workspacePath, state: 'open', reused: true };
+    if (method === 'settings.workspace') return { workspace: workspacePath, known_workspaces: [workspacePath] };
+    if (method === 'settings.tools') return { editor: { installed: false, install: '', start: '' }, trace: { installed: false, install: '', start: '' }, pi: { installed: false, install: '', start: '' } };
+    if (method === 'session.list') return [];
+    return {};
+  }, { hash: `#workspace=${workspaceId}` });
+
+  const catalog = app.calls.findIndex(call => call.method === 'settings.workspaces.list');
+  const opened = app.calls.findIndex(call => call.method === 'settings.workspaces.open');
+  const health = app.calls.findIndex(call => call.method === 'runtime.health');
+  assert.ok(catalog >= 0 && opened > catalog && health > opened, 'workspace is registered before its first runtime call');
+  assert.equal(app.calls[catalog].workspace_id, undefined);
+  assert.equal(app.calls[opened].workspace_id, undefined);
+  assert.equal(app.calls[health].workspace_id, workspaceId);
+  assert.equal(app.calls.find(call => call.method === 'settings.workspace')?.workspace_id, workspaceId);
+});
 
 test('workbench_dom: visual editor configurable entrance opens in external window without leaking tokens', async t => {
   let openedPanelState = null;

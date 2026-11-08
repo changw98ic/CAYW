@@ -74,17 +74,15 @@ async fn configured_transport_child() {
         .unwrap();
     let base = std::env::var("CAYW_TRANSPORT_BASE").unwrap();
     let (service, api, version) = PROFILES[profile];
-    let config: ProviderConfig = serde_json::from_value(json!({
+    let mut value = json!({
         "service":service,"api":api,"id":"fixture-model","base_url":base,
-        "api_version":version,"max_output_tokens":32,"api_key_env":"CAYW_SYNTHETIC_KEY"
-    }))
-    .unwrap();
-    let configured = config
-        .build_with_environment(|name| {
-            assert_eq!(name, "CAYW_SYNTHETIC_KEY");
-            Some("synthetic-transport-key".into())
-        })
-        .unwrap();
+        "api_version":version,"max_output_tokens":32
+    });
+    if std::env::var("CAYW_TRANSPORT_AUTH").as_deref() == Ok("plain_file") {
+        value["api_key"] = json!("synthetic-transport-key");
+    }
+    let config: ProviderConfig = serde_json::from_value(value).unwrap();
+    let configured = config.build().unwrap();
     let events = tokio::time::timeout(
         WATCHDOG,
         configured
@@ -160,6 +158,16 @@ async fn check(profile: usize, status: u16, bypass: bool) {
 }
 
 async fn check_at(profile: usize, status: u16, bypass: bool, prefix: &str) {
+    check_at_with_auth(profile, status, bypass, prefix, true).await;
+}
+
+async fn check_at_with_auth(
+    profile: usize,
+    status: u16,
+    bypass: bool,
+    prefix: &str,
+    authenticated: bool,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let base = if bypass {
@@ -184,6 +192,10 @@ async fn check_at(profile: usize, status: u16, bypass: bool, prefix: &str) {
         .env("CAYW_TRANSPORT_PROFILE", profile.to_string())
         .env("CAYW_TRANSPORT_STATUS", status.to_string())
         .env("CAYW_TRANSPORT_BASE", &base)
+        .env(
+            "CAYW_TRANSPORT_AUTH",
+            if authenticated { "plain_file" } else { "none" },
+        )
         .env("HTTP_PROXY", &proxy)
         .env("http_proxy", &proxy)
         .env("NO_PROXY", if bypass { "localhost" } else { "" })
@@ -235,19 +247,22 @@ async fn check_at(profile: usize, status: u16, bypass: bool, prefix: &str) {
         header.lines().next().unwrap(),
         format!("POST {target}/{suffix} HTTP/1.1")
     );
-    if api.starts_with("stream_") || api == "generate_content" {
-        assert!(
-            header
-                .to_ascii_lowercase()
-                .contains("x-goog-api-key: synthetic-transport-key")
-        );
-    } else if api == "messages" {
-        assert!(
-            header
-                .to_ascii_lowercase()
-                .contains("anthropic-version: 2023-06-01")
-        );
-    } else {
+    let header = header.to_ascii_lowercase();
+    assert_eq!(
+        header.contains("authorization: bearer synthetic-transport-key"),
+        authenticated && matches!(api, "chat_completions" | "responses")
+    );
+    assert_eq!(
+        header.contains("x-api-key: synthetic-transport-key"),
+        authenticated && api == "messages"
+    );
+    assert_eq!(
+        header.contains("x-goog-api-key: synthetic-transport-key"),
+        authenticated && matches!(api, "stream_generate_content" | "generate_content")
+    );
+    if api == "messages" {
+        assert!(header.contains("anthropic-version: 2023-06-01"));
+    } else if matches!(api, "chat_completions" | "responses") {
         assert_eq!(value["model"], "fixture-model");
     }
 }
@@ -265,6 +280,13 @@ async fn configured_adapters_keep_encoded_and_root_deployment_paths() {
         for prefix in ["/", "/deploy/tenant%2Falpha/v1/"] {
             check_at(profile, 200, true, prefix).await;
         }
+    }
+}
+
+#[tokio::test]
+async fn configured_adapters_support_no_auth_without_sending_auth_headers() {
+    for profile in 0..PROFILES.len() {
+        check_at_with_auth(profile, 200, true, "/deploy/team/v1", false).await;
     }
 }
 

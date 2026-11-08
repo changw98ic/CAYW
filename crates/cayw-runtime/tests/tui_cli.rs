@@ -1,13 +1,17 @@
 #![cfg(target_os = "macos")]
 
+#[cfg(feature = "plugins")]
 use cayw_ipc::Client;
+#[cfg(feature = "plugins")]
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    process::Command,
-};
+#[cfg(feature = "plugins")]
+use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::{path::Path, process::Stdio};
+#[cfg(feature = "plugins")]
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 
+#[cfg(feature = "plugins")]
 const WATCHDOG: Duration = Duration::from_secs(30);
 
 fn command(binary: &Path, home: &Path, workspace: &Path) -> Command {
@@ -47,6 +51,7 @@ async fn tui_help_leaves_state_absent_and_missing_service_prints_the_next_step()
     assert!(!home.path().join(".cayw").exists());
 }
 
+#[cfg(feature = "plugins")]
 #[tokio::test]
 async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_arguments() {
     let home = tempfile::tempdir().unwrap();
@@ -72,11 +77,7 @@ async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_argu
     let binary = installed.path().join("cayw");
     std::fs::copy(env!("CARGO_BIN_EXE_cayw"), &binary).unwrap();
     let sibling = installed.path().join("cayw-tui");
-    std::fs::write(
-        &sibling,
-        b"#!/bin/sh\n[ \"$#\" -eq 0 ] || exit 91\n[ \"$CAYW_IPC_ADDR\" = \"$EXPECTED_ADDR\" ] || exit 92\n[ \"$CAYW_IPC_TOKEN\" = \"$EXPECTED_TOKEN\" ] || exit 93\nprintf 'workspace connection received\\n'\nexit 7\n",
-    )
-    .unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_cayw-runtime-plugin-fixture"), &sibling).unwrap();
     std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o700)).unwrap();
     let output = tokio::time::timeout(
         WATCHDOG,
@@ -86,6 +87,8 @@ async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_argu
             .arg(workspace.path())
             .env("EXPECTED_ADDR", ready["listening"].as_str().unwrap())
             .env("EXPECTED_TOKEN", &token)
+            .env("EXPECTED_WORKSPACE_ID", "local")
+            .env("CAYW_TEST_TUI_FIXTURE", "1")
             .env("CAYW_IPC_ADDR", "127.0.0.1:1")
             .env(
                 "CAYW_IPC_TOKEN",
@@ -96,7 +99,13 @@ async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_argu
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(output.status.code(), Some(7));
+    assert!(
+        output.status.success(),
+        "TUI launcher failed with {}; stdout: {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
     assert_eq!(output.stdout, b"workspace connection received\n");
     assert!(output.stderr.is_empty());
     let client = Client::connect(ready["listening"].as_str().unwrap().parse().unwrap(), token)
@@ -119,5 +128,5 @@ async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_argu
             .unwrap()
             .success()
     );
-    assert!(!Path::new(ready["connection_file"].as_str().unwrap()).exists());
+    assert!(!Path::new(ready["client_file"].as_str().unwrap()).exists());
 }

@@ -1,9 +1,9 @@
 #![cfg(target_os = "macos")]
 use cayw_host::ProcessIdentity;
 use cayw_ipc::Client;
-use cayw_runtime::{HeadlessConfig, RuntimeConfig, ScopedPermission};
+use cayw_runtime::{HeadlessConfig, RuntimeConfig, ScopedPermission, local_cli::save_config};
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -368,17 +368,21 @@ impl Server {
     async fn start(root: &Path, config: Value, base: &str) -> Self {
         Self::start_with_options(root, config, base, &[]).await
     }
-    async fn start_with_options(
+    async fn start_with_options(root: &Path, config: Value, base: &str, options: &[&str]) -> Self {
+        Self::start_with_command(root, config, base, options, |_| {}).await
+    }
+    async fn start_with_command(
         root: &Path,
         mut config: Value,
         base: &str,
         options: &[&str],
+        configure: impl FnOnce(&mut tokio::process::Command),
     ) -> Self {
         if !options.contains(&"--offline") {
             config["model"] = json!({
                 "service":"openai", "api":"chat_completions", "id":"fixture-config-model",
                 "base_url":base, "api_version":"v1", "max_output_tokens":1024,
-                "api_key_env":"CAYW_CONFIG_TEST_PROVIDER_KEY"
+                "api_key":"synthetic-provider-key-never-print"
             });
         }
         std::fs::create_dir(root.join("workspace")).unwrap();
@@ -387,7 +391,13 @@ impl Server {
             serde_json::to_vec(&config).unwrap(),
         )
         .unwrap();
-        let mut child = command(root, base).args(options).spawn().unwrap();
+        let mut process = command(root, base);
+        process.args(options);
+        configure(&mut process);
+        Self::start_process(process).await
+    }
+    async fn start_process(mut process: tokio::process::Command) -> Self {
+        let mut child = process.spawn().unwrap();
         let ready = tokio::time::timeout(
             WATCHDOG,
             BufReader::new(child.stdout.take().unwrap())
@@ -431,6 +441,12 @@ impl Server {
     }
 }
 fn command(root: &Path, _base: &str) -> tokio::process::Command {
+    command_with_config(root, true)
+}
+fn command_without_config(root: &Path) -> tokio::process::Command {
+    command_with_config(root, false)
+}
+fn command_with_config(root: &Path, include_config: bool) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_cayw"));
     command
         .args(["serve", "--db"])
@@ -442,15 +458,13 @@ fn command(root: &Path, _base: &str) -> tokio::process::Command {
             "127.0.0.1:0",
             "--token-env",
             "CAYW_CONFIG_TEST_TOKEN",
-            "--config",
-        ])
-        .arg(root.join("config.json"))
+        ]);
+    if include_config {
+        command.arg("--config").arg(root.join("config.json"));
+    }
+    command
         .env_clear()
         .env("CAYW_CONFIG_TEST_TOKEN", TOKEN)
-        .env(
-            "CAYW_CONFIG_TEST_PROVIDER_KEY",
-            "synthetic-provider-key-never-print",
-        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -748,6 +762,120 @@ async fn offline_startup_counts_configured_and_demo_permissions_without_connecti
 }
 
 #[tokio::test]
+async fn explicit_headless_paths_never_create_default_user_state() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let database = root.path().join("session.db");
+    let config = root.path().join("config.json");
+    let server = Server::start_with_command(
+        root.path(),
+        json!({}),
+        "http://127.0.0.1:9/v1",
+        &["--offline"],
+        |command| {
+            command.env("HOME", home.path());
+        },
+    )
+    .await;
+    assert_eq!(server.ready["database"].as_str(), database.to_str());
+    assert_eq!(server.ready["config_file"].as_str(), config.to_str());
+    assert!(server.ready["token_file"].is_null());
+    assert!(server.ready["connection_file"].is_null());
+    assert!(!home.path().join(".cayw").exists());
+    let error = server
+        .client
+        .request("settings.models.list", json!({}))
+        .await
+        .expect_err("fully explicit serve must not expose local settings");
+    assert_eq!(error.code, "settings_unavailable");
+    server.stop().await;
+    assert!(!home.path().join(".cayw").exists());
+}
+
+#[tokio::test]
+async fn partial_explicit_paths_use_default_config_and_keep_local_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let data_home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(data_home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = data_home.path().join("config.json");
+    save_config(
+        &config,
+        None,
+        &serde_json::to_vec(&json!({
+            "model": {
+                "service":"openai", "api":"chat_completions", "id":"default-config-model",
+                "base_url":"http://127.0.0.1:9/v1", "api_version":"v1",
+                "max_output_tokens":1024, "api_key":"synthetic-provider-key-never-print"
+            },
+            "permissions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join("workspace")).unwrap();
+    let mut process = command_without_config(root.path());
+    process.env("CAYW_HOME", data_home.path());
+    let server = Server::start_process(process).await;
+    assert_eq!(server.ready["config_file"].as_str(), config.to_str());
+    assert_eq!(server.ready["model"], "default-config-model");
+    assert_eq!(server.ready["model_configured"], true);
+    assert!(server.ready["token_file"].is_null());
+    assert!(server.ready["connection_file"].is_null());
+    let settings = server
+        .client
+        .request("settings.models.list", json!({}))
+        .await
+        .expect("partial explicit serve must keep local settings");
+    assert_eq!(settings["health"]["model"], "default-config-model");
+    assert!(data_home.path().join("workspaces").is_dir());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn conf_with_explicit_file_never_requires_or_creates_local_state() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("configured.json");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cayw"))
+        .args(["conf", "--workspace"])
+        .arg(root.path())
+        .arg("--config")
+        .arg(&config)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    if let Some(mut input) = child.stdin.take() {
+        let _ = input.write_all(b"1\n\n\nfixture-model\n\n\n\n").await;
+    }
+    let output = tokio::time::timeout(WATCHDOG, child.wait_with_output())
+        .await
+        .expect("conf deadline")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["configured"], true);
+    assert_eq!(report["model_configured"], true);
+    assert_eq!(report["config_file"].as_str(), config.to_str());
+    assert!(report["activation"].is_null());
+    let saved: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    assert_eq!(saved["model"]["id"], "fixture-model");
+    assert!(saved["model"].get("api_key").is_none());
+    assert_eq!(
+        std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!root.path().join(".cayw").exists());
+    assert!(!root.path().join("workspaces").exists());
+}
+
+#[tokio::test]
 async fn installed_runtime_loads_request_policy_without_grant_or_model_dispatch() {
     let root = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -927,7 +1055,7 @@ async fn bad_or_oversized_configuration_is_rejected_before_database_or_network()
                 value["model"] = json!({
                     "service":"openai", "api":"chat_completions", "id":"fixture-config-model",
                     "base_url":base, "api_version":"v1", "max_output_tokens":1024,
-                    "api_key_env":"CAYW_CONFIG_TEST_PROVIDER_KEY"
+                    "api_key":"synthetic-provider-key-never-print"
                 });
                 serde_json::to_string(&value).unwrap()
             }

@@ -1,6 +1,7 @@
 //! Offline child-process fixture for Runtime lifecycle integration tests.
 use cayw_plugins::{
-    ExternalMessage, ExternalResult, HostMessage, PluginKind, PluginManifest, ToolDefinition,
+    ExternalMessage, ExternalResult, HostMessage, PluginKind, PluginManifest, PluginRole,
+    ToolDefinition,
 };
 use serde_json::json;
 use std::io::{BufRead, Write};
@@ -10,6 +11,24 @@ fn emit(message: ExternalMessage) {
     std::io::stdout().flush().unwrap();
 }
 fn main() {
+    if std::env::var_os("CAYW_TEST_TUI_FIXTURE").is_some() {
+        if std::env::args_os().nth(1).is_some() {
+            std::process::exit(91);
+        }
+        for (actual, expected, failure) in [
+            ("CAYW_IPC_ADDR", "EXPECTED_ADDR", 92),
+            ("CAYW_IPC_TOKEN", "EXPECTED_TOKEN", 93),
+            ("CAYW_WORKSPACE_ID", "EXPECTED_WORKSPACE_ID", 94),
+        ] {
+            if std::env::var_os(actual) != std::env::var_os(expected) {
+                std::process::exit(failure);
+            }
+        }
+        println!("workspace connection received");
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        return;
+    }
     let mode = std::env::args().nth(1).expect("mode");
     let input = std::io::stdin();
     let mut lines = input.lock().lines();
@@ -25,6 +44,7 @@ fn main() {
             name: "process".into(),
             version: "1.0.0".into(),
             protocol_version: 1,
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::External,
             capabilities: vec![ToolDefinition {
                 name: "process.echo".into(),

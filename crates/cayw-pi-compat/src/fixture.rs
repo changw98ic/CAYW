@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
-use cayw_plugins::{PLUGIN_PROTOCOL_VERSION, Plugin, PluginError, PluginKind, PluginManifest};
+use cayw_plugins::{
+    PLUGIN_PROTOCOL_VERSION, Plugin, PluginError, PluginKind, PluginManifest, PluginRole,
+};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,6 +44,7 @@ impl PiFixturePlugin {
             name: Self::PACKAGE_NAME.into(),
             version: Self::PACKAGE_VERSION.into(),
             protocol_version: PLUGIN_PROTOCOL_VERSION,
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::Native,
             capabilities: vec![ToolDefinition {
                 name: Self::TOOL.into(),
@@ -84,12 +87,13 @@ impl Plugin for PiFixturePlugin {
             .get("text")
             .and_then(|v| v.as_str())
             .ok_or_else(|| PluginError::InvalidArguments("missing text".into()))?;
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(json!({
             "echo": text,
             "package": Self::PACKAGE_NAME,
             "version": Self::PACKAGE_VERSION,
-            "surface": "tools.invoke"
+            "surface": "tools.invoke",
+            "call_index": call_index
         }))
     }
 }

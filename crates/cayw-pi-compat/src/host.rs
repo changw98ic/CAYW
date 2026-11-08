@@ -351,8 +351,8 @@ impl PiCompatHost {
         }
     }
 
-    /// Unload a previously installed package.
-    pub fn unload(&self, package: &PiPackageId) -> Result<PluginDescription, PiCompatError> {
+    /// Unload a previously installed package and wait for owned process cleanup.
+    pub async fn unload(&self, package: &PiPackageId) -> Result<PluginDescription, PiCompatError> {
         self.ensure_enabled()?;
         let surface = SurfaceId::new(SurfaceFamily::Lifecycle, "unload");
         let row = {
@@ -376,7 +376,8 @@ impl PiCompatHost {
             return Err(PiCompatError::NotLoaded(package.key()));
         }
         self.registry
-            .unload_exact(&description)
+            .unload_exact_and_wait(&description)
+            .await
             .map_err(|err| match err {
                 PluginError::NotFound(name) => PiCompatError::NotLoaded(name),
                 other => {
@@ -579,7 +580,7 @@ mod tests {
             description,
             ownership_key: "old-pi-source".into(),
         };
-        host.unload(&package).unwrap();
+        host.unload(&package).await.unwrap();
         let replacement = Arc::new(PiFixturePlugin::new());
         let current = host
             .registry

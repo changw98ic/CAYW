@@ -65,7 +65,8 @@ impl BindingRecord {
                 .reason
                 .as_ref()
                 .is_some_and(|reason| reason.trim().is_empty())
-            || (self.plugin() == "strongflow") != self.strongflow.is_some()
+            || self.plugin() != "strongflow"
+            || self.strongflow.is_none()
         {
             return Err(CoreError::CorruptStore("invalid canonical plugin binding".into()).into());
         }
@@ -393,13 +394,61 @@ mod tests {
     use cayw_core::SessionStore;
     use std::cell::RefCell;
 
-    fn frozen_binding() -> BindingRecord {
+    const FIXTURE_PLUGIN_PROTOCOL_VERSION: u32 = 1;
+
+    fn frozen_binding(session: &str) -> BindingRecord {
+        let registry_id = uuid::Uuid::new_v4().to_string();
+        let generation = 1;
+        let reason = Some("frozen by the test host".to_owned());
+        let parameters = serde_json::json!({
+            "type":"object", "properties":{"workflow_id":{"type":"string"}},
+            "required":["workflow_id"], "additionalProperties":false,
+        });
+        let manifest = serde_json::json!({
+            "name":"strongflow",
+            "version":env!("CARGO_PKG_VERSION"),
+            "protocol_version":FIXTURE_PLUGIN_PROTOCOL_VERSION,
+            "role":"workspace_architecture",
+            "kind":"native",
+            "capabilities":[
+                {
+                    "name":"strongflow.describe",
+                    "description":"Read host-created workflow state",
+                    "parameters":parameters.clone(),
+                },
+                {
+                    "name":"strongflow.ready",
+                    "description":"Read host-created workflow state",
+                    "parameters":parameters,
+                },
+            ],
+            "permissions":{},
+        });
+        let workflow_state = serde_json::json!({
+            "format_version":1,
+            "plugin_manifest":manifest.clone(),
+            "workflows":{},
+        });
+        let strongflow = serde_json::json!({
+            "session_id":session,
+            "mode":"strong_flow",
+            "bound_plugin_version":{
+                "name":"strongflow",
+                "version":env!("CARGO_PKG_VERSION"),
+                "registry_id":registry_id.clone(),
+                "generation":generation,
+            },
+            "plugin_manifest":manifest.clone(),
+            "workflow_state":workflow_state,
+            "frozen_reason":reason.clone(),
+            "source_session_id":null,
+        });
         BindingRecord {
-            manifest: serde_json::json!({"name": "fixture", "version": "1.0.0"}),
-            registry_id: uuid::Uuid::new_v4().to_string(),
-            generation: 1,
-            reason: Some("frozen by the test host".into()),
-            strongflow: None,
+            manifest,
+            registry_id,
+            generation,
+            reason,
+            strongflow: Some(strongflow),
         }
     }
 
@@ -452,7 +501,7 @@ mod tests {
         let cache = BindingCache::default();
         let pages = RefCell::new(vec![]);
         read(&cache, &store, &before, &pages).unwrap();
-        let binding = frozen_binding();
+        let binding = frozen_binding(&before.id);
         let after = append(
             &store,
             &before,
@@ -472,7 +521,7 @@ mod tests {
         let cache = BindingCache::default();
         let pages = RefCell::new(vec![]);
         read(&cache, &store, &before, &pages).unwrap();
-        let binding = frozen_binding();
+        let binding = frozen_binding(&before.id);
         let after = append(
             &store,
             &before,
@@ -497,7 +546,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
         let before = store.create_session("interleaved").unwrap();
-        let binding = frozen_binding();
+        let binding = frozen_binding(&before.id);
         let after = append(
             &store,
             &before,
@@ -530,7 +579,7 @@ mod tests {
         let cache = BindingCache::default();
         let pages = RefCell::new(vec![]);
         read(&cache, &store, &before, &pages).unwrap();
-        let mut invalid = frozen_binding();
+        let mut invalid = frozen_binding(&before.id);
         invalid.generation = 0;
         let invalid = append(
             &store,
@@ -542,7 +591,7 @@ mod tests {
             &store,
             &invalid,
             "plugin_frozen",
-            serde_json::json!({"binding": frozen_binding()}),
+            serde_json::json!({"binding": frozen_binding(&before.id)}),
         );
         for _ in 0..2 {
             assert!(matches!(
@@ -578,7 +627,7 @@ mod tests {
             &store,
             &frozen,
             "plugin_frozen",
-            serde_json::json!({"binding": frozen_binding()}),
+            serde_json::json!({"binding": frozen_binding(&frozen.id)}),
         );
         let ordinary = store.create_session("ordinary").unwrap();
         let ordinary = append(&store, &ordinary, "fixture_progress", serde_json::json!({}));

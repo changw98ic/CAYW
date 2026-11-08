@@ -1,11 +1,12 @@
 //! Explicit host connection settings. No local model credentials are read.
 use std::{fmt, net::SocketAddr};
 
-pub const USAGE: &str = "cayw-tui [--addr IP:PORT]\n\nConnect to a running host using CAYW_IPC_ADDR and CAYW_IPC_TOKEN.\n--addr overrides CAYW_IPC_ADDR. The token is accepted only from the environment.\n\nCtrl+N new session | Tab focus | Alt+1..4 Chat/Files/Diff/Logs | Enter send | Alt+Enter newline\nCtrl+X cancel | Alt+O once | Alt+T task | Alt+D deny | Ctrl+F fork\nPgUp/PgDn history | Ctrl+R reconnect | Ctrl+Q quit";
+pub const USAGE: &str = "cayw-tui [--addr IP:PORT]\n\nConnect to the local Client using CAYW_IPC_ADDR and CAYW_IPC_TOKEN.\n--addr overrides CAYW_IPC_ADDR. CAYW_WORKSPACE_ID selects an opened workspace through the same Client connection.\nThe token is accepted only from the environment.\n\nCtrl+N new session | Tab focus | Alt+1..4 Chat/Files/Diff/Logs | Enter send | Alt+Enter newline\nCtrl+X cancel | Alt+O once | Alt+T task | Alt+D deny | Ctrl+F fork\nPgUp/PgDn history | Ctrl+R reconnect | Ctrl+Q quit";
 
 pub struct Config {
     pub address: SocketAddr,
     token: String,
+    workspace_id: Option<String>,
 }
 
 impl Config {
@@ -16,6 +17,10 @@ impl Config {
     pub fn token(&self) -> &str {
         &self.token
     }
+
+    pub fn workspace_id(&self) -> Option<&str> {
+        self.workspace_id.as_deref()
+    }
 }
 
 impl fmt::Debug for Config {
@@ -23,6 +28,7 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("address", &self.address)
             .field("token", &"[redacted]")
+            .field("workspace_id", &self.workspace_id)
             .finish()
     }
 }
@@ -53,5 +59,25 @@ pub fn parse(
     let token = environment("CAYW_IPC_TOKEN")
         .filter(|value| !value.trim().is_empty() && !value.chars().any(char::is_control))
         .ok_or("Set CAYW_IPC_TOKEN to the host-configured token.")?;
-    Ok(Config { address, token })
+    let workspace_id = environment("CAYW_WORKSPACE_ID")
+        .filter(|value| !value.is_empty() && value != "local")
+        .map(|value| {
+            let digest = value.strip_prefix("workspace-");
+            if digest.is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }) {
+                Err("CAYW_WORKSPACE_ID is not a valid local workspace ID.")
+            } else {
+                Ok(value)
+            }
+        })
+        .transpose()?;
+    Ok(Config {
+        address,
+        token,
+        workspace_id,
+    })
 }

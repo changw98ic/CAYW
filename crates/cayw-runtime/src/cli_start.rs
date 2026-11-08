@@ -1,16 +1,46 @@
-//! Foreground local application supervisor; optional UIs stay separate programs.
-use cayw_ai::CancellationToken;
+//! Foreground entrypoint for the unique local Client and its built-in UI plugins.
 use cayw_ipc::Client;
-use cayw_runtime::local_cli::{LocalPaths, read_private, save_config};
+use cayw_runtime::local_cli::LocalPaths;
 use serde_json::{Value, json};
-use std::{error::Error, io, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    error::Error,
+    net::SocketAddr,
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
+    signal::unix::{Signal, SignalKind},
+    time::{Instant, sleep_until},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const HELP: &str = "cayw start [--workspace DIR] [--ui web|tui|none] [--offline] [--demo-authorized] [--config PATH] [--no-open] [--lan IP:PORT] [--account-file FILE]\n\nOne foreground command starts or connects to this workspace's runtime and starts the chosen UI.\nThe default UI is TUI. Select --ui web to open the optional local WebUI without login.\n--no-open, SSH and headless web launches print the URL. --lan IP:PORT allows LAN access; an optional configured account enables password login.\nCtrl+C stops only processes started by this command. Existing services are kept.\nUse --workspace to choose another project. No model request is made by startup.";
+
+pub(super) struct ShutdownSignals {
+    interrupt: Signal,
+    terminate: Signal,
+}
+
+impl ShutdownSignals {
+    pub(super) fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::unix::signal(SignalKind::interrupt())?,
+            terminate: tokio::signal::unix::signal(SignalKind::terminate())?,
+        })
+    }
+
+    pub(super) async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+const HELP: &str = "cayw start [--workspace DIR] [--ui web|tui|none] [--offline] [--demo-authorized] [--config PATH] [--no-open] [--lan IP:PORT] [--account-file FILE]\n\nOne foreground command starts or reuses the unique local Client and opens the requested workspace.\nThe default UI is TUI. Select --ui web to ask the Client to start the optional local WebUI.\nTUI keeps the caller's foreground terminal, then hands its process identity to the Client for supervision.\n--no-open, SSH and headless web launches print the URL. --lan IP:PORT allows LAN access; an optional configured account enables password login.\nCtrl+C stops only a UI or Client created by this command. Existing services are kept.\nUse --workspace to choose another project. No model request is made by startup.";
 
 pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut workspace = std::env::current_dir()?;
@@ -48,99 +78,189 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<()> {
     if (lan.is_some() || account_file.is_some()) && ui != "web" {
         return Err("--lan and --account-file require explicit --ui web".into());
     }
+    let mut signals = ShutdownSignals::new()?;
     let paths = LocalPaths::from_environment(workspace)?;
     paths.initialize()?;
-    let executable = std::env::current_exe()?;
-    let ui_binary = executable.with_file_name(if ui == "web" {
-        "cayw-webui"
-    } else {
-        "cayw-tui"
-    });
-    if ui != "none" && !ui_binary.is_file() {
-        return Err(format!(
-            "{} is missing; install a complete package or select --ui none",
-            ui_binary.display()
-        )
-        .into());
-    }
+    let account_file = match account_file {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => std::env::current_dir()?.join(path),
+        None => paths.data_dir.join("web-account.json"),
+    };
     let options = UiOptions {
         ui,
         no_open,
         lan,
-        account_file: account_file.unwrap_or_else(|| paths.state_file("web-account.json")),
+        account_file,
     };
-    let ui = options.ui.as_str();
-    // A single launcher owns each optional UI per workspace. A second start
-    // reports the existing launch without spawning or stopping anything.
-    let lock_path = paths.state_file(&format!("launcher-{ui}.lock"));
-    save_if_missing(&lock_path, b"")?;
-    let lock = std::fs::File::open(&lock_path)?;
-    if lock.try_lock().is_err() {
-        // A concurrent first start may still be waiting on Runtime/UI readiness.
-        // Wait for its private descriptor so the second command can hand off too.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            match read_private(&paths.state_file(&format!("launcher-{ui}.json")), 16384) {
-                Ok(ready) => {
-                    if ui == "tui" {
-                        return super::cli_tui::run([
-                            "--workspace".into(),
-                            paths.workspace.to_string_lossy().into_owned(),
-                        ]);
-                    }
-                    let mut ready: Value = serde_json::from_slice(&ready)?;
-                    if ui == "web" && options.lan.is_none() && ready["access"] == "lan" {
-                        ready["lan_url"] = ready["url"].clone();
-                        ready["url"] = ready["local_url"].clone();
-                        ready["access"] = json!("local");
-                        ready["login_required"] = json!(false);
-                    } else if ui == "web" && options.lan.is_some() && ready["access"] != "lan" {
-                        return Err("existing WebUI is local-only; stop its owning launcher before enabling LAN".into());
-                    }
-                    present(ready, no_open).await?;
-                    return Ok(());
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err("another launcher has not confirmed readiness; inspect its terminal and retry".into());
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                Err(error) => return Err(error.into()),
-            }
+    let Some(mut connection) = connect_or_start(&paths, &extra, &mut signals).await? else {
+        return Ok(());
+    };
+    let result = start(
+        &paths,
+        &options,
+        connection.address,
+        &connection.token,
+        connection.child.as_mut(),
+        &mut signals,
+    )
+    .await;
+    let cleanup = match connection.child.as_mut() {
+        Some(child) => stop_child(child).await,
+        None => Ok(()),
+    };
+    match (result, cleanup) {
+        (Err(start), Err(cleanup)) => {
+            Err(format!("{start}; Client shutdown also was not confirmed: {cleanup}").into())
         }
-    }
-    match std::fs::remove_file(paths.state_file(&format!("launcher-{ui}.json"))) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let stop = CancellationToken::new();
-    let interrupt = stop.clone();
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let signal = tokio::spawn(async move {
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
-        interrupt.cancel();
-    });
-    let mut children = Vec::<Child>::new();
-    let result = start(&paths, &ui_binary, &options, &extra, &stop, &mut children).await;
-    // Stop UI first, then the owned runtime; signal, allow durable cancellation
-    // and cleanup, then report an unconfirmed shutdown rather than kill/replay.
-    let mut cleanup_error = None;
-    for child in children.iter_mut().rev() {
-        if let Err(error) = stop_child(child).await {
-            eprintln!("{error}");
-            cleanup_error = Some(error);
-        }
-    }
-
-    signal.abort();
-    let _ = std::fs::remove_file(paths.state_file(&format!("launcher-{ui}.json")));
-    match cleanup_error {
-        Some(error) => Err(error),
-        None => result,
+        (Err(start), _) => Err(start),
+        (_, Err(cleanup)) => Err(cleanup),
+        _ => Ok(()),
     }
 }
+
+struct ClientConnection {
+    address: SocketAddr,
+    token: String,
+    child: Option<Child>,
+}
+
+fn existing_connection(
+    address: SocketAddr,
+    token: String,
+    extra: &[String],
+) -> Result<ClientConnection> {
+    if !extra.is_empty() {
+        return Err("Client already running: startup overrides cannot be applied to it; stop that Client first".into());
+    }
+    Ok(ClientConnection {
+        address,
+        token,
+        child: None,
+    })
+}
+
+async fn connect_or_start(
+    paths: &LocalPaths,
+    extra: &[String],
+    signals: &mut ShutdownSignals,
+) -> Result<Option<ClientConnection>> {
+    let existing = tokio::select! {
+        result = healthy(paths) => Some(result),
+        _ = signals.recv() => None,
+    };
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if let Ok((address, token)) = existing {
+        return existing_connection(address, token, extra).map(Some);
+    }
+
+    let startup_deadline = Instant::now() + Duration::from_secs(30);
+    let _start_lock = loop {
+        if let Some(lock) = paths.try_acquire_client_start()? {
+            break lock;
+        }
+        let existing = tokio::select! {
+            result = healthy(paths) => Some(result),
+            _ = signals.recv() => None,
+        };
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if let Ok((address, token)) = existing {
+            return existing_connection(address, token, extra).map(Some);
+        }
+        if Instant::now() >= startup_deadline {
+            return Err("another command started the Client but it did not become healthy".into());
+        }
+        let retry = (Instant::now() + Duration::from_millis(50)).min(startup_deadline);
+        tokio::select! {
+            _ = sleep_until(retry) => {}
+            _ = signals.recv() => return Ok(None),
+        }
+    };
+
+    // Another command may have finished startup immediately before releasing the lock.
+    let existing = tokio::select! {
+        result = healthy(paths) => Some(result),
+        _ = signals.recv() => None,
+    };
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    if let Ok((address, token)) = existing {
+        return existing_connection(address, token, extra).map(Some);
+    }
+
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("serve")
+        .arg("--workspace")
+        .arg(&paths.workspace)
+        .args(extra)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
+    command.as_std_mut().process_group(0);
+    let mut child = command.spawn()?;
+    let mut lines = BufReader::new(child.stdout.take().ok_or("Client stdout unavailable")?).lines();
+    let readiness = tokio::select! {
+        result = tokio::time::timeout(Duration::from_secs(30), lines.next_line()) => Some(result),
+        _ = signals.recv() => None,
+    };
+    let Some(readiness) = readiness else {
+        stop_child(&mut child).await?;
+        return Ok(None);
+    };
+    let line = match readiness {
+        Ok(Ok(Some(line))) => line,
+        Ok(Ok(None)) => {
+            let _ = stop_child(&mut child).await;
+            return Err("Client exited before readiness; see its error above".into());
+        }
+        Ok(Err(error)) => {
+            let _ = stop_child(&mut child).await;
+            return Err(error.into());
+        }
+        Err(_) => {
+            let _ = stop_child(&mut child).await;
+            return Err("Client did not report readiness".into());
+        }
+    };
+    let ready: Value = match serde_json::from_str(&line) {
+        Ok(ready) => ready,
+        Err(error) => {
+            let _ = stop_child(&mut child).await;
+            return Err(format!("invalid Client readiness: {error}").into());
+        }
+    };
+    let address = match ready["listening"]
+        .as_str()
+        .ok_or("Client readiness is missing its local address")
+        .and_then(|address| {
+            address
+                .parse()
+                .map_err(|_| "Client readiness has an invalid local address")
+        }) {
+        Ok(address) => address,
+        Err(error) => {
+            let _ = stop_child(&mut child).await;
+            return Err(error.into());
+        }
+    };
+    let token = match paths.token() {
+        Ok(token) => token,
+        Err(error) => {
+            let _ = stop_child(&mut child).await;
+            return Err(error.into());
+        }
+    };
+    Ok(Some(ClientConnection {
+        address,
+        token,
+        child: Some(child),
+    }))
+}
+
 pub(super) async fn stop_child(child: &mut Child) -> Result<()> {
     if child.try_wait()?.is_some() {
         return Ok(());
@@ -154,124 +274,237 @@ pub(super) async fn stop_child(child: &mut Child) -> Result<()> {
         return Err("could not signal owned child; shutdown is unconfirmed".into());
     }
     match tokio::time::timeout(Duration::from_secs(90), child.wait()).await {
-        Ok(status) => { status?; Ok(()) },
+        Ok(status) => {
+            status?;
+            Ok(())
+        }
         Err(_) => Err("owned process did not confirm shutdown; inspect persistent task state before restarting".into()),
     }
 }
-async fn healthy(paths: &LocalPaths) -> Result<(std::net::SocketAddr, String)> {
+
+async fn healthy(paths: &LocalPaths) -> Result<(SocketAddr, String)> {
     let (address, token) = paths.connect()?;
     let client = tokio::time::timeout(
         Duration::from_secs(3),
         Client::connect(address, token.clone()),
     )
     .await??;
-    let health = client.request("runtime.health", json!({})).await?;
-    if health["status"] != "ok" {
-        return Err("existing runtime is unhealthy".into());
+    let health = client.request("client.health", json!({})).await?;
+    client.close().await;
+    if health["status"] != "ok" || health["client"] != true {
+        return Err("existing local Client is unhealthy".into());
     }
     Ok((address, token))
 }
+
+async fn open_workspace(
+    address: SocketAddr,
+    token: &str,
+    workspace: &Path,
+    signals: &mut ShutdownSignals,
+) -> Result<Option<String>> {
+    let client = tokio::select! {
+        result = Client::connect(address, token) => result?,
+        _ = signals.recv() => return Ok(None),
+    };
+    let result = {
+        let operation = async {
+            let catalog = client.request("client.workspaces.list", json!({})).await?;
+            let id = catalog["workspaces"]
+                .as_array()
+                .and_then(|workspaces| {
+                    workspaces.iter().find_map(|entry| {
+                        (entry["path"].as_str() == workspace.to_str())
+                            .then(|| entry["id"].as_str().map(str::to_owned))
+                            .flatten()
+                    })
+                })
+                .ok_or("workspace is not registered; run `cayw init --workspace DIR`")?;
+            client
+                .request("client.workspaces.open", json!({"id":id}))
+                .await?;
+            Ok::<_, Box<dyn Error>>(id)
+        };
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut operation => Some(result),
+            _ = signals.recv() => None,
+        }
+    };
+    client.close().await;
+    match result {
+        Some(result) => result.map(Some),
+        None => Ok(None),
+    }
+}
+
 async fn start(
     paths: &LocalPaths,
-    ui_binary: &std::path::Path,
     options: &UiOptions,
-    extra: &[String],
-    stop: &CancellationToken,
-    children: &mut Vec<Child>,
+    address: SocketAddr,
+    token: &str,
+    owned_client: Option<&mut Child>,
+    signals: &mut ShutdownSignals,
 ) -> Result<()> {
-    let ui = options.ui.as_str();
-    let (address, token, owned) = if let Ok((address, token)) = healthy(paths).await {
-        if !extra.is_empty() {
-            return Err("runtime already running: startup overrides cannot be applied to it; stop that runtime first".into());
-        }
-        (address, token, false)
-    } else {
-        let mut command = Command::new(std::env::current_exe()?);
-        command
-            .arg("serve")
-            .arg("--workspace")
-            .arg(&paths.workspace)
-            .args(extra)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped());
-        children.push(command.spawn()?);
-        let child = children.last_mut().expect("owned runtime");
-        let mut lines =
-            BufReader::new(child.stdout.take().ok_or("runtime stdout unavailable")?).lines();
-        let line = tokio::select! {
-            _ = stop.cancelled() => return Ok(()),
-            line = tokio::time::timeout(Duration::from_secs(30), lines.next_line()) => line??.ok_or("runtime exited before readiness; see its error above")?,
-        };
-        let ready: Value = serde_json::from_str(&line)?;
-        let address = ready["listening"]
-            .as_str()
-            .ok_or("missing runtime address")?
-            .parse()?;
-        (address, paths.token()?, true)
+    let Some(workspace_id) = open_workspace(address, token, &paths.workspace, signals).await?
+    else {
+        return Ok(());
     };
-    let mut ready =
-        json!({"workspace":paths.workspace,"runtime":address,"owned_runtime":owned,"ui":ui});
-    if ui != "none" {
-        let mut command = Command::new(ui_binary);
-        command
-            .env("CAYW_IPC_ADDR", address.to_string())
-            .env("CAYW_IPC_TOKEN", token);
-        if ui == "web" {
-            command
-                .env_remove("CAYW_WEB_TOKEN")
-                .env("CAYW_LAUNCHER", "1")
-                .env("CAYW_OWNERSHIP_PATH", paths.state_file("ownership.json"))
-                .env("CAYW_WEB_ADDR", "127.0.0.1:0")
-                .stdout(Stdio::piped())
-                .stdin(Stdio::null());
-            command.arg("--account-file").arg(&options.account_file);
-            if let Some(lan) = &options.lan {
-                command.arg("--lan").arg(lan);
-            }
-            children.push(command.spawn()?);
-            let child = children.last_mut().expect("owned web UI");
-            let mut lines =
-                BufReader::new(child.stdout.take().ok_or("Web stdout unavailable")?).lines();
-            let line = tokio::select! {
-                _ = stop.cancelled() => return Ok(()),
-                line = tokio::time::timeout(Duration::from_secs(30), lines.next_line()) => line??.ok_or("WebUI exited before readiness; see its error above")?,
+    match options.ui.as_str() {
+        "tui" => {
+            super::cli_tui::run_connected(address, token.to_owned(), workspace_id, signals).await
+        }
+        "web" => {
+            start_web(
+                paths,
+                options,
+                address,
+                token,
+                workspace_id,
+                owned_client.is_some(),
+                signals,
+            )
+            .await
+        }
+        "none" => {
+            println!(
+                "{}",
+                json!({
+                    "workspace":paths.workspace,
+                    "workspace_id":workspace_id,
+                    "client":address,
+                    "owned_client":owned_client.is_some(),
+                    "ui":"none"
+                })
+            );
+            let Some(child) = owned_client else {
+                return Ok(());
             };
-            let web: Value = serde_json::from_str(&line)?;
-            ready["url"] = web["url"].clone();
-            ready["access"] = web["access"].clone();
-            ready["login_required"] = web["login_required"].clone();
-            ready["local_url"] = web["local_url"].clone();
-        } else {
-            children.push(command.spawn()?);
+            tokio::select! {
+                _ = signals.recv() => Ok(()),
+                status = child.wait() => process_exit(status?),
+            }
         }
+        _ => unreachable!("validated UI"),
     }
-    let path = paths.state_file(&format!("launcher-{ui}.json"));
-    let previous = match read_private(&path, 16384) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
+}
+
+async fn start_web(
+    paths: &LocalPaths,
+    options: &UiOptions,
+    address: SocketAddr,
+    token: &str,
+    workspace_id: String,
+    owned_client: bool,
+    signals: &mut ShutdownSignals,
+) -> Result<()> {
+    let client = tokio::select! {
+        result = Client::connect(address, token) => result?,
+        _ = signals.recv() => return Ok(()),
     };
-    save_config(&path, previous.as_deref(), &serde_json::to_vec(&ready)?)?;
-    present(ready, options.no_open).await?;
+    let mut params = json!({
+        "plugin":"webui",
+        "workspace_id":workspace_id,
+        "account_file":options.account_file,
+    });
+    if let Some(lan) = &options.lan {
+        params["lan"] = json!(lan);
+    }
+    let (mut ready, interrupted) = {
+        let request = client.request("client.plugins.start", params);
+        tokio::pin!(request);
+        tokio::select! {
+            result = &mut request => (result?, false),
+            _ = signals.recv() => (request.await?, true),
+        }
+    };
+    let reused = ready["reused"]
+        .as_bool()
+        .ok_or("Client did not report whether the WebUI was reused")?;
+    let launch_id = ready["launch_id"]
+        .as_str()
+        .ok_or("Client did not return a WebUI launch identity")?
+        .to_owned();
+    if interrupted {
+        let result = if reused {
+            Ok(())
+        } else {
+            client
+                .request("client.plugins.stop", json!({"launch_id":launch_id}))
+                .await
+                .map(|_| ())
+                .map_err(|error| error.into())
+        };
+        client.close().await;
+        return result;
+    }
+
+    ready["workspace"] = json!(paths.workspace);
+    ready["client"] = json!(address);
+    ready["owned_client"] = json!(owned_client);
+    ready["ui"] = json!("web");
+    let (presented, presentation_interrupted) = {
+        let presentation = present(ready.clone(), options.no_open);
+        tokio::pin!(presentation);
+        tokio::select! {
+            result = &mut presentation => (result, false),
+            _ = signals.recv() => (presentation.await, true),
+        }
+    };
+    presented?;
+    if presentation_interrupted {
+        let result = if reused {
+            Ok(())
+        } else {
+            client
+                .request("client.plugins.stop", json!({"launch_id":launch_id}))
+                .await
+                .map(|_| ())
+                .map_err(|error| error.into())
+        };
+        client.close().await;
+        return result;
+    }
+    if reused {
+        client.close().await;
+        return Ok(());
+    }
+    let result = wait_for_web(&client, &launch_id, signals).await;
+    client.close().await;
+    result
+}
+
+async fn wait_for_web(
+    client: &Client,
+    launch_id: &str,
+    signals: &mut ShutdownSignals,
+) -> Result<()> {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = stop.cancelled() => return Ok(()),
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                for child in children.iter_mut() {
-                    if let Some(status) = child.try_wait()? {
-                        if status.success() { return Ok(()); }
-                        return Err(format!("owned process exited with {status}; no request was replayed").into());
-                    }
+            _ = signals.recv() => {
+                client.request("client.plugins.stop", json!({"launch_id":launch_id})).await?;
+                return Ok(());
+            }
+            _ = interval.tick() => {
+                let listing = client.request("client.plugins.list", json!({})).await?;
+                let running = listing["entries"].as_array().is_some_and(|entries| {
+                    entries.iter().any(|entry| entry["launch_id"] == launch_id)
+                });
+                if !running {
+                    return Err("Client-owned WebUI exited; no request was replayed".into());
                 }
             }
         }
     }
 }
-fn save_if_missing(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
-    match read_private(path, 1024) {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => save_config(path, None, bytes),
-        Err(e) => Err(e),
+
+fn process_exit(status: std::process::ExitStatus) -> Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("owned Client exited with {status}; no request was replayed").into())
     }
 }
 
@@ -281,18 +514,22 @@ struct UiOptions {
     lan: Option<String>,
     account_file: PathBuf,
 }
+
 async fn present(mut ready: Value, no_open: bool) -> Result<()> {
     if ready["ui"] == "tui" {
         return Ok(());
     }
     if ready["ui"] == "web" {
-        // Account settings can change the shared LAN policy while this launcher
-        // is running. Report live state rather than the private startup snapshot.
+        // Account settings can change the shared LAN policy while WebUI runs.
+        // Query the local management listener instead of trusting startup state.
         let status_url = format!(
             "{}api/auth/status",
-            ready["url"].as_str().ok_or("missing browser URL")?
+            ready["local_url"]
+                .as_str()
+                .or_else(|| ready["url"].as_str())
+                .ok_or("missing browser URL")?
         );
-        let current: Result<Value> = async {
+        let current: std::result::Result<Value, Box<dyn Error>> = async {
             let response = reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
@@ -317,8 +554,9 @@ async fn present(mut ready: Value, no_open: bool) -> Result<()> {
                 );
             }
         }
-        let url = ready["local_url"]
+        let url = ready["open_url"]
             .as_str()
+            .or_else(|| ready["local_url"].as_str())
             .or_else(|| ready["url"].as_str())
             .ok_or("missing browser URL")?
             .to_owned();
@@ -337,6 +575,7 @@ async fn present(mut ready: Value, no_open: bool) -> Result<()> {
     println!("{ready}");
     Ok(())
 }
+
 /// Explicit account setup delegates to the optional WebUI binary, keeping all
 /// password handling and hashing outside Runtime/Core.
 pub async fn account(mut args: impl Iterator<Item = String>) -> Result<()> {
@@ -354,7 +593,7 @@ pub async fn account(mut args: impl Iterator<Item = String>) -> Result<()> {
             }
             "--help" | "-h" => {
                 println!(
-                    "cayw account --username NAME [--workspace DIR] [--file FILE]\nInteractively creates a LAN account with a salted password hash; no network service is started."
+                    "cayw account --username NAME [--workspace DIR] [--file FILE]\nInteractively creates a Client-wide LAN account with a salted password hash; no network service is started."
                 );
                 return Ok(());
             }
@@ -373,7 +612,7 @@ pub async fn account(mut args: impl Iterator<Item = String>) -> Result<()> {
         .arg("--username")
         .arg(username)
         .arg("--file")
-        .arg(file.unwrap_or_else(|| paths.state_file("web-account.json")))
+        .arg(file.unwrap_or_else(|| paths.data_dir.join("web-account.json")))
         .status()
         .await?;
     if !status.success() {
@@ -381,6 +620,7 @@ pub async fn account(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
     Ok(())
 }
+
 fn open_skip_reason(no_open: bool) -> Option<&'static str> {
     if no_open {
         return Some("disabled");
@@ -400,6 +640,7 @@ fn open_skip_reason(no_open: bool) -> Option<&'static str> {
     }
     None
 }
+
 async fn open_browser(link: &str) -> Result<()> {
     let program = if cfg!(target_os = "macos") {
         "/usr/bin/open"
@@ -416,8 +657,12 @@ async fn open_browser(link: &str) -> Result<()> {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Ok(status)) => Err(format!("system browser opener exited with {status}").into()),
         Ok(Err(error)) => Err(error.into()),
-        // Some system openers wait for the browser. Do not terminate the user's
-        // browser; keep serving and offer the clickable fallback.
-        Err(_) => Err("system browser opener has not confirmed opening".into()),
+        // Some system openers wait for the browser. Stop and reap only the
+        // disposable opener process; the browser is a separate application.
+        Err(_) => {
+            child.start_kill()?;
+            child.wait().await?;
+            Err("system browser opener has not confirmed opening".into())
+        }
     }
 }

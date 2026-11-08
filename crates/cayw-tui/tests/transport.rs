@@ -160,6 +160,67 @@ impl RpcHandler for Fixture {
     }
 }
 
+#[derive(Default)]
+struct WorkspaceRoutingFixture {
+    calls: Mutex<Vec<Value>>,
+}
+
+#[async_trait]
+impl RpcHandler for WorkspaceRoutingFixture {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        _cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        if method != "client.workspace.call" {
+            return Err(RpcError::new(
+                "direct_runtime_call",
+                format!("TUI bypassed the Client workspace router with {method}"),
+            ));
+        }
+        self.calls.lock().unwrap().push(params.clone());
+        let rpc = &params["rpc"];
+        match rpc["method"].as_str().unwrap_or("") {
+            "session.get" | "task.resume" => Ok(json!({
+                "id":"routed-session",
+                "label":"routed fixture",
+                "state":"idle",
+                "cursor":8,
+                "messages":[],
+                "pending_approvals":[],
+                "unresolved_calls":[],
+                "frozen":false,
+                "binding":null
+            })),
+            "task.enqueue" => Ok(json!({
+                "id":"routed-task",
+                "session_id":"routed-session",
+                "state":"queued",
+                "worker_id":null,
+                "attempt_id":null,
+                "fence":0
+            })),
+            "task.get" => Ok(json!({
+                "id":"routed-task",
+                "session_id":"routed-session",
+                "state":"running",
+                "worker_id":"routed-worker",
+                "attempt_id":"routed-attempt",
+                "fence":9
+            })),
+            "session.cancel" => Ok(json!({"cancelled":true})),
+            "session.events" => Ok(json!([
+                {"cursor":8,"event":{"type":"agent","event":{"type":"turn_start"}}}
+            ])),
+            other => Err(RpcError::new(
+                "fixture_rejected",
+                format!("unexpected routed method {other}"),
+            )),
+        }
+    }
+}
+
 async fn server(
     listener: TcpListener,
     fixture: Arc<Fixture>,
@@ -290,6 +351,154 @@ async fn real_ipc_prompt_events_approval_and_cancel_run_concurrently_with_consum
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn non_primary_workspace_routes_all_rpc_and_reconnects_without_replaying_writes() {
+    const WORKSPACE_ID: &str =
+        "workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = Arc::new(WorkspaceRoutingFixture::default());
+    let stop = CancellationToken::new();
+    let server_stop = stop.clone();
+    let server_fixture = fixture.clone();
+    let server = tokio::spawn(async move {
+        serve(
+            listener,
+            server_fixture,
+            ServerConfig::new("fixture-token"),
+            server_stop,
+        )
+        .await
+    });
+    let mut transport =
+        Transport::start_for_workspace(address, "fixture-token".into(), Some(WORKSPACE_ID.into()));
+    connect(&mut transport).await;
+
+    transport
+        .call(Request {
+            tag: 10,
+            method: "session.get",
+            params: json!({"session_id":"routed-session"}),
+        })
+        .unwrap();
+    assert_eq!(
+        response(&mut transport, 10).await.unwrap()["id"],
+        "routed-session"
+    );
+
+    transport
+        .call(Request {
+            tag: 11,
+            method: "session.prompt",
+            params: json!({"session_id":"routed-session","text":"routed prompt"}),
+        })
+        .unwrap();
+    assert_eq!(
+        response(&mut transport, 11).await.unwrap()["id"],
+        "routed-session"
+    );
+
+    transport
+        .call(Request {
+            tag: 12,
+            method: "session.cancel",
+            params: json!({"session_id":"routed-session","task_id":"routed-task"}),
+        })
+        .unwrap();
+    assert_eq!(
+        response(&mut transport, 12).await.unwrap()["cancelled"],
+        true
+    );
+
+    transport
+        .watch(Some(Watch {
+            session_id: "routed-session".into(),
+            after: 7,
+        }))
+        .unwrap();
+    loop {
+        if let Update::Events { watch, result } = next(&mut transport).await {
+            assert_eq!(watch.after, 7);
+            assert_eq!(result.unwrap()[0]["cursor"], 8);
+            break;
+        }
+    }
+
+    transport.reconnect().unwrap();
+    connect(&mut transport).await;
+    loop {
+        if let Update::Events { watch, result } = next(&mut transport).await {
+            assert_eq!(watch.after, 7);
+            assert_eq!(result.unwrap()[0]["cursor"], 8);
+            break;
+        }
+    }
+    transport
+        .call(Request {
+            tag: 13,
+            method: "session.get",
+            params: json!({"session_id":"routed-session"}),
+        })
+        .unwrap();
+    response(&mut transport, 13).await.unwrap();
+
+    transport.shutdown().await;
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(4), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let calls = fixture.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 8);
+    for envelope in &calls {
+        assert_eq!(envelope["workspace_id"], WORKSPACE_ID);
+        assert_eq!(envelope.as_object().unwrap().len(), 2);
+        assert_eq!(envelope["rpc"].as_object().unwrap().len(), 2);
+    }
+    let routed = calls
+        .iter()
+        .map(|envelope| {
+            (
+                envelope["rpc"]["method"].as_str().unwrap(),
+                envelope["rpc"]["params"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routed,
+        vec![
+            ("session.get", json!({"session_id":"routed-session"})),
+            (
+                "task.enqueue",
+                json!({"session_id":"routed-session","text":"routed prompt"}),
+            ),
+            ("task.resume", json!({"task_id":"routed-task"})),
+            ("task.get", json!({"task_id":"routed-task"})),
+            (
+                "session.cancel",
+                json!({
+                    "session_id":"routed-session",
+                    "task_id":"routed-task",
+                    "worker_id":"routed-worker",
+                    "attempt_id":"routed-attempt",
+                    "fence":9
+                }),
+            ),
+            (
+                "session.events",
+                json!({"session_id":"routed-session","after":7,"limit":100}),
+            ),
+            (
+                "session.events",
+                json!({"session_id":"routed-session","after":7,"limit":100}),
+            ),
+            ("session.get", json!({"session_id":"routed-session"})),
+        ]
+    );
 }
 
 #[tokio::test]

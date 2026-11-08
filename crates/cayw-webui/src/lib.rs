@@ -12,6 +12,12 @@ pub struct AccountSettings {
     pub path: std::path::PathBuf,
     pub local_listener: Option<tokio::net::TcpListener>,
 }
+
+/// Browser settings bound to one workspace routed by the local Client.
+pub struct WorkspaceAccountSettings {
+    pub account: AccountSettings,
+    pub default_workspace_id: Option<String>,
+}
 pub use ownership::OwnershipStore;
 
 use axum::{
@@ -46,7 +52,6 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "settings.models.use",
     "settings.models.remove",
     "settings.plugins.list",
-    "settings.plugins.bind",
     "settings.plugins.install",
     "settings.plugins.update",
     "settings.plugins.enable",
@@ -296,6 +301,9 @@ struct Gateway {
     /// Durable Session/Task → device maps (F13). Present when served via
     /// [`serve_with_ownership`]; create/bind writes and route/restore reads it.
     ownership: Option<Arc<OwnershipStore>>,
+    /// Startup routing target for browser calls that do not select a workspace.
+    /// This is an opaque route through the one local Client endpoint.
+    default_workspace_id: Option<String>,
     workspace_ids: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
@@ -391,6 +399,32 @@ pub async fn serve_with_account_settings(
     settings: AccountSettings,
     cancel: CancellationToken,
 ) -> io::Result<()> {
+    serve_with_account_settings_for_workspace(
+        listener,
+        devices,
+        access,
+        limits,
+        ownership,
+        WorkspaceAccountSettings {
+            account: settings,
+            default_workspace_id: None,
+        },
+        cancel,
+    )
+    .await
+}
+
+/// Serve account settings while using one opened local workspace as the browser's
+/// initial route. The workspace remains behind the same Client IPC endpoint.
+pub async fn serve_with_account_settings_for_workspace(
+    listener: TcpListener,
+    devices: Arc<DeviceRouter>,
+    access: WebAccess,
+    limits: GatewayLimits,
+    ownership: Option<Arc<OwnershipStore>>,
+    settings: WorkspaceAccountSettings,
+    cancel: CancellationToken,
+) -> io::Result<()> {
     serve_inner(
         listener,
         devices,
@@ -409,10 +443,25 @@ async fn serve_inner(
     access: WebAccess,
     limits: GatewayLimits,
     ownership: Option<Arc<OwnershipStore>>,
-    settings: Option<AccountSettings>,
+    settings: Option<WorkspaceAccountSettings>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
     let address = listener.local_addr()?;
+    let default_workspace_id = settings
+        .as_ref()
+        .and_then(|settings| settings.default_workspace_id.as_deref());
+    let default_workspace_id = parse_local_workspace_id(default_workspace_id)
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    if default_workspace_id
+        .as_deref()
+        .is_some_and(|id| devices.endpoint_for(Some(id)).is_ok())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Local workspace ID conflicts with a registered remote device endpoint",
+        ));
+    }
+    let workspace_ids = default_workspace_id.iter().cloned().collect();
     if !address.ip().is_loopback() && !matches!(access, WebAccess::Lan(_)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -444,7 +493,7 @@ async fn serve_inner(
     }
     let mut management_authorities = Vec::new();
     let (account_path, local_listener) = match settings {
-        Some(settings) => (Some(settings.path), settings.local_listener),
+        Some(settings) => (Some(settings.account.path), settings.account.local_listener),
         None => (None, None),
     };
     if account_path.is_some() && matches!(access, WebAccess::Local) {
@@ -475,12 +524,14 @@ async fn serve_inner(
         cancel: cancel.clone(),
         workbench,
         ownership,
-        workspace_ids: Default::default(),
+        default_workspace_id,
+        workspace_ids: std::sync::Mutex::new(workspace_ids),
     });
     let app = Router::new()
         .route("/", get(index))
         .route("/app.js", get(script))
         .route("/styles.css", get(styles))
+        .route("/favicon.ico", get(favicon))
         .route("/api/rpc", post(rpc))
         .route("/api/panels", post(panels))
         .fallback(not_found)
@@ -519,6 +570,27 @@ async fn serve_inner(
         admin.await.map_err(io::Error::other)??;
     }
     result
+}
+
+/// Validate the opaque local workspace route used behind the one Client endpoint.
+/// `local` selects the Client's primary workspace and is represented by `None`.
+pub fn parse_local_workspace_id(value: Option<&str>) -> Result<Option<String>, &'static str> {
+    match value {
+        None | Some("local") => Ok(None),
+        Some(value) => {
+            let digest = value.strip_prefix("workspace-");
+            if digest.is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }) {
+                Ok(Some(value.to_owned()))
+            } else {
+                Err("CAYW_WORKSPACE_ID is not a valid local workspace ID")
+            }
+        }
+    }
 }
 
 /// One policy for IPC and web credentials. The host must generate independent
@@ -805,17 +877,34 @@ async fn rpc(
         if !primary_remote {
             owned_device = Some(scope.to_owned());
         }
+    } else if owned_device.is_none() {
+        // Persisted Session/Task ownership is authoritative. The startup route
+        // applies only when the browser did not select a workspace and no owner
+        // has already been restored.
+        owned_device = state.default_workspace_id.clone();
     }
 
-    let endpoint = match state.devices.endpoint_for(owned_device.as_deref()) {
-        Ok(endpoint) => endpoint,
-        Err(code) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                code,
-                "Owned device has no registered IPC endpoint; register the device or clear ownership",
-                false,
-            );
+    let local_workspace = owned_device.as_deref().is_some_and(|id| {
+        id == "local"
+            || state
+                .workspace_ids
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(id)
+    });
+    let endpoint = if local_workspace {
+        state.devices.default.clone()
+    } else {
+        match state.devices.endpoint_for(owned_device.as_deref()) {
+            Ok(endpoint) => endpoint,
+            Err(code) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    code,
+                    "Owned device has no registered IPC endpoint; register the device or clear ownership",
+                    false,
+                );
+            }
         }
     };
     let method = request.method.clone();
@@ -827,6 +916,16 @@ async fn rpc(
             .expect("validated object")
             .remove("device_id");
     }
+    let (upstream_method, upstream_params) = match owned_device.as_deref() {
+        Some(id) if local_workspace && id != "local" => (
+            "client.workspace.call".to_owned(),
+            json!({
+                "workspace_id":id,
+                "rpc":{"method":method,"params":runtime_params}
+            }),
+        ),
+        _ => (method.clone(), runtime_params),
+    };
     let client = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
         result = endpoint.connect(budget) => match result {
@@ -839,7 +938,7 @@ async fn rpc(
     tokio::select! {
         biased;
         _ = state.cancel.cancelled() => shutting_down(side_effecting(&request.method)),
-        result = timeout(budget, client.request(&method, runtime_params)) => match result {
+        result = timeout(budget, client.request(&upstream_method, upstream_params)) => match result {
             Ok(Ok(mut result)) => {
                 if method == "settings.workspaces.open"
                     && let Err(message) = register_workspace(&state, &mut result) {
@@ -868,42 +967,32 @@ async fn rpc(
     }
 }
 
-// IPC addresses and credentials stay on the gateway. The browser only receives
-// an opaque registered workspace ID and display metadata.
+// Every local workspace stays behind the gateway's one Client endpoint. The
+// browser receives only an opaque workspace ID and display metadata.
 fn register_workspace(state: &Gateway, result: &mut Value) -> Result<(), &'static str> {
-    let id = result["id"].as_str().ok_or("Workspace receipt has no id")?;
-    let address: SocketAddr = result["ipc_addr"]
-        .as_str()
-        .ok_or("Workspace receipt has no endpoint")?
-        .parse()
-        .map_err(|_| "Workspace endpoint is invalid")?;
-    if id == "local" {
-        if address != state.devices.default.address {
-            return Err("Primary workspace endpoint changed");
-        }
-    } else {
-        if !id.starts_with("workspace-") {
+    let object = result
+        .as_object()
+        .ok_or("Workspace receipt must be an object")?;
+    if object.contains_key("ipc_addr") {
+        return Err("Workspace receipt unexpectedly exposed an IPC endpoint");
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("Workspace receipt has no id")?;
+    if id != "local" {
+        if parse_local_workspace_id(Some(id)).is_err() {
             return Err("Unexpected workspace id");
         }
         let mut known = state
             .workspace_ids
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|error| error.into_inner());
         if !known.contains(id) && state.devices.endpoint_for(Some(id)).is_ok() {
-            return Err("Workspace ID conflicts with a registered device endpoint");
+            return Err("Workspace ID conflicts with a registered remote device endpoint");
         }
-        let endpoint = IpcEndpoint::new(address, state.devices.default.token.clone())
-            .map_err(|_| "Workspace endpoint must use loopback")?;
-        state
-            .devices
-            .register(id, endpoint)
-            .map_err(|_| "Workspace endpoint could not be registered")?;
         known.insert(id.to_owned());
     }
-    result
-        .as_object_mut()
-        .ok_or("Workspace receipt must be an object")?
-        .remove("ipc_addr");
     Ok(())
 }
 
@@ -1298,6 +1387,10 @@ async fn styles() -> impl IntoResponse {
     )
 }
 
+async fn favicon() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 #[cfg(test)]
 mod outcome_tests {
     use super::*;
@@ -1344,6 +1437,11 @@ mod outcome_tests {
         };
         assert!(upstream_outcome_unknown(&error, true));
         assert!(upstream_outcome_unknown(&error, false));
+    }
+
+    #[tokio::test]
+    async fn favicon_request_is_a_known_empty_success() {
+        assert_eq!(favicon().await, StatusCode::NO_CONTENT);
     }
 }
 

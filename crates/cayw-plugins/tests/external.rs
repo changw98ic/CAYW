@@ -12,6 +12,7 @@ fn config(mode: &str) -> ExternalConfig {
             name: "fixture".into(),
             version: "1.0.0".into(),
             protocol_version: PLUGIN_PROTOCOL_VERSION,
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::External,
             capabilities: vec![ToolDefinition {
                 name: "fixture.echo".into(),
@@ -170,7 +171,7 @@ async fn idle_parent_exit_is_detected_even_when_descendant_keeps_stdout_open() {
         }
     })
     .await;
-    registry.unload("strongflow").unwrap();
+    registry.unload_and_wait("strongflow").await.unwrap();
     let _ = tokio::fs::remove_file(exit_gate).await;
     let _ = tokio::fs::remove_file(descendant_marker).await;
     frozen.expect("parent exit must freeze despite inherited stdout");
@@ -265,7 +266,7 @@ async fn direct_availability_detects_exit_without_scheduling_and_cleans_descenda
     let (parent, descendant) = fixture.exit_without_scheduling();
     let checks: Vec<_> = (0..3).map(|_| plugin.check_available()).collect();
     // No await has occurred since the parent was released. Cleanup can now run.
-    plugin.shutdown();
+    plugin.shutdown().await.unwrap();
     wait_dead(parent).await;
     wait_dead(descendant).await;
     for result in checks {
@@ -293,7 +294,7 @@ async fn registry_availability_detects_exit_without_scheduling_and_cleans_descen
         .map(|_| registry.check_available("fixture"))
         .collect();
     assert_eq!(registry.describe("fixture").unwrap(), loaded);
-    registry.unload("fixture").unwrap();
+    registry.unload_and_wait("fixture").await.unwrap();
     wait_dead(parent).await;
     wait_dead(descendant).await;
     for result in checks {
@@ -330,7 +331,7 @@ async fn binding_availability_freezes_on_exit_without_scheduling() {
     let check = binding.check_available(&registry);
     let frozen = binding.frozen_reason().is_some();
     let second_check = registry.check_available("strongflow");
-    registry.unload("strongflow").unwrap();
+    registry.unload_and_wait("strongflow").await.unwrap();
     wait_dead(parent).await;
     wait_dead(descendant).await;
     assert!(matches!(check, Err(PluginError::Unavailable(_))));
@@ -369,7 +370,7 @@ async fn synchronous_exit_detection_keeps_an_in_flight_call_unknown() {
         .await
         .expect("exit check must wake the in-flight request")
         .unwrap();
-    plugin.shutdown();
+    plugin.shutdown().await.unwrap();
     wait_dead(parent).await;
     wait_dead(descendant).await;
     assert!(matches!(check, Err(PluginError::Unavailable(_))));
@@ -507,15 +508,20 @@ async fn external_data_cannot_approve_or_expand_grants() {
 async fn handshake_mismatch_and_manifest_escalation_are_rejected() {
     for mode in ["version", "capabilities", "handshake_large"] {
         let registry = PluginRegistry::new();
-        assert!(
-            matches!(
-                registry
-                    .load_external(config(mode), context(), CancellationToken::new())
-                    .await,
-                Err(PluginError::Protocol(_))
-            ),
-            "{mode}"
-        );
+        let result = registry
+            .load_external(config(mode), context(), CancellationToken::new())
+            .await;
+        if mode == "handshake_large" {
+            assert!(
+                result.as_ref().unwrap_err().outcome_unknown(),
+                "{mode}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(PluginError::Protocol(_))),
+                "{mode}: {result:?}"
+            );
+        }
         assert!(registry.list().is_empty());
     }
 }
@@ -538,6 +544,14 @@ async fn handshake_timeout_and_cancel_do_not_load_plugin() {
             .load_external(config("echo"), context(), cancel)
             .await,
         Err(PluginError::Cancelled)
+    ));
+    let mut invalid = config("echo");
+    invalid.shutdown_timeout = Duration::ZERO;
+    assert!(matches!(
+        registry
+            .load_external(invalid, context(), CancellationToken::new())
+            .await,
+        Err(PluginError::InvalidManifest(_))
     ));
     assert!(registry.list().is_empty());
 }
@@ -731,8 +745,23 @@ async fn cancellation_unload_and_drop_kill_actual_running_process() {
                 assert_eq!(task.await.unwrap(), Err(PluginError::Cancelled));
             }
             "unload" => {
-                registry.unload("fixture").unwrap();
-                assert_eq!(task.await.unwrap(), Err(PluginError::Unloaded));
+                registry.unload_and_wait("fixture").await.unwrap();
+                let error = task.await.unwrap().unwrap_err();
+                assert_eq!(error, PluginError::Unloaded);
+                assert!(error.outcome_unknown());
+                assert!(registry.list().is_empty());
+                assert!(matches!(
+                    registry
+                        .call(
+                            "fixture",
+                            "fixture.echo",
+                            json!({}),
+                            CancellationToken::new(),
+                            Duration::from_secs(1),
+                        )
+                        .await,
+                    Err(PluginError::NotFound(_))
+                ));
             }
             "drop" => {
                 task.abort();
@@ -779,7 +808,17 @@ async fn unix_unload_kills_process_group_including_descendant() {
         )
         .await
         .unwrap();
-    registry.unload("fixture").unwrap();
-    wait_dead(data["parent"].as_u64().unwrap() as u32).await;
-    wait_dead(data["descendant"].as_u64().unwrap() as u32).await;
+    let parent = data["parent"].as_u64().unwrap() as u32;
+    let descendant = data["descendant"].as_u64().unwrap() as u32;
+    registry.unload_and_wait("fixture").await.unwrap();
+    assert!(
+        process_state(parent).is_none(),
+        "unload returned before reaping the parent"
+    );
+    assert!(
+        process_state(descendant).is_none_or(|state| state.starts_with('Z')),
+        "unload returned while the descendant was still running"
+    );
+    wait_dead(parent).await;
+    wait_dead(descendant).await;
 }

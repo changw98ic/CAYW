@@ -41,6 +41,15 @@ impl OpenAiProvider {
         base_url: impl AsRef<str>,
         api_key: impl Into<String>,
     ) -> Result<Self, ProviderConfigError> {
+        Self::configured(base_url, api_key.into())
+    }
+
+    /// Build an adapter for a local service that explicitly requires no authentication.
+    pub fn without_auth(base_url: impl AsRef<str>) -> Result<Self, ProviderConfigError> {
+        Self::configured(base_url, String::new())
+    }
+
+    fn configured(base_url: impl AsRef<str>, api_key: String) -> Result<Self, ProviderConfigError> {
         let mut endpoint = Url::parse(base_url.as_ref())
             .map_err(|_| ProviderConfigError("Invalid provider base URL".into()))?;
         if !matches!(endpoint.scheme(), "http" | "https")
@@ -69,7 +78,7 @@ impl OpenAiProvider {
         Ok(Self {
             client,
             endpoint,
-            api_key: api_key.into(),
+            api_key,
         })
     }
 

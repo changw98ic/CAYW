@@ -127,6 +127,8 @@ pub enum RuntimeError {
     Content(cayw_content::Error),
     Json(serde_json::Error),
     Agent(cayw_agent::AgentError),
+    #[cfg(feature = "plugins")]
+    Plugin(cayw_plugins::PluginError),
     Workspace(String),
     Worker(String),
     WorkerPanicked(String),
@@ -163,6 +165,8 @@ impl fmt::Display for RuntimeError {
             Self::Content(error) => write!(f, "local content error: {error}"),
             Self::Json(error) => write!(f, "invalid serialized data: {error}"),
             Self::Agent(error) => write!(f, "agent error: {error}"),
+            #[cfg(feature = "plugins")]
+            Self::Plugin(error) => write!(f, "plugin error: {error}"),
             Self::Workspace(message) => write!(f, "workspace error: {message}"),
             Self::Worker(message) => write!(f, "runtime worker failed: {message}"),
             Self::WorkerPanicked(message) => {
@@ -194,6 +198,8 @@ impl std::error::Error for RuntimeError {
             Self::Content(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::Agent(error) => Some(error),
+            #[cfg(feature = "plugins")]
+            Self::Plugin(error) => Some(error),
             Self::WorkerLost(error) => Some(error),
             // The boxed cause is exposed as the concrete `RuntimeError`, so
             // callers can downcast the typed recovery cause.
@@ -239,6 +245,13 @@ impl From<cayw_agent::AgentError> for RuntimeError {
     }
 }
 
+#[cfg(feature = "plugins")]
+impl From<cayw_plugins::PluginError> for RuntimeError {
+    fn from(error: cayw_plugins::PluginError) -> Self {
+        Self::Plugin(error)
+    }
+}
+
 impl From<tokio::task::JoinError> for RuntimeError {
     fn from(error: tokio::task::JoinError) -> Self {
         Self::WorkerLost(error)
@@ -263,6 +276,10 @@ impl RuntimeError {
             Self::Journal(error) => StorageFailure::from_sqlite(error).code(),
             Self::Request(error) => request_code(error),
             Self::Content(error) => content_code(error),
+            #[cfg(feature = "plugins")]
+            Self::Plugin(error) if error.outcome_unknown() => "plugin_outcome_unknown",
+            #[cfg(feature = "plugins")]
+            Self::Plugin(_) => "plugin_error",
             Self::Workspace(_) => "workspace_error",
             // Serialized stored data is not an invalid client parameter.
             Self::Json(_) => "stored_data_corrupt",
@@ -296,6 +313,8 @@ impl RuntimeError {
             ) => true,
             Self::Content(cayw_content::Error::CommitOutcomeUnknown(_)) => true,
             Self::Agent(cayw_agent::AgentError::UnresolvedToolEffects) => true,
+            #[cfg(feature = "plugins")]
+            Self::Plugin(error) => error.outcome_unknown(),
             Self::WorkerPanicked(_) | Self::WorkerLost(_) => true,
             Self::RecoveryRequired {
                 outcome_unknown,

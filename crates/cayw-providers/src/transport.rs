@@ -18,11 +18,27 @@ const DECODE_BATCH_BYTES: usize = 4096;
 pub(crate) struct HttpConfig {
     client: Client,
     base: Url,
-    key: HeaderValue,
+    key: Option<HeaderValue>,
 }
 
 impl HttpConfig {
     pub fn new(base: &str, key: String) -> std::result::Result<Self, ProviderConfigError> {
+        if key.trim().is_empty() {
+            return Err(ProviderConfigError(
+                "An explicit API key is required".into(),
+            ));
+        }
+        Self::configured(base, Some(key))
+    }
+
+    pub fn without_auth(base: &str) -> std::result::Result<Self, ProviderConfigError> {
+        Self::configured(base, None)
+    }
+
+    fn configured(
+        base: &str,
+        key: Option<String>,
+    ) -> std::result::Result<Self, ProviderConfigError> {
         let base = Url::parse(base)
             .map_err(|_| ProviderConfigError("Invalid provider base URL".into()))?;
         if !matches!(base.scheme(), "http" | "https")
@@ -36,14 +52,15 @@ impl HttpConfig {
                 "Base URL must be HTTP(S), without credentials, query or fragment".into(),
             ));
         }
-        if key.trim().is_empty() {
-            return Err(ProviderConfigError(
-                "An explicit API key is required".into(),
-            ));
-        }
-        let mut key = HeaderValue::from_str(&key)
-            .map_err(|_| ProviderConfigError("API key is not a valid HTTP header value".into()))?;
-        key.set_sensitive(true);
+        let key = key
+            .map(|key| {
+                let mut value = HeaderValue::from_str(&key).map_err(|_| {
+                    ProviderConfigError("API key is not a valid HTTP header value".into())
+                })?;
+                value.set_sensitive(true);
+                Ok(value)
+            })
+            .transpose()?;
         // Keep redirects and automatic retries disabled. Environment proxy
         // discovery and TLS certificate verification stay at the reqwest default.
         let client = Client::builder()
@@ -208,17 +225,23 @@ pub(crate) fn stream(
             let endpoint = config.endpoint(protocol, &request)?;
             let json = matches!(protocol, Protocol::Gemini(GeminiMode::GenerateContent, _));
             let mut builder = config.client.post(endpoint).header(ACCEPT, if json { "application/json" } else { "text/event-stream" }).json(&body);
-            builder = match protocol {
-                Protocol::Anthropic => builder.header("x-api-key", config.key.clone()).header("anthropic-version", "2023-06-01"),
-                Protocol::Responses => {
-                    let mut bearer = Vec::with_capacity(7 + config.key.as_bytes().len());
+            builder = match (protocol, config.key.as_ref()) {
+                (Protocol::Anthropic, Some(key)) => builder
+                    .header("x-api-key", key.clone())
+                    .header("anthropic-version", "2023-06-01"),
+                (Protocol::Anthropic, None) => {
+                    builder.header("anthropic-version", "2023-06-01")
+                }
+                (Protocol::Responses, Some(key)) => {
+                    let mut bearer = Vec::with_capacity(7 + key.as_bytes().len());
                     bearer.extend_from_slice(b"Bearer ");
-                    bearer.extend_from_slice(config.key.as_bytes());
+                    bearer.extend_from_slice(key.as_bytes());
                     let mut bearer = HeaderValue::from_bytes(&bearer).map_err(|_| "Invalid provider authorization header".to_owned())?;
                     bearer.set_sensitive(true);
                     builder.header(AUTHORIZATION, bearer)
                 }
-                Protocol::Gemini(..) => builder.header("x-goog-api-key", config.key.clone()),
+                (Protocol::Gemini(..), Some(key)) => builder.header("x-goog-api-key", key.clone()),
+                (Protocol::Responses | Protocol::Gemini(..), None) => builder,
             };
             let response = tokio::select! {
                 biased;

@@ -1,0 +1,32 @@
+{
+  "schema": "cayw.live-webui-e2e-validation.v1",
+  "started_utc": "2026-11-08T01:33:06.707Z",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "os_release": "27.0.0",
+  "node": "v24.4.1",
+  "base_commit": "cb8599d0fd2e8ce73edb5545e00db57b7049a69d",
+  "working_diff_sha256": "ec22229895bb24e84e5abebe2d1d33b5f14139c4db24b57fff50082312a2c7eb",
+  "binary": {
+    "path": "/Volumes/ORICO/CAYW/target/debug/cayw",
+    "sha256": "3fbb53eea76837a8ef332d8117822d43a495bdb49bd4e28a82dfc128d3d87969"
+  },
+  "model": {
+    "requested": "auto/deepseek-v4.1-flash",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "authentication": "none"
+  },
+  "assertions": [
+    "The live gateway catalog contains the selected model before product startup",
+    "A fresh isolated macOS product start owns one Client and one Client-managed WebUI",
+    "The fresh Client, Runtime and WebUI start without a selected model",
+    "The browser saves and hot-selects a no-auth live model through settings RPC"
+  ],
+  "passed": false,
+  "browser_version": "157.0.8103.38",
+  "session_id": "f6203010-7dbc-4676-be22-71b123959ac7",
+  "error": "locator.waitFor: Timeout 180000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('#approvals .approval-card').filter({ hasText: '修改文件' }) to be visible\u001b[22m\n\n    at /Volumes/ORICO/CAYW/scripts/validate-live-webui-e2e.mjs:309:18",
+  "changed_sources": [],
+  "binary_changed": false,
+  "finished_utc": "2026-11-08T01:36:14.309Z"
+}

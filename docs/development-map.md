@@ -4,6 +4,10 @@
 
 [返回项目说明](../README.md) · [架构文档](architecture.md) · [查看全部 Issues](https://github.com/changw98ic/CAYW/issues)
 
+当前 macOS 本地产品采用一台设备一个 Client。所有工作区共享 Client 的 IPC 地址、访问码、连接、重连和进程监管；工作区各自保留目录、SQLite、Runtime、Session、`models.json`、MCP/Pi 实例和 WorkspaceArchitecture plugin 启用关系。TUI 与 WebUI 是 Client plugin，StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin 是按工作区启用的 WorkspaceArchitecture plugin；所有 plugin 进程都由 Client 监管。普通架构 plugin 不绑定或冻结普通 Session，StrongFlow 保留专用绑定、冻结和显式 Fork 合同。该产品合同不改变下表的 Issue 硬依赖或远端状态。
+
+本地产品在没有模型时也能启动、创建和查询 Session；第一次执行任务时才返回 `model_not_configured`。`cayw conf` 是唯一交互式首次配置入口，每工作区 `models.json` 是本地模型配置的唯一权威文件。完全显式 Headless 继续只使用显式 `--config`，与本地 Client 状态分开。模型密钥是可选明文 `api_key`；公开状态和诊断不得回显密钥。
+
 2026-10-24 的 [macOS 无界面主线最终组合验收](validation/macos-headless-mainline-final.md) 汇总 #2、#3、#4、#5、#6、#7、#8、#9、#10、#11、#18 共 11 项：同一测试源码上的 22 步离线回归、14 步正式 VerifyTool 检查，以及各项原证据的重新核对。该记录保留构建来源完整性 pending、#18 原 19 步及其他历史场景未在本次树重跑等限制；各项旧验收只证明各自源码，不据此更新远端 Issue 状态。
 
 ## 从哪里开始
@@ -46,11 +50,12 @@
 
 [#12](https://github.com/changw98ic/CAYW/issues/12) 在真实 SDK/IPC 上交付 plugin 接口与完整生命周期（发现、校验、授权、初始化、启用、停止/升级/卸载）、plugin 模板和 plugin 自检；[#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14)、[#15](https://github.com/changw98ic/CAYW/issues/15)、[#16](https://github.com/changw98ic/CAYW/issues/16)、[#17](https://github.com/changw98ic/CAYW/issues/17) 各有独立范围，不把全部 Provider 或所有 UI 变成 Core 前置条件。
 
-- 可信 Native plugin 通过 Cargo feature 静态链接，升级需重新编译。External plugin 通过独立进程 IPC 接入，管理权限与生命周期；进程隔离不等同安全沙箱。plugin 不能直接读写 Core 数据库，不能绕过审批。
+- plugin 按角色管理。TUI/WebUI 是 Client plugin；StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin 是 WorkspaceArchitecture plugin。所有 plugin 进程由唯一 Client 启动、停止和监管；工作区不能创建独立 plugin 连接状态或绕过 Client 直连 plugin。
+- 可信 Native plugin 通过 Cargo feature 静态链接，升级需重新编译。External plugin 通过独立进程 IPC 接入，管理权限与生命周期；进程隔离不等同安全沙箱。plugin 不能直接读写 Core 数据库，不能绕过审批。卸载须等待原进程确认退出；清理、持久化或调用结果不明时保留 `outcome_unknown`，不自动拉起或重放。
 - 公开接口先有最小真实往返，再由 [#2](https://github.com/changw98ic/CAYW/issues/2) 的 VerifyTool 与 [#13](https://github.com/changw98ic/CAYW/issues/13) 的真实消费共同验证。[#12](https://github.com/changw98ic/CAYW/issues/12) 完成初版不代表 SDK 已稳定；稳定版本需相应消费与兼容性证据。
-- TUI 与 WebUI 可拆。TUI 增加只读的文件、Diff 和日志查看；WebUI 增加多项目管理和 plugin 管理页面，多设备管理暂不做。WebUI 的本地轻网关消费公开接口，不依赖可选远程 Server。
+- TUI 与 WebUI 可拆，但都经唯一 Client 路由工作区。TUI 增加只读的文件、Diff 和日志查看；WebUI 增加多项目管理和 plugin 管理页面，多设备管理暂不做。WebUI 不依赖可选远程 Server。
 - 可选 Server 管远程绑定、认证吊销、路由与重连；Device 仅出站连接，无需入站端口。监听地址、公开 URL、TLS/代理、绑定成功响应丢失、断线与吊销恢复必须明确，并提供独立两机证据。
-- StrongFlow/JEv/Fusion/Observer 都可插拔，普通 Chat 不依赖它们。已有 StrongFlow 任务在该 plugin 卸载后仍不能静默绕过已绑定流程：原 Session 直接提示不可用并保持原绑定冻结，同时提供显式 Fork 转换选项（由用户确认后分叉为新的普通 Session 并记录来源关系）；Observer 诊断失败、缓慢或队列饱和不阻塞主链。
+- StrongFlow/JEv/Fusion/Observer 都可插拔，普通 Chat 不依赖它们。普通 WorkspaceArchitecture plugin 不绑定普通 Session，卸载、崩溃或缺失不能冻结普通 Session。已有 StrongFlow 任务在 StrongFlow 卸载后仍不能静默绕过已绑定流程：原 Session 直接提示不可用并保持原绑定冻结，同时提供显式 Fork 转换选项（由用户确认后分叉为新的普通 Session 并记录来源关系）；Observer 诊断失败、缓慢或队列饱和不阻塞主链。
 
 ### 当前页面的可视化编辑
 

@@ -34,7 +34,7 @@ async fn fixture_install_call_unload_smoke() {
     assert_eq!(value["echo"], "你好");
     assert_eq!(value["package"], "cayw-pi-fixture");
 
-    let unloaded = host.unload(&package).expect("unload");
+    let unloaded = host.unload(&package).await.expect("unload");
     assert_eq!(unloaded.manifest.name, package.name);
     assert!(matches!(
         host.call_tool(
@@ -80,7 +80,7 @@ async fn sample_extension_from_disk_install_call_unload() {
     // Homemade sample must NOT claim Pi ExtensionAPI.
     assert!(value.get("pi_extension_api").is_none());
 
-    host.unload(&package).expect("unload sample");
+    host.unload(&package).await.expect("unload sample");
 }
 
 /// Primary F15 acceptance: real unmodified npm Pi hello.ts via ExtensionAPI adapter.
@@ -174,7 +174,7 @@ async fn npm_hello_extension_install_call_unload() {
     );
     assert_eq!(value["details"]["greeted"], "CAYW");
 
-    host.unload(&package).expect("unload npm hello");
+    host.unload(&package).await.expect("unload npm hello");
 }
 
 /// Guard: swapping the acceptance target for the Rust sample alone must fail.
@@ -195,7 +195,7 @@ async fn acceptance_requires_pi_extension_api_markers() {
         )
         .await
         .expect("call sample");
-    host.unload(&sample_pkg).expect("unload sample");
+    host.unload(&sample_pkg).await.expect("unload sample");
 
     // Sample alone lacks Pi ExtensionAPI proof markers.
     assert!(sample_value.get("pi_extension_api").is_none());
@@ -227,7 +227,7 @@ async fn acceptance_requires_pi_extension_api_markers() {
             .unwrap_or("")
             .contains("Hello, Guard!")
     );
-    host.unload(&npm_pkg).expect("unload npm");
+    host.unload(&npm_pkg).await.expect("unload npm");
 }
 
 #[tokio::test]
@@ -424,7 +424,7 @@ async fn shared_registry_across_compat_hosts() {
         .expect("call via host b");
     assert_eq!(value["echo"], "shared");
 
-    host_a.unload(&package).expect("unload");
+    host_a.unload(&package).await.expect("unload");
 }
 
 #[tokio::test]
@@ -463,5 +463,5 @@ async fn register_into_bridge_and_invoke() {
     let registered_prov = snapshot.sources.get(&package.name).unwrap();
     assert_eq!(registered_prov.source.id, package.name);
 
-    host.unload(&package).expect("unload");
+    host.unload(&package).await.expect("unload");
 }

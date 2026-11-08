@@ -1,6 +1,6 @@
 # cayw-tui
 
-`cayw-tui` 是 CAYW 的可选本机终端界面客户端。它通过公开的认证 loopback IPC（`cayw-ipc`）连接宿主持有的 `cayw-runtime`，本身不执行模型请求、不调用隐藏工具、也不直接读写宿主数据库或工作区文件。
+`cayw-tui` 是 CAYW 的可选 Client plugin。它通过认证 loopback IPC（`cayw-ipc`）连接设备上的唯一 Client，再由 Client 路由到所选工作区 Runtime。它本身不执行模型请求、不调用隐藏工具，也不直接读写宿主数据库或工作区文件。
 
 ## 职责与边界
 
@@ -22,11 +22,11 @@ cayw serve
 cayw tui
 ```
 
-`cayw tui` 使用 `~/.cayw`（或 `CAYW_HOME`）中当前工作区的连接记录，把本机连接设置交给同目录的 `cayw-tui`。无需手填地址或访问码，也不会启动另一份 Runtime。`--workspace DIR` 可以连接其他项目。退出界面后，独立启动的服务继续运行。
+`cayw tui` 使用 `~/.cayw`（或 `CAYW_HOME`）中的 Client 级发现记录，把唯一 Client 的连接设置和工作区标识交给同目录的 `cayw-tui`。无需手填地址或访问码，也不会为工作区启动另一套连接管理。`--workspace DIR` 通过同一个 Client 连接选择其他项目。退出界面后，独立启动的 Client 继续运行。
 
 从源码构建时，用 `cargo build -p cayw-runtime -p cayw-tui --bins --release --locked` 把两个程序放入同一个构建目录，再运行 `target/release/cayw tui`。
 
-需要直接连接显式地址的本机 Runtime IPC 时：
+`cayw` 启动器和 Client 进程监管使用下面的显式连接接口；它不是工作区独立连接入口：
 
 ```sh
 CAYW_IPC_ADDR=127.0.0.1:4100 \

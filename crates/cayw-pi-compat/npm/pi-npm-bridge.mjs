@@ -130,6 +130,7 @@ function buildManifest(args, tools) {
     name: args.packageName,
     version: args.packageVersion,
     protocol_version: PLUGIN_PROTOCOL_VERSION,
+    role: "workspace_architecture",
     kind: "external",
     capabilities,
     permissions: {},

@@ -1,0 +1,123 @@
+# macOS 本地唯一 Client：无模型 WebUI 可访问性快照
+
+- 验收日期：2026-11-08（本机日期）
+- 页面：`http://127.0.0.1:<临时端口>/#workspace=local`
+- 视口：1200 × 900 CSS 像素；下方记录为完整滚动页面
+- 前置状态：唯一 Client 和 WebUI 已启动；当前工作区没有模型方案
+- 操作：创建“无模型启动验收”会话，发送一条合成消息，再次在输入框中输入文本
+- 服务端结果：`task.enqueue` 返回 HTTP 502、`model_not_configured`、`outcome_unknown: false`
+- 页面结果：会话保持“就绪”；错误说明可见；阻断区隐藏；输入框可用；再次发送可用；停止按钮禁用
+- 后端复核：`session.list` 返回 HTTP 200，会话状态为 `idle`
+- 隐私：快照不包含 IPC 访问码、账号密码或模型密钥
+
+## 最终可访问性树
+
+```yaml
+- generic [ref=e1] [box=0,-11,1200,1899]:
+  - link "跳到会话内容" [ref=e2] [cursor=pointer] [box=16,-100,114,48]:
+    - /url: "#conversation"
+  - banner [ref=e3] [box=0,-11,1200,76]:
+    - generic [ref=e4] [box=32,7,97,38]:
+      - generic [aria-hidden] [ref=e5] [box=32,9,33,36]: C
+      - generic [ref=e6] [box=77,7,52,38]:
+        - strong [ref=e7] [box=77,7,52,21]: CAYW
+        - generic [ref=e8] [box=77,28,52,18]: 本机会话
+    - status [ref=e10] [box=1108,17,60,19]: 已连接本机
+  - status [box=0,65,1200,0]
+  - generic [ref=e11] [box=0,65,1200,1823]:
+    - complementary [ref=e12] [box=0,65,282,1443]:
+      - group [ref=e13] [box=22,93,237,1387]:
+        - generic "工作区与会话 无模型启动验收 ⌃" [ref=e99] [cursor=pointer] [box=22,93,237,37]:
+          - generic [ref=e15] [box=22,93,84,22]: 工作区与会话
+          - generic [ref=e16] [box=134,95,84,19]: 无模型启动验收
+          - text: ⌃
+        - generic [ref=e17] [box=22,148,237,1332]:
+          - region "选择工作区" [ref=e18] [box=22,148,237,189]:
+            - generic [ref=e19] [box=22,148,237,21]: 工作区
+            - combobox "工作区" [ref=e20] [box=22,183,237,35]:
+              - option "/private/tmp/cayw-macos-local-20261108-r3/manual-ui/workspace" [selected] [box=0,0,0,0]
+            - button "打开 / 切换" [ref=e21] [cursor=pointer] [box=22,224,106,44]
+            - button "刷新目录" [ref=e22] [cursor=pointer] [box=132,226,72,42]
+            - status [ref=e23] [box=22,268,237,58]: 所有工作区都通过唯一 Client 打开。新目录使用 cayw init --workspace DIR 登记后刷新；切换不停止旧任务。
+          - group [ref=e24] [box=22,356,237,35]:
+            - generic "可选工具状态与安装" [ref=e25] [cursor=pointer] [box=22,356,237,35]
+          - button "设置（模型 / 插件 / 账号）" [ref=e26] [cursor=pointer] [box=22,408,237,44]
+          - generic [ref=e27] [box=22,470,237,42]:
+            - heading "会话" [level=2] [ref=e28] [box=22,478,34,27]
+            - button "刷新" [ref=e29] [cursor=pointer] [box=213,470,46,42]
+          - generic [ref=e30] [box=22,530,237,103]:
+            - generic [ref=e31] [box=22,530,237,19]: 新会话名称
+            - generic [ref=e32] [box=22,557,237,42]:
+              - textbox "新会话名称" [ref=e33] [box=22,557,178,42]:
+                - /placeholder: 今天想做什么？
+              - button "创建会话" [ref=e34] [cursor=pointer] [box=207,557,52,42]: 新建
+            - generic [ref=e35] [box=22,605,237,29]:
+              - generic [ref=e36] [box=22,610,48,19]: 执行设备
+              - textbox "执行设备" [ref=e37] [box=76,605,183,29]:
+                - /placeholder: local (默认本机，可选设备标识)
+          - status [ref=e74] [box=22,652,237,19]: 1 个会话
+          - navigation "选择会话" [ref=e75] [box=22,701,237,85]:
+            - button "无模型启动验收 就绪 · 6797b658-5bfb-437e-9 …内容过长，已截断显示。" [ref=e134] [cursor=pointer] [box=22,701,237,85]:
+              - strong [ref=e135] [box=35,713,211,22]: 无模型启动验收
+              - generic [ref=e136] [box=35,738,211,35]: 就绪 · 6797b658-5bfb-437e-9 …内容过长，已截断显示。
+          - region [ref=e38] [box=22,804,237,514]:
+            - generic [ref=e39] [box=22,821,237,42]:
+              - heading "面板" [level=2] [ref=e40] [box=22,828,34,27]
+              - button "刷新" [ref=e41] [cursor=pointer] [box=213,821,46,42]
+            - status [ref=e42] [box=22,873,237,19]: 已注册 9 个面板
+            - navigation "侧栏面板目录" [ref=e77] [box=22,914,237,394]:
+              - button "Files" [ref=e78] [cursor=pointer] [box=22,914,237,44]
+              - button "Visual Editor" [ref=e79] [cursor=pointer] [box=22,964,237,44]
+              - button "Trace Debugger" [ref=e80] [cursor=pointer] [box=22,1014,237,44]
+              - button "Artifacts" [ref=e81] [cursor=pointer] [box=22,1064,237,44]
+              - button "Plannotator" [ref=e82] [cursor=pointer] [box=22,1114,237,44]
+              - button "Tasks & Timeline" [ref=e83] [cursor=pointer] [box=22,1164,237,44]
+              - button "Usage & Context" [ref=e84] [cursor=pointer] [box=22,1214,237,44]
+              - button "Demo" [ref=e85] [cursor=pointer] [box=22,1264,237,44]
+          - group [ref=e43] [box=22,1336,237,52]:
+            - generic "宿主能力" [ref=e44] [cursor=pointer] [box=22,1353,237,35]
+          - paragraph [ref=e45] [box=22,1406,237,62]: 对话保存在本机。断线后继续接收结果，消息不会自动重发。
+    - main [ref=e46] [box=282,65,918,1443]:
+      - generic [ref=e47] [box=326,97,830,115]:
+        - generic [ref=e48] [box=326,97,627,97]:
+          - paragraph [ref=e49] [box=326,97,627,18]: 工作空间
+          - heading "无模型启动验收" [level=1] [ref=e103] [box=326,124,627,31]
+          - navigation "工作台入口" [ref=e51] [box=326,165,627,29]:
+            - button "任务 / 时间线" [ref=e52] [cursor=pointer] [box=326,165,88,29]
+            - button "用量 / 状态" [ref=e53] [cursor=pointer] [box=420,165,76,29]
+            - button "产物与动作" [ref=e54] [cursor=pointer] [box=503,165,78,29]
+            - button "版本批注" [ref=e55] [cursor=pointer] [box=587,165,66,29]
+            - button "可视化编辑器（需连接）" [ref=e86] [cursor=pointer] [box=659,165,150,29]
+            - button "Trace 调试（需连接）" [ref=e87] [cursor=pointer] [box=815,165,138,29]
+        - generic [ref=e58] [box=1114,119,42,28]: 就绪
+      - alert [ref=e124] [box=326,230,830,105]: "尚未配置模型。当前工作区的模型方案文件：/private/tmp/cayw-macos-local-20261108-r3/manual-ui/cayw-home/workspaces/e70abb2449789302ed5ea6c06fc39e4020899df0c278dbb3d5de6c336d1e5a8b/models.json。运行 `cayw conf --workspace '/private/tmp/cayw-macos-local-20261108-r3/manual-ui/workspace'` 逐项配置模型，或进入 WebUI 的模型设置。密钥可以明文保存在普通本地配置文件中；无需认证的本地服务可留空。"
+      - status [ref=e104] [box=326,348,830,19]: 已同步
+      - region "会话历史" [ref=e59] [box=326,379,830,210]:
+        - paragraph [box=326,379,830,0]
+        - generic [ref=e137] [box=326,379,830,210]:
+          - heading "从一条消息开始" [level=2] [ref=e138] [box=342,441,798,35]
+          - paragraph [ref=e139] [box=342,485,798,21]: 输入任务，Runtime 会在这里保留对话和工具记录。
+      - group [ref=e64] [box=326,613,830,44]:
+        - generic "事件记录 0 · 游标 1" [ref=e108] [cursor=pointer] [box=326,622,830,35]
+      - generic [ref=e66] [box=326,681,830,216]:
+        - generic [ref=e67] [box=343,698,796,21]: 发送消息
+        - textbox "发送消息" [active] [ref=e68] [box=343,726,796,94]:
+          - /placeholder: 输入你想完成的事情…
+          - text: 再次输入后应允许重新尝试。
+        - generic [ref=e69] [box=343,838,796,42]:
+          - status [ref=e70] [box=343,850,195,19]: Enter 换行，Ctrl / ⌘ + Enter 发送。
+          - generic [ref=e71] [box=993,838,146,42]:
+            - button "停止运行" [disabled] [ref=e72] [box=993,838,82,42]
+            - button "发送" [ref=e73] [cursor=pointer] [box=1083,838,56,42]
+    - complementary [ref=e88] [box=0,1508,1200,380]:
+      - generic [ref=e89] [box=24,1525,1152,27]:
+        - heading "底部工作区" [level=2] [ref=e90] [box=24,1525,85,27]
+        - status [ref=e91] [box=1056,1529,120,19]: 可从目录打开底部面板
+      - navigation "底部面板目录" [ref=e92] [box=24,1562,1152,294]:
+        - button "Files" [ref=e93] [cursor=pointer] [box=24,1562,1152,44]
+        - button "Visual Editor" [ref=e94] [cursor=pointer] [box=24,1612,1152,44]
+        - button "Trace Debugger" [ref=e95] [cursor=pointer] [box=24,1662,1152,44]
+        - button "Artifacts" [ref=e96] [cursor=pointer] [box=24,1712,1152,44]
+        - button "Tasks & Timeline" [ref=e97] [cursor=pointer] [box=24,1762,1152,44]
+        - button "Terminal" [ref=e98] [cursor=pointer] [box=24,1812,1152,44]
+```

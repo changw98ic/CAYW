@@ -94,7 +94,7 @@ async fn pi_compat_shares_runtime_plugin_registry_and_enables_discovery_and_call
     assert_eq!(provenance.source.id, PiFixturePlugin::PACKAGE_NAME);
 
     // 7. Unload cleanly removes from Runtime's shared registry
-    pi_host.unload(&package).unwrap();
+    pi_host.unload(&package).await.unwrap();
     assert!(runtime.list_plugins().is_empty());
 
     // 8. Subsequent call confirms unloaded state

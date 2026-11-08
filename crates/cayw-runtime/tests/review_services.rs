@@ -410,7 +410,9 @@ mod plugins_review {
     use super::*;
     use async_trait::async_trait;
     use cayw_ai::ToolDefinition;
-    use cayw_plugins::{Plugin, PluginContext, PluginError, PluginKind, PluginManifest};
+    use cayw_plugins::{
+        Plugin, PluginContext, PluginError, PluginKind, PluginManifest, PluginRole,
+    };
     use serde_json::Value;
     use std::{
         collections::BTreeMap,
@@ -429,6 +431,7 @@ mod plugins_review {
                     name: "echo_plugin".into(),
                     version: "1.0.0".into(),
                     protocol_version: 1,
+                    role: PluginRole::WorkspaceArchitecture,
                     kind: PluginKind::Native,
                     capabilities: vec![ToolDefinition {
                         name: "echo_plugin.echo".into(),
@@ -473,6 +476,29 @@ mod plugins_review {
         }
     }
 
+    #[test]
+    fn client_role_plugin_cannot_enter_workspace_runtime_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("workspace")).unwrap();
+        let rt = Runtime::open(
+            root.join("sessions.sqlite"),
+            root.join("workspace"),
+            Arc::new(Script(String::new())),
+            Model::new("fixture", "client-role-rejection"),
+            RuntimeConfig::default(),
+        )
+        .unwrap();
+        let mut plugin = EchoPlugin::new();
+        plugin.manifest.role = PluginRole::Client;
+        assert!(matches!(
+            rt.load_native(Arc::new(plugin), PluginContext::default()),
+            Err(RuntimeError::InvalidInput(message))
+                if message.contains("Client plugins cannot enter")
+        ));
+        assert!(rt.list_plugins().is_empty());
+    }
+
     #[tokio::test]
     async fn plugin_capability_invoked_via_host_validation_without_middle_validator() {
         let temp = tempfile::tempdir().unwrap();
@@ -503,7 +529,6 @@ mod plugins_review {
         )
         .unwrap();
         let session = rt.create(None).unwrap().id;
-        rt.bind_plugin(&session, "echo_plugin").unwrap();
 
         rt.prompt(&session, "call echo", CancellationToken::new())
             .await
@@ -574,7 +599,6 @@ mod plugins_review {
         )
         .unwrap();
         let session = rt.create(None).unwrap().id;
-        rt.bind_plugin(&session, "echo_plugin").unwrap();
 
         let view = rt
             .prompt(&session, "call echo bad", CancellationToken::new())

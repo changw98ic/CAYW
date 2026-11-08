@@ -1,14 +1,12 @@
 //! Shared offline input with a real Runtime, Core database, Host and IPC adapter.
-use async_trait::async_trait;
 use cayw_ai::{
     AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
     ModelRequest, Provider, StopReason, ToolCall, Usage, UsageStatus,
 };
-use cayw_plugins::{Plugin, PluginContext, PluginError, PluginKind, PluginManifest};
+use cayw_plugins::{PluginContext, strongflow::StrongFlow};
 use cayw_runtime::{Runtime, RuntimeConfig};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
-    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -88,21 +86,6 @@ impl Provider for OfflineProvider {
     }
 }
 
-struct BindingPlugin {
-    manifest: PluginManifest,
-}
-#[async_trait]
-impl Plugin for BindingPlugin {
-    fn manifest(&self) -> &PluginManifest {
-        &self.manifest
-    }
-    async fn call(&self, _: &str, _: Value, _: CancellationToken) -> Result<Value, PluginError> {
-        Err(PluginError::Failed(
-            "binding-only offline plugin has no capabilities".into(),
-        ))
-    }
-}
-
 pub struct OfflineRuntime {
     pub runtime: Runtime,
     pub directory: tempfile::TempDir,
@@ -133,21 +116,11 @@ impl OfflineRuntime {
         )
         .unwrap();
         let frozen = runtime.create(Some("Frozen fixture".into())).unwrap();
-        let plugin = BindingPlugin {
-            manifest: PluginManifest {
-                name: "fixture-binding".into(),
-                version: "1.0.0".into(),
-                protocol_version: 1,
-                kind: PluginKind::Native,
-                capabilities: vec![],
-                permissions: BTreeMap::new(),
-            },
-        };
         runtime
-            .load_native(Arc::new(plugin), PluginContext::default())
+            .load_native(Arc::new(StrongFlow::new()), PluginContext::default())
             .unwrap();
-        runtime.bind_plugin(&frozen.id, "fixture-binding").unwrap();
-        runtime.unload_plugin("fixture-binding").unwrap();
+        runtime.bind_strongflow(&frozen.id).unwrap();
+        futures::executor::block_on(runtime.unload_plugin("strongflow")).unwrap();
         Self {
             runtime,
             directory,

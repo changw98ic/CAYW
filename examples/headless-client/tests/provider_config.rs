@@ -5,14 +5,21 @@ use std::{
     process::{Command, Output},
 };
 
-const SELECTED_KEY: &str = "CAYW_CLIENT_CONFIG_TEST_KEY";
+const MODEL_KEY: &str = "synthetic-client-selected-key";
 
 fn configuration(service: &str, api: &str, version: &str, base: &str) -> Value {
     json!({"model": {
         "service":service, "api":api, "id":"fixture-model", "base_url":base,
         "api_version":version, "max_output_tokens":64,
-        "api_key_env":SELECTED_KEY
+        "api_key":MODEL_KEY
     }})
+}
+
+fn public_model(input: &Value) -> Value {
+    let mut model = input["model"].clone();
+    let authenticated = model.as_object_mut().unwrap().remove("api_key").is_some();
+    model["authentication"] = json!(if authenticated { "plain_file" } else { "none" });
+    model
 }
 
 fn sdk_command(root: &Path) -> Command {
@@ -30,10 +37,7 @@ fn sdk_command(root: &Path) -> Command {
 fn command(root: &Path, input: &Value) -> Command {
     std::fs::write(root.join("config.json"), serde_json::to_vec(input).unwrap()).unwrap();
     let mut command = sdk_command(root);
-    command
-        .arg("--config")
-        .arg(root.join("config.json"))
-        .env(SELECTED_KEY, "synthetic-client-selected-key");
+    command.arg("--config").arg(root.join("config.json"));
     command
 }
 
@@ -95,10 +99,10 @@ fn sdk_selects_every_service_from_the_same_model_configuration() {
         );
         let output = command(root.path(), &input).arg("create").output().unwrap();
         let row = metadata(&output);
-        assert_eq!(row["model_configuration"], input["model"]);
+        assert_eq!(row["model_configuration"], public_model(&input));
         assert_eq!(row["requested_model"], "fixture-model");
         assert_eq!(row["model_execution"], "not_requested");
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-client-selected-key"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(MODEL_KEY));
     }
 }
 
@@ -132,14 +136,15 @@ fn sdk_does_not_fall_back_to_legacy_environment() {
         error["message"]
             .as_str()
             .unwrap()
-            .contains("cayw configure")
+            .contains("显式 --config")
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-old-key"));
 }
 
-// Break caught: an unrelated credential hides a missing selected credential for prompt.
+// Break caught: legacy environment values override the explicit plain-file key
+// or the public Runtime metadata prints either credential.
 #[test]
-fn sdk_requires_only_the_selected_credential_and_never_prints_it() {
+fn sdk_uses_only_the_plain_file_key_and_never_prints_it() {
     let root = tempfile::tempdir().unwrap();
     let input = configuration(
         "gemini",
@@ -148,19 +153,18 @@ fn sdk_requires_only_the_selected_credential_and_never_prints_it() {
         "http://127.0.0.1:9/v1beta",
     );
     let mut create = command(root.path(), &input);
-    create.arg("create");
-    let created = run(create);
-    let id = result_id(&created);
-    let mut prompt = command(root.path(), &input);
-    prompt
-        .env_remove(SELECTED_KEY)
+    create
         .env("CAYW_PROVIDER_API_KEY", "synthetic-unselected-key")
-        .args(["prompt", "--session", &id, "--text", "must not run"]);
-    let output = prompt.output().unwrap();
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains(SELECTED_KEY), "{error}");
-    assert!(!error.contains("synthetic-unselected-key"));
+        .env("CAYW_MODEL", "legacy-environment-model")
+        .arg("create");
+    let output = create.output().unwrap();
+    let runtime = metadata(&output);
+    assert_eq!(runtime["model_configuration"], public_model(&input));
+    assert_eq!(runtime["requested_model"], "fixture-model");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains(MODEL_KEY));
+    assert!(!stdout.contains("synthetic-unselected-key"));
+    assert!(!stdout.contains("legacy-environment-model"));
 }
 
 // Break caught: query and control commands require a model object or credential
@@ -224,32 +228,33 @@ fn sdk_read_and_control_commands_need_no_model_configuration_or_credential() {
         assert!(!output.status.success());
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(!error.contains("model configuration"), "{error}");
-        assert!(!error.contains(SELECTED_KEY), "{error}");
+        assert!(!error.contains(MODEL_KEY), "{error}");
     }
 }
 
-// Break caught: an existing host-selected model configuration requires its
-// credential even for a read-only query.
+// Break caught: a host-selected no-authentication deployment is rejected before
+// a read-only query even though its model adapter is never used.
 #[test]
-fn sdk_queries_accept_host_selected_deployment_without_credential() {
+fn sdk_queries_accept_host_selected_deployment_without_authentication() {
     let root = tempfile::tempdir().unwrap();
-    let input = configuration(
+    let mut input = configuration(
         "openai",
         "chat_completions",
         "v1",
         "http://gateway.invalid/gateway/v1",
     );
+    input["model"].as_object_mut().unwrap().remove("api_key");
     let mut create = command(root.path(), &input);
-    create.env_remove(SELECTED_KEY).arg("create");
+    create.arg("create");
     let created = run(create);
     let runtime = created.iter().find(|row| row["type"] == "runtime").unwrap();
-    assert_eq!(runtime["model_configuration"], input["model"]);
+    assert_eq!(runtime["model_configuration"], public_model(&input));
     assert_eq!(runtime["requested_model"], "fixture-model");
     assert_eq!(runtime["model_execution"], "not_requested");
     let id = result_id(&created);
 
     let mut get = command(root.path(), &input);
-    get.env_remove(SELECTED_KEY).args(["get", "--session", &id]);
+    get.args(["get", "--session", &id]);
     let lines = run(get);
     assert_eq!(result_id(&lines), id);
 }

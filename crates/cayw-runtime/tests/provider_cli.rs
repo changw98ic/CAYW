@@ -15,7 +15,7 @@ fn config(service: &str, api: &str, version: &str, base: &str) -> Value {
     json!({"model": {
         "service": service, "api": api, "id": "fixture-model",
         "base_url": base, "api_version": version,
-        "max_output_tokens": 64, "api_key_env": "CAYW_SELECTION_TEST_KEY"
+        "max_output_tokens": 64, "api_key": KEY
     }})
 }
 
@@ -26,7 +26,6 @@ fn command(root: &Path, input: &Value) -> tokio::process::Command {
     command
         .env_clear()
         .env("CAYW_SELECTION_TEST_TOKEN", TOKEN)
-        .env("CAYW_SELECTION_TEST_KEY", KEY)
         .args(["serve", "--db"])
         .arg(root.join("session.db"))
         .arg("--workspace")

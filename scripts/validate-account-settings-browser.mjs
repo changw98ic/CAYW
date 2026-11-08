@@ -1,5 +1,5 @@
 // Real browser -> paired local settings / LAN gateway -> real offline Runtime.
-// Uses only temporary state and this cloud container's own private interface.
+// Uses only temporary state and this host's own private interface.
 // node scripts/validate-account-settings-browser.mjs BIN_DIR NEW_EVIDENCE_DIR
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
@@ -25,7 +25,10 @@ async function launch(args){
  return {child,ready:JSON.parse(line)};
 }
 async function stop(child){if(child.exitCode===null&&child.signalCode===null){child.kill('SIGINT');const [code]=await once(child,'exit');assert.equal(code,0);}}
-const rpc=(base)=>fetch(base+'api/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method:'runtime.health',params:{}})});
+const rpc=(base)=>new Promise((resolve,reject)=>{
+ const req=httpRequest(new URL('api/rpc',base),{method:'POST',headers:{'Content-Type':'application/json'}},res=>{res.resume();res.on('end',()=>resolve({status:res.statusCode}));});
+ req.setTimeout(10000,()=>req.destroy(new Error(`runtime.health timed out for ${base}`)));req.on('error',reject);req.end(JSON.stringify({method:'runtime.health',params:{}}));
+});
 async function raw(base,headers,data){
  return new Promise((resolve,reject)=>{
   const req=httpRequest(new URL('api/settings/account',base),{method:'POST',headers:{'Content-Type':'application/json',...headers}},res=>{let text='';res.on('data',b=>text+=b);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(text),source:req.socket.localAddress}));});req.on('error',reject);req.end(JSON.stringify(data));
@@ -80,14 +83,14 @@ try{
  await remote.locator('#logout').click();await remote.reload();await remote.locator('#account-fields').waitFor({state:'visible'});assert(await remote.locator('#workspace').isHidden());
  await admin.reload();await admin.locator('#workspace').waitFor({state:'visible'});assert(await admin.locator('#logout').isHidden());
  checks.push('configured LAN rejects bad login, accepts saved password and refreshes; remote logged-in users still cannot alter account; local password update revokes old sessions; logout and local exemption work');
- const repeat=JSON.parse(execFileSync(join(bin,'cayw'),['--ui','web','--no-open','--workspace',workspace],{env,encoding:'utf8'}));assert.equal(repeat.url,app.ready.local_url);assert.equal(repeat.lan_url,app.ready.url);
+ const repeat=JSON.parse(execFileSync(join(bin,'cayw'),['--ui','web','--no-open','--account-file',accountFile,'--workspace',workspace],{env,encoding:'utf8'}));assert.equal(repeat.url,app.ready.local_url);assert.equal(repeat.lan_url,app.ready.url);
  await stop(app.child);
  await assert.rejects(fetch(app.ready.local_url));await assert.rejects(fetch(app.ready.url));
  const local=await launch(['--ui','web','--account-file',accountFile,'--workspace',workspace,'--offline','--no-open']);await admin.goto(local.ready.url);await admin.locator('#workspace').waitFor({state:'visible'});await openSettings(admin);await admin.locator('#account-settings-status').filter({hasText:'下次启动局域网模式'}).waitFor();assert.equal((await rpc(local.ready.url)).status,200);await stop(local.child);
- const restarted=await launch(['--ui','web','--lan',`${address}:0`,'--account-file',accountFile,'--workspace',workspace,'--offline','--no-open']);assert.equal(restarted.ready.login_required,true);assert.equal((await rpc(restarted.ready.url)).status,401);assert.equal((await rpc(restarted.ready.local_url)).status,200);await stop(restarted.child);
+ const restarted=await launch(['--ui','web','--lan',`${address}:0`,'--account-file',accountFile,'--workspace',workspace,'--offline','--no-open']);assert.equal(restarted.ready.lan_login_enabled,true);assert.equal((await rpc(restarted.ready.url)).status,401);assert.equal((await rpc(restarted.ready.local_url)).status,200);await stop(restarted.child);
  checks.push('repeated local WebUI command reaches paired management; both listeners shut down; local-only mode explains future LAN activation; saved account survives restart');
  assert.deepEqual(errors,[]);assert(!logs.map(f=>f()).join('\n').includes(firstPassword));assert(!logs.map(f=>f()).join('\n').includes(secondPassword));
- await writeFile(join(out,'summary.json'),JSON.stringify({passed:true,platform:process.platform,checks,errors,peer_validation:'same cloud container private interface, real non-loopback TCP peer',macos:'not run'},null,2)+'\n');console.log(JSON.stringify({passed:true,checks}));
+ await writeFile(join(out,'summary.json'),JSON.stringify({passed:true,platform:process.platform,checks,errors,peer_validation:'same isolated host private interface, real non-loopback TCP peer',macos:process.platform==='darwin'?'validated':'not run'},null,2)+'\n');console.log(JSON.stringify({passed:true,checks}));
 }catch(error){console.error(JSON.stringify({diagnostics}));console.error(error);throw error;}finally{
  await browser?.close();for(const child of children.reverse())await stop(child);await writeFile(join(out,'processes.stderr'),logs.map(f=>f()).join('\n'));
 }

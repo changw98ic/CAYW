@@ -1,60 +1,67 @@
 # 本地工作流
 
-完整发行包包含同一源码版本构建的 `cayw`、`cayw-client`、`cayw-tui`、`cayw-webui`。首发范围仍为 macOS arm64。Core Only 可单独安装 Runtime，UI 和 plugins 不是 Core 依赖。
+完整发行包包含同一源码版本构建的 `cayw`、`cayw-client`、`cayw-tui` 和 `cayw-webui`。首发范围是 macOS arm64。Core Only 可以单独安装 Runtime；UI 和 plugin 不是 Core 依赖。
 
-## 启动与访问
+## 唯一 Client
+
+一台设备只运行一个本地 Client。所有工作区共享它的 IPC 地址、访问码、连接、重连和进程监管。工作区不保存自己的连接状态或 Runtime 地址。
+
+每个工作区仍有独立的规范目录、SQLite、Session、模型方案、MCP/Pi 实例和架构插件启用关系。Client 在进程内打开这些工作区，并按 `workspace_id` 路由请求。一个页面选择工作区，不会改变其他页面的选择，也不会把已经提交的任务换到另一个工作区。
 
 ```sh
 cd /你的项目
-cayw                                  # 默认 TUI，当前目录是 workspace
-cayw --workspace /另一个项目           # 显式覆盖目录
-cayw start                            # 与裸命令相同，默认 TUI
-cayw --ui web                         # 可选网页，自动打开浏览器
+cayw                                  # 启动或复用唯一 Client，打开 TUI
+cayw --workspace /另一个项目           # 选择初始工作区
+cayw start                            # 与裸命令相同
+cayw --ui web                         # 启动或复用 Client 管理的 WebUI
 cayw --ui web --no-open               # 只输出普通 URL
-cayw --ui none                        # 仅 Runtime
-cayw --ui web --lan 192.168.1.10:3080  # 显式局域网，无账号时直接放行
+cayw --ui none                        # 只运行 Client
+cayw --ui web --lan 192.168.1.10:3080  # 显式开放局域网入口
 ```
 
-`cayw` 自动启动或复用 Runtime，不要求先开 `serve`，不默认启动网页或浏览器。TUI、WebUI 是独立程序，TUI 不要求安装 WebUI。兼容命令 `cayw tui` 仍只连接已有 Runtime；`serve`、`init`、`configure`、模型和插件命令保留。启动不发送模型请求。
+并发启动命令通过全局启动锁决定谁创建 Client。其他命令等待并连接同一个健康 Client。重复 WebUI 启动复用同一个网页进程和网关。TUI、WebUI 和后续 Client 类 plugin 都由 Client 统一启动、停止和监管。
 
-本地网页只监听回环地址，无登录、网页 token、launch ticket 或认证 cookie 的门槛。直接打开普通 URL 即可使用，刷新读取已有会话，不自动重发任务。`--no-open`、SSH_CONNECTION / SSH_TTY 非空或无桌面环境会跳过打开浏览器；系统打开失败仍保留服务和可用地址。SSH 转发保持相同端口，启动器不猜测客户端地址。macOS 使用 `/usr/bin/open` 打开默认浏览器。
+Client 只在 `<CAYW_HOME>/client.json` 发布全局发现信息。启动结果和 doctor 使用 `client_file` 指向这个文件。工作区不创建 `connection.json`，也没有旧的公开 `connection_file` 字段。doctor 只报告发现的旧工作区连接文件，不迁移或删除它们。
 
-`--lan IP:PORT` 必须明确选择 WebUI，并指定本机私有 IP（也接受回环 IP，便于隔离测试），不从环境变量隐式开启。账户文件不存在时正常启动、允许访问，终端和页面显示“局域网访问已开放，未配置账号，网络内可直接访问”。不会强迫初次配置或登录。Host/Origin/Sec-Fetch-Site 继续校验，RPC 参数和凭据不接受 URL 传递。
+`cayw tui` 是只连接入口。`cayw serve` 可以显式启动 Client。退出一个复用 Client 的界面不会停止 Client；创建 Client 的前台命令收到 Ctrl+C 或 SIGTERM 后会停止它，并等待所有已打开工作区和 Client plugin 清理。清理结果不确定时会报错，不会自动重放任务。
 
-账户是可选配置，以网页为主要入口：
+## 工作区
 
-1. 在运行 CAYW 的电脑上打开 `cayw --ui web`，进入“设置 → 局域网访问账号”。
-2. 填写账号、新密码和确认密码，点击“保存账号”。本地访问始终免登录。
-3. 如果当前运行局域网入口，保存后立即要求局域网登录并撤销旧会话，无需重启；仅本地模式则明确显示“下次启动局域网模式时启用登录”。
-
-局域网启动同时提供 `local_url` 本机管理地址，默认浏览器打开此地址。也可在该电脑再次执行 `cayw --ui web` 复用本机管理入口。普通局域网访客可以使用未配置账号的网页，但账号表单禁用，不能抢先配置或修改账号；已登录远端也不能修改。服务端使用真实 TCP 对端与本机 Host 双重校验，不使用 Forwarded / X-Forwarded-For 判断本机身份。不要把本机管理地址代理到远端。
-
-账号保护当前网页服务中的所有工作区。文件仍为宿主指定的 `web-account.json`，只保存用户名与加盐 Argon2id 摘要，0600 原子写入。保存使用版本核对，重复/过期请求不会覆盖新配置。两次密码不一致或保存失败会显示具体错误；密码输入随提交、关闭设置及离开页面清空，不回显、不写日志、URL 或浏览器存储。保存回执不确定时，页面提示刷新账号状态核对，不自动重试。已有文件损坏或权限异常明确报错，避免静默取消已配置的登录。
-
-备用 CLI 仍可首次创建账户：
+工作区由规范化目录确定。状态位于 `CAYW_HOME/workspaces/<目录摘要>/`。先登记目录，再从 TUI 或 WebUI 打开：
 
 ```sh
-cayw account --username admin [--workspace DIR]
-cayw account --username admin --file /私有目录/account.json
+cayw init --workspace /你的项目
 ```
 
-CLI 不覆盖已有账户；CLI 在网关外创建文件后，需重启网页服务，或在本机设置页重新保存使当前 LAN 实例立即应用。GUI 可修改已有账号，旧密码和旧会话随保存失效。配置后的局域网页面用账号密码登录，刷新通过当前网关的 HttpOnly、SameSite=Strict cookie 保持会话，“退出登录”撤销当前会话。未配置时仍直接放行。本轮不增加 TLS、远程账户管理或多用户权限系统，LAN 当前为 HTTP，仅供可信网络。
+WebUI 只提交登记后的工作区标识，不接受任意目录路径。移动项目目录会产生新的工作区身份，不会自动搬迁数据库。Client 最多打开有界数量的工作区；打开失败不会替换已经打开的工作区。
 
-TUI、WebUI 各有启动锁，可同时连接同一 Runtime。重复 `cayw` 在另一终端打开 TUI；重复网页启动复用原网页实例。每个启动器只停止自己创建的进程，复用的外部 Runtime 保留。退出最初拥有 Runtime 的启动器会停止它自己创建的 Runtime；其他页面显示真实连接错误，不自动重发任务。
+浏览器 RPC 在顶层携带 `workspace_id`。Client 内部通过 `client.workspace.call` 把请求交给对应工作区。内部 IPC 地址和访问码不会返回浏览器。刷新页面只读取已有 Session 和事件，不重新提交任务。
 
-工作区由规范化后的目录路径确定，数据库位于 `CAYW_HOME/workspaces/<目录摘要>/`。网页侧栏的工作区选择器显示已登记目录。选择后点击“连接 / 切换”，网关会复用该目录的现有服务，或由本机宿主启动独立 Runtime。切换不会把已有会话或执行器换根，也不停止旧工作区的任务。浏览器提交的是登记标识，不接受任意目录路径；添加新目录先在本机执行 `cayw init --workspace DIR`，再在网页刷新目录。移动项目目录后会产生另一工作区身份，不自动搬迁数据库。 每个页面保留自己的选择，其他页面的请求不随之改路由。已提交任务的 enqueue/resume 捕获原工作区，切换不取消连接、不重发任务；返回原工作区继续读取同一 Task/Attempt 的事件和审批。
+## 无模型启动与首次配置
 
-网关保留会话与任务归属，工作区标识不匹配的请求在转发前被拒绝。目录管理请求固定交给最初宿主；目标 IPC 地址只在宿主与网关之间传递，不返回浏览器。宿主最多持有 16 个由本次启动创建的 Runtime；正常退出清理这些实例，复用的外部服务由原所有者管理。新实例不复制原工作区命令行中的演示授权、权限或自定义配置路径。
+Client、TUI 和 WebUI 不要求先配置模型。启动不发送模型请求，也不弹出配置向导。创建和查询 Session 可用。第一次 `prompt`、`enqueue` 或 `resume` 在任务准入前返回 `model_not_configured`，并提示运行：
 
-重复网页启动复用同一实例；初始化时等待就绪，超时明确报错。若 `serve` 已独立启动，`start` 复用该服务，退出界面保留它。已有服务不能通过第二条启动命令修改 `--offline`、`--config` 等启动参数。Ctrl+C / SIGTERM 停止本次拥有的 UI 与 Runtime，并等待原有任务取消和持久化清理；若清理未确认会报错，不自动重放任务。
+```sh
+cayw conf --workspace /你的项目
+```
 
-工作区和工具状态通过认证的 CLI 宿主控制接口提供，均未注册成模型工具。网页请求在 `/api/rpc` 的顶层携带 `workspace_id`；省略时保留原有网关路由。`settings.workspaces.list` 返回登记标识与路径，`settings.workspaces.open` 只接收 `{ "id": "登记标识" }`，管理请求固定转发给初始宿主。网关根据握手回执登记目标连接，再移除内部 IPC 地址后返回给浏览器。`settings.tools` 只读取已知同目录程序的安装元数据与宿主编译/启用状态；侧栏的“刷新安装状态”可重新读取。
+`cayw conf` 是本地产品唯一的首次模型配置命令。没有 `cayw configure` 兼容入口。它把当前工作区的 `configured` 方案写入私有 `models.json` 并选中该方案。模型字段包括服务、API、模型名称、端点、版本、输出上限和可选 `api_key`。密钥可以留空；留空表示服务不需要认证。填写后，密钥以明文保存在普通本地文件中。CAYW 不使用 Keychain、加密或 OAuth。
 
-## 模型日常管理
+模型方案示例：
 
-启动不调用模型；保存方案也不调用模型。可先启动无模型服务，再在网页“设置”添加并使用方案。填入服务、API、模型名称、端点、版本、输出限制及密钥**环境变量名称**。密钥值不进入配置，也不由网页收集。使用方案时，服务只读取选中变量；服务启动时必须已经有该环境变量。新增环境变量需要重新启动进程，已有变量对应的模型切换不需要重启。
+```json
+{
+  "service": "openai",
+  "api": "chat_completions",
+  "id": "local-model",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "api_version": "v1",
+  "max_output_tokens": 4096,
+  "api_key": "optional-plain-text-key"
+}
+```
 
-CLI 通过相同的认证 IPC 接口管理：
+CLI 通过同一个认证 Client 管理方案：
 
 ```sh
 cayw models add daily --file /path/model.json --workspace /你的项目
@@ -63,62 +70,112 @@ cayw models use daily --workspace /你的项目
 cayw models remove unused --workspace /你的项目
 ```
 
-`model.json` 是原 `config.json` 的 `model` 对象，不包含预算或权限。最多保存 64 个方案，名称允许字母、数字、`._-`。方案保存在当前工作区的 `models.json`，选中方案优先于旧 `config.json.model`。旧配置仍可启动；`cayw configure` 支持替换已有模型，取消或输入中断保留原文件，在线或离线保存都会通过同一写入函数原子更新当前工作区的 `models.json` 并选中 `configured` 方案；`config.json.model` 保留兼容副本。在线服务随后从这一方案库重新加载，不再分别执行另一组 put/use 写入。结果中的 `activation` 区分已保存与已应用；激活失败返回非零退出码、保留当前运行模型，并说明已保存选择。停服后保存 B，再启动会读取 B，不会被旧的 A 遮蔽。配置预算、工具权限及进程 profile 仍通过启动配置选择，模型管理不修改它们。
+公开模型视图、启动输出、doctor 和 Settings RPC 只显示 `authentication: plain_file` 或 `none`，不返回密钥。切换只影响后续开始的 Task Attempt。运行中的 Attempt 保留原 Provider、模型和输出上限。
 
-切换对后续开始的 Task Attempt 生效，包括尚未派发的任务。每个运行中的 Attempt 固定 Provider、模型名称和输出上限，后续工具回合继续使用同一快照，持久账本记录实际模型身份。切换不增加预算，不清除已消费或未知预留。不能删除选中的方案；先选择另一方案。`--offline` 明确使用合成 Provider，拒绝选择真实模型方案。
+本地 `config.json.model` 不是长期配置源。发现旧字段时，Client 把它单向迁移到当前工作区的 `models.json`，然后删除旧字段。已有选中方案优先，损坏的旧字段不会覆盖它。
 
-## 本地 External 插件
+完整显式 Headless 是另一条系统边界：同时提供 `--db`、`--token-env` 和 `--config` 时，不读写默认数据根，`--config` 中的 `model` 是唯一模型来源，本地 Settings 接口不可用。它仍使用相同的可选明文 `api_key` 字段。
 
-发行包的 Runtime 使用 `plugins` feature。单独的无插件构建仍可使用普通聊天；插件设置接口会明确返回不支持。可信 Native 插件继续通过 Cargo feature 静态链接，不支持任意 npm、URL、Rust 动态库安装或在线更新。
+## 本地网页和可选账号
 
-安装来源是本机 External IPC 描述 JSON：
+本地 WebUI 只监听回环地址。它没有登录、网页 token 或 launch ticket。普通 URL 可直接访问。`--no-open`、SSH 环境或无桌面环境会跳过系统浏览器；服务仍保持可用。
+
+`--lan IP:PORT` 必须显式选择 WebUI。未配置账号时，LAN 请求直接放行，终端和页面显示暴露提示。Host、Origin 和 Sec-Fetch-Site 仍会校验，RPC 参数和凭据不能放进 URL。
+
+局域网启动同时提供两个入口：
+
+- LAN URL 面向网络访问。
+- `local_url` 只允许真实回环连接，用于本机管理。
+
+账号配置在本机 WebUI 的“设置 → 局域网访问账号”中完成。保存后立即应用于当前 LAN 入口，并撤销旧登录会话。本机入口始终免登录。远端访客不能配置账号，也不能利用 Forwarded 或 X-Forwarded-For 伪装成本机。
+
+账号文件是 Client 级 `CAYW_HOME/web-account.json`。它保护当前网页服务中的所有工作区，只保存用户名和加盐 Argon2id 摘要，使用 0600 原子写入。CLI 备用入口为：
+
+```sh
+cayw account --username admin
+cayw account --username admin --file /私有目录/account.json
+```
+
+CLI 不覆盖已有账号。LAN 当前使用 HTTP，只适合可信网络。本阶段不增加 TLS、远程账号管理或多用户权限系统。
+
+## 两类 plugin
+
+Client 根据 plugin 类型管理生命周期。
+
+- Client plugin：TUI、WebUI 等设备级入口。它们连接唯一 Client，不能按工作区保存连接状态。
+- WorkspaceArchitecture plugin：StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin。它们按工作区启用，但进程仍由唯一 Client 启动、停止和监管。
+
+本地 External descriptor 必须声明 `role: "workspace_architecture"` 和 `kind: "external"`：
 
 ```json
 {
   "executable": "/absolute/path/my-plugin",
   "argv": [],
   "manifest": {
-    "name": "my-plugin", "version": "1.0.0", "protocol_version": 1,
-    "kind": "external", "capabilities": [], "permissions": {}
+    "name": "my-plugin",
+    "version": "1.0.0",
+    "protocol_version": 1,
+    "role": "workspace_architecture",
+    "kind": "external",
+    "capabilities": [],
+    "permissions": {}
   }
 }
 ```
 
-登记时检查本机可执行文件、清单协议版本、能力 schema 和参数边界，记录可执行文件 SHA256；不启动程序，也不下载或复制源码。描述文件不接受环境变量映射或 shell 命令。External 进程使用清空的环境，不继承模型凭据。进程隔离不是安全沙箱，插件仍以本机用户身份运行；启用前必须审阅路径、参数、能力与权限，并明确批准执行。
+安装清单是 Client 全局状态。启用关系属于工作区：
 
 ```sh
 cayw plugins install --file /path/local-plugin.json
-cayw plugins list
-cayw plugins enable my-plugin --approve-process
-cayw plugins bind my-plugin --session SESSION_ID
-cayw plugins disable my-plugin
+cayw plugins list --workspace /你的项目
+cayw plugins enable my-plugin --approve-process --workspace /你的项目
+cayw plugins disable my-plugin --workspace /你的项目
 cayw plugins update my-plugin --file /path/new-local-plugin.json
 cayw plugins remove my-plugin
 ```
 
-各命令可添加 `--workspace DIR`。网页提供相同操作、实际可用状态和错误原因；启用必须勾选进程批准，成功后清空勾选。启用会核对已登记可执行文件的摘要并运行真实协议握手；失败保留安装登记与错误，保持停用，不自动重试。摘要只覆盖可执行文件，不覆盖 argv 指向的脚本、解释器加载的模块或其他资源，批准前须自行审阅这些来源。
+安装和更新只校验本地文件并记录可执行文件 SHA256，不运行程序。启用需要明确的进程批准，并核对摘要和真实协议握手。External 进程使用清空的环境，不继承模型密钥。进程隔离不是安全沙箱；它仍以本机用户身份运行。
 
-停用先持久化停止意图，再经 Runtime checkpoint/freeze 卸载；停止意图保存失败时保留当前实例并返回错误。进程握手或持久化边界的结果不明确时返回 `settings_outcome_unknown`，先读取实际状态，不自动重试。
+普通 WorkspaceArchitecture plugin 不绑定普通 Session。它被停用、卸载或崩溃时，普通 Session 不冻结，后续对话仍可继续。进行中的调用若无法确认结果，返回 `outcome_unknown`；Client 不自动拉起 plugin，也不重放旧调用。External plugin 的退出确认有时间上限。终止、等待或超时无法确认清理时，Client 保留精确实例阻断并拒绝同名 plugin 重启，直到清理得到确认。
 
-更新必须先停用，保持同名，验证失败保留原登记。更新只登记本地新版本，成功后仍需重新批准启用。卸载只删除登记和停止对应实例，不删除用户的本机可执行文件。已批准启用的插件在 Runtime 重启时按同一路径、参数及摘要恢复；恢复失败转为停用并记录错误。
+StrongFlow 是专用例外。StrongFlow Session 保留版本化 binding、checkpoint、冻结和恢复合同。StrongFlow 缺失时，原 Session 保持冻结。用户只能显式确认 Fork 为新的普通 Session；原 Session 和证据不变。
 
-启用不自动绑定所有会话。绑定通过 Runtime 原有接口检查会话空闲和插件身份；能力调用仍经过 Host 精确权限、预算和持久化。停用、卸载或替换会先走 Runtime 原有 checkpoint/freeze 路径，已绑定会话保持冻结，重新启用不会静默换绑。用户可在原有网页流程中明确确认 Fork 为普通聊天；未知副作用仍需先核对。
+更新或移除前，必须先在所有工作区停用该 plugin。摘要变化或恢复失败会保留启用意图和错误状态，不静默改成成功。
+
+## MCP 和 Pi
+
+MCP 与 Pi 配置由 Client 在打开每个工作区时准备。每个工作区获得独立 Registry、MCP 进程和 Pi 实例。相同 source ID 不会让两个工作区共享进程或调用计数。
+
+如果后续 Pi、Runtime 或架构 plugin 初始化失败，Client 会关闭已经启动的 MCP/Pi 资源。Client 正常退出时也会清理所有已打开工作区的这些资源。无法确认清理时返回错误，不把它当作已停止。
+
+## doctor
+
+`cayw doctor` 是只读检查。它报告本地状态、模型方案、Client、Client plugin、架构 plugin 和旧状态文件，但不会启动进程、重写配置、删除清理记录或迁移数据。
+
+```sh
+cayw doctor --workspace /你的项目
+```
+
+旧模型迁移发生在正常初始化或启动路径，不发生在 doctor。
 
 ## 打包和验证
 
-在 macOS arm64 源码目录运行 `sh scripts/package-cli.sh /新的输出目录`，构建四个程序和启用 plugins 的 Runtime，生成 `BUILD.json`、`SHA256SUMS` 与安装脚本。不会安装、推送或发布。包内 `install.sh` 对四个程序检查摘要、暂存文件和 `--help`，替换失败时尝试恢复备份。可视化编辑器、Trace 调试与 Pi 兼容仍是独立可选组件，不随这个基础包安装；工作台读取实际同目录安装状态，未安装的 Editor/Trace 默认入口禁用，侧栏明确显示安装与启动命令，Pi 则区分未编译、未启用和已启用。已安装的外部服务仍需单独启动；连接配置中只有有效本机地址才允许打开，令牌保持独立。安装命令根据当前二进制所在位置选择相同前缀的安装方式或源码构建方式，需在 CAYW 源码根目录运行。
-
-复跑入口：
+在 macOS arm64 源码目录运行：
 
 ```sh
-cargo fmt --all -- --check
-cargo check --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test -p cayw-runtime --features plugins --test model_switch --locked
-cargo build -p cayw-runtime --features plugins --bin cayw --bin cayw-runtime-plugin-fixture -p cayw-webui --bin cayw-webui --locked
-python3 scripts/validate-product-workflows.py target/debug /新的证据目录
-CAYW_PLAYWRIGHT_MODULE=/绝对路径/playwright/index.mjs node scripts/validate-product-settings-browser.mjs target/debug /另一个新证据目录
-CAYW_PLAYWRIGHT_MODULE=/绝对路径/playwright/index.mjs node scripts/validate-workspace-switch-browser.mjs target/debug /工作区切换新证据目录
+sh scripts/package-cli.sh /新的输出目录
 ```
 
-这些验证只用合成 Provider、离线 Fixture、本机进程与临时配置，不加载用户模型配置或真实密钥，不调用外部付费模型。平台和实际运行范围见对应验证记录，其他平台的开发结果不构成 macOS 验收。
+安装包生成 `BUILD.json`、`SHA256SUMS` 和 `install.sh`。脚本不联网、不使用 sudo、不修改 shell 配置。
+
+主要复跑入口：
+
+```sh
+cargo +1.95.0 fmt --all -- --check
+cargo +1.95.0 check --workspace --locked
+cargo +1.95.0 test --workspace --locked
+cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
+cargo +1.95.0 run -p cayw-agent --example offline --locked
+```
+
+浏览器验收使用 `scripts/validate-browser-launch.mjs`。它在临时私有 HOME 中启动唯一 Client、两个工作区和真实浏览器，使用离线 Provider 和回环网络。普通测试不读取用户模型配置，不调用真实或付费模型。真实模型测试仍需要当次明确授权。

@@ -7,7 +7,7 @@
 
 use crate::types::{PINNED_PI_CODING_AGENT, PINNED_PI_CODING_AGENT_VERSION, PiPackageId};
 use cayw_ai::ToolDefinition;
-use cayw_plugins::{PLUGIN_PROTOCOL_VERSION, PluginKind, PluginManifest};
+use cayw_plugins::{PLUGIN_PROTOCOL_VERSION, PluginKind, PluginManifest, PluginRole};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,6 +50,7 @@ impl PiNpmHelloExtension {
             name: Self::PACKAGE_NAME.into(),
             version: Self::PACKAGE_VERSION.into(),
             protocol_version: PLUGIN_PROTOCOL_VERSION,
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::External,
             capabilities: vec![ToolDefinition {
                 name: Self::TOOL.into(),

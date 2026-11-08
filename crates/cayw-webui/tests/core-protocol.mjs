@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applySnapshot, beginWrite, consumeEvents, createView, finishWrite, messagePresentation } from '../assets/app.js';
+import { applySnapshot, beginWrite, consumeEvents, createView, finishWrite, messagePresentation, workspaceIdFromHash } from '../assets/app.js';
 
 const lease = { session_id: 'core3-session', attempt_id: 'attempt-1', worker_id: 'worker-1', fence: 1 };
 const snapshot = { id: lease.session_id, state: 'idle', cursor: 5, attempt: null, messages: [], pending_approvals: [], unresolved_calls: [] };
+
+test('workspace launch hash accepts only canonical local workspace IDs', () => {
+  const id = `workspace-${'a'.repeat(64)}`;
+  assert.equal(workspaceIdFromHash(`#workspace=${id}`), id);
+  assert.equal(workspaceIdFromHash('#workspace=local'), 'local');
+  assert.equal(workspaceIdFromHash(''), null);
+  assert.throws(() => workspaceIdFromHash('#workspace=workspace-ABC'), /无效/);
+  assert.throws(() => workspaceIdFromHash(`#workspace=${id}&workspace=local`), /只能包含一个/);
+});
 
 function finishedCancel(protocol, eventLease = lease, envelopeLease = lease, receiptError = null) {
   let view = createView(lease.session_id);

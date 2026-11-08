@@ -12,6 +12,7 @@ fn manifest(name: &str, capability: &str) -> PluginManifest {
     PluginManifest {
         name: name.into(),
         version: "1.0.0".into(),
+        role: PluginRole::WorkspaceArchitecture,
         kind: PluginKind::Native,
         protocol_version: PLUGIN_PROTOCOL_VERSION,
         capabilities: vec![ToolDefinition {
@@ -68,6 +69,142 @@ impl Plugin for Native {
             Ok(arguments)
         }
     }
+}
+
+struct FailingCleanup(Native);
+
+#[async_trait]
+impl Plugin for FailingCleanup {
+    fn manifest(&self) -> &PluginManifest {
+        self.0.manifest()
+    }
+
+    async fn call(
+        &self,
+        method: &str,
+        arguments: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, PluginError> {
+        self.0.call(method, arguments, cancel).await
+    }
+
+    async fn wait_shutdown(&self) -> Result<(), PluginError> {
+        Err(PluginError::Failed(
+            "synthetic cleanup confirmation failure".into(),
+        ))
+    }
+}
+
+struct RetryCleanup {
+    native: Native,
+    waits: AtomicUsize,
+}
+
+#[async_trait]
+impl Plugin for RetryCleanup {
+    fn manifest(&self) -> &PluginManifest {
+        self.native.manifest()
+    }
+
+    async fn call(
+        &self,
+        method: &str,
+        arguments: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, PluginError> {
+        self.native.call(method, arguments, cancel).await
+    }
+
+    async fn wait_shutdown(&self) -> Result<(), PluginError> {
+        if self.waits.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(PluginError::OutcomeUnknown(
+                "synthetic first cleanup observation was inconclusive".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_cleanup_blocks_same_name_restart() {
+    let registry = PluginRegistry::new();
+    let description = registry
+        .load_native(
+            Arc::new(FailingCleanup(Native::new(
+                "fixture",
+                "fixture.echo",
+                false,
+            ))),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    let error = registry
+        .unload_exact_and_wait(&description)
+        .await
+        .unwrap_err();
+    assert!(error.outcome_unknown());
+    assert_eq!(registry.pending_cleanup(), vec![description]);
+    assert!(matches!(
+        registry.load_native(
+            Arc::new(Native::new("fixture", "fixture.echo", false)),
+            context("fixture.echo"),
+        ),
+        Err(PluginError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn exact_retry_clears_retiring_only_after_cleanup_confirmation() {
+    let registry = PluginRegistry::new();
+    let description = registry
+        .load_native(
+            Arc::new(RetryCleanup {
+                native: Native::new("fixture", "fixture.echo", false),
+                waits: AtomicUsize::new(0),
+            }),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    assert!(
+        registry
+            .unload_exact_and_wait(&description)
+            .await
+            .unwrap_err()
+            .outcome_unknown()
+    );
+    assert_eq!(registry.pending_cleanup(), vec![description.clone()]);
+
+    let foreign = PluginRegistry::new();
+    let foreign_description = foreign
+        .load_native(
+            Arc::new(Native::new("fixture", "fixture.echo", false)),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    assert!(
+        registry
+            .retry_cleanup_exact_and_wait(&foreign_description)
+            .await
+            .unwrap_err()
+            .outcome_unknown()
+    );
+    assert_eq!(registry.pending_cleanup(), vec![description.clone()]);
+
+    assert_eq!(
+        registry
+            .retry_cleanup_exact_and_wait(&description)
+            .await
+            .unwrap(),
+        description
+    );
+    assert!(registry.pending_cleanup().is_empty());
+    registry
+        .load_native(
+            Arc::new(Native::new("fixture", "fixture.echo", false)),
+            context("fixture.echo"),
+        )
+        .unwrap();
 }
 
 #[tokio::test]
@@ -668,7 +805,7 @@ impl Plugin for Reentrant {
         Ok(json!({"effect_performed": true}))
     }
 
-    fn shutdown(&self) {
+    fn request_shutdown(&self) {
         self.shutdowns.fetch_add(1, Ordering::Relaxed);
         assert!(self.registry.upgrade().unwrap().list().is_empty());
     }

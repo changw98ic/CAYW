@@ -73,7 +73,7 @@ return { files = files, matches = matches }
 
 macOS Apple Silicon 发行包解压后，在包目录运行 `sh install.sh` 即可安装 `cayw`、`cayw-tui`、`cayw-webui` 和 `cayw-client`，默认位置为 `~/.local/bin`。用 `--prefix DIR` 改到 `DIR/bin`；目标已有不同程序时需加 `--force`。脚本会核对 `SHA256SUMS`，不联网、不使用 sudo、不修改 shell 配置。`scripts/install-cli.sh` 是发行包安装入口，发布时位于包根目录并命名为 `install.sh`；从源码构建仍需下面的 Cargo 命令。
 
-安装完整发行包后，在项目目录直接运行 `cayw` 即可启动或复用 Runtime 并进入 TUI；`cayw start` 是同一入口。网页是可选界面，使用 `cayw --ui web` 显式启动，本地默认免登录。显式 `--lan IP:PORT` 开放局域网访问，未配置账号时直接放行；在本机网页“设置 → 局域网访问账号”中可配置或修改可选账号，保存后立即应用于当前局域网入口；本地访问仍免登录。局域网启动同时提供仅回环可达的本机管理地址，普通远端访客不能配置账号。CLI 账户命令保留为备用。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立会话和模型方案。网页“设置”可管理模型方案和本地 External 插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再经显式批准启动，普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
+安装完整发行包后，在项目目录直接运行 `cayw` 即可启动或复用设备上唯一的 Client，并进入 TUI；`cayw start` 是同一入口。TUI 和 WebUI 都由这个 Client 统一连接和监管，不为每个工作区保存独立连接状态。网页是可选界面，使用 `cayw --ui web` 显式启动，本地默认免登录。显式 `--lan IP:PORT` 开放局域网访问，未配置账号时直接放行；在本机网页“设置 → 局域网访问账号”中可配置或修改可选账号，保存后立即应用于当前局域网入口；本地访问仍免登录。局域网启动同时提供仅回环可达的本机管理地址，普通远端访客不能配置账号。CLI 账户命令保留为备用。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立的目录、SQLite、会话、模型方案和架构插件启用关系。网页“设置”可管理模型方案和本地 External 架构插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再按工作区经显式批准启用；其进程仍由唯一 Client 统一启动和停止。普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
 
 
 需要 **Rust 1.95+** 从源码运行离线示例：
@@ -91,9 +91,9 @@ assistant: 2 + 3 = 5
 completed: 5 messages, running=false
 ```
 
-终端交互界面直接运行 `cayw`，默认以当前目录作为工作区并自动启动或连接服务。已有显式 `cayw serve` 服务时，`cayw tui` 仍可作为仅连接的兼容命令，选择会话、发送消息、审批和取消。界面自动连接当前工作区的服务，快捷键见 [TUI 说明](crates/cayw-tui/README.md)。
+终端交互界面直接运行 `cayw`，默认以当前目录作为工作区并启动或复用唯一 Client。已有显式 `cayw serve` Client 时，`cayw tui` 可作为只连接入口，选择会话、发送消息、审批和取消。TUI 的所有工作区请求都经同一个 Client 路由；工作区不保存自己的连接地址或进程生命周期。快捷键见 [TUI 说明](crates/cayw-tui/README.md)。
 
-安装独立 Runtime 和 Rust 客户端后，可以通过 Rust SDK 或认证本机 IPC 使用同一个持久会话。`cayw serve` 会自动初始化默认数据根（macOS 为 `~/.cayw`，可用 `CAYW_HOME` 指定专用根），工作区默认为当前目录。没有配置模型时，创建和查询可用，`prompt` 返回 `model_not_configured`，不会发送模型请求。可以用固定响应做离线演示：
+安装独立 Runtime 和 Rust 客户端后，可以通过 Rust SDK 或认证本机 IPC 使用同一个持久会话。使用默认位置时，`cayw serve` 会自动初始化数据根（macOS 为 `~/.cayw`，可用 `CAYW_HOME` 指定专用根），并成为设备上唯一的本地 Client；工作区默认为当前目录。完整显式提供 `--db`、`--token-env` 和 `--config` 时，服务进入独立 Headless 模式，不读取或创建默认数据根。没有配置模型时，Client、TUI 和 WebUI 都能正常启动；创建和查询可用，第一次 `prompt`、`enqueue` 或 `resume` 返回 `model_not_configured`，不会发送模型请求。可以用固定响应做离线演示：
 
 ```sh
 cayw serve --offline --demo-authorized
@@ -102,7 +102,7 @@ cayw-client create
 cayw-client prompt --session SESSION_ID --text 'Run the offline demo'
 ```
 
-演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。真实模型运行 `cayw configure` 配置（只保存凭据的环境变量名），或直接编辑数据根的 `config.json` 加入 `model` 后重启服务。没有配置时，`cayw serve` 在终端会询问是否运行 `cayw configure`；非交互环境会打印配置路径和 `cayw configure` 提示。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
+演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。本地产品只通过 `cayw conf` 首次配置模型。它把当前工作区的 `configured` 方案写入私有 `models.json`，并允许把可选密钥作为普通明文字段 `api_key` 保存；留空表示模型服务不需要认证。启动不会弹出配置向导。旧 `config.json.model` 只在迁移时读取，迁移后删除。只有完整显式 Headless 的 `--config` 继续以 `config.model` 为权威来源。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
 
 ## 文档与参与
 

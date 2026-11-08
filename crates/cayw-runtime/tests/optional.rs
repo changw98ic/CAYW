@@ -93,7 +93,7 @@ async fn actual_plugin_binding_freezes_on_unload_and_only_confirmed_fork_runs_ch
         .unwrap();
     assert_eq!(before["frozen"], false);
     assert_eq!(before["binding"]["plugin"], "strongflow");
-    rt.unload_plugin("strongflow").unwrap();
+    rt.unload_plugin("strongflow").await.unwrap();
     let frozen = rt
         .call(
             "session.get",

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>CAYW 本机会话</title>
+  <link rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -38,7 +39,7 @@
       <div class="session-picker-content">
       <section class="workspace-switcher" aria-label="选择工作区">
         <label for="workspace-choice">工作区</label><select id="workspace-choice"></select>
-        <button id="switch-workspace" type="button">连接 / 切换</button>
+        <button id="switch-workspace" type="button">打开 / 切换</button>
         <button id="refresh-workspaces" type="button" class="quiet">刷新目录</button>
         <p id="workspace-switch-status" class="small muted" role="status">连接后读取已登记工作区。</p>
       </section>
@@ -125,23 +126,23 @@
       <button id="save-account" type="submit" disabled>保存账号</button>
     </form>
     <button id="refresh-account" type="button" class="secondary">刷新账号状态</button>
-    <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。只保存密钥环境变量名称；服务启动时需已有该变量。保存不发送模型请求。</p>
+    <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。密钥可明文保存在当前工作区的普通私有配置文件；无认证本地服务可以留空。保存不发送模型请求。</p>
     <div id="model-profiles"></div>
     <form id="model-settings-form">
-      <label>方案名称<input name="name" required maxlength="80" pattern="[a-zA-Z0-9_.-]+" placeholder="daily"></label>
+      <label>方案名称<input name="name" required maxlength="80" pattern="[a-zA-Z0-9_.\-]+" placeholder="daily"></label>
       <label>服务<select name="service"><option value="openai">OpenAI / 兼容服务</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="magpie">Magpie</option></select></label>
       <label>接口<select name="api"><option>chat_completions</option><option>responses</option><option>messages</option><option>stream_generate_content</option><option>generate_content</option></select></label>
       <label>服务地址<input name="base_url" type="url" required value="https://api.openai.com/v1"></label>
       <label>模型名称<input name="id" required maxlength="256"></label>
       <label>API 版本<input name="api_version" required value="v1"></label>
-      <label>密钥环境变量名称<input name="api_key_env" required value="OPENAI_API_KEY" maxlength="128"></label>
+      <label>API 密钥（可选，明文保存）<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="无认证服务请留空"></label>
       <label>单次输出 token 上限<input name="max_output_tokens" type="number" required min="1" max="9007199254740991" value="4096"></label>
       <button type="submit">保存模型方案</button>
     </form>
-    <h3>插件</h3><p class="small muted">支持本机 External IPC 插件。登记和更新不执行代码；不支持 npm、URL 下载或动态 Native 安装。停用或更新后，已绑定会话保持冻结。</p>
+    <h3>插件</h3><p class="small muted">支持本机 External 工作区架构插件。登记和更新不执行代码；不支持 npm、URL 下载或动态 Native 安装。插件由唯一 Client 启动和监管，普通插件不绑定会话。</p>
     <div id="plugin-profiles"></div>
     <form id="plugin-settings-form">
-      <label>本地插件描述 JSON<textarea name="descriptor" required rows="7" maxlength="240000" placeholder='{"executable":"/绝对路径/plugin","argv":[],"manifest":{"name":"example","version":"1.0.0","protocol_version":1,"kind":"external","capabilities":[],"permissions":{}}}'></textarea></label>
+      <label>本地插件描述 JSON<textarea name="descriptor" required rows="7" maxlength="240000" placeholder='{"executable":"/绝对路径/plugin","argv":[],"manifest":{"name":"example","version":"1.0.0","protocol_version":1,"role":"workspace_architecture","kind":"external","capabilities":[],"permissions":{}}}'></textarea></label>
       <label>更新已有插件时填写名称<input name="name" maxlength="128" placeholder="留空表示安装新插件"></label>
       <button type="submit">校验并登记</button>
     </form>

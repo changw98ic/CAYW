@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig};
 use cayw_webui::{
-    DeviceRouter, GatewayLimits, IpcEndpoint, LanAccount, MAX_REQUEST_BYTES, OwnershipStore,
-    WebAccess, serve_configured, serve_with_limits, serve_with_ownership,
+    AccountSettings, DeviceRouter, GatewayLimits, IpcEndpoint, LanAccount, MAX_REQUEST_BYTES,
+    OwnershipStore, WebAccess, WorkspaceAccountSettings, serve_configured,
+    serve_with_account_settings_for_workspace, serve_with_limits, serve_with_ownership,
 };
 use reqwest::{Client as HttpClient, StatusCode};
 use serde_json::{Value, json};
@@ -338,6 +339,113 @@ async fn envelope(response: reqwest::Response, expected: StatusCode) -> Value {
 }
 
 #[tokio::test]
+async fn startup_workspace_uses_one_client_route_without_overriding_durable_owner() {
+    const WORKSPACE_ID: &str =
+        "workspace-0000000000000000000000000000000000000000000000000000000000000000";
+    let directory = tempdir().unwrap();
+    let ownership =
+        Arc::new(OwnershipStore::open(directory.path().join("ownership.json")).unwrap());
+    ownership
+        .bind_session("owned-remote", "device-alpha")
+        .unwrap();
+
+    let stop = CancellationToken::new();
+    let runtime = Arc::new(RuntimeFixture::default());
+    let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ipc_addr = ipc_listener.local_addr().unwrap();
+    let ipc_task = tokio::spawn(cayw_ipc::serve(
+        ipc_listener,
+        runtime,
+        ServerConfig::new(IPC_TOKEN),
+        stop.child_token(),
+    ));
+    let endpoint = IpcEndpoint::new(ipc_addr, IPC_TOKEN).unwrap();
+    let devices = Arc::new(DeviceRouter::new(endpoint.clone()));
+    devices.register("device-alpha", endpoint).unwrap();
+
+    let web_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_addr = web_listener.local_addr().unwrap();
+    let web_task = tokio::spawn(serve_with_account_settings_for_workspace(
+        web_listener,
+        devices,
+        WebAccess::LegacyBearer(WEB_TOKEN.into()),
+        GatewayLimits::default(),
+        Some(ownership),
+        WorkspaceAccountSettings {
+            account: AccountSettings {
+                path: directory.path().join("web-account.json"),
+                local_listener: None,
+            },
+            default_workspace_id: Some(WORKSPACE_ID.into()),
+        },
+        stop.clone(),
+    ));
+    let http = HttpClient::builder().no_proxy().build().unwrap();
+    let request = |value: Value| {
+        http.post(format!("http://{web_addr}/api/rpc"))
+            .bearer_auth(WEB_TOKEN)
+            .json(&value)
+    };
+
+    let default_routed = envelope(
+        request(json!({"method":"session.list","params":{}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(default_routed["result"]["method"], "client.workspace.call");
+    assert_eq!(
+        default_routed["result"]["params"],
+        json!({
+            "workspace_id":WORKSPACE_ID,
+            "rpc":{"method":"session.list","params":{}}
+        })
+    );
+
+    let primary = envelope(
+        request(json!({"method":"runtime.health","params":{},"workspace_id":"local"}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(primary["result"]["status"], "ok");
+
+    let catalog = envelope(
+        request(json!({"method":"settings.workspaces.list","params":{}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(catalog["result"]["method"], "settings.workspaces.list");
+
+    let owned = envelope(
+        request(json!({"method":"session.get","params":{"session_id":"owned-remote"}}))
+            .send()
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(owned["result"]["id"], "s1");
+    assert!(owned["result"].get("method").is_none());
+
+    stop.cancel();
+    for task in [web_task, ipc_task] {
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown")
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn static_assets_load_before_login_and_never_contain_credentials() {
     let fixture = Fixture::start(GatewayLimits::default()).await;
     for (path, content_type) in [
@@ -450,6 +558,7 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
         "tool.execute",
         "session.reconcile",
         "plugin.load",
+        "settings.plugins.bind",
         "runtime.shutdown",
     ] {
         let result = envelope(

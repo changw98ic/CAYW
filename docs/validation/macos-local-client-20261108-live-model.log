@@ -1,0 +1,4 @@
+   Compiling cayw-agent v0.1.0 (/Volumes/ORICO/CAYW/crates/cayw-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.97s
+     Running `target/debug/examples/magpie`
+Error: Custom { kind: Other, error: "Set MAGPIE_API_KEY explicitly; this example sends real requests" }

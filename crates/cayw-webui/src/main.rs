@@ -1,6 +1,6 @@
 use cayw_webui::{
     AccountSettings, DeviceRouter, GatewayLimits, IpcEndpoint, LanAccount, OwnershipStore,
-    WebAccess,
+    WebAccess, WorkspaceAccountSettings,
 };
 use std::{
     collections::HashMap,
@@ -22,6 +22,7 @@ struct Config {
     ownership_path: PathBuf,
     account_path: PathBuf,
     access: WebAccess,
+    workspace_id: Option<String>,
 }
 impl Config {
     fn parse(
@@ -107,6 +108,10 @@ impl Config {
         if !cayw_webui::valid_token(&ipc_token) {
             return Err("CAYW_IPC_TOKEN 格式无效".into());
         }
+        let workspace_id = cayw_webui::parse_local_workspace_id(
+            values.get("CAYW_WORKSPACE_ID").map(String::as_str),
+        )
+        .map_err(str::to_owned)?;
         Ok(Self {
             ipc_addr,
             web_addr,
@@ -114,6 +119,7 @@ impl Config {
             ownership_path,
             account_path,
             access,
+            workspace_id,
         })
     }
 }
@@ -178,7 +184,11 @@ async fn run(args: Vec<String>) -> Result<(), String> {
             .filter(|(name, _)| {
                 matches!(
                     name.as_str(),
-                    "CAYW_IPC_ADDR" | "CAYW_IPC_TOKEN" | "CAYW_WEB_ADDR" | "CAYW_OWNERSHIP_PATH"
+                    "CAYW_IPC_ADDR"
+                        | "CAYW_IPC_TOKEN"
+                        | "CAYW_WEB_ADDR"
+                        | "CAYW_OWNERSHIP_PATH"
+                        | "CAYW_WORKSPACE_ID"
                 )
             })
             .collect(),
@@ -218,7 +228,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     } else {
         "local"
     };
-    if env::var_os("CAYW_LAUNCHER").is_some() {
+    if env::var_os("CAYW_CLIENT_SUPERVISED").is_some() {
         println!(
             "{}",
             serde_json::json!({"url":format!("http://{address}/"),"access":mode,"login_required":login_required,"local_url":format!("http://{local_address}/")})
@@ -235,15 +245,18 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         let _ = tokio::signal::ctrl_c().await;
         stop.cancel();
     });
-    let result = cayw_webui::serve_with_account_settings(
+    let result = cayw_webui::serve_with_account_settings_for_workspace(
         listener,
         devices,
         config.access,
         GatewayLimits::default(),
         Some(Arc::new(ownership)),
-        AccountSettings {
-            path: config.account_path,
-            local_listener,
+        WorkspaceAccountSettings {
+            account: AccountSettings {
+                path: config.account_path,
+                local_listener,
+            },
+            default_workspace_id: config.workspace_id,
         },
         cancel,
     )
@@ -269,6 +282,30 @@ mod tests {
         let config = Config::parse([], environment()).unwrap();
         assert_eq!(config.web_addr, "127.0.0.1:0".parse().unwrap());
         assert!(matches!(config.access, WebAccess::Local));
+        assert_eq!(config.workspace_id, None);
+
+        let mut routed_environment = environment();
+        routed_environment.insert(
+            "CAYW_WORKSPACE_ID".into(),
+            "workspace-0000000000000000000000000000000000000000000000000000000000000000".into(),
+        );
+        let routed = Config::parse([], routed_environment).unwrap();
+        assert_eq!(
+            routed.workspace_id.as_deref(),
+            Some("workspace-0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        let mut primary_environment = environment();
+        primary_environment.insert("CAYW_WORKSPACE_ID".into(), "local".into());
+        assert_eq!(
+            Config::parse([], primary_environment).unwrap().workspace_id,
+            None
+        );
+        for workspace_id in ["", "other", "workspace-", "workspace-a b"] {
+            let mut invalid_environment = environment();
+            invalid_environment.insert("CAYW_WORKSPACE_ID".into(), workspace_id.into());
+            assert!(Config::parse([], invalid_environment).is_err());
+        }
+
         let lan = Config::parse(
             ["--lan", "192.168.1.10:1234"].into_iter().map(String::from),
             environment(),

@@ -170,6 +170,7 @@ fn fixture_manifest() -> PluginManifest {
         name: "fixture".into(),
         version: "1.0.0".into(),
         protocol_version: PLUGIN_PROTOCOL_VERSION,
+        role: PluginRole::WorkspaceArchitecture,
         kind: PluginKind::External,
         capabilities: vec![ToolDefinition {
             name: "fixture.echo".into(),

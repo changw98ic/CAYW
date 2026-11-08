@@ -67,7 +67,7 @@ host.install_npm_hello_extension(CancellationToken::new()).await?;
 let _ = host
     .call_tool(&npm, PiNpmHelloExtension::TOOL, json!({"name": "CAYW"}), CancellationToken::new())
     .await?;
-host.unload(&npm)?;
+host.unload(&npm).await?;
 
 println!("{}", host.matrix_snapshot().markdown_table());
 # Ok(())

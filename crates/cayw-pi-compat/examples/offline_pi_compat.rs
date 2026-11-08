@@ -49,7 +49,7 @@ async fn main() {
         .await
         .expect("call fixture");
     println!("fixture call result: {value}");
-    host.unload(&package).expect("unload fixture");
+    host.unload(&package).await.expect("unload fixture");
     println!("unloaded {}", package.key());
 
     if let Some(exe) = sample_exe() {
@@ -75,7 +75,7 @@ async fn main() {
                     .await
                     .expect("call sample");
                 println!("sample call result: {value}");
-                host.unload(&sample).expect("unload sample");
+                host.unload(&sample).await.expect("unload sample");
             }
             Err(err) => println!("sample path refused (explicit): {err}"),
         }
@@ -104,7 +104,7 @@ async fn main() {
                 .await
                 .expect("call npm hello");
             println!("npm hello call result: {value}");
-            host.unload(&npm).expect("unload npm hello");
+            host.unload(&npm).await.expect("unload npm hello");
         }
         Err(err) => println!("npm Pi hello refused (explicit; need Node>=22.19 + npm ci): {err}"),
     }

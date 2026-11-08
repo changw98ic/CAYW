@@ -1,0 +1,19 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running `target/debug/examples/magpie`
+{"credentials":"not logged","event":"live_test_start","inputs":"synthetic","max_agent_turns":3,"provider":"magpie","requested_model":"auto/deepseek-v4.1-flash","text_max_tokens":1024,"thinking_level":"low","timeout_seconds":90,"timestamp_ms":1794099759580,"tool_max_tokens":2048}
+{"case":"text_stream","event":"stream_counts","terminals":1,"text_deltas":2,"thinking_deltas":9}
+{"case":"text_stream","duration_ms":1825,"error":null,"event":"assistant_end","requested_model":"auto/deepseek-v4.1-flash","response_id":"chatcmpl-7c65ae374df942769c76e4da1056a9a6","response_model":"group/auto-deepseek-v4-1-flash","stop_reason":"stop","text":"CAYW_MAGPIE_STREAM_OK","tool_calls":[],"usage":{"cache_read":0,"cache_write":0,"input":46,"output":35,"reasoning":24,"total_tokens":81}}
+{"case":"text_stream","result":"passed"}
+{"case":"tool_loop","event":"prompt","text":"Call read_probe exactly once with key cayw-rust. Then reply with only its returned value, unchanged. Do not guess the value."}
+{"case":"tool_request","duration_ms":1185,"error":null,"event":"assistant_end","requested_model":"auto/deepseek-v4.1-flash","response_id":"chatcmpl-07f6dea2c6354de3aec78e1cdcf2a34f","response_model":"group/auto-deepseek-v4-1-flash","stop_reason":"toolUse","text":"","tool_calls":[{"arguments":{"key":"cayw-rust"},"id":"call_bf4cc3c8dfcf43a087417449","name":"read_probe"}],"usage":{"cache_read":0,"cache_write":0,"input":348,"output":44,"reasoning":0,"total_tokens":392}}
+{"call":{"arguments":{"key":"cayw-rust"},"id":"call_bf4cc3c8dfcf43a087417449","name":"read_probe"},"event":"tool_start"}
+{"call_id":"call_bf4cc3c8dfcf43a087417449","duration_ms":0,"event":"tool_end","result":{"content":[{"text":"CAYW_PROBE_1794099761406_2773","type":"text"}],"details":null,"is_error":false,"outcome_unknown":false,"structured_content":{"value":"CAYW_PROBE_1794099761406_2773"},"terminate":false,"usage":null}}
+{"case":"tool_loop","duration_ms":1176,"error":null,"event":"assistant_end","requested_model":"auto/deepseek-v4.1-flash","response_id":"chatcmpl-2899b0910c7b4523876b1d97ca29928a","response_model":"group/auto-deepseek-v4-1-flash","stop_reason":"stop","text":"CAYW_PROBE_1794099761406_2773","tool_calls":[],"usage":{"cache_read":0,"cache_write":0,"input":435,"output":46,"reasoning":31,"total_tokens":481}}
+{"case":"tool_loop","executions":1,"expected_value":"CAYW_PROBE_1794099761406_2773","paired_call_id":"call_bf4cc3c8dfcf43a087417449","result":"passed"}
+{"case":"follow_up","event":"prompt","text":"Repeat only the exact value returned by read_probe in our previous turn. Do not add any other text."}
+{"case":"follow_up","duration_ms":2486,"error":null,"event":"assistant_end","requested_model":"auto/deepseek-v4.1-flash","response_id":"chatcmpl-60fbdf1a384f467f8e838e4bd4e3a6d9","response_model":"group/auto-deepseek-v4-1-flash","stop_reason":"stop","text":"CAYW_PROBE_1794099761406_2773","tool_calls":[],"usage":{"cache_read":0,"cache_write":0,"input":183,"output":166,"reasoning":151,"total_tokens":349}}
+{"case":"follow_up","executions":1,"result":"passed"}
+{"case":"cancel_stream","event":"prompt","text":"Print the integers 1 through 200, one per line. Output only the integers and keep going until 200."}
+{"case":"cancel_stream","duration_ms":3118,"error":"Model request cancelled","event":"assistant_end","requested_model":"auto/deepseek-v4.1-flash","response_id":"gw-db10255fc9e-bbdbea","response_model":"group/auto-deepseek-v4-1-flash","stop_reason":"aborted","text":"1","tool_calls":[],"usage":{"cache_read":0,"cache_write":0,"input":0,"output":0,"reasoning":0,"total_tokens":0}}
+{"case":"cancel_stream","result":"passed","running":false,"text_deltas_before_abort":1}
+{"cases":4,"event":"live_test_end","result":"passed","timestamp_ms":1794099769402}

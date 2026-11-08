@@ -2,9 +2,10 @@
 """Live SDK/IPC normal path, Core write checks, storage errors and worker panic.
 
 Run with ``python3 -I``. Real model calls go through a loopback relay that forwards
-upstream bytes without retry or invented replies. Only MAGPIE_API_KEY from the
-caller environment is used; when it is absent on loopback the documented public
-Magpie application id is injected into child environments only. Credential values
+upstream bytes without retry or invented replies. CAYW receives only a synthetic
+loopback relay key in its explicit configuration. The real MAGPIE_API_KEY, or the
+documented loopback public application id, stays in this relay process and replaces
+the synthetic Authorization header only while forwarding. Real credential values
 and authentication headers are never printed or saved.
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ MAX_POSTS, MAX_REQUEST, MAX_RESPONSE = 32, 16 << 20, 64 << 20
 NORMAL_TOKENS = PROBE_TOKENS = 1_000_000
 ALLOCATION_CAP = 10_000_000
 PUBLIC_APP_ID = 'magpie-cayw-runtime-validation'
+RELAY_API_KEY = 'cayw-loopback-relay-synthetic-key'
 TOKEN_ENV = 'CAYW_RUNTIME_LIVE_IPC_TOKEN'
 PROMPT = ('Complete this file task in one execute_code cell, then answer the nonce from its '
           'result. Use action=exec, yield_time_ms=10000, max_output_tokens=4096 and this script: '
@@ -127,13 +129,11 @@ def find_values(value, key, found):
     return found
 
 
-def minimal_env(credential=None):
+def minimal_env():
     env = {name: os.environ[name] for name in ('PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL')
            if name in os.environ}
     env.setdefault('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')
     env['NO_COLOR'] = '1'
-    if credential is not None:
-        env['MAGPIE_API_KEY'] = credential
     return env
 
 
@@ -351,6 +351,10 @@ class Relay:
             self.respond_error(handler, 413, 'relay request body limit')
             return
         body = handler.rfile.read(length) if length else b''
+        relay_authorized = handler.headers.get('Authorization') == 'Bearer ' + RELAY_API_KEY
+        if not relay_authorized:
+            self.respond_error(handler, 401, 'relay synthetic credential rejected')
+            return
         with self.lock:
             number = len(self.entries) + len(self.refusals) + 1
             if method == 'POST':
@@ -367,6 +371,7 @@ class Relay:
         entry = {'number': number, 'method': method, 'client_path': handler.path,
                  'upstream_path': target, 'request_headers': clean(dict(handler.headers)),
                  'authorization_present': auth_present(handler.headers),
+                 'relay_authorization_valid': relay_authorized,
                  'request_bytes': len(body), 'request_sha256': sha(body),
                  'started_at': started, 'complete': False}
         try:
@@ -378,8 +383,9 @@ class Relay:
         headers.update({'accept-encoding': 'identity', 'host': self.up.netloc})
         if body:
             headers['content-length'] = str(len(body))
-        if not any(k.lower() == 'authorization' for k in headers):
-            headers['Authorization'] = 'Bearer ' + self.credential
+        # Never forward the synthetic CAYW credential. The real upstream value
+        # exists only in this relay object and is overwritten for this request.
+        headers['authorization'] = 'Bearer ' + self.credential
         connection, response, received = None, None, bytearray()
         content_type, expected_length, error_text, status = '', None, None, 502
         response_headers, downstream_closed, sent = {}, False, False
@@ -487,8 +493,8 @@ class Relay:
 
 
 class Normal:
-    def __init__(self, mode, args, relay, credential):
-        self.mode, self.args, self.relay, self.credential = mode, args, relay, credential
+    def __init__(self, mode, args, relay):
+        self.mode, self.args, self.relay = mode, args, relay
         self.dir = args.out / (mode + '-normal')
         self.dir.mkdir()
         self.workspace = self.dir / 'workspace'
@@ -502,7 +508,7 @@ class Normal:
         self.config = {
             'model': {'service': 'magpie', 'api': 'chat_completions', 'id': args.model,
                       'base_url': relay.base, 'api_version': 'v1',
-                      'max_output_tokens': 4096, 'api_key_env': 'MAGPIE_API_KEY'},
+                      'max_output_tokens': 4096, 'api_key': RELAY_API_KEY},
             'budgets': {'max_total_tokens': NORMAL_TOKENS, 'max_turns': 4,
                         'max_run_time_ms': 180000, 'host_wait_ms': 170000,
                         'host_call_timeout_ms': 170000},
@@ -523,18 +529,18 @@ class Normal:
                    'prompt_text': PROMPT, 'permissions': self.config['permissions'],
                    'credential_source': args.credential_source}
 
-    def env(self, credentials=False):
-        env = minimal_env(self.credential if credentials else None)
+    def env(self):
+        env = minimal_env()
         if self.mode == 'ipc':
             env[TOKEN_ENV] = self.token
         return env
 
-    def start_server(self, credentials=True):
+    def start_server(self):
         self.server_no += 1
         self.server = Running([self.args.runtime, 'serve', '--db', self.db,
                                '--workspace', self.workspace, '--listen', '127.0.0.1:0',
                                '--token-env', TOKEN_ENV, '--config', self.config_path],
-                              self.env(credentials), self.dir, 'server-%03d' % self.server_no)
+                              self.env(), self.dir, 'server-%03d' % self.server_no)
         self.children.append(self.server)
 
         def ready():
@@ -546,8 +552,12 @@ class Normal:
         row = wait_for(ready, 'IPC server not ready')
         conf = row.get('configuration') or {}
         need(row.get('offline_fixture') is False, 'IPC server used offline mode')
-        need(row.get('model_configuration') == self.config['model'],
-             'IPC server did not use the exact model configuration')
+        public_model = dict(self.config['model'])
+        public_model.pop('api_key')
+        public_model['authentication'] = 'plain_file'
+        need(row.get('model_configuration') == public_model,
+             'IPC server did not report the redacted model configuration')
+        need(RELAY_API_KEY not in json.dumps(row), 'IPC readiness disclosed the relay key')
         need(conf.get('max_total_tokens') == NORMAL_TOKENS, 'IPC token budget changed')
         need(conf.get('max_turns') == 4 and conf.get('max_run_time_ms') == 180000,
              'IPC run budget changed')
@@ -565,18 +575,18 @@ class Normal:
         self.ev['server_exit_%d' % self.server_no] = {'exit_code': code, 'rows': rows}
         self.server = self.address = None
 
-    def launch(self, command, *flags, credentials=False):
+    def launch(self, command, *flags):
         self.seq += 1
         argv = [self.args.client, '--mode', self.mode]
         argv += (['--db', self.db, '--workspace', self.workspace, '--config', self.config_path]
                  if self.mode == 'sdk' else ['--address', self.address, '--token-env', TOKEN_ENV])
         argv += [command, *flags]
-        child = Running(argv, self.env(credentials), self.dir, '%03d-%s' % (self.seq, command))
+        child = Running(argv, self.env(), self.dir, '%03d-%s' % (self.seq, command))
         self.children.append(child)
         return child
 
-    def call(self, command, *flags, expected=0, credentials=False, timeout=WATCHDOG):
-        return self.launch(command, *flags, credentials=credentials).finish(expected, timeout)
+    def call(self, command, *flags, expected=0, timeout=WATCHDOG):
+        return self.launch(command, *flags).finish(expected, timeout)
 
     @staticmethod
     def result(rows, command):
@@ -620,8 +630,7 @@ class Normal:
     def prompt(self):
         cursor_path = self.dir / 'prompt.cursor.json'
         rows, _ = self.launch('prompt', '--session', self.identity, '--text', PROMPT,
-                              '--cursor-file', str(cursor_path), credentials=True).finish(
-            0, PROMPT_WATCHDOG)
+                              '--cursor-file', str(cursor_path)).finish(0, PROMPT_WATCHDOG)
         finished = [row for row in rows if row.get('type') == 'prompt_finished']
         need(len(finished) == 1, 'prompt has no unique terminal')
         need(not [row for row in rows if row.get('type') == 'error'], 'prompt emitted an error row')
@@ -733,7 +742,7 @@ class Normal:
     def verify_reopen(self):
         if self.mode == 'ipc':
             self.stop_server()
-            self.start_server(True)
+            self.start_server()
         reopened, tasks, events = self.get(), self.tasks(), self.all_events('events-reopened')
         need(reopened == self.session_view, 'new process changed Session state')
         need(tasks == self.task_list, 'new process changed Task identity')
@@ -750,7 +759,7 @@ class Normal:
         summary, payload = run_probe([self.args.probe, '--case', 'inspect', '--db', self.db,
                                       '--workspace', self.workspace, '--config', self.config_path,
                                       '--session', self.identity, '--out', out],
-                                     self.env(False), self.dir, name, 120)
+                                     self.env(), self.dir, name, 120)
         need(self.relay.post_count() == before, 'inspect made a provider request')
         check_summary(summary, 'inspect', 0)
         need(out.is_file(), 'inspect did not save its detailed output')
@@ -765,7 +774,7 @@ class Normal:
         need(self.nonce not in PROMPT, 'nonce leaked into the prompt')
         self.post_start = self.relay.post_count()
         if self.mode == 'ipc':
-            self.start_server(True)
+            self.start_server()
         try:
             self.identity = self.create()
             terminal = self.prompt()
@@ -955,7 +964,7 @@ def writes_step(mode, normal, args):
     before, out = normal.relay.post_count(), normal.dir / 'writes.json'
     summary, payload = run_probe([args.probe, '--case', 'writes', '--db', normal.db,
                                   '--session', normal.identity, '--out', out],
-                                 normal.env(False), normal.dir, 'writes', 120)
+                                 normal.env(), normal.dir, 'writes', 120)
     need(normal.relay.post_count() == before, 'writes probe made a provider request')
     check_summary(summary, 'writes', 0)
     need(out.is_file(), 'writes probe did not save its detailed output')
@@ -997,7 +1006,7 @@ def reopen_check(case, mode, root, args, relay, payload, entries, session, tasks
                                    '--workspace', root / 'workspace',
                                    '--config', root / 'runtime.json',
                                    '--session', session['id'], '--out', out],
-                                  minimal_env(None), root, case + '-' + mode + '-reopen', 120)
+                                  minimal_env(), root, case + '-' + mode + '-reopen', 120)
     need(relay.post_count() == before, case + ': reopen inspect made a provider request')
     check_summary(summary, 'inspect', 0)
     need(out.is_file(), case + ': reopen inspect did not save its detailed output')
@@ -1031,7 +1040,7 @@ def reopen_check(case, mode, root, args, relay, payload, entries, session, tasks
     return result
 
 
-def root_probe(case, mode, args, relay, credential):
+def root_probe(case, mode, args, relay):
     root = args.out / (case + '-' + mode)
     root.mkdir()
     workspace, database = root / 'workspace', root / 'session.db'
@@ -1040,14 +1049,14 @@ def root_probe(case, mode, args, relay, credential):
     save(config, {
         'model': {'service': 'magpie', 'api': 'chat_completions', 'id': args.model,
                   'base_url': relay.base, 'api_version': 'v1',
-                  'max_output_tokens': 4096, 'api_key_env': 'MAGPIE_API_KEY'},
+                  'max_output_tokens': 4096, 'api_key': RELAY_API_KEY},
         'budgets': {'max_total_tokens': PROBE_TOKENS, 'max_turns': 1,
                     'max_run_time_ms': 180000, 'host_wait_ms': 170000,
                     'host_call_timeout_ms': 170000}, 'permissions': []})
     before, out = relay.post_count(), root / (case + '.json')
     summary, payload = run_probe([args.probe, '--case', case, '--mode', mode, '--db', database,
                                   '--workspace', workspace, '--config', config, '--out', out],
-                                 minimal_env(credential), root, case + '-' + mode, PROBE_WATCHDOG)
+                                 minimal_env(), root, case + '-' + mode, PROBE_WATCHDOG)
     after = relay.post_count()
     need(after - before == 1, case + ': expected exactly one actual provider request')
     entries = relay.await_posts(before, 1)
@@ -1267,7 +1276,7 @@ def main():
                 report['preflight'] = {'error': type(error).__name__ + ': ' + str(error)}
         if not report['failures']:
             for mode in ('sdk', 'ipc'):
-                normal = Normal(mode, args, relay, credential)
+                normal = Normal(mode, args, relay)
                 normals[mode] = normal
                 try:
                     normal.run()
@@ -1299,7 +1308,7 @@ def main():
                 for mode in ('sdk', 'ipc'):
                     name = case + '-' + mode
                     try:
-                        report['scenarios'][name] = root_probe(case, mode, args, relay, credential)
+                        report['scenarios'][name] = root_probe(case, mode, args, relay)
                     except Exception as error:
                         report['failures'].append(name + ': ' + type(error).__name__ +
                                                   ': ' + str(error))

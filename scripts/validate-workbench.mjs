@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import {spawn, execFileSync} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
-import {mkdir, readFile, writeFile} from 'node:fs/promises';
+import {mkdir, readFile, realpath, writeFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
 import {dirname, resolve} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -30,7 +30,10 @@ await mkdir(dirname(out), {recursive: true});
 await mkdir(out, {recursive: false});
 const work = resolve(out, 'work');
 const workspace = resolve(work, 'workspace');
+const home = resolve(work, 'home');
+const caywHome = resolve(home, 'cayw');
 await mkdir(workspace, {recursive: true});
+await mkdir(home, {mode: 0o700});
 const tokens = Object.fromEntries(['ipc', 'web', 'editor', 'trace', 'provider'].map(key => [key, randomBytes(32).toString('hex')]));
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const digest = async path => sha(await readFile(path));
@@ -187,20 +190,31 @@ try {
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  const configPath = resolve(work, 'runtime-config.json');
+  const localEnv = {HOME: home, CAYW_HOME: caywHome};
+  execFileSync(binaries.cayw, ['init', '--workspace', workspace], {
+    cwd: root,
+    env: {PATH: process.env.PATH, ...localEnv},
+    stdio: 'pipe',
+  });
+  const canonicalWorkspace = await realpath(workspace);
+  const workspaceKey = sha(Buffer.from(canonicalWorkspace));
+  const stateDir = resolve(caywHome, 'workspaces', workspaceKey);
+  const configPath = resolve(caywHome, 'config.json');
   await writeFile(configPath, JSON.stringify({
-    model: {service: 'openai', api: 'chat_completions', id: 'workbench-local-fixed', base_url: `http://127.0.0.1:${provider.address().port}/v1`, api_version: 'v1', max_output_tokens: 1024, api_key_env: 'CAYW_WORKBENCH_PROVIDER_KEY'},
     budgets: {max_total_tokens: 8192, max_turns: 8, max_run_time_ms: 180000, max_capability_calls: 16, max_capability_bytes: 1048576, host_wait_ms: 150000, host_call_timeout_ms: 150000},
     permissions: [{capability: 'fs.write', arguments: writeArgs}, {capability: 'fs.read', arguments: readArgs}],
-  }, null, 2));
-  const runtime = await start('cayw', ['serve', '--db', resolve(work, 'runtime.db'), '--workspace', workspace, '--listen', '127.0.0.1:0', '--token-env', 'CAYW_WORKBENCH_IPC_TOKEN', '--config', configPath], {
-    CAYW_WORKBENCH_IPC_TOKEN: tokens.ipc, CAYW_WORKBENCH_PROVIDER_KEY: tokens.provider,
-  }, JSON.parse);
-  assert.equal(providerRequests, 0, 'Starting Runtime must not call the model');
-  const web = await start('cayw-webui', [], {
-    CAYW_IPC_ADDR: runtime.listening, CAYW_IPC_TOKEN: tokens.ipc,
-    CAYW_OWNERSHIP_PATH: resolve(work, 'ownership.json'),
-  }, line => { const match = line.match(/http:\/\/127\.0\.0\.1:\d+\//); assert(match, 'WebUI did not print its actual address'); return {url: match[0]}; });
+  }, null, 2) + '\n');
+  await writeFile(resolve(stateDir, 'models.json'), JSON.stringify({
+    selected: 'workbench',
+    models: {
+      workbench: {service: 'openai', api: 'chat_completions', id: 'workbench-local-fixed', base_url: `http://127.0.0.1:${provider.address().port}/v1`, api_version: 'v1', max_output_tokens: 1024, api_key: tokens.provider},
+    },
+  }, null, 2) + '\n', {mode: 0o600, flag: 'wx'});
+  tokens.ipc = (await readFile(resolve(caywHome, 'ipc.token'), 'utf8')).trim();
+  const web = await start('cayw', ['start', '--ui', 'web', '--no-open', '--workspace', workspace], localEnv, JSON.parse);
+  assert.equal(web.owned_client, true);
+  const runtime = {listening: web.client};
+  assert.equal(providerRequests, 0, 'Starting Runtime and WebUI must not call the model');
   async function rpc(method, params = {}, allowError = false) {
     const response = await fetch(`${web.url}api/rpc`, {
       method: 'POST', headers: {'Content-Type': 'application/json', Origin: new URL(web.url).origin},

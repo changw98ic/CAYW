@@ -21,7 +21,35 @@ fn explicit_endpoint_and_token_are_required_without_local_credential_discovery()
     .unwrap();
     assert_eq!(parsed.address.to_string(), "127.0.0.1:4100");
     assert_eq!(parsed.token(), "host secret");
+    assert_eq!(parsed.workspace_id(), None);
     assert!(!format!("{parsed:?}").contains("host secret"));
+
+    let routed = config(
+        &[],
+        &[
+            ("CAYW_IPC_ADDR", "127.0.0.1:4100"),
+            ("CAYW_IPC_TOKEN", "host secret"),
+            (
+                "CAYW_WORKSPACE_ID",
+                "workspace-0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        routed.workspace_id(),
+        Some("workspace-0000000000000000000000000000000000000000000000000000000000000000")
+    );
+    let primary = config(
+        &[],
+        &[
+            ("CAYW_IPC_ADDR", "127.0.0.1:4100"),
+            ("CAYW_IPC_TOKEN", "host secret"),
+            ("CAYW_WORKSPACE_ID", "local"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(primary.workspace_id(), None);
 }
 
 #[test]
@@ -44,4 +72,17 @@ fn command_line_endpoint_overrides_environment_and_rejects_ambiguous_input() {
         assert!(config(&args, &[("CAYW_IPC_TOKEN", "fixture")]).is_err());
     }
     assert!(config(&["--addr", "127.0.0.1:123"], &[("CAYW_IPC_TOKEN", "   ")]).is_err());
+    for workspace_id in ["other", "workspace-", "workspace-a b", "workspace-a\n"] {
+        assert!(
+            config(
+                &[],
+                &[
+                    ("CAYW_IPC_ADDR", "127.0.0.1:4100"),
+                    ("CAYW_IPC_TOKEN", "fixture"),
+                    ("CAYW_WORKSPACE_ID", workspace_id),
+                ],
+            )
+            .is_err()
+        );
+    }
 }

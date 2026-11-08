@@ -416,14 +416,13 @@ class Scenario:
         self.token = secrets.token_urlsafe(32)
         self.environment = {
             'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
-            'CAYW_CHAT_FIXTURE_KEY': 'offline-http-fixture',
             'CAYW_CHAT_FIXTURE_TOKEN': self.token,
         }
         self.configuration = directory / 'runtime.json'
         save(self.configuration, {
             'model': {'service': 'magpie', 'api': 'chat_completions', 'id': ROUTE,
                       'base_url': fixture.base, 'api_version': 'v1',
-                      'max_output_tokens': 4096, 'api_key_env': 'CAYW_CHAT_FIXTURE_KEY'},
+                      'max_output_tokens': 4096, 'api_key': 'offline-http-fixture'},
             'budgets': {'max_turns': 8, 'max_total_tokens': 8192,
                         'max_run_time_ms': 45000, 'host_wait_ms': 40000,
                         'host_call_timeout_ms': 40000},
@@ -457,8 +456,13 @@ class Scenario:
             return None
         ready = wait_for(ready_or_failed, 'server not ready')
         require(ready.get('offline_fixture') is False, 'the HTTP adapter was bypassed')
-        require(ready.get('model_configuration') == json.loads(self.configuration.read_text())['model'],
-                'server did not use the fixture model configuration')
+        expected_model = dict(json.loads(self.configuration.read_text())['model'])
+        expected_model.pop('api_key')
+        expected_model['authentication'] = 'plain_file'
+        require(ready.get('model_configuration') == expected_model,
+                'server did not report the redacted fixture model configuration')
+        require('offline-http-fixture' not in json.dumps(ready),
+                'server readiness disclosed the fixture model key')
         self.address = ready['listening']
 
     def launch(self, command, *flags, environment=None):
@@ -748,7 +752,7 @@ class Scenario:
                                '--text', 'Do not replay the uncertain operation.')
         repeated.finish(expected=1)
         rejected = json.loads((self.directory / (repeated.name + '.stderr.log')).read_text())
-        require(rejected.get('code') == 'needs_reconciliation'
+        require(rejected.get('code') == 'needs_reconciliation_outcome_unknown'
                 and rejected.get('session_id') == identity
                 and rejected.get('outcome_unknown') is True,
                 'rejected prompt lost the original unknown outcome')

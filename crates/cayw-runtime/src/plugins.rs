@@ -1,15 +1,15 @@
 use crate::{
-    Runtime, RuntimeError,
-    cells::CallScope,
-    execution::RunContext,
-    session::{BindingRecord, cursor_conflict},
+    Runtime, RuntimeError, cells::CallScope, execution::RunContext, session::cursor_conflict,
 };
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};
 use cayw_codemode::{CapabilityError, CapabilityHost};
-use cayw_plugins::{Plugin, PluginContext, PluginDescription};
+use cayw_plugins::{Plugin, PluginContext, PluginDescription, PluginRole};
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc};
+
+#[cfg(feature = "strongflow")]
+use crate::session::BindingRecord;
 
 impl Runtime {
     /// Read-only plugin catalog. Lifecycle mutations go through Runtime so an
@@ -49,6 +49,11 @@ impl Runtime {
         &self,
         manifest: &cayw_plugins::PluginManifest,
     ) -> Result<(), RuntimeError> {
+        if manifest.role != PluginRole::WorkspaceArchitecture {
+            return Err(RuntimeError::InvalidInput(
+                "Client plugins cannot enter a workspace Runtime capability catalog".into(),
+            ));
+        }
         let catalog = self.capabilities()?;
         if manifest
             .capabilities
@@ -63,26 +68,61 @@ impl Runtime {
     }
     /// Checkpoint the original obligations and freeze before unloading. An
     /// unavailable instance still freezes; a storage failure cancels execution.
-    pub fn unload_plugin(&self, name: &str) -> Result<PluginDescription, RuntimeError> {
-        let _coordinate = self.inner.coordination.enter()?;
+    pub async fn unload_plugin(&self, name: &str) -> Result<PluginDescription, RuntimeError> {
         let description = self.inner.registry.describe(name).map_err(plugin_error)?;
+        self.unload_plugin_exact(&description).await
+    }
+
+    pub async fn unload_plugin_exact(
+        &self,
+        description: &PluginDescription,
+    ) -> Result<PluginDescription, RuntimeError> {
+        let _coordinate = self.inner.coordination.enter()?;
+        let current = self
+            .inner
+            .registry
+            .describe(&description.manifest.name)
+            .map_err(plugin_error)?;
+        if current != *description {
+            return Err(RuntimeError::Plugin(
+                cayw_plugins::PluginError::Unavailable("loaded plugin identity changed".into()),
+            ));
+        }
         for session in self.inner.store.list_sessions()? {
             if self
                 .binding_at(&session)?
-                .is_some_and(|binding| binding.plugin() == name)
+                .is_some_and(|binding| binding.plugin() == description.manifest.name)
             {
-                self.freeze_plugin_session(&session.id, name)?;
+                self.freeze_plugin_session(&session.id, &description.manifest.name)?;
             }
         }
-        let description = self
+        let unloaded = self
             .inner
             .registry
-            .unload(name)
-            .map_err(plugin_error)
-            .map(|_| description)?;
+            .unload_exact_and_wait(description)
+            .await
+            .map_err(plugin_error)?;
         self.inner.changed.notify_waiters();
-        Ok(description)
+        Ok(unloaded)
     }
+
+    /// Retry cleanup only for an instance already moved to the retiring set.
+    /// Absence is not success because the caller may be reconciling another process.
+    pub async fn retry_plugin_cleanup_exact(
+        &self,
+        description: &PluginDescription,
+    ) -> Result<PluginDescription, RuntimeError> {
+        let _coordinate = self.inner.coordination.enter()?;
+        let cleaned = self
+            .inner
+            .registry
+            .retry_cleanup_exact_and_wait(description)
+            .await
+            .map_err(plugin_error)?;
+        self.inner.changed.notify_waiters();
+        Ok(cleaned)
+    }
+
     fn freeze_plugin_session(&self, session: &str, name: &str) -> Result<(), RuntimeError> {
         for _ in 0..32 {
             let snapshot = self.inner.store.snapshot(session)?;
@@ -123,56 +163,7 @@ impl Runtime {
         self.control_failed(session);
         Err(RuntimeError::Busy)
     }
-    pub fn bind_plugin(
-        &self,
-        session: &str,
-        name: &str,
-    ) -> Result<PluginDescription, RuntimeError> {
-        let _coordinate = self.inner.coordination.enter()?;
-        let view = self.check_ready(session)?;
-        self.ensure_no_task(session)?;
-        if view.binding.is_some() {
-            return Err(RuntimeError::InvalidInput(
-                "session already has a plugin binding".into(),
-            ));
-        }
-        let plugin = self
-            .inner
-            .registry
-            .check_available(name)
-            .map_err(plugin_error)?;
-        let binding = BindingRecord {
-            manifest: serde_json::to_value(&plugin.manifest)?,
-            registry_id: plugin.registry_id.clone(),
-            generation: plugin.generation,
-            reason: None,
-            strongflow: None,
-        };
-        #[cfg(feature = "strongflow")]
-        let binding = if name == "strongflow" {
-            let mut state =
-                cayw_plugins::strongflow::SessionBinding::strongflow(session.into(), &plugin)
-                    .map_err(plugin_error)?;
-            state
-                .checkpoint_strongflow(&self.inner.registry)
-                .map_err(plugin_error)?;
-            BindingRecord {
-                strongflow: Some(serde_json::to_value(state)?),
-                ..binding
-            }
-        } else {
-            binding
-        };
-        #[cfg(not(feature = "strongflow"))]
-        if name == "strongflow" {
-            return Err(RuntimeError::InvalidInput(
-                "StrongFlow support is disabled".into(),
-            ));
-        }
-        let snapshot = self.inner.store.snapshot(session)?;
-        self.record_binding(&snapshot, "plugin_bound", &binding, "runtime-host-bind")?;
-        Ok(plugin)
-    }
+    #[cfg(feature = "strongflow")]
     fn ensure_no_task(&self, session: &str) -> Result<(), RuntimeError> {
         if self.inner.queue.list(session)?.iter().any(|task| {
             matches!(
@@ -189,10 +180,45 @@ impl Runtime {
         &self,
         session: &str,
     ) -> Result<cayw_plugins::strongflow::SessionBinding, RuntimeError> {
-        self.bind_plugin(session, "strongflow")?;
-        self.binding_at(&self.inner.store.snapshot(session)?)?
-            .ok_or_else(|| RuntimeError::InvalidInput("session has no plugin binding".into()))?
-            .strongflow_binding()
+        let _coordinate = self.inner.coordination.enter()?;
+        let view = self.check_ready(session)?;
+        self.ensure_no_task(session)?;
+        if view.binding.is_some() {
+            return Err(RuntimeError::InvalidInput(
+                "session already has a StrongFlow binding".into(),
+            ));
+        }
+        let plugin = self
+            .inner
+            .registry
+            .check_available("strongflow")
+            .map_err(plugin_error)?;
+        if plugin.manifest.role != PluginRole::WorkspaceArchitecture {
+            return Err(RuntimeError::InvalidInput(
+                "StrongFlow must be a workspace architecture plugin".into(),
+            ));
+        }
+        let mut state =
+            cayw_plugins::strongflow::SessionBinding::strongflow(session.into(), &plugin)
+                .map_err(plugin_error)?;
+        state
+            .checkpoint_strongflow(&self.inner.registry)
+            .map_err(plugin_error)?;
+        let binding = BindingRecord {
+            manifest: serde_json::to_value(&plugin.manifest)?,
+            registry_id: plugin.registry_id.clone(),
+            generation: plugin.generation,
+            reason: None,
+            strongflow: Some(serde_json::to_value(&state)?),
+        };
+        let snapshot = self.inner.store.snapshot(session)?;
+        self.record_binding(
+            &snapshot,
+            "plugin_bound",
+            &binding,
+            "runtime-host-strongflow-bind",
+        )?;
+        Ok(state)
     }
     /// Trusted host checkpoint after plan/evidence changes. Unavailable or frozen
     /// bindings cannot use checkpointing to replace their original obligations.
@@ -305,7 +331,7 @@ impl Runtime {
 }
 
 fn plugin_error(error: cayw_plugins::PluginError) -> RuntimeError {
-    RuntimeError::Workspace(error.to_string())
+    RuntimeError::Plugin(error)
 }
 
 struct PluginCapability {
@@ -331,9 +357,36 @@ impl PluginCatalog {
                     .unwrap_or_default(),
             ));
         }
+        for plugin in context.inner.registry.list() {
+            if plugin.manifest.role != PluginRole::WorkspaceArchitecture
+                || plugin.manifest.name == "strongflow"
+                || context
+                    .inner
+                    .registry
+                    .check_available(&plugin.manifest.name)
+                    .is_err()
+            {
+                continue;
+            }
+            for definition in plugin.manifest.capabilities.iter().cloned() {
+                capabilities.insert(
+                    definition.name.clone(),
+                    PluginCapability {
+                        plugin: plugin.manifest.name.clone(),
+                        description: plugin.clone(),
+                        definition,
+                    },
+                );
+            }
+        }
         if let Some(binding) =
             rt.binding_at(&context.inner.store.snapshot(&context.lease.session_id)?)?
         {
+            if binding.plugin() != "strongflow" || binding.strongflow.is_none() {
+                return Err(RuntimeError::InvalidInput(
+                    "only StrongFlow may be bound to a Session".into(),
+                ));
+            }
             let plugin = binding.description()?;
             for definition in plugin.manifest.capabilities.iter().cloned() {
                 capabilities.insert(

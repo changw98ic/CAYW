@@ -290,18 +290,15 @@ impl Fixture {
     fn model_configuration(&self) -> Value {
         json!({"service":"openai", "api":"chat_completions", "id":"fixture-route",
             "base_url":self.base, "api_version":"v1", "max_output_tokens":4096,
-            "api_key_env":"CAYW_CLIENT_TEST_KEY"})
+            "api_key":"public-http-fixture-key"})
     }
     fn configured_provider(&self) -> cayw_runtime::ConfiguredProvider {
         serde_json::from_value::<cayw_runtime::ProviderConfig>(self.model_configuration())
             .unwrap()
-            .build_with_environment(|name| {
-                assert_eq!(name, "CAYW_CLIENT_TEST_KEY");
-                Some("public-http-fixture-key".into())
-            })
+            .build()
             .unwrap()
     }
-    fn configure(&self, command: &mut Command, root: &Path) {
+    fn configure(&self, _command: &mut Command, root: &Path) {
         let configuration = root.join("runtime.json");
         if !configuration.exists() {
             std::fs::write(
@@ -310,7 +307,6 @@ impl Fixture {
             )
             .unwrap();
         }
-        command.env("CAYW_CLIENT_TEST_KEY", "public-http-fixture-key");
     }
 }
 impl Drop for Fixture {

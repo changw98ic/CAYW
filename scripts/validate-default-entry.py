@@ -29,7 +29,9 @@ class Terminal:
  def until(self,pattern):
   end=time.monotonic()+30
   while not re.search(pattern,self.output.decode(errors='replace')):
-   assert time.monotonic()<end,'PTY transition timed out'
+   if time.monotonic()>=end:
+    (out/f'pty-{self.child.pid}.log').write_bytes(self.output)
+    raise AssertionError('PTY transition timed out: '+self.output[-4000:].decode(errors='replace'))
    if select.select([self.master],[],[],.1)[0]:
     try:chunk=os.read(self.master,65536)
     except OSError:raise AssertionError('PTY exited before expected state: '+self.output[-1500:].decode(errors='replace'))
@@ -48,35 +50,38 @@ class Terminal:
 try:
  if not fixture:
   # No arguments: inherited cwd is the workspace, even without any model setup.
-  first=Terminal([]).until(r'connected')
+  first=Terminal([]).until(r'CAYW\s+•\s+connected')
   states=list((home/'cayw'/'workspaces').glob('*/workspace.json'))
   assert len(states)==1 and str(a) in states[0].read_text()
   assert not list((home/'cayw').rglob('launcher-web.json'))
   assert not list((home/'cayw').rglob('web.token'))
   checks.append('bare cayw opens actual TUI at cwd without starting WebUI, browser or web token setup')
-  repeated=Terminal([]).until(r'connected');repeated.quit()
+  repeated=Terminal([]).until(r'CAYW\s+•\s+connected');repeated.quit()
   assert first.child.poll() is None
   subprocess.run([str(bin_dir/'cayw'),'models','list'],cwd=a,env=env,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-  checks.append('second bare command opens another TUI and preserves the original Runtime on exit')
+  checks.append('second bare command opens another TUI and preserves the unique Client on exit')
   # Explicit WebUI can attach while the default TUI remains active.
   web=subprocess.Popen([str(bin_dir/'cayw'),'--ui','web','--no-open'],cwd=a,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
   try:
-   assert select.select([web.stdout],[],[],30)[0];ready=json.loads(web.stdout.readline());assert ready['owned_runtime'] is False and ready['access']=='local'
+   assert select.select([web.stdout],[],[],30)[0];ready=json.loads(web.stdout.readline());assert ready['owned_client'] is False and ready['access']=='local'
+   client_file=home/'cayw'/'client.json';assert client_file.is_file() and 'cayw.client-endpoint.v1' in client_file.read_text()
    web.send_signal(signal.SIGINT);assert web.wait(timeout=30)==0;assert first.child.poll() is None
   finally:
    if web.poll() is None:web.send_signal(signal.SIGINT);web.wait(timeout=30)
-  checks.append('WebUI is explicitly selected alongside TUI; its shutdown preserves externally owned Runtime')
+  checks.append('WebUI is explicitly selected alongside TUI; its shutdown preserves the existing unique Client')
   first.send(b'\x0eCurrent cwd session\r');first.until('Current cwd session');first.quit()
-  explicit=Terminal(['--workspace',str(b)]).until(r'connected');explicit.quit()
+  explicit=Terminal(['--workspace',str(b)]).until(r'CAYW\s+•\s+connected');explicit.quit()
   assert any(str(b) in file.read_text() for file in (home/'cayw'/'workspaces').glob('*/workspace.json'))
-  compatibility=Terminal(['start','--workspace',str(b)]).until(r'connected');compatibility.quit()
+  compatibility=Terminal(['start','--workspace',str(b)]).until(r'CAYW\s+•\s+connected');compatibility.quit()
   assert not list((home/'cayw').rglob('connection.json'))
-  checks.append('explicit workspace overrides cwd; start alias also defaults to TUI; owned Runtime is cleaned up')
+  assert not (home/'cayw'/'client.json').exists()
+  checks.append('explicit workspace overrides cwd; start alias uses the same Client; Client discovery is cleaned up and no workspace connection file is created')
  # Actual optional account command prompts twice, without echo or plaintext storage.
  setup=Terminal(['account','--username','browser-operator']).until('Password \\(hidden\\):')
  setup.password(password);setup.until('Confirm password \\(hidden\\):');setup.password(password)
  assert setup.finish()==0;assert password.encode() not in setup.output
- account=next((home/'cayw'/'workspaces').glob('*/web-account.json'))
+ account=home/'cayw'/'web-account.json';assert account.is_file()
+ assert not list((home/'cayw'/'workspaces').glob('*/web-account.json'))
  assert account.stat().st_mode & 0o777 == 0o600
  data=account.read_text();assert password not in data and '$argon2id$' in data
  old=account.read_bytes()
@@ -86,6 +91,13 @@ try:
  (out/'summary.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
 finally:
  for terminal in children:
-  if terminal.child.poll() is None:terminal.child.send_signal(signal.SIGINT);terminal.child.wait(timeout=30)
+  if terminal.child.poll() is None:
+   try:os.killpg(terminal.child.pid,signal.SIGINT)
+   except ProcessLookupError:pass
+   try:terminal.child.wait(timeout=30)
+   except subprocess.TimeoutExpired:
+    try:os.killpg(terminal.child.pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+    terminal.child.wait(timeout=30)
   try:os.close(terminal.master)
   except OSError:pass

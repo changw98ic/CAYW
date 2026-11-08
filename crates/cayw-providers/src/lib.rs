@@ -45,6 +45,13 @@ impl AnthropicProvider {
     pub fn standard(api_key: impl Into<String>) -> Result<Self, ProviderConfigError> {
         Self::new("https://api.anthropic.com/v1", api_key)
     }
+
+    /// Build an adapter for a local service that explicitly requires no authentication.
+    pub fn without_auth(base_url: impl AsRef<str>) -> Result<Self, ProviderConfigError> {
+        Ok(Self {
+            config: HttpConfig::without_auth(base_url.as_ref())?,
+        })
+    }
 }
 
 impl Provider for AnthropicProvider {
@@ -71,6 +78,13 @@ impl ResponsesProvider {
 
     pub fn standard(api_key: impl Into<String>) -> Result<Self, ProviderConfigError> {
         Self::new("https://api.openai.com/v1", api_key)
+    }
+
+    /// Build an adapter for a local service that explicitly requires no authentication.
+    pub fn without_auth(base_url: impl AsRef<str>) -> Result<Self, ProviderConfigError> {
+        Ok(Self {
+            config: HttpConfig::without_auth(base_url.as_ref())?,
+        })
     }
 }
 
@@ -111,6 +125,15 @@ impl GeminiProvider {
 
     pub fn standard(api_key: impl Into<String>) -> Result<Self, ProviderConfigError> {
         Self::new("https://generativelanguage.googleapis.com/v1beta", api_key)
+    }
+
+    /// Build an adapter for a local service that explicitly requires no authentication.
+    pub fn without_auth(base_url: impl AsRef<str>) -> Result<Self, ProviderConfigError> {
+        Ok(Self {
+            config: HttpConfig::without_auth(base_url.as_ref())?,
+            mode: GeminiMode::default(),
+            gateway_routes: false,
+        })
     }
 
     /// Enables the host's explicit Gemini gateway routes.

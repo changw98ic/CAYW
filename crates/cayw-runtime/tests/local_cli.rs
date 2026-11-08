@@ -9,12 +9,13 @@ use cayw_ipc::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     os::unix::{
         ffi::OsStrExt,
-        fs::{PermissionsExt, symlink},
+        fs::{MetadataExt, PermissionsExt, symlink},
     },
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -121,6 +122,73 @@ fn assert_private_file(path: &Path) {
 fn workspace_key(workspace: &Path) -> String {
     let canonical = workspace.canonicalize().unwrap();
     format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TreeEntry {
+    kind: &'static str,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    bytes: Vec<u8>,
+}
+
+fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, TreeEntry> {
+    fn visit(base: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, TreeEntry>) {
+        let metadata = path.symlink_metadata().unwrap();
+        let kind = if metadata.file_type().is_dir() {
+            "directory"
+        } else if metadata.file_type().is_file() {
+            "file"
+        } else if metadata.file_type().is_symlink() {
+            "symlink"
+        } else {
+            "other"
+        };
+        let bytes = if metadata.file_type().is_file() {
+            std::fs::read(path).unwrap()
+        } else if metadata.file_type().is_symlink() {
+            std::fs::read_link(path)
+                .unwrap()
+                .as_os_str()
+                .as_bytes()
+                .to_vec()
+        } else {
+            Vec::new()
+        };
+        entries.insert(
+            path.strip_prefix(base).unwrap().to_path_buf(),
+            TreeEntry {
+                kind,
+                mode: metadata.mode(),
+                uid: metadata.uid(),
+                gid: metadata.gid(),
+                size: metadata.size(),
+                modified_seconds: metadata.mtime(),
+                modified_nanoseconds: metadata.mtime_nsec(),
+                bytes,
+            },
+        );
+        if metadata.file_type().is_dir() {
+            let mut children = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            children.sort();
+            for child in children {
+                visit(base, &child, entries);
+            }
+        }
+    }
+
+    let mut entries = BTreeMap::new();
+    if root.exists() {
+        visit(root, root, &mut entries);
+    }
+    entries
 }
 
 // Break caught: init requires a pre-existing database, writes state outside the
@@ -252,6 +320,181 @@ async fn init_defaults_to_home_dot_cayw_when_cayw_home_is_absent() {
     );
 }
 
+#[tokio::test]
+async fn doctor_is_read_only_before_and_after_initialization() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let absent_root = home.path().join("not-created-by-doctor");
+    let mut absent = command(home.path(), workspace.path(), Some(absent_root.as_os_str()));
+    absent.arg("doctor");
+    let output = run(absent).await;
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "cayw.doctor.v1");
+    assert_eq!(report["network_model_request"], false);
+    assert!(!absent_root.exists());
+
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    assert!(
+        init(home.path(), workspace.path(), root.path())
+            .await
+            .status
+            .success()
+    );
+    let mut server = serve(home.path(), workspace.path(), root.path(), &["--offline"])
+        .spawn()
+        .unwrap();
+    read_ready(&mut server).await;
+
+    let cleanup_file = root.path().join("client-plugin-cleanup.json");
+    std::fs::write(
+        &cleanup_file,
+        serde_json::to_vec_pretty(&json!({
+            "schema":"cayw.client-plugin-cleanup.v1",
+            "processes":[{
+                "launch_id":"stale-launch",
+                "plugin":"webui",
+                "workspace_id":"local",
+                "process":{"pid":u32::MAX,"started":"stale","command":"stale"}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cleanup_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let state_dir = root
+        .path()
+        .join("workspaces")
+        .join(workspace_key(workspace.path()));
+    for name in [
+        "connection.json",
+        "server.lock",
+        "launcher-web.lock",
+        "launcher-retired.json",
+    ] {
+        std::fs::write(state_dir.join(name), b"legacy fixture").unwrap();
+    }
+
+    let before = snapshot_tree(root.path());
+    let mut running = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    running.arg("doctor");
+    let output = run(running).await;
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "cayw.doctor.v1");
+    assert_eq!(report["network_model_request"], false);
+    let client = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "client")
+        .unwrap();
+    assert_eq!(client["status"], "ok");
+    assert_eq!(client["unique"], true);
+    assert_eq!(
+        client["client_file"],
+        root.path().join("client.json").to_str().unwrap()
+    );
+    assert!(client.get("connection_file").is_none());
+    assert_eq!(client["health"]["client"], true);
+    let cleanup = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "client_plugin_cleanup")
+        .unwrap();
+    assert_eq!(cleanup["status"], "warning");
+    assert_eq!(cleanup["details"]["exists"], true);
+    assert_eq!(cleanup["details"]["live_processes"], 0);
+    let legacy = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "legacy_client_state")
+        .unwrap();
+    assert_eq!(legacy["status"], "warning");
+    assert_eq!(legacy["entries"].as_array().unwrap().len(), 4);
+    let client_plugins = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "client_plugins")
+        .unwrap();
+    assert_eq!(client_plugins["status"], "ok");
+    assert_eq!(snapshot_tree(root.path()), before);
+
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+// Break caught: the Client publishes discovery and readiness before the Client
+// plugin supervisor has accepted its persistent cleanup state.
+#[tokio::test]
+async fn serve_never_reports_readiness_when_client_plugin_initialization_fails() {
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    assert!(
+        init(home.path(), workspace.path(), root.path())
+            .await
+            .status
+            .success()
+    );
+
+    let cleanup_file = root.path().join("client-plugin-cleanup.json");
+    std::fs::write(
+        &cleanup_file,
+        serde_json::to_vec_pretty(&json!({
+            "schema":"unsupported-client-plugin-cleanup-schema",
+            "processes":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cleanup_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let output = run(serve(
+        home.path(),
+        workspace.path(),
+        root.path(),
+        &["--offline"],
+    ))
+    .await;
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "failed initialization must not publish readiness: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsupported schema"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.path().join("client.json").exists());
+}
+
 // Break caught: a bare serve still demands --db/--token-env, silently falls back
 // to offline, admits work without a model, or reports an incomplete ready line.
 #[tokio::test]
@@ -280,7 +523,7 @@ async fn serve_auto_initializes_and_rejects_execution_without_a_model() {
     let database = state.join("session.sqlite");
     let config_file = root.path().join("config.json");
     let token_file = root.path().join("ipc.token");
-    let connection_file = state.join("connection.json");
+    let client_file = root.path().join("client.json");
 
     assert_eq!(
         ready["workspace"].as_str().unwrap(),
@@ -299,27 +542,45 @@ async fn serve_auto_initializes_and_rejects_execution_without_a_model() {
         token_file.to_str().unwrap()
     );
     assert_eq!(
-        ready["connection_file"].as_str().unwrap(),
-        connection_file.to_str().unwrap()
+        ready["client_file"].as_str().unwrap(),
+        client_file.to_str().unwrap()
     );
+    assert!(ready.get("connection_file").is_none());
     assert!(database.is_file());
     assert_private_dir(root.path());
     assert_private_dir(&state);
     assert_private_file(&config_file);
     assert_private_file(&token_file);
 
-    // connection.json is the discovery record a client reads from the same
-    // workspace. It must point at this live loopback service and token.
-    let connection: Value =
-        serde_json::from_slice(&std::fs::read(&connection_file).unwrap()).unwrap();
+    // client.json is the one global Client discovery record. It identifies the
+    // live loopback endpoint without assigning connection ownership to a workspace.
+    let connection: Value = serde_json::from_slice(&std::fs::read(&client_file).unwrap()).unwrap();
+    assert_eq!(connection["schema"], "cayw.client-endpoint.v1");
+    assert_eq!(connection["protocol_version"], cayw_ipc::PROTOCOL_VERSION);
     assert_eq!(connection["address"], ready["listening"]);
-    assert_eq!(
-        connection["workspace"].as_str().unwrap(),
-        canonical_workspace.to_str().unwrap()
+    assert!(
+        connection["generation"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
     );
-    assert_eq!(connection["token_file"], ready["token_file"]);
+    assert!(connection["pid"].as_u64().is_some_and(|value| value > 0));
+    assert!(connection.get("workspace").is_none());
+    assert!(connection.get("token_file").is_none());
 
     let client = connect(&ready).await;
+    let client_health = client.request("client.health", json!({})).await.unwrap();
+    assert_eq!(client_health["client"], true);
+    assert_eq!(
+        client_health["client_plugins"]["schema"],
+        "cayw.client-plugins.v1"
+    );
+    assert_eq!(client_health["client_plugins"]["entries"], json!([]));
+    let client_plugins = client
+        .request("client.plugins.list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(client_plugins["schema"], "cayw.client-plugins.v1");
+    assert_eq!(client_plugins["entries"], json!([]));
 
     // Queries and session creation need no model and must stay available.
     let session = client
@@ -406,58 +667,731 @@ async fn serve_auto_initializes_and_rejects_execution_without_a_model() {
     child.wait().await.unwrap();
 }
 
-// Break caught: two serve processes race on the same database, or a second
-// workspace silently reuses the first workspace's database.
+// Break caught: a second local Client starts for another workspace, or routing
+// lets one workspace read the other's SQLite-backed Session state.
 #[tokio::test]
-async fn one_server_per_workspace_and_a_separate_database_per_workspace() {
+async fn one_client_routes_separate_in_process_workspaces() {
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
     let home = tempfile::tempdir().unwrap();
     let first_workspace = tempfile::tempdir().unwrap();
     let second_workspace = tempfile::tempdir().unwrap();
 
+    let second_init = init(home.path(), second_workspace.path(), root.path()).await;
+    assert!(second_init.status.success());
+    let second_report = first_json_line(&second_init);
+
     let mut first = serve(home.path(), first_workspace.path(), root.path(), &[])
         .spawn()
         .unwrap();
     let first_ready = read_ready(&mut first).await;
 
-    // The same workspace cannot run a second service. Failure happens before a
-    // second database, listener or ready line is produced.
-    let rejected = run(serve(home.path(), first_workspace.path(), root.path(), &[])).await;
+    let rejected = run(serve(
+        home.path(),
+        second_workspace.path(),
+        root.path(),
+        &[],
+    ))
+    .await;
     assert!(!rejected.status.success());
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("local server already running"),
+        String::from_utf8_lossy(&rejected.stderr).contains("local Client is already running"),
         "stderr: {}",
         String::from_utf8_lossy(&rejected.stderr)
     );
-    assert!(
-        rejected.stdout.is_empty(),
-        "a rejected serve prints no ready line"
-    );
+    assert!(rejected.stdout.is_empty());
 
-    let mut second = serve(home.path(), second_workspace.path(), root.path(), &[])
-        .spawn()
+    let client = connect(&first_ready).await;
+    let catalog = client
+        .request("client.workspaces.list", json!({}))
+        .await
         .unwrap();
-    let second_ready = read_ready(&mut second).await;
+    let second_path = second_workspace.path().canonicalize().unwrap();
+    let second_id = catalog["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["path"].as_str() == second_path.to_str())
+        .and_then(|workspace| workspace["id"].as_str())
+        .unwrap()
+        .to_owned();
+    assert!(second_id.starts_with("workspace-"));
 
-    assert_ne!(first_ready["database"], second_ready["database"]);
-    assert_ne!(
-        first_ready["connection_file"],
-        second_ready["connection_file"]
+    let opened = client
+        .request("client.workspaces.open", json!({"id":second_id}))
+        .await
+        .unwrap();
+    assert_eq!(opened["state"], "open");
+    assert_eq!(opened["reused"], false);
+    assert!(opened.get("ipc_addr").is_none());
+    let reopened = client
+        .request("client.workspaces.open", json!({"id":second_id}))
+        .await
+        .unwrap();
+    assert_eq!(reopened["reused"], true);
+
+    let secondary = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{"method":"session.create","params":{"label":"secondary"}}
+            }),
+        )
+        .await
+        .unwrap();
+    let secondary_id = secondary["id"].as_str().unwrap();
+    let secondary_sessions = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{"method":"session.list","params":{}}
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        secondary_sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["id"].as_str() == Some(secondary_id))
     );
+    assert!(
+        client
+            .request("session.list", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session["id"].as_str() != Some(secondary_id))
+    );
+
+    assert_ne!(first_ready["database"], second_report["database"]);
     assert!(Path::new(first_ready["database"].as_str().unwrap()).is_file());
-    assert!(Path::new(second_ready["database"].as_str().unwrap()).is_file());
-    assert!(Path::new(first_ready["connection_file"].as_str().unwrap()).is_file());
-    assert!(Path::new(second_ready["connection_file"].as_str().unwrap()).is_file());
+    assert!(Path::new(second_report["database"].as_str().unwrap()).is_file());
+    assert_eq!(
+        first_ready["client_file"].as_str(),
+        root.path().join("client.json").to_str()
+    );
+    assert!(root.path().join("client.json").is_file());
+    for workspace in [&first_workspace, &second_workspace] {
+        let state = root
+            .path()
+            .join("workspaces")
+            .join(workspace_key(workspace.path()));
+        assert!(!state.join("connection.json").exists());
+        assert!(!state.join("server.lock").exists());
+        for ui in ["none", "tui", "web"] {
+            assert!(!state.join(format!("launcher-{ui}.lock")).exists());
+            assert!(!state.join(format!("launcher-{ui}.json")).exists());
+        }
+    }
 
-    // One private root is shared, but each workspace keeps its own state.
-    assert_eq!(first_ready["token_file"], second_ready["token_file"]);
-    assert_eq!(first_ready["config_file"], second_ready["config_file"]);
-
+    client.close().await;
     first.kill().await.unwrap();
     first.wait().await.unwrap();
-    second.kill().await.unwrap();
-    second.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_local_model_moves_once_to_the_workspace_profile_file() {
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    assert!(
+        init(home.path(), workspace.path(), root.path())
+            .await
+            .status
+            .success()
+    );
+    let key = "synthetic-migration-key-never-print";
+    let legacy = json!({
+        "permissions":[],
+        "model":{
+            "service":"openai",
+            "api":"chat_completions",
+            "id":"legacy-local-model",
+            "base_url":"http://127.0.0.1:9/v1",
+            "api_version":"v1",
+            "max_output_tokens":64,
+            "api_key":key
+        }
+    });
+    std::fs::write(
+        root.path().join("config.json"),
+        serde_json::to_vec_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        root.path().join("config.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+
+    let mut server = serve(home.path(), workspace.path(), root.path(), &[])
+        .spawn()
+        .unwrap();
+    let ready = read_ready(&mut server).await;
+    assert_eq!(ready["provider"], "openai");
+    assert_eq!(ready["model"], "legacy-local-model");
+    assert_eq!(ready["model_configured"], true);
+    assert!(!ready.to_string().contains(key));
+
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(config, json!({"permissions":[]}));
+    let models_path = root
+        .path()
+        .join("workspaces")
+        .join(workspace_key(workspace.path()))
+        .join("models.json");
+    let models: Value = serde_json::from_slice(&std::fs::read(&models_path).unwrap()).unwrap();
+    assert_eq!(models["selected"], "configured");
+    assert_eq!(models["models"]["configured"]["id"], "legacy-local-model");
+    assert_eq!(models["models"]["configured"]["api_key"], key);
+    assert_private_file(&models_path);
+
+    let client = connect(&ready).await;
+    let public = client
+        .request("settings.models.list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(public["selected"], "configured");
+    assert!(!public.to_string().contains(key));
+    client.close().await;
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+
+    let mut restarted = serve(home.path(), workspace.path(), root.path(), &[])
+        .spawn()
+        .unwrap();
+    let ready = read_ready(&mut restarted).await;
+    assert_eq!(ready["model"], "legacy-local-model");
+    assert!(
+        serde_json::from_slice::<Value>(&std::fs::read(root.path().join("config.json")).unwrap())
+            .unwrap()
+            .get("model")
+            .is_none()
+    );
+    restarted.kill().await.unwrap();
+    restarted.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_cli_routes_to_the_requested_nonprimary_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let first_workspace = tempfile::tempdir().unwrap();
+    let second_workspace = tempfile::tempdir().unwrap();
+    assert!(
+        init(home.path(), second_workspace.path(), root.path())
+            .await
+            .status
+            .success()
+    );
+    let mut server = serve(home.path(), first_workspace.path(), root.path(), &[])
+        .spawn()
+        .unwrap();
+    let ready = read_ready(&mut server).await;
+    let model_path = root.path().join("second-model.json");
+    let key = "synthetic-secondary-key-never-print";
+    std::fs::write(
+        &model_path,
+        serde_json::to_vec(&json!({
+            "service":"openai",
+            "api":"chat_completions",
+            "id":"secondary-model",
+            "base_url":"http://127.0.0.1:9/v1",
+            "api_version":"v1",
+            "max_output_tokens":64,
+            "api_key":key
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut add = command(
+        home.path(),
+        first_workspace.path(),
+        Some(root.path().as_os_str()),
+    );
+    add.args(["models", "add", "secondary", "--file"])
+        .arg(&model_path)
+        .arg("--workspace")
+        .arg(second_workspace.path());
+    let added = run(add).await;
+    assert!(
+        added.status.success(),
+        "add failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&added.stdout).contains(key));
+
+    let mut select = command(
+        home.path(),
+        first_workspace.path(),
+        Some(root.path().as_os_str()),
+    );
+    select
+        .args(["models", "use", "secondary", "--workspace"])
+        .arg(second_workspace.path());
+    let selected = run(select).await;
+    assert!(
+        selected.status.success(),
+        "use failed: {}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&selected.stdout).contains(key));
+
+    let client = connect(&ready).await;
+    let primary_health = client.request("runtime.health", json!({})).await.unwrap();
+    assert_eq!(primary_health["provider"], "unconfigured");
+    let catalog = client
+        .request("client.workspaces.list", json!({}))
+        .await
+        .unwrap();
+    let second_path = second_workspace.path().canonicalize().unwrap();
+    let second_id = catalog["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"].as_str() == second_path.to_str())
+        .and_then(|entry| entry["id"].as_str())
+        .unwrap();
+    let secondary_health = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{"method":"runtime.health","params":{}}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(secondary_health["provider"], "openai");
+    assert_eq!(secondary_health["model"], "secondary-model");
+    assert!(
+        !root
+            .path()
+            .join("workspaces")
+            .join(workspace_key(first_workspace.path()))
+            .join("models.json")
+            .exists()
+    );
+    let second_models = root
+        .path()
+        .join("workspaces")
+        .join(workspace_key(second_workspace.path()))
+        .join("models.json");
+    assert!(second_models.is_file());
+    assert!(String::from_utf8_lossy(&std::fs::read(second_models).unwrap()).contains(key));
+
+    client.close().await;
+    server.kill().await.unwrap();
+    server.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn start_owns_one_client_without_workspace_launcher_state() {
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let mut start = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    start.args(["start", "--ui", "none", "--offline"]);
+    let mut start = start.spawn().unwrap();
+    let mut lines = BufReader::new(start.stdout.take().unwrap()).lines();
+    let line = tokio::time::timeout(WATCHDOG, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ready: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(ready["ui"], "none");
+    assert_eq!(ready["owned_client"], true);
+    assert_eq!(
+        ready["workspace"].as_str(),
+        workspace.path().canonicalize().unwrap().to_str()
+    );
+
+    let address = ready["client"].as_str().unwrap().parse().unwrap();
+    let token = std::fs::read_to_string(root.path().join("ipc.token")).unwrap();
+    let client = Client::connect(address, token.trim()).await.unwrap();
+    let health = client.request("client.health", json!({})).await.unwrap();
+    assert_eq!(health["client"], true);
+    assert_eq!(health["client_plugins"]["entries"], json!([]));
+
+    let missing_workspace = format!("workspace-{}", "0".repeat(64));
+    let rejected = client
+        .request(
+            "client.plugins.start",
+            json!({"plugin":"tui","workspace_id":missing_workspace}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code, "workspace_unavailable");
+    assert!(rejected.message.contains("workspace is not registered"));
+    let plugins = client
+        .request("client.plugins.list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(plugins["entries"], json!([]));
+    client.close().await;
+
+    let state = root
+        .path()
+        .join("workspaces")
+        .join(workspace_key(workspace.path()));
+    for ui in ["none", "tui", "web"] {
+        assert!(!state.join(format!("launcher-{ui}.lock")).exists());
+        assert!(!state.join(format!("launcher-{ui}.json")).exists());
+    }
+
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(start.id().unwrap().to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, start.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert!(!root.path().join("client.json").exists());
+}
+
+#[cfg(feature = "plugins")]
+#[tokio::test]
+async fn client_owns_global_plugin_inventory_and_workspace_activations() {
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let first_workspace = tempfile::tempdir().unwrap();
+    let second_workspace = tempfile::tempdir().unwrap();
+    assert!(
+        init(home.path(), second_workspace.path(), root.path())
+            .await
+            .status
+            .success()
+    );
+
+    let mut server = serve(
+        home.path(),
+        first_workspace.path(),
+        root.path(),
+        &["--offline"],
+    )
+    .spawn()
+    .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    let catalog = client
+        .request("client.workspaces.list", json!({}))
+        .await
+        .unwrap();
+    let second_path = second_workspace.path().canonicalize().unwrap();
+    let second_id = catalog["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["path"].as_str() == second_path.to_str())
+        .and_then(|workspace| workspace["id"].as_str())
+        .unwrap()
+        .to_owned();
+    client
+        .request("client.workspaces.open", json!({"id":second_id}))
+        .await
+        .unwrap();
+
+    let plugin_executable = root.path().join("plugin-fixture");
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_cayw-runtime-plugin-fixture"),
+        &plugin_executable,
+    )
+    .unwrap();
+    std::fs::set_permissions(&plugin_executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let descriptor = json!({
+        "executable":plugin_executable,
+        "argv":["normal","/tmp/cayw-unused-plugin-gate"],
+        "manifest":{
+            "name":"process",
+            "version":"1.0.0",
+            "protocol_version":1,
+            "role":"workspace_architecture",
+            "kind":"external",
+            "capabilities":[{
+                "name":"process.echo",
+                "description":"Offline process lifecycle fixture",
+                "parameters":{"type":"object","additionalProperties":false}
+            }],
+            "permissions":{}
+        }
+    });
+    let mut client_descriptor = descriptor.clone();
+    client_descriptor["manifest"]["role"] = json!("client");
+    let role_error = client
+        .request(
+            "settings.plugins.install",
+            json!({"name":null,"descriptor":client_descriptor}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(role_error.code, "settings_error");
+    assert!(role_error.message.contains("Client plugins"));
+    assert!(!root.path().join("plugins.json").exists());
+
+    let installed = client
+        .request(
+            "settings.plugins.install",
+            json!({"name":null,"descriptor":descriptor}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(installed["entries"][0]["enabled"], false);
+    assert_eq!(installed["entries"][0]["available"], false);
+
+    let primary_enabled = client
+        .request(
+            "settings.plugins.enable",
+            json!({"name":"process","approve_process":true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(primary_enabled["entries"][0]["enabled"], true);
+    assert_eq!(primary_enabled["entries"][0]["available"], true);
+    let secondary_before = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{"method":"settings.plugins.list","params":{}}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(secondary_before["entries"][0]["enabled"], false);
+    assert_eq!(secondary_before["entries"][0]["available"], false);
+
+    let secondary_enabled = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{
+                    "method":"settings.plugins.enable",
+                    "params":{"name":"process","approve_process":true}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(secondary_enabled["entries"][0]["enabled"], true);
+    assert_eq!(secondary_enabled["entries"][0]["available"], true);
+
+    let inventory: Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("plugins.json")).unwrap()).unwrap();
+    assert_eq!(inventory["schema"], "cayw.plugin-inventory.v1");
+    assert!(inventory["entries"]["process"].get("enabled").is_none());
+    assert!(inventory["entries"]["process"].get("last_error").is_none());
+    for workspace in [&first_workspace, &second_workspace] {
+        let activation = root
+            .path()
+            .join("workspaces")
+            .join(workspace_key(workspace.path()))
+            .join("architecture-plugins.json");
+        let state: Value = serde_json::from_slice(&std::fs::read(&activation).unwrap()).unwrap();
+        assert_eq!(state["schema"], "cayw.workspace-architecture-plugins.v2");
+        assert_eq!(state["entries"]["process"]["enabled"], true);
+        assert_private_file(&activation);
+    }
+
+    client.close().await;
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    server = serve(
+        home.path(),
+        first_workspace.path(),
+        root.path(),
+        &["--offline"],
+    )
+    .spawn()
+    .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    let restored_primary = client
+        .request("settings.plugins.list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(restored_primary["entries"][0]["available"], true);
+    client
+        .request("client.workspaces.open", json!({"id":second_id}))
+        .await
+        .unwrap();
+    let restored_secondary = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{"method":"settings.plugins.list","params":{}}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored_secondary["entries"][0]["available"], true);
+
+    client.close().await;
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let mut changed = std::fs::read(&plugin_executable).unwrap();
+    changed.push(0);
+    std::fs::write(&plugin_executable, changed).unwrap();
+
+    server = serve(
+        home.path(),
+        first_workspace.path(),
+        root.path(),
+        &["--offline"],
+    )
+    .spawn()
+    .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    let failed_primary = client
+        .request("settings.plugins.list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(failed_primary["entries"][0]["enabled"], true);
+    assert_eq!(failed_primary["entries"][0]["available"], false);
+    assert!(
+        failed_primary["entries"][0]["last_error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("executable changed")
+            && failed_primary["entries"][0]["last_error"]["outcome_unknown"] == false
+    );
+    client
+        .request("client.workspaces.open", json!({"id":second_id}))
+        .await
+        .unwrap();
+    let failed_secondary = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{"method":"settings.plugins.list","params":{}}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed_secondary["entries"][0]["enabled"], true);
+    assert_eq!(failed_secondary["entries"][0]["available"], false);
+    for workspace in [&first_workspace, &second_workspace] {
+        let activation = root
+            .path()
+            .join("workspaces")
+            .join(workspace_key(workspace.path()))
+            .join("architecture-plugins.json");
+        let state: Value = serde_json::from_slice(&std::fs::read(&activation).unwrap()).unwrap();
+        assert_eq!(state["entries"]["process"]["enabled"], true);
+        assert!(
+            state["entries"]["process"]["last_error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("executable changed")
+                && state["entries"]["process"]["last_error"]["outcome_unknown"] == false
+        );
+    }
+
+    client
+        .request("settings.plugins.disable", json!({"name":"process"}))
+        .await
+        .unwrap();
+    let remove_error = client
+        .request("settings.plugins.remove", json!({"name":"process"}))
+        .await
+        .unwrap_err();
+    assert!(remove_error.message.contains(second_path.to_str().unwrap()));
+    let secondary_disabled = client
+        .request(
+            "client.workspace.call",
+            json!({
+                "workspace_id":second_id,
+                "rpc":{
+                    "method":"settings.plugins.disable",
+                    "params":{"name":"process"}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(secondary_disabled["entries"][0]["enabled"], false);
+    let removed = client
+        .request("settings.plugins.remove", json!({"name":"process"}))
+        .await
+        .unwrap();
+    assert_eq!(removed["entries"], json!([]));
+    let bind_error = client
+        .request(
+            "settings.plugins.bind",
+            json!({"name":"process","session_id":"removed"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(bind_error.code, "settings_error");
+
+    client.close().await;
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }
 
 #[tokio::test]
@@ -477,7 +1411,7 @@ async fn explicit_token_keeps_default_database_lock_and_reports_its_actual_sourc
     let mut first = command.spawn().unwrap();
     let ready = read_ready(&mut first).await;
     assert!(ready["token_file"].is_null());
-    assert!(ready["connection_file"].is_null());
+    assert!(ready["client_file"].is_null());
     assert_ne!(
         std::fs::read_to_string(root.path().join("ipc.token")).unwrap(),
         token
@@ -490,7 +1424,7 @@ async fn explicit_token_keeps_default_database_lock_and_reports_its_actual_sourc
     let rejected = run(serve(home.path(), workspace.path(), root.path(), &[])).await;
     assert!(!rejected.status.success());
     assert!(rejected.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("local server already running"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("local Client is already running"));
     first.kill().await.unwrap();
     first.wait().await.unwrap();
 
@@ -516,7 +1450,7 @@ async fn explicit_token_keeps_default_database_lock_and_reports_its_actual_sourc
     let rejected = run(duplicate).await;
     assert!(!rejected.status.success());
     assert!(rejected.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("local server already running"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("local Client is already running"));
     client.close().await;
     second.kill().await.unwrap();
     second.wait().await.unwrap();

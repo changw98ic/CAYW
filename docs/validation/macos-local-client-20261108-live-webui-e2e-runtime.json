@@ -1,0 +1,5137 @@
+{
+  "session": {
+    "attempt": null,
+    "binding": null,
+    "cursor": 85,
+    "executions": [
+      {
+        "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+        "lease": {
+          "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+          "fence": 1,
+          "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+          "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+        },
+        "parent_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+        "source_hash": "sha256:dc20ad3868b9ad7dbf88cf268bded5ab681885784643344fb5761c52aec1b3d6",
+        "state": "completed",
+        "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+        "terminal": {
+          "result": {
+            "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+            "status": "completed"
+          },
+          "type": "completed"
+        }
+      }
+    ],
+    "frozen": false,
+    "id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+    "label": "Live browser E2E",
+    "messages": [
+      {
+        "content": "",
+        "role": "system",
+        "sections": {
+          "cayw-runtime-codemode": "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available."
+        },
+        "tools_added": [],
+        "tools_removed": []
+      },
+      {
+        "content": [
+          {
+            "text": "Complete this exact local acceptance task.\nYou MUST call execute_code with action \"exec\" and this exact Luau script:\nreturn cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})\nUse yield_time_ms 30000 and max_output_tokens 32768.\nDo not call any other capability. Do not claim success before the tool result.\nAfter the tool reports success, reply with exactly CAYW_LIVE_WEBUI_E2E_OK and nothing else.",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "timestamp": 1794102750662
+      },
+      {
+        "content": "",
+        "role": "system",
+        "sections": {},
+        "tools_added": [
+          {
+            "description": "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.",
+            "name": "execute_code",
+            "parameters": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "action": {
+                      "const": "exec"
+                    },
+                    "max_output_tokens": {
+                      "maximum": 131072,
+                      "minimum": 1024,
+                      "type": "integer"
+                    },
+                    "script": {
+                      "maxLength": 65536,
+                      "type": "string"
+                    },
+                    "yield_time_ms": {
+                      "maximum": 30000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "script",
+                    "yield_time_ms",
+                    "max_output_tokens"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "action": {
+                      "const": "wait"
+                    },
+                    "cell_id": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "continue_execution": {
+                      "type": "boolean"
+                    },
+                    "cursor": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "max_output_tokens": {
+                      "maximum": 131072,
+                      "minimum": 1024,
+                      "type": "integer"
+                    },
+                    "yield_time_ms": {
+                      "maximum": 30000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "cell_id",
+                    "cursor",
+                    "yield_time_ms",
+                    "max_output_tokens"
+                  ],
+                  "type": "object"
+                }
+              ],
+              "type": "object"
+            }
+          }
+        ],
+        "tools_removed": []
+      },
+      {
+        "content": [
+          {
+            "text": "I'll execute that exact script now.\n\n",
+            "type": "text"
+          },
+          {
+            "arguments": {
+              "action": "exec",
+              "max_output_tokens": 32768,
+              "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+              "yield_time_ms": 30000
+            },
+            "id": "chatcmpl-tool-b332ccd17bbd67bf",
+            "name": "execute_code",
+            "type": "toolCall"
+          }
+        ],
+        "duration_ms": 1369,
+        "error_message": null,
+        "model": "auto/deepseek-v4.1-flash",
+        "provider": "magpie",
+        "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+        "response_model": "group/auto-deepseek-v4-1-flash",
+        "role": "assistant",
+        "stop_reason": "toolUse",
+        "timestamp": 1794102750670,
+        "usage": {
+          "cache_read": 1280,
+          "cache_write": 0,
+          "input": 47,
+          "output": 133,
+          "reasoning": 0,
+          "total_tokens": 1460
+        },
+        "usage_fields": {
+          "completion_tokens": 133,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 1327,
+          "prompt_tokens_details": {
+            "cache_write_tokens": null,
+            "cached_tokens": 1280
+          },
+          "total_tokens": 1460
+        },
+        "usage_status": "reported"
+      },
+      {
+        "content": [
+          {
+            "text": "{\"cell_id\":\"0626696d-d00b-45eb-87f1-0bc91067b464\",\"status\":\"completed\",\"vm_alive\":false,\"cursor\":0,\"next_cursor\":1,\"outputs\":[{\"cursor\":1,\"output\":{\"type\":\"json\",\"value\":{\"bytes\":24,\"sha256\":\"ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc\"}}}],\"has_more\":false,\"required_budget\":null,\"outcome_unknown\":false,\"error\":null}",
+            "type": "text"
+          }
+        ],
+        "details": null,
+        "duration_ms": 1099,
+        "is_error": false,
+        "outcome_unknown": false,
+        "role": "toolResult",
+        "structured_content": {
+          "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+          "cursor": 0,
+          "error": null,
+          "has_more": false,
+          "next_cursor": 1,
+          "outcome_unknown": false,
+          "outputs": [
+            {
+              "cursor": 1,
+              "output": {
+                "type": "json",
+                "value": {
+                  "bytes": 24,
+                  "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+                }
+              }
+            }
+          ],
+          "required_budget": null,
+          "status": "completed",
+          "vm_alive": false
+        },
+        "timestamp": 1794102753148,
+        "tool_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+        "tool_name": "execute_code",
+        "usage": null
+      },
+      {
+        "content": [
+          {
+            "signature": null,
+            "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+            "type": "thinking"
+          },
+          {
+            "text": "CAYW_LIVE_WEBUI_E2E_OK",
+            "type": "text"
+          }
+        ],
+        "duration_ms": 735,
+        "error_message": null,
+        "model": "auto/deepseek-v4.1-flash",
+        "provider": "magpie",
+        "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+        "response_model": "group/auto-deepseek-v4-1-flash",
+        "role": "assistant",
+        "stop_reason": "stop",
+        "timestamp": 1794102753162,
+        "usage": {
+          "cache_read": 1280,
+          "cache_write": 0,
+          "input": 455,
+          "output": 27,
+          "reasoning": 14,
+          "total_tokens": 1762
+        },
+        "usage_fields": {
+          "completion_tokens": 27,
+          "completion_tokens_details": {
+            "reasoning_tokens": 14
+          },
+          "prompt_tokens": 1735,
+          "prompt_tokens_details": {
+            "cache_write_tokens": null,
+            "cached_tokens": 1280
+          },
+          "total_tokens": 1762
+        },
+        "usage_status": "reported"
+      }
+    ],
+    "pending_approvals": [],
+    "state": "idle",
+    "unresolved_calls": [],
+    "unresolved_capabilities": []
+  },
+  "tasks": [
+    {
+      "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+      "cancel_requested": false,
+      "dispatches": 2,
+      "error": null,
+      "fence": 1,
+      "holds_slot": false,
+      "id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+      "input": {
+        "images": [],
+        "text": "Complete this exact local acceptance task.\nYou MUST call execute_code with action \"exec\" and this exact Luau script:\nreturn cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})\nUse yield_time_ms 30000 and max_output_tokens 32768.\nDo not call any other capability. Do not claim success before the tool result.\nAfter the tool reports success, reply with exactly CAYW_LIVE_WEBUI_E2E_OK and nothing else."
+      },
+      "intent": {
+        "kind": "general"
+      },
+      "priority": "normal",
+      "queued_at": 1794102750636,
+      "ready_order": 1,
+      "ready_since_dispatch": 1,
+      "resources": {
+        "cpu_quota_percent": null,
+        "declared_memory_bytes": 0,
+        "gpu_units": 0,
+        "hard_memory_limit_bytes": null,
+        "io_bandwidth_bytes_per_sec": null
+      },
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "state": "completed",
+      "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+    }
+  ],
+  "context_overview": {
+    "budget_session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+    "budget_unknown": false,
+    "cache": {
+      "cache_read": 2560,
+      "cache_write": 0,
+      "hit_rate": 0.8360548661005879
+    },
+    "composition": [
+      {
+        "kind": "input",
+        "tokens": 502
+      },
+      {
+        "kind": "output",
+        "tokens": 160
+      },
+      {
+        "kind": "cache_read",
+        "tokens": 2560
+      },
+      {
+        "kind": "reasoning",
+        "tokens": 14
+      }
+    ],
+    "cost": {
+      "status": "unknown"
+    },
+    "evolution": [
+      {
+        "model": "auto/deepseek-v4.1-flash",
+        "provider": "magpie",
+        "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+        "terminal": "completed",
+        "turn": 1,
+        "usage": {
+          "cache_read": 1280,
+          "cache_write": 0,
+          "input": 47,
+          "output": 133,
+          "reasoning": 0,
+          "total_tokens": 1460
+        },
+        "usage_status": "reported"
+      },
+      {
+        "model": "auto/deepseek-v4.1-flash",
+        "provider": "magpie",
+        "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+        "terminal": "completed",
+        "turn": 2,
+        "usage": {
+          "cache_read": 1280,
+          "cache_write": 0,
+          "input": 455,
+          "output": 27,
+          "reasoning": 14,
+          "total_tokens": 1762
+        },
+        "usage_status": "reported"
+      }
+    ],
+    "label": "Live browser E2E",
+    "ledger_remaining_tokens": 124778,
+    "ledger_reserved_tokens": 0,
+    "ledger_settled_tokens": 3222,
+    "request_count": 2,
+    "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+    "tokens": {
+      "cache_read": 2560,
+      "cache_write": 0,
+      "input": 502,
+      "output": 160,
+      "reasoning": 14,
+      "total_tokens": 3222
+    },
+    "turn_count": 2
+  },
+  "events": [
+    {
+      "attempt": null,
+      "cursor": 1,
+      "event": {
+        "label": "Live browser E2E",
+        "type": "session_created"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750585
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 2,
+      "event": {
+        "lease": {
+          "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+          "fence": 1,
+          "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+          "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+        },
+        "type": "attempt_started"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750652
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 3,
+      "event": {
+        "event": {
+          "type": "agent_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750662
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 4,
+      "event": {
+        "event": {
+          "type": "turn_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750662
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 5,
+      "event": {
+        "event": {
+          "message": {
+            "content": "",
+            "role": "system",
+            "sections": {
+              "cayw-runtime-codemode": "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available."
+            },
+            "tools_added": [],
+            "tools_removed": []
+          },
+          "type": "message_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750662
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 6,
+      "event": {
+        "event": {
+          "message": {
+            "content": "",
+            "role": "system",
+            "sections": {
+              "cayw-runtime-codemode": "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available."
+            },
+            "tools_added": [],
+            "tools_removed": []
+          },
+          "type": "message_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750663
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 7,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "Complete this exact local acceptance task.\nYou MUST call execute_code with action \"exec\" and this exact Luau script:\nreturn cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})\nUse yield_time_ms 30000 and max_output_tokens 32768.\nDo not call any other capability. Do not claim success before the tool result.\nAfter the tool reports success, reply with exactly CAYW_LIVE_WEBUI_E2E_OK and nothing else.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 1794102750662
+          },
+          "type": "message_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750663
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 8,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "Complete this exact local acceptance task.\nYou MUST call execute_code with action \"exec\" and this exact Luau script:\nreturn cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})\nUse yield_time_ms 30000 and max_output_tokens 32768.\nDo not call any other capability. Do not claim success before the tool result.\nAfter the tool reports success, reply with exactly CAYW_LIVE_WEBUI_E2E_OK and nothing else.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "timestamp": 1794102750662
+          },
+          "type": "message_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750663
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 9,
+      "event": {
+        "event": {
+          "message": {
+            "content": "",
+            "role": "system",
+            "sections": {},
+            "tools_added": [
+              {
+                "description": "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.",
+                "name": "execute_code",
+                "parameters": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "exec"
+                        },
+                        "max_output_tokens": {
+                          "maximum": 131072,
+                          "minimum": 1024,
+                          "type": "integer"
+                        },
+                        "script": {
+                          "maxLength": 65536,
+                          "type": "string"
+                        },
+                        "yield_time_ms": {
+                          "maximum": 30000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "action",
+                        "script",
+                        "yield_time_ms",
+                        "max_output_tokens"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "wait"
+                        },
+                        "cell_id": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "continue_execution": {
+                          "type": "boolean"
+                        },
+                        "cursor": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "max_output_tokens": {
+                          "maximum": 131072,
+                          "minimum": 1024,
+                          "type": "integer"
+                        },
+                        "yield_time_ms": {
+                          "maximum": 30000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "action",
+                        "cell_id",
+                        "cursor",
+                        "yield_time_ms",
+                        "max_output_tokens"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "type": "object"
+                }
+              }
+            ],
+            "tools_removed": []
+          },
+          "type": "message_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750664
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 10,
+      "event": {
+        "event": {
+          "message": {
+            "content": "",
+            "role": "system",
+            "sections": {},
+            "tools_added": [
+              {
+                "description": "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.",
+                "name": "execute_code",
+                "parameters": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "exec"
+                        },
+                        "max_output_tokens": {
+                          "maximum": 131072,
+                          "minimum": 1024,
+                          "type": "integer"
+                        },
+                        "script": {
+                          "maxLength": 65536,
+                          "type": "string"
+                        },
+                        "yield_time_ms": {
+                          "maximum": 30000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "action",
+                        "script",
+                        "yield_time_ms",
+                        "max_output_tokens"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "const": "wait"
+                        },
+                        "cell_id": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "continue_execution": {
+                          "type": "boolean"
+                        },
+                        "cursor": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "max_output_tokens": {
+                          "maximum": 131072,
+                          "minimum": 1024,
+                          "type": "integer"
+                        },
+                        "yield_time_ms": {
+                          "maximum": 30000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "action",
+                        "cell_id",
+                        "cursor",
+                        "yield_time_ms",
+                        "max_output_tokens"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "type": "object"
+                }
+              }
+            ],
+            "tools_removed": []
+          },
+          "type": "message_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750665
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 11,
+      "event": {
+        "event": {
+          "message": {
+            "content": [],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": null,
+            "response_model": null,
+            "role": "assistant",
+            "stop_reason": "pending",
+            "timestamp": 1794102750666,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750666
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 12,
+      "event": {
+        "data": {
+          "identity": {
+            "budget_session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "lease": {
+              "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+              "fence": 1,
+              "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+              "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+            },
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+            "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+            "turn": 1
+          },
+          "output_max_tokens": 2048,
+          "policy": "entire_session_remainder",
+          "record": "reserved",
+          "token_limit": 128000,
+          "tokens": 128000
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750669
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 13,
+      "event": {
+        "data": {
+          "previous_cursor": 12,
+          "record": "started",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750670
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 14,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "start",
+            "metadata_redacted": false,
+            "response_id": null,
+            "response_model": null,
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 13,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750671
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 15,
+      "event": {
+        "event": {
+          "event": {
+            "message": {
+              "content": [],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": null,
+              "response_model": null,
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "start"
+          },
+          "message": {
+            "content": [],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": null,
+            "response_model": null,
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102750671
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 16,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_start",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 14,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102751576
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 17,
+      "event": {
+        "event": {
+          "event": {
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "text": "",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_start"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102751578
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 18,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_delta",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 16,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102751582
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 19,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "I'll execute that exact script now.\n\n",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102751583
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 20,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "tool_call_start",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 18,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102751588
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 21,
+      "event": {
+        "event": {
+          "event": {
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                },
+                {
+                  "arguments": {},
+                  "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                  "name": "execute_code",
+                  "type": "toolCall"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "tool_call_start"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {},
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102751588
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 22,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "tool_call_delta",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 20,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752018
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 23,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "{\"action\": \"exec\", \"script\": \"return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})\", \"yield_time_ms\": 30000, \"max_output_tokens\": 32768}",
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                },
+                {
+                  "arguments": {
+                    "action": "exec",
+                    "max_output_tokens": 32768,
+                    "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                    "yield_time_ms": 30000
+                  },
+                  "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                  "name": "execute_code",
+                  "type": "toolCall"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "tool_call_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {
+                  "action": "exec",
+                  "max_output_tokens": 32768,
+                  "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                  "yield_time_ms": 30000
+                },
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752019
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 24,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_end",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 22,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752025
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 25,
+      "event": {
+        "event": {
+          "event": {
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                },
+                {
+                  "arguments": {
+                    "action": "exec",
+                    "max_output_tokens": 32768,
+                    "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                    "yield_time_ms": 30000
+                  },
+                  "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                  "name": "execute_code",
+                  "type": "toolCall"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_end"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {
+                  "action": "exec",
+                  "max_output_tokens": 32768,
+                  "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                  "yield_time_ms": 30000
+                },
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752027
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 26,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "tool_call_end",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 24,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752032
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 27,
+      "event": {
+        "event": {
+          "event": {
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                },
+                {
+                  "arguments": {
+                    "action": "exec",
+                    "max_output_tokens": 32768,
+                    "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                    "yield_time_ms": 30000
+                  },
+                  "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                  "name": "execute_code",
+                  "type": "toolCall"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "tool_call_end"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {
+                  "action": "exec",
+                  "max_output_tokens": 32768,
+                  "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                  "yield_time_ms": 30000
+                },
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752032
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 28,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "usage_update",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "toolUse",
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 47,
+              "output": 133,
+              "reasoning": 0,
+              "total_tokens": 1460
+            },
+            "usage_fields": {
+              "completion_tokens": 133,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 1327,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1460
+            },
+            "usage_status": "reported"
+          },
+          "previous_cursor": 26,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752038
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 29,
+      "event": {
+        "event": {
+          "event": {
+            "partial": {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                },
+                {
+                  "arguments": {
+                    "action": "exec",
+                    "max_output_tokens": 32768,
+                    "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                    "yield_time_ms": 30000
+                  },
+                  "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                  "name": "execute_code",
+                  "type": "toolCall"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "toolUse",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 1280,
+                "cache_write": 0,
+                "input": 47,
+                "output": 133,
+                "reasoning": 0,
+                "total_tokens": 1460
+              },
+              "usage_fields": {
+                "completion_tokens": 133,
+                "completion_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "prompt_tokens": 1327,
+                "prompt_tokens_details": {
+                  "cache_write_tokens": null,
+                  "cached_tokens": 1280
+                },
+                "total_tokens": 1460
+              },
+              "usage_status": "reported"
+            },
+            "type": "usage_update"
+          },
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {
+                  "action": "exec",
+                  "max_output_tokens": 32768,
+                  "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                  "yield_time_ms": 30000
+                },
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "toolUse",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 47,
+              "output": 133,
+              "reasoning": 0,
+              "total_tokens": 1460
+            },
+            "usage_fields": {
+              "completion_tokens": 133,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 1327,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1460
+            },
+            "usage_status": "reported"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752039
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 30,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "done",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "toolUse",
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 47,
+              "output": 133,
+              "reasoning": 0,
+              "total_tokens": 1460
+            },
+            "usage_fields": {
+              "completion_tokens": 133,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 1327,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1460
+            },
+            "usage_status": "reported"
+          },
+          "previous_cursor": 28,
+          "record": "observed",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752042
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 31,
+      "event": {
+        "data": {
+          "last_received": {
+            "event": "done",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "toolUse",
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 47,
+              "output": 133,
+              "reasoning": 0,
+              "total_tokens": 1460
+            },
+            "usage_fields": {
+              "completion_tokens": 133,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 1327,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1460
+            },
+            "usage_status": "reported"
+          },
+          "previous_cursor": 30,
+          "record": "finished",
+          "request_id": "c616b777-4c2b-4398-a220-700baf948670",
+          "reservation_cursor": 12,
+          "settled_tokens": 1460,
+          "terminal": "completed"
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752045
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 32,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {
+                  "action": "exec",
+                  "max_output_tokens": 32768,
+                  "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                  "yield_time_ms": 30000
+                },
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": 1369,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "role": "assistant",
+            "stop_reason": "toolUse",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 47,
+              "output": 133,
+              "reasoning": 0,
+              "total_tokens": 1460
+            },
+            "usage_fields": {
+              "completion_tokens": 133,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 1327,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1460
+            },
+            "usage_status": "reported"
+          },
+          "type": "message_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752045
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 33,
+      "event": {
+        "event": {
+          "call": {
+            "arguments": {
+              "action": "exec",
+              "max_output_tokens": 32768,
+              "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+              "yield_time_ms": 30000
+            },
+            "id": "chatcmpl-tool-b332ccd17bbd67bf",
+            "name": "execute_code"
+          },
+          "type": "tool_execution_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752047
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 34,
+      "event": {
+        "call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+        "lease": {
+          "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+          "fence": 1,
+          "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+          "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+        },
+        "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+        "type": "tool_origin_bound"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752050
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 35,
+      "event": {
+        "call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+        "type": "tool_started"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752051
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 36,
+      "event": {
+        "execution": {
+          "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+          "lease": {
+            "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+            "fence": 1,
+            "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+          },
+          "parent_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+          "source_hash": "sha256:dc20ad3868b9ad7dbf88cf268bded5ab681885784643344fb5761c52aec1b3d6",
+          "state": "running",
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+          "terminal": null
+        },
+        "type": "execution_started"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752053
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 37,
+      "event": {
+        "call": {
+          "arguments": {
+            "content": "CAYW_LIVE_WEBUI_E2E_FILE",
+            "path": "live-e2e.txt"
+          },
+          "authorization": null,
+          "external_provenance": null,
+          "key": {
+            "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+            "sequence": 0
+          },
+          "lease": {
+            "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+            "fence": 1,
+            "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+          },
+          "name": "fs.write",
+          "outcome": null,
+          "parent_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+          "source_hash": "sha256:dc20ad3868b9ad7dbf88cf268bded5ab681885784643344fb5761c52aec1b3d6",
+          "stage": "planned",
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+        },
+        "type": "capability_planned"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752064
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 38,
+      "event": {
+        "approval": {
+          "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+          "decision": null,
+          "id": "a46d762b-7315-4625-bc18-800418d7da0d",
+          "input": {
+            "capability": "fs.write",
+            "reason": "Execution 0626696d-d00b-45eb-87f1-0bc91067b464 call 0 requires explicit permission for this exact capability",
+            "scope": "{\"content\":\"CAYW_LIVE_WEBUI_E2E_FILE\",\"path\":\"live-e2e.txt\"}",
+            "target": {
+              "key": {
+                "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+                "sequence": 0
+              },
+              "type": "capability_call"
+            },
+            "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+          },
+          "requested_at": 1794102752066,
+          "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6"
+        },
+        "type": "approval_requested"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102752066
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 39,
+      "event": {
+        "approval": {
+          "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+          "decision": {
+            "actor": "rpc-user",
+            "decided_at": 1794102753103,
+            "decision": "approve"
+          },
+          "id": "a46d762b-7315-4625-bc18-800418d7da0d",
+          "input": {
+            "capability": "fs.write",
+            "reason": "Execution 0626696d-d00b-45eb-87f1-0bc91067b464 call 0 requires explicit permission for this exact capability",
+            "scope": "{\"content\":\"CAYW_LIVE_WEBUI_E2E_FILE\",\"path\":\"live-e2e.txt\"}",
+            "target": {
+              "key": {
+                "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+                "sequence": 0
+              },
+              "type": "capability_call"
+            },
+            "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+          },
+          "requested_at": 1794102752066,
+          "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6"
+        },
+        "type": "approval_decided"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753103
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 40,
+      "event": {
+        "data": {
+          "actor": "rpc-user",
+          "approval_id": "a46d762b-7315-4625-bc18-800418d7da0d",
+          "choice": "allow_once",
+          "grant_id": "91dfb41a-e74e-406d-a82f-dff9a2bf0126",
+          "scope": "{\"content\":\"CAYW_LIVE_WEBUI_E2E_FILE\",\"path\":\"live-e2e.txt\"}",
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+        },
+        "kind": "approval_scope_decided",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753104
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 41,
+      "event": {
+        "data": {
+          "approval_id": "a46d762b-7315-4625-bc18-800418d7da0d",
+          "grant": {
+            "actor": "rpc-user",
+            "approval_id": "a46d762b-7315-4625-bc18-800418d7da0d",
+            "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+            "capability": "fs.write",
+            "consumed": true,
+            "expires_at": 1794103053103,
+            "id": "91dfb41a-e74e-406d-a82f-dff9a2bf0126",
+            "mode": "allow_once",
+            "scope": "{\"content\":\"CAYW_LIVE_WEBUI_E2E_FILE\",\"path\":\"live-e2e.txt\"}",
+            "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "state": "active"
+          },
+          "grant_id": "91dfb41a-e74e-406d-a82f-dff9a2bf0126",
+          "key": {
+            "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+            "sequence": 0
+          },
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+        },
+        "kind": "permission_admitted",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753110
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 42,
+      "event": {
+        "call": {
+          "arguments": {
+            "content": "CAYW_LIVE_WEBUI_E2E_FILE",
+            "path": "live-e2e.txt"
+          },
+          "authorization": {
+            "actor": "rpc-user",
+            "approval_id": "a46d762b-7315-4625-bc18-800418d7da0d",
+            "capability": "fs.write",
+            "decision": "approve",
+            "external_provenance": null,
+            "scope": "{\"content\":\"CAYW_LIVE_WEBUI_E2E_FILE\",\"path\":\"live-e2e.txt\"}",
+            "target": {
+              "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+              "sequence": 0
+            },
+            "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+          },
+          "external_provenance": null,
+          "key": {
+            "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+            "sequence": 0
+          },
+          "lease": {
+            "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+            "fence": 1,
+            "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+          },
+          "name": "fs.write",
+          "outcome": null,
+          "parent_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+          "source_hash": "sha256:dc20ad3868b9ad7dbf88cf268bded5ab681885784643344fb5761c52aec1b3d6",
+          "stage": "started",
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+        },
+        "type": "capability_started"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753114
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 43,
+      "event": {
+        "call": {
+          "arguments": {
+            "content": "CAYW_LIVE_WEBUI_E2E_FILE",
+            "path": "live-e2e.txt"
+          },
+          "authorization": {
+            "actor": "rpc-user",
+            "approval_id": "a46d762b-7315-4625-bc18-800418d7da0d",
+            "capability": "fs.write",
+            "decision": "approve",
+            "external_provenance": null,
+            "scope": "{\"content\":\"CAYW_LIVE_WEBUI_E2E_FILE\",\"path\":\"live-e2e.txt\"}",
+            "target": {
+              "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+              "sequence": 0
+            },
+            "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+          },
+          "external_provenance": null,
+          "key": {
+            "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+            "sequence": 0
+          },
+          "lease": {
+            "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+            "fence": 1,
+            "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+          },
+          "name": "fs.write",
+          "outcome": {
+            "result": {
+              "bytes": 24,
+              "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+            },
+            "type": "completed"
+          },
+          "parent_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+          "source_hash": "sha256:dc20ad3868b9ad7dbf88cf268bded5ab681885784643344fb5761c52aec1b3d6",
+          "stage": "settled",
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba"
+        },
+        "type": "capability_settled"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753138
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 44,
+      "event": {
+        "execution": {
+          "execution_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+          "lease": {
+            "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+            "fence": 1,
+            "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+          },
+          "parent_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+          "source_hash": "sha256:dc20ad3868b9ad7dbf88cf268bded5ab681885784643344fb5761c52aec1b3d6",
+          "state": "completed",
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+          "terminal": {
+            "result": {
+              "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+              "status": "completed"
+            },
+            "type": "completed"
+          }
+        },
+        "type": "execution_finished"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753146
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 45,
+      "event": {
+        "event": {
+          "call": {
+            "arguments": {
+              "action": "exec",
+              "max_output_tokens": 32768,
+              "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+              "yield_time_ms": 30000
+            },
+            "id": "chatcmpl-tool-b332ccd17bbd67bf",
+            "name": "execute_code"
+          },
+          "duration_ms": 1099,
+          "result": {
+            "content": [
+              {
+                "text": "{\"cell_id\":\"0626696d-d00b-45eb-87f1-0bc91067b464\",\"status\":\"completed\",\"vm_alive\":false,\"cursor\":0,\"next_cursor\":1,\"outputs\":[{\"cursor\":1,\"output\":{\"type\":\"json\",\"value\":{\"bytes\":24,\"sha256\":\"ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc\"}}}],\"has_more\":false,\"required_budget\":null,\"outcome_unknown\":false,\"error\":null}",
+                "type": "text"
+              }
+            ],
+            "details": null,
+            "is_error": false,
+            "outcome_unknown": false,
+            "structured_content": {
+              "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+              "cursor": 0,
+              "error": null,
+              "has_more": false,
+              "next_cursor": 1,
+              "outcome_unknown": false,
+              "outputs": [
+                {
+                  "cursor": 1,
+                  "output": {
+                    "type": "json",
+                    "value": {
+                      "bytes": 24,
+                      "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+                    }
+                  }
+                }
+              ],
+              "required_budget": null,
+              "status": "completed",
+              "vm_alive": false
+            },
+            "terminate": false,
+            "usage": null
+          },
+          "type": "tool_execution_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753148
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 46,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "{\"cell_id\":\"0626696d-d00b-45eb-87f1-0bc91067b464\",\"status\":\"completed\",\"vm_alive\":false,\"cursor\":0,\"next_cursor\":1,\"outputs\":[{\"cursor\":1,\"output\":{\"type\":\"json\",\"value\":{\"bytes\":24,\"sha256\":\"ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc\"}}}],\"has_more\":false,\"required_budget\":null,\"outcome_unknown\":false,\"error\":null}",
+                "type": "text"
+              }
+            ],
+            "details": null,
+            "duration_ms": 1099,
+            "is_error": false,
+            "outcome_unknown": false,
+            "role": "toolResult",
+            "structured_content": {
+              "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+              "cursor": 0,
+              "error": null,
+              "has_more": false,
+              "next_cursor": 1,
+              "outcome_unknown": false,
+              "outputs": [
+                {
+                  "cursor": 1,
+                  "output": {
+                    "type": "json",
+                    "value": {
+                      "bytes": 24,
+                      "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+                    }
+                  }
+                }
+              ],
+              "required_budget": null,
+              "status": "completed",
+              "vm_alive": false
+            },
+            "timestamp": 1794102753149,
+            "tool_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+            "tool_name": "execute_code",
+            "usage": null
+          },
+          "type": "message_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753149
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 47,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "{\"cell_id\":\"0626696d-d00b-45eb-87f1-0bc91067b464\",\"status\":\"completed\",\"vm_alive\":false,\"cursor\":0,\"next_cursor\":1,\"outputs\":[{\"cursor\":1,\"output\":{\"type\":\"json\",\"value\":{\"bytes\":24,\"sha256\":\"ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc\"}}}],\"has_more\":false,\"required_budget\":null,\"outcome_unknown\":false,\"error\":null}",
+                "type": "text"
+              }
+            ],
+            "details": null,
+            "duration_ms": 1099,
+            "is_error": false,
+            "outcome_unknown": false,
+            "role": "toolResult",
+            "structured_content": {
+              "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+              "cursor": 0,
+              "error": null,
+              "has_more": false,
+              "next_cursor": 1,
+              "outcome_unknown": false,
+              "outputs": [
+                {
+                  "cursor": 1,
+                  "output": {
+                    "type": "json",
+                    "value": {
+                      "bytes": 24,
+                      "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+                    }
+                  }
+                }
+              ],
+              "required_budget": null,
+              "status": "completed",
+              "vm_alive": false
+            },
+            "timestamp": 1794102753149,
+            "tool_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+            "tool_name": "execute_code",
+            "usage": null
+          },
+          "type": "message_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753150
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 48,
+      "event": {
+        "data": {
+          "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+          "cursor": 0,
+          "next_cursor": 1,
+          "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+          "tool_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+          "vm_alive": false
+        },
+        "kind": "cell_output_delivered",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753151
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 49,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "text": "I'll execute that exact script now.\n\n",
+                "type": "text"
+              },
+              {
+                "arguments": {
+                  "action": "exec",
+                  "max_output_tokens": 32768,
+                  "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                  "yield_time_ms": 30000
+                },
+                "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                "name": "execute_code",
+                "type": "toolCall"
+              }
+            ],
+            "duration_ms": 1369,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "toolUse",
+            "timestamp": 1794102750670,
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 47,
+              "output": 133,
+              "reasoning": 0,
+              "total_tokens": 1460
+            },
+            "usage_fields": {
+              "completion_tokens": 133,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_tokens": 1327,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1460
+            },
+            "usage_status": "reported"
+          },
+          "tool_results": [
+            {
+              "content": [
+                {
+                  "text": "{\"cell_id\":\"0626696d-d00b-45eb-87f1-0bc91067b464\",\"status\":\"completed\",\"vm_alive\":false,\"cursor\":0,\"next_cursor\":1,\"outputs\":[{\"cursor\":1,\"output\":{\"type\":\"json\",\"value\":{\"bytes\":24,\"sha256\":\"ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc\"}}}],\"has_more\":false,\"required_budget\":null,\"outcome_unknown\":false,\"error\":null}",
+                  "type": "text"
+                }
+              ],
+              "details": null,
+              "duration_ms": 1099,
+              "is_error": false,
+              "outcome_unknown": false,
+              "structured_content": {
+                "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+                "cursor": 0,
+                "error": null,
+                "has_more": false,
+                "next_cursor": 1,
+                "outcome_unknown": false,
+                "outputs": [
+                  {
+                    "cursor": 1,
+                    "output": {
+                      "type": "json",
+                      "value": {
+                        "bytes": 24,
+                        "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+                      }
+                    }
+                  }
+                ],
+                "required_budget": null,
+                "status": "completed",
+                "vm_alive": false
+              },
+              "timestamp": 1794102753149,
+              "tool_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+              "tool_name": "execute_code",
+              "usage": null
+            }
+          ],
+          "type": "turn_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753152
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 50,
+      "event": {
+        "event": {
+          "type": "turn_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753153
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 51,
+      "event": {
+        "event": {
+          "message": {
+            "content": [],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": null,
+            "response_model": null,
+            "role": "assistant",
+            "stop_reason": "pending",
+            "timestamp": 1794102753155,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_start"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753155
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 52,
+      "event": {
+        "data": {
+          "identity": {
+            "budget_session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+            "lease": {
+              "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+              "fence": 1,
+              "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+              "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+            },
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+            "task_id": "107ad2d7-ed61-4343-8aef-b7585dc0afba",
+            "turn": 2
+          },
+          "output_max_tokens": 2048,
+          "policy": "entire_session_remainder",
+          "record": "reserved",
+          "token_limit": 128000,
+          "tokens": 126540
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753160
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 53,
+      "event": {
+        "data": {
+          "previous_cursor": 52,
+          "record": "started",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753162
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 54,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "start",
+            "metadata_redacted": false,
+            "response_id": null,
+            "response_model": null,
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 53,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753164
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 55,
+      "event": {
+        "event": {
+          "event": {
+            "message": {
+              "content": [],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": null,
+              "response_model": null,
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "start"
+          },
+          "message": {
+            "content": [],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": null,
+            "response_model": null,
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753164
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 56,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "thinking_start",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 54,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753720
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 57,
+      "event": {
+        "event": {
+          "event": {
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_start"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753721
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 58,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "thinking_delta",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 56,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753726
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 59,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "Tool",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753726
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 60,
+      "event": {
+        "event": {
+          "event": {
+            "delta": " reported",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753727
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 61,
+      "event": {
+        "event": {
+          "event": {
+            "delta": " success (",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753787
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 62,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "completed",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753788
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 63,
+      "event": {
+        "event": {
+          "event": {
+            "delta": ", wrote",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753789
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 64,
+      "event": {
+        "event": {
+          "event": {
+            "delta": " 24 bytes). Reply",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply",
+                  "type": "thinking"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply",
+                "type": "thinking"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753825
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 65,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_start",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 58,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753837
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 66,
+      "event": {
+        "event": {
+          "event": {
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply",
+                  "type": "thinking"
+                },
+                {
+                  "text": "",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_start"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply",
+                "type": "thinking"
+              },
+              {
+                "text": "",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753837
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 67,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_delta",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 65,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753842
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 68,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "CAYW",
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753843
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 69,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "thinking_delta",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 67,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753846
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 70,
+      "event": {
+        "event": {
+          "event": {
+            "delta": " exactly.",
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753846
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 71,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_delta",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 69,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753867
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 72,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "_LIVE_WEB",
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW_LIVE_WEB",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEB",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753868
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 73,
+      "event": {
+        "event": {
+          "event": {
+            "delta": "UI_E2E_OK",
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_delta"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753874
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 74,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "thinking_end",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 71,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753878
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 75,
+      "event": {
+        "event": {
+          "event": {
+            "index": 0,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "thinking_end"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753879
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 76,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "text_end",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "previous_cursor": 74,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753882
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 77,
+      "event": {
+        "event": {
+          "event": {
+            "index": 1,
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "pending",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 0,
+                "cache_write": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "total_tokens": 0
+              },
+              "usage_fields": {},
+              "usage_status": "unknown"
+            },
+            "type": "text_end"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "pending",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 0,
+              "cache_write": 0,
+              "input": 0,
+              "output": 0,
+              "reasoning": 0,
+              "total_tokens": 0
+            },
+            "usage_fields": {},
+            "usage_status": "unknown"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753882
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 78,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "usage_update",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "stop",
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 455,
+              "output": 27,
+              "reasoning": 14,
+              "total_tokens": 1762
+            },
+            "usage_fields": {
+              "completion_tokens": 27,
+              "completion_tokens_details": {
+                "reasoning_tokens": 14
+              },
+              "prompt_tokens": 1735,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1762
+            },
+            "usage_status": "reported"
+          },
+          "previous_cursor": 76,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753895
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 79,
+      "event": {
+        "event": {
+          "event": {
+            "partial": {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": null,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "stop_reason": "stop",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 1280,
+                "cache_write": 0,
+                "input": 455,
+                "output": 27,
+                "reasoning": 14,
+                "total_tokens": 1762
+              },
+              "usage_fields": {
+                "completion_tokens": 27,
+                "completion_tokens_details": {
+                  "reasoning_tokens": 14
+                },
+                "prompt_tokens": 1735,
+                "prompt_tokens_details": {
+                  "cache_write_tokens": null,
+                  "cached_tokens": 1280
+                },
+                "total_tokens": 1762
+              },
+              "usage_status": "reported"
+            },
+            "type": "usage_update"
+          },
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                "type": "text"
+              }
+            ],
+            "duration_ms": null,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "stop",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 455,
+              "output": 27,
+              "reasoning": 14,
+              "total_tokens": 1762
+            },
+            "usage_fields": {
+              "completion_tokens": 27,
+              "completion_tokens_details": {
+                "reasoning_tokens": 14
+              },
+              "prompt_tokens": 1735,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1762
+            },
+            "usage_status": "reported"
+          },
+          "type": "message_update"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753896
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 80,
+      "event": {
+        "data": {
+          "observation": {
+            "event": "done",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "stop",
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 455,
+              "output": 27,
+              "reasoning": 14,
+              "total_tokens": 1762
+            },
+            "usage_fields": {
+              "completion_tokens": 27,
+              "completion_tokens_details": {
+                "reasoning_tokens": 14
+              },
+              "prompt_tokens": 1735,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1762
+            },
+            "usage_status": "reported"
+          },
+          "previous_cursor": 78,
+          "record": "observed",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753900
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 81,
+      "event": {
+        "data": {
+          "last_received": {
+            "event": "done",
+            "metadata_redacted": false,
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "stop",
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 455,
+              "output": 27,
+              "reasoning": 14,
+              "total_tokens": 1762
+            },
+            "usage_fields": {
+              "completion_tokens": 27,
+              "completion_tokens_details": {
+                "reasoning_tokens": 14
+              },
+              "prompt_tokens": 1735,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1762
+            },
+            "usage_status": "reported"
+          },
+          "previous_cursor": 80,
+          "record": "finished",
+          "request_id": "99a26930-2eef-41ee-a3a3-a545ee675604",
+          "reservation_cursor": 52,
+          "settled_tokens": 1762,
+          "terminal": "completed"
+        },
+        "kind": "model_request",
+        "type": "host"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753904
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 82,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                "type": "text"
+              }
+            ],
+            "duration_ms": 735,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "role": "assistant",
+            "stop_reason": "stop",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 455,
+              "output": 27,
+              "reasoning": 14,
+              "total_tokens": 1762
+            },
+            "usage_fields": {
+              "completion_tokens": 27,
+              "completion_tokens_details": {
+                "reasoning_tokens": 14
+              },
+              "prompt_tokens": 1735,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1762
+            },
+            "usage_status": "reported"
+          },
+          "type": "message_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753904
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 83,
+      "event": {
+        "event": {
+          "message": {
+            "content": [
+              {
+                "signature": null,
+                "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                "type": "thinking"
+              },
+              {
+                "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                "type": "text"
+              }
+            ],
+            "duration_ms": 735,
+            "error_message": null,
+            "model": "auto/deepseek-v4.1-flash",
+            "provider": "magpie",
+            "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+            "response_model": "group/auto-deepseek-v4-1-flash",
+            "stop_reason": "stop",
+            "timestamp": 1794102753162,
+            "usage": {
+              "cache_read": 1280,
+              "cache_write": 0,
+              "input": 455,
+              "output": 27,
+              "reasoning": 14,
+              "total_tokens": 1762
+            },
+            "usage_fields": {
+              "completion_tokens": 27,
+              "completion_tokens_details": {
+                "reasoning_tokens": 14
+              },
+              "prompt_tokens": 1735,
+              "prompt_tokens_details": {
+                "cache_write_tokens": null,
+                "cached_tokens": 1280
+              },
+              "total_tokens": 1762
+            },
+            "usage_status": "reported"
+          },
+          "tool_results": [],
+          "type": "turn_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753906
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 84,
+      "event": {
+        "event": {
+          "messages": [
+            {
+              "content": "",
+              "role": "system",
+              "sections": {
+                "cayw-runtime-codemode": "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available."
+              },
+              "tools_added": [],
+              "tools_removed": []
+            },
+            {
+              "content": [
+                {
+                  "text": "Complete this exact local acceptance task.\nYou MUST call execute_code with action \"exec\" and this exact Luau script:\nreturn cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})\nUse yield_time_ms 30000 and max_output_tokens 32768.\nDo not call any other capability. Do not claim success before the tool result.\nAfter the tool reports success, reply with exactly CAYW_LIVE_WEBUI_E2E_OK and nothing else.",
+                  "type": "text"
+                }
+              ],
+              "role": "user",
+              "timestamp": 1794102750662
+            },
+            {
+              "content": "",
+              "role": "system",
+              "sections": {},
+              "tools_added": [
+                {
+                  "description": "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.",
+                  "name": "execute_code",
+                  "parameters": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "action": {
+                            "const": "exec"
+                          },
+                          "max_output_tokens": {
+                            "maximum": 131072,
+                            "minimum": 1024,
+                            "type": "integer"
+                          },
+                          "script": {
+                            "maxLength": 65536,
+                            "type": "string"
+                          },
+                          "yield_time_ms": {
+                            "maximum": 30000,
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "action",
+                          "script",
+                          "yield_time_ms",
+                          "max_output_tokens"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "action": {
+                            "const": "wait"
+                          },
+                          "cell_id": {
+                            "maxLength": 128,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "continue_execution": {
+                            "type": "boolean"
+                          },
+                          "cursor": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "max_output_tokens": {
+                            "maximum": 131072,
+                            "minimum": 1024,
+                            "type": "integer"
+                          },
+                          "yield_time_ms": {
+                            "maximum": 30000,
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "action",
+                          "cell_id",
+                          "cursor",
+                          "yield_time_ms",
+                          "max_output_tokens"
+                        ],
+                        "type": "object"
+                      }
+                    ],
+                    "type": "object"
+                  }
+                }
+              ],
+              "tools_removed": []
+            },
+            {
+              "content": [
+                {
+                  "text": "I'll execute that exact script now.\n\n",
+                  "type": "text"
+                },
+                {
+                  "arguments": {
+                    "action": "exec",
+                    "max_output_tokens": 32768,
+                    "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+                    "yield_time_ms": 30000
+                  },
+                  "id": "chatcmpl-tool-b332ccd17bbd67bf",
+                  "name": "execute_code",
+                  "type": "toolCall"
+                }
+              ],
+              "duration_ms": 1369,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RTr7Vtozy53xtgaMxnr8NHYT",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "role": "assistant",
+              "stop_reason": "toolUse",
+              "timestamp": 1794102750670,
+              "usage": {
+                "cache_read": 1280,
+                "cache_write": 0,
+                "input": 47,
+                "output": 133,
+                "reasoning": 0,
+                "total_tokens": 1460
+              },
+              "usage_fields": {
+                "completion_tokens": 133,
+                "completion_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "prompt_tokens": 1327,
+                "prompt_tokens_details": {
+                  "cache_write_tokens": null,
+                  "cached_tokens": 1280
+                },
+                "total_tokens": 1460
+              },
+              "usage_status": "reported"
+            },
+            {
+              "content": [
+                {
+                  "text": "{\"cell_id\":\"0626696d-d00b-45eb-87f1-0bc91067b464\",\"status\":\"completed\",\"vm_alive\":false,\"cursor\":0,\"next_cursor\":1,\"outputs\":[{\"cursor\":1,\"output\":{\"type\":\"json\",\"value\":{\"bytes\":24,\"sha256\":\"ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc\"}}}],\"has_more\":false,\"required_budget\":null,\"outcome_unknown\":false,\"error\":null}",
+                  "type": "text"
+                }
+              ],
+              "details": null,
+              "duration_ms": 1099,
+              "is_error": false,
+              "outcome_unknown": false,
+              "role": "toolResult",
+              "structured_content": {
+                "cell_id": "0626696d-d00b-45eb-87f1-0bc91067b464",
+                "cursor": 0,
+                "error": null,
+                "has_more": false,
+                "next_cursor": 1,
+                "outcome_unknown": false,
+                "outputs": [
+                  {
+                    "cursor": 1,
+                    "output": {
+                      "type": "json",
+                      "value": {
+                        "bytes": 24,
+                        "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc"
+                      }
+                    }
+                  }
+                ],
+                "required_budget": null,
+                "status": "completed",
+                "vm_alive": false
+              },
+              "timestamp": 1794102753149,
+              "tool_call_id": "chatcmpl-tool-b332ccd17bbd67bf",
+              "tool_name": "execute_code",
+              "usage": null
+            },
+            {
+              "content": [
+                {
+                  "signature": null,
+                  "thinking": "Tool reported success (completed, wrote 24 bytes). Reply exactly.",
+                  "type": "thinking"
+                },
+                {
+                  "text": "CAYW_LIVE_WEBUI_E2E_OK",
+                  "type": "text"
+                }
+              ],
+              "duration_ms": 735,
+              "error_message": null,
+              "model": "auto/deepseek-v4.1-flash",
+              "provider": "magpie",
+              "response_id": "chatcmpl-RJvbwbKNpbdCEcXdSg7dCKjq",
+              "response_model": "group/auto-deepseek-v4-1-flash",
+              "role": "assistant",
+              "stop_reason": "stop",
+              "timestamp": 1794102753162,
+              "usage": {
+                "cache_read": 1280,
+                "cache_write": 0,
+                "input": 455,
+                "output": 27,
+                "reasoning": 14,
+                "total_tokens": 1762
+              },
+              "usage_fields": {
+                "completion_tokens": 27,
+                "completion_tokens_details": {
+                  "reasoning_tokens": 14
+                },
+                "prompt_tokens": 1735,
+                "prompt_tokens_details": {
+                  "cache_write_tokens": null,
+                  "cached_tokens": 1280
+                },
+                "total_tokens": 1762
+              },
+              "usage_status": "reported"
+            }
+          ],
+          "type": "agent_end"
+        },
+        "type": "agent"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753907
+    },
+    {
+      "attempt": {
+        "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+        "fence": 1,
+        "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+        "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+      },
+      "cursor": 85,
+      "event": {
+        "lease": {
+          "attempt_id": "5033cbcb-a61b-48c7-a2da-ba3a8e8b8997",
+          "fence": 1,
+          "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+          "worker_id": "449a9787-541e-4403-9de0-42a2a52be236"
+        },
+        "type": "attempt_finished"
+      },
+      "protocol_version": 3,
+      "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+      "timestamp": 1794102753925
+    }
+  ],
+  "file": {
+    "path": "live-e2e.txt",
+    "content": "CAYW_LIVE_WEBUI_E2E_FILE"
+  },
+  "model": {
+    "health": {
+      "max_concurrent_runs": 4,
+      "model": "auto/deepseek-v4.1-flash",
+      "protocol_version": 3,
+      "provider": "magpie",
+      "queued": 0,
+      "running": 0,
+      "status": "ok"
+    },
+    "models": {
+      "live-browser-e2e": {
+        "api": "chat_completions",
+        "api_version": "v1",
+        "authentication": "none",
+        "base_url": "http://127.0.0.1:3425/v1",
+        "id": "auto/deepseek-v4.1-flash",
+        "max_output_tokens": 2048,
+        "service": "magpie"
+      }
+    },
+    "offline": false,
+    "selected": "live-browser-e2e"
+  }
+}

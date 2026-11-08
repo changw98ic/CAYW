@@ -1,26 +1,51 @@
-use cayw_runtime::{HeadlessConfig, ProviderConfig, local_cli::save_config};
+use cayw_runtime::{
+    HeadlessConfig, ProviderConfig,
+    local_cli::{LocalPaths, save_config},
+};
 use serde_json::{Value, json};
 use std::{
     error::Error,
     fs::File,
-    io::{self, BufRead, IsTerminal, Read, Write},
+    io::{self, BufRead, Read, Write},
     path::Path,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-pub fn interactive() -> bool {
-    io::stdin().is_terminal() && io::stderr().is_terminal()
+pub fn configure_local(paths: &LocalPaths) -> Result<bool> {
+    configure_local_with(paths, &mut io::stdin().lock(), &mut io::stderr().lock())
 }
 
-pub fn offer(path: &Path) -> Result<bool> {
-    let mut input = io::stdin().lock();
-    let mut output = io::stderr().lock();
-    writeln!(output, "尚未配置模型。配置文件：{}", path.display())?;
-    if !confirm(&mut input, &mut output, "现在配置模型吗？[Y/n] ")? {
+fn configure_local_with(
+    paths: &LocalPaths,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    if let Some(existing) = crate::cli_settings::selected_model(paths)? {
+        writeln!(
+            output,
+            "当前工作区已选择模型：{}。继续填写可替换 configured 方案，取消会保留原方案。",
+            existing.id()
+        )?;
+    }
+    let Some(model) = read_model(input, output)? else {
+        writeln!(output, "已取消配置，原模型方案未改动。")?;
+        return Ok(false);
+    };
+    let path = paths.state_file("models.json");
+    writeln!(output, "将保存当前工作区模型方案：{}", path.display())?;
+    if !confirm(input, output, "保存配置吗？[Y/n] ")? {
+        writeln!(output, "已取消配置，原模型方案未改动。")?;
         return Ok(false);
     }
-    configure_with(path, &mut input, &mut output)
+    crate::cli_settings::save_configured_model(paths, model)?;
+    writeln!(output, "模型方案已保存：{}", path.display())?;
+    writeln!(
+        output,
+        "如填写了密钥，密钥会以明文保存在这个仅限当前用户读取的普通配置文件中。"
+    )?;
+    writeln!(output, "已有 Client 会尝试即时应用这个工作区的新模型。")?;
+    Ok(true)
 }
 
 pub fn configure(path: &Path) -> Result<bool> {
@@ -72,17 +97,14 @@ fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write
     let mut bytes = serde_json::to_vec_pretty(&configuration)?;
     bytes.push(b'\n');
     save_config(path, original.as_deref(), &bytes)?;
-    let value = serde_json::to_value(&model)?;
-    let name = value["api_key_env"]
-        .as_str()
-        .expect("validated environment name");
     writeln!(output, "模型配置已保存：{}", path.display())?;
-    writeln!(output, "配置只保存密钥环境变量的名称，不保存密钥。")?;
-    writeln!(output, "请在启动服务的终端设置密钥：")?;
-    writeln!(output, "  export {name}='你的密钥'")?;
     writeln!(
         output,
-        "尚未启动服务时运行 `cayw start --config {}`；已有服务会尝试即时应用。",
+        "如填写了密钥，密钥会以明文保存在这个仅限当前用户读取的普通配置文件中。"
+    )?;
+    writeln!(
+        output,
+        "下一次显式 Headless 启动时运行 `cayw serve --config {}`，并同时提供 --db 和 --token-env。",
         shell_path(path)
     )?;
     Ok(true)
@@ -95,7 +117,7 @@ fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Optio
     )?;
     writeln!(
         output,
-        "这里只填写配置。不会发送模型请求，也不会要求输入密钥值。"
+        "这里只填写配置，不会发送模型请求。密钥可留空；填写后会明文保存在普通本地文件。"
     )?;
     let service = loop {
         let Some(value) = answer(input, output, "模型服务 [1-4 或名称]：", None)? else {
@@ -109,29 +131,25 @@ fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Optio
             _ => writeln!(output, "请选择 1-4，或输入对应的服务名称。")?,
         }
     };
-    let (default_api, default_base, default_key, apis) = match service {
+    let (default_api, default_base, apis) = match service {
         "openai" => (
             "chat_completions",
             "https://api.openai.com/v1",
-            "OPENAI_API_KEY",
             &["chat_completions", "responses"][..],
         ),
         "anthropic" => (
             "messages",
             "https://api.anthropic.com/v1",
-            "ANTHROPIC_API_KEY",
             &["messages"][..],
         ),
         "gemini" => (
             "stream_generate_content",
             "https://generativelanguage.googleapis.com/v1beta",
-            "GEMINI_API_KEY",
             &["stream_generate_content", "generate_content"][..],
         ),
         _ => (
             "chat_completions",
             "http://127.0.0.1:3425/v1",
-            "MAGPIE_API_KEY",
             &[
                 "chat_completions",
                 "responses",
@@ -175,15 +193,16 @@ fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Optio
     else {
         return Ok(None);
     };
-    let Some(api_key_env) = answer(
+    let Some(api_key) = answer(
         input,
         output,
-        &format!("密钥环境变量名 [{default_key}]："),
-        Some(default_key),
+        "模型密钥（可留空，表示该服务不需要认证）：",
+        Some(""),
     )?
     else {
         return Ok(None);
     };
+    let api_key = (!api_key.is_empty()).then_some(api_key);
     let max_output_tokens = loop {
         let Some(value) = answer(input, output, "单次输出 token 上限 [4096]：", Some("4096"))?
         else {
@@ -198,7 +217,7 @@ fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Optio
     };
     let model: ProviderConfig = serde_json::from_value(json!({
         "service":service, "api":api, "base_url":base_url, "id":id,
-        "api_version":version, "api_key_env":api_key_env, "max_output_tokens":max_output_tokens
+        "api_version":version, "api_key":api_key, "max_output_tokens":max_output_tokens
     }))?;
     model.validate()?;
     Ok(Some(model))

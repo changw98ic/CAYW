@@ -14,6 +14,14 @@ const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cur
 const record = (cursor, event, attempt = lease()) => ({ protocol_version: 3, session_id: 's1', cursor, timestamp: 1, attempt, event });
 const failure = (code, outcome_unknown = false) => ({ status: 502, error: { code, message: 'internal diagnostic is not the main user message', outcome_unknown } });
 
+test('shipped HTML pattern attributes compile with browser Unicode Sets rules', () => {
+  const patterns = [...html.matchAll(/\spattern="([^"]*)"/g)].map(match => match[1]);
+  assert.ok(patterns.length > 0);
+  for (const pattern of patterns) {
+    assert.doesNotThrow(() => new RegExp(pattern, 'v'), `invalid pattern attribute: ${pattern}`);
+  }
+});
+
 class Element {
   constructor(tag = 'div') { this.tagName = tag; this.children = []; this.listeners = new Map(); this.dataset = {}; this.disabled = false; this.hidden = false; this.value = ''; this.checked = false; this.ownText = ''; }
   set textContent(text) { this.ownText = String(text); this.children = []; }
@@ -41,7 +49,7 @@ async function page(t, handler) {
     calls.push(call);
     let result;
     if (call.method === 'task.enqueue') {
-      result = { id: 'original-task', session_id: call.params.session_id, state: 'queued', worker_id: null, attempt_id: null, fence: 0 };
+      result = await handler('task.enqueue', call.params) ?? { id: 'original-task', session_id: call.params.session_id, state: 'queued', worker_id: null, attempt_id: null, fence: 0 };
     } else if (call.method === 'task.resume') result = await handler('session.prompt', call.params);
     else if (call.method === 'task.get') result = { id: 'original-task', session_id: 's1', state: 'running', worker_id: 'worker-1', attempt_id: 'attempt-1', fence: 7 };
     else result = await handler(call.method, call.params);
@@ -64,7 +72,7 @@ async function page(t, handler) {
   let nextTimer = 0;
   const context = vm.createContext({
     document: { getElementById: id => elements[id], createElement: tag => new Element(tag), createDocumentFragment: () => new Element('#fragment'), addEventListener() {}, hidden: false },
-    window: { addEventListener() {}, matchMedia: () => ({ matches: false }) }, AbortController, TypeError,
+    window: { addEventListener() {}, matchMedia: () => ({ matches: false }) }, AbortController, TypeError, URLSearchParams,
     fetch: (url, options) => fetch(`http://127.0.0.1:${server.address().port}${url}`, options),
     setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout: id => timers.delete(id),
@@ -123,6 +131,26 @@ test('unknown prompt stays locked through old idle, unrelated terminal and uncov
   await app.poll();
   assert.equal(app.ui.prompt.disabled, true, 'no attempt fact correlates an unknown prompt to its request');
   assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
+});
+
+test('known model_not_configured admission failure keeps the session usable', async t => {
+  const current = snapshot();
+  let admissions = 0;
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events') return [];
+    if (method === 'task.enqueue') {
+      admissions++;
+      return failure('model_not_configured', false);
+    }
+  });
+  await app.send();
+  assert.equal(app.ui.prompt.disabled, false);
+  assert.doesNotMatch(app.ui['blocked-text'].textContent, /待确认|核对/);
+  assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 0);
+  await app.send();
+  assert.equal(admissions, 2, 'a known failure must not strand the session');
 });
 
 test('successful prompt response waits for consumed durable terminal before next send', async t => {

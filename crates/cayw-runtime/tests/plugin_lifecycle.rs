@@ -5,8 +5,10 @@ use cayw_ai::{
 };
 use cayw_core::{CoreEvent, SessionState};
 use cayw_ipc::RpcHandler;
-use cayw_plugins::{ExternalConfig, PluginContext, PluginKind, PluginManifest};
-use cayw_runtime::{Runtime, RuntimeConfig, RuntimeError, ScopedPermission};
+use cayw_plugins::{ExternalConfig, PluginContext, PluginKind, PluginManifest, PluginRole};
+#[cfg(feature = "strongflow")]
+use cayw_runtime::RuntimeError;
+use cayw_runtime::{Runtime, RuntimeConfig, ScopedPermission};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -51,6 +53,7 @@ fn external(mode: &str, gate: &std::path::Path) -> ExternalConfig {
             name: "process".into(),
             version: "1.0.0".into(),
             protocol_version: 1,
+            role: PluginRole::WorkspaceArchitecture,
             kind: PluginKind::External,
             capabilities: vec![ToolDefinition {
                 name: "process.echo".into(),
@@ -63,7 +66,7 @@ fn external(mode: &str, gate: &std::path::Path) -> ExternalConfig {
 }
 
 #[tokio::test]
-async fn actual_idle_process_exit_freezes_rpc_get_list_and_event_observers() {
+async fn idle_architecture_plugin_exit_does_not_freeze_unbound_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let gate = dir.path().join("exit");
     let rt = runtime(&dir, "", None);
@@ -75,20 +78,19 @@ async fn actual_idle_process_exit_freezes_rpc_get_list_and_event_observers() {
     .await
     .unwrap();
     let id = rt.create(None).unwrap().id;
-    rt.bind_plugin(&id, "process").unwrap();
     let cursor = rt.get(&id).unwrap().cursor;
     tokio::fs::write(&gate, b"exit").await.unwrap();
-    let events = rt
-        .wait_events(
-            &id,
-            cursor,
-            100,
-            Duration::from_secs(5),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert!(events.iter().any(|record| matches!(&record.event, CoreEvent::Host { kind, data } if kind == "plugin_frozen" && data["decision"]["binding"]["reason"].as_str().is_some_and(|reason| reason.contains("process stopped")))));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while rt.plugin_registry().check_available("process").is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "plugin process did not stop"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(rt.events(&id, cursor, 100).unwrap().iter().all(
+        |record| !matches!(&record.event, CoreEvent::Host { kind, .. } if kind == "plugin_frozen")
+    ));
     let view = rt
         .call(
             "session.get",
@@ -97,28 +99,53 @@ async fn actual_idle_process_exit_freezes_rpc_get_list_and_event_observers() {
         )
         .await
         .unwrap();
-    assert_eq!(view["frozen"], true);
-    assert_eq!(view["binding"]["frozen"], true);
-    let list = rt
-        .call("session.list", json!({}), CancellationToken::new())
+    assert_eq!(view["frozen"], false);
+    assert!(view["binding"].is_null());
+    rt.prompt(&id, "ordinary session continues", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(
-        list.as_array()
-            .unwrap()
-            .iter()
-            .find(|view| view["id"] == id)
-            .unwrap()["binding"],
-        view["binding"]
-    );
-    assert!(matches!(
-        rt.prompt(&id, "blocked", CancellationToken::new()).await,
-        Err(RuntimeError::Frozen(_))
-    ));
 }
 
 #[tokio::test]
-async fn actual_process_exit_during_capability_preserves_unknown_and_frozen_binding() {
+async fn unloading_architecture_plugin_does_not_freeze_unbound_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = runtime(&dir, "", None);
+    rt.load_external(
+        external("normal", &dir.path().join("unused")),
+        PluginContext::new(["process.echo".into()], []),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let id = rt.create(None).unwrap().id;
+    rt.plugin_registry()
+        .call(
+            "process",
+            "process.echo",
+            json!({}),
+            CancellationToken::new(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let cursor = rt.get(&id).unwrap().cursor;
+
+    rt.unload_plugin("process").await.unwrap();
+
+    assert!(rt.plugin_registry().describe("process").is_err());
+    let view = rt.get(&id).unwrap();
+    assert!(!view.frozen);
+    assert!(view.binding.is_none());
+    assert!(rt.events(&id, cursor, 100).unwrap().iter().all(
+        |record| !matches!(&record.event, CoreEvent::Host { kind, .. } if kind == "plugin_frozen")
+    ));
+    rt.prompt(&id, "ordinary session continues", CancellationToken::new())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn process_exit_during_capability_preserves_unknown_without_freezing_session() {
     let dir = tempfile::tempdir().unwrap();
     let rt = runtime(
         &dir,
@@ -133,20 +160,13 @@ async fn actual_process_exit_during_capability_preserves_unknown_and_frozen_bind
     .await
     .unwrap();
     let id = rt.create(None).unwrap().id;
-    rt.bind_plugin(&id, "process").unwrap();
     let view = rt
         .prompt(&id, "actual process crash", CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(view.state, SessionState::NeedsReconciliation);
-    assert!(view.frozen);
-    assert!(
-        view.binding
-            .unwrap()
-            .reason
-            .unwrap()
-            .contains("process stopped")
-    );
+    assert!(!view.frozen);
+    assert!(view.binding.is_none());
     assert!(rt.events(&id, 0, 1000).unwrap().iter().any(
         |record| matches!(&record.event, CoreEvent::CapabilitySettled { call } if matches!(call.outcome, Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })))
     ));
@@ -206,14 +226,14 @@ mod strongflow {
             expected.workflows["plan"].statuses["test"],
             StepStatus::Passed
         );
-        rt.unload_plugin("strongflow").unwrap();
+        rt.unload_plugin("strongflow").await.unwrap();
         let empty = rt
             .load_native(Arc::new(StrongFlow::new()), PluginContext::default())
             .unwrap();
         assert!(rt.get(&id).unwrap().frozen);
         assert!(rt.resume_strongflow(&id, &empty).is_err());
         assert!(rt.get(&id).unwrap().frozen);
-        rt.unload_plugin("strongflow").unwrap();
+        rt.unload_plugin("strongflow").await.unwrap();
         let restored = rt
             .load_native(
                 Arc::new(StrongFlow::restore(expected.clone()).unwrap()),
@@ -325,7 +345,7 @@ mod strongflow {
             .unwrap();
         rt.store().mark_tool_started(&lease, "lost").unwrap();
         let expected = rt.store().tool_reconciliation_origin(&id, "lost").unwrap();
-        rt.unload_plugin("strongflow").unwrap();
+        rt.unload_plugin("strongflow").await.unwrap();
         let recovered = rt.recover(&id).unwrap();
         assert!(recovered.frozen);
         assert_eq!(recovered.state, SessionState::NeedsReconciliation);
@@ -373,7 +393,7 @@ mod strongflow {
             .workflow_state()
             .unwrap()
             .clone();
-        rt.unload_plugin("strongflow").unwrap();
+        rt.unload_plugin("strongflow").await.unwrap();
         let before = rt.get(&id).unwrap();
         let target = rt
             .load_native(
@@ -400,7 +420,7 @@ mod strongflow {
         flow.start_step("plan", "test").unwrap();
         flow.submit_evidence("plan", "test", evidence()).unwrap();
         let expected = flow.export_state();
-        rt.unload_plugin("strongflow").unwrap();
+        rt.unload_plugin("strongflow").await.unwrap();
         let frozen = rt.get(&id).unwrap();
         assert_eq!(
             frozen.binding.unwrap().workflow_state.unwrap(),

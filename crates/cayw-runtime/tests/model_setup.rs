@@ -1,9 +1,8 @@
 //! First-run model setup for the local CLI.
 //!
 //! Every test spawns the real `cayw` binary with a cleared environment and a
-//! temporary HOME/CAYW_HOME. Only the public CLI, the config file on disk and
-//! the public IPC client are used. No test reads a real credential, opens a
-//! network connection or touches the user's own `~/.cayw`.
+//! temporary HOME/CAYW_HOME. Only the public CLI, files on disk and the public
+//! IPC client are used. No test reads a real credential or calls a model.
 #![cfg(target_os = "macos")]
 
 use cayw_ipc::Client;
@@ -11,7 +10,7 @@ use serde_json::{Value, json};
 use std::{
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -23,9 +22,6 @@ use tokio::{
 /// Generous guard for a local process. It is not a timing assertion: a healthy
 /// run finishes long before it, and a process that blocks on stdin fails.
 const WATCHDOG: Duration = Duration::from_secs(30);
-
-/// A credential value that must never reach the config file or either output
-/// stream. It is deliberately distinctive so a leak is easy to spot.
 const SECRET: &str = "sk-sentinel-credential-must-not-be-saved";
 
 fn cli(home: &Path, workspace: &Path, cayw_home: &Path) -> Command {
@@ -48,9 +44,9 @@ fn init_command(home: &Path, workspace: &Path, cayw_home: &Path) -> Command {
     command
 }
 
-fn configure_command(home: &Path, workspace: &Path, cayw_home: &Path) -> Command {
+fn conf_command(home: &Path, workspace: &Path, cayw_home: &Path) -> Command {
     let mut command = cli(home, workspace, cayw_home);
-    command.args(["configure", "--workspace"]).arg(workspace);
+    command.args(["conf", "--workspace"]).arg(workspace);
     command
 }
 
@@ -60,7 +56,6 @@ fn serve_command(home: &Path, workspace: &Path, cayw_home: &Path) -> Command {
     command
 }
 
-/// Write the wizard answers and then close stdin, so the child sees EOF.
 async fn run_with_input(mut command: Command, input: &[u8]) -> std::process::Output {
     let mut child = command.spawn().expect("CLI should start");
     {
@@ -73,8 +68,6 @@ async fn run_with_input(mut command: Command, input: &[u8]) -> std::process::Out
         .expect("CLI should wait")
 }
 
-/// Keep the stdin pipe open (an ordinary pipe, not a terminal, and no EOF).
-/// A command that wrongly waits for an answer blocks here and fails the guard.
 async fn run_holding_stdin(mut command: Command) -> std::process::Output {
     let mut child = command.spawn().expect("CLI should start");
     let _stdin = child.stdin.take().expect("CLI stdin is piped");
@@ -89,16 +82,6 @@ fn first_json(output: &std::process::Output) -> Option<Value> {
         .lines()
         .find(|line| line.trim_start().starts_with('{'))
         .and_then(|line| serde_json::from_str(line).ok())
-}
-
-fn assert_not_configured(output: &std::process::Output) {
-    if let Some(report) = first_json(output) {
-        assert_ne!(
-            report["configured"],
-            json!(true),
-            "a cancelled or EOF run must not report a completed configuration"
-        );
-    }
 }
 
 fn private_dir(path: &Path) {
@@ -116,6 +99,26 @@ fn write_private(path: &Path, bytes: &[u8]) {
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn only_state_dir(cayw_home: &Path) -> PathBuf {
+    let mut entries = std::fs::read_dir(cayw_home.join("workspaces"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1, "one workspace state directory expected");
+    entries.pop().unwrap()
+}
+
+fn model_config(id: &str, max_output_tokens: u64) -> Value {
+    json!({
+        "service": "openai",
+        "api": "chat_completions",
+        "id": id,
+        "base_url": "http://127.0.0.1:9/v1",
+        "api_version": "v1",
+        "max_output_tokens": max_output_tokens
+    })
 }
 
 async fn read_ready(child: &mut Child) -> Value {
@@ -143,39 +146,21 @@ async fn connect(ready: &Value) -> Client {
         .expect("authenticated IPC connection")
 }
 
-fn model_config(id: &str, max_output_tokens: u64) -> Value {
-    json!({
-        "service": "openai",
-        "api": "chat_completions",
-        "id": id,
-        "base_url": "http://127.0.0.1:9/v1",
-        "api_version": "v1",
-        "max_output_tokens": max_output_tokens,
-        "api_key_env": "OPENAI_API_KEY"
-    })
-}
-
-// Break caught: `cayw configure` from an ordinary pipe does not save every
-// model field, writes the credential value, or replaces host-owned settings.
 #[tokio::test]
-async fn pipe_configure_saves_the_model_and_preserves_existing_settings() {
+async fn pipe_conf_saves_workspace_profile_and_preserves_host_settings() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
     let config_file = root.path().join("config.json");
-    write_private(
-        &config_file,
-        &serde_json::to_vec(&json!({
-            "budgets": {"max_total_tokens": 123456, "max_turns": 7},
-            "scheduler": {"max_concurrent_runs": 2},
-            "permissions": [{"capability": "fs.read", "arguments": {"path": "notes.txt"}}]
-        }))
-        .unwrap(),
-    );
+    let existing = json!({
+        "budgets": {"max_total_tokens": 123456, "max_turns": 7},
+        "scheduler": {"max_concurrent_runs": 2},
+        "permissions": [{"capability": "fs.read", "arguments": {"path": "notes.txt"}}]
+    });
+    write_private(&config_file, &serde_json::to_vec(&existing).unwrap());
 
-    let mut command = configure_command(home.path(), workspace.path(), root.path());
-    // The wizard must save only the variable name, never the value it points at.
+    let mut command = conf_command(home.path(), workspace.path(), root.path());
     command.env("OPENAI_API_KEY", SECRET);
     let output = run_with_input(
         command,
@@ -184,46 +169,35 @@ async fn pipe_configure_saves_the_model_and_preserves_existing_settings() {
     .await;
     assert!(
         output.status.success(),
-        "configure failed: {}",
+        "conf failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let report = first_json(&output).expect("configure prints one JSON line");
-    assert_eq!(report["configured"], json!(true));
-    assert_eq!(report["model_configured"], json!(true));
+    let report = first_json(&output).expect("conf prints one JSON line");
+    assert_eq!(report["configured"], true);
+    assert_eq!(report["model_configured"], true);
+    let models_file = PathBuf::from(report["models_file"].as_str().unwrap());
+    assert_eq!(models_file, only_state_dir(root.path()).join("models.json"));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&models_file).unwrap()).unwrap();
+    assert_eq!(saved["selected"], "configured");
     assert_eq!(
-        report["config_file"].as_str(),
-        Some(config_file.to_str().unwrap())
+        saved["models"]["configured"],
+        model_config("fixture-model", 4096)
     );
-
-    let saved: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
-    // Blank answers select the documented defaults: chat_completions,
-    // OPENAI_API_KEY and 4096 tokens (the explicit base URL is kept as typed).
-    assert_eq!(saved["model"], model_config("fixture-model", 4096));
-
-    // Host-owned configuration survives the new model write.
-    assert_eq!(saved["budgets"]["max_total_tokens"], json!(123456));
-    assert_eq!(saved["budgets"]["max_turns"], json!(7));
-    assert_eq!(saved["scheduler"]["max_concurrent_runs"], json!(2));
-    assert_eq!(saved["permissions"][0]["capability"], json!("fs.read"));
+    assert!(saved["models"]["configured"].get("api_key").is_none());
     assert_eq!(
-        saved["permissions"][0]["arguments"]["path"],
-        json!("notes.txt")
+        serde_json::from_slice::<Value>(&std::fs::read(&config_file).unwrap()).unwrap(),
+        existing
     );
 
-    let text = String::from_utf8(std::fs::read(&config_file).unwrap()).unwrap();
-    assert!(
-        !text.contains(SECRET),
-        "the credential value must never be written to the config"
-    );
+    let stored = String::from_utf8(std::fs::read(&models_file).unwrap()).unwrap();
+    assert!(!stored.contains(SECRET));
     assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
 }
 
-// Break caught: cancelling at the confirmation prompt or closing stdin halfway
-// rewrites the existing config, losing the user's current settings.
 #[tokio::test]
-async fn cancel_or_eof_leaves_the_existing_config_untouched() {
+async fn cancel_or_eof_does_not_create_or_replace_a_workspace_profile() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -234,53 +208,54 @@ async fn cancel_or_eof_leaves_the_existing_config_untouched() {
         "permissions": [{"capability": "fs.read", "arguments": {"path": "notes.txt"}}]
     });
     write_private(&config_file, &serde_json::to_vec(&existing).unwrap());
-    let before: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
 
-    // Explicit "n" at the save confirmation.
     let cancel = run_with_input(
-        configure_command(home.path(), workspace.path(), root.path()),
+        conf_command(home.path(), workspace.path(), root.path()),
         b"openai\n\nhttp://127.0.0.1:9/v1\ncancelled-model\n\n\nn\n",
     )
     .await;
-    assert_not_configured(&cancel);
+    assert!(cancel.status.success());
+    let cancel_report = first_json(&cancel).unwrap();
+    assert_eq!(cancel_report["configured"], false);
+    assert_eq!(cancel_report["model_configured"], false);
+    let models_file = PathBuf::from(cancel_report["models_file"].as_str().unwrap());
+    assert!(!models_file.exists());
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&config_file).unwrap()).unwrap(),
-        before,
-        "cancelling must not change the existing config"
+        existing
     );
 
-    // EOF before the confirmation prompt, after a valid service and URL.
     let eof = run_with_input(
-        configure_command(home.path(), workspace.path(), root.path()),
+        conf_command(home.path(), workspace.path(), root.path()),
         b"openai\n\nhttp://127.0.0.1:9/v1\n",
     )
     .await;
-    assert_not_configured(&eof);
+    assert!(eof.status.success());
+    let eof_report = first_json(&eof).unwrap();
+    assert_eq!(eof_report["configured"], false);
+    assert_eq!(eof_report["model_configured"], false);
+    assert!(!models_file.exists());
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&config_file).unwrap()).unwrap(),
-        before,
-        "EOF must not change the existing config"
+        existing
     );
 }
 
-// Break caught: `init` tries to resolve the credential while validating a
-// configured model, so a machine with no key can never finish first-run setup.
 #[tokio::test]
-async fn init_after_configure_does_not_require_the_credential() {
+async fn init_after_conf_does_not_require_a_model_key() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
 
-    // No OPENAI_API_KEY is placed in the cleared environment.
     let configured = run_with_input(
-        configure_command(home.path(), workspace.path(), root.path()),
+        conf_command(home.path(), workspace.path(), root.path()),
         b"openai\n\nhttp://127.0.0.1:9/v1\nfixture-model\n\n\n\n",
     )
     .await;
     assert!(
         configured.status.success(),
-        "configure failed: {}",
+        "conf failed: {}",
         String::from_utf8_lossy(&configured.stderr)
     );
 
@@ -291,27 +266,20 @@ async fn init_after_configure_does_not_require_the_credential() {
     .await;
     assert!(
         output.status.success(),
-        "init failed without a credential: {}",
+        "init failed without a key: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let report = first_json(&output).expect("init prints one JSON line");
-    assert_eq!(report["model_configured"], json!(true));
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("未配置模型"),
-        "init must not claim the model is missing after configure"
-    );
+    assert_eq!(report["model_configured"], true);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("未配置模型"));
 }
 
-// Break caught: a non-terminal `init`/`serve` gives no actionable setup path,
-// blocks waiting on an ordinary pipe, or omits the real config file location.
 #[tokio::test]
-async fn missing_model_reports_configure_and_the_actual_path_without_blocking() {
+async fn missing_model_reports_conf_and_workspace_profile_path_without_blocking() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
-    let config_file = root.path().join("config.json");
-    let config_text = config_file.to_str().unwrap();
 
     let output = run_holding_stdin(init_command(home.path(), workspace.path(), root.path())).await;
     assert!(
@@ -319,22 +287,22 @@ async fn missing_model_reports_configure_and_the_actual_path_without_blocking() 
         "init failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let models_file = only_state_dir(root.path()).join("models.json");
+    let models_text = models_file.to_str().unwrap();
     let report = first_json(&output).expect("init prints one JSON line");
-    assert_eq!(report["model_configured"], json!(false));
+    assert_eq!(report["model_configured"], false);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("未配置模型"), "stderr: {stderr}");
-    assert!(stderr.contains("cayw configure"), "stderr: {stderr}");
-    assert!(stderr.contains(config_text), "stderr: {stderr}");
+    assert!(stderr.contains("cayw conf"), "stderr: {stderr}");
+    assert!(stderr.contains(models_text), "stderr: {stderr}");
 
-    // A bare `serve` whose stdin is an ordinary open pipe must start, not ask.
     let mut child = serve_command(home.path(), workspace.path(), root.path())
         .spawn()
         .unwrap();
     let _stdin = child.stdin.take().expect("serve stdin is piped");
     let mut serve_stderr = child.stderr.take().expect("serve stderr is piped");
     let ready = read_ready(&mut child).await;
-    assert_eq!(ready["model_configured"], json!(false));
-    assert_eq!(ready["config_file"].as_str(), Some(config_text));
+    assert_eq!(ready["model_configured"], false);
 
     let client = connect(&ready).await;
     let session = client.request("session.create", json!({})).await.unwrap();
@@ -346,62 +314,138 @@ async fn missing_model_reports_configure_and_the_actual_path_without_blocking() 
         .await
         .expect_err("an unconfigured model must refuse execution");
     assert_eq!(error.code, "model_not_configured");
-    assert!(
-        error.message.contains(config_text),
-        "RPC error must name the actual config file: {}",
-        error.message
-    );
-    assert!(
-        error.message.contains("cayw configure"),
-        "RPC error must name the setup command: {}",
-        error.message
-    );
+    assert!(error.message.contains(models_text), "{}", error.message);
+    assert!(error.message.contains("cayw conf"), "{}", error.message);
     client.close().await;
 
-    child.kill().await.unwrap();
+    child.start_kill().unwrap();
     child.wait().await.unwrap();
     let mut serve_text = String::new();
     serve_stderr.read_to_string(&mut serve_text).await.unwrap();
     assert!(serve_text.contains("未配置模型"), "stderr: {serve_text}");
+    assert!(serve_text.contains("cayw conf"), "stderr: {serve_text}");
+    assert!(serve_text.contains(models_text), "stderr: {serve_text}");
     assert!(
-        serve_text.contains("cayw configure"),
-        "stderr: {serve_text}"
+        !serve_text.contains("现在配置模型吗"),
+        "ordinary startup must never launch the model wizard: {serve_text}"
     );
-    assert!(serve_text.contains(config_text), "stderr: {serve_text}");
 }
 
-// Break caught: cancelling a replacement wizard destroys the existing model or host settings.
 #[tokio::test]
-async fn configure_cancelled_replacement_keeps_existing_model() {
+async fn removed_configure_command_is_rejected_without_creating_state() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
+
+    let mut command = cli(home.path(), workspace.path(), root.path());
+    command.arg("configure");
+    let output = run_holding_stdin(command).await;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("expected `start`"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.path().join("config.json").exists());
+    assert!(!root.path().join("workspaces").exists());
+}
+
+#[tokio::test]
+async fn selected_profile_wins_and_malformed_legacy_model_is_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+
+    let initialized = run_with_input(
+        init_command(home.path(), workspace.path(), root.path()),
+        b"",
+    )
+    .await;
+    assert!(initialized.status.success());
+    let state_dir = only_state_dir(root.path());
+    let models_file = state_dir.join("models.json");
+    let profiles = json!({
+        "selected": "keep",
+        "models": {"keep": model_config("keep-model", 64)}
+    });
+    let profile_bytes = serde_json::to_vec_pretty(&profiles).unwrap();
+    write_private(&models_file, &profile_bytes);
+
     let config_file = root.path().join("config.json");
-    let existing = json!({
-        "model": model_config("keep-model", 64),
+    let remaining = json!({
         "budgets": {"max_turns": 3},
         "permissions": [{"capability": "fs.read", "arguments": {"path": "notes.txt"}}]
     });
-    write_private(&config_file, &serde_json::to_vec(&existing).unwrap());
-    let before: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
+    let mut legacy = remaining.clone();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .insert("model".into(), json!({"obsolete_invalid_shape": true}));
+    write_private(&config_file, &serde_json::to_vec(&legacy).unwrap());
 
     let output = run_with_input(
-        configure_command(home.path(), workspace.path(), root.path()),
+        conf_command(home.path(), workspace.path(), root.path()),
         b"",
     )
     .await;
     assert!(
         output.status.success(),
-        "configure failed: {}",
+        "conf failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let report = first_json(&output).expect("configure prints one JSON line");
-    assert_eq!(report["model_configured"], json!(true));
+    let report = first_json(&output).unwrap();
+    assert_eq!(report["configured"], false);
+    assert_eq!(report["model_configured"], true);
+    assert_eq!(std::fs::read(&models_file).unwrap(), profile_bytes);
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&config_file).unwrap()).unwrap(),
-        before,
-        "an existing model and its settings must be kept unchanged"
+        remaining
     );
+}
+
+#[tokio::test]
+async fn explicit_conf_cancel_and_save_do_not_create_local_state() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let config_file = root.path().join("headless.json");
+
+    let mut cancelled = cli(home.path(), workspace.path(), root.path());
+    cancelled.args(["conf", "--config"]).arg(&config_file);
+    let output = run_with_input(cancelled, b"").await;
+    assert!(
+        output.status.success(),
+        "cancelled explicit conf failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = first_json(&output).unwrap();
+    assert_eq!(report["configured"], false);
+    assert_eq!(report["model_configured"], false);
+    assert_eq!(report["config_file"], config_file.to_str().unwrap());
+    assert!(!config_file.exists());
+    assert!(!root.path().join("workspaces").exists());
+    assert!(!home.path().join(".cayw").exists());
+
+    let mut configured = cli(home.path(), workspace.path(), root.path());
+    configured.args(["conf", "--config"]).arg(&config_file);
+    let output = run_with_input(
+        configured,
+        b"openai\n\nhttp://127.0.0.1:9/v1\nheadless-model\n\n128\n\n",
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "explicit conf failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = first_json(&output).unwrap();
+    assert_eq!(report["configured"], true);
+    assert_eq!(report["model_configured"], true);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
+    assert_eq!(saved["model"], model_config("headless-model", 128));
+    assert!(!root.path().join("workspaces").exists());
+    assert!(!home.path().join(".cayw").exists());
 }

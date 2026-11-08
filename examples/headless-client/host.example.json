@@ -5,8 +5,7 @@
     "id": "group/auto-deepseek-v4-1-flash",
     "base_url": "http://127.0.0.1:3425/v1",
     "api_version": "v1",
-    "max_output_tokens": 4096,
-    "api_key_env": "MAGPIE_API_KEY"
+    "max_output_tokens": 4096
   },
   "budgets": {
     "max_turns": 8,

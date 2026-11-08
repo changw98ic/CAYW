@@ -29,14 +29,14 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-agent` | AgentLoop：历史、模型流、工具批次、steering/follow-up、取消 | 消费 Provider 与宿主注册工具；自身历史在内存中，不冒充持久化 Runtime |
 | `cayw-queue` | 持久 Task 身份、状态、优先级、公平顺序、取消目标和资源准入 | 不依赖 Runtime、Host、Device 或 Agent 执行实现；跨组件锁、授权和清理仍由 Runtime 协调 |
 | `cayw-core` | Session、Attempt lease、事件日志、执行/调用/审批事实与核对 | 对执行写入检查完整 lease；不加载 UI、Server 或外部代码索引 |
-| `cayw-runtime` / `cayw-ipc` | 公开 Rust 入口、调度与生命周期协调；本地传输 | 复用同一 Runtime 分派，不另建 IPC 专用执行器 |
+| `cayw-runtime` / `cayw-ipc` | 公开 Rust 入口、调度与生命周期协调；本地传输；macOS 本地产品的唯一 Client 与工作区路由 | Core Only 继续使用显式 Runtime；本地 TUI、WebUI 和工作区 Runtime 统一经过一台设备上的唯一 Client，不另建工作区连接管理器或 IPC 专用执行器 |
 | `cayw-codemode` / `cayw-cells` | Luau 编排、分段 cell、输出、会话值、执行记录与共享读协调 | 通过宿主能力接口调用 Rust，不自带环境文件/进程/网络权限 |
 | `cayw-host` / `cayw-workspace` / `cayw-data` | 授权、审计和预算后分派文件、检索、数据、Git 与配置好的进程能力 | Workspace/Data 执行器本身不是模型权限边界，不能另作旁路暴露 |
 | `cayw-device` | 进程树归属、交互进程、停止确认、资源记账和准入底座 | 本地执行不依赖远程 Server；进程组不是安全沙箱 |
 | `cayw-requests` | 长尾能力申请、可信评估、精确任务授权与撤销 | 申请本身不执行、不自授权；仍经过原 Host/Device |
 | `cayw-bridge` | 宿主已有 MCP/Skills/搜索能力的目录、来源快照和调用桥接 | 不在 Core 再创建连接或 loader |
 | `cayw-plugins` / `cayw-content` / `cayw-remote` | plugin、Device 内容存放/备份、远程绑定路由 | 各自边界与局部实现分开验收；不成为普通 Chat 的强依赖 |
-| `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | 客户端、浏览器轻网关与验证消费者 | 依赖公开接口；Runtime 不反向依赖这些消费者 |
+| `cayw-tui` / `cayw-webui` / `cayw-verify-tool` | Client plugin、浏览器入口与验证消费者 | 本地 TUI/WebUI 由唯一 Client 启停和监管，并经 Client 路由到工作区；Runtime 不反向依赖这些消费者，VerifyTool 仍可直接消费公开接口 |
 | `cayw-visual-editor` | HTML/CSS、Vite React 与 Vue 3 页面的可选编辑应用；源码映射、预览和直接操作 | Rust 持有草稿与源码权威，保存通过 Host 公开接口执行文件权限、调用记录和摘要核对；可选 Node 进程解析 JSX/TSX/SFC 并启动 Vite，Core 不依赖编辑器 |
 | `cayw-codeintel` | 工作区相对路径、内容摘要、文件版本与符号位置 | Host、Editor 与 Trace 可注入同一个进程内共享实例；轻量大纲不等于完整跨文件语义索引 |
 | `cayw-output-filter` | 固定进程 profile 的显示过滤与原文引用 | 原文通过宿主注入的内容接口保存；过滤不改变进程实际终态 |
@@ -56,8 +56,8 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 
 | 形态 | 必需组成 | 可选接入 | 权威内容与限制 |
 | --- | --- | --- | --- |
-| Core Only | Runtime、持久化 Core、Agent/Provider、Cells/CodeMode、宿主受控能力及所需 Device 底座 | 独立 Rust API 客户端；需要进程边界时使用本地 IPC | 不需要 UI/Server/VerifyTool/工作流；Provider 可由宿主注入，真实模型使用另行授权 |
-| Local | 同一台设备上的 Core Only | TUI；WebUI + 本地轻网关 | Device 保持权威内容；本地轻网关不依赖可选远程 Server |
+| Core Only | Runtime、持久化 Core、Agent/Provider、Cells/CodeMode、宿主受控能力及所需 Device 底座 | 独立 Rust API 客户端；需要进程边界时使用显式 Headless IPC | 不读取本地 Client 状态；显式 `--config` 中的模型是权威配置；不需要 UI/Server/VerifyTool/工作流 |
+| Local | 一台设备上的唯一 Client，以及由它路由的一个或多个工作区 Runtime | 由 Client 监管的 TUI、WebUI 和工作区架构 plugin | 所有工作区共享 Client 的 IPC 地址、访问码、连接、重连和进程监管；每个工作区仍保留独立目录、SQLite、模型方案、MCP/Pi 实例和架构 plugin 启用关系 |
 | Remote | Device 上的同一运行底座，外加远程绑定与路由 | 远端 Server、客户端及 TLS 代理 | Device 主动连出，无需对外入站端口；Server 不因转发任务而取得执行或内容权威 |
 
 以下是部署与数据流图，不是每个节点都已完成验收的声明。
@@ -65,35 +65,49 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 ```mermaid
 flowchart LR
   subgraph Local["Device / 本地用户空间"]
-    SDK["Rust SDK 客户端"]
-    TUI["可选 TUI"]
-    WEB["可选 WebUI"]
-    GW["本地轻网关"]
-    IPC["公开 SDK / 本地 IPC"]
-    RT["Headless Runtime"]
+    SDK["显式 Core Only SDK / IPC"]
+    TUI["TUI Client plugin"]
+    WEB["WebUI Client plugin"]
+    CLIENT["唯一 Client"]
+    RTA["工作区 A Runtime"]
+    RTB["工作区 B Runtime"]
     CAP["受控 Host + Device"]
-    DB["本地权威会话与内容"]
-    SDK --> RT
-    TUI --> IPC
-    WEB --> GW
-    GW --> IPC
-    IPC --> RT
-    RT --> CAP
-    RT --> DB
+    DBA["工作区 A SQLite / 配置"]
+    DBB["工作区 B SQLite / 配置"]
+    SDK --> RTA
+    TUI --> CLIENT
+    WEB --> CLIENT
+    CLIENT --> RTA
+    CLIENT --> RTB
+    RTA --> CAP
+    RTB --> CAP
+    RTA --> DBA
+    RTB --> DBB
   end
-  RT --> MODEL["宿主配置的 Provider"]
-  RT --> OUT["可选 Device 出站连接"]
+  RTA --> MODEL["工作区选择的 Provider"]
+  RTB --> MODEL
+  CLIENT --> OUT["可选 Device 出站连接"]
   OUT --> TLS["公开 URL / TLS 入口"]
   TLS --> SRV["可选 Server"]
-  CLIENT["远程客户端"] --> TLS
+  REMOTE["远程客户端"] --> TLS
 ```
 
-Core Only 是可嵌入库的组合，不要求每个 crate 都成为独立进程。Worker 也不必一一对应操作系统进程。图中的本地 IPC/网关监听与 Device 不开放公网入站端口并不冲突。
+Core Only 是可嵌入库的组合，不要求每个 crate 都成为独立进程。Worker 也不必一一对应操作系统进程。本地产品只有一个 Client 连接状态；工作区 Runtime 不是第二个 Client。图中的 Client 回环监听与 Device 不开放公网入站端口并不冲突。
+
+### 本地模型配置
+
+本地产品无需先配置模型。唯一 Client、TUI 和 WebUI 在工作区没有模型时仍可启动，也可创建和查询 Session；第一次执行 `prompt`、`enqueue` 或 `resume` 时才返回 `model_not_configured`。启动过程不弹出模型向导。`cayw conf` 是唯一交互式首次配置入口，不保留 `cayw configure`。
+
+每个工作区的 `models.json` 是本地模型配置的唯一权威文件。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。省略密钥表示模型服务不需要认证。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
+
+完全显式 Headless 与本地 Client 状态分开。显式 `--db`、`--token-env` 和 `--config` 运行只使用该配置中的 `model`，不读取或创建 `CAYW_HOME` 下的工作区模型状态。
 
 ## 身份、归属与生命周期
 
 | 身份 | 含义与生命周期 | 不可混用的标识 |
 | --- | --- | --- |
+| Client | 一台设备唯一的本地连接与进程监管者；持有共享 IPC 地址、访问码、重连和工作区路由 | 不等于工作区、Runtime、Session 或某个 TUI/WebUI 进程 |
+| Workspace | 独立目录、SQLite、Runtime、模型方案、MCP/Pi 实例和架构 plugin 启用关系 | 不持有独立 Client 连接状态、IPC 地址或 plugin 进程监管权 |
 | Session | 持久对话、历史、游标、待处理义务与来源关系；可以跨进程退出继续存在 | 不等于一次模型请求、Worker 或 PID |
 | Task | 一次显式 prompt/任务准入，绑定 Session、意图、队列与预算 | 断线续读不是新 Task；重新提交可能产生新副作用 |
 | Attempt | Task 的一次受围栏执行；lease 含 `session_id/attempt_id/worker_id/fence` | 旧 attempt 不能更新新执行，fence 必须随接管推进 |
@@ -225,7 +239,7 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 
 ## MCP、Skills 与外部检索
 
-宿主统一持有 MCP 连接和 Skills loader，Core 只消费被注入的目录与能力桥。发现名称、读取 Schema/Skill、执行调用是独立权限操作；发现结果和 Skill 文本均不授予执行权限。
+宿主统一持有 MCP 连接和 Skills loader，Core 只消费被注入的目录与能力桥。本地唯一 Client 为每个工作区创建独立 MCP Registry 和 Pi plugin 实例；工作区打开失败、关闭或 Client 退出时，Client 必须等待这些资源完成清理，不能让一个工作区复用另一个工作区的实例。发现名称、读取 Schema/Skill、执行调用是独立权限操作；发现结果和 Skill 文本均不授予执行权限。
 
 Bridge 保存来源 ID、版本、origin、实例/代际、manifest 摘要和原调用关联。来源卸载/替换后，旧快照或迟到结果不能装作当前来源；已开始但未获可靠回执的调用保持 unknown。模型不能通过一个看似相同的工具名改绑连接或伪造来源。
 
@@ -274,13 +288,15 @@ Device 持有会话、工作区与内容的权威事实。可信宿主可在安�
 
 ## Native / External plugin、UI 贡献与 StrongFlow
 
-可信 Native plugin 用 Cargo feature 静态链接，升级需重新编译；不承诺热替换 Rust ABI。External plugin 用独立进程、版本化 IPC，宿主限定启动配置、能力、权限、预算和生命周期。plugin manifest、版本/代际与调用关联必须可核对。独立进程并不防止恶意本地代码访问其进程已经拥有的资源，不能把进程隔离当成安全沙箱。
+plugin 分成两个角色。Client plugin 包括 TUI 和 WebUI，面向唯一 Client 连接；WorkspaceArchitecture plugin 包括 StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin，按工作区启用。所有 plugin 进程都由唯一 Client 启动、停止和监管，plugin 不能绕过 Client 直接连接工作区，也不能给工作区创建第二套进程生命周期。
 
-plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡献不取得 Core 私有状态或新的执行权。TUI/WebUI 选择如何展示，用户动作仍经公开接口及原审批/权限路径；模型或 plugin 提供的“批准”只作为数据处理。不先加入新的 UI 框架，也不要求所有 plugin 实现某种界面。
+可信 Native plugin 用 Cargo feature 静态链接，升级需重新编译；不承诺热替换 Rust ABI。External plugin 用独立进程、版本化 IPC，Client 限定启动配置、能力、权限、预算和生命周期。plugin manifest、角色、版本/代际与调用关联必须可核对。独立进程并不防止恶意本地代码访问其进程已经拥有的资源，不能把进程隔离当成安全沙箱。卸载只有在原 supervisor 与子进程完成退出核对后才结束。退出确认必须有上限；超时、终止失败、等待失败或持久化失败都保留未知状态和精确实例阻断，不能自动拉起同名 plugin 或重放原调用。
 
-普通 Chat 不依赖 StrongFlow/JEv/Fusion/Observer。StrongFlow Session 持久绑定流程版本、来源与义务：plugin 卸载或缺失时，原 Session 提示不可用并保持冻结，不在原地去掉义务或伪造完成。允许的转换是用户显式确认后，核对原执行已停止且没有未结未知效果，Fork 为新的普通 Session，保存来源会话/游标；原 Session 与证据保持原状，新会话重新获得自己的权限。
+plugin 可贡献能力、状态、命令或供 UI 呈现的数据，但 UI 贡献不取得 Core 私有状态或新的执行权。TUI/WebUI 选择如何展示，用户动作仍经唯一 Client、公开接口及原审批/权限路径；模型或 plugin 提供的“批准”只作为数据处理。不先加入新的 UI 框架，也不要求所有 plugin 实现某种界面。
 
-恢复 plugin 须核对原绑定、版本、实例/代际及兼容条件；重新加载同版本并不当然解冻。原 Session 恢复后仍按原流程继续，不能因 Fork 或 plugin 重载跳过验收。此处规定架构约束，不把现有 plugin 库、Runtime 接线和所有卸载/清理场景统称为已验收。
+普通 Chat 不依赖 StrongFlow/JEv/Fusion/Observer。普通 WorkspaceArchitecture plugin 不绑定普通 Session；它卸载、崩溃或缺失时，普通 Session 继续保持原状态，不能冻结。StrongFlow 是专用例外：StrongFlow Session 持久绑定流程版本、来源与义务，plugin 卸载或缺失时，原 Session 提示不可用并保持冻结，不在原地去掉义务或伪造完成。允许的转换是用户显式确认后，核对原执行已停止且没有未结未知效果，Fork 为新的普通 Session，保存来源会话/游标；原 Session 与证据保持原状，新会话重新获得自己的权限。
+
+恢复 plugin 须核对原角色、工作区、绑定、版本、实例/代际、清理记录及兼容条件；重新加载同版本并不当然解冻。已知未开始的失败可以显式重试；`outcome_unknown` 或清理未确认时禁止自动恢复。原 StrongFlow Session 恢复后仍按原流程继续，不能因 Fork 或 plugin 重载跳过验收。此处规定架构约束，不把现有 plugin 库、Runtime 接线和所有卸载/清理场景统称为已验收。
 
 Observer 通过有界非阻塞诊断通道处理慢消费者与丢弃计数。它可以缺失，不能拦住已授权任务。执行授权、持久化和必要审计是主链事实，不能为了“诊断不阻塞”而跳过。JEv/Fusion 已有局部离线适配，结果/分歧不自动成为事实、审批或 StrongFlow 交付证据；真实服务、成本和产品集成按 [#17](https://github.com/changw98ic/CAYW/issues/17) 继续核验。
 
@@ -312,9 +328,9 @@ Server 负责远程绑定、认证吊销和路由；Device 使用自己主动建
 
 ## TUI、WebUI 与 VerifyTool
 
-TUI 是可选终端消费者，WebUI 是可选浏览器消费者；WebUI 的本地轻网关通过公开接口连接 Runtime，不强制使用远程 Server。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。各自交付范围与验收以对应 Issue 和 `docs/validation/` 记录为准。
+TUI 和 WebUI 是可选 Client plugin。它们始终连接设备上的唯一 Client，再由 Client 按 `workspace_id` 路由到对应工作区 Runtime；它们不保存工作区独立连接地址、访问码、重连状态或 Runtime 进程生命周期。Client 统一启动、停止和监管两种界面进程。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。各自交付范围与验收以对应 Issue 和 `docs/validation/` 记录为准。
 
-本地浏览器轻网关默认只监听回环地址并免登录，仍严格校验 Host、Origin 与跨站请求。只有显式 `--lan IP:PORT` 才开放局域网；账户可选，未配置时允许访问并给出非阻塞提示，配置后使用账号密码与 HttpOnly 会话。账号配置以 WebUI 设置为主，仅允许真实回环连接且 Host 匹配本机管理地址的请求修改；不信任转发头。LAN 模式配对一个仅回环管理入口，与局域网入口共享状态，保存时立即应用并撤销旧登录。Runtime IPC 保留独立内部认证，不向浏览器暴露。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
+WebUI 默认只监听回环地址并免登录，仍严格校验 Host、Origin 与跨站请求。只有显式 `--lan IP:PORT` 才开放局域网；账户可选，未配置时允许访问并给出非阻塞提示，配置后使用账号密码与 HttpOnly 会话。账号配置以 WebUI 设置为主，仅允许真实回环连接且 Host 匹配本机管理地址的请求修改；不信任转发头。LAN 模式配对一个仅回环管理入口，与局域网入口共享状态，保存时立即应用并撤销旧登录。Client IPC 保留独立内部认证，不向浏览器暴露。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
 
 VerifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [VerifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
 

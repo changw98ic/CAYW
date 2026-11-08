@@ -4,11 +4,12 @@
 
 ## plugin 注册
 
-- `PluginManifest` 声明名称、版本、协议版本、Native / External 类型、工具参数和逐工具权限。`PluginContext::new` 的能力与权限只能由宿主提供，默认不授权。
+- `PluginManifest` 声明名称、版本、协议版本、Client / WorkspaceArchitecture 角色、Native / External 类型、工具参数和逐工具权限。`PluginContext::new` 的能力与权限只能由宿主提供，默认不授权。TUI/WebUI 属于 Client plugin；StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin 属于 WorkspaceArchitecture plugin。
 - `Plugin` 是可信 Rust 实现的异步调用接口。`PluginRegistry::load_native`、`load_external`、`describe`、`list`、`call`、`unload` 提供实际注册和执行。plugin 名称和工具名称均拒绝冲突；参数不做隐式转换；schema 外部引用不可读取文件或访问网络。
 - 每次调用取得 plugin 代际快照；卸载取消旧代际中的请求，返回结果前再次检查代际。注册表不持锁等待 plugin 代码，不同 plugin 可以并行运行。同一个 External plugin 顺序处理协议请求。
 - plugin 返回的 JSON 仅是数据，不会变成权限或用户审批。宿主必须保持这条边界；恶意 Native Rust 代码和 External 进程本身都不能靠此库获得安全隔离。
-- 取消、超时、卸载、传输失败或 plugin 明确报告未知结果时，`PluginError::outcome_unknown()` 为真。终止等待或杀进程不能证明副作用已回滚，宿主必须核对再重试。原生 plugin 应主动响应取消，不能在异步函数中阻塞线程或使 `shutdown` 阻塞。
+- macOS 本地产品的所有 plugin 进程都由设备上的唯一 Client 启动、停止和监管。WorkspaceArchitecture plugin 可以按工作区启用，但不能绕过 Client 直连工作区或创建工作区自己的进程生命周期。普通架构 plugin 不绑定普通 Session；StrongFlow 是保留专用 binding、冻结和显式 Fork 的例外。
+- 取消、超时、卸载、传输失败或 plugin 明确报告未知结果时，`PluginError::outcome_unknown()` 为真。终止等待或杀进程不能证明副作用已回滚，宿主必须核对再重试。`request_shutdown` 只关闭准入并发出取消，不能阻塞；宿主随后异步等待 `wait_shutdown`，确认该实例的调用、supervisor 和外部进程已经结束。原生 plugin 也必须主动响应取消，不能在异步函数中阻塞线程。
 
 ## External 协议 v1
 
@@ -18,13 +19,13 @@
 
 ```json
 {"type":"handshake","protocol_version":1}
-{"type":"handshake","manifest":{"name":"fixture","version":"1.0.0","protocol_version":1,"kind":"external","capabilities":[{"name":"fixture.echo","description":"Echo offline JSON","parameters":{"type":"object"}}],"permissions":{}}}
+{"type":"handshake","manifest":{"name":"fixture","version":"1.0.0","protocol_version":1,"role":"workspace_architecture","kind":"external","capabilities":[{"name":"fixture.echo","description":"Echo offline JSON","parameters":{"type":"object"}}],"permissions":{}}}
 {"type":"call","request_id":1,"method":"fixture.echo","arguments":{"n":2}}
 {"type":"response","request_id":1,"result":{"status":"ok","data":{"n":2}}}
 {"type":"response","request_id":2,"result":{"status":"error","message":"known failure","outcome_unknown":false}}
 ```
 
-一个请求恰好对应一个响应。取消、超时、格式错误、错配、输出超限、未知副作用或卸载均使进程终结并拒绝继续调用；普通已知失败可以继续。丢弃正在等待的 Future 也传播取消。Unix 新建进程组，正常和异常释放都向整个组发送 SIGKILL，随后回收直接子进程；主动脱离该进程组的后代不受此机制保证。Windows 只保证直接子进程终止，尚未实现 Job Object 进程树隔离。独立进程不是安全沙箱。
+一个请求恰好对应一个响应。取消、超时、格式错误、错配、输出超限、未知副作用或卸载均使进程终结并拒绝继续调用；普通已知失败可以继续。丢弃正在等待的 Future 也传播取消。macOS 上新建独立进程组，正常和异常释放都向整个组发送 SIGKILL，随后回收直接子进程；主动脱离该进程组的后代不受此机制保证。`shutdown_timeout` 限制握手失败和卸载后的退出确认，默认是 10 秒。终止、等待或超时无法确认清理时返回未知结果，注册表保留精确实例并阻止同名 plugin 重启；只有确认清理后才移除阻断。独立进程不是安全沙箱。
 
 `cayw-plugin-fixture` 是测试用真实 Rust 子进程，可模拟握手、往返、卡住、崩溃、错编号、超大输出、伪审批字段和 Unix 后代进程，不连接网络。
 

@@ -69,7 +69,7 @@ async fn canonical_frozen_view_and_confirmed_fork_use_runtime_not_invented_fixtu
         .await
         .unwrap();
     assert_eq!(value["frozen"], true);
-    assert_eq!(value["binding"]["plugin"], "fixture-binding");
+    assert_eq!(value["binding"]["plugin"], "strongflow");
     assert_eq!(value["binding"]["frozen"], true);
     assert!(value["binding"]["registry_id"].is_string());
     assert!(

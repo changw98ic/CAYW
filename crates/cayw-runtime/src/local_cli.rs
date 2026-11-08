@@ -19,16 +19,18 @@ pub struct LocalPaths {
     pub database: PathBuf,
     pub config_file: PathBuf,
     pub token_file: PathBuf,
-    pub connection_file: PathBuf,
+    pub client_file: PathBuf,
     state_dir: PathBuf,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Connection {
+    schema: String,
+    protocol_version: u32,
+    generation: String,
+    pid: u32,
     address: SocketAddr,
-    workspace: PathBuf,
-    token_file: PathBuf,
 }
 
 impl LocalPaths {
@@ -58,7 +60,7 @@ impl LocalPaths {
             database: state_dir.join("session.sqlite"),
             config_file: data_dir.join("config.json"),
             token_file: data_dir.join("ipc.token"),
-            connection_file: state_dir.join("connection.json"),
+            client_file: data_dir.join("client.json"),
             data_dir,
             workspace,
             state_dir,
@@ -93,6 +95,16 @@ impl LocalPaths {
         Ok(())
     }
 
+    /// Read-only validation used by `cayw doctor`. It never creates or replaces state.
+    pub fn validate_existing(&self) -> io::Result<()> {
+        check_directory(&self.data_dir)?;
+        check_directory(&self.data_dir.join("workspaces"))?;
+        check_directory(&self.state_dir)?;
+        self.validate_config()?;
+        self.token()?;
+        Ok(())
+    }
+
     pub fn token(&self) -> io::Result<String> {
         check_directory(&self.data_dir)?;
         let bytes = read_private(&self.token_file, 4096)?;
@@ -108,44 +120,48 @@ impl LocalPaths {
 
     pub fn connect(&self) -> io::Result<(SocketAddr, String)> {
         check_directory(&self.data_dir)?;
-        check_directory(&self.data_dir.join("workspaces"))?;
-        check_directory(&self.state_dir).map_err(|error| {
+        let bytes = read_private(&self.client_file, 16 * 1024).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
-                invalid("no local service for this workspace; start `cayw serve`")
+                invalid("no local Client is running; start `cayw start` or `cayw serve`")
             } else {
                 error
             }
         })?;
-        let bytes = read_private(&self.connection_file, 16 * 1024).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                invalid("no local service for this workspace; start `cayw serve`")
-            } else {
-                error
-            }
+        let connection: Connection = serde_json::from_slice(&bytes).map_err(|_| {
+            invalid("local Client connection record is invalid; restart the Client")
         })?;
-        let connection: Connection = serde_json::from_slice(&bytes)
-            .map_err(|_| invalid("local connection record is invalid; restart `cayw serve`"))?;
-        if connection.workspace != self.workspace
-            || connection.token_file != self.token_file
+        if connection.schema != "cayw.client-endpoint.v1"
+            || connection.protocol_version != cayw_ipc::PROTOCOL_VERSION
+            || connection.generation.is_empty()
+            || connection.pid == 0
             || !connection.address.ip().is_loopback()
             || connection.address.port() == 0
         {
-            return Err(invalid(
-                "local connection record does not match this workspace",
-            ));
+            return Err(invalid("local Client connection record is invalid"));
         }
         Ok((connection.address, self.token()?))
     }
 
+    pub fn workspace_state_dirs(&self) -> io::Result<Vec<PathBuf>> {
+        let root = self.data_dir.join("workspaces");
+        check_directory(&root)?;
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(root)? {
+            let path = entry?.path();
+            check_directory(&path)?;
+            paths.push(path);
+            if paths.len() > 256 {
+                return Err(invalid("local workspace catalog exceeds 256 entries"));
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
     pub fn known_workspaces(&self) -> io::Result<Vec<PathBuf>> {
         let mut paths = Vec::new();
-        for entry in fs::read_dir(self.data_dir.join("workspaces"))? {
-            let entry = entry?;
-            if paths.len() >= 256 {
-                break;
-            }
-            check_directory(&entry.path())?;
-            let path = entry.path().join("workspace.json");
+        for state_dir in self.workspace_state_dirs()? {
+            let path = state_dir.join("workspace.json");
             let bytes = match read_private(&path, 16384) {
                 Ok(bytes) => bytes,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -165,19 +181,32 @@ impl LocalPaths {
         self.state_dir.join(name)
     }
 
+    /// Serialize foreground commands while one of them starts the unique Client.
+    pub fn try_acquire_client_start(&self) -> io::Result<Option<ClientStartLock>> {
+        check_directory(&self.data_dir)?;
+        let file = private_lock(&self.data_dir.join("client-start.lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(ClientStartLock { _lock: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
     pub fn acquire_server(&self) -> io::Result<LocalServer> {
         check_directory(&self.data_dir)?;
-        check_directory(&self.data_dir.join("workspaces"))?;
-        check_directory(&self.state_dir)?;
-        let file = private_lock(&self.state_dir.join("server.lock"))?;
+        let file = private_lock(&self.data_dir.join("client.lock"))?;
         file.try_lock()
-            .map_err(|_| invalid("local server already running for this workspace"))?;
+            .map_err(|_| invalid("the local Client is already running"))?;
         Ok(LocalServer {
             _lock: file,
             paths: self.clone(),
             published: None,
         })
     }
+}
+
+pub struct ClientStartLock {
+    _lock: File,
 }
 
 pub struct LocalServer {
@@ -193,22 +222,24 @@ impl LocalServer {
                 "local service address must use loopback and a nonzero port",
             ));
         }
-        match fs::symlink_metadata(&self.paths.connection_file) {
+        match fs::symlink_metadata(&self.paths.client_file) {
             Ok(_) => {
-                open_private(&self.paths.connection_file)?;
+                open_private(&self.paths.client_file)?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
         let bytes = serde_json::to_vec(&Connection {
+            schema: "cayw.client-endpoint.v1".into(),
+            protocol_version: cayw_ipc::PROTOCOL_VERSION,
+            generation: uuid::Uuid::new_v4().to_string(),
+            pid: std::process::id(),
             address,
-            workspace: self.paths.workspace.clone(),
-            token_file: self.paths.token_file.clone(),
         })?;
         let temporary = self
             .paths
-            .state_dir
-            .join(format!(".connection-{}.tmp", uuid::Uuid::new_v4()));
+            .data_dir
+            .join(format!(".client-{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -218,9 +249,9 @@ impl LocalServer {
             file.write_all(&bytes)?;
             file.sync_all()?;
             let metadata = file.metadata()?;
-            fs::rename(&temporary, &self.paths.connection_file)?;
+            fs::rename(&temporary, &self.paths.client_file)?;
             self.published = Some((metadata.dev(), metadata.ino()));
-            File::open(&self.paths.state_dir)?.sync_all()
+            File::open(&self.paths.data_dir)?.sync_all()
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -232,11 +263,11 @@ impl LocalServer {
 impl Drop for LocalServer {
     fn drop(&mut self) {
         if let Some(identity) = self.published
-            && let Ok(metadata) = fs::symlink_metadata(&self.paths.connection_file)
+            && let Ok(metadata) = fs::symlink_metadata(&self.paths.client_file)
             && metadata.is_file()
             && (metadata.dev(), metadata.ino()) == identity
         {
-            let _ = fs::remove_file(&self.paths.connection_file);
+            let _ = fs::remove_file(&self.paths.client_file);
         }
     }
 }
@@ -308,15 +339,24 @@ fn private_lock(path: &Path) -> io::Result<File> {
     }
 }
 
-/// Explain how to configure the model selected by this CLI host.
-pub fn model_setup_hint(config_file: Option<&Path>) -> String {
+/// Explain how to configure the one model profile selected by a local workspace.
+pub fn local_model_setup_hint(paths: &LocalPaths) -> String {
+    format!(
+        "尚未配置模型。当前工作区的模型方案文件：{}。运行 `cayw conf --workspace {}` 逐项配置模型，或进入 WebUI 的模型设置。密钥可以明文保存在普通本地配置文件中；无需认证的本地服务可留空。",
+        paths.state_file("models.json").display(),
+        shell_path(&paths.workspace)
+    )
+}
+
+/// Explain how a fully explicit Headless host selects its model.
+pub fn headless_model_setup_hint(config_file: Option<&Path>) -> String {
     match config_file {
         Some(path) => format!(
-            "尚未配置模型。配置文件：{}。运行 `cayw configure --config {}` 逐项配置模型。网页的“工作区 / 模型 / 插件”也可保存并选择模型方案。服务启动时需已设置所选密钥环境变量。",
+            "尚未配置模型。Headless 配置文件：{}。运行 `cayw conf --config {}` 逐项配置模型。无需认证的本地服务可留空。",
             path.display(),
             shell_path(path)
         ),
-        None => "尚未配置模型。运行 `cayw configure` 完成配置，然后在当前启动命令中加入 `--config <配置文件路径>`。服务启动时需已设置所选密钥环境变量。".into(),
+        None => "尚未配置模型。为 Headless 启动提供含 model 对象的显式 --config 文件。无需认证的本地服务可以不填写密钥。".into(),
     }
 }
 
@@ -342,7 +382,7 @@ pub fn save_config(path: &Path, expected: Option<&[u8]>, bytes: &[u8]) -> io::Re
     };
     if current.as_deref() != expected {
         return Err(invalid(
-            "配置文件已被修改；未覆盖文件，请重新运行 `cayw configure`",
+            "配置文件已被修改；未覆盖文件，请重新运行 `cayw conf`",
         ));
     }
     write_private(path, bytes)

@@ -21,7 +21,16 @@ impl Drop for Entry {
 #[derive(Default)]
 struct State {
     entries: BTreeMap<String, Arc<Entry>>,
+    retiring: BTreeMap<String, Arc<Entry>>,
     next_generation: u64,
+}
+
+fn cleanup_unconfirmed(error: PluginError) -> PluginError {
+    if error.outcome_unknown() {
+        error
+    } else {
+        PluginError::OutcomeUnknown(format!("plugin cleanup was not confirmed: {error}"))
+    }
 }
 
 /// Independent plugins can run concurrently. No registry lock is held across
@@ -71,8 +80,16 @@ impl PluginRegistry {
         context: PluginContext,
         cancel: CancellationToken,
     ) -> Result<PluginDescription, PluginError> {
-        let plugin = ExternalPlugin::spawn(config, cancel).await?;
-        self.insert(Arc::new(plugin), context)
+        let plugin = Arc::new(ExternalPlugin::spawn(config, cancel).await?);
+        match self.insert(plugin.clone(), context) {
+            Ok(description) => Ok(description),
+            Err(error) => match plugin.shutdown().await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(PluginError::OutcomeUnknown(format!(
+                    "{error}; rejected plugin cleanup was not confirmed: {cleanup}"
+                ))),
+            },
+        }
     }
 
     fn insert(
@@ -83,10 +100,11 @@ impl PluginRegistry {
         let manifest = plugin.manifest().clone();
         let validators = validate_manifest(&manifest)?;
         let mut state = self.state.lock().expect("plugin registry poisoned");
-        if state.entries.contains_key(&manifest.name) {
+        if state.entries.contains_key(&manifest.name) || state.retiring.contains_key(&manifest.name)
+        {
             return Err(PluginError::Conflict(manifest.name));
         }
-        for other in state.entries.values() {
+        for other in state.entries.values().chain(state.retiring.values()) {
             if let Some(name) = validators
                 .keys()
                 .find(|name| other.validators.contains_key(*name))
@@ -200,32 +218,23 @@ impl PluginRegistry {
             .collect()
     }
 
-    /// Removing the entry is the unload boundary. All old snapshots are cancelled
-    /// before another generation can be inserted. Shutdown runs outside the lock.
+    /// Synchronous unload is restricted to Native plugins, whose shutdown has
+    /// no external supervisor to join. External callers must await
+    /// [`Self::unload_and_wait`].
     pub fn unload(&self, name: &str) -> Result<PluginDescription, PluginError> {
-        let entry = {
-            let mut state = self.state.lock().expect("plugin registry poisoned");
-            let entry = state
-                .entries
-                .remove(name)
-                .ok_or_else(|| PluginError::NotFound(name.into()))?;
-            entry.cancel.cancel();
-            entry
-        };
-        entry.plugin.shutdown();
-        Ok(PluginDescription {
-            manifest: entry.manifest.clone(),
-            registry_id: self.registry_id.clone(),
-            generation: entry.generation,
-        })
+        let expected = self.describe(name)?;
+        self.unload_exact(&expected)
     }
 
-    /// Remove only the registry instance captured by this description. An old
-    /// source must never shut down a newly installed plugin with the same name.
     pub fn unload_exact(
         &self,
         expected: &PluginDescription,
     ) -> Result<PluginDescription, PluginError> {
+        if expected.manifest.kind == PluginKind::External {
+            return Err(PluginError::Unavailable(
+                "external plugin unload requires unload_and_wait".into(),
+            ));
+        }
         let entry = {
             let mut state = self.state.lock().expect("plugin registry poisoned");
             let entry = state
@@ -247,8 +256,162 @@ impl PluginRegistry {
             entry.cancel.cancel();
             entry
         };
-        entry.plugin.shutdown();
+        entry.plugin.request_shutdown();
+        Ok(PluginDescription {
+            manifest: entry.manifest.clone(),
+            registry_id: self.registry_id.clone(),
+            generation: entry.generation,
+        })
+    }
+
+    /// Removing the active entry closes admission. The retiring entry remains
+    /// owned until its supervisor confirms shutdown, blocking same-name restart.
+    pub async fn unload_and_wait(&self, name: &str) -> Result<PluginDescription, PluginError> {
+        let expected = self.describe(name)?;
+        self.unload_exact_and_wait(&expected).await
+    }
+
+    /// Remove only the registry instance captured by this description. An old
+    /// source must never shut down a newly installed plugin with the same name.
+    pub async fn unload_exact_and_wait(
+        &self,
+        expected: &PluginDescription,
+    ) -> Result<PluginDescription, PluginError> {
+        let entry = {
+            let mut state = self.state.lock().expect("plugin registry poisoned");
+            if state.retiring.contains_key(&expected.manifest.name) {
+                return Err(PluginError::OutcomeUnknown(format!(
+                    "cleanup for plugin {} is not confirmed",
+                    expected.manifest.name
+                )));
+            }
+            let entry = state
+                .entries
+                .get(expected.manifest.name.as_str())
+                .ok_or_else(|| PluginError::NotFound(expected.manifest.name.clone()))?;
+            if self.registry_id != expected.registry_id
+                || entry.generation != expected.generation
+                || entry.manifest != expected.manifest
+            {
+                return Err(PluginError::Unavailable(
+                    "loaded plugin identity changed".into(),
+                ));
+            }
+            let entry = state
+                .entries
+                .remove(&expected.manifest.name)
+                .expect("checked plugin entry");
+            entry.cancel.cancel();
+            state
+                .retiring
+                .insert(expected.manifest.name.clone(), entry.clone());
+            entry
+        };
+        entry.plugin.request_shutdown();
+        match entry.plugin.wait_shutdown().await {
+            Ok(()) => {
+                let mut state = self.state.lock().expect("plugin registry poisoned");
+                if state
+                    .retiring
+                    .get(&expected.manifest.name)
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                {
+                    state.retiring.remove(&expected.manifest.name);
+                }
+                Ok(expected.clone())
+            }
+            Err(error) => Err(cleanup_unconfirmed(error)),
+        }
+    }
+
+    /// Retry shutdown only for the exact retiring instance. A missing or replaced
+    /// instance is not evidence that the original cleanup completed.
+    pub async fn retry_cleanup_exact_and_wait(
+        &self,
+        expected: &PluginDescription,
+    ) -> Result<PluginDescription, PluginError> {
+        let entry = {
+            let state = self.state.lock().expect("plugin registry poisoned");
+            let entry = state.retiring.get(&expected.manifest.name).ok_or_else(|| {
+                PluginError::OutcomeUnknown(format!(
+                    "cleanup instance for plugin {} is unavailable",
+                    expected.manifest.name
+                ))
+            })?;
+            if self.registry_id != expected.registry_id
+                || entry.generation != expected.generation
+                || entry.manifest != expected.manifest
+            {
+                return Err(PluginError::OutcomeUnknown(
+                    "retiring plugin identity changed or is unavailable".into(),
+                ));
+            }
+            entry.clone()
+        };
+        entry.plugin.request_shutdown();
+        entry
+            .plugin
+            .wait_shutdown()
+            .await
+            .map_err(cleanup_unconfirmed)?;
+        let mut state = self.state.lock().expect("plugin registry poisoned");
+        if !state
+            .retiring
+            .get(&expected.manifest.name)
+            .is_some_and(|current| Arc::ptr_eq(current, &entry))
+        {
+            return Err(PluginError::OutcomeUnknown(
+                "retiring plugin identity changed before cleanup confirmation".into(),
+            ));
+        }
+        state.retiring.remove(&expected.manifest.name);
         Ok(expected.clone())
+    }
+
+    pub fn pending_cleanup(&self) -> Vec<PluginDescription> {
+        self.state
+            .lock()
+            .expect("plugin registry poisoned")
+            .retiring
+            .values()
+            .map(|entry| PluginDescription {
+                manifest: entry.manifest.clone(),
+                registry_id: self.registry_id.clone(),
+                generation: entry.generation,
+            })
+            .collect()
+    }
+
+    pub async fn shutdown_all(&self) -> Result<(), PluginError> {
+        let descriptions = self.list();
+        let mut failures = Vec::new();
+        for description in descriptions {
+            if let Err(error) = self.unload_exact_and_wait(&description).await {
+                failures.push(error.to_string());
+            }
+        }
+        let pending = self.pending_cleanup();
+        if failures.is_empty() && pending.is_empty() {
+            Ok(())
+        } else {
+            Err(PluginError::OutcomeUnknown(format!(
+                "plugin cleanup was not confirmed: {}{}",
+                failures.join("; "),
+                if pending.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "{}pending {}",
+                        if failures.is_empty() { "" } else { "; " },
+                        pending
+                            .iter()
+                            .map(|plugin| plugin.manifest.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            )))
+        }
     }
 
     /// Call whichever instance is registered under this name at first poll.
@@ -351,9 +514,9 @@ impl PluginRegistry {
 impl Drop for PluginRegistry {
     fn drop(&mut self) {
         let state = self.state.get_mut().expect("plugin registry poisoned");
-        for entry in state.entries.values() {
+        for entry in state.entries.values().chain(state.retiring.values()) {
             entry.cancel.cancel();
-            entry.plugin.shutdown();
+            entry.plugin.request_shutdown();
         }
     }
 }

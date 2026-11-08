@@ -277,6 +277,7 @@ impl StrongFlow {
                 name: "strongflow".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 protocol_version: PLUGIN_PROTOCOL_VERSION,
+                role: PluginRole::WorkspaceArchitecture,
                 kind: PluginKind::Native,
                 capabilities: ["strongflow.describe", "strongflow.ready"]
                     .into_iter()

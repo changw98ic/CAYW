@@ -26,6 +26,13 @@ pub const PLUGIN_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum PluginRole {
+    Client,
+    WorkspaceArchitecture,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PluginKind {
     Native,
     External,
@@ -37,6 +44,7 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub protocol_version: u32,
+    pub role: PluginRole,
     pub kind: PluginKind,
     pub capabilities: Vec<ToolDefinition>,
     /// Capability name -> permissions required in addition to the capability grant.
@@ -145,7 +153,16 @@ pub trait Plugin: Send + Sync {
         arguments: Value,
         cancel: CancellationToken,
     ) -> Result<Value, PluginError>;
-    fn shutdown(&self) {}
+    /// Close admission immediately. This method must not block.
+    fn request_shutdown(&self) {}
+    /// Wait until all owned work and processes have published a terminal state.
+    async fn wait_shutdown(&self) -> Result<(), PluginError> {
+        Ok(())
+    }
+    async fn shutdown(&self) -> Result<(), PluginError> {
+        self.request_shutdown();
+        self.wait_shutdown().await
+    }
 }
 
 pub(crate) struct CancelOnDrop(pub CancellationToken);

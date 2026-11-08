@@ -68,22 +68,23 @@ impl Connections {
                     if needs_model {
                         let selected = selected.ok_or_else(|| Failure {
                             code: "model_not_configured".into(),
-                            message: cayw_runtime::local_cli::model_setup_hint(config.as_deref()),
+                            message: cayw_runtime::local_cli::headless_model_setup_hint(
+                                config.as_deref(),
+                            ),
                             outcome_unknown: false,
                         })?;
                         let configured = selected.build()?;
                         (
                             configured.provider,
                             configured.model,
-                            serde_json::to_value(&selected)?,
+                            selected.public_view(),
                             Some(selected.id().to_owned()),
                             "configured",
                         )
                     } else {
                         let configuration = selected
                             .as_ref()
-                            .map(serde_json::to_value)
-                            .transpose()?
+                            .map(|config| config.public_view())
                             .unwrap_or(Value::Null);
                         (
                             Arc::new(UnconfiguredProvider) as Arc<dyn Provider>,

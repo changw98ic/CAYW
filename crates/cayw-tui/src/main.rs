@@ -34,7 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     let mut terminal = TerminalGuard::enter()?;
-    let mut transport = Transport::start(config.address, config.token().to_owned());
+    let mut transport = Transport::start_for_workspace(
+        config.address,
+        config.token().to_owned(),
+        config.workspace_id().map(str::to_owned),
+    );
     let mut app = App::default();
     app.status = "Connecting to the host…".into();
     let mut driver = Driver::default();

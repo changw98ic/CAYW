@@ -1,0 +1,16 @@
+{
+  "Cargo.toml": "f83b7ac9449a2c1724517bb2ce8eeac1739eaf1b1fae288231d47e0d8c46333f",
+  "Cargo.lock": "76f08ca54fc685f2f317df8116762eb9f3cc396cfdf8f145129ba7310f1b4521",
+  "scripts/validate-live-webui-e2e.mjs": "19ba7d6e448bfe053e96f3d8dfd92f3c459a3bb62c9b314d074159f28023675c",
+  "crates/cayw-runtime/src/main.rs": "81a8c154496f0f918a399fc5f1f3af2b4f830cf0b21fb2f033a4d7e4d0bb59a0",
+  "crates/cayw-runtime/src/cli_workspaces.rs": "dd0697699e4e7a8e177fc026ebb52ef969c9632b4f866dac6e1a249f6686168b",
+  "crates/cayw-runtime/src/cli_settings.rs": "3a5b21981fc194dc2f4593232f96dbafa950dd172a6c3e717b035611d18b0e16",
+  "crates/cayw-runtime/src/provider.rs": "03c92747d32a101100d2460cb87512948c8b0ffa5214d13d039ca0ffdc981242",
+  "crates/cayw-runtime/src/session.rs": "280d6ec47d5ad750687971c49c6898e339e78c32deaea68fa34b43645d2b4d82",
+  "crates/cayw-agent/src/agent.rs": "6aa2a7b3a70867a03d83c81344e7effb12e1b8790647d8bbdfb001980a67b41c",
+  "crates/cayw-agent/src/execution.rs": "99b4c1ad9ff457d253a8d014499180688e1650ff006ee941924d9e5ce86c283c",
+  "crates/cayw-ai/src/providers/openai.rs": "e6cf4d90e66a7a5fc5cb2fa978d892198b19a523d387b2eb905a1c09b06f617b",
+  "crates/cayw-webui/src/lib.rs": "0bcb081378c3ce1282dd680e2f3db54865c4b2f920699226df420de5ae8778b4",
+  "crates/cayw-webui/assets/app.js": "9c8c036abfb85c4fb543dc48349ec35113dda46ebe53ab2e036c85fdcfc55242",
+  "crates/cayw-webui/assets/index.html": "49a39940e9043a14f8efd5d28b451e048bb5a0be999a6f5b4153de650576fb2e"
+}

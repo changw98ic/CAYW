@@ -25,6 +25,60 @@ fn ordinary(view: &Value) {
     assert_eq!(view["binding"], Value::Null);
 }
 
+fn frozen_strongflow_binding(session: &str, registry: &str, reason: &str) -> Value {
+    let parameters = json!({
+        "type": "object",
+        "properties": {"workflow_id": {"type": "string"}},
+        "required": ["workflow_id"],
+        "additionalProperties": false,
+    });
+    let manifest = json!({
+        "name": "strongflow",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocol_version": 1,
+        "role": "workspace_architecture",
+        "kind": "native",
+        "capabilities": [
+            {
+                "name": "strongflow.describe",
+                "description": "Read host-created workflow state",
+                "parameters": parameters.clone(),
+            },
+            {
+                "name": "strongflow.ready",
+                "description": "Read host-created workflow state",
+                "parameters": parameters,
+            },
+        ],
+        "permissions": {},
+    });
+    let workflow_state = json!({
+        "format_version": 1,
+        "plugin_manifest": manifest.clone(),
+        "workflows": {},
+    });
+    json!({
+        "manifest": manifest.clone(),
+        "registry_id": registry,
+        "generation": 1,
+        "reason": reason,
+        "strongflow": {
+            "session_id": session,
+            "mode": "strong_flow",
+            "bound_plugin_version": {
+                "name": "strongflow",
+                "version": env!("CARGO_PKG_VERSION"),
+                "registry_id": registry,
+                "generation": 1,
+            },
+            "plugin_manifest": manifest,
+            "workflow_state": workflow_state,
+            "frozen_reason": reason,
+            "source_session_id": null,
+        },
+    })
+}
+
 #[tokio::test]
 async fn sdk_and_rpc_session_results_share_the_ordinary_view() {
     let dir = tempfile::tempdir().unwrap();
@@ -186,13 +240,11 @@ fn peer_runtime_observes_a_later_frozen_binding_without_restart() {
             None,
             "trusted-host",
             "plugin_frozen",
-            json!({"binding": {
-                "manifest": {"name": "fixture", "version": "1.0.0"},
-                "registry_id": registry,
-                "generation": 1,
-                "reason": "frozen by another Runtime connection",
-                "strongflow": null
-            }}),
+            json!({"binding": frozen_strongflow_binding(
+                &id,
+                &registry,
+                "frozen by another Runtime connection",
+            )}),
         )
         .unwrap();
     let frozen = reader.get(&id).unwrap();
@@ -259,7 +311,7 @@ async fn binding_checkpoint_and_unload_are_visible_in_the_canonical_event_cursor
         json!(["actual-tests"])
     );
     let before = bound["cursor"].as_u64().unwrap();
-    rt.unload_plugin("strongflow").unwrap();
+    rt.unload_plugin("strongflow").await.unwrap();
     let changes = rt
         .wait_events(
             &created.id,

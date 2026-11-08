@@ -86,6 +86,7 @@ async fn jev_registry_adapter_obeys_plugin_permissions_and_unload() {
         name: "local-jev".into(),
         version: "1".into(),
         protocol_version: PLUGIN_PROTOCOL_VERSION,
+        role: PluginRole::WorkspaceArchitecture,
         kind: PluginKind::Native,
         capabilities: vec![ToolDefinition {
             name: "jev.score".into(),

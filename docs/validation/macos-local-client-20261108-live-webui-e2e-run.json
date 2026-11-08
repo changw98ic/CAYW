@@ -1,0 +1,42 @@
+{
+  "schema": "cayw.live-webui-e2e-validation.v1",
+  "started_utc": "2026-11-08T01:52:27.619Z",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "os_release": "27.0.0",
+  "node": "v24.4.1",
+  "base_commit": "cb8599d0fd2e8ce73edb5545e00db57b7049a69d",
+  "working_diff_sha256": "a6f17a7f5f8f1aa1d9b84478c21e84592c8d2a125b810e5af743373c36c9f14e",
+  "binary": {
+    "path": "/Volumes/ORICO/CAYW/target/debug/cayw",
+    "sha256": "3fbb53eea76837a8ef332d8117822d43a495bdb49bd4e28a82dfc128d3d87969"
+  },
+  "webui_binary": {
+    "path": "/Volumes/ORICO/CAYW/target/debug/cayw-webui",
+    "sha256": "fcc6645477999a608d208fe308386ece320a4a7439c7017365a93ef28f1a5ec3"
+  },
+  "model": {
+    "requested": "auto/deepseek-v4.1-flash",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "authentication": "none"
+  },
+  "assertions": [
+    "The live gateway catalog contains the selected model before product startup",
+    "A fresh isolated macOS product start owns one Client and one Client-managed WebUI",
+    "The fresh Client, Runtime and WebUI start without a selected model",
+    "The browser saves and hot-selects a no-auth live model through settings RPC",
+    "The live model requests execute_code and the browser exposes the exact fs.write approval",
+    "One browser task completes a real two-request model/tool/model loop with one Host file effect",
+    "A full page reload renders the durable final answer without replay",
+    "Browser RPC trace, Runtime terminal state, events, usage and disk effect agree"
+  ],
+  "passed": true,
+  "browser_version": "157.0.8103.38",
+  "session_id": "95e3017b-8ffe-48b1-b96e-f6978eec0cf6",
+  "real_generation_requests": 2,
+  "known_usage_tokens": 3222,
+  "changed_sources": [],
+  "binary_changed": false,
+  "webui_binary_changed": false,
+  "finished_utc": "2026-11-08T01:52:35.940Z"
+}

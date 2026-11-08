@@ -1,0 +1,325 @@
+{
+  "schema": "cayw.macos-local-client-live-webui-e2e.v1",
+  "validation_date_local": "2026-11-08",
+  "passed": true,
+  "authorization": "The user explicitly authorized live model requests in the active session.",
+  "scope": "Browser -> WebUI -> one Client -> workspace Runtime -> live Magpie model -> execute_code -> browser approval -> fs.write Host effect -> second live model response -> durable browser reload",
+  "platform": {
+    "product": "macOS",
+    "darwin_release": "27.0.0",
+    "architecture": "arm64",
+    "node": "v24.4.1",
+    "chrome": "157.0.8103.38"
+  },
+  "source": {
+    "branch": "workflow/macos-startup-20261020T012416Z-8f7112",
+    "base_commit": "cb8599d0fd2e8ce73edb5545e00db57b7049a69d",
+    "dirty_worktree": true,
+    "tracked_working_diff_sha256_at_successful_run_start": "a6f17a7f5f8f1aa1d9b84478c21e84592c8d2a125b810e5af743373c36c9f14e",
+    "changed_sources_during_successful_run": [],
+    "source_receipt_sha256": "37c649432a0d2f9eb8ea709ca728bb6282266746318f28cfa9aacebf4010e40c"
+  },
+  "binaries": {
+    "target/debug/cayw": {
+      "sha256": "3fbb53eea76837a8ef332d8117822d43a495bdb49bd4e28a82dfc128d3d87969",
+      "changed_during_run": false,
+      "features": [
+        "plugins",
+        "strongflow",
+        "pi-compat"
+      ]
+    },
+    "target/debug/cayw-webui": {
+      "sha256": "8cab00d7cf8f0454ec55a4ec2846120ce3c5e29fa986213565f87ea437a8b511",
+      "changed_during_run": false
+    }
+  },
+  "gateway": {
+    "name": "Magpie",
+    "base_url": "http://127.0.0.1:3425/v1",
+    "requested_model": "auto/deepseek-v4.1-flash",
+    "response_model": "group/auto-deepseek-v4-1-flash",
+    "authentication": "none",
+    "api_key_stored": false
+  },
+  "successful_run": {
+    "evidence_directory": "/private/tmp/cayw-live-webui-e2e-20261108-r5",
+    "started_utc": "2026-11-08T02:21:28.819Z",
+    "finished_utc": "2026-11-08T02:21:37.642Z",
+    "assertions": 8,
+    "session_id": "d16403d2-c005-41fd-8000-3902eca5b752",
+    "task_id": "13a71ed6-2598-45a0-94e6-86cc54f93ec1",
+    "execution_id": "6f301abc-f6f2-4177-a420-264a5f727a92",
+    "model_configuration": {
+      "saved_by_browser": true,
+      "selected": "live-browser-e2e",
+      "service": "magpie",
+      "api": "chat_completions",
+      "model": "auto/deepseek-v4.1-flash",
+      "authentication": "none",
+      "stored_without_api_key": true
+    },
+    "model_requests": [
+      {
+        "turn": 1,
+        "request_id": "32d08606-9a0f-4d50-8e45-6e8fe297d073",
+        "response_id": "chatcmpl-Rf2WsyBelyvx1VaSXzorl3N4",
+        "terminal": "completed",
+        "stop_reason": "toolUse",
+        "usage_status": "reported",
+        "usage": {
+          "input": 47,
+          "output": 178,
+          "cache_read": 1280,
+          "cache_write": 0,
+          "reasoning": 52,
+          "total_tokens": 1505
+        }
+      },
+      {
+        "turn": 2,
+        "request_id": "6ae193a3-098e-48b4-9a14-0dd6b6517879",
+        "response_id": "chatcmpl-RLPPcvvzEyYAiy0yrksfcIst",
+        "terminal": "completed",
+        "stop_reason": "stop",
+        "usage_status": "reported",
+        "usage": {
+          "input": 371,
+          "output": 13,
+          "cache_read": 1408,
+          "cache_write": 0,
+          "reasoning": 0,
+          "total_tokens": 1792
+        }
+      }
+    ],
+    "tool_call": {
+      "name": "execute_code",
+      "count": 1,
+      "arguments": {
+        "action": "exec",
+        "script": "return cayw.call('fs.write',{path='live-e2e.txt',content='CAYW_LIVE_WEBUI_E2E_FILE'})",
+        "yield_time_ms": 30000,
+        "max_output_tokens": 32768
+      }
+    },
+    "approval": {
+      "shown_in_browser": true,
+      "operation": "写入文件",
+      "capability": "fs.write",
+      "path": "live-e2e.txt",
+      "decision": "allow_once",
+      "actor": "rpc-user",
+      "effect_started_after_approval": true
+    },
+    "host_effect": {
+      "path": "live-e2e.txt",
+      "content": "CAYW_LIVE_WEBUI_E2E_FILE",
+      "bytes": 24,
+      "sha256": "ea1af8184cdb699e0da32752f570e7091d86a8a4c04a23867dc715fa7017e5bc",
+      "outcome_unknown": false
+    },
+    "tool_result": {
+      "count": 1,
+      "status": "completed",
+      "is_error": false,
+      "outcome_unknown": false,
+      "vm_alive": false,
+      "has_more": false
+    },
+    "final_browser_text": "CAYW_LIVE_WEBUI_E2E_OK",
+    "runtime_terminal": {
+      "task_state": "completed",
+      "session_state": "idle",
+      "attempt": null,
+      "pending_approvals": 0,
+      "unresolved_calls": 0,
+      "unresolved_capabilities": 0,
+      "execution_state": "completed",
+      "request_count": 2,
+      "known_usage_tokens": 3297,
+      "budget_unknown": false
+    },
+    "durability": {
+      "full_page_reload_performed": true,
+      "final_answer_rendered_after_reload": true,
+      "task_replayed": false
+    },
+    "browser_rpc": {
+      "required_successful_methods": [
+        "settings.models.put",
+        "settings.models.use",
+        "session.create",
+        "task.enqueue",
+        "task.resume",
+        "approval.decide",
+        "session.events",
+        "session.get"
+      ],
+      "settings_plugins_list_statuses": [
+        200,
+        200,
+        200
+      ]
+    },
+    "browser_console_errors": [],
+    "process_exit_code": 0
+  },
+  "attempts": [
+    {
+      "name": "r1",
+      "passed": false,
+      "directory": "/private/tmp/cayw-live-webui-e2e-20261108-r1",
+      "failure_class": "validation_script_selector",
+      "failure": "The script waited for 修改文件, while fs.write is rendered as 写入文件.",
+      "real_model_requests_started_and_finished": 2,
+      "known_usage_tokens": 3245,
+      "summary_path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r1-failure.json",
+      "summary_sha256": "d41fc7f76dd71db843029a16f7c16972648248dfe1a8382aec57cc22b54e7f2d"
+    },
+    {
+      "name": "r2",
+      "passed": false,
+      "directory": "/private/tmp/cayw-live-webui-e2e-20261108-r2",
+      "failure_class": "validation_script_strict_locator",
+      "failure": "The file name locator matched both the human summary and raw JSON, so Playwright strict mode rejected the ambiguous match.",
+      "real_model_requests_started_and_finished": 1,
+      "known_usage_tokens": 1460,
+      "summary_path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r2-failure.json",
+      "summary_sha256": "d491926db8feb15f8e8c2dab5ff3bb12443b09b53a988f2f7482c76f73528a60"
+    },
+    {
+      "name": "r3",
+      "passed": false,
+      "directory": "/private/tmp/cayw-live-webui-e2e-20261108-r3",
+      "failure_class": "wrong_product_build_features",
+      "failure": "The core E2E chain completed, but a default-feature cayw build made settings.plugins.list return HTTP 502 three times. The validation correctly rejected the browser console errors.",
+      "core_e2e_chain_completed": true,
+      "real_model_requests_started_and_finished": 2,
+      "known_usage_tokens": 3210,
+      "summary_path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r3-failure.json",
+      "summary_sha256": "a5b2b68af29e4a56785b6efda270d54b60d8ca5eee5c32545070650178561a84"
+    },
+    {
+      "name": "r4",
+      "passed": true,
+      "directory": "/private/tmp/cayw-live-webui-e2e-20261108-r4",
+      "real_model_requests_started_and_finished": 2,
+      "known_usage_tokens": 3222,
+      "summary_path": "docs/validation/macos-local-client-20261108-live-webui-e2e-run.json",
+      "summary_sha256": "d6393cde773635cd6e589c93541bf20b693eff551525a740778556cbc5f70296",
+      "webui_binary_sha256": "fcc6645477999a608d208fe308386ece320a4a7439c7017365a93ef28f1a5ec3"
+    },
+    {
+      "name": "r5",
+      "passed": true,
+      "purpose": "Bind the successful E2E to binaries rebuilt after the final workspace test.",
+      "directory": "/private/tmp/cayw-live-webui-e2e-20261108-r5",
+      "real_model_requests_started_and_finished": 2,
+      "known_usage_tokens": 3297,
+      "summary_path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-run.json",
+      "summary_sha256": "334b70f881d3e10044896e1b4e4e47ee21111b9a38ef51555966d7d5f60d6037",
+      "webui_binary_sha256": "8cab00d7cf8f0454ec55a4ec2846120ce3c5e29fa986213565f87ea437a8b511"
+    }
+  ],
+  "request_accounting": {
+    "webui_e2e_attempt_requests": 9,
+    "webui_e2e_attempt_known_usage_tokens": 14434,
+    "webui_e2e_unknown_usage_requests": 0,
+    "earlier_live_acceptance_requests": 7,
+    "earlier_live_acceptance_known_usage_tokens": 3781,
+    "earlier_live_acceptance_unknown_usage_requests": 1,
+    "active_session_real_requests_total": 16,
+    "active_session_known_completed_usage_tokens": 18215,
+    "active_session_unknown_usage_requests": 1,
+    "billing_status": "unknown",
+    "counting_rule": "Count durable model_request started records. Reported usage is summed only from matching finished records; an incomplete or cancelled zero-valued usage record is never treated as zero cost."
+  },
+  "issues_found_and_resolved": [
+    {
+      "kind": "validation script",
+      "change": "Match the actual fs.write approval label 写入文件 and the exact visible file summary."
+    },
+    {
+      "kind": "product WebUI",
+      "change": "Escape the hyphen in the model profile HTML pattern so Chrome Unicode Sets validation compiles it without a JavaScript console error.",
+      "regression_test": "All shipped HTML pattern attributes compile with the RegExp v flag."
+    },
+    {
+      "kind": "validation build",
+      "change": "Build the local product with plugins, strongflow and pi-compat before the final run."
+    },
+    {
+      "kind": "evidence integrity",
+      "change": "Freeze and compare both cayw and cayw-webui binary hashes, and save browser RPC traces on failures."
+    }
+  ],
+  "evidence": {
+    "r4": {
+      "run_summary": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-run.json",
+        "sha256": "d6393cde773635cd6e589c93541bf20b693eff551525a740778556cbc5f70296"
+      },
+      "runtime_and_events": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-runtime.json",
+        "sha256": "a22a202f2d75734b8b7b578ffb8c7c0fbd1cd81345b117a929479a9bd10fc210"
+      },
+      "browser_rpc_trace": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-rpc.json",
+        "sha256": "200cc0ccd95746592e4a53502196f30510b1295d923279cb0c99b7048637e233"
+      },
+      "approval_screenshot": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-approval.png",
+        "sha256": "d29892dc3b1f8b40a7322079d38bd84b3a1c58d9d3fbb9f80056a79027a49d79"
+      },
+      "completed_screenshot": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-completed.png",
+        "sha256": "8bdb660904869268f8244f1d2ff9be53f231a75fb02d09caf7d51984710f2359"
+      }
+    },
+    "r5": {
+      "run_summary": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-run.json",
+        "sha256": "334b70f881d3e10044896e1b4e4e47ee21111b9a38ef51555966d7d5f60d6037"
+      },
+      "runtime_and_events": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-runtime.json",
+        "sha256": "77396da4f08cf392015f823b699688d5e2afe7b237db3cb740b0a6cc2adbf25a"
+      },
+      "browser_rpc_trace": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-rpc.json",
+        "sha256": "200cc0ccd95746592e4a53502196f30510b1295d923279cb0c99b7048637e233"
+      },
+      "source_receipt": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-source-receipt.json",
+        "sha256": "37c649432a0d2f9eb8ea709ca728bb6282266746318f28cfa9aacebf4010e40c"
+      },
+      "model_configuration": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-model-config.json",
+        "sha256": "cd2e264d118dd09b031674d8fc079c5b4e946de2494d6086b595cb2ed9c7cc01"
+      },
+      "browser_errors": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-e2e-r5-browser-errors.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      "approval_screenshot": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-r5-approval.png",
+        "sha256": "91a6b050cb04a05e635bcc696ec32c99e620cacdf6f8c6694dce27b42aaabb5f"
+      },
+      "completed_screenshot": {
+        "path": "docs/validation/macos-local-client-20261108-live-webui-r5-completed.png",
+        "sha256": "1bf1cebbd17c30bc83397102904e352af9d881ae0f7a3449137fbe75bb7b05f0"
+      }
+    },
+    "workspace_test_log": {
+      "path": "docs/validation/macos-local-client-20261108-workspace-test.log",
+      "sha256": "b9e4815f9617080d2083d7d6a6665554e3f346815b97b036679b37756233486f"
+    }
+  },
+  "limits": [
+    "This validates the current dirty working tree and listed binaries on macOS arm64 only.",
+    "The gateway was a local unauthenticated Magpie service. Upstream billing was not independently checked.",
+    "The prompt, file path and file content were synthetic. No repository content or credentials were sent to the model.",
+    "The three failed attempt directories are retained as local evidence and are not reclassified as passing runs."
+  ]
+}
