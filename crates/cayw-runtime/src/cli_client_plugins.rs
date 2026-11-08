@@ -600,7 +600,8 @@ impl ClientPlugins {
         if pending.created.elapsed() > PREPARE_TIMEOUT {
             return Err("TUI launch record expired before attach".into());
         }
-        let Some(identity) = validate_tui_process(request.pid, &self.inner.tui_binary).await? else {
+        let Some(identity) = validate_tui_process(request.pid, &self.inner.tui_binary).await?
+        else {
             // The foreground UI can connect and quit before this RPC finishes
             // inspecting it. An exited child is not an impersonating live process.
             // No supervision identity is granted; its launcher must reap the

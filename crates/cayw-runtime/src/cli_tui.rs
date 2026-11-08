@@ -152,9 +152,10 @@ pub(super) async fn run_connected(
             client.close().await;
             return match cleanup {
                 Ok(()) => Err(format!("Client 未能接管终端界面：{error}").into()),
-                Err(cleanup) => {
-                    Err(format!("Client 未能接管终端界面：{error}；本地清理也未确认：{cleanup}").into())
-                }
+                Err(cleanup) => Err(format!(
+                    "Client 未能接管终端界面：{error}；本地清理也未确认：{cleanup}"
+                )
+                .into()),
             };
         }
     };
