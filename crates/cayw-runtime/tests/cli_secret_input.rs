@@ -72,7 +72,8 @@ impl Terminal {
         // already the PTY slave, and the child becomes its controlling session.
         unsafe {
             command.pre_exec(|| {
-                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                let request: libc::c_ulong = libc::TIOCSCTTY.into();
+                if libc::setsid() == -1 || libc::ioctl(0, request, 0) == -1 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
