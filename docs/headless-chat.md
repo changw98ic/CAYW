@@ -6,6 +6,8 @@ CAYW 可以安装为独立的 `cayw` Runtime 和 `cayw-client` Rust 客户端。
 
 ## 安装
 
+CI 产物的外层 ZIP 中包含 `cayw-macos-arm64.tar.gz` 和对应 SHA256 文件。先解开 ZIP，再校验并解开 tar.gz；执行权限保存在 tar 包内。
+
 macOS Apple Silicon 发行包以 `install.sh` 作为安装入口，旁边是 `bin/cayw`、`bin/cayw-tui`、`bin/cayw-webui`、`bin/cayw-client` 和 `SHA256SUMS`。解压后在该目录运行：
 
 ```sh

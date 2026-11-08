@@ -34,14 +34,18 @@ cargo clippy -p cayw-runtime --all-targets --locked --features plugins,strongflo
 ```sh
 python3 scripts/test-install-cli.py
 sh scripts/package-cli.sh "$RUNNER_TEMP/cayw-release"
-python3 scripts/validate-release-install.py "$RUNNER_TEMP/cayw-release" "$RUNNER_TEMP/cayw-release-evidence"
+tar -czf "$RUNNER_TEMP/cayw-macos-arm64.tar.gz" -C "$RUNNER_TEMP" cayw-release
+(cd "$RUNNER_TEMP" && shasum -a 256 cayw-macos-arm64.tar.gz > cayw-macos-arm64.tar.gz.sha256)
+mkdir "$RUNNER_TEMP/cayw-distribution"
+tar -xzf "$RUNNER_TEMP/cayw-macos-arm64.tar.gz" -C "$RUNNER_TEMP/cayw-distribution"
+python3 scripts/validate-release-install.py "$RUNNER_TEMP/cayw-distribution/cayw-release" "$RUNNER_TEMP/cayw-release-evidence"
 ```
 
 - 第一步是合成程序的安装失败/中断回归，不能替代后两步真实发行二进制验证。
 - 打包从干净候选提交构建四个程序：`cayw`、`cayw-client`、`cayw-tui`、`cayw-webui`。独立 headless-client workspace 也以 `--locked` 构建。
 - 实际包的 Runtime 仍只启用 `plugins`。可选产品组合通过不等于这些组件已随包分发，Pi/remote/StrongFlow 不在该标准包的声明范围内。
 - 安装验收使用新建 HOME、CAYW_HOME、workspace 和合成数据。不得使用真实用户配置、真实 API key 或付费模型调用。
-- Actions artifact 保存发行包、`BUILD.json`、校验和及安装验收记录，保留 7 天。这不是发布 GitHub Release，也不执行部署或合并。
+- Actions artifact 保存 `cayw-macos-arm64.tar.gz`、外层 SHA256 和安装验收记录，保留 7 天。包内继续保存 `BUILD.json` 与文件校验和。先 tar 再上传可保留执行权限；门禁从解压后的 tar 包执行，避免 [upload-artifact 的权限归一化](https://github.com/actions/upload-artifact/tree/v4#permission-loss) 使下载后的程序变为不可执行。这不是发布 GitHub Release，也不执行部署或合并。
 
 ## 尚不能由这些门禁证明的范围
 

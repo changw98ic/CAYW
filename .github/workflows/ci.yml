@@ -182,8 +182,17 @@ jobs:
       - name: Build exact release bundle
         run: sh scripts/package-cli.sh "$RUNNER_TEMP/cayw-release"
 
-      - name: Validate clean install and upgrade with packaged binaries
-        run: python3 scripts/validate-release-install.py "$RUNNER_TEMP/cayw-release" "$RUNNER_TEMP/cayw-release-evidence"
+      # upload-artifact normalizes file permissions. Keep executable modes
+      # inside a tarball and accept the extracted distribution, not the build tree.
+      - name: Archive and extract the release distribution
+        run: |
+          tar -czf "$RUNNER_TEMP/cayw-macos-arm64.tar.gz" -C "$RUNNER_TEMP" cayw-release
+          (cd "$RUNNER_TEMP" && shasum -a 256 cayw-macos-arm64.tar.gz > cayw-macos-arm64.tar.gz.sha256)
+          mkdir "$RUNNER_TEMP/cayw-distribution"
+          tar -xzf "$RUNNER_TEMP/cayw-macos-arm64.tar.gz" -C "$RUNNER_TEMP/cayw-distribution"
+
+      - name: Validate clean install and upgrade with distributed binaries
+        run: python3 scripts/validate-release-install.py "$RUNNER_TEMP/cayw-distribution/cayw-release" "$RUNNER_TEMP/cayw-release-evidence"
 
       - name: Preserve release bundle and acceptance evidence
         if: always()
@@ -191,7 +200,8 @@ jobs:
         with:
           name: macos-arm64-release-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            ${{ runner.temp }}/cayw-release
+            ${{ runner.temp }}/cayw-macos-arm64.tar.gz
+            ${{ runner.temp }}/cayw-macos-arm64.tar.gz.sha256
             ${{ runner.temp }}/cayw-release-evidence
           if-no-files-found: warn
           retention-days: 7
