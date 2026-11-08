@@ -1400,13 +1400,17 @@ mod tests {
         assert!(tui_exit_state(output(0, b"\xff", b"")).is_err());
     }
 
+    fn early_exit_tui_fixture(directory: &Path) -> PathBuf {
+        let path = directory.join("cayw-tui");
+        std::fs::write(&path, "#!/bin/sh\nexit 7\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
     async fn assert_early_exit_is_not_supervised(reap_first: bool) {
         let temp = tempfile::tempdir().unwrap();
-        let plugins = fixture_plugins(
-            temp.path(),
-            temp.path().join("missing-webui"),
-            temp.path().join("cayw-tui"),
-        );
+        let tui = early_exit_tui_fixture(temp.path());
+        let plugins = fixture_plugins(temp.path(), temp.path().join("missing-webui"), tui.clone());
         let prepared = plugins
             .call(
                 "client.plugins.start",
@@ -1418,8 +1422,7 @@ mod tests {
         let launch_id = prepared["launch_id"].as_str().unwrap();
         // std::process retains an unreaped child for the zombie case. Synchronize
         // on its actual OS state, not a fixed sleep or an assumed exit delay.
-        let mut child = StdCommand::new("/bin/sh")
-            .args(["-c", "exit 7"])
+        let mut child = StdCommand::new(&tui)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1476,11 +1479,8 @@ mod tests {
     #[tokio::test]
     async fn live_wrong_tui_executable_is_still_rejected() {
         let temp = tempfile::tempdir().unwrap();
-        let plugins = fixture_plugins(
-            temp.path(),
-            temp.path().join("missing-webui"),
-            temp.path().join("cayw-tui"),
-        );
+        let tui = early_exit_tui_fixture(temp.path());
+        let plugins = fixture_plugins(temp.path(), temp.path().join("missing-webui"), tui);
         let prepared = plugins
             .call(
                 "client.plugins.start",
