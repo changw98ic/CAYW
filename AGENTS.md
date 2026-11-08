@@ -6,7 +6,7 @@
 
 CAYW（Code As You Wish）是正在开发的开源、Rust 原生、模块化 Agent 运行时。项目愿景是让模型通过代码组织工具，在用户明确的权限和预算内完成任务，让用户始终掌控执行过程。核心可独立运行，模型、工具、设备、界面与插件按需组合；建设目标是让任务执行可追溯、可取消，并在中断后核对记录再恢复。workspace 成员和 feature 以 Cargo 清单为准。
 
-**首发只面向 macOS。** 不为 Windows、Linux 做适配、探针、环境排查或测试，也不以其缺口阻塞首发；后续支持由 [Issue #19](https://github.com/changw98ic/CAYW/issues/19) 跟踪。macOS 内未实际执行的架构或场景标为“未验证”，不外推。
+**首发只面向 macOS。** 不为 Windows、Linux 做适配、探针、环境排查或测试，也不以其缺口阻塞首发；后续支持由 [Issue #19](https://github.com/changw98ic/CAYW/issues/19) 跟踪。例外：CI 另有 Ubuntu Linux 任务，只验证 Rust 工作区在 Linux 上的 fmt、`check --all-targets`、`clippy -D warnings` 与 `test`；进程身份（`/proc/<pid>/stat` 的 PID + 启动时钟滴答 + 进程组）及其清理/恢复测试在 Linux 实际运行。这不等于 Linux 桌面产品支持：PTY、Git 读能力及其余标为 macOS 的测试仍只在 macOS 验收。macOS 内未实际执行的架构或场景标为“未验证”，不外推。
 
 - **进度不写在本文件。** 各 Issue 的状态见 `docs/development-map.md`，以 GitHub Issue 为准；各次验收记录在 `docs/validation/`，每份只证明自己记录的源码、平台和场景，判断最新代码须重新运行命令并核对原始日志。
 - **已有实现不等于 Issue 验收。** 不要把局部测试写成整个功能或所有 macOS 架构通过，也不要把已有实现写成“尚未实现”。

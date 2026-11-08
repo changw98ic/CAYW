@@ -6,6 +6,9 @@ on:
   pull_request:
 
 # First ship targets macOS (see AGENTS.md); run the required checks on macOS.
+# The Linux job verifies the same Rust workspace builds, lints, and tests on
+# Ubuntu. It is not desktop product support: Pty terminals, Git read
+# capabilities, and other macOS-only tests stay cfg-gated to macOS.
 jobs:
   rust:
     name: fmt / check / test / clippy
@@ -37,7 +40,50 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo check
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --all-targets --locked
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  rust-linux:
+    name: linux / fmt / check / test / clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            crates/cayw-visual-editor/framework/package-lock.json
+            crates/cayw-pi-compat/npm/package-lock.json
+
+      - name: Show C/C++ toolchain
+        run: |
+          cc --version
+          c++ --version
+
+      - name: Install editor companion dependencies
+        run: npm ci --prefix crates/cayw-visual-editor/framework --no-fund --no-audit
+
+      - name: Install Pi adapter dependencies
+        run: npm ci --prefix crates/cayw-pi-compat/npm --omit=dev --no-fund --no-audit
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked
 
       - name: cargo test
         run: cargo test --workspace --locked

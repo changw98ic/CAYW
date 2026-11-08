@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 //! Integration tests for review items BR-02, RT-04, RT-05:
 //! - BR-02: Clean up auxiliary records (executors, processes, cleanup_confirmations, cancels)
 //!   during retention pruning of known terminal tasks, preserving running and outcome_unknown tasks.

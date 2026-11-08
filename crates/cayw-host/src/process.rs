@@ -1459,6 +1459,8 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    // Only the macOS-only Git read tests below use this helper.
+    #[cfg(target_os = "macos")]
     fn git(root: &Path, args: &[&str]) -> String {
         let result = std::process::Command::new("/usr/bin/git")
             .args(args)
@@ -1479,6 +1481,8 @@ mod tests {
         );
         String::from_utf8(result.stdout).unwrap()
     }
+    // Only the macOS-only Git read tests below use this helper.
+    #[cfg(target_os = "macos")]
     fn host(root: &Path) -> Host {
         Host::new(
             root,
@@ -1577,6 +1581,9 @@ mod tests {
         }
     }
 
+    // Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+    // and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn renamed_private_metadata_view_is_retained_and_cleanup_stays_unconfirmed() {
         let container = Tree::new();
@@ -1613,6 +1620,9 @@ mod tests {
         owner.remove_dir_all(&moved).unwrap();
     }
 
+    // Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+    // and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn prepared_git_read_never_redirects_to_replacement_root_subtree_or_object_store() {
         for replacement in ["root", "subtree", "objects"] {

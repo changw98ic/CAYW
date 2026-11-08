@@ -29,5 +29,7 @@ zeroize = { version = "1.8.2", optional = true }
 tempfile = "3.23"
 
 [[example]]
-name = "offline"
+# Unique across the workspace: `offline` also names cayw-agent's example.
+name = "content_offline"
+path = "examples/offline.rs"
 required-features = ["encryption"]

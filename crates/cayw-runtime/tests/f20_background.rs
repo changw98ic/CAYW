@@ -8,6 +8,9 @@
 //! 5) Device descendant cleanup terminating processes
 //! 6) Drop runtime and reopen, preserving Session, Task, logs, and ownership without prompt replay.
 
+// Background executors need durable process identity: macOS and Linux only.
+#![cfg(any(target_os = "macos", target_os = "linux"))]
+
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_host::{Profile, ProfileKind};
 use cayw_ipc::{Client, ServerConfig};
@@ -72,7 +75,6 @@ fn test_config() -> RuntimeConfig {
     config
 }
 
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn background_ownership_survives_reopen() {
     let temp = tempfile::tempdir().unwrap();

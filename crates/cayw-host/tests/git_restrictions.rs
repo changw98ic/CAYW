@@ -143,6 +143,9 @@ fn stdout(result: &Value) -> String {
     result["stdout"].as_str().unwrap().to_string()
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn history_and_status_do_not_depend_on_ignored_build_data_or_worktree_links() {
     let root = Dir::new();
@@ -226,6 +229,9 @@ async fn allowed_filter_accepts_underscore_unicode_spaces_and_parentheses_as_one
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn unicode_git_branch_and_worktree_names_are_accepted_without_ascii_whitelist() {
     let root = Dir::new();
@@ -279,6 +285,9 @@ async fn unicode_git_branch_and_worktree_names_are_accepted_without_ascii_whitel
     }
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn ordinary_worktree_directory_names_follow_path_rules_instead_of_ref_rules() {
     let root = Dir::new();

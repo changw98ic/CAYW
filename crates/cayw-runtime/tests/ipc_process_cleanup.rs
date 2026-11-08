@@ -8,7 +8,7 @@
 //!
 //! Everything below the transport is the same product code the SDK tests use:
 //! the same Runtime, Host, Device and process fixture. Only the caller changes.
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_host::{Profile, ProfileKind};
 use cayw_ipc::{Client, ServerConfig, serve};
@@ -180,15 +180,18 @@ async fn wait_recorded(dir: &Path, pids: &[i64]) {
 /// confirmed cleanup, and the slot released only after it.
 #[tokio::test]
 async fn authenticated_ipc_cancel_stops_and_records_every_chain_generation_in_both_io_modes() {
-    let mut modes = vec![("pipes", cayw_host::ProcessIo::Pipes)];
-    #[cfg(target_os = "macos")]
-    modes.push((
-        "pty",
-        cayw_host::ProcessIo::Pty {
-            columns: 80,
-            rows: 24,
-        },
-    ));
+    let modes = [
+        ("pipes", cayw_host::ProcessIo::Pipes),
+        // Terminal execution is macOS-only; Linux rejects Pty before launch.
+        #[cfg(target_os = "macos")]
+        (
+            "pty",
+            cayw_host::ProcessIo::Pty {
+                columns: 80,
+                rows: 24,
+            },
+        ),
+    ];
     for (io_label, io) in modes {
         let label = format!("{io_label}/ipc-cancel");
         let dir = tempfile::tempdir().unwrap();

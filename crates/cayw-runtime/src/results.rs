@@ -1604,18 +1604,20 @@ pub(crate) fn is_session_result_read(
 
 #[cfg(test)]
 mod unit {
-    use super::{page_bytes, search_bytes, utf8_floor};
+    use super::{
+        CapabilityError, MAX_SNIPPET_BYTES, is_busy, page_bytes, search_bytes, utf8_floor,
+    };
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     use super::*;
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     use cayw_content::{ContentStore, Limits};
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     use serde_json::json;
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     use tempfile::TempDir;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn open_store() -> (TempDir, ContentStore) {
         // ContentStore::open walks with open_dir_nofollow; macOS temp paths often
         // go through /tmp or /var/folders symlinks, which yield ENOTDIR (Not a
@@ -1628,7 +1630,7 @@ mod unit {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn storage_log_merges_selected_facts_and_observes_peer_appends_without_content() {
         use cayw_core::{CapabilityCallRecord, CapabilityStage, EventRecord};
         use rusqlite::{Connection, params};
@@ -1851,7 +1853,7 @@ mod unit {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn content_store_backed_handle_pages_searches_and_releases() {
         let (_root, store) = open_store();
         let body = "line-one\nneedle alpha\nline-three\nneedle beta\ntrail";
@@ -1924,7 +1926,7 @@ mod unit {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn task_scope_does_not_collide_with_session_scope() {
         let (_root, store) = open_store();
         let mut op_task = StoreOperation::prepare(
@@ -1979,7 +1981,7 @@ mod unit {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn store_operation_retries_only_metadata_when_busy_after_body_committed() {
         let (root, store) = open_store();
         let mut op = StoreOperation::prepare(
@@ -2031,7 +2033,7 @@ mod unit {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     fn store_operation_retries_only_metadata_with_explicit_handle_without_revision_conflict() {
         let (root, store) = open_store();
         let explicit_handle = "custom-handle-abc";

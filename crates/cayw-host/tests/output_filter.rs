@@ -135,8 +135,11 @@ fn host(root: &Path, config: HostConfig) -> Arc<Host> {
 fn noisy_profile(script: PathBuf) -> Profile {
     Profile {
         kind: ProfileKind::Test,
-        program: script,
-        args: vec![],
+        // Interpret the freshly written script with /bin/sh instead of
+        // exec'ing it: on Linux a concurrent fork in this test binary can
+        // still hold its write descriptor, making exec fail with ETXTBSY.
+        program: "/bin/sh".into(),
+        args: vec![script.to_string_lossy().into_owned()],
         env: BTreeMap::new(),
         timeout: Duration::from_secs(10),
         max_output_bytes: 64 * 1024,

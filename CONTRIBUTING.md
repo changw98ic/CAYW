@@ -1,6 +1,6 @@
 # 参与贡献
 
-感谢关注 [CAYW](README.md)。本仓库用 Rust workspace 开发；首发面向 macOS，CI（`.github/workflows/ci.yml`）在 `macos-latest` 上跑与 `AGENTS.md` 一致的检查。
+感谢关注 [CAYW](README.md)。本仓库用 Rust workspace 开发；首发面向 macOS，CI（`.github/workflows/ci.yml`）在 `macos-latest` 上跑与 `AGENTS.md` 一致的检查，并在 Ubuntu 上验证 Rust 工作区的构建、测试与 lint。Ubuntu CI 不代表 Linux 桌面产品支持，macOS 专有场景仍只在 macOS 验收。
 
 ## 构建与测试
 
@@ -8,7 +8,7 @@
 
 ```sh
 cargo fmt --all -- --check
-cargo check --workspace --locked
+cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```

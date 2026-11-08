@@ -11,7 +11,7 @@ fn id(value: &str) -> Result<Id> {
 fn main() -> Result<()> {
     let path = std::env::args_os().nth(1).ok_or_else(|| {
         std::io::Error::other(
-            "usage: cargo run -p cayw-content --example offline -- /absolute/new/private-directory",
+            "usage: cargo run -p cayw-content --example content_offline -- /absolute/new/private-directory",
         )
     })?;
     let path = std::path::PathBuf::from(path);

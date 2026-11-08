@@ -1200,7 +1200,9 @@ async fn stop_child(child: &mut Child) -> Result<()> {
     }
 }
 
-#[cfg(test)]
+// These exercise macOS local-product supervision, including the executable
+// paths reported by macOS `ps`; Linux CI covers the Device identity contract.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

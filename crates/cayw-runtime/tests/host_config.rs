@@ -1,3 +1,7 @@
+// This end-to-end test drives git.blame, and Git read capabilities need a
+// macOS directory handle path (F_GETPATH); they fail closed on Linux (see
+// cayw-host tests/git.rs `git_reads_fail_closed_on_linux_without_running_git`).
+#![cfg(target_os = "macos")]
 use cayw_ai::{
     AssistantEvent, AssistantStream, CancellationToken, Message, Model, ModelRequest, Provider,
 };

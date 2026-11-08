@@ -82,7 +82,7 @@ pub(super) struct LeaderIdentity {
     pub exited: bool,
     #[cfg(unix)]
     pub lost: bool,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub original: Option<super::ProcessIdentity>,
 }
 
