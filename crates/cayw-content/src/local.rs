@@ -683,8 +683,19 @@ fn sync_file(file: &File) -> Result<()> {
     file.sync_all()?;
     Ok(())
 }
+/// `cap_std::Dir` handles are `O_PATH` descriptors on Linux and `fsync` on
+/// them fails with `EBADF`. Reopen `"."` beneath the held handle (no path
+/// re-resolution from outside) to get a normal descriptor for the same
+/// directory. Other Unix platforms sync the held handle directly.
 fn sync_dir(dir: &Dir) -> Result<()> {
-    sync_file(&dir.try_clone()?.into_std_file())
+    #[cfg(target_os = "linux")]
+    {
+        sync_file(&dir.open(".")?.into_std())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        sync_file(&dir.try_clone()?.into_std_file())
+    }
 }
 fn open_root(path: &Path) -> Result<Dir> {
     open_root_inner(path, true)

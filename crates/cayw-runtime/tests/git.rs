@@ -1,3 +1,7 @@
+// This end-to-end test drives Git reads, which need a macOS directory handle
+// path (F_GETPATH) and fail closed on Linux (see cayw-host tests/git.rs
+// `git_reads_fail_closed_on_linux_without_running_git`).
+#![cfg(target_os = "macos")]
 //! Git capabilities through the real Runtime: the model-visible `execute_code`
 //! cell calls `cayw.call`, Runtime performs Host permission/start/settle
 //! bookkeeping in Core, and the synthetic repository is inspected directly

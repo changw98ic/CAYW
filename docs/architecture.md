@@ -260,7 +260,7 @@ Session 事件追加记录并与其状态投影一起提交，保存原 lease �
 
 Device 管理执行进程、派生进程和交互会话，归属至少关联 Task、Attempt、Worker、启动身份与进程组。进程正常结束、取消、超时、宿主/Worker 退出均要确认原执行者退出和后代清理，再释放名额；Future Drop 或 PID 消失本身不证明外部效果撤销。
 
-当前有进程/PTY 和资源记账实现，macOS 交互进程验证有单独范围。统一 External plugin 进程清理仍有独立失败，不能将 Device 局部通过外推到所有启动路径。进程组不等同安全沙箱；复杂 CPU/内存/GPU 准入和硬限制尚按 [#18](https://github.com/changw98ic/CAYW/issues/18) 推进。当前不开展 Linux/Windows 适配。
+当前有进程/PTY 和资源记账实现，macOS 交互进程验证有单独范围。统一 External plugin 进程清理仍有独立失败，不能将 Device 局部通过外推到所有启动路径。进程组不等同安全沙箱；复杂 CPU/内存/GPU 准入和硬限制尚按 [#18](https://github.com/changw98ic/CAYW/issues/18) 推进。当前不开展 Linux/Windows 适配。例外：为让 Ubuntu CI 实际运行进程清理与恢复测试，Device 的进程身份在 Linux 上以 `/proc/<pid>/stat`（PID + 启动时钟滴答 + 进程组）实现，`cayw-content` 目录同步改为在 Linux 上重新打开 `"."` 后 fsync；这只是 CI 验证范围，不代表 Linux 产品支持，PTY 与 Git 读/工作树写仍只支持 macOS 并在 Linux 上失败关闭。
 
 Device 持有会话、工作区与内容的权威事实。可信宿主可在安全停止后启用原先未启用的内容库，也可为同一原目录和 Device 增加配额；旧句柄和并存实例不能按冲突配置继续写入。目录身份、版本冲突和未知效果仍需核对。已有 `cayw-content` 提供本地内容和可选加密备份对象，但不等于远程同步已经验收。存放档位按需实现：本地独立运行先成立，再验证可选同步的密钥持有者、版本/冲突、撤销、读回校验与恢复。Server 不因保存中转对象而成为内容权威；远端失败不阻断本地权威读取。参见 [内容库边界](../crates/cayw-content/README.md)。
 

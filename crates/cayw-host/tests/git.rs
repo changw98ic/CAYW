@@ -182,6 +182,7 @@ fn cached_names(root: &Path) -> String {
     String::from_utf8(git_bytes(root, &["diff", "--cached", "--name-only", "--"])).unwrap()
 }
 
+#[cfg(target_os = "macos")]
 fn capability_names(host: &Host) -> Vec<String> {
     host.capabilities()
         .into_iter()
@@ -197,6 +198,9 @@ fn stage_args(root: &Path, path: &str) -> Value {
     })
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn git_catalog_is_policy_gated_and_calls_use_permission_and_audit() {
     let tree = Tree::new();
@@ -246,6 +250,42 @@ async fn git_catalog_is_policy_gated_and_calls_use_permission_and_audit() {
     );
 }
 
+/// Linux has no F_GETPATH; Git reads must refuse before running any process
+/// rather than fall back to an unverified path.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn git_reads_fail_closed_on_linux_without_running_git() {
+    let tree = Tree::new();
+    init_repo(tree.path());
+    let (host, _, audit) = host(tree.path(), Some(policy()));
+    for (name, arguments) in [
+        ("git.status", json!({})),
+        ("git.blame", json!({"path":"note"})),
+    ] {
+        let error = call(&host, name, arguments).await.unwrap_err();
+        assert!(
+            error
+                .message
+                .contains("Git read capabilities require a macOS directory handle path"),
+            "{name}: {error:?}"
+        );
+        assert!(!error.outcome_unknown, "{name}: {error:?}");
+    }
+    assert_eq!(host.active_processes(), 0);
+    assert!(
+        !audit
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| record == "success"),
+        "no Git read may succeed on Linux"
+    );
+}
+
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn blame_reads_a_snapshot_and_rejects_non_full_commit_ids_before_permission() {
     let tree = Tree::new();
@@ -532,6 +572,9 @@ async fn branch_writes_check_head_and_controlled_names_and_safe_delete() {
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn worktree_operations_stay_under_the_fixed_root_and_verify_registration() {
     let tree = Tree::new();
@@ -626,6 +669,9 @@ async fn worktree_operations_stay_under_the_fixed_root_and_verify_registration()
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn worktree_remove_refuses_an_external_gitdir_pointer() {
     let tree = Tree::new();
@@ -669,6 +715,9 @@ async fn worktree_remove_refuses_an_external_gitdir_pointer() {
     assert!(git(tree.path(), &["worktree", "list", "--porcelain"]).contains(".cayw-worktrees/one"));
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn worktree_remove_never_forces_a_dirty_linked_worktree() {
     let tree = Tree::new();

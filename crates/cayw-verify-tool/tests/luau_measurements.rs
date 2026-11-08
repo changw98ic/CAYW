@@ -175,7 +175,13 @@ fn memory_limit_occurs_after_a_real_call_and_before_the_following_write() {
     );
     let peak = serde_json::to_value(sample.process_peak_rss.unwrap()).unwrap();
     assert!(peak["scope"].as_str().unwrap().contains("process lifetime"));
-    assert_eq!(peak["unit"], "bytes");
+    // getrusage ru_maxrss is bytes on macOS and KiB on Linux (measurement.rs).
+    let unit = if cfg!(target_os = "macos") {
+        "bytes"
+    } else {
+        "KiB"
+    };
+    assert_eq!(peak["unit"], unit);
 }
 
 #[test]

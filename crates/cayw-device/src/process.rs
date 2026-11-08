@@ -1352,7 +1352,7 @@ mod unix {
             result
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         fn record_started(&mut self) -> io::Result<()> {
             let identity = lock(&self.identity)
                 .original
@@ -1361,7 +1361,7 @@ mod unix {
             self.record("start", |observer| observer.started(&identity))
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         fn record_members(&mut self) -> io::Result<()> {
             if self.observer.is_none() {
                 return Ok(());
@@ -1413,7 +1413,7 @@ mod unix {
             }
             identity.exited = false;
             observe_identity(&mut identity)?;
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(original) = identity.original {
                 let current = ProcessIdentity::observe(pid)?;
                 if !original.same_process(current) {
@@ -1487,7 +1487,7 @@ mod unix {
             while group_has_running_members(self.child.id())? {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             for identity in &self.observed {
                 while identity.is_running()? {
                     std::thread::sleep(Duration::from_millis(5));
@@ -1523,6 +1523,39 @@ mod unix {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_group_members(group: u32) -> io::Result<Vec<ProcessIdentity>> {
+        // Same evidence rules as inspect_group: only read the stat records of
+        // processes whose current group is ours, and treat an unreadable
+        // member as an error unless it has provably left the group or exited.
+        let mut members = Vec::new();
+        for entry in fs::read_dir("/proc")? {
+            let entry = entry?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<libc::pid_t>().ok())
+                .filter(|pid| *pid > 0)
+            else {
+                continue;
+            };
+            if process_group_id(pid)? != Some(group) {
+                continue;
+            }
+            match ProcessIdentity::observe(pid as u32) {
+                Ok(identity) if identity.process_group == group => members.push(identity),
+                Ok(_) => {}
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(error) => {
+                    if process_group_id(pid)? == Some(group) {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        Ok(members)
     }
 
     #[cfg(target_os = "macos")]
@@ -4052,7 +4085,7 @@ mod unix {
             records_closed: false,
             ledger,
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let original = ProcessIdentity::observe(group.child.id())
                 .map_err(|error| DeviceError::io("capture process startup identity", error))?;
@@ -4135,7 +4168,7 @@ mod unix {
             if Instant::now() >= deadline {
                 break TerminationReason::TimedOut;
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             group
                 .record_members()
                 .map_err(|error| DeviceError::io("record process members", error))?;

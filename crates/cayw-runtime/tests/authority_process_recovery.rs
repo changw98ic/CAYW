@@ -1,5 +1,5 @@
 //! Combined loss of the Requests authority and its original process supervisor.
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_requests::{AuthorityRepairRequest, HostActor, OperationScope, RequestError};
 use cayw_runtime::{

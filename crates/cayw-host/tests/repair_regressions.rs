@@ -971,6 +971,9 @@ fn fixture_process() {
         }
     }
 }
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[cfg(unix)]
 #[tokio::test]
 async fn replaced_root_keeps_profiles_and_git_in_the_opened_directory() {
@@ -1116,6 +1119,7 @@ async fn host_scopes_drain_dropped_processes_and_keep_other_tasks_independent() 
 }
 
 #[cfg(unix)]
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn git(root: &Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("/usr/bin/git")
         .args(args)
@@ -1127,6 +1131,7 @@ fn git(root: &Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 #[cfg(unix)]
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn git_object(root: &Path, kind: &str, bytes: &[u8]) -> String {
     use std::{
         io::Write,
@@ -1153,6 +1158,7 @@ fn git_object(root: &Path, kind: &str, bytes: &[u8]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 #[cfg(unix)]
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn tree_entry(mode: &str, name: &str, id: &str) -> Vec<u8> {
     let mut bytes = format!("{mode} {name}\0").into_bytes();
     bytes.extend(
@@ -1163,6 +1169,7 @@ fn tree_entry(mode: &str, name: &str, id: &str) -> Vec<u8> {
     bytes
 }
 #[cfg(unix)]
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn repository(root: &Path) -> String {
     std::fs::create_dir_all(root.join(".git/objects")).unwrap();
     std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
@@ -1181,6 +1188,9 @@ fn repository(root: &Path) -> String {
     assert!(git(root, &["read-tree", &commit]).status.success());
     commit
 }
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[cfg(unix)]
 #[tokio::test]
 async fn git_historical_and_deleted_parent_paths_work_without_following_links() {
@@ -1217,6 +1227,9 @@ async fn git_historical_and_deleted_parent_paths_work_without_following_links() 
             .is_err()
     );
 }
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[cfg(unix)]
 #[tokio::test]
 async fn git_snapshot_accepts_links_without_following_and_still_bounds_metadata_budgets() {
@@ -1282,6 +1295,9 @@ async fn git_snapshot_accepts_links_without_following_and_still_bounds_metadata_
     }
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[cfg(unix)]
 #[tokio::test]
 async fn git_passive_metadata_retains_local_excludes_and_split_indexes() {

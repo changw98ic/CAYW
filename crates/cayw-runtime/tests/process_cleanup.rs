@@ -1,4 +1,7 @@
-#![cfg(unix)]
+// Durable process identity (PID + kernel start time + group) is implemented
+// for macOS (proc_pidinfo) and Linux (/proc/<pid>/stat); terminal (Pty) modes
+// stay macOS-only inside `io_modes`.
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_core::{CoreEvent, SessionState};
 use cayw_host::{Profile, ProfileKind};
@@ -183,7 +186,7 @@ enum Incarnation {
 /// - any other read failure, or an inconsistent pair of reads, is a refusal —
 ///   never an assumption that cleanup happened.
 fn verify_incarnation(recorded: &cayw_host::ProcessIdentity, label: &str) -> Incarnation {
-    // POSIX `ESRCH`. This platform is macOS only, and `ErrorKind` does not map
+    // `ESRCH` is 3 on both macOS and Linux, and `ErrorKind` does not map
     // `ESRCH` to `NotFound` (that is `ENOENT`), so the raw number is the only
     // exact check.
     const ESRCH: i32 = 3;
@@ -298,7 +301,6 @@ fn verify_lost_cleanup(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_suspended_original_incarnation_is_not_cleanup_evidence() {
     struct OwnedChild(std::process::Child);
@@ -330,6 +332,10 @@ fn a_suspended_original_incarnation_is_not_cleanup_evidence() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(
+        original.is_running().unwrap(),
+        "the runtime's own probe must also treat a stopped original as running"
+    );
     let verdict = verify_incarnation(&original, "suspended-child");
     eprintln!("SUSPENDED_INCARNATION identity={original:?} verdict={verdict:?}");
     assert!(
@@ -1526,16 +1532,7 @@ async fn registration_rejects_a_record_whose_recorded_topology_differs() {
 /// adds only the process-identity half of the two real I/O modes.
 #[tokio::test]
 async fn pipe_and_pty_process_chains_record_and_clean_all_three_generations() {
-    let mut modes = vec![("pipes", cayw_host::ProcessIo::Pipes)];
-    #[cfg(target_os = "macos")]
-    modes.push((
-        "pty",
-        cayw_host::ProcessIo::Pty {
-            columns: 80,
-            rows: 24,
-        },
-    ));
-    for (label, io) in modes {
+    for (label, io) in io_modes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("workspace")).unwrap();
         let rt = Runtime::open(
@@ -1794,16 +1791,7 @@ fn assert_recorded_chain(
 /// child/grandchild topology is not applicable and is never asserted here.
 #[tokio::test]
 async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
-    let mut modes = vec![("pipes", cayw_host::ProcessIo::Pipes)];
-    #[cfg(target_os = "macos")]
-    modes.push((
-        "pty",
-        cayw_host::ProcessIo::Pty {
-            columns: 80,
-            rows: 24,
-        },
-    ));
-    for (io_label, io) in modes {
+    for (io_label, io) in io_modes() {
         for trigger in [
             ChainTrigger::Normal,
             ChainTrigger::Cancel,
@@ -2268,16 +2256,18 @@ async fn runtime_deadline_stops_the_real_chain_before_resource_release() {
 }
 
 fn io_modes() -> Vec<(&'static str, cayw_host::ProcessIo)> {
-    let mut modes = vec![("pipes", cayw_host::ProcessIo::Pipes)];
-    #[cfg(target_os = "macos")]
-    modes.push((
-        "pty",
-        cayw_host::ProcessIo::Pty {
-            columns: 80,
-            rows: 24,
-        },
-    ));
-    modes
+    vec![
+        ("pipes", cayw_host::ProcessIo::Pipes),
+        // Terminal execution is macOS-only; Linux rejects Pty before launch.
+        #[cfg(target_os = "macos")]
+        (
+            "pty",
+            cayw_host::ProcessIo::Pty {
+                columns: 80,
+                rows: 24,
+            },
+        ),
+    ]
 }
 
 /// The three real generations of one cell, read from the fixture's own readiness

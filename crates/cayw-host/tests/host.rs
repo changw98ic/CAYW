@@ -1824,6 +1824,7 @@ async fn test_filter_is_one_literal_argument_and_nonzero_exit_is_confirmed() {
 }
 
 #[cfg(unix)]
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn git_object(git: &Path, root: &Path, kind: &str, bytes: &[u8]) -> String {
     use std::{
         io::Write,
@@ -1850,6 +1851,9 @@ fn git_object(git: &Path, root: &Path, kind: &str, bytes: &[u8]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[cfg(unix)]
 #[tokio::test]
 async fn git_fixed_commands_use_real_device_without_running_repo_helpers() {

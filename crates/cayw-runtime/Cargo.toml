@@ -75,6 +75,11 @@ test = false
 doc = false
 
 [[example]]
+# Unique across the workspace: `offline` also names cayw-agent's example.
+name = "runtime_offline"
+path = "examples/offline.rs"
+
+[[example]]
 name = "runtime_error_live"
 required-features = ["fault-injection"]
 
