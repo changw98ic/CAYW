@@ -130,7 +130,7 @@ for program in $PROGRAMS; do
     source=$SCRIPT_DIR/bin/$program
     [ -f "$source" ] && [ -x "$source" ] || die "发行包缺少可执行的 bin/$program"
     expected=$(expected_hash "$program") || die "SHA256SUMS 缺少或含有无效/重复的 bin/$program 记录"
-    [ "$(sha_of "$source")" = "$expected" ] || die "SHA256 校验失败：bin/$program；未改动任何已安装程序"
+    [ "$(sha_of "$source")" = "$expected" ] || die "SHA256 校验失败：bin/${program}；未改动任何已安装程序"
 done
 printf '校验通过：四个程序与 SHA256SUMS 一致。\n'
 check_stopped

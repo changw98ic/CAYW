@@ -102,7 +102,10 @@ impl Terminal {
     fn read_until(&mut self, marker: &str) {
         let deadline = Instant::now() + WATCHDOG;
         while !String::from_utf8_lossy(&self.transcript).contains(marker) {
-            assert!(Instant::now() < deadline, "missing terminal prompt: {marker}");
+            assert!(
+                Instant::now() < deadline,
+                "missing terminal prompt: {marker}"
+            );
             let mut descriptor = libc::pollfd {
                 fd: self.master.as_raw_fd(),
                 events: libc::POLLIN,
@@ -190,7 +193,10 @@ fn terminal_conf_hides_key_and_restores_echo_for_local_and_explicit_config() {
         terminal.enter_model();
         terminal.send(&format!("{SECRET}\n"));
         terminal.read_until("单次输出 token");
-        assert!(terminal.echo_enabled(), "echo must be restored after key input");
+        assert!(
+            terminal.echo_enabled(),
+            "echo must be restored after key input"
+        );
         terminal.send("64\n");
         terminal.read_until("保存配置吗");
         terminal.send("y\n");
@@ -222,8 +228,7 @@ fn terminal_conf_accepts_empty_key_without_authentication() {
     let workspace = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
     let config = state.path().join("headless.json");
-    let mut terminal =
-        Terminal::start(home.path(), workspace.path(), state.path(), Some(&config));
+    let mut terminal = Terminal::start(home.path(), workspace.path(), state.path(), Some(&config));
     terminal.enter_model();
     terminal.send("\n");
     terminal.read_until("单次输出 token");
@@ -263,8 +268,7 @@ async fn redirected_conf_reads_synthetic_key_from_its_pipe() {
         .take()
         .unwrap()
         .write_all(
-            format!("openai\n\nhttp://127.0.0.1:9/v1\npipe-fixture\n{SECRET}\n64\ny\n")
-                .as_bytes(),
+            format!("openai\n\nhttp://127.0.0.1:9/v1\npipe-fixture\n{SECRET}\n64\ny\n").as_bytes(),
         )
         .await
         .unwrap();

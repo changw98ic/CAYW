@@ -1583,7 +1583,10 @@ async fn home_workspace_is_rejected_before_default_state_is_created() {
         let mut command = command(home.path(), home.path(), None);
         command.arg(action).stdin(Stdio::null());
         let output = run(command).await;
-        assert!(!output.status.success(), "{action} must reject HOME as workspace");
+        assert!(
+            !output.status.success(),
+            "{action} must reject HOME as workspace"
+        );
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("must not overlap"),
             "stderr: {}",
@@ -1675,7 +1678,12 @@ async fn legacy_overlapping_registration_cannot_open_a_workspace_runtime() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let state = home.path().join("private-state");
-    assert!(init(home.path(), workspace.path(), &state).await.status.success());
+    assert!(
+        init(home.path(), workspace.path(), &state)
+            .await
+            .status
+            .success()
+    );
     // Simulate the catalog left by an older version that allowed HOME as a
     // workspace. Opening it must fail before creating a database or Host.
     let legacy = state.join("workspaces").join(workspace_key(home.path()));
@@ -1689,7 +1697,9 @@ async fn legacy_overlapping_registration_cannot_open_a_workspace_runtime() {
     .unwrap();
     std::fs::set_permissions(&registration, std::fs::Permissions::from_mode(0o600)).unwrap();
     let before = snapshot_tree(&legacy);
-    let mut server = serve(home.path(), workspace.path(), &state, &[]).spawn().unwrap();
+    let mut server = serve(home.path(), workspace.path(), &state, &[])
+        .spawn()
+        .unwrap();
     let ready = read_ready(&mut server).await;
     let client = connect(&ready).await;
     let error = client

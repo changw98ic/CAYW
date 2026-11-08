@@ -84,12 +84,12 @@ exec "$REAL_MV" "$@"
         return {p: (self.bin / p).read_bytes() if (self.bin / p).exists() else None
                 for p in PROGRAMS}
 
-    def install(self, force=False, good=True, **env):
-        args = ['sh', str(self.bundle / 'install.sh'), '--prefix', str(self.prefix)]
+    def install(self, force=False, good=True, shell='sh', **env):
+        args = [shell, str(self.bundle / 'install.sh'), '--prefix', str(self.prefix)]
         if force:
             args.append('--force')
         result = subprocess.run(args, env=dict(self.env, **env), cwd=self.root,
-                                text=True, capture_output=True, timeout=20)
+                                text=True, encoding="utf-8", capture_output=True, timeout=20)
         self.assertEqual(result.returncode == 0, good, result.stdout + result.stderr)
         self.assertEqual((self.state / 'sentinel').read_bytes(), b'private synthetic state unchanged')
         return result
@@ -120,7 +120,27 @@ exec "$REAL_MV" "$@"
         before = self.old()
         with (self.bundle / 'bin/cayw-tui').open('a') as stream:
             stream.write('# damaged\n')
-        self.install(force=True, good=False)
+        result = self.install(force=True, good=False)
+        self.assertEqual(result.stderr,
+                         '安装失败：SHA256 校验失败：bin/cayw-tui；未改动任何已安装程序\n')
+        self.assertEqual(self.snapshot(), before)
+
+    def test_checksum_diagnostic_in_single_byte_bash_locale(self):
+        # Bash treats the first UTF-8 byte of adjacent Chinese punctuation as
+        # part of an unbraced variable name in some single-byte locales. With
+        # set -u, `$program；` emitted `program\xef: unbound variable` on macOS,
+        # not the intended checksum error. Keep strict UTF-8 decoding above.
+        available = subprocess.check_output(['locale', '-a'], text=True).splitlines()
+        locale = next((name for name in ('en_US.ISO8859-1', 'en_US', 'en_US.iso88591')
+                       if name in available), None)
+        if locale is None:
+            self.skipTest('no supported English single-byte locale installed')
+        before = self.old()
+        with (self.bundle / 'bin/cayw-tui').open('a') as stream:
+            stream.write('# damaged\n')
+        result = self.install(force=True, good=False, shell='bash', LC_ALL=locale)
+        self.assertEqual(result.stderr,
+                         '安装失败：SHA256 校验失败：bin/cayw-tui；未改动任何已安装程序\n')
         self.assertEqual(self.snapshot(), before)
 
     def test_duplicate_checksum_rejected(self):
@@ -269,7 +289,7 @@ for i, arg in enumerate(args):
         for call in calls:
             self.assertEqual(call[call.index('--target') + 1], 'aarch64-apple-darwin')
             self.assertEqual(call[call.index('--target-dir') + 1],
-                             str(self.root / 'relative target with spaces'))
+                             str((self.root / 'relative target with spaces').resolve()))
         for program in PROGRAMS:
             self.assertTrue(os.access(self.output / 'bin' / program, os.X_OK))
         self.assertEqual(json.loads((self.output / 'BUILD.json').read_text())['runtime_features'], ['plugins'])

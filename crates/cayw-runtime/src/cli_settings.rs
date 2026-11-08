@@ -707,7 +707,13 @@ mod model_credential_tests {
                     .is_err()
             );
         }
-        for value in [Value::Null, json!(""), json!(" "), json!(7), json!("bad\nkey")] {
+        for value in [
+            Value::Null,
+            json!(""),
+            json!(" "),
+            json!(7),
+            json!("bad\nkey"),
+        ] {
             let mut changed = model();
             changed["api_key"] = value;
             assert!(

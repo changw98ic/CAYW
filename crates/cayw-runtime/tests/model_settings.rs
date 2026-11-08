@@ -82,9 +82,10 @@ async fn prompt_headers(client: &Client, listener: &TcpListener, model: &str) ->
         "session.prompt",
         json!({"session_id":session["id"],"text":"synthetic loopback fixture"}),
     );
-    let (headers, result) = tokio::time::timeout(WATCHDOG, async { tokio::join!(response, prompt) })
-        .await
-        .expect("local HTTP fixture must finish");
+    let (headers, result) =
+        tokio::time::timeout(WATCHDOG, async { tokio::join!(response, prompt) })
+            .await
+            .expect("local HTTP fixture must finish");
     let result = result.unwrap();
     assert!(!result.to_string().contains("SYNTHETIC_KEY"));
     headers.to_ascii_lowercase()
