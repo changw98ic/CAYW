@@ -7,3 +7,8 @@ __pycache__/
 *.pyc
 node_modules/
 .local/
+/.codegraph/
+/crates/cayw-webui/.validation/
+/docs/validation/**/sessions.sqlite
+/docs/validation/**/sessions.sqlite-*
+/docs/validation/**/.cayw-host-lock
