@@ -41,8 +41,16 @@ jobs:
       - name: WebUI regression tests
         run: node --test crates/cayw-webui/tests/*.test.mjs
 
+      - name: Product eval scorer tests (offline, no model)
+        run: CAYW_EVAL_RUSTC="$(rustup which rustc)" python3 scripts/test_product_eval.py
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
+
+      # Exercise the partial-recording cancellation barrier before the slow
+      # workspace suite. This uses only the local fake curl, never a Provider.
+      - name: Vision cancellation readiness regressions (offline)
+        run: cargo test -p cayw-vision --lib --locked backends::http_describe_cancel
 
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
