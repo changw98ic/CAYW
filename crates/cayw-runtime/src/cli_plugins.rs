@@ -1825,6 +1825,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     fn save_fixture_inventory(plugins: &Plugins, manifest: PluginManifest) {
         let descriptor = validate(Descriptor {
             executable: std::env::current_exe().unwrap(),
