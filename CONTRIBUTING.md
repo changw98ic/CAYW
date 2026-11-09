@@ -19,6 +19,18 @@ PR CI 另有 macOS 显式产品 feature/故障恢复及真实发行包安装升�
 
 真实模型示例 `cargo run -p cayw-agent --example magpie --locked` 需当次授权与环境变量，默认不要跑。
 
+## 真实产品效果评估
+
+协议测试与固定响应不证明真实模型完成任务的质量。真实任务集、隔离准备、独立产物评分、UI/恢复与插件对照见 [产品效果 Eval](docs/validation/product-eval.md)。离线评分器自测不会调用模型：
+
+```sh
+python3 scripts/test_product_eval.py
+# 有 Rust 时同时执行隔离 fixture 的编译/行为正反例：
+CAYW_EVAL_RUSTC="$(rustup which rustc)" python3 scripts/test_product_eval.py
+```
+
+真实模型运行由操作者另行授权并限定预算，不加入普通 CI。
+
 ## 命名
 
 - 产品名：**VerifyTool**（大小写固定，不要写成 `verifyTool`）。

@@ -41,6 +41,9 @@ jobs:
       - name: WebUI regression tests
         run: node --test crates/cayw-webui/tests/*.test.mjs
 
+      - name: Product eval scorer tests (offline, no model)
+        run: CAYW_EVAL_RUSTC="$(rustup which rustc)" python3 scripts/test_product_eval.py
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
