@@ -28,11 +28,13 @@ test('shipped HTML pattern attributes compile with browser Unicode Sets rules', 
   }
 });
 
-test('model credential edits preserve by default and require an explicit clear choice', () => {
-  assert.match(html, /name="clear_api_key" type="checkbox"/);
-  assert.match(source, /model\.authentication === 'plain_file'/);
-  assert.match(source, /clear_api_key:clearApiKey/);
-  assert.match(source, /留空表示保持不变/);
+test('model credential edits preserve by default and use explicit keep/replace/remove choices', () => {
+  assert.match(html, /name="credential"/);
+  for (const choice of ['keep', 'replace', 'remove']) assert.ok(html.includes(`value="${choice}"`));
+  assert.match(source, /credential\.value = 'keep'/);
+  assert.match(source, /settings\.models\.put', \{name, model:values, credential\}/);
+  assert.doesNotMatch(html, /name="clear_api_key"/);
+  assert.doesNotMatch(source, /clear_api_key|showModelApiKeyState/);
 });
 
 test('unknown model usage requires an explicit finite continuation confirmation', () => {
@@ -51,6 +53,7 @@ class Element {
   replaceChildren(...children) { this.ownText = ''; this.children = []; this.append(...children); }
   get classList() { return { add: (...names) => { this.className = [...new Set([...(this.className ?? '').split(/\s+/).filter(Boolean), ...names])].join(' '); } }; }
   setAttribute(name, value) { this[name] = value; }
+  removeAttribute(name) { delete this[name]; }
   addEventListener(name, fn) { const list = this.listeners.get(name) ?? []; list.push(fn); this.listeners.set(name, list); }
   async dispatch(name) { for (const fn of this.listeners.get(name) ?? []) await fn({ preventDefault() {} }); }
   showModal() { this.open = true; }

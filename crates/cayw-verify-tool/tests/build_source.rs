@@ -287,7 +287,18 @@ fn actual_cargo_artifacts_verify_known_inputs_and_keep_untraced_inputs_pending()
             .iter()
             .any(|input| input.path.ends_with("Cargo.lock"))
     );
-    assert!(receipt.context.target.contains("apple-darwin"));
+    // The receipt records the host target triple of the real build.
+    let host_os = if cfg!(target_os = "macos") {
+        "apple-darwin"
+    } else {
+        std::env::consts::OS
+    };
+    assert!(
+        receipt.context.target.starts_with(std::env::consts::ARCH)
+            && receipt.context.target.contains(host_os),
+        "{}",
+        receipt.context.target
+    );
     let mut wrong_artifact = receipt.clone();
     wrong_artifact.selected_artifact["features"] = json!([]);
     assert!(verify_receipt(Some(&wrong_artifact), &receipt.executable.sha256).is_err());

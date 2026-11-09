@@ -77,7 +77,7 @@ impl ProcessJournal {
                 "process scope is closed or belongs to another attempt".into(),
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let supervisor =
                 cayw_host::ProcessIdentity::observe(std::process::id()).map_err(|error| {
@@ -109,7 +109,7 @@ impl ProcessJournal {
         )?)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) fn inspect_lost(
         &self,
         target: &crate::CancelTarget,
@@ -180,7 +180,7 @@ impl ProcessJournal {
         })
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) fn confirm_lost(
         &self,
         inspection: &ProcessCleanupInspection,
@@ -375,7 +375,7 @@ impl ProcessJournal {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn process_identity(
     row: &rusqlite::Row<'_>,
     offset: usize,
@@ -396,7 +396,7 @@ fn process_identity(
     Ok(identity)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn original_supervisor(
     connection: &Connection,
     task: &str,

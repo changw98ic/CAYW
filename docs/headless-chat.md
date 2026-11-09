@@ -6,15 +6,29 @@ CAYW 可以安装为独立的 `cayw` Runtime 和 `cayw-client` Rust 客户端。
 
 ## 安装
 
+CI 产物的外层 ZIP 中包含 `cayw-macos-arm64.tar.gz` 和对应 SHA256 文件。先解开 ZIP，再校验并解开 tar.gz；执行权限保存在 tar 包内。
+
 macOS Apple Silicon 发行包以 `install.sh` 作为安装入口，旁边是 `bin/cayw`、`bin/cayw-tui`、`bin/cayw-webui`、`bin/cayw-client` 和 `SHA256SUMS`。解压后在该目录运行：
 
 ```sh
 sh install.sh                 # 默认安装到 $HOME/.local/bin
 sh install.sh --prefix DIR    # 安装到 DIR/bin
-sh install.sh --force         # 目标已有不同程序时替换
+sh install.sh --force         # 正常退出全部 CAYW 后，替换已有的不同程序
 ```
 
-脚本可以从任意目录运行，并按自身位置定位发行文件；包目录可以包含空格。它只接受 Darwin arm64，其他系统和架构会明确拒绝。安装前检查四个程序可执行，并按 `SHA256SUMS` 核对摘要；校验或自检失败时不改动已有程序。脚本不联网、不使用 sudo、不修改 shell 配置，也不读写 `~/.cayw` 或模型凭据。目标目录不在 `PATH` 时，脚本会打印 `export PATH=...` 提示。安装后用四个程序的 `--help` 自检。源码中的脚本位于 `scripts/install-cli.sh`，发布时放在包根目录并命名为 `install.sh`。
+脚本可以从任意目录运行，并按自身位置定位发行文件；包目录可以包含空格。它只接受 Darwin arm64，其他系统和架构会明确拒绝。安装前检查四个程序可执行，并按 `SHA256SUMS` 核对摘要，再暂存并逐个运行 `--help`；这些预检查失败时不改动已有程序。脚本不联网、不使用 sudo、不修改 shell 配置，也不读写 `~/.cayw` 或模型凭据。目标目录不在 `PATH` 时，脚本会打印 `export PATH=...` 提示。源码中的脚本位于 `scripts/install-cli.sh`，发布时放在包根目录并命名为 `install.sh`。
+
+升级前，先正常退出当前用户的全部 CAYW Client、启动器和界面，等待任务及进程清理完成；安装期间不要重新启动。安装脚本通过当前用户的进程可执行名检查 `cayw`、`cayw-client`、`cayw-tui` 和 `cayw-webui`，包括其他安装目录中的进程。发现运行中进程时即使有 `--force` 也拒绝，避免把新界面连接到尚未退出的旧 Client。脚本不会自动终止任务，也不会读取 PID 状态文件或密钥。这个检查不能阻止另一个终端在检查之后同时启动程序。
+
+安装期间，`PREFIX/bin/.cayw-install.lock` 保存原程序并阻止另一次安装。四个程序仍然逐个替换，不是多文件原子提交。替换失败、安装后 `--help` 失败，或收到可捕获的 HUP/INT/TERM 时，会尝试恢复完整旧文件集合；原来没有的程序会移除。若恢复失败，备份和锁目录保留，下一次安装拒绝覆盖。
+
+**SIGKILL、断电或文件系统故障不受 shell trap 保护，磁盘可能留下新旧混合的程序。** 应用启动器目前不检查安装锁，因此锁只阻止后续安装，不能阻止启动混合程序。遇到遗留目录时先停止使用 CAYW，并确认没有安装或 CAYW 进程仍在运行：
+
+- 若存在 `.cayw-install.lock/replacing`，该目录保存了完整替换前快照。对四个程序逐一核对：存在 `old.程序名` 时将它复制回同目录临时文件再重命名到 `PREFIX/bin/程序名`；不存在对应备份表示原来没有该程序，应移除该次安装的目标。保留备份，直到四项都恢复并核对成功后才移除锁目录。
+- 若没有 `replacing`，在正常文件系统写入条件下替换尚未开始，`old.*` 可能只有部分备份，不要按不完整快照恢复。脚本不提供断电持久性保证；断电或文件系统故障后不能只凭标记存在或缺失判断快照完整，应对照保留的发行包核对。确认安装进程已退出、目标程序仍完整后，再移除这个暂存目录。
+- 不确定、缺少应有备份或恢复报错时，不要删除目录后盲目 `--force`。先核对原安装来源并恢复完整的一套程序。安装器不提供数据库降级或跨版本迁移承诺。
+
+发行包内 `BUILD.json` 记录源码提交和构建 feature，`SHA256SUMS` 记录包文件摘要。安装器只复制四个程序，尚不在安装目录保存版本注册表；请保留发行包和清单以便追溯。
 
 需要从源码安装无界面入口时，准备 macOS、Rust 1.95+ 和仓库源码。以下命令在仓库根目录执行，把两个程序装入同一指定目录：
 
@@ -31,6 +45,8 @@ cargo +1.95.0 install --path examples/headless-client --root "$CAYW_INSTALL_ROOT
 Runtime 默认 feature 为空。它独立于 UI、plugin 和 remote，也不需要 VerifyTool 服务。客户端是独立 Cargo workspace，单独保留锁文件。`--root` 指定安装目录，程序位于它的 `bin/` 下。验证记录使用仓外独立安装目录和 `--debug --offline`；上面的日常安装采用 Cargo 默认的 release 构建。
 
 统一启动、具名模型方案和本地插件管理见[本地工作流](local-workflows.md)。无界面入口保持独立；完整发行包额外包含可选的 TUI 与 WebUI。
+
+本地 Client 的工作区与数据根（默认 `~/.cayw`，或显式 `CAYW_HOME`）必须互不包含。因此不能直接把包含 `~/.cayw` 的 HOME 目录作为工作区；需要时把 `CAYW_HOME` 放到项目目录之外且不包含项目的位置。该限制针对本地 Client，不改变完全显式 Headless 的配置路径合同。
 
 ## 终端交互界面
 

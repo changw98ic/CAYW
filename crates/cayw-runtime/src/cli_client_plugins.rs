@@ -600,7 +600,30 @@ impl ClientPlugins {
         if pending.created.elapsed() > PREPARE_TIMEOUT {
             return Err("TUI launch record expired before attach".into());
         }
-        let identity = validate_tui_process(request.pid, &self.inner.tui_binary).await?;
+        let Some(identity) = validate_tui_process(request.pid, &self.inner.tui_binary).await?
+        else {
+            // The foreground UI can connect and quit before this RPC finishes
+            // inspecting it. An exited child is not an impersonating live process.
+            // No supervision identity is granted; its launcher must reap the
+            // original child and decide success from that child's exit status.
+            record_terminal(
+                &mut state,
+                "tui",
+                &request.launch_id,
+                &pending.workspace_id,
+                request.pid,
+                "exited_before_attach",
+                None,
+            );
+            self.persist_cleanup(&cleanup_snapshot(&state))?;
+            return Ok(json!({
+                "plugin":"tui",
+                "launch_id":request.launch_id,
+                "pid":request.pid,
+                "supervised":false,
+                "exited_before_attach":true,
+            }));
+        };
         state.tui.insert(
             request.launch_id.clone(),
             Tui {
@@ -1136,10 +1159,44 @@ async fn identity_matches(identity: &ProcessIdentity) -> Result<bool> {
     Ok(process_identity(identity.pid).await?.as_ref() == Some(identity))
 }
 
-async fn validate_tui_process(pid: u32, expected: &Path) -> Result<ProcessIdentity> {
-    let identity = process_identity(pid)
-        .await?
-        .ok_or("TUI process exited before Client supervision")?;
+async fn tui_process_has_exited(pid: u32) -> Result<bool> {
+    // macOS may report a zombie's comm as `(cayw-tui)` rather than its
+    // executable path. It is already dead, even while its launcher has not
+    // reaped it. A live wrong executable must still fail identity validation.
+    let output = Command::new("/bin/ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .args(["-o", "stat="])
+        .stdin(Stdio::null())
+        .output()
+        .await?;
+    tui_exit_state(output)
+}
+
+fn tui_exit_state(output: std::process::Output) -> Result<bool> {
+    let state = String::from_utf8(output.stdout)?;
+    if output.status.success() && output.stderr.is_empty() && !state.trim().is_empty() {
+        return Ok(state.trim().starts_with('Z'));
+    }
+    // ps returns 1 and no output when the selected PID no longer exists. Do
+    // not confuse an inspection error, malformed output or signal with death.
+    if output.status.code() == Some(1) && state.trim().is_empty() && output.stderr.is_empty() {
+        return Ok(true);
+    }
+    Err(format!(
+        "could not confirm TUI process state ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .into())
+}
+
+async fn validate_tui_process(pid: u32, expected: &Path) -> Result<Option<ProcessIdentity>> {
+    let identity = process_identity(pid).await?;
+    if tui_process_has_exited(pid).await? {
+        return Ok(None);
+    }
+    let identity = identity.ok_or("TUI process identity changed before Client supervision")?;
     let expected_name = expected
         .file_name()
         .and_then(|name| name.to_str())
@@ -1149,7 +1206,7 @@ async fn validate_tui_process(pid: u32, expected: &Path) -> Result<ProcessIdenti
     {
         return Err("foreground process is not the packaged cayw-tui binary".into());
     }
-    Ok(identity)
+    Ok(Some(identity))
 }
 
 async fn signal(pid: u32) -> Result<()> {
@@ -1200,7 +1257,9 @@ async fn stop_child(child: &mut Child) -> Result<()> {
     }
 }
 
-#[cfg(test)]
+// These exercise macOS local-product supervision, including the executable
+// paths reported by macOS `ps`; Linux CI covers the Device identity contract.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -1321,6 +1380,127 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
+    }
+
+    #[test]
+    fn tui_exit_state_rejects_inspection_errors() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |code, stdout: &[u8], stderr: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        assert!(tui_exit_state(output(1, b"", b"")).unwrap());
+        assert!(tui_exit_state(output(0, b"Z+\n", b"")).unwrap());
+        assert!(!tui_exit_state(output(0, b"S+\n", b"")).unwrap());
+        assert!(tui_exit_state(output(1, b"", b"inspection denied")).is_err());
+        assert!(tui_exit_state(output(0, b"Z+\n", b"inspection warning")).is_err());
+        assert!(tui_exit_state(output(2, b"", b"")).is_err());
+        assert!(tui_exit_state(output(0, b"", b"")).is_err());
+        assert!(tui_exit_state(output(0, b"\xff", b"")).is_err());
+    }
+
+    fn early_exit_tui_fixture(directory: &Path) -> PathBuf {
+        let path = directory.join("cayw-tui");
+        std::fs::write(&path, "#!/bin/sh\nexit 7\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+
+    async fn assert_early_exit_is_not_supervised(reap_first: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let tui = early_exit_tui_fixture(temp.path());
+        let plugins = fixture_plugins(temp.path(), temp.path().join("missing-webui"), tui.clone());
+        let prepared = plugins
+            .call(
+                "client.plugins.start",
+                json!({"plugin":"tui","workspace_id":"local"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let launch_id = prepared["launch_id"].as_str().unwrap();
+        // std::process retains an unreaped child for the zombie case. Synchronize
+        // on its actual OS state, not a fixed sleep or an assumed exit delay.
+        let mut child = StdCommand::new(&tui)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        if reap_first {
+            assert_eq!(child.wait().unwrap().code(), Some(7));
+        } else {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if process_field(pid, "stat=")
+                        .await
+                        .unwrap()
+                        .is_some_and(|state| state.starts_with('Z'))
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fixture must reach a known zombie state");
+        }
+        let attached = plugins
+            .call(
+                "client.plugins.attach",
+                json!({"launch_id":launch_id,"pid":pid}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attached["supervised"], false);
+        assert_eq!(attached["exited_before_attach"], true);
+        assert_eq!(attached["pid"], pid);
+        assert_eq!(child.wait().unwrap().code(), Some(7));
+        let summary = plugins.read_only_summary().await;
+        assert_eq!(summary["entries"], json!([]));
+        assert_eq!(summary["recent"][0]["status"], "exited_before_attach");
+        assert!(plugins.inner.state.lock().await.pending_tui.is_empty());
+        assert!(!temp.path().join(CLEANUP_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn reaped_tui_before_attach_does_not_claim_supervision() {
+        assert_early_exit_is_not_supervised(true).await;
+    }
+
+    #[tokio::test]
+    async fn zombie_tui_before_attach_does_not_claim_supervision() {
+        assert_early_exit_is_not_supervised(false).await;
+    }
+
+    #[tokio::test]
+    async fn live_wrong_tui_executable_is_still_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let tui = early_exit_tui_fixture(temp.path());
+        let plugins = fixture_plugins(temp.path(), temp.path().join("missing-webui"), tui);
+        let prepared = plugins
+            .call(
+                "client.plugins.start",
+                json!({"plugin":"tui","workspace_id":"local"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        // This current test process is alive and is not the packaged cayw-tui.
+        let error = plugins
+            .call(
+                "client.plugins.attach",
+                json!({"launch_id":prepared["launch_id"],"pid":std::process::id()}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("not the packaged cayw-tui binary"));
+        assert_eq!(plugins.read_only_summary().await["entries"], json!([]));
+        assert!(!temp.path().join(CLEANUP_FILE).exists());
     }
 
     #[tokio::test]

@@ -43,7 +43,7 @@ fn base_config() -> RuntimeConfig {
     config
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn running_process_tree(db: &std::path::Path, id: &str) -> Vec<cayw_host::ProcessIdentity> {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -91,7 +91,7 @@ async fn running_process_tree(db: &std::path::Path, id: &str) -> Vec<cayw_host::
     .expect("Device must observe both original shell and real child")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn assert_stopped_tree(db: &std::path::Path, id: &str, identities: &[cayw_host::ProcessIdentity]) {
     let connection = rusqlite::Connection::open(db).unwrap();
     for identity in identities {
@@ -334,7 +334,7 @@ async fn parent_cleanup_does_not_reconcile_an_orphaned_background_task() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn descendant_cancellation_terminates_process_group_and_reaps() {
     let temp = tempfile::tempdir().unwrap();
@@ -585,7 +585,7 @@ async fn concurrent_runtime_instances_do_not_falsely_orphan_active_tasks() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn descendant_process_identities_terminate_and_reap() {
     let temp = tempfile::tempdir().unwrap();
@@ -654,7 +654,7 @@ async fn descendant_process_identities_terminate_and_reap() {
     assert_stopped_tree(&db, &started.id, &identities);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn host_reconciles_lost_original_executor_and_process_before_recovering() {
     struct OwnedProcess(std::process::Child);

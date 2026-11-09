@@ -70,7 +70,7 @@ key id 是宿主命名的外部密钥身份；宿主必须对同一个秘密使�
 /Users/chengwen/.cargo/bin/cargo +1.95.0 test -p cayw-content --no-default-features --locked
 /Users/chengwen/.cargo/bin/cargo +1.95.0 clippy -p cayw-content --all-targets --locked -- -D warnings
 /Users/chengwen/.cargo/bin/cargo +1.95.0 clippy -p cayw-content --all-targets --no-default-features --locked -- -D warnings
-/Users/chengwen/.cargo/bin/cargo +1.95.0 run -p cayw-content --example offline --locked -- /absolute/new/private-directory
+/Users/chengwen/.cargo/bin/cargo +1.95.0 run -p cayw-content --example content_offline --locked -- /absolute/new/private-directory
 ```
 
 `offline` 示例创建真实磁盘记录、重新打开读取、导出加密对象、拒绝旧内容覆盖新版本、显式 Fork 恢复、撤销后拒绝导出。目录须为尚未存在的绝对路径且不能经过软链接。示例不联网、不调用模型、不保存密钥。

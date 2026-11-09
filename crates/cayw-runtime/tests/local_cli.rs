@@ -1601,6 +1601,150 @@ async fn offline_demo_writes_the_authorized_file_and_stops_on_sigint() {
     );
 }
 
+// Local Client authority state must never be part of a model workspace, even
+// when an exact tool read of a seemingly ordinary file would be authorized.
+#[tokio::test]
+async fn home_workspace_is_rejected_before_default_state_is_created() {
+    let home = tempfile::tempdir().unwrap();
+    let before = snapshot_tree(home.path());
+    for action in ["init", "conf", "serve", "start"] {
+        let mut command = command(home.path(), home.path(), None);
+        command.arg(action).stdin(Stdio::null());
+        let output = run(command).await;
+        assert!(
+            !output.status.success(),
+            "{action} must reject HOME as workspace"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("must not overlap"),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(snapshot_tree(home.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn custom_state_overlap_is_rejected_without_creating_or_changing_files() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let existing = workspace.path().join("private-state");
+    std::fs::create_dir(&existing).unwrap();
+    private_dir(&existing);
+    // No real credential is used. Even already-existing state must stay intact.
+    std::fs::write(existing.join("ipc.token"), b"SYNTHETIC_STATE_SENTINEL").unwrap();
+    let before = snapshot_tree(workspace.path());
+    for state in [
+        workspace.path().to_path_buf(),
+        existing,
+        workspace.path().join("not-created/nested-state"),
+        workspace.path().join("not-created/../other-state"),
+    ] {
+        let output = init(home.path(), workspace.path(), &state).await;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
+        assert_eq!(snapshot_tree(workspace.path()), before);
+    }
+
+    // A workspace inside private state is also invalid, including when it
+    // directly names a workspace's models/database directory.
+    let state = tempfile::tempdir().unwrap();
+    let nested_workspace = state.path().join("project");
+    std::fs::create_dir(&nested_workspace).unwrap();
+    let before = snapshot_tree(state.path());
+    let output = init(home.path(), &nested_workspace, state.path()).await;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
+    assert_eq!(snapshot_tree(state.path()), before);
+}
+
+#[tokio::test]
+async fn canonical_aliases_cannot_hide_state_overlap() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let alias = home.path().join("project-alias");
+    symlink(workspace.path(), &alias).unwrap();
+    let before = snapshot_tree(workspace.path());
+    for (project, state) in [
+        (workspace.path().to_path_buf(), alias.join("new-state")),
+        (alias.clone(), workspace.path().join("new-state")),
+        (
+            workspace.path().to_path_buf(),
+            alias.join("missing/../new-state"),
+        ),
+    ] {
+        let output = init(home.path(), &project, &state).await;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
+        assert_eq!(snapshot_tree(workspace.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn separate_default_state_and_canonical_sibling_prefix_are_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = home.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut default = command(home.path(), &workspace, None);
+    default.arg("init");
+    let output = run(default).await;
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(home.path().join(".cayw/ipc.token").is_file());
+
+    let alias = home.path().join("home-alias");
+    symlink(home.path(), &alias).unwrap();
+    // A path string prefix is not a directory ancestor. Resolve the symlinked
+    // parent without rejecting an actually separate custom state directory.
+    let state = alias.join("project-state");
+    let output = init(home.path(), &workspace, &state).await;
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(home.path().join("project-state/ipc.token").is_file());
+}
+
+#[tokio::test]
+async fn legacy_overlapping_registration_cannot_open_a_workspace_runtime() {
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let state = home.path().join("private-state");
+    assert!(
+        init(home.path(), workspace.path(), &state)
+            .await
+            .status
+            .success()
+    );
+    // Simulate the catalog left by an older version that allowed HOME as a
+    // workspace. Opening it must fail before creating a database or Host.
+    let legacy = state.join("workspaces").join(workspace_key(home.path()));
+    std::fs::create_dir(&legacy).unwrap();
+    private_dir(&legacy);
+    let registration = legacy.join("workspace.json");
+    std::fs::write(
+        &registration,
+        serde_json::to_vec(&json!({"workspace":home.path().canonicalize().unwrap()})).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&registration, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let before = snapshot_tree(&legacy);
+    let mut server = serve(home.path(), workspace.path(), &state, &[])
+        .spawn()
+        .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    let error = client
+        .request(
+            "client.workspaces.open",
+            json!({"id":format!("workspace-{}", workspace_key(home.path()))}),
+        )
+        .await
+        .expect_err("overlapping catalog entry must not create a Runtime");
+    assert!(error.message.contains("must not overlap"), "{error:?}");
+    assert_eq!(snapshot_tree(&legacy), before);
+    client.request("session.create", json!({})).await.unwrap();
+    client.close().await;
+    server.kill().await.unwrap();
+    server.wait().await.unwrap();
+}
+
 // Break caught: a relative, empty, symlinked or world-accessible CAYW_HOME is
 // accepted, letting private tokens land outside the intended root.
 #[tokio::test]

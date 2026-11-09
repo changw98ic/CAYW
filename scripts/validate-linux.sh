@@ -41,7 +41,7 @@ docker run --rm \
     run_check tests cargo test --workspace --all-features --locked
     run_check minimal-tests cargo test --workspace --no-default-features --locked
     run_check offline cargo run -p cayw-agent --example offline --locked
-    run_check headless cargo run -p cayw-runtime --example offline --locked -- /evidence/headless-demo
+    run_check headless cargo run -p cayw-runtime --example runtime_offline --locked -- /evidence/headless-demo
     validation_stage=complete
   ' > "$validation_dir/container.log" 2>&1 || validation_exit=$?
 printf 'docker_exit_code=%s\n' "$validation_exit" >> "$validation_dir/result.log"

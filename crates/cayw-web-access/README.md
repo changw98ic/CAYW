@@ -8,7 +8,7 @@ CAYW 网页搜索 / URL 获取 / HTML·PDF 正文提取（F10）。
 
 - 可插拔 [`SearchProvider`] + [`HttpTransport`]
 - 离线 [`FixtureTransport`] / [`FixtureSearch`]（失败带 [`FailureDiagnostic`]）
-- 实网 [`ReqwestTransport`]（HTTP/HTTPS GET）。初始 URL 和每次重定向都重新解析并固定到已验证的公网地址；拒绝 loopback、private、link-local、unspecified、multicast、IPv6 ULA 和映射后的私有 IPv4，最多跟随 5 跳。客户端禁用系统代理，避免代理重新解析目标并绕过地址固定。生产入口没有允许本机地址的开关
+- 实网 [`ReqwestTransport`]（HTTP/HTTPS GET）。初始 URL 和每次重定向都重新解析并固定到已验证的公网地址；拒绝 loopback、private、link-local、unspecified、multicast、IPv6 ULA 和映射后的私有 IPv4，最多跟随 5 跳。客户端禁用系统代理，避免代理重新解析目标并绕过地址固定。生产入口没有允许本机地址的开关。单次 GET 共用 30 秒总 deadline，覆盖 DNS 等待、全部跳转和最终正文读取，不按跳转重置；超时后不再使用迟到的 DNS 结果发起 HTTP 请求。已开始的系统 DNS 阻塞调用不能强制中止，可能在后台完成
 - **实网搜索**：[`DuckDuckGoHtmlSearch`]（HTML 结果页，**无需 API key**）；可选 [`BraveSearch`]（`BRAVE_SEARCH_API_KEY`，空结果/失败时回退 DDG）
 - Host/Runtime 目录：[`definitions`] → `Executor::WebAccess`；宿主设置 `HostConfig.web_access` 后启用，默认不提供
 - HTML 正文：`html5gum`

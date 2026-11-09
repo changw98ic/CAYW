@@ -231,7 +231,8 @@ impl SearchProvider for FixtureSearch {
 /// address. Hostnames are resolved before the request and pinned into the
 /// per-request client so a later DNS answer cannot redirect the connection to
 /// a private address. Redirects are followed manually, at most
-/// [`MAX_REDIRECTS`] times.
+/// [`MAX_REDIRECTS`] times. A single 30-second budget covers DNS, redirects,
+/// and reading the final body.
 #[derive(Debug, Clone)]
 pub struct ReqwestTransport {
     timeout: Duration,
@@ -295,7 +296,26 @@ impl HttpTransport for ReqwestTransport {
         url: &'a str,
         max_bytes: usize,
     ) -> BoxFuture<'a, Result<RawResponse, WebAccessError>> {
-        Box::pin(async move {
+        self.get_with_resolver(url, max_bytes, |url| {
+            Box::pin(async move { resolve_public_addrs(&url).await })
+        })
+    }
+}
+
+impl ReqwestTransport {
+    // Keep the resolver injectable for deterministic deadline tests without DNS
+    // or external network access. The production entry point always validates
+    // and pins public addresses using resolve_public_addrs.
+    fn get_with_resolver<'a, R>(
+        &'a self,
+        url: &'a str,
+        max_bytes: usize,
+        resolve: R,
+    ) -> BoxFuture<'a, Result<RawResponse, WebAccessError>>
+    where
+        R: Fn(Url) -> BoxFuture<'static, Result<ResolvedTarget, WebAccessError>> + Send + 'a,
+    {
+        Box::pin(with_request_deadline(self.timeout, url, async move {
             let mut current =
                 Url::parse(url).map_err(|e| invalid_url(url, format!("invalid URL: {e}")))?;
             let mut redirects = 0usize;
@@ -305,7 +325,7 @@ impl HttpTransport for ReqwestTransport {
                 }
                 let pin = if self.strict_targets {
                     validate_public_url(&current)?;
-                    resolve_public_addrs(&current).await?.pin
+                    resolve(current.clone()).await?.pin
                 } else {
                     None
                 };
@@ -380,8 +400,25 @@ impl HttpTransport for ReqwestTransport {
                     body,
                 });
             }
-        })
+        }))
     }
+}
+
+/// One budget for DNS, all redirect hops, and the final streamed body. Per-hop
+/// reqwest timeouts remain a backstop, not a fresh budget for each redirect.
+async fn with_request_deadline<T>(
+    timeout: Duration,
+    url: &str,
+    request: impl Future<Output = Result<T, WebAccessError>>,
+) -> Result<T, WebAccessError> {
+    tokio::time::timeout(timeout, request).await.map_err(|_| {
+        let safe_url = Url::parse(url)
+            .map(|url| display_url(&url))
+            .unwrap_or_else(|_| "<invalid URL>".to_string());
+        WebAccessError::new(FailureClass::Timeout, "HTTP GET total deadline exceeded")
+            .with_url(safe_url)
+            .with_provider("reqwest")
+    })?
 }
 
 fn is_redirect(status: u16) -> bool {
@@ -440,6 +477,9 @@ async fn resolve_public_addrs(url: &Url) -> Result<ResolvedTarget, WebAccessErro
         Some(url::Host::Domain(domain)) => {
             let host = domain.to_string();
             let lookup = host.clone();
+            // The outer request deadline bounds waiting for this task. A running
+            // system resolver cannot be aborted; it may finish in the background,
+            // but its late result cannot start an HTTP request after timeout.
             let addrs = tokio::task::spawn_blocking(move || {
                 (lookup.as_str(), port)
                     .to_socket_addrs()
@@ -669,6 +709,75 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[tokio::test(start_paused = true)]
+    async fn total_deadline_includes_public_dns_resolution() {
+        let transport = ReqwestTransport::new().unwrap();
+        let started = tokio::time::Instant::now();
+        let error = transport
+            .get_with_resolver("https://user:secret@example.com/", 1024, |_| {
+                Box::pin(std::future::pending())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.diagnostic().class, FailureClass::Timeout);
+        assert_eq!(error.diagnostic().provider.as_deref(), Some("reqwest"));
+        assert_eq!(
+            error.diagnostic().url.as_deref(),
+            Some("https://example.com/")
+        );
+        // This is Tokio's virtual clock, not an elapsed wall-time assertion.
+        assert_eq!(started.elapsed(), transport.timeout);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_deadline_does_not_restart_between_request_phases() {
+        use std::cell::Cell;
+
+        // Model DNS, redirect hops and a streamed body with deterministic waits.
+        // No individual timer exceeds the budget, but their sum does.
+        // Exercise expiry in each phase and check that no later phase runs.
+        for blocked_phase in 0..4 {
+            let completed = Cell::new(0);
+            let started = tokio::time::Instant::now();
+            let error =
+                with_request_deadline(Duration::from_secs(30), "https://example.com/", async {
+                    for phase in 0..4 {
+                        let duration = if phase == blocked_phase { 30 } else { 5 };
+                        tokio::time::sleep(Duration::from_secs(duration)).await;
+                        // Make the boundary case unambiguously pending at expiry.
+                        if phase == blocked_phase {
+                            std::future::pending::<()>().await;
+                        }
+                        completed.set(completed.get() + 1);
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.diagnostic().class, FailureClass::Timeout);
+            assert_eq!(completed.get(), blocked_phase);
+            assert_eq!(started.elapsed(), Duration::from_secs(30));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn total_deadline_preserves_success_and_request_errors() {
+        let result =
+            with_request_deadline(Duration::from_secs(30), "https://example.com/", async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(42)
+            })
+            .await;
+        assert_eq!(result, Ok(42));
+
+        let expected = blocked_target(&Url::parse("http://127.0.0.1/").unwrap(), "loopback");
+        let result = with_request_deadline(Duration::from_secs(30), "http://127.0.0.1/", async {
+            Err::<(), _>(expected.clone())
+        })
+        .await;
+        assert_eq!(result, Err(expected));
+    }
 
     #[test]
     fn ip_policy_rejects_non_public_targets() {

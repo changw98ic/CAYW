@@ -5,10 +5,12 @@ use cayw_ai::CancellationToken;
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, HostConfig, PermissionGate, Profile, ProfileKind};
 use serde_json::{Value, json};
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -136,6 +138,7 @@ fn assert_gone(pid: u32) {
         .unwrap();
     assert!(!observed.status.success(), "PID {pid} remained alive");
 }
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn repository(root: &Path) {
     fs::create_dir_all(root.join(".git/objects")).unwrap();
     fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
@@ -182,6 +185,9 @@ async fn configured_pty_profile_runs_through_permission_audit_and_the_same_devic
 // that pathname while the process runs must not redirect it, and a third-party
 // replacement must be preserved. Private-view cleanup itself is covered by the
 // process unit tests, which can address the view directly.
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_read_holds_its_working_directory_across_path_replacement() {
     for case in ["control", "directory", "symlink"] {
@@ -260,6 +266,9 @@ async fn running_read_holds_its_working_directory_across_path_replacement() {
     }
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_git_read_after_root_rename_uses_the_held_repository() {
     let root = Root::new();
@@ -328,6 +337,9 @@ async fn actual_git_read_after_root_rename_uses_the_held_repository() {
     drained.unwrap();
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replaced_index_is_discarded_instead_of_returning_another_view() {
     let root = Root::new();
@@ -364,6 +376,9 @@ async fn replaced_index_is_discarded_instead_of_returning_another_view() {
     drained.unwrap();
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_git_read_keeps_unknown_when_its_index_was_replaced() {
     let root = Root::new();

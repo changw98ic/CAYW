@@ -155,7 +155,7 @@ impl Runtime {
     /// The host callback must independently verify its original processes and
     /// resources. It runs with the original Task and Cells ownership held.
     /// This never reconciles effects, enables Requests, or releases Queue capacity.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn confirm_lost_processes_stopped(
         store_path: impl AsRef<Path>,
         config: RuntimeConfig,

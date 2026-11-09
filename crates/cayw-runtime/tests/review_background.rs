@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 //! Integration tests for review items BR-02, RT-04, RT-05:
 //! - BR-02: Clean up auxiliary records (executors, processes, cleanup_confirmations, cancels)
 //!   during retention pruning of known terminal tasks, preserving running and outcome_unknown tasks.
@@ -13,7 +13,7 @@ use cayw_runtime::{
     BackgroundConfig, BackgroundStatus, Runtime, RuntimeConfig, ScopedPermission,
     fixture::script_response,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
@@ -348,6 +348,42 @@ async fn rt04_cross_runtime_kill_active_task_terminates_via_device_and_records_c
         .expect("sleeper started");
     assert_eq!(started.status, BackgroundStatus::Running);
 
+    // Running records admission before the background worker launches its child.
+    // Wait for Device's durable startup identity so this tests real termination,
+    // rather than the equally valid cancellation-before-launch path.
+    let conn = Connection::open(&db).unwrap();
+    let original = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let identity = conn
+                .query_row(
+                    "SELECT pid,parent_pid,process_group,started_seconds,started_microseconds
+                     FROM runtime_background_processes WHERE task_id=?1 AND state='started'",
+                    [&started.id],
+                    |row| {
+                        Ok(cayw_host::ProcessIdentity {
+                            pid: row.get(0)?,
+                            parent_pid: row.get(1)?,
+                            process_group: row.get(2)?,
+                            started_seconds: u64::try_from(row.get::<_, i64>(3)?)
+                                .expect("valid original start time"),
+                            started_microseconds: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()
+                .unwrap();
+            if let Some(identity) = identity {
+                assert!(identity.is_running().expect("observe original child"));
+                break identity;
+            }
+            let view = rt1.background_inspect(&started.id).unwrap().unwrap();
+            assert_eq!(view.status, BackgroundStatus::Running, "{view:?}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Device must record an actual running child before cross-runtime kill");
+
     // Open rt2 on the same db concurrently
     let rt2 = open_runtime(&db, &workspace, "return 1", cfg);
 
@@ -356,7 +392,6 @@ async fn rt04_cross_runtime_kill_active_task_terminates_via_device_and_records_c
     assert_eq!(view.id, started.id);
 
     // Verify persistent cancel intent was written to runtime_background_cancels
-    let conn = Connection::open(&db).unwrap();
     let cancel_recorded: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_background_cancels WHERE task_id=?1)",
@@ -389,6 +424,12 @@ async fn rt04_cross_runtime_kill_active_task_terminates_via_device_and_records_c
         )
         .unwrap();
     assert_eq!(cleanup_state, "device_confirmed");
+    assert!(
+        !original
+            .is_running()
+            .expect("observe original child after cleanup"),
+        "original child remains alive after device_confirmed: {original:?}"
+    );
 
     // Second kill on already killed task succeeds without re-killing
     let terminal_view = rt2.background_kill(&started.id).unwrap();

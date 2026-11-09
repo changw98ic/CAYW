@@ -445,6 +445,7 @@ function boot() {
   let connected = false;
   let workspaceId = null;
   let workspaceBusy = false;
+  let settings = { reset() {} };
   const sessionWorkspaces = new Map();
   let toolAvailability = {};
   let loginGeneration = 0;
@@ -1414,6 +1415,7 @@ function boot() {
   }
 
   function disconnect(reason = '') {
+    settings.reset();
     loginGeneration++;
     selectionGeneration++;
     listGeneration++;
@@ -2002,6 +2004,7 @@ function boot() {
   }
   async function switchWorkspace() {
     if (workspaceBusy || !connected) return;
+    settings.reset();
     workspaceBusy = true; $('switch-workspace').disabled = true;
     const login = loginGeneration;
     const status = $('workspace-switch-status');
@@ -2013,6 +2016,7 @@ function boot() {
       if (target.id !== workspaceId) {
         // In-flight enqueue/resume keeps its captured workspace and transport.
         // Do not disconnect, abort controllers, or cancel another root's task.
+        settings.reset();
         workspaceId = target.id;
         ++selectionGeneration; ++listGeneration; clearTimeout(timer);
         selected = null; sessions = []; openedPanels = []; openedPanelsSession = null;
@@ -2032,8 +2036,9 @@ function boot() {
   $('refresh-workspaces').addEventListener('click', refreshWorkspaceCatalog);
   $('refresh-optional-tools').addEventListener('click', refreshOptionalTools);
 
-  mountSettings(rpc);
+  settings = mountSettings(rpc) || settings;
   ui['logout'].addEventListener('click', async () => {
+    settings.reset();
     try {
       const response = await fetch('/api/auth/logout', { method:'POST', credentials:'same-origin' });
       if (!response.ok) throw new Error('无法注销本机会话，请重试。');
@@ -2251,17 +2256,20 @@ function mountSettings(rpc) {
   if (!open) return;
   const dialog = $('settings-dialog');
   let busy = false;
+  let generation = 0;
   const status = text => { $('settings-status').textContent = text; };
   const button = (text, handler) => {
+    const current = generation;
     const node = document.createElement('button'); node.type = 'button'; node.textContent = text;
-    node.addEventListener('click', () => action(handler)); return node;
+    node.addEventListener('click', () => { if (current === generation) return action(handler); }); return node;
   };
   async function action(handler) {
     if (busy) return;
+    const current = generation;
     busy = true; dialog.setAttribute('aria-busy', 'true'); status('处理中…');
-    try { await handler(); status('已完成。'); }
-    catch (error) { status(error.message || String(error)); }
-    finally { busy = false; dialog.removeAttribute('aria-busy'); }
+    try { await handler(current); if (current === generation) status('已完成。'); }
+    catch (error) { if (current === generation) status(error.message || String(error)); }
+    finally { if (current === generation) { busy = false; dialog.removeAttribute('aria-busy'); } }
   }
   let accountRevision = null;
   let accountCanManage = false;
@@ -2277,16 +2285,18 @@ function mountSettings(rpc) {
     renderLanNotice(state.lan_active === true && state.login_required !== true);
     accountControls();
   }
-  async function refreshAccount() {
+  async function refreshAccount(current = generation) {
     try {
       const response = await fetch('/api/settings/account', {credentials:'same-origin',cache:'no-store'});
       const state = await response.json();
+      if (current !== generation) return;
       if (!response.ok) throw new Error(state.error?.message || '无法读取账号状态');
       showAccount(state);
-    } catch (error) { accountCanManage = false; accountControls(); $('account-settings-status').textContent = error.message || '账号状态未确认，请刷新重试。'; }
+    } catch (error) { if (current === generation) { accountCanManage = false; accountControls(); $('account-settings-status').textContent = error.message || '账号状态未确认，请刷新重试。'; } }
   }
   $('account-settings-form').addEventListener('submit', async event => {
     event.preventDefault(); if (accountBusy || !accountCanManage) return;
+    const current = generation;
     const values = {username:$('account-username').value,password:$('account-password').value,confirm_password:$('account-confirm').value,expected_revision:accountRevision};
     clearAccountPasswords();
     if (values.password !== values.confirm_password) { $('account-settings-status').textContent = '两次密码不一致，未保存。'; return; }
@@ -2294,27 +2304,54 @@ function mountSettings(rpc) {
     try {
       const response = await fetch('/api/settings/account', {method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});
       const state = await response.json();
+      if (current !== generation) return;
       if (!response.ok) { if (state.error?.outcome_unknown) accountCanManage = false; throw new Error(state.error?.message || '保存未完成，请刷新账号状态核对。'); }
       showAccount(state);
       // The server's current status distinguishes immediate LAN activation
       // from a local-only gateway saving an account for its next LAN launch.
-    } catch (error) { const unconfirmed = error instanceof TypeError || error instanceof SyntaxError; if (unconfirmed) accountCanManage = false; $('account-settings-status').textContent = unconfirmed ? '保存回执未确认，请刷新账号状态核对；不会自动重试。' : error.message; }
-    finally { accountBusy = false; accountControls(); clearAccountPasswords(); }
+    } catch (error) { if (current === generation) { const unconfirmed = error instanceof TypeError || error instanceof SyntaxError; if (unconfirmed) accountCanManage = false; $('account-settings-status').textContent = unconfirmed ? '保存回执未确认，请刷新账号状态核对；不会自动重试。' : error.message; } }
+    finally { if (current === generation) { accountBusy = false; accountControls(); clearAccountPasswords(); } }
   });
   $('refresh-account').addEventListener('click', () => { if (!accountBusy) refreshAccount(); });
-  dialog.addEventListener('close', clearAccountPasswords);
-  window.addEventListener('pagehide', clearAccountPasswords);
   const modelForm = $('model-settings-form');
-  function showModelApiKeyState(hasApiKey) {
-    modelForm.elements.clear_api_key.checked = false;
-    modelForm.elements.clear_api_key.disabled = !hasApiKey;
-    modelForm.elements.api_key.placeholder = hasApiKey
-      ? '已保存密钥；留空表示保持不变'
-      : '无认证服务请留空';
-    $('model-api-key-status').textContent = hasApiKey
-      ? '此方案已有密钥。留空会保留原值；只有勾选下方选项才会清除。'
-      : '此方案没有已保存密钥。';
+  let editingModel = null;
+  let modelNames = new Set();
+  function credentialControls() {
+    const fields = modelForm.elements;
+    if (!fields) return;
+    const replacing = fields.credential.value === 'replace';
+    fields.api_key.disabled = !replacing; fields.api_key.required = replacing;
+    if (!replacing) fields.api_key.value = '';
+    const endpointChanged = editingModel?.authentication === 'plain_file' && ['service','api','base_url','api_version'].some(key => fields[key].value !== editingModel[key]);
+    $('model-credential-status').textContent = fields.credential.value === 'keep'
+      ? endpointChanged ? '服务或接口地址已更改，请选择设置 / 更换密钥并重新输入，或明确移除认证。' : '保存时保留已有认证，不需要输入原密钥。'
+      : replacing ? '请输入用于当前服务地址的新密钥。' : '保存后不使用认证；已有密钥将被移除。';
   }
+  function resetModelForm() {
+    editingModel = null;
+    if (!modelForm.elements) return;
+    modelForm.reset();
+    modelForm.elements.name.readOnly = false;
+    modelForm.elements.api_key.value = '';
+    modelForm.elements.credential.value = 'remove';
+    $('keep-model-credential').disabled = true;
+    serviceOptions(modelForm.elements.service.value, true);
+    credentialControls();
+  }
+  function clearSettings() {
+    ++generation; busy = false; accountBusy = false; accountCanManage = false; accountRevision = null;
+    dialog.removeAttribute('aria-busy'); clearAccountPasswords(); accountControls(); resetModelForm();
+    modelNames.clear(); $('model-profiles').replaceChildren(); $('plugin-profiles').replaceChildren();
+    $('settings-workspace').textContent = ''; status('');
+  }
+  function reset() {
+    clearSettings();
+    if (dialog.open) dialog.close();
+  }
+  dialog.addEventListener('close', clearSettings);
+  // Clear immediately on Escape as the native close event is queued.
+  dialog.addEventListener('cancel', clearSettings);
+  window.addEventListener('pagehide', reset);
   const serviceDefaults = {
     openai: ['https://api.openai.com/v1', ['chat_completions', 'responses']],
     anthropic: ['https://api.anthropic.com/v1', ['messages']],
@@ -2325,83 +2362,97 @@ function mountSettings(rpc) {
     const [base, apis] = serviceDefaults[service];
     modelForm.elements.api.replaceChildren(...apis.map(api => { const option = document.createElement('option'); option.value = api; option.textContent = api; return option; }));
     if (defaults) { modelForm.elements.base_url.value = base; modelForm.elements.api_key.value = ''; apiVersion(); }
+    credentialControls();
   }
   function apiVersion() {
     const api = modelForm.elements.api.value;
     modelForm.elements.api_version.value = api === 'messages' ? '2023-06-01' : api.includes('generate_content') ? 'v1beta' : 'v1';
     if (modelForm.elements.service.value === 'magpie' && /^http:\/\/127\.0\.0\.1:3425\/v1(?:beta)?$/.test(modelForm.elements.base_url.value)) modelForm.elements.base_url.value = api.includes('generate_content') ? 'http://127.0.0.1:3425/v1beta' : 'http://127.0.0.1:3425/v1';
+    credentialControls();
   }
   if (modelForm.elements) {
-    showModelApiKeyState(false);
     modelForm.elements.service.addEventListener('change', () => serviceOptions(modelForm.elements.service.value, true));
-    modelForm.elements.api.addEventListener('change', apiVersion);
-    modelForm.elements.api_key.addEventListener('input', () => {
-      if (modelForm.elements.api_key.value) modelForm.elements.clear_api_key.checked = false;
-    });
-    modelForm.elements.clear_api_key.addEventListener('change', () => {
-      if (modelForm.elements.clear_api_key.checked) modelForm.elements.api_key.value = '';
-    });
+    modelForm.elements.api.addEventListener('change', () => { modelForm.elements.api_key.value = ''; apiVersion(); });
+    modelForm.elements.credential.addEventListener('change', credentialControls);
+    for (const key of ['base_url','api_version']) modelForm.elements[key].addEventListener('input', () => { modelForm.elements.api_key.value = ''; credentialControls(); });
   }
+  $('new-model-profile').addEventListener('click', () => { if (!busy) resetModelForm(); });
 
-  async function refresh() {
-    await refreshAccount();
+  async function refresh(current = generation) {
+    if (current !== generation) return;
+    await refreshAccount(current);
+    if (current !== generation) return;
     const workspace = await rpc('settings.workspace');
+    if (current !== generation) return;
     $('settings-workspace').textContent = `当前目录：${workspace.workspace}${workspace.offline ? ' · 离线演示' : ''}\n已登记工作区：${(workspace.known_workspaces || []).join('、')}`;
     const models = await rpc('settings.models.list');
+    if (current !== generation) return;
+    modelNames = new Set(Object.keys(models.models || {}));
     const modelList = $('model-profiles'); modelList.replaceChildren();
-    const current = document.createElement('p'); current.textContent = `当前：${models.health.provider} / ${models.health.model}`; modelList.append(current);
+    const selected = document.createElement('p'); selected.textContent = `当前：${models.health.provider} / ${models.health.model}`; modelList.append(selected);
     for (const [name, model] of Object.entries(models.models || {})) {
       const row = document.createElement('div'); const label = document.createElement('p');
       label.textContent = `${name} · ${model.id}${models.selected === name ? ' · 已保存选择' : ''}`; row.append(label);
       row.append(button('编辑', async () => {
         modelForm.reset();
         modelForm.elements.name.value = name;
+        modelForm.elements.name.readOnly = true;
         serviceOptions(model.service, false);
         modelForm.elements.api_key.value = '';
         for (const [key, value] of Object.entries(model)) {
-          if (modelForm.elements[key]) modelForm.elements[key].value = value;
+          if (key !== 'api_key' && modelForm.elements[key]) modelForm.elements[key].value = value;
         }
-        showModelApiKeyState(model.authentication === 'plain_file');
+        editingModel = { ...model };
+        modelForm.elements.credential.value = 'keep'; $('keep-model-credential').disabled = false;
+        credentialControls();
       }));
-      const use = button('使用', async () => { await rpc('settings.models.use', {name}); await refresh(); }); use.disabled = models.offline; row.append(use);
-      const remove = button('删除', async () => { await rpc('settings.models.remove', {name}); await refresh(); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);
+      const use = button('使用', async current => { await rpc('settings.models.use', {name}); await refresh(current); }); use.disabled = models.offline; row.append(use);
+      const remove = button('删除', async current => { await rpc('settings.models.remove', {name}); if (current === generation && modelForm.elements.name.value === name) resetModelForm(); await refresh(current); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);
     }
     const list = $('plugin-profiles'); list.replaceChildren();
     try {
       const plugins = await rpc('settings.plugins.list');
+      if (current !== generation) return;
       for (const plugin of plugins.entries || []) {
         const row = document.createElement('div'); const label = document.createElement('p');
         label.textContent = `${plugin.name} ${plugin.descriptor.manifest.version} · ${plugin.available ? '可用' : plugin.enabled ? '异常' : '已停用'}${plugin.last_error ? ' · ' + plugin.last_error : ''}`; row.append(label);
         const detail = document.createElement('pre'); detail.textContent = JSON.stringify({ ...plugin.descriptor, executable_sha256: plugin.executable_sha256 }, null, 2); row.append(detail);
         row.append(button('编辑登记', async () => { $('plugin-settings-form').elements.name.value = plugin.name; $('plugin-settings-form').elements.descriptor.value = JSON.stringify(plugin.descriptor, null, 2); }));
         const loaded = plugin.enabled || plugin.available;
-        row.append(button(loaded ? '停用' : '启用', async () => {
+        row.append(button(loaded ? '停用' : '启用', async current => {
           const approve = $('plugin-process-approval');
           if (!loaded && !approve.checked) throw new Error('请先审阅插件并勾选本地进程执行批准。');
           await rpc(`settings.plugins.${loaded ? 'disable' : 'enable'}`, { name: plugin.name, ...(!loaded ? {approve_process:true} : {}) });
-          approve.checked = false; await refresh();
+          if (current === generation) approve.checked = false; await refresh(current);
         }));
-        row.append(button('卸载登记', async () => { await rpc('settings.plugins.remove', {name:plugin.name}); await refresh(); })); list.append(row);
+        row.append(button('卸载登记', async current => { await rpc('settings.plugins.remove', {name:plugin.name}); await refresh(current); })); list.append(row);
       }
-    } catch (error) { const message = document.createElement('p'); message.textContent = error.message || String(error); list.append(message); }
+    } catch (error) { if (current === generation) { const message = document.createElement('p'); message.textContent = error.message || String(error); list.append(message); } }
   }
   open.addEventListener('click', () => { $('plugin-process-approval').checked = false; dialog.showModal(); action(refresh); });
-  $('close-settings').addEventListener('click', () => dialog.close());
+  $('close-settings').addEventListener('click', reset);
   $('refresh-settings').addEventListener('click', () => action(refresh));
   modelForm.addEventListener('submit', event => {
-    event.preventDefault(); action(async () => {
+    event.preventDefault(); action(async current => {
       const values = Object.fromEntries(new FormData(modelForm)); const name = values.name; delete values.name;
-      const clearApiKey = values.clear_api_key === 'on'; delete values.clear_api_key;
+      if (!editingModel && modelNames.has(name)) throw new Error('此方案名称已存在，请点击编辑后明确选择认证方式。');
+      const credential = values.credential; delete values.credential;
       values.max_output_tokens = Number(values.max_output_tokens);
-      if (clearApiKey && values.api_key) throw new Error('不能同时填写新密钥和清除已保存密钥。');
-      if (!values.api_key) delete values.api_key;
-      await rpc('settings.models.put', {name, model:values, clear_api_key:clearApiKey}); await refresh();
+      if (credential !== 'replace') delete values.api_key;
+      if (credential === 'replace' && !values.api_key?.trim()) throw new Error('请输入新密钥，或选择保留 / 移除认证。');
+      if (credential === 'keep' && editingModel?.authentication === 'plain_file' && ['service','api','base_url','api_version'].some(key => values[key] !== editingModel[key])) throw new Error('服务或接口地址已更改，请重新输入密钥或明确移除认证。');
+      // Do not leave secrets in the DOM while a request or its refresh is pending.
+      modelForm.elements.api_key.value = '';
+      await rpc('settings.models.put', {name, model:values, credential});
+      if (current !== generation) return;
+      resetModelForm(); await refresh(current);
     });
   });
   $('plugin-settings-form').addEventListener('submit', event => {
-    event.preventDefault(); action(async () => {
+    event.preventDefault(); action(async current => {
       const form = $('plugin-settings-form'); const name = form.elements.name.value.trim();
-      await rpc(`settings.plugins.${name ? 'update' : 'install'}`, { ...(name ? {name} : {}), descriptor:JSON.parse(form.elements.descriptor.value) }); await refresh();
+      await rpc(`settings.plugins.${name ? 'update' : 'install'}`, { ...(name ? {name} : {}), descriptor:JSON.parse(form.elements.descriptor.value) }); await refresh(current);
     });
   });
+  return { reset };
 }

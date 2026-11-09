@@ -272,7 +272,12 @@ mod tests {
         let cancel_worker = cancel.clone();
 
         let worker = thread::spawn(move || {
-            let cmd = Command::new(&script);
+            // Run the script through /bin/sh instead of exec'ing the file we
+            // just wrote: on Linux a concurrent fork elsewhere in this test
+            // binary can still hold the write descriptor, and exec of the
+            // script then fails with ETXTBSY ("Text file busy").
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg(&script);
             run_command_cancellable(cmd, &cancel_worker)
         });
 
@@ -379,7 +384,10 @@ mod tests {
         }
 
         let cancel = CancellationToken::new();
-        let cmd = Command::new(&script);
+        // Through /bin/sh, not exec of the just-written file (Linux ETXTBSY
+        // when a concurrent fork still holds its write descriptor).
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg(&script);
         // Limit stdout to 32 bytes. Child sends infinite stream without EOF.
         let result = run_command_bounded(cmd, &cancel, 32, 1024);
         assert!(
@@ -433,7 +441,10 @@ mod tests {
         }
 
         let cancel = CancellationToken::new();
-        let cmd = Command::new(&script);
+        // Through /bin/sh, not exec of the just-written file (Linux ETXTBSY
+        // when a concurrent fork still holds its write descriptor).
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg(&script);
         // Limit stderr to 32 bytes. Child sends infinite stream on stderr without EOF.
         let result = run_command_bounded(cmd, &cancel, 1024, 32);
         assert!(

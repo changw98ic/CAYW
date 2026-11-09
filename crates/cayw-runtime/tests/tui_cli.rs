@@ -58,14 +58,17 @@ async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_argu
     let workspace = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let installed = tempfile::tempdir().unwrap();
-    let mut server = command(
-        Path::new(env!("CARGO_BIN_EXE_cayw")),
-        home.path(),
-        workspace.path(),
-    )
-    .arg("serve")
-    .spawn()
-    .unwrap();
+    let binary = installed.path().join("cayw");
+    std::fs::copy(env!("CARGO_BIN_EXE_cayw"), &binary).unwrap();
+    let sibling = installed.path().join("cayw-tui");
+    std::fs::copy(env!("CARGO_BIN_EXE_cayw-runtime-plugin-fixture"), &sibling).unwrap();
+    std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The unique Client validates its own packaged sibling. Both processes
+    // must use this isolated installation, not companions in target/debug.
+    let mut server = command(&binary, home.path(), workspace.path())
+        .arg("serve")
+        .spawn()
+        .unwrap();
     let mut lines = BufReader::new(server.stdout.take().unwrap()).lines();
     let ready = tokio::time::timeout(WATCHDOG, lines.next_line())
         .await
@@ -74,11 +77,6 @@ async fn tui_uses_the_selected_workspace_and_sibling_program_without_secret_argu
         .unwrap();
     let ready: Value = serde_json::from_str(&ready).unwrap();
     let token = std::fs::read_to_string(ready["token_file"].as_str().unwrap()).unwrap();
-    let binary = installed.path().join("cayw");
-    std::fs::copy(env!("CARGO_BIN_EXE_cayw"), &binary).unwrap();
-    let sibling = installed.path().join("cayw-tui");
-    std::fs::copy(env!("CARGO_BIN_EXE_cayw-runtime-plugin-fixture"), &sibling).unwrap();
-    std::fs::set_permissions(&sibling, std::fs::Permissions::from_mode(0o700)).unwrap();
     let output = tokio::time::timeout(
         WATCHDOG,
         command(&binary, home.path(), other.path())

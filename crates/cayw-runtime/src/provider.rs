@@ -171,7 +171,11 @@ impl ProviderConfig {
         let Some(previous) = previous.filter(|config| config.api_key.is_some()) else {
             return Ok(());
         };
-        if self.service != previous.service || self.base_url != previous.base_url {
+        if self.service != previous.service
+            || self.api != previous.api
+            || self.base_url != previous.base_url
+            || self.api_version != previous.api_version
+        {
             return Err(invalid(
                 "changed the credential destination; provide a new api_key or explicitly clear the saved key",
             ));
@@ -294,6 +298,27 @@ mod tests {
                 .merge_saved_api_key(Some(&previous), true)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn omitted_api_key_cannot_cross_adapter_or_version_boundaries() {
+        let previous = profile("https://api.example/v1", Some("saved-secret"));
+        let mut changed_api = profile("https://api.example/v1", None);
+        changed_api.api = ProviderApi::Responses;
+        assert!(
+            changed_api
+                .merge_saved_api_key(Some(&previous), false)
+                .is_err()
+        );
+        assert!(!changed_api.has_api_key());
+        let mut changed_version = profile("https://api.example/v1", None);
+        changed_version.api_version = "v2".into();
+        assert!(
+            changed_version
+                .merge_saved_api_key(Some(&previous), false)
+                .is_err()
+        );
+        assert!(!changed_version.has_api_key());
     }
 
     #[test]

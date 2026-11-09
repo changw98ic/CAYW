@@ -98,7 +98,7 @@ Core Only 是可嵌入库的组合，不要求每个 crate 都成为独立进程
 
 本地产品无需先配置模型。唯一 Client、TUI 和 WebUI 在工作区没有模型时仍可启动，也可创建和查询 Session；第一次执行 `prompt`、`enqueue` 或 `resume` 时才返回 `model_not_configured`。启动过程不弹出模型向导。`cayw conf` 是唯一交互式首次配置入口，不保留 `cayw configure`。
 
-每个工作区的 `models.json` 是本地模型配置的唯一权威文件。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。新建方案时省略密钥表示模型服务不需要认证。编辑已有方案时，同一 `service` 和 `base_url` 下省略密钥保留原值；删除必须发送显式 `clear_api_key`，且不能同时提供新密钥。凭据目标改变时，必须提供新密钥或显式清除，不能把旧密钥静默搬到新地址。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
+每个工作区的 `models.json` 是本地模型配置的唯一权威文件。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。新建方案时省略密钥表示模型服务不需要认证。编辑已有方案时，同一 `service`、`api`、`base_url` 和 `api_version` 下省略密钥保留原值；可用 `credential: keep/replace/remove` 显式控制凭据，兼容 `clear_api_key: true` 或 `api_key: null` 删除。删除不能同时提供新密钥，`clear_api_key` 不能与 keep/replace 冲突。凭据目标改变时，必须提供新密钥或显式清除，不能把旧密钥静默搬到新地址。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
 
 完全显式 Headless 与本地 Client 状态分开。显式 `--db`、`--token-env` 和 `--config` 运行只使用该配置中的 `model`，不读取或创建 `CAYW_HOME` 下的工作区模型状态。
 
@@ -276,7 +276,7 @@ Session 事件追加记录并与其状态投影一起提交，保存原 lease �
 
 Device 管理执行进程、派生进程和交互会话，归属至少关联 Task、Attempt、Worker、启动身份与进程组。进程正常结束、取消、超时、宿主/Worker 退出均要确认原执行者退出和后代清理，再释放名额；Future Drop 或 PID 消失本身不证明外部效果撤销。
 
-当前有进程/PTY 和资源记账实现，macOS 交互进程验证有单独范围。统一 External plugin 进程清理仍有独立失败，不能将 Device 局部通过外推到所有启动路径。进程组不等同安全沙箱；复杂 CPU/内存/GPU 准入和硬限制尚按 [#18](https://github.com/changw98ic/CAYW/issues/18) 推进。当前不开展 Linux/Windows 适配。
+当前有进程/PTY 和资源记账实现，macOS 交互进程验证有单独范围。统一 External plugin 进程清理仍有独立失败，不能将 Device 局部通过外推到所有启动路径。进程组不等同安全沙箱；复杂 CPU/内存/GPU 准入和硬限制尚按 [#18](https://github.com/changw98ic/CAYW/issues/18) 推进。当前不开展 Linux/Windows 适配。例外：为让 Ubuntu CI 实际运行进程清理与恢复测试，Device 的进程身份在 Linux 上以 `/proc/<pid>/stat`（PID + 启动时钟滴答 + 进程组）实现，`cayw-content` 目录同步改为在 Linux 上重新打开 `"."` 后 fsync；这只是 CI 验证范围，不代表 Linux 产品支持，PTY 与 Git 读/工作树写仍只支持 macOS 并在 Linux 上失败关闭。
 
 Device 持有会话、工作区与内容的权威事实。可信宿主可在安全停止后启用原先未启用的内容库，也可为同一原目录和 Device 增加配额；旧句柄和并存实例不能按冲突配置继续写入。目录身份、版本冲突和未知效果仍需核对。已有 `cayw-content` 提供本地内容和可选加密备份对象，但不等于远程同步已经验收。存放档位按需实现：本地独立运行先成立，再验证可选同步的密钥持有者、版本/冲突、撤销、读回校验与恢复。Server 不因保存中转对象而成为内容权威；远端失败不阻断本地权威读取。参见 [内容库边界](../crates/cayw-content/README.md)。
 

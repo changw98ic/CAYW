@@ -134,10 +134,14 @@ async fn status(host: &Host) -> Result<Value, CapabilityError> {
         .await
 }
 
+#[cfg(target_os = "macos")] // used only by macOS-only Git tests
 fn stdout(result: &Value) -> String {
     result["stdout"].as_str().unwrap().to_string()
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn filemode_false_clean_repository_matches_real_git() {
     let root = Dir::new();
@@ -168,6 +172,9 @@ async fn filemode_false_clean_repository_matches_real_git() {
     assert_eq!(stdout(&result), "", "snapshot must agree with real Git");
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn autocrlf_true_clean_repository_matches_real_git() {
     let root = Dir::new();
@@ -221,6 +228,9 @@ async fn sha256_repository_is_rejected_instead_of_misread_as_sha1() {
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn tracked_user_cayw_named_file_is_readable_by_history_and_status() {
     let root = Dir::new();
@@ -252,6 +262,9 @@ async fn tracked_user_cayw_named_file_is_readable_by_history_and_status() {
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn untracked_internal_lock_is_hidden_but_user_cayw_names_are_not() {
     let root = Dir::new();
@@ -311,6 +324,9 @@ async fn sparse_checkout_repository_is_rejected() {
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn local_filters_includes_fsmonitor_and_hooks_never_execute() {
     let root = Dir::new();
@@ -375,6 +391,9 @@ async fn local_filters_includes_fsmonitor_and_hooks_never_execute() {
     );
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn explicit_empty_filemode_is_false_and_matches_real_git() {
     let root = Dir::new();
@@ -406,6 +425,9 @@ async fn explicit_empty_filemode_is_false_and_matches_real_git() {
     assert_eq!(stdout(&result), "", "snapshot must agree with real Git");
 }
 
+// Git read/write capabilities need a macOS directory handle path (F_GETPATH)
+// and fail closed on Linux; see the Linux fail-closed test in cayw-host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn explicit_empty_sparse_checkout_is_false_and_allowed() {
     let root = Dir::new();

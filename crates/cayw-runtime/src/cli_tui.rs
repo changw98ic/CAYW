@@ -145,15 +145,28 @@ pub(super) async fn run_connected(
             _ = signals.recv() => (request.await, true),
         }
     };
-    if let Err(error) = attached {
-        let cleanup = cleanup_unattached(&client, &launch_id, Some(&mut child)).await;
+    let attached = match attached {
+        Ok(attached) => attached,
+        Err(error) => {
+            let cleanup = cleanup_unattached(&client, &launch_id, Some(&mut child)).await;
+            client.close().await;
+            return match cleanup {
+                Ok(()) => Err(format!("Client 未能接管终端界面：{error}").into()),
+                Err(cleanup) => Err(format!(
+                    "Client 未能接管终端界面：{error}；本地清理也未确认：{cleanup}"
+                )
+                .into()),
+            };
+        }
+    };
+    if attached["exited_before_attach"] == true && attached["supervised"] == false {
+        // Client did not adopt a live process. Only our own child's wait result
+        // can establish a clean early quit; never turn a crash into success.
+        let status = child.wait().await?;
+        let cleanup = cleanup_unattached(&client, &launch_id, None).await;
         client.close().await;
-        return match cleanup {
-            Ok(()) => Err(format!("Client 未能接管终端界面：{error}").into()),
-            Err(cleanup) => {
-                Err(format!("Client 未能接管终端界面：{error}；本地清理也未确认：{cleanup}").into())
-            }
-        };
+        cleanup?;
+        return tui_exit(status, attach_interrupted);
     }
 
     let mut interrupted = attach_interrupted;
@@ -176,6 +189,10 @@ pub(super) async fn run_connected(
         .await;
     client.close().await;
     detach?;
+    tui_exit(status, interrupted)
+}
+
+fn tui_exit(status: std::process::ExitStatus, interrupted: bool) -> Result<(), Box<dyn Error>> {
     if status.success() || interrupted {
         Ok(())
     } else {
@@ -218,4 +235,17 @@ async fn stop_attached(
     );
     stop?;
     Ok(status?)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn early_tui_exit_uses_actual_child_status() {
+        assert!(tui_exit(std::process::ExitStatus::from_raw(0), false).is_ok());
+        assert!(tui_exit(std::process::ExitStatus::from_raw(7 << 8), false).is_err());
+        assert!(tui_exit(std::process::ExitStatus::from_raw(2), false).is_err());
+    }
 }

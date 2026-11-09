@@ -298,19 +298,19 @@ impl CleanupRecords {
 }
 
 fn observe_supervisor() -> Result<cayw_host::ProcessIdentity, RuntimeError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         cayw_host::ProcessIdentity::observe(std::process::id()).map_err(|error| {
             RuntimeError::Worker(format!("observe background supervisor: {error}"))
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     Err(RuntimeError::Worker(
         "background process identity is unavailable on this platform".into(),
     ))
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn require_stopped_with(
     identity: cayw_host::ProcessIdentity,
     probe: impl FnOnce(cayw_host::ProcessIdentity) -> std::io::Result<bool>,
@@ -325,11 +325,11 @@ fn require_stopped_with(
 }
 
 fn require_stopped(identity: cayw_host::ProcessIdentity) -> Result<(), RuntimeError> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         require_stopped_with(identity, cayw_host::ProcessIdentity::is_running)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = identity;
         Err(RuntimeError::Worker(
@@ -1107,7 +1107,7 @@ impl BackgroundRegistry {
                 "background task executor identity is incomplete".into(),
             ));
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             match executor_id.is_running() {
                 Ok(true) => {}
@@ -1129,7 +1129,7 @@ impl BackgroundRegistry {
             )?;
             Ok(view)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = executor_id;
             Err(RuntimeError::Worker(

@@ -165,10 +165,33 @@ cayw doctor --workspace /你的项目
 在 macOS arm64 源码目录运行：
 
 ```sh
+# 冷缓存构建先准备两个锁定 workspace 的依赖（此步可能联网）
+cargo fetch --locked --target aarch64-apple-darwin
+cargo fetch --locked --target aarch64-apple-darwin --manifest-path examples/headless-client/Cargo.toml
 sh scripts/package-cli.sh /新的输出目录
 ```
 
-安装包生成 `BUILD.json`、`THIRD-PARTY-NOTICES`、`SHA256SUMS` 和 `install.sh`，并附带需要单独分发的第三方许可文本。许可清单按锁定依赖和实际打包 feature 离线生成；许可证不在允许范围或缺少所需文本时，打包失败。上述文件都进入 `SHA256SUMS`。脚本不联网、不使用 sudo、不修改 shell 配置。
+安装包包含四个真实程序（`cayw`、`cayw-client`、`cayw-tui`、`cayw-webui`），其中 `cayw-client` 从独立的 `examples/headless-client` workspace 构建。固定目标为 `aarch64-apple-darwin`，Runtime 只启用 `plugins`，不是所有 feature/plugin 的发行包；不包含 `pi-compat`、`strongflow` 或其他可选组合的验收承诺。
+
+安装包生成 `BUILD.json`、`THIRD-PARTY-NOTICES`、`SHA256SUMS` 和 `install.sh`，并附带需要单独分发的第三方许可文本。许可清单按锁定依赖和实际打包 feature 离线生成；许可证不在允许范围或缺少所需文本时，打包失败。上述文件都进入 `SHA256SUMS`。构建要求干净的已提交源码，并拒绝构建过程中已提交版本或跟踪源码发生变化。`BUILD.json` 留在包中，不会复制为安装目录的版本注册表。安装不联网、不使用 sudo、不修改 shell 配置。升级须先正常退出全部 CAYW；运行中拒绝、回滚和强制中断后的人工恢复限制见[安装指南](headless-chat.md#安装)。
+
+真实发行安装验收（仅 macOS arm64，输出目录必须不存在）：
+
+```sh
+python3 scripts/validate-release-install.py /发行包目录 /新的证据目录
+```
+
+该入口使用全新临时 HOME 和 CAYW_HOME，运行安装后的真实程序，覆盖无模型默认 TUI 的真实 PTY 启动/连接/Ctrl+Q 退出、WebUI/Client 启动、独立 IPC 客户端创建/查询 Session、执行任务明确拒绝、同目录及另一安装目录的运行中 Client 阻止升级、正常停止/重启、不同文件的替换拒绝与强制替换、持久 Session 保留，以及无需模型的固定响应离线文件任务。旧程序替换部分使用合成可执行文件，不是历史 release 或跨版本数据库迁移证据。TUI 只覆盖启动、连接及退出，不代替完整交互终端验收；不包含浏览器自动化。
+
+证据目录仅保存命令日志、构建清单、二进制摘要和 `summary.json`；临时 IPC 凭据与数据库不放入 CI artifact。任何失败或未确认清理都不能记为通过。Actions 中的发行 artifact 是候选包，不是已发布 release。
+
+安装器故障注入可独立复跑：
+
+```sh
+python3 scripts/test-install-cli.py
+```
+
+此脚本显式模拟 uname、进程列表和可执行文件，覆盖校验/替换拒绝、TERM 中断、安装后自检失败、完整回滚、SIGKILL 留存备份及失败回滚后的再次安装拒绝。这些是合成 shell 流程测试，不是 macOS 产品通过证据；真实包验收仍需上面的 macOS 命令。
 
 主要复跑入口：
 

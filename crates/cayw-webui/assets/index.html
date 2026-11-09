@@ -136,8 +136,9 @@
       <button id="save-account" type="submit" disabled>保存账号</button>
     </form>
     <button id="refresh-account" type="button" class="secondary">刷新账号状态</button>
-    <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。密钥可明文保存在当前工作区的普通私有配置文件；无认证本地服务可以留空。保存不发送模型请求。</p>
+    <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。密钥可明文保存在当前工作区的普通私有配置文件。编辑时默认保留原认证；更改服务、接口、地址或版本后，须重新输入密钥或明确移除认证。保存不发送模型请求。</p>
     <div id="model-profiles"></div>
+    <button id="new-model-profile" type="button" class="secondary">新建模型方案</button>
     <form id="model-settings-form">
       <label>方案名称<input name="name" required maxlength="80" pattern="[a-zA-Z0-9_.\-]+" placeholder="daily"></label>
       <label>服务<select name="service"><option value="openai">OpenAI / 兼容服务</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="magpie">Magpie</option></select></label>
@@ -145,9 +146,9 @@
       <label>服务地址<input name="base_url" type="url" required value="https://api.openai.com/v1"></label>
       <label>模型名称<input name="id" required maxlength="256"></label>
       <label>API 版本<input name="api_version" required value="v1"></label>
-      <label>API 密钥（可选，明文保存）<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="无认证服务请留空"></label>
-      <p id="model-api-key-status" class="small muted">新方案留空表示服务不需要认证。</p>
-      <label class="confirm-label"><input name="clear_api_key" type="checkbox">清除这个方案已经保存的 API 密钥</label>
+      <label>认证方式<select name="credential"><option value="remove">不使用认证 / 移除密钥</option><option id="keep-model-credential" value="keep" disabled>保留已有认证</option><option value="replace">设置 / 更换密钥</option></select></label>
+      <p id="model-credential-status" class="small muted" role="status">新方案默认不使用认证。</p>
+      <label>新的 API 密钥（明文保存）<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="选择设置 / 更换密钥后输入" disabled></label>
       <label>单次输出 token 上限<input name="max_output_tokens" type="number" required min="1" max="9007199254740991" value="4096"></label>
       <button type="submit">保存模型方案</button>
     </form>

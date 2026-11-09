@@ -107,9 +107,84 @@ struct Name {
 #[serde(deny_unknown_fields)]
 struct Put {
     name: String,
-    model: ProviderConfig,
+    model: Value,
+    #[serde(default)]
+    credential: Option<CredentialUpdate>,
     #[serde(default)]
     clear_api_key: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CredentialUpdate {
+    Keep,
+    Replace,
+    Remove,
+}
+
+impl Put {
+    fn resolve_model(&self, previous: Option<&ProviderConfig>) -> Result<ProviderConfig> {
+        // Keep old callers compatible: a supplied key replaces, explicit null
+        // removes, and an omitted key preserves an existing profile. Omission
+        // still means no authentication when creating a new profile.
+        let credential = if self.clear_api_key {
+            if self.model.get("api_key").is_some_and(|key| !key.is_null()) {
+                return Err("cannot set and clear api_key in the same update".into());
+            }
+            if matches!(
+                self.credential,
+                Some(CredentialUpdate::Keep | CredentialUpdate::Replace)
+            ) {
+                return Err("clear_api_key contradicts the credential action".into());
+            }
+            CredentialUpdate::Remove
+        } else {
+            self.credential
+                .unwrap_or_else(|| match self.model.get("api_key") {
+                    Some(Value::Null) => CredentialUpdate::Remove,
+                    Some(_) => CredentialUpdate::Replace,
+                    None => CredentialUpdate::Keep,
+                })
+        };
+        let mut model = self.model.clone();
+        match credential {
+            CredentialUpdate::Keep => {
+                if model.get("api_key").is_some() {
+                    return Err("keep credential must not include api_key".into());
+                }
+                if let Some(previous) = previous {
+                    if previous.has_api_key() {
+                        let public = previous.public_view();
+                        // Compare the full endpoint and adapter, including path
+                        // and scheme. Never reuse a stored secret at a changed
+                        // destination, even when the caller explicitly says keep.
+                        if ["service", "api", "base_url", "api_version"]
+                            .iter()
+                            .any(|field| model.get(*field) != public.get(*field))
+                        {
+                            return Err("endpoint or adapter changed; explicitly replace or remove the credential".into());
+                        }
+                        model["api_key"] = serde_json::to_value(previous)?["api_key"].clone();
+                    }
+                } else if self.credential.is_some() {
+                    return Err("cannot keep a credential for a missing model profile".into());
+                }
+            }
+            CredentialUpdate::Replace => {
+                if model.get("api_key").and_then(Value::as_str).is_none() {
+                    return Err("replace credential requires a nonempty api_key".into());
+                }
+            }
+            CredentialUpdate::Remove => {
+                if model.get("api_key").is_some_and(|key| !key.is_null()) {
+                    return Err("remove credential must not include an api_key value".into());
+                }
+            }
+        }
+        let model: ProviderConfig = parse(model)?;
+        model.validate()?;
+        Ok(model)
+    }
 }
 
 fn name(value: &str) -> Result<()> {
@@ -124,17 +199,14 @@ fn name(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn put_model_profile(models: &mut Models, mut put: Put) -> Result<ProviderConfig> {
+fn put_model_profile(models: &mut Models, put: Put) -> Result<ProviderConfig> {
     name(&put.name)?;
-    put.model
-        .merge_saved_api_key(models.models.get(&put.name), put.clear_api_key)?;
-    put.model.validate()?;
+    let model = put.resolve_model(models.models.get(&put.name))?;
     if models.models.len() >= 64 && !models.models.contains_key(&put.name) {
         return Err("at most 64 model profiles are supported".into());
     }
-    let selected = put.model.clone();
-    models.models.insert(put.name, put.model);
-    Ok(selected)
+    models.models.insert(put.name, model.clone());
+    Ok(model)
 }
 
 fn read_models(paths: &LocalPaths) -> Result<(Option<Vec<u8>>, Models)> {
@@ -429,7 +501,7 @@ pub async fn run(mut args: impl Iterator<Item = String>, plugin: bool) -> Result
     let action = args.next().ok_or("expected list / add / use / remove (plugins: list / install / update / enable / disable / remove)")?;
     if action == "--help" {
         println!(
-            "cayw models list|add NAME --file MODEL.json|use NAME|remove NAME [--workspace DIR]\ncayw plugins list|install --file LOCAL.json|update NAME --file LOCAL.json|enable NAME --approve-process|disable NAME|remove NAME [--workspace DIR]\nLocal External workspace architecture descriptors only; no downloads. Install/update do not execute code. Enable requires explicit process approval."
+            "cayw models list|add NAME --file MODEL.json|use NAME|remove NAME [--workspace DIR]\nFor an existing model profile, omitting api_key preserves its credential; api_key:null explicitly removes it. Changing the endpoint or adapter requires a supplied key or explicit null. New profiles without api_key use no authentication.\ncayw plugins list|install --file LOCAL.json|update NAME --file LOCAL.json|enable NAME --approve-process|disable NAME|remove NAME [--workspace DIR]\nLocal External workspace architecture descriptors only; no downloads. Install/update do not execute code. Enable requires explicit process approval."
         );
         return Ok(());
     }
@@ -501,9 +573,15 @@ mod model_tests {
     }
 
     fn update(model: ProviderConfig, clear_api_key: bool) -> Put {
+        let has_api_key = model.has_api_key();
+        let mut model = serde_json::to_value(model).unwrap();
+        if !has_api_key {
+            model.as_object_mut().unwrap().remove("api_key");
+        }
         Put {
             name: "local".into(),
             model,
+            credential: None,
             clear_api_key,
         }
     }
@@ -567,11 +645,37 @@ mod model_tests {
         )
         .err()
         .expect("moving a saved key without a replacement must be rejected");
-        assert!(error.to_string().contains("credential destination"));
+        assert!(error.to_string().contains("endpoint or adapter changed"));
         assert_eq!(
             serde_json::to_value(&models.models["local"]).unwrap()["api_key"],
             "saved-secret"
         );
+    }
+
+    #[test]
+    fn clear_api_key_alias_is_compatible_but_rejects_conflicting_actions() {
+        let previous = profile("https://api.example/v1", Some("saved-secret"));
+        for action in [None, Some("remove")] {
+            let mut params = json!({
+                "name":"local",
+                "model":previous.public_view(),
+                "clear_api_key":true
+            });
+            params["model"]
+                .as_object_mut()
+                .unwrap()
+                .remove("authentication");
+            if let Some(action) = action {
+                params["credential"] = json!(action);
+            }
+            let put: Put = parse(params).unwrap();
+            assert!(!put.resolve_model(Some(&previous)).unwrap().has_api_key());
+        }
+        for action in ["keep", "replace"] {
+            let mut put = update(profile("https://api.example/v1", None), true);
+            put.credential = Some(parse(json!(action)).unwrap());
+            assert!(put.resolve_model(Some(&previous)).is_err());
+        }
     }
 
     #[test]
@@ -616,5 +720,183 @@ mod tests {
 
         assert!(error_outcome_unknown(&error));
         assert_eq!(settings_error_code(&error), "settings_outcome_unknown");
+    }
+}
+
+#[cfg(test)]
+mod model_credential_tests {
+    use super::*;
+
+    fn model() -> Value {
+        json!({
+            "service":"openai", "api":"chat_completions", "id":"synthetic-model",
+            "base_url":"https://fixture.invalid/v1", "api_version":"v1",
+            "max_output_tokens":4096
+        })
+    }
+
+    fn stored() -> ProviderConfig {
+        let mut value = model();
+        value["api_key"] = json!("SYNTHETIC_NOT_A_REAL_KEY");
+        parse(value).unwrap()
+    }
+
+    fn put(model: Value, credential: Option<CredentialUpdate>) -> Put {
+        Put {
+            name: "daily".into(),
+            model,
+            credential,
+            clear_api_key: false,
+        }
+    }
+
+    #[test]
+    fn unrelated_edit_preserves_key_for_explicit_and_legacy_callers() {
+        for credential in [None, Some(CredentialUpdate::Keep)] {
+            let mut changed = model();
+            changed["max_output_tokens"] = json!(2048);
+            changed["id"] = json!("synthetic-model-2");
+            let resolved = put(changed, credential)
+                .resolve_model(Some(&stored()))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&resolved).unwrap()["api_key"],
+                "SYNTHETIC_NOT_A_REAL_KEY"
+            );
+            assert_eq!(resolved.public_view()["max_output_tokens"], 2048);
+            assert_eq!(resolved.public_view()["authentication"], "plain_file");
+            assert!(resolved.public_view().get("api_key").is_none());
+        }
+    }
+
+    #[test]
+    fn endpoint_or_adapter_changes_never_reuse_stored_credentials() {
+        for (field, value) in [
+            ("base_url", "https://other.invalid/v1"),
+            ("base_url", "http://fixture.invalid/v1"),
+            ("base_url", "https://fixture.invalid/other"),
+            ("base_url", "https://fixture.invalid:8443/v1"),
+            ("service", "magpie"),
+            ("api", "responses"),
+            ("api_version", "v2"),
+        ] {
+            for credential in [None, Some(CredentialUpdate::Keep)] {
+                let mut changed = model();
+                changed[field] = json!(value);
+                let result = put(changed, credential).resolve_model(Some(&stored()));
+                let error = result.err().unwrap().to_string();
+                assert!(error.contains("explicitly replace or remove"));
+                assert!(!error.contains("SYNTHETIC_NOT_A_REAL_KEY"));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_replacement_and_removal_allow_changed_endpoint() {
+        for credential in [None, Some(CredentialUpdate::Replace)] {
+            let mut changed = model();
+            changed["base_url"] = json!("https://other.invalid/v1");
+            changed["api_key"] = json!("SYNTHETIC_REPLACEMENT");
+            let resolved = put(changed, credential)
+                .resolve_model(Some(&stored()))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(resolved).unwrap()["api_key"],
+                "SYNTHETIC_REPLACEMENT"
+            );
+        }
+        for credential in [None, Some(CredentialUpdate::Remove)] {
+            let mut changed = model();
+            changed["base_url"] = json!("https://other.invalid/v1");
+            changed["api_key"] = Value::Null;
+            assert!(
+                !put(changed, credential)
+                    .resolve_model(Some(&stored()))
+                    .unwrap()
+                    .has_api_key()
+            );
+        }
+        assert!(
+            !put(model(), Some(CredentialUpdate::Remove))
+                .resolve_model(Some(&stored()))
+                .unwrap()
+                .has_api_key()
+        );
+    }
+
+    #[test]
+    fn new_profiles_and_no_auth_edits_remain_supported() {
+        for credential in [None, Some(CredentialUpdate::Remove)] {
+            assert!(
+                !put(model(), credential)
+                    .resolve_model(None)
+                    .unwrap()
+                    .has_api_key()
+            );
+        }
+        assert!(
+            put(model(), Some(CredentialUpdate::Keep))
+                .resolve_model(None)
+                .is_err()
+        );
+        let unauthenticated: ProviderConfig = parse(model()).unwrap();
+        let mut changed = model();
+        changed["base_url"] = json!("https://other.invalid/v1");
+        assert!(
+            !put(changed, Some(CredentialUpdate::Keep))
+                .resolve_model(Some(&unauthenticated))
+                .unwrap()
+                .has_api_key()
+        );
+        let mut authenticated = model();
+        authenticated["api_key"] = json!("SYNTHETIC_NEW_KEY");
+        for credential in [None, Some(CredentialUpdate::Replace)] {
+            assert!(
+                put(authenticated.clone(), credential)
+                    .resolve_model(None)
+                    .unwrap()
+                    .has_api_key()
+            );
+        }
+    }
+
+    #[test]
+    fn contradictory_and_invalid_credential_updates_fail_closed() {
+        for credential in [CredentialUpdate::Keep, CredentialUpdate::Remove] {
+            let mut value = model();
+            value["api_key"] = json!("SYNTHETIC_NOT_A_REAL_KEY");
+            assert!(
+                put(value, Some(credential))
+                    .resolve_model(Some(&stored()))
+                    .is_err()
+            );
+        }
+        for value in [
+            Value::Null,
+            json!(""),
+            json!(" "),
+            json!(7),
+            json!("bad\nkey"),
+        ] {
+            let mut changed = model();
+            changed["api_key"] = value;
+            assert!(
+                put(changed, Some(CredentialUpdate::Replace))
+                    .resolve_model(Some(&stored()))
+                    .is_err()
+            );
+        }
+        assert!(
+            put(model(), Some(CredentialUpdate::Replace))
+                .resolve_model(None)
+                .is_err()
+        );
+        let mut unknown_field = model();
+        unknown_field["unknown"] = json!(true);
+        assert!(put(unknown_field, None).resolve_model(None).is_err());
+        assert!(
+            parse::<Put>(json!({"name":"daily","model":model(),"credential":"invalid"})).is_err()
+        );
+        assert!(put(json!([]), None).resolve_model(None).is_err());
     }
 }

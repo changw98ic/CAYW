@@ -160,6 +160,9 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .unwrap()
             .max_output_bytes = 8192;
     });
+    // Terminal PTY profiles are macOS-only; Linux rejects them in Host::new
+    // (pinned by `pty_terminal_profiles_are_rejected_off_macos`).
+    #[cfg(target_os = "macos")]
     changed(&root, "terminal profile I/O mode", |config| {
         config
             .terminal_handoffs
@@ -261,4 +264,33 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
     changed(&root, "frozen read mode", |config| {
         config.frozen_reads = true;
     });
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn pty_terminal_profiles_are_rejected_off_macos() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let mut config = config();
+    config
+        .terminal_handoffs
+        .as_mut()
+        .unwrap()
+        .profiles
+        .get_mut("terminal")
+        .unwrap()
+        .io = ProcessIo::Pty {
+        columns: 80,
+        rows: 24,
+    };
+    let Err(error) = Host::new(&root, Arc::new(Allow), Arc::new(Audit), config) else {
+        panic!("a Pty terminal profile must be rejected off macOS");
+    };
+    assert!(
+        error
+            .message
+            .contains("terminal PTY is only supported on macOS"),
+        "{error:?}"
+    );
 }

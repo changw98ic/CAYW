@@ -471,6 +471,7 @@ async fn failed_process_records_keep_the_original_permit_after_real_child_cleanu
                         ResourceRequest::default(),
                     )
                     .unwrap();
+                println!("RECORD_FAILURE_BEGIN phase={phase} panics={panics} io={io:?}");
                 let result = tokio::time::timeout(
                     Duration::from_secs(15),
                     runner.run_in_directory_with_permit(
@@ -492,7 +493,41 @@ async fn failed_process_records_keep_the_original_permit_after_real_child_cleanu
                     ),
                 )
                 .await
-                .expect("the original supervisor did not finish real OS cleanup");
+                .unwrap_or_else(|error| {
+                    let identities = records.identities.lock().unwrap().clone();
+                    let running = identities
+                        .iter()
+                        .map(|identity| (*identity, identity.is_running()))
+                        .collect::<Vec<_>>();
+                    let markers = ["root.pid", "middle.pid", "leaf.pid"]
+                        .map(|name| (name, fs::read_to_string(directory.join(name))));
+                    // Report only this fixture's group, without command arguments.
+                    // A live member absent from the observer can distinguish a
+                    // fork/termination race from an unreadable recorded identity.
+                    let group = identities
+                        .first()
+                        .map(|identity| identity.process_group.to_string());
+                    let processes = std::process::Command::new("/bin/ps")
+                        .args(["-axo", "pid=,ppid=,pgid=,stat="])
+                        .output()
+                        .map(|output| {
+                            String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .filter(|line| {
+                                    group.as_deref().is_some_and(|group| {
+                                        line.split_whitespace().nth(2) == Some(group)
+                                    })
+                                })
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        });
+                    panic!(
+                        "the original supervisor did not finish real OS cleanup: {error:?}; phase={phase} panics={panics} io={io:?}; running={running:?}; markers={markers:?}; group_processes={processes:?}; active={} reserved={} failure={:?}",
+                        runner.active_count(),
+                        scheduler.usage().active_tasks,
+                        runner.cleanup_failure()
+                    );
+                });
                 let identities = records.identities.lock().unwrap().clone();
                 let original = identities
                     .first()

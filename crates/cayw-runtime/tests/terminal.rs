@@ -1,7 +1,9 @@
 //! Real Runtime -> Cell -> Host terminal path. Every host process is a real
 //! child selected by application configuration; the synthetic model only reads
 //! the session ID returned by the Host and never supplies a program or argv.
-use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
+use cayw_ai::{
+    AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider, StopReason,
+};
 use cayw_core::{ApprovalRequest, CapabilityOutcome, CoreEvent, SessionState};
 use cayw_host::{ProcessIo, Profile, ProfileKind, TerminalConfig, TerminalLimits};
 use cayw_runtime::{
@@ -14,7 +16,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::time::timeout;
+use tokio::{sync::Semaphore, time::timeout};
 
 const WATCHDOG: Duration = Duration::from_secs(20);
 
@@ -27,6 +29,35 @@ impl Provider for Script {
             &format!("terminal-{}", request.messages.len()),
         );
         Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+    }
+}
+
+/// Hold only the existing final response, not another model/tool call. Process
+/// registration does not guarantee that the child has run its PID publication.
+struct CompletionGate {
+    script: &'static str,
+    entered: Arc<Semaphore>,
+    release: Arc<Semaphore>,
+}
+impl Provider for CompletionGate {
+    fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantStream {
+        let message = cayw_runtime::fixture::script_response(
+            &request,
+            self.script,
+            &format!("terminal-{}", request.messages.len()),
+        );
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        Box::pin(async_stream::stream! {
+            if message.stop_reason == StopReason::Stop {
+                entered.add_permits(1);
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    permit = release.acquire() => permit.unwrap().forget(),
+                }
+            }
+            yield AssistantEvent::Done { message };
+        })
     }
 }
 
@@ -224,9 +255,13 @@ async fn runtime_terminal_success_reads_the_actual_host_returned_session() {
 #[tokio::test]
 async fn runtime_terminal_live_session_blocks_early_task_completion_and_reaps_the_process() {
     let root = root();
-    let provider = Arc::new(Script(
-        "local t = cayw.call('exec_command',{profile='terminal'})\nreturn t.session_id",
-    ));
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let provider = Arc::new(CompletionGate {
+        script: "local t = cayw.call('exec_command',{profile='terminal'})\nreturn t.session_id",
+        entered: entered.clone(),
+        release: release.clone(),
+    });
     let config = runtime_config(
         profile(
             fixture(),
@@ -239,21 +274,31 @@ async fn runtime_terminal_live_session_blocks_early_task_completion_and_reaps_th
     );
     let rt = open(root.path(), provider, config);
     let id = rt.create(None).unwrap().id;
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
     let run = {
         let rt = rt.clone();
         let id = id.clone();
         tokio::spawn(async move {
-            rt.prompt(
-                &id,
-                "start a terminal and finish early",
-                CancellationToken::new(),
-            )
-            .await
+            rt.prompt(&id, "start a terminal and finish early", cancel)
+                .await
         })
     };
     // The fixture writes this PID and then waits for a release file the test
     // never creates, so its absence after the prompt proves Runtime cleanup.
     let pid = ready(&root.path().join("leaf.pid")).await;
+    timeout(WATCHDOG, entered.acquire())
+        .await
+        .expect("the provider did not reach its final response")
+        .unwrap()
+        .forget();
+    assert!(alive(pid), "the terminal must be live before completion");
+    assert!(!run.is_finished(), "completion must still be gated");
+    // Allow the same final response only after observing the child. Otherwise
+    // correct Runtime cleanup can kill it before it ever publishes leaf.pid.
+    // This gate does not release the child: it must still block completion and
+    // be reaped by Runtime, not exit voluntarily via the fixture release file.
+    release.add_permits(1);
     let error = timeout(WATCHDOG, run)
         .await
         .unwrap()

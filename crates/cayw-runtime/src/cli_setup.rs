@@ -6,20 +6,26 @@ use serde_json::{Value, json};
 use std::{
     error::Error,
     fs::File,
-    io::{self, BufRead, Read, Write},
+    io::{self, BufRead, IsTerminal, Read, Write},
     path::Path,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub fn configure_local(paths: &LocalPaths) -> Result<bool> {
-    configure_local_with(paths, &mut io::stdin().lock(), &mut io::stderr().lock())
+    configure_local_with(
+        paths,
+        &mut io::stdin().lock(),
+        &mut io::stderr().lock(),
+        io::stdin().is_terminal(),
+    )
 }
 
 fn configure_local_with(
     paths: &LocalPaths,
     input: &mut impl BufRead,
     output: &mut impl Write,
+    terminal: bool,
 ) -> Result<bool> {
     if let Some(existing) = crate::cli_settings::selected_model(paths)? {
         writeln!(
@@ -28,7 +34,7 @@ fn configure_local_with(
             existing.id()
         )?;
     }
-    let Some(model) = read_model(input, output)? else {
+    let Some(model) = read_model(input, output, terminal)? else {
         writeln!(output, "已取消配置，原模型方案未改动。")?;
         return Ok(false);
     };
@@ -49,10 +55,20 @@ fn configure_local_with(
 }
 
 pub fn configure(path: &Path) -> Result<bool> {
-    configure_with(path, &mut io::stdin().lock(), &mut io::stderr().lock())
+    configure_with(
+        path,
+        &mut io::stdin().lock(),
+        &mut io::stderr().lock(),
+        io::stdin().is_terminal(),
+    )
 }
 
-fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write) -> Result<bool> {
+fn configure_with(
+    path: &Path,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    terminal: bool,
+) -> Result<bool> {
     let original = match File::open(path) {
         Ok(file) => {
             let mut bytes = Vec::new();
@@ -79,7 +95,7 @@ fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write
             model.id()
         )?;
     }
-    let Some(model) = read_model(input, output)? else {
+    let Some(model) = read_model(input, output, terminal)? else {
         writeln!(output, "已取消配置，原配置未改动。")?;
         return Ok(false);
     };
@@ -113,7 +129,11 @@ fn configure_with(path: &Path, input: &mut impl BufRead, output: &mut impl Write
     Ok(true)
 }
 
-fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Option<ProviderConfig>> {
+fn read_model(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    terminal: bool,
+) -> Result<Option<ProviderConfig>> {
     writeln!(
         output,
         "选择模型服务：1) OpenAI  2) Anthropic  3) Gemini  4) Magpie"
@@ -196,13 +216,7 @@ fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Optio
     else {
         return Ok(None);
     };
-    let Some(api_key) = answer(
-        input,
-        output,
-        "模型密钥（可留空，表示该服务不需要认证）：",
-        Some(""),
-    )?
-    else {
+    let Some(api_key) = secret_answer(input, output, terminal)? else {
         return Ok(None);
     };
     let api_key = (!api_key.is_empty()).then_some(api_key);
@@ -224,6 +238,33 @@ fn read_model(input: &mut impl BufRead, output: &mut impl Write) -> Result<Optio
     }))?;
     model.validate()?;
     Ok(Some(model))
+}
+
+fn secret_answer(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    terminal: bool,
+) -> io::Result<Option<String>> {
+    let prompt = "模型密钥（输入隐藏；可留空，表示该服务不需要认证）：";
+    if !terminal {
+        // Keep redirected input and synthetic CLI fixtures independent of /dev/tty.
+        return answer(input, output, prompt, Some(""));
+    }
+    write!(output, "{prompt}")?;
+    output.flush()?;
+    // Never fall back to an echoed terminal read if hiding input fails.
+    let value = match rpassword::read_password() {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if value.len() > 4096 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "输入超过 4096 字节，未保存配置",
+        ));
+    }
+    Ok(Some(value.trim().to_owned()))
 }
 
 fn answer(
