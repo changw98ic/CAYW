@@ -47,11 +47,12 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 
-      - name: cargo test
-        run: cargo test --workspace --locked
-
+      # Report lint failures before the long-running workspace tests.
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
 
   rust-linux:
     name: linux / fmt / check / test / clippy
@@ -95,11 +96,12 @@ jobs:
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 
-      - name: cargo test
-        run: cargo test --workspace --locked
-
+      # Report lint failures before the long-running workspace tests.
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
 
   runtime-product:
     name: macOS / product features / crash recovery

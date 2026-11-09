@@ -877,6 +877,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn plugin_with(
         identity: Option<PluginProcessIdentity>,
         cleanup: Result<(), PluginError>,
