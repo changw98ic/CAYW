@@ -650,7 +650,13 @@ async fn broken_stdin_error_reaches_writer_stdout_and_repeatable_wait() {
     )
     .await;
     let pid = marker(&directory, "stdin-closed.pid").await;
-    let error = process.stdin.write_all(b"frame\n").await.unwrap_err();
+    // A concurrent fork can temporarily retain a CLOEXEC copy of the pipe's
+    // read end until exec. The marker proves this fixture closed stdin, not
+    // that those copies are gone: a small write can still fit in the pipe.
+    // Keep one frame larger than the pipe buffer pending until those readers
+    // close, so write_all must observe BrokenPipe rather than buffered success.
+    let frame = vec![b'f'; limits().max_write_bytes];
+    let error = process.stdin.write_all(&frame).await.unwrap_err();
     assert!(
         matches!(error, DeviceError::Io { operation: "write stdin", source } if source.kind() == std::io::ErrorKind::BrokenPipe)
     );
