@@ -18,7 +18,11 @@ fn main() {
             let root = PathBuf::from(&args[1]);
             // Readers use this marker as readiness evidence, so publish only a
             // complete PID rather than exposing the create/write interval.
-            std::fs::write(root.join("leaf.pid.pending"), std::process::id().to_string()).unwrap();
+            std::fs::write(
+                root.join("leaf.pid.pending"),
+                std::process::id().to_string(),
+            )
+            .unwrap();
             std::fs::rename(root.join("leaf.pid.pending"), root.join("leaf.pid")).unwrap();
             wait_for(&root.join("release"));
         }
