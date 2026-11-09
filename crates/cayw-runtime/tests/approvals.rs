@@ -208,6 +208,41 @@ async fn sdk_peer_cancellation_closes_pending_approval_before_any_effect() {
 }
 
 #[tokio::test]
+async fn cancelled_approval_wait_recovers_and_accepts_a_new_prompt_without_effect() {
+    // Regression: cancelling while an approval is pending must leave a known
+    // NotExecuted capability, not a permanent recovery failure. After explicit
+    // recovery the same Session must accept a new prompt, and no Host call may
+    // have occurred for either attempt.
+    let svc = service();
+    let lifetime = Duration::from_secs(10);
+    let (dir, rt, id) = setup(TWICE, svc.clone(), lifetime);
+    let controller = peer(&dir, lifetime);
+    let task = start(&rt, &id);
+    let pending = approval(&controller, &id).await;
+    let original = controller.task(&pending.input.task_id).unwrap();
+    assert!(controller.cancel(&original.cancel_target()).unwrap());
+    let _ = task.await.unwrap();
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+
+    let recovered = controller.recover(&id).unwrap();
+    assert_eq!(recovered.state, cayw_core::SessionState::Idle);
+    assert!(recovered.pending_approvals.is_empty());
+    assert!(controller.grants(&id).unwrap().is_empty());
+
+    // The first prompt cancelled only the original attempt. The same Session
+    // must accept a second prompt from its owning Runtime and request approval
+    // again without any Host effect.
+    let next = start(&rt, &id);
+    let pending = approval(&controller, &id).await;
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    let next_task = controller.task(&pending.input.task_id).unwrap();
+    assert!(controller.cancel(&next_task.cancel_target()).unwrap());
+    let _ = next.await.unwrap();
+    assert_eq!(svc.calls.load(Ordering::SeqCst), 0);
+    assert!(controller.grants(&id).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn sdk_peer_approval_storage_failure_closes_admission_until_recovery() {
     // Break caught: a peer cannot cancel the owner's in-memory token. A failed
     // durable decision must close the persistent fence and retain the slot.

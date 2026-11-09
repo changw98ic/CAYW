@@ -5,6 +5,10 @@
 //! and that memory is bounded during the receive process.
 //!
 //! Uses deterministic channel handshakes instead of fixed sleep delays.
+//!
+//! These fixtures connect to loopback, so they need the debug-only
+//! `ReqwestTransport::for_local_tests` constructor.
+#![cfg(debug_assertions)]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -139,7 +143,7 @@ async fn chunked_exceeding_max_terminates_early_without_waiting_for_eof() {
 
     let guard = ServerGuard::new(release_tx, server_handle);
 
-    let transport = ReqwestTransport::new().expect("transport");
+    let transport = ReqwestTransport::for_local_tests();
     let url = format!("http://127.0.0.1:{port}/chunked");
 
     let fetch_result =
@@ -188,7 +192,7 @@ async fn missing_content_length_stream_terminates_on_exceeding_max() {
 
     let guard = ServerGuard::new(release_tx, server_handle);
 
-    let transport = ReqwestTransport::new().expect("transport");
+    let transport = ReqwestTransport::for_local_tests();
     let url = format!("http://127.0.0.1:{port}/close_delimited");
 
     let fetch_result =
@@ -240,7 +244,7 @@ async fn forged_content_length_does_not_prevent_enforcement() {
 
     let guard = ServerGuard::new(release_tx, server_handle);
 
-    let transport = ReqwestTransport::new().expect("transport");
+    let transport = ReqwestTransport::for_local_tests();
     let url = format!("http://127.0.0.1:{port}/forged_len");
 
     let res = tokio::time::timeout(Duration::from_secs(10), transport.get(&url, 1000))
@@ -272,7 +276,7 @@ async fn declared_content_length_exceeding_max_fails_fast() {
 
     let guard = ThreadGuard::new(server_handle);
 
-    let transport = ReqwestTransport::new().expect("transport");
+    let transport = ReqwestTransport::for_local_tests();
     let url = format!("http://127.0.0.1:{port}/declared_too_large");
 
     let res = transport.get(&url, 1000).await.expect_err("must reject");
@@ -305,7 +309,7 @@ async fn exact_boundary_check() {
 
     let guard = ThreadGuard::new(server_handle);
 
-    let transport = ReqwestTransport::new().expect("transport");
+    let transport = ReqwestTransport::for_local_tests();
 
     // Exactly 500 bytes with limit 500 -> Ok
     let ok_url = format!("http://127.0.0.1:{port}/exact_fit");
@@ -367,7 +371,7 @@ async fn cancelling_future_aborts_promptly() {
 
     let guard = ThreadGuard::new(server_handle);
 
-    let transport = ReqwestTransport::new().expect("transport");
+    let transport = ReqwestTransport::for_local_tests();
     let url = format!("http://127.0.0.1:{port}/cancel");
 
     let mut fut = transport.get(&url, 1000);
@@ -395,4 +399,35 @@ async fn cancelling_future_aborts_promptly() {
     );
 
     guard.join();
+}
+
+/// The production constructor must reject loopback/private targets before any
+/// socket work. `for_local_tests` exists only for the streaming fixtures above.
+#[tokio::test]
+async fn default_transport_rejects_loopback_and_private_targets() {
+    let transport = ReqwestTransport::new().expect("transport");
+    for url in [
+        "http://127.0.0.1:9/",
+        "http://[::1]:9/",
+        "http://10.0.0.1/",
+        "http://192.168.1.1/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://localhost:9/",
+    ] {
+        let error = transport
+            .get(url, 1024)
+            .await
+            .expect_err("strict transport must reject non-public target");
+        assert_eq!(
+            error.diagnostic.class,
+            FailureClass::InvalidUrl,
+            "unexpected class for {url}: {:?}",
+            error.diagnostic
+        );
+        assert!(
+            error.diagnostic.message.contains("non-public"),
+            "unexpected message for {url}: {}",
+            error.diagnostic.message
+        );
+    }
 }

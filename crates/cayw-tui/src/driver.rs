@@ -47,7 +47,10 @@ impl Driver {
             }) {
                 app.request_failed(&id, method, error);
                 // Failed prompt admission stays blocked until a get confirms state.
-                if method == "session.prompt" {
+                if matches!(
+                    method,
+                    "session.prompt" | "session.prompt_with_model_budget"
+                ) {
                     self.next_tag = self.next_tag.wrapping_add(1);
                     let _ = transport.call(Request {
                         tag: self.next_tag,
@@ -129,7 +132,10 @@ impl Driver {
                         if app.connected
                             && matches!(
                                 request.method,
-                                "session.prompt" | "approval.decide" | "session.cancel"
+                                "session.prompt"
+                                    | "session.prompt_with_model_budget"
+                                    | "approval.decide"
+                                    | "session.cancel"
                             )
                         {
                             return vec![Command::Get { session_id: id }];
@@ -137,15 +143,29 @@ impl Driver {
                         return vec![];
                     }
                 };
+                if request.method == "model.budget.prepare_prompt" {
+                    return match app.model_budget_status(&id, value) {
+                        Ok(commands) => commands,
+                        Err(error) => {
+                            app.request_failed(&id, request.method, &error);
+                            vec![]
+                        }
+                    };
+                }
                 let applied = match request.method {
                     "session.list" => app.apply_list(value),
                     "session.create" | "session.fork" => app.upsert_snapshot(value, true),
-                    "session.get" | "session.prompt" => {
+                    "session.get" | "session.prompt" | "session.prompt_with_model_budget" => {
                         if value["id"].as_str() != Some(id.as_str()) {
                             Err("Snapshot response belongs to another session".into())
                         } else {
                             let applied = app.upsert_snapshot(value, false);
-                            if applied.is_ok() && request.method == "session.prompt" {
+                            if applied.is_ok()
+                                && matches!(
+                                    request.method,
+                                    "session.prompt" | "session.prompt_with_model_budget"
+                                )
+                            {
                                 app.prompt_completed(&id);
                             }
                             applied
@@ -172,9 +192,11 @@ impl Driver {
                 };
                 if let Err(error) = applied {
                     app.request_failed(&id, request.method, &error);
-                    if matches!(request.method, "session.get" | "session.prompt")
-                        && let Some(session) =
-                            app.sessions.iter_mut().find(|session| session.id == id)
+                    if matches!(
+                        request.method,
+                        "session.get" | "session.prompt" | "session.prompt_with_model_budget"
+                    ) && let Some(session) =
+                        app.sessions.iter_mut().find(|session| session.id == id)
                     {
                         session.synced = false;
                     }
@@ -183,7 +205,10 @@ impl Driver {
                 if app.connected
                     && matches!(
                         request.method,
-                        "session.prompt" | "session.cancel" | "approval.decide"
+                        "session.prompt"
+                            | "session.prompt_with_model_budget"
+                            | "session.cancel"
+                            | "approval.decide"
                     )
                 {
                     vec![Command::Get { session_id: id }]

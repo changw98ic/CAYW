@@ -21,7 +21,7 @@ async fn shutdown_interrupts_reconnect_and_closes_owned_work() {
 }
 
 #[tokio::test]
-async fn disconnected_mutation_is_rejected_without_queueing_for_reconnect() {
+async fn disconnected_budget_check_is_rejected_without_queueing_a_prompt() {
     use cayw_tui::{App, driver::Driver};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let address: SocketAddr = "127.0.0.1:1".parse().unwrap();
@@ -39,7 +39,7 @@ async fn disconnected_mutation_is_rejected_without_queueing_for_reconnect() {
             .unwrap()
             .unwrap();
         if let Update::Response { request, result } = &update
-            && request.method == "session.prompt"
+            && request.method == "model.budget.prepare_prompt"
         {
             assert!(
                 result
@@ -53,7 +53,7 @@ async fn disconnected_mutation_is_rejected_without_queueing_for_reconnect() {
     }
     assert_eq!(app.input.text(), "fixture prompt");
     assert!(app.selected().unwrap().messages.is_empty());
-    assert!(!app.selected().unwrap().can_prompt());
+    assert!(app.selected().unwrap().can_prompt());
     transport
         .watch(Some(Watch {
             session_id: "s1".into(),
@@ -160,6 +160,89 @@ impl RpcHandler for Fixture {
     }
 }
 
+#[derive(Clone, Copy)]
+enum BudgetCleanupTask {
+    Queued,
+    Running,
+    StaleAfterRead,
+}
+
+struct BudgetCleanupFixture {
+    task: BudgetCleanupTask,
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+#[async_trait]
+impl RpcHandler for BudgetCleanupFixture {
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        _cancel: CancellationToken,
+    ) -> Result<Value, RpcError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((method.to_owned(), params.clone()));
+        match method {
+            "task.enqueue" => {
+                assert_eq!(params, json!({"session_id":"s1","text":"budget prompt"}));
+                Ok(json!({
+                    "id":"budget-task","session_id":"s1","state":"queued",
+                    "worker_id":null,"attempt_id":null,"fence":0,"dispatches":0,
+                    "holds_slot":false,"cancel_requested":false
+                }))
+            }
+            "model.budget.continue" => {
+                assert_eq!(params["session_id"], "s1");
+                assert_eq!(params["task_id"], "budget-task");
+                Err(RpcError::new(
+                    "invalid_params",
+                    "fixture continuation grant rejected",
+                ))
+            }
+            "task.get" => {
+                assert_eq!(params, json!({"task_id":"budget-task"}));
+                match self.task {
+                    BudgetCleanupTask::Queued | BudgetCleanupTask::StaleAfterRead => Ok(json!({
+                        "id":"budget-task","session_id":"s1","state":"queued",
+                        "worker_id":null,"attempt_id":null,"fence":0,"dispatches":0,
+                        "holds_slot":false,"cancel_requested":false
+                    })),
+                    BudgetCleanupTask::Running => Ok(json!({
+                        "id":"budget-task","session_id":"s1","state":"running",
+                        "worker_id":"worker-1","attempt_id":"attempt-1","fence":7,
+                        "dispatches":1,"holds_slot":true,"cancel_requested":false
+                    })),
+                }
+            }
+            "session.cancel" => {
+                assert!(!matches!(self.task, BudgetCleanupTask::Running));
+                assert_eq!(
+                    params,
+                    json!({
+                        "session_id":"s1","task_id":"budget-task","worker_id":null,
+                        "attempt_id":null,"fence":0
+                    })
+                );
+                if matches!(self.task, BudgetCleanupTask::StaleAfterRead) {
+                    Err(RpcError::new(
+                        "stale_task",
+                        "fixture task was claimed after task.get",
+                    ))
+                } else {
+                    Ok(json!({"cancelled":true}))
+                }
+            }
+            "task.resume" => panic!("budget cleanup must not resume after a rejected grant"),
+            other => Err(RpcError::new(
+                "fixture_rejected",
+                format!("unexpected budget cleanup method {other}"),
+            )),
+        }
+    }
+}
+
 #[derive(Default)]
 struct WorkspaceRoutingFixture {
     calls: Mutex<Vec<Value>>,
@@ -239,6 +322,24 @@ async fn server(
     (cancel, task)
 }
 
+async fn budget_cleanup_server(
+    listener: TcpListener,
+    fixture: Arc<BudgetCleanupFixture>,
+) -> (CancellationToken, JoinHandle<std::io::Result<()>>) {
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        serve(
+            listener,
+            fixture,
+            ServerConfig::new("fixture-token"),
+            task_cancel,
+        )
+        .await
+    });
+    (cancel, task)
+}
+
 async fn next(transport: &mut Transport) -> Update {
     tokio::time::timeout(Duration::from_secs(8), transport.next())
         .await
@@ -262,6 +363,122 @@ async fn response(transport: &mut Transport, tag: u64) -> Result<Value, String> 
             return result;
         }
     }
+}
+
+async fn run_budget_cleanup(task: BudgetCleanupTask) -> (String, Vec<(String, Value)>, bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = Arc::new(BudgetCleanupFixture {
+        task,
+        calls: Mutex::new(Vec::new()),
+    });
+    let (stop, server) = budget_cleanup_server(listener, fixture.clone()).await;
+    let mut transport = Transport::start(address, "fixture-token".into());
+    connect(&mut transport).await;
+    transport
+        .call(Request {
+            tag: 40,
+            method: "session.prompt_with_model_budget",
+            params: json!({
+                "session_id":"s1",
+                "text":"budget prompt",
+                "expected":[],
+                "additional_tokens":1,
+                "token_limit":1,
+                "confirm":true
+            }),
+        })
+        .unwrap();
+    let mut disconnected = false;
+    let error = loop {
+        match next(&mut transport).await {
+            Update::TaskAdmitted {
+                session_id,
+                task_id,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(task_id, "budget-task");
+            }
+            Update::Disconnected(_) => disconnected = true,
+            Update::Response { request, result } if request.tag == 40 => {
+                break result.unwrap_err();
+            }
+            _ => {}
+        }
+    };
+    transport.shutdown().await;
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(4), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let calls = fixture.calls.lock().unwrap().clone();
+    (error, calls, disconnected)
+}
+
+#[tokio::test]
+async fn failed_budget_grant_cancels_only_the_exact_unclaimed_task() {
+    let (error, calls, disconnected) = run_budget_cleanup(BudgetCleanupTask::Queued).await;
+    assert!(!disconnected);
+    assert!(
+        error.starts_with("budget_continuation_not_executed:"),
+        "{error}"
+    );
+    assert!(error.ends_with("(outcome_unknown=false)"), "{error}");
+    assert!(!error.contains("outcome_unknown=true"), "{error}");
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "task.enqueue",
+            "model.budget.continue",
+            "task.get",
+            "session.cancel"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failed_budget_grant_never_cleans_up_a_running_task_as_known() {
+    let (error, calls, disconnected) = run_budget_cleanup(BudgetCleanupTask::Running).await;
+    assert!(disconnected);
+    assert!(
+        error.contains("budget_continuation_cleanup_unknown"),
+        "{error}"
+    );
+    assert!(error.contains("outcome_unknown=true"), "{error}");
+    assert!(
+        !error.contains("budget_continuation_not_executed"),
+        "{error}"
+    );
+    assert!(calls.iter().all(|(method, _)| method != "session.cancel"));
+    assert!(calls.iter().all(|(method, _)| method != "task.resume"));
+}
+
+#[tokio::test]
+async fn stale_cancellation_after_queued_read_keeps_budget_cleanup_unknown() {
+    let (error, calls, disconnected) = run_budget_cleanup(BudgetCleanupTask::StaleAfterRead).await;
+    assert!(disconnected);
+    assert!(
+        error.contains("budget_continuation_cleanup_unknown"),
+        "{error}"
+    );
+    assert!(error.contains("outcome_unknown=true"), "{error}");
+    assert!(
+        !error.contains("budget_continuation_not_executed"),
+        "{error}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(method, _)| method == "session.cancel")
+            .count(),
+        1
+    );
+    assert!(calls.iter().all(|(method, _)| method != "task.resume"));
 }
 
 #[tokio::test]

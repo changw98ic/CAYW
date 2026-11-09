@@ -6,6 +6,7 @@
 #![cfg(target_os = "macos")]
 
 use cayw_ipc::Client;
+use cayw_runtime::local_cli::tighten_explicit_config;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -115,6 +116,33 @@ fn assert_private_dir(path: &Path) {
 
 fn assert_private_file(path: &Path) {
     assert_eq!(mode(path), 0o600, "{} must be a 0600 file", path.display());
+}
+
+#[test]
+fn explicit_config_tightens_only_a_single_owned_regular_file() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("configured.json");
+    std::fs::write(&path, b"{}").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    tighten_explicit_config(&path).unwrap();
+    assert_eq!(mode(&path), 0o600);
+
+    let symlink_path = root.path().join("symlink.json");
+    symlink(&path, &symlink_path).unwrap();
+    let error = tighten_explicit_config(&symlink_path).unwrap_err();
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert_eq!(mode(&path), 0o600);
+
+    let hard_link = root.path().join("hard.json");
+    std::fs::hard_link(&path, &hard_link).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let error = tighten_explicit_config(&path).unwrap_err();
+    assert!(error.to_string().contains("hard link"), "{error}");
+    assert_eq!(mode(&path), 0o644);
+
+    let directory = root.path().join("directory");
+    std::fs::create_dir(&directory).unwrap();
+    assert!(tighten_explicit_config(&directory).is_err());
 }
 
 /// The state directory is identified by the canonical workspace path, so two

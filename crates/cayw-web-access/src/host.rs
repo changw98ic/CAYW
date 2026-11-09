@@ -58,6 +58,7 @@ impl WebAccessOptions {
         &self,
         sink: Option<Arc<dyn ContentSink>>,
     ) -> Result<WebAccess, WebAccessError> {
+        self.limits.validate()?;
         let transport: Arc<dyn HttpTransport> = match self.search {
             SearchBackend::Fixture => Arc::new(FixtureTransport::new()),
             _ => Arc::new(ReqwestTransport::new()?),

@@ -175,6 +175,13 @@ pub(crate) async fn call(
         error
     });
     scope.settle(&result)?;
+    // Evidence keeps the original raw hash, but Core, Cells and the model share
+    // the same bounded durable receipt or handle when the bytes exceed the Core
+    // metadata limit.
+    let result = match result {
+        Ok(value) => Ok(scope.durable_result(value)),
+        Err(error) => Err(error),
+    };
     let presentation = match &result {
         Ok(value) => crate::results::maybe_externalize(scope, value.clone()).await,
         Err(error) => Err(error.clone()),

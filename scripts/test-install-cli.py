@@ -241,6 +241,17 @@ class PackageTests(unittest.TestCase):
         for name in ('package-cli.sh', 'install-cli.sh'):
             shutil.copyfile(INSTALLER.with_name(name), self.root / 'scripts' / name)
         (self.root / 'LICENSE').write_text('synthetic package fixture license')
+        (self.root / 'third-party').mkdir()
+        for name in ('CDLA-Permissive-2.0.txt', 'pi-MIT.txt'):
+            (self.root / 'third-party' / name).write_text('synthetic license fixture')
+        # Test package wiring only; the actual generator has its own tests.
+        (self.root / 'scripts/generate-third-party-notices.py').write_text(
+            "import os, pathlib, sys\n"
+            "if os.environ.get('NOTICE_FAILURE') == '1': sys.exit(1)\n"
+            "output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+            "output.write_text('' if os.environ.get('EMPTY_NOTICE') == '1' "
+            "else 'synthetic dependency notices')\n")
+
         shim = self.root / 'shim'
         shim.mkdir()
         executable(shim / 'uname', 'case "$1" in -s) echo Darwin;; -m) echo arm64;; esac\n')
@@ -270,7 +281,8 @@ for i, arg in enumerate(args):
         self.env = dict(os.environ, PATH=str(shim) + os.pathsep + os.environ['PATH'],
                         CARGO_TARGET_DIR='relative target with spaces',
                         CARGO_BUILD_TARGET='ignored-wrong-target', CARGO_FIXTURE_LOG=str(self.log))
-        self.env.pop('SOURCE_CHANGED', None)
+        for key in ('SOURCE_CHANGED', 'NOTICE_FAILURE', 'EMPTY_NOTICE'):
+            self.env.pop(key, None)
 
     def package(self, good=True, **env):
         result = subprocess.run(['sh', str(self.root / 'scripts/package-cli.sh'), str(self.output)],
@@ -296,6 +308,22 @@ for i, arg in enumerate(args):
         checked = subprocess.run(['shasum', '-a', '256', '-c', 'SHA256SUMS'],
                                  cwd=self.output, capture_output=True, text=True)
         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_notices_and_license_assets_are_checksummed(self):
+        self.package()
+        sums = (self.output / 'SHA256SUMS').read_text()
+        for name in ('THIRD-PARTY-NOTICES', 'third-party/CDLA-Permissive-2.0.txt',
+                     'third-party/pi-MIT.txt'):
+            self.assertTrue((self.output / name).is_file())
+            self.assertIn('  ' + name + '\n', sums)
+
+    def test_missing_or_empty_notices_prevent_build_and_bundle(self):
+        for failure in ('NOTICE_FAILURE', 'EMPTY_NOTICE'):
+            with self.subTest(failure=failure):
+                self.package(good=False, **{failure: '1'})
+                self.assertFalse(self.output.exists())
+                self.assertFalse(self.log.exists())
+                self.assertEqual(list(self.root.glob('.cayw-package.*')), [])
 
     def test_source_change_during_build_refuses_bundle(self):
         self.package(good=False, SOURCE_CHANGED='1')

@@ -243,13 +243,28 @@ impl Drop for OwnedCall {
     }
 }
 
+fn persistent_prompt(method: &str, params: &Value) -> bool {
+    matches!(method, "session.prompt" | "task.resume")
+        || (method == "client.workspace.call"
+            && params
+                .get("rpc")
+                .and_then(|rpc| rpc.get("method"))
+                .and_then(Value::as_str)
+                .is_some_and(|method| matches!(method, "session.prompt" | "task.resume")))
+}
+
 fn call_handler(
     request: Request,
     handler: Arc<dyn RpcHandler>,
     token: CancellationToken,
     config: &ServerConfig,
 ) -> OwnedCall {
-    let request_timeout = config.request_timeout;
+    let request_timeout = if persistent_prompt(&request.method, &request.params) {
+        config.prompt_timeout
+    } else {
+        Some(config.request_timeout)
+    };
+    let deadline = request_timeout.map(|timeout| Instant::now() + timeout);
     let grace = config.cancellation_grace;
     let cancel = token.clone();
     let future = Box::pin(async move {
@@ -259,7 +274,12 @@ fn call_handler(
         let interruption = tokio::select! {
             biased;
             _ = token.cancelled() => RpcError::new("cancelled_outcome_unknown", "request cancelled; side effects may have happened"),
-            _ = tokio::time::sleep(request_timeout) => RpcError::new("timeout_outcome_unknown", "request timed out; side effects may have happened"),
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => RpcError::new("timeout_outcome_unknown", "request timed out; side effects may have happened"),
             result = &mut work => return (request.id, result.unwrap_or_else(|_| Err(RpcError::new("handler_panic_outcome_unknown", "handler panicked; reconcile runtime state")))),
         };
         token.cancel();

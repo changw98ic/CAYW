@@ -177,10 +177,25 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Test installer failures with synthetic binaries
-        run: python3 scripts/test-install-cli.py
+        run: |
+          python3 scripts/test-install-cli.py
+          python3 scripts/test_install_cli.py
+
+      # The license generator intentionally resolves metadata offline. Prepare
+      # both locked workspaces first, including dependencies outside the binary
+      # build closure, so a fresh runner does not depend on a warmed Cargo cache.
+      - name: Fetch locked release dependencies
+        run: |
+          cargo fetch --locked --target aarch64-apple-darwin
+          cargo fetch --locked --target aarch64-apple-darwin --manifest-path examples/headless-client/Cargo.toml
 
       - name: Build exact release bundle
         run: sh scripts/package-cli.sh "$RUNNER_TEMP/cayw-release"
+
+      # The bundle build resolves and caches its locked dependency closure.
+      # Check both synthetic license policies and actual metadata offline.
+      - name: Test third-party notices
+        run: python3 scripts/test-generate-third-party-notices.py
 
       # upload-artifact normalizes file permissions. Keep executable modes
       # inside a tarball and accept the extracted distribution, not the build tree.

@@ -812,7 +812,7 @@ async fn long_prompt_does_not_block_events_cancel_or_approval() {
 #[tokio::test]
 async fn timed_out_dispatched_prompt_is_not_retried_and_preserves_unknown_status() {
     let fixture = Fixture::start(GatewayLimits {
-        prompt_timeout: Duration::from_millis(150),
+        prompt_timeout: Some(Duration::from_millis(150)),
         ..Default::default()
     })
     .await;
@@ -848,6 +848,33 @@ async fn timed_out_dispatched_prompt_is_not_retried_and_preserves_unknown_status
         events["result"][0]["cursor"], 1,
         "a timeout must not break subsequent event consumption"
     );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn default_prompt_waits_for_a_slow_fixture_without_a_fixed_deadline() {
+    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let prompt = tokio::spawn(
+        fixture
+            .rpc("session.prompt", json!({"session_id":"s1","text":"执行"}))
+            .send(),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.runtime.prompt_started.acquire(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .forget();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !prompt.is_finished(),
+        "a default prompt must not have a fixed short deadline"
+    );
+    fixture.runtime.prompt_release.add_permits(1);
+    let value = envelope(prompt.await.unwrap().unwrap(), StatusCode::OK).await;
+    assert_eq!(value["result"]["state"], "idle");
     fixture.close().await;
 }
 

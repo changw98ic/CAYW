@@ -30,6 +30,9 @@ sha2 = { version = "0.10", optional = true }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", default-features = false, features = ["process", "signal"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 

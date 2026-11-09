@@ -483,6 +483,10 @@ async fn busy_other_client_run_survives_rejected_tui_shutdown() {
     app.input.insert("rejected draft");
     let mut driver = Driver::default();
     let commands = press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::PreparePrompt { .. }]
+    ));
     driver.dispatch(&mut app, &transport, commands);
     loop {
         let update = next(&mut transport).await;
@@ -498,6 +502,16 @@ async fn busy_other_client_run_survives_rejected_tui_shutdown() {
                 }]
             );
             break;
+        }
+        let budget_status = matches!(
+            &update,
+            Update::Response { request, result: Ok(_) }
+                if request.method == "model.budget.prepare_prompt"
+        );
+        let commands = driver.update(&mut app, update);
+        if budget_status {
+            assert!(matches!(commands.as_slice(), [Command::Prompt { .. }]));
+            driver.dispatch(&mut app, &transport, commands);
         }
     }
     assert_eq!(app.input.text(), "rejected draft");

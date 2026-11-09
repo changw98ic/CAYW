@@ -357,6 +357,48 @@ pub fn read_private(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Tighten one explicitly selected configuration file before saving. Only a
+/// regular file owned by the current user with one link is accepted; symlinks,
+/// hard links and files owned by another user are rejected.
+pub fn tighten_explicit_config(path: &Path) -> io::Result<()> {
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() || before.file_type().is_symlink() {
+        return Err(invalid(
+            "explicit configuration must be a regular file, not a symlink",
+        ));
+    }
+    if before.nlink() != 1 {
+        return Err(invalid(
+            "explicit configuration must have exactly one hard link",
+        ));
+    }
+    if before.uid() != unsafe { libc::geteuid() } {
+        return Err(invalid(
+            "explicit configuration must be owned by the current user",
+        ));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if (before.dev(), before.ino()) != (opened.dev(), opened.ino()) {
+        return Err(invalid("explicit configuration changed while opening"));
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.sync_all()?;
+    let after = fs::symlink_metadata(path)?;
+    if !after.is_file()
+        || (opened.dev(), opened.ino()) != (after.dev(), after.ino())
+        || after.permissions().mode() & 0o777 != 0o600
+    {
+        return Err(invalid(
+            "explicit configuration changed while tightening permissions",
+        ));
+    }
+    Ok(())
+}
+
 fn private_lock(path: &Path) -> io::Result<File> {
     match OpenOptions::new()
         .read(true)

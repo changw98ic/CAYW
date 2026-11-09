@@ -371,3 +371,99 @@ async fn ddg_search_body_too_large_fails_fast() {
         .expect_err("must exceed body limit");
     assert_eq!(err.diagnostic().class, FailureClass::BodyTooLarge);
 }
+
+#[test]
+fn invalid_search_limits_are_configuration_errors_not_panics() {
+    for limits in [
+        Limits {
+            max_search_limit: 0,
+            ..Limits::default()
+        },
+        Limits {
+            default_search_limit: 0,
+            ..Limits::default()
+        },
+        Limits {
+            default_search_limit: 21,
+            max_search_limit: 20,
+            ..Limits::default()
+        },
+        Limits {
+            max_body_bytes: 0,
+            ..Limits::default()
+        },
+        Limits {
+            max_extract_chars: 0,
+            ..Limits::default()
+        },
+    ] {
+        let options = WebAccessOptions {
+            limits,
+            ..WebAccessOptions::default()
+        };
+        let error = options.build().err().expect("invalid limits must fail");
+        assert_eq!(error.diagnostic().class, FailureClass::Configuration);
+        assert!(
+            error
+                .diagnostic()
+                .message
+                .contains("invalid web-access limits"),
+            "unexpected message: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn request_limit_zero_still_clamps_to_one() {
+    let search = FixtureSearch::new().insert(
+        "example",
+        vec![
+            hit(1, "https://example.com/1", "One", "s"),
+            hit(2, "https://example.com/2", "Two", "s"),
+            hit(3, "https://example.com/3", "Three", "s"),
+        ],
+    );
+    let access = WebAccess::new(
+        std::sync::Arc::new(FixtureTransport::new()),
+        std::sync::Arc::new(search),
+        ContentStore::new(),
+        Limits::default(),
+    );
+    let result = access.search("example", Some(0)).await.unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert!(result.truncated);
+}
+
+#[tokio::test]
+async fn invalid_limits_on_direct_service_are_known_errors() {
+    let access = WebAccess::new(
+        std::sync::Arc::new(FixtureTransport::new()),
+        std::sync::Arc::new(FixtureSearch::new()),
+        ContentStore::new(),
+        Limits {
+            max_search_limit: 0,
+            ..Limits::default()
+        },
+    );
+    let error = access
+        .search("example", Some(0))
+        .await
+        .expect_err("invalid configured limits must not panic");
+    assert_eq!(error.diagnostic().class, FailureClass::Configuration);
+
+    let error = access
+        .fetch("https://example.com/")
+        .await
+        .expect_err("fetch must reject invalid configured limits");
+    assert_eq!(error.diagnostic().class, FailureClass::Configuration);
+
+    let error = access
+        .extract_bytes(
+            "https://example.com/",
+            "https://example.com/",
+            Some("text/plain"),
+            b"body",
+        )
+        .expect_err("extract must reject invalid configured limits");
+    assert_eq!(error.diagnostic().class, FailureClass::Configuration);
+}

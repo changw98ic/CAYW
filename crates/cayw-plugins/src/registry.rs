@@ -85,9 +85,12 @@ impl PluginRegistry {
             Ok(description) => Ok(description),
             Err(error) => match plugin.shutdown().await {
                 Ok(()) => Err(error),
-                Err(cleanup) => Err(PluginError::OutcomeUnknown(format!(
-                    "{error}; rejected plugin cleanup was not confirmed: {cleanup}"
-                ))),
+                Err(cleanup) => Err(PluginError::OutcomeUnknownProcess {
+                    message: format!(
+                        "{error}; rejected plugin cleanup was not confirmed: {cleanup}"
+                    ),
+                    process: cleanup.process_identity().cloned(),
+                }),
             },
         }
     }

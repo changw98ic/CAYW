@@ -396,7 +396,32 @@ impl Server {
         configure(&mut process);
         Self::start_process(process).await
     }
-    async fn start_process(mut process: tokio::process::Command) -> Self {
+    #[cfg(feature = "plugins")]
+    async fn start_local(root: &Path) -> Self {
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_cayw"));
+        process
+            .arg("serve")
+            .arg("--workspace")
+            .arg(&workspace)
+            .args(["--listen", "127.0.0.1:0", "--offline"])
+            .env_clear()
+            .env("CAYW_HOME", root.join("cayw-home"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        Self::start_process_with_token(process, true).await
+    }
+
+    async fn start_process(process: tokio::process::Command) -> Self {
+        Self::start_process_with_token(process, false).await
+    }
+
+    async fn start_process_with_token(
+        mut process: tokio::process::Command,
+        local_token: bool,
+    ) -> Self {
         let mut child = process.spawn().unwrap();
         let ready = tokio::time::timeout(
             WATCHDOG,
@@ -416,9 +441,17 @@ impl Server {
             );
         };
         let ready: Value = serde_json::from_str(&ready).unwrap();
-        let client = Client::connect(ready["listening"].as_str().unwrap().parse().unwrap(), TOKEN)
-            .await
-            .unwrap();
+        let token = if local_token {
+            std::fs::read_to_string(ready["token_file"].as_str().unwrap()).unwrap()
+        } else {
+            TOKEN.to_owned()
+        };
+        let client = Client::connect(
+            ready["listening"].as_str().unwrap().parse().unwrap(),
+            token.trim(),
+        )
+        .await
+        .unwrap();
         Self {
             child,
             client,
@@ -835,25 +868,7 @@ async fn partial_explicit_paths_use_default_config_and_keep_local_settings() {
 async fn conf_with_explicit_file_never_requires_or_creates_local_state() {
     let root = tempfile::tempdir().unwrap();
     let config = root.path().join("configured.json");
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cayw"))
-        .args(["conf", "--workspace"])
-        .arg(root.path())
-        .arg("--config")
-        .arg(&config)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    if let Some(mut input) = child.stdin.take() {
-        let _ = input.write_all(b"1\n\n\nfixture-model\n\n\n\n").await;
-    }
-    let output = tokio::time::timeout(WATCHDOG, child.wait_with_output())
-        .await
-        .expect("conf deadline")
-        .unwrap();
+    let output = run_conf(root.path(), &config).await;
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -873,6 +888,76 @@ async fn conf_with_explicit_file_never_requires_or_creates_local_state() {
     );
     assert!(!root.path().join(".cayw").exists());
     assert!(!root.path().join("workspaces").exists());
+}
+
+async fn run_conf(workspace: &Path, config: &Path) -> std::process::Output {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cayw"))
+        .args(["conf", "--workspace"])
+        .arg(workspace)
+        .arg("--config")
+        .arg(config)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    if let Some(mut input) = child.stdin.take() {
+        let _ = input.write_all(b"1\n\n\nfixture-model\n\n\n\n").await;
+    }
+    tokio::time::timeout(WATCHDOG, child.wait_with_output())
+        .await
+        .expect("conf deadline")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn conf_tightens_an_existing_explicit_config_before_saving() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("configured.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({"permissions":[]})).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let output = run_conf(root.path(), &config).await;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["configured"], true);
+    let saved: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    assert_eq!(saved["model"]["id"], "fixture-model");
+    assert_eq!(
+        std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[tokio::test]
+async fn conf_rejects_a_symlinked_explicit_config_without_touching_its_target() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target.json");
+    let original = serde_json::to_vec(&json!({"permissions":[]})).unwrap();
+    std::fs::write(&target, &original).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = root.path().join("link.json");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let output = run_conf(root.path(), &link).await;
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("symlink"), "{error}");
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[tokio::test]
@@ -1022,6 +1107,123 @@ async fn cancellation_drains_the_configured_original_processes_before_task_termi
     ));
     provider.abort();
     server.stop().await;
+}
+
+#[tokio::test]
+async fn sigterm_stops_serve_cleanly_instead_of_leaving_the_process_running() {
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start_with_options(
+        root.path(),
+        json!({}),
+        "http://127.0.0.1:9/v1",
+        &["--offline"],
+    )
+    .await;
+    let pid = server.child.id().expect("serve process id");
+    let status = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = tokio::time::timeout(WATCHDOG, server.child.wait_with_output())
+        .await
+        .expect("serve must exit after SIGTERM")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "serve must run cleanup and exit cleanly: {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "plugins")]
+#[tokio::test]
+async fn sigterm_waits_for_external_plugin_process_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("external-plugin.sh");
+    let marker = root.path().join("plugin.pid");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+IFS= read -r _handshake
+printf '%s\n' "$$" > "$1"
+printf '%s\n' '{"type":"handshake","manifest":{"name":"sigterm-fixture","version":"1.0.0","protocol_version":1,"role":"workspace_architecture","kind":"external","capabilities":[],"permissions":{}}}'
+while IFS= read -r _message; do
+    :
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let server = Server::start_local(root.path()).await;
+    let manifest = json!({
+        "name":"sigterm-fixture",
+        "version":"1.0.0",
+        "protocol_version":1,
+        "role":"workspace_architecture",
+        "kind":"external",
+        "capabilities":[],
+        "permissions":{}
+    });
+    server
+        .client
+        .request(
+            "settings.plugins.install",
+            json!({"descriptor":{"executable":script,"argv":[marker],"manifest":manifest}}),
+        )
+        .await
+        .unwrap();
+    server
+        .client
+        .request(
+            "settings.plugins.enable",
+            json!({"name":"sigterm-fixture","approve_process":true}),
+        )
+        .await
+        .unwrap();
+    let plugin_pid: libc::pid_t = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only checks whether the fixture process exists.
+    assert_eq!(unsafe { libc::kill(plugin_pid, 0) }, 0);
+
+    server.client.close().await;
+    let serve_pid = server.child.id().expect("serve process id");
+    assert!(
+        std::process::Command::new("/bin/kill")
+            .args(["-TERM", &serve_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = tokio::time::timeout(WATCHDOG, server.child.wait_with_output())
+        .await
+        .expect("serve must finish plugin cleanup after SIGTERM")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "serve must confirm plugin cleanup before exiting: {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // SAFETY: signal 0 only checks whether the exact just-observed PID remains.
+    assert_eq!(unsafe { libc::kill(plugin_pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "External plugin process remained after clean serve shutdown"
+    );
+    assert!(
+        !root
+            .path()
+            .join("cayw-home/workspace-plugin-cleanup.json")
+            .exists()
+    );
 }
 
 #[tokio::test]

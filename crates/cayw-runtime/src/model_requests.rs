@@ -140,7 +140,10 @@ pub struct ModelRequestReconciliationRecord {
 pub struct ModelBudgetContinuation {
     pub task_id: String,
     pub expected: Vec<ModelRequestOrigin>,
+    /// Finite allowance available only to this exact newly queued Task.
     pub additional_tokens: u64,
+    /// Explicit cumulative cap after retaining every historical hold. This may
+    /// exceed the configured base tree limit only through this durable decision.
     pub token_limit: u64,
     pub actor: String,
     pub evidence: String,
@@ -1551,11 +1554,6 @@ impl Runtime {
             ));
         }
 
-        if input.token_limit > tree_limit {
-            return Err(RuntimeError::Budget(
-                "model budget continuation token_limit exceeds current tree token limit",
-            ));
-        }
         let total_occupied = projection
             .ledger
             .settled_tokens
@@ -2016,7 +2014,10 @@ impl RequestGuard {
         let unknown_blocked = ledger.budget_unknown && !unknown_allowed;
 
         let (reservation_tokens, effective_token_limit) = if let Some(grant) = task_grant {
-            let tree_available = ledger.remaining_tokens;
+            // A continuation is an explicit, durable user decision to add a finite
+            // allowance without releasing historical unknown holds. Its token_limit
+            // is therefore allowed to exceed the configured base tree limit. Only
+            // this exact newly queued Task can consume the added allowance.
             let grant_tree_room = grant.token_limit.saturating_sub(total_occupied);
 
             let mut task_consumption = 0_u64;
@@ -2030,9 +2031,8 @@ impl RequestGuard {
             }
 
             let grant_task_room = grant.additional_tokens.saturating_sub(task_consumption);
-            let available = tree_available.min(grant_tree_room).min(grant_task_room);
-            let eff_limit = grant.token_limit.min(ledger.token_limit);
-            (available, eff_limit)
+            let available = grant_tree_room.min(grant_task_room);
+            (available, grant.token_limit)
         } else {
             (ledger.remaining_tokens, ledger.token_limit)
         };
@@ -2081,7 +2081,7 @@ impl RequestGuard {
                 identity,
                 policy: ModelReservationPolicy::EntireSessionRemainder,
                 tokens: reservation_tokens,
-                token_limit: ledger.token_limit,
+                token_limit: effective_token_limit,
                 output_max_tokens: request.options.max_tokens.expect("set above"),
             },
         )?;

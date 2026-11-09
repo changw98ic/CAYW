@@ -70,6 +70,11 @@ fn app(value: Value) -> App {
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, modifiers)
 }
+fn known_budget(app: &mut App) -> Vec<Command> {
+    app.model_budget_status("s1", json!({"budget_unknown":false}))
+        .unwrap()
+}
+
 fn events(after: u64, result: Result<Value, String>) -> Update {
     Update::Events {
         watch: Watch {
@@ -118,6 +123,10 @@ fn rejected_prompts_keep_the_original_draft_without_automatic_resend() {
         assert!(matches!(
             app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE))
                 .as_slice(),
+            [Command::PreparePrompt { .. }]
+        ));
+        assert!(matches!(
+            known_budget(&mut app).as_slice(),
             [Command::Prompt { .. }]
         ));
         app.request_failed("s1", "session.prompt", error);
@@ -245,6 +254,10 @@ fn session_frozen_rpc_error_blocks_prompt_and_enables_only_confirmed_fork_after_
     let mut app = app(snapshot("idle", 2));
     app.input.insert("question");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        known_budget(&mut app).as_slice(),
+        [Command::Prompt { .. }]
+    ));
     app.request_failed(
         "s1",
         "session.prompt",
@@ -264,6 +277,10 @@ fn rejected_and_successful_prompt_responses_never_overwrite_newer_or_other_sessi
         let mut app = app(snapshot("idle", 1));
         app.input.insert("submitted question");
         app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            known_budget(&mut app).as_slice(),
+            [Command::Prompt { .. }]
+        ));
         app.input.clear();
         app.input.insert("newer draft");
         app.request_failed("s1", "session.prompt", error);
@@ -289,6 +306,10 @@ fn unknown_prompt_outcome_retains_text_and_stays_locked_after_an_idle_snapshot()
     let mut app = app(snapshot("idle", 1));
     app.input.insert("uncertain question");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        known_budget(&mut app).as_slice(),
+        [Command::Prompt { .. }]
+    ));
     app.request_failed(
         "s1",
         "session.prompt",
@@ -437,6 +458,10 @@ fn malformed_success_response_preserves_prompt_text_and_does_not_unlock_send() {
     let mut app = app(snapshot("idle", 1));
     app.input.insert("submitted");
     app.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        known_budget(&mut app).as_slice(),
+        [Command::Prompt { .. }]
+    ));
     let mut driver = Driver::default();
     driver.update(
         &mut app,
@@ -520,4 +545,164 @@ async fn shutdown_of_prompt_rejected_busy_never_sends_session_cancel() {
         .unwrap()
         .unwrap();
     assert_eq!(methods, vec!["enqueue_rejected_busy"]);
+}
+
+#[tokio::test]
+async fn failed_budget_grant_cancels_the_admitted_task_before_model_dispatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = socket.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        let mut methods = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let call: Value = serde_json::from_str(&line).unwrap();
+            let method = call["method"].as_str().unwrap().to_owned();
+            methods.push(method.clone());
+            match method.as_str() {
+                "hello" => {
+                    reply(
+                        &mut writer,
+                        &call["id"],
+                        json!({"version":1,"max_frame_bytes":1048576,"max_in_flight":64,"max_requests_per_connection":65536,"max_id_bytes":128}),
+                    )
+                    .await;
+                }
+                "task.enqueue" => {
+                    assert_eq!(
+                        call["params"],
+                        json!({"session_id":"s1","text":"continue safely"})
+                    );
+                    reply(
+                        &mut writer,
+                        &call["id"],
+                        json!({"id":"new-task","session_id":"s1","state":"queued"}),
+                    )
+                    .await;
+                }
+                "model.budget.continue" => {
+                    assert_eq!(call["params"]["task_id"], "new-task");
+                    writer
+                        .write_all(
+                            (json!({
+                                "version":1,
+                                "id":call["id"],
+                                "error":{
+                                    "code":"budget_changed",
+                                    "message":"unknown request set changed"
+                                }
+                            })
+                            .to_string()
+                                + "\n")
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                "task.get" => {
+                    assert_eq!(call["params"], json!({"task_id":"new-task"}));
+                    reply(
+                        &mut writer,
+                        &call["id"],
+                        json!({
+                            "id":"new-task",
+                            "session_id":"s1",
+                            "state":"queued",
+                            "worker_id":null,
+                            "attempt_id":null,
+                            "fence":7,
+                            "dispatches":0,
+                            "holds_slot":false,
+                            "cancel_requested":false
+                        }),
+                    )
+                    .await;
+                }
+                "session.cancel" => {
+                    assert_eq!(
+                        call["params"],
+                        json!({
+                            "session_id":"s1",
+                            "task_id":"new-task",
+                            "worker_id":null,
+                            "attempt_id":null,
+                            "fence":7
+                        })
+                    );
+                    reply(&mut writer, &call["id"], json!({"cancelled":true})).await;
+                }
+                "task.resume" => panic!("a failed continuation grant must not dispatch the model"),
+                _ => {}
+            }
+        }
+        methods
+    });
+
+    let mut transport = Transport::start(address, "fixture-token".into());
+    timeout(Duration::from_secs(3), async {
+        while !matches!(transport.next().await, Some(Update::Connected)) {}
+    })
+    .await
+    .unwrap();
+    transport
+        .call(Request {
+            tag: 43,
+            method: "session.prompt_with_model_budget",
+            params: json!({
+                "session_id":"s1",
+                "text":"continue safely",
+                "expected":[{"request_id":"unknown-request"}],
+                "additional_tokens":128,
+                "token_limit":1128,
+                "confirm":true
+            }),
+        })
+        .unwrap();
+    let error = timeout(Duration::from_secs(3), async {
+        let mut admitted = false;
+        loop {
+            match transport.next().await {
+                Some(Update::TaskAdmitted {
+                    session_id,
+                    task_id,
+                }) => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(task_id, "new-task");
+                    admitted = true;
+                }
+                Some(Update::Response { request, result })
+                    if request.method == "session.prompt_with_model_budget" =>
+                {
+                    assert!(admitted);
+                    break result.unwrap_err();
+                }
+                Some(_) => {}
+                None => panic!("transport closed before the continuation result"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        error.contains("budget_continuation_not_executed")
+            && error.contains("outcome_unknown=false"),
+        "{error}"
+    );
+
+    transport.shutdown().await;
+    let methods = timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        methods,
+        vec![
+            "hello",
+            "task.enqueue",
+            "model.budget.continue",
+            "task.get",
+            "session.cancel"
+        ]
+    );
 }

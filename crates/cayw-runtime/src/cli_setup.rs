@@ -112,6 +112,9 @@ fn configure_with(
     }
     let mut bytes = serde_json::to_vec_pretty(&configuration)?;
     bytes.push(b'\n');
+    if original.is_some() {
+        cayw_runtime::local_cli::tighten_explicit_config(path)?;
+    }
     save_config(path, original.as_deref(), &bytes)?;
     writeln!(output, "模型配置已保存：{}", path.display())?;
     writeln!(

@@ -38,6 +38,108 @@ pub enum PluginKind {
     External,
 }
 
+/// Exact OS identity of one plugin process. The microsecond startup time
+/// distinguishes a reused PID; `process_group` also covers owned descendants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginProcessIdentity {
+    pub pid: u32,
+    pub started_seconds: u64,
+    pub started_microseconds: u32,
+    pub command: String,
+    pub process_group: Option<u32>,
+}
+
+impl PluginProcessIdentity {
+    /// Capture one macOS process incarnation without signalling it.
+    #[cfg(target_os = "macos")]
+    pub fn observe(pid: u32, command: impl Into<String>) -> std::io::Result<Self> {
+        let info = inspect_process(pid)?;
+        if info.pbi_start_tvsec == 0 || info.pbi_start_tvusec >= 1_000_000 {
+            return Err(std::io::Error::other(
+                "invalid plugin process startup identity",
+            ));
+        }
+        Ok(Self {
+            pid,
+            started_seconds: info.pbi_start_tvsec,
+            started_microseconds: info.pbi_start_tvusec as u32,
+            command: command.into(),
+            process_group: (info.pbi_pgid > 0).then_some(info.pbi_pgid),
+        })
+    }
+
+    /// Check the exact original PID incarnation. Unreadable state is an error,
+    /// not evidence that cleanup completed.
+    #[cfg(target_os = "macos")]
+    pub fn is_running(&self) -> std::io::Result<bool> {
+        let info = match inspect_process(self.pid) {
+            Ok(info) => info,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(info.pbi_start_tvsec == self.started_seconds
+            && info.pbi_start_tvusec as u32 == self.started_microseconds
+            && info.pbi_status != libc::SZOMB)
+    }
+
+    /// Check whether any process still belongs to the original process group.
+    /// A reused group keeps cleanup blocked, which is conservative.
+    #[cfg(target_os = "macos")]
+    pub fn process_group_running(&self) -> std::io::Result<bool> {
+        let Some(group) = self.process_group else {
+            return Ok(false);
+        };
+        let group = libc::pid_t::try_from(group)
+            .ok()
+            .filter(|group| *group > 1)
+            .ok_or_else(|| std::io::Error::other("invalid plugin process group"))?;
+        // SAFETY: signal 0 performs a read-only existence/permission check.
+        if unsafe { libc::kill(-group, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(false),
+            Some(libc::EPERM) => Ok(true),
+            _ => Err(error),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_process(pid: u32) -> std::io::Result<libc::proc_bsdinfo> {
+    let pid = libc::pid_t::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 1)
+        .ok_or_else(|| std::io::Error::other("invalid plugin process ID"))?;
+    // SAFETY: proc_bsdinfo is C POD and the writable buffer has exactly `size` bytes.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of_val(&info) as libc::c_int;
+    let count = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            1,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    if count != size {
+        return Err(if count == 0 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::other("incomplete plugin process identity observation")
+        });
+    }
+    if info.pbi_pid != pid as u32 {
+        return Err(std::io::Error::other(
+            "plugin process identity changed during inspection",
+        ));
+    }
+    Ok(info)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
@@ -113,6 +215,13 @@ pub enum PluginError {
     Failed(String),
     #[error("plugin outcome unknown: {0}")]
     OutcomeUnknown(String),
+    /// Cleanup could not be confirmed. The exact process identity is retained so
+    /// a later retry can re-observe the same process instead of trusting text.
+    #[error("plugin outcome unknown: {message}")]
+    OutcomeUnknownProcess {
+        message: String,
+        process: Option<PluginProcessIdentity>,
+    },
 }
 
 impl PluginError {
@@ -126,7 +235,16 @@ impl PluginError {
                 | Self::Timeout
                 | Self::Unloaded
                 | Self::OutcomeUnknown(_)
+                | Self::OutcomeUnknownProcess { .. }
         )
+    }
+
+    /// Exact process retained by an unconfirmed cleanup, when the host observed it.
+    pub fn process_identity(&self) -> Option<&PluginProcessIdentity> {
+        match self {
+            Self::OutcomeUnknownProcess { process, .. } => process.as_ref(),
+            _ => None,
+        }
     }
 }
 

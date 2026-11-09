@@ -135,7 +135,7 @@ impl Facts {
                 .ok_or_else(|| corrupt("shared read call disappeared"))?;
             facts.verify_read(evidence, call)?;
             if let Some(CapabilityOutcome::Completed { result }) = &call.outcome
-                && cayw_cells::HostResult::value_hash(result) != evidence.result_sha256
+                && !shared_read_result_matches(result, &evidence.result_sha256)
             {
                 return Err(corrupt("shared read terminal differs from captured result"));
             }
@@ -289,7 +289,7 @@ impl Facts {
                 || source.stamp != evidence.stamp
                 || source.dependencies != evidence.dependencies
                 || source.arguments != evidence.arguments
-                || !matches!(&source_call.outcome, Some(CapabilityOutcome::Completed { result }) if cayw_cells::HostResult::value_hash(result) == evidence.result_sha256)
+                || !matches!(&source_call.outcome, Some(CapabilityOutcome::Completed { result }) if shared_read_result_matches(result, &evidence.result_sha256))
             {
                 return Err(corrupt(
                     "shared read source does not retain the original known bytes",
@@ -926,6 +926,26 @@ fn hash_valid(value: &str) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
+}
+/// Shared-read Evidence binds the original raw result hash. When the Host
+/// result exceeds the Core metadata limit, the terminal stores a bounded
+/// receipt or handle that carries that original hash; comparing the handle's
+/// own hash would reject a valid read.
+fn shared_read_result_matches(result: &serde_json::Value, expected: &str) -> bool {
+    HostResult::value_hash(result) == expected
+        || bounded_original_hash(result).is_some_and(|hash| hash == expected)
+}
+fn bounded_original_hash(result: &serde_json::Value) -> Option<&str> {
+    let object = result.as_object()?;
+    if object.get("core_result_bounded").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let externalized = object.get("externalized").and_then(|v| v.as_bool()) == Some(true);
+    let omitted = object.get("result_omitted").and_then(|v| v.as_bool()) == Some(true);
+    if !externalized && !omitted {
+        return None;
+    }
+    object.get("original_sha256")?.as_str()
 }
 fn corrupt(message: &str) -> RuntimeError {
     CoreError::CorruptStore(message.into()).into()

@@ -111,6 +111,16 @@
     <p>尚未核对的工具副作用不能通过 Fork 清除。</p>
     <form id="fork-form"><label for="fork-label">新会话名称</label><input id="fork-label" maxlength="160" required><label class="confirm-label"><input id="fork-confirm" type="checkbox" required>我确认新建普通聊天分支，并理解原会话仍被冻结。</label><p id="fork-error" class="error" role="alert"></p><div class="dialog-actions"><button id="close-fork" class="secondary" type="button">返回</button><button id="fork-button" type="submit">确认 Fork</button></div></form>
   </dialog>
+  <dialog id="model-budget-dialog" aria-labelledby="model-budget-heading">
+    <h2 id="model-budget-heading">确认继续模型请求</h2>
+    <p id="model-budget-summary"></p>
+    <p>先前的模型请求已经发出，但 Runtime 没有收到完整用量。继续不会清除原预留，也不会把未知费用记为零。</p>
+    <form id="model-budget-form">
+      <label class="confirm-label"><input id="model-budget-confirm" type="checkbox" required>我确认保留先前的未知预留，并为这一个新任务增加页面列明的 token 上限。</label>
+      <p id="model-budget-error" class="error" role="alert"></p>
+      <div class="dialog-actions"><button id="close-model-budget" class="secondary" type="button">返回</button><button id="continue-model-budget" type="submit">确认并继续</button></div>
+    </form>
+  </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-heading">
     <div class="section-heading"><h2 id="settings-heading">设置</h2><button id="close-settings" type="button" class="quiet">关闭</button></div>
     <p id="settings-workspace" class="small muted"></p>

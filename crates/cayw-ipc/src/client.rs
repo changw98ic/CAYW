@@ -25,7 +25,7 @@ type Reply = Result<Value, ClientError>;
 // None is a transport-owned cancellation acknowledgment. It is still paired exactly once.
 struct Pending {
     reply: Option<oneshot::Sender<Reply>>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     sent: bool,
 }
 
@@ -105,6 +105,7 @@ impl State {
         &self,
         method: &str,
         params: Value,
+        deadline: Option<Instant>,
     ) -> Result<(String, oneshot::Receiver<Reply>), ClientError> {
         wire::validate_value(&params, 1).map_err(|_| {
             ClientError::known(
@@ -144,7 +145,7 @@ impl State {
             id.clone(),
             Pending {
                 reply: Some(reply),
-                deadline: Instant::now() + self.config.request_timeout,
+                deadline,
                 sent: false,
             },
         );
@@ -198,7 +199,7 @@ impl State {
             id.clone(),
             Pending {
                 reply: None,
-                deadline: Instant::now() + self.config.request_timeout,
+                deadline: Some(Instant::now() + self.config.request_timeout),
                 sent: false,
             },
         );
@@ -436,6 +437,27 @@ impl Client {
         params: Value,
         cancel: CancellationToken,
     ) -> Reply {
+        let deadline = Instant::now() + self.owner.state.config.request_timeout;
+        self.request_inner(method, params, cancel, Some(deadline))
+            .await
+    }
+
+    /// Send one call without a client-side response deadline. The server may
+    /// still enforce its own request budget. Dropping this future closes the
+    /// shared connection and reports an unknown outcome, exactly like
+    /// [`Client::request_with_cancel`].
+    pub async fn request_without_timeout(&self, method: &str, params: Value) -> Reply {
+        self.request_inner(method, params, CancellationToken::new(), None)
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Reply {
         if !wire::valid_method(method) || method == "hello" || method == wire::CANCEL_METHOD {
             return Err(ClientError::known(
                 "invalid_method",
@@ -455,18 +477,23 @@ impl Client {
                 "client in-flight limit reached; request was not sent",
             )
         })?;
-        let deadline = Instant::now() + state.config.request_timeout;
-        let (id, mut reply) = state.admit(method, params)?;
+        let (id, mut reply) = state.admit(method, params, deadline)?;
         let mut guard = RequestGuard {
             state: state.clone(),
             armed: true,
         };
         let mut cancellation_sent = false;
         let result = loop {
+            let expired = async {
+                match deadline {
+                    Some(deadline) => sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 biased;
                 result = &mut reply => break result.unwrap_or_else(|_| Err(ClientError::unknown("connection_lost", "connection ended without a terminal response"))),
-                _ = sleep_until(deadline) => {
+                _ = expired => {
                     let error = ClientError::unknown("request_timeout", "client deadline exceeded; reconcile runtime state before retrying");
                     state.fail(error.clone());
                     break Err(error);
@@ -516,8 +543,8 @@ async fn run(
     ));
 }
 
-// Every pending response has a deadline, including internal cancel acknowledgments
-// whose original caller has already received a terminal response.
+// Pending responses may have no client deadline. Internal cancel acknowledgments
+// always do, even after their original caller has received a terminal response.
 async fn expire_responses(state: &State) {
     loop {
         let changed = state.changed.notified();
@@ -525,7 +552,7 @@ async fn expire_responses(state: &State) {
             .lock()
             .pending
             .values()
-            .map(|pending| pending.deadline)
+            .filter_map(|pending| pending.deadline)
             .min();
         tokio::select! {
             biased;
@@ -539,7 +566,11 @@ async fn expire_responses(state: &State) {
             } => {
                 // A response may have arrived just as the timer fired. Recheck atomically
                 // against the pending set before closing the connection.
-                let expired = state.lock().pending.values().any(|pending| pending.deadline <= Instant::now());
+                let expired = state.lock().pending.values().any(|pending| {
+                    pending
+                        .deadline
+                        .is_some_and(|deadline| deadline <= Instant::now())
+                });
                 if expired {
                     state.fail(ClientError::unknown("request_timeout", "response deadline exceeded; reconcile runtime state before retrying"));
                     return;

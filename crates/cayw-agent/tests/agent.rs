@@ -520,3 +520,79 @@ async fn host_must_reconcile_unknown_results_before_continuing() {
         AgentError::UnresolvedToolEffects
     );
 }
+
+struct Echo {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AgentTool for Echo {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "echo".into(),
+            description: "measure text".into(),
+            parameters: json!({
+                "type":"object",
+                "properties":{"text":{"type":"string"}},
+                "required":["text"],
+                "additionalProperties":false
+            }),
+        }
+    }
+    async fn execute(&self, context: ToolContext) -> Result<ToolResult, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::text(
+            context.arguments["text"]
+                .as_str()
+                .unwrap()
+                .len()
+                .to_string(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn standalone_agent_applies_no_implicit_large_argument_limit() {
+    let huge = "x".repeat(80 * 1024);
+    let mut call = AssistantMessage::new(&model());
+    call.content = vec![Content::ToolCall(ToolCall::new(
+        "big",
+        "echo",
+        json!({"text": huge}),
+    ))];
+    call.stop_reason = StopReason::ToolUse;
+    let provider = Scripted::from(vec![call, response("done")]);
+    let agent = Agent::new(provider, model());
+    let calls = Arc::new(AtomicUsize::new(0));
+    agent
+        .set_tools(vec![Arc::new(Echo {
+            calls: calls.clone(),
+        })])
+        .unwrap();
+
+    let result = agent.prompt(Message::user("measure")).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let call = result
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Assistant(assistant) => assistant
+                .tool_calls()
+                .into_iter()
+                .find(|call| call.id == "big"),
+            _ => None,
+        })
+        .expect("the original call remains in history");
+    assert_eq!(call.arguments["text"].as_str().unwrap().len(), 80 * 1024);
+    assert!(call.arguments.get("tool_arguments_omitted").is_none());
+    let tool_result = result
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_call_id == "big" => Some(result),
+            _ => None,
+        })
+        .expect("the tool result is paired");
+    assert!(!tool_result.is_error);
+    assert!(!tool_result.outcome_unknown);
+}

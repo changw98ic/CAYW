@@ -98,7 +98,7 @@ Core Only 是可嵌入库的组合，不要求每个 crate 都成为独立进程
 
 本地产品无需先配置模型。唯一 Client、TUI 和 WebUI 在工作区没有模型时仍可启动，也可创建和查询 Session；第一次执行 `prompt`、`enqueue` 或 `resume` 时才返回 `model_not_configured`。启动过程不弹出模型向导。`cayw conf` 是唯一交互式首次配置入口，不保留 `cayw configure`。
 
-每个工作区的 `models.json` 是本地模型配置的唯一权威文件。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。省略密钥表示模型服务不需要认证。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
+每个工作区的 `models.json` 是本地模型配置的唯一权威文件。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。新建方案时省略密钥表示模型服务不需要认证。编辑已有方案时，同一 `service`、`api`、`base_url` 和 `api_version` 下省略密钥保留原值；可用 `credential: keep/replace/remove` 显式控制凭据，兼容 `clear_api_key: true` 或 `api_key: null` 删除。删除不能同时提供新密钥，`clear_api_key` 不能与 keep/replace 冲突。凭据目标改变时，必须提供新密钥或显式清除，不能把旧密钥静默搬到新地址。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
 
 完全显式 Headless 与本地 Client 状态分开。显式 `--db`、`--token-env` 和 `--config` 运行只使用该配置中的 `model`，不读取或创建 `CAYW_HOME` 下的工作区模型状态。
 
@@ -268,7 +268,9 @@ Session 事件追加记录并与其状态投影一起提交，保存原 lease �
 
 模型用量通过同一公开 Rust `reconcile_model_request` 入口显式核对。可信宿主可证明精确请求未发出，或提供完整响应捕获对应的最终用量报告；默认没有验证器，也没有模型可调用的核对入口。Runtime 核对原请求身份与游标、共享预算树的停止状态、原执行者锁、响应身份、先前观察和额度，再追加一条控制记录。完整报告还须由宿主核对请求/响应关联、原内容事件前缀和协议计数转换。原 Failed/Cancelled/Dropped、Task、消息和观察保持不变，只派生已结算 token 与剩余预留；费用仍未知。缺失、部分或矛盾报告继续占用额度，取消的本地零值不作为证据。核对不执行旧工具，也不自动创建下一任务。
 
-存在历史未结用量（unknown hold）时，可信 Rust 宿主可通过 `authorize_model_budget_continuation` 入口为确切的新排队 Task 显式授权延续预算（`ModelBudgetContinuation` / `ModelBudgetContinuationRecord`），不提供模型工具或 IPC 授权端点。该延续授权必须在预算互斥锁与进程共享生命周期围栏（`stopped_model_budget`）下提交，要求会话树中所有执行者已停止，目标任务为真正未开始排队的新任务（无 worker、attempt、dispatch 或 slot 占用），且其任务 ID 与所有历史任务不同。授权声明的 `expected` 必须精确匹配会话树当前全部未结预留（原请求身份、原始游标与完整占用），且非空唯一有界。延续授权单独持久化，原记录、unknown 标志和被占用的预留保持不变，不阻塞后续旧请求的正当核对。请求准入时，仅对持有该授权的目标任务放行历史 unknown；若会话树出现任何未在授权名单中的新 unknown（包括该任务后续轮次产生的未结请求），则再次阻塞。该任务每轮请求的实际预留额度严格受限于会话树可用预算、授权上限扣除总占用、以及额外授予额度扣除该任务已结算与在途消费三者的最小值；旧占用释放或后续配置调大均不能扩大该任务已确定的额外额度。已完成请求结算后，后续轮次可继续复用该授权未用尽的额度；未来其他任务若仍面临历史 unknown，必须重新显式授予独立授权。仅调大配置、重新打开或 Fork 均不构成延续授权。
+存在历史未结用量（unknown hold）时，可信 Rust 宿主可通过 `authorize_model_budget_continuation` 为确切的新排队 Task 显式授权延续预算（`ModelBudgetContinuation` / `ModelBudgetContinuationRecord`）。本地认证 IPC 另外提供用户确认入口 `model.budget.status` 和 `model.budget.continue`，但不提供模型工具。界面先只读查询状态；如果存在 unknown hold，就展示全部精确来源、原预留、费用仍未知、新增额度和累计上限。用户确认前不能创建 Task。确认后，界面依次创建一个新 Task、把授权绑定到这个 Task，再执行 `task.resume`。`confirm` 必须为 `true`；Runtime 固定 actor 并生成证据文本，不接受客户端伪造 actor 或任意证据。授权失败时，界面只取消刚创建且尚未派发的原 Task；取消结果不能确认时停止并要求核对，不能改用另一个 Task 重试。
+
+延续授权必须在预算互斥锁与进程共享生命周期围栏（`stopped_model_budget`）下提交，要求会话树中所有执行者已停止，目标任务为真正未开始排队的新任务（无 worker、attempt、dispatch 或 slot 占用），且其任务 ID 与所有历史任务不同。授权声明的 `expected` 必须精确匹配会话树当前全部未结预留（原请求身份、原始游标与完整占用），且非空、唯一、有界。显式累计上限可以高于基础配置上限，但只能来自这一次持久授权；它不会改写基础配置。延续授权单独持久化，原记录、unknown 标志、费用未知状态和被占用的预留保持不变，也不阻塞后续旧请求的正当核对。请求准入时，仅对持有该授权的目标任务放行历史 unknown；若会话树出现任何未在授权名单中的新 unknown（包括该任务后续轮次产生的未结请求），则再次阻塞。该任务每轮请求的实际预留额度严格受限于授权累计上限扣除总占用，以及额外授予额度扣除该任务已结算与在途消费两者的最小值；旧占用释放、后续配置调大、重开或 Fork 都不能扩大已确定的额外额度。已完成请求结算后，后续轮次可继续使用该授权尚未消费的额度；未来其他任务若仍面临历史 unknown，必须重新确认并获得独立授权。
 
 ## Device、内容权威与资源
 
@@ -330,7 +332,7 @@ Server 负责远程绑定、认证吊销和路由；Device 使用自己主动建
 
 TUI 和 WebUI 是可选 Client plugin。它们始终连接设备上的唯一 Client，再由 Client 按 `workspace_id` 路由到对应工作区 Runtime；它们不保存工作区独立连接地址、访问码、重连状态或 Runtime 进程生命周期。Client 统一启动、停止和监管两种界面进程。两种界面都负责展示事件、工具、审批、取消与恢复状态，而不自行执行隐藏工具或修改数据库。各自交付范围与验收以对应 Issue 和 `docs/validation/` 记录为准。
 
-WebUI 默认只监听回环地址并免登录，仍严格校验 Host、Origin 与跨站请求。只有显式 `--lan IP:PORT` 才开放局域网；账户可选，未配置时允许访问并给出非阻塞提示，配置后使用账号密码与 HttpOnly 会话。账号配置以 WebUI 设置为主，仅允许真实回环连接且 Host 匹配本机管理地址的请求修改；不信任转发头。LAN 模式配对一个仅回环管理入口，与局域网入口共享状态，保存时立即应用并撤销旧登录。Client IPC 保留独立内部认证，不向浏览器暴露。UI 断连续读保存的事件游标，不自动再提交 prompt。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
+WebUI 默认只监听回环地址并免登录，仍严格校验 Host、Origin 与跨站请求。只有显式 `--lan IP:PORT` 才开放局域网；账户可选，未配置时允许访问并给出非阻塞提示，配置后使用账号密码与 HttpOnly 会话。账号配置以 WebUI 设置为主，仅允许真实回环连接且 Host 匹配本机管理地址的请求修改；不信任转发头。LAN 模式配对一个仅回环管理入口，与局域网入口共享状态，保存时立即应用并撤销旧登录。Client IPC 保留独立内部认证，不向浏览器暴露。UI 断连续读保存的事件游标，不自动再提交 prompt。历史模型用量未知时，TUI 和 WebUI 都必须先显示保留的预留和有限新增额度；用户确认前不创建 Task，拒绝后保留草稿。plugin 缺失、unknown、取消中、清理未确认和 Fork 确认都要显示真实状态，不能用“完成”掩盖。
 
 VerifyTool 是开发/验收消费者，不是运行必需服务。它运行真实 SDK/IPC/Host 路径，使用明确标记的离线模型 fixture、故障点和原始观测。它不另造执行内核，也不能把 fixture 授权写成用户批准。参见 [VerifyTool 约束](../crates/cayw-verify-tool/README.md)与[网页验证](validation/webui-runtime.md)。
 

@@ -348,13 +348,22 @@ impl Runtime {
             )
             .map_err(|error| RuntimeError::Workspace(error.to_string()))?,
         );
+        // The read coordinator validates captured bytes before they settle. Use
+        // the Host's own result cap here; the durable Core bound still applies
+        // before the terminal, Cells projection or model presentation.
+        let mut read_limits = config.cells.clone();
+        let read_result_cap = config.host.max_result_bytes.min(16 * 1024 * 1024 - 1024);
+        read_limits.item_bytes = read_limits.item_bytes.max(read_result_cap);
+        read_limits.max_output_tokens = read_limits
+            .max_output_tokens
+            .max(read_limits.item_bytes.saturating_add(1024));
         let reads = cayw_cells::ReadCoordinator::new(
             vec![cayw_cells::ReadPolicy {
                 capability: "fs.read".into(),
                 reuse: true,
                 coalesce: true,
             }],
-            config.cells.clone(),
+            read_limits,
         )
         .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
         let journal = audit::AuditDb::open(store_path.as_ref())?;
@@ -745,13 +754,30 @@ impl Runtime {
     pub(crate) fn check_ready(&self, id: &str) -> Result<SessionView, RuntimeError> {
         let snapshot = self.get(id)?;
         self.ensure_artifact_executor_idle(id)?;
+        let artifact_unknown = self.has_artifact_unknown(id)?;
+        self.check_ready_snapshot(id, snapshot, artifact_unknown)
+    }
+    /// Same readiness contract while the caller already owns this Session's
+    /// artifact executor. Artifact state is observed without re-acquiring the
+    /// executor, so a live action does not reject itself.
+    pub(crate) fn check_ready_locked(&self, id: &str) -> Result<SessionView, RuntimeError> {
+        let snapshot = self.get(id)?;
+        let artifact_unknown = self.artifact_unknown(id, false)?;
+        self.check_ready_snapshot(id, snapshot, artifact_unknown)
+    }
+    fn check_ready_snapshot(
+        &self,
+        id: &str,
+        snapshot: SessionView,
+        artifact_unknown: bool,
+    ) -> Result<SessionView, RuntimeError> {
         if snapshot.state == SessionState::NeedsReconciliation
             || self
                 .inner
                 .cells
                 .is_frozen(id)
                 .map_err(|error| RuntimeError::Workspace(error.to_string()))?
-            || self.has_artifact_unknown(id)?
+            || artifact_unknown
         {
             return Err(RuntimeError::NeedsReconciliation);
         }
@@ -907,5 +933,40 @@ mod tests {
         assert!(second.clone().try_lock_owned().is_err());
         drop(permit);
         assert!(second.try_lock_owned().is_ok());
+    }
+
+    #[test]
+    fn readiness_rejects_a_frozen_binding() {
+        // Break caught: artifact InvokeTool must reuse the same readiness
+        // contract as prompts, including a frozen plugin binding.
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(temp.path());
+        let id = runtime.create(None).unwrap().id;
+        let mut view = runtime.get(&id).unwrap();
+        view.frozen = true;
+        let error = runtime.check_ready_snapshot(&id, view, false).unwrap_err();
+        assert!(matches!(error, RuntimeError::Frozen(_)), "{error:?}");
+    }
+
+    #[test]
+    fn readiness_rechecks_state_after_the_first_gate() {
+        // Break caught: readiness observed before the artifact executor lock can
+        // go stale. The second gate must observe a freeze that landed after the
+        // first gate returned successfully.
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(temp.path());
+        let id = runtime.create(None).unwrap().id;
+        runtime.check_ready(&id).unwrap();
+        let db = rusqlite::Connection::open(temp.path().join("session.db")).unwrap();
+        db.execute(
+            "INSERT OR IGNORE INTO cells_frozen_v1(session) VALUES(?1)",
+            [&id],
+        )
+        .unwrap();
+        let error = runtime.check_ready_locked(&id).unwrap_err();
+        assert!(
+            matches!(error, RuntimeError::NeedsReconciliation),
+            "{error:?}"
+        );
     }
 }

@@ -4,7 +4,10 @@ use crate::{
     queue::{TaskLease, TaskTerminal},
 };
 use async_trait::async_trait;
-use cayw_agent::{Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolContext, ToolResult};
+use cayw_agent::{
+    Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolArgumentLimit, ToolContext,
+    ToolResult,
+};
 use cayw_ai::{CancellationToken, Message, ToolDefinition};
 use cayw_cells::{CellManager, CellTool};
 use cayw_codemode::{CapabilityError, CapabilityStop};
@@ -997,7 +1000,14 @@ async fn execute_with_cells(
             context.clone(),
         )),
         context.selection.model.clone(),
-    );
+    )
+    // Core v3 rejects oversized metadata before it can commit an event. This is
+    // a Runtime persistence constraint, not an Agent product limit.
+    .with_tool_argument_limit(Some(ToolArgumentLimit::new(
+        cayw_core::MAX_METADATA_BYTES,
+        cayw_core::MAX_METADATA_DEPTH,
+        cayw_core::MAX_METADATA_NODES,
+    )));
     // FleetView intervention: steer/stop need the live Agent control.
     inner
         .fleet
