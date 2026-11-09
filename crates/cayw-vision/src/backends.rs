@@ -625,13 +625,13 @@ impl FakeCurl {
         let sizes = dir.path().join("sizes");
         let recording_complete = dir.path().join("recording-complete");
         let header_mode_pending = dir.path().join("header-mode-pending");
-        let before_header_mode = match mode {
-            // Hold the exact race window with shell builtins only: killing the
-            // direct child leaves no helper process holding the output pipes.
-            FakeCurlMode::HoldBeforeHeaderMode => {
-                ": > \"$header_mode_pending\"\nwhile :; do :; done"
-            }
-            _ => "",
+        // Stop in the exact race window without a busy loop. `exec` keeps
+        // the sleeper as the direct child, and it exits even if cancellation
+        // regresses. No grandchild can keep the output pipes open.
+        let before_header_mode = if matches!(mode, FakeCurlMode::HoldBeforeHeaderMode) {
+            ": > \"$header_mode_pending\"\nexec sleep 5"
+        } else {
+            ""
         };
         let behaviour = match mode {
             FakeCurlMode::Success => "printf '{\"answer\":\"ok\"}'",
@@ -641,7 +641,7 @@ impl FakeCurl {
             // `exec` keeps the shell pid as the direct child, so cancellation
             // kills the sleeper instead of orphaning a grandchild that holds
             // the stdout/stderr pipes open.
-            FakeCurlMode::Sleep | FakeCurlMode::HoldBeforeHeaderMode => "exec sleep 30",
+            FakeCurlMode::Sleep | FakeCurlMode::HoldBeforeHeaderMode => "exec sleep 5",
         };
         let script = format!(
             r#"#!/bin/sh
@@ -717,7 +717,8 @@ fi
         }
     }
 
-    // Return on timeout so callers can cancel and join before asserting.
+    // Return on timeout so callers can cancel and wait for a bounded result
+    // before asserting.
     fn wait_for_marker(&self, marker: &Path) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !marker.exists() {
@@ -737,6 +738,39 @@ fi
         );
         backend.curl_program = self.program.clone();
         backend
+    }
+
+    fn describe_in_background(
+        &self,
+        key: &str,
+        cancel: CancellationToken,
+    ) -> std::sync::mpsc::Receiver<Result<String, VisionError>> {
+        let backend = self.backend(Some(key));
+        let image = ImageBuffer::solid(2, 2, [1, 2, 3, 255]).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = backend.describe(
+                &image,
+                &DescribeRequest {
+                    question: "q".into(),
+                    json: false,
+                },
+                &cancel,
+            );
+            // A timed-out test may already have dropped its receiver.
+            let _ = sender.send(result);
+        });
+        receiver
+    }
+
+    fn wait_for_describe(
+        receiver: std::sync::mpsc::Receiver<Result<String, VisionError>>,
+    ) -> Result<String, VisionError> {
+        // Never join an unfinished worker: a cancellation/reader regression
+        // must fail this test rather than hang the whole workspace suite.
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("fake curl describe worker did not finish within 10 seconds")
     }
 
     fn argv(&self) -> String {
@@ -875,27 +909,15 @@ fn http_describe_failure_redacts_key_and_cleans_temp_files() {
 #[test]
 fn http_describe_cancel_cleans_temp_files() {
     let fake = FakeCurl::new(FakeCurlMode::Sleep);
-    let backend = Arc::new(fake.backend(Some("sk-cancel-secret-789")));
-    let image = Arc::new(ImageBuffer::solid(2, 2, [1, 2, 3, 255]).unwrap());
     let cancel = CancellationToken::new();
-    let thread_cancel = cancel.clone();
-    let handle = std::thread::spawn(move || {
-        backend.describe(
-            &image,
-            &DescribeRequest {
-                question: "q".into(),
-                json: false,
-            },
-            &thread_cancel,
-        )
-    });
+    let receiver = fake.describe_in_background("sk-cancel-secret-789", cancel.clone());
 
     // Paths are published before their modes. Only the final marker proves
     // that all permission evidence is recorded before cancellation kills curl.
     let recording_complete = fake.wait_for_marker(&fake.recording_complete);
     cancel.cancel();
 
-    let result = handle.join().unwrap();
+    let result = FakeCurl::wait_for_describe(receiver);
     assert!(recording_complete, "fake curl did not finish recording");
     assert!(matches!(result, Err(VisionError::Cancelled)));
     assert_eq!(fake.modes(), vec!["-rw-------", "-rw-------"]);
@@ -910,20 +932,8 @@ fn http_describe_cancel_cleans_temp_files() {
 #[test]
 fn http_describe_cancel_between_path_and_mode_records() {
     let fake = FakeCurl::new(FakeCurlMode::HoldBeforeHeaderMode);
-    let backend = fake.backend(Some("sk-cancel-partial-recording"));
-    let image = ImageBuffer::solid(2, 2, [1, 2, 3, 255]).unwrap();
     let cancel = CancellationToken::new();
-    let thread_cancel = cancel.clone();
-    let handle = std::thread::spawn(move || {
-        backend.describe(
-            &image,
-            &DescribeRequest {
-                question: "q".into(),
-                json: false,
-            },
-            &thread_cancel,
-        )
-    });
+    let receiver = fake.describe_in_background("sk-cancel-partial-recording", cancel.clone());
 
     // Deterministically expose the old readiness condition: both paths are
     // visible, but the header mode cannot be written until after this hold.
@@ -931,9 +941,9 @@ fn http_describe_cancel_between_path_and_mode_records() {
     let paths_before_cancel = fake.paths();
     let modes_before_cancel = fake.modes();
     let ready_before_cancel = fake.recording_complete.exists();
-    // Always reap the worker, including when the readiness wait times out.
+    // Always request cleanup, including when the readiness wait times out.
     cancel.cancel();
-    let result = handle.join().unwrap();
+    let result = FakeCurl::wait_for_describe(receiver);
 
     assert!(
         header_mode_pending,
@@ -947,6 +957,31 @@ fn http_describe_cancel_between_path_and_mode_records() {
     assert!(!fake.recording_complete.exists());
     for path in paths_before_cancel {
         assert!(!path.exists(), "temp file survived cancel: {path:?}");
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn http_describe_cancel_hold_expires_without_cancellation() {
+    let fake = FakeCurl::new(FakeCurlMode::HoldBeforeHeaderMode);
+    // Deliberately never cancel: even a broken cancellation path must not leave
+    // this fixture spinning forever. The worker wait is independently bounded.
+    let receiver = fake.describe_in_background("sk-no-cancel", CancellationToken::new());
+    let header_mode_pending = fake.wait_for_marker(&fake.header_mode_pending);
+    let result = FakeCurl::wait_for_describe(receiver);
+
+    assert!(
+        header_mode_pending,
+        "fake curl did not reach recording hold"
+    );
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("describe response JSON"), "{error}");
+    assert_eq!(fake.modes(), vec!["-rw-------"]);
+    assert!(!fake.recording_complete.exists());
+    let paths = fake.paths();
+    assert_eq!(paths.len(), 2);
+    for path in paths {
+        assert!(!path.exists(), "temp file survived hold expiry: {path:?}");
     }
 }
 

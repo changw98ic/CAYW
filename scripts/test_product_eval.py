@@ -576,6 +576,24 @@ class ScorerTests(unittest.TestCase):
         self.assertEqual(pe.report(scores)["comparison"], "descriptive_only")
 
 
+def cargo_toolchain_env(rustc):
+    # Cargo test also invokes rustdoc, even when a crate has no doctests.
+    # Keep both executables on the selected toolchain, independent of PATH or
+    # a caller's inherited RUSTDOC setting.
+    return {**os.environ, "RUSTC": rustc, "RUSTDOC": str(Path(rustc).with_name("rustdoc"))}
+
+
+class CargoToolchainEnvironmentTests(unittest.TestCase):
+    def test_selected_toolchain_overrides_inherited_rust_tools(self):
+        inherited = {"PATH": "/usr/bin:/bin", "RUSTC": "/other/rustc", "RUSTDOC": "/other/rustdoc"}
+        with patch.dict(os.environ, inherited, clear=True):
+            env = cargo_toolchain_env("/selected toolchain/bin/rustc")
+            self.assertEqual(env["RUSTC"], "/selected toolchain/bin/rustc")
+            self.assertEqual(env["RUSTDOC"], "/selected toolchain/bin/rustdoc")
+            self.assertEqual(env["PATH"], inherited["PATH"])
+            self.assertEqual(dict(os.environ), inherited)
+
+
 @unittest.skipUnless(os.environ.get("CAYW_EVAL_RUSTC"), "set CAYW_EVAL_RUSTC to the real rustc binary for native fixture checks")
 class RustScorerTests(unittest.TestCase):
     def setUp(self):
@@ -591,20 +609,43 @@ class RustScorerTests(unittest.TestCase):
     def grade(self, root, case):
         return pe.grade_rust(root, case, True, self.rustc)["status"]
 
-    def test_locked_cargo_build_uses_host_cache_not_workspace_target(self):
+    def cargo_test(self, root, target):
         cargo = str(Path(self.rustc).with_name("cargo"))
+        return subprocess.run([cargo, "test", "--locked", "--offline", "--target-dir", str(target)],
+                              cwd=root / "workspace", env=cargo_toolchain_env(self.rustc),
+                              text=True, capture_output=True, timeout=90)
+
+    def test_locked_cargo_build_uses_host_cache_not_workspace_target(self):
         for case in ("C02", "C03"):
             root = self.prepare(case)
             target = Path(self.temp.name) / (case + "-host-cache")
-            completed = subprocess.run([cargo, "test", "--locked", "--offline", "--target-dir", str(target)],
-                                       cwd=root / "workspace", env={**os.environ, "RUSTC": self.rustc},
-                                       text=True, capture_output=True, timeout=90)
+            completed = self.cargo_test(root, target)
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertFalse((root / "workspace/target").exists())
             meta, files, outputs, expected = pe.validate_run(root)
             checks = pe.machine_checks(root, meta, files, outputs, expected)
             self.assertIn(pe.check("input_unchanged:Cargo.lock", True), checks)
             self.assertFalse(any(c["criterion"].startswith("scope:") for c in checks))
+
+    @unittest.skipUnless(os.name == "posix", "executable rustdoc decoy uses a POSIX shell")
+    def test_cargo_doctest_ignores_conflicting_rustdoc_and_path(self):
+        root = self.prepare("C02")
+        with (root / "workspace/src/lib.rs").open("a") as source:
+            source.write("\n/// ```\n/// assert_eq!(2 + 2, 4);\n/// ```\npub fn toolchain_doctest() {}\n")
+        decoy_dir = Path(self.temp.name) / "wrong-toolchain"
+        decoy_dir.mkdir()
+        decoy = decoy_dir / "rustdoc"
+        decoy.write_text("#!/bin/sh\nprintf 'wrong rustdoc used\\n' >&2\nexit 97\n")
+        decoy.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": str(decoy_dir) + os.pathsep + os.environ.get("PATH", ""),
+                                     "RUSTDOC": str(decoy)}):
+            completed = self.cargo_test(root, Path(self.temp.name) / "doctest-host-cache")
+        output = completed.stdout + completed.stderr
+        self.assertEqual(completed.returncode, 0, output)
+        self.assertIn("Doc-tests", output)
+        self.assertIn("toolchain_doctest", output)
+        self.assertNotIn("wrong rustdoc used", output)
+        self.assertFalse((root / "workspace/target").exists())
 
     def test_both_buggy_baselines_fail(self):
         for case in ["C02", "C03"]:

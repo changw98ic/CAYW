@@ -65,3 +65,16 @@ git diff --check
 后续修复仅调整测试 fixture：所有记录完成后发布显式就绪标记，正常取消测试等待该标记，原两条权限和临时文件清理断言全部保留。另加受控停点，在第二个路径已记录、第二条权限未记录时保持子进程，用确定性反例验证此时两条路径不等于记录齐全；取消后仍须清理两个临时文件。停点只用 shell builtin，不启动长寿命辅助子进程。
 
 macOS CI 在完整 workspace 检查前执行针对性的 `cargo test -p cayw-vision --lib --locked backends::http_describe_cancel`，便于尽早发现本类回归；完整 workspace test 仍照常执行。当前本地无 Rust/Cargo，且可用列表中的 Mac 离线，未在本地执行或外推 macOS 结果；新提交的 CI 状态须按其精确 SHA 另查。
+
+## 测试工具链与取消回归的有界执行（2026-11-09）
+
+本轮从 PR56 当时最新 head `e28c3aa0ed67136f49c7c73c54086c10e10138ca` 追加，不改生产逻辑。
+
+- 原 Cargo fixture 子进程只固定 `RUSTC`，却继承宿主 `RUSTDOC`/`PATH`。本地用 mock 子进程检查原环境时，选定 `/chosen/toolchain/bin/rustc` 仍传入冲突的 `/conflicting/rustdoc`。这是环境传递反例，不是本地真实 Cargo 运行。
+- 现在由同一 helper 固定选定工具链的 `cargo`、`RUSTC` 和同目录 `RUSTDOC`。新增纯 Python 环境检查，证明覆盖继承值且不修改宿主环境；新增 native 回归，在 PATH 首位和 RUSTDOC 同时放置必失败的 rustdoc 替身，并实际运行一个通过的 doctest，防止只跑普通测试而漏掉 rustdoc。
+- 原 Vision 受控停点为无限 shell 忙等，取消后无期限 join。现在停点使用 `exec sleep 5`，保持直接子进程身份且自然退出；两项取消测试改用有 10 秒上限的完成通道。就绪标记仍有独立 5 秒上限，原完整/部分权限记录、取消终态和两个临时文件清理断言不变。
+- 新增 `http_describe_cancel_hold_expires_without_cancellation`，故意不取消，验证停点会自然结束、仍只留下部分记录、返回无有效响应的错误并清理临时文件。现有 CI 的 `backends::http_describe_cancel` 过滤器也会运行这项反例。这些秒级上限用于防止测试挂起，不是产品响应时间指标。
+
+本地实际执行：`python3 scripts/test_product_eval.py` 为 **56 项通过、7 项 native 跳过**；Python compile、`git diff --check` 通过；既有 WebUI Node 测试 **122/122 通过**。另直接提取当前 Rust 文件中的完整 shell 模板运行，确认无取消停点约 5 秒退出，以及完整/部分记录两条取消路径都关闭 stdout/stderr 管道；这只验证 shell fixture，不能冒充 Rust 取消路径验证。
+
+本地没有 Rust/Cargo，当前列出的 Mac 为离线，因此 Rust fmt/check/clippy/native 测试由新提交的 CI 精确 SHA 实际结果决定，本记录不提前宣称通过。没有运行真实/付费模型、交互 UI、插件效果或真实长任务恢复。
