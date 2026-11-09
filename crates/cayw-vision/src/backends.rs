@@ -935,7 +935,10 @@ fn http_describe_cancel_between_path_and_mode_records() {
     cancel.cancel();
     let result = handle.join().unwrap();
 
-    assert!(header_mode_pending, "fake curl did not reach recording hold");
+    assert!(
+        header_mode_pending,
+        "fake curl did not reach recording hold"
+    );
     assert_eq!(paths_before_cancel.len(), 2);
     assert_eq!(modes_before_cancel, vec!["-rw-------"]);
     assert!(!ready_before_cancel, "partial recording must not be ready");
