@@ -661,7 +661,10 @@ mod model_tests {
                 "model":previous.public_view(),
                 "clear_api_key":true
             });
-            params["model"].as_object_mut().unwrap().remove("authentication");
+            params["model"]
+                .as_object_mut()
+                .unwrap()
+                .remove("authentication");
             if let Some(action) = action {
                 params["credential"] = json!(action);
             }

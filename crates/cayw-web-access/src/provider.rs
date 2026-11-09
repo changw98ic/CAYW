@@ -722,7 +722,10 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.diagnostic().class, FailureClass::Timeout);
         assert_eq!(error.diagnostic().provider.as_deref(), Some("reqwest"));
-        assert_eq!(error.diagnostic().url.as_deref(), Some("https://example.com/"));
+        assert_eq!(
+            error.diagnostic().url.as_deref(),
+            Some("https://example.com/")
+        );
         // This is Tokio's virtual clock, not an elapsed wall-time assertion.
         assert_eq!(started.elapsed(), transport.timeout);
     }
@@ -737,10 +740,8 @@ mod tests {
         for blocked_phase in 0..4 {
             let completed = Cell::new(0);
             let started = tokio::time::Instant::now();
-            let error = with_request_deadline(
-                Duration::from_secs(30),
-                "https://example.com/",
-                async {
+            let error =
+                with_request_deadline(Duration::from_secs(30), "https://example.com/", async {
                     for phase in 0..4 {
                         let duration = if phase == blocked_phase { 30 } else { 5 };
                         tokio::time::sleep(Duration::from_secs(duration)).await;
@@ -751,10 +752,9 @@ mod tests {
                         completed.set(completed.get() + 1);
                     }
                     Ok(())
-                },
-            )
-            .await
-            .unwrap_err();
+                })
+                .await
+                .unwrap_err();
             assert_eq!(error.diagnostic().class, FailureClass::Timeout);
             assert_eq!(completed.get(), blocked_phase);
             assert_eq!(started.elapsed(), Duration::from_secs(30));
@@ -763,11 +763,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn total_deadline_preserves_success_and_request_errors() {
-        let result = with_request_deadline(Duration::from_secs(30), "https://example.com/", async {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            Ok(42)
-        })
-        .await;
+        let result =
+            with_request_deadline(Duration::from_secs(30), "https://example.com/", async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(42)
+            })
+            .await;
         assert_eq!(result, Ok(42));
 
         let expected = blocked_target(&Url::parse("http://127.0.0.1/").unwrap(), "loopback");
