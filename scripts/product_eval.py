@@ -27,6 +27,10 @@ RUBRICS = ["correctness", "completeness", "clarity", "effort", "trust"]
 UI_RUBRICS = ["discoverability", "progress", "control", "workspace_clarity", "error_recovery"]
 KINDS = ["live_model", "fixture", "not_run"]
 STATUSES = ["completed", "failed", "cancelled", "blocked", "not_run"]
+OUTCOMES = ["accepted", "failed", "unverified", "blocked", "not_run", "invalid"]
+COUNTERS = ["input_tokens", "output_tokens", "model_requests", "repair_attempts", "human_interventions", "human_repairs"]
+METRICS = ["wall_seconds", "active_seconds", "approval_seconds", *COUNTERS, "cost"]
+USAGE_STATUSES = ["unknown", "partial", "reported", "invalid"]
 
 
 def digest(data):
@@ -92,7 +96,7 @@ def template(case, run_id):
         "metrics": {"wall_seconds": None, "active_seconds": None, "approval_seconds": None,
                     "input_tokens": None, "output_tokens": None, "cost": None, "currency": None,
                     "usage_status": "unknown", "model_requests": None, "repair_attempts": None,
-                    "human_interventions": None},
+                    "human_interventions": None, "human_repairs": None},
         "review": {"reviewer": None, "evidence_checked": False, "live_provider_verified": False,
                    "scope_safe": None, "budget_respected": None, "terminal_verified": None,
                    "recovery_verified": None, "ui_verified": None,
@@ -241,13 +245,11 @@ def machine_checks(root, meta, files, outputs, expected, allow_exec=False, rustc
                 passed = False
             checks.append(check("input_unchanged:" + name, passed))
     allowed = set(files) | set(outputs)
-    if meta["case"] in ("C02", "C03"):
-        allowed.add("Cargo.lock")
     for path in workspace.rglob("*"):
         rel = path.relative_to(workspace).as_posix()
         if path.is_symlink():
             checks.append(check("no_symlink:" + rel, False))
-        elif path.is_file() and rel not in allowed and not (meta["case"] in ("C02", "C03") and rel.startswith("target/")):
+        elif path.is_file() and rel not in allowed:
             checks.append(check("scope:" + rel, False, "unexpected file"))
     for name in outputs:
         try:
@@ -315,20 +317,31 @@ def record_checks(root, record, meta):
         if not record["conditions"].get(key):
             missing.append("conditions." + key)
     metrics = record["metrics"]
-    for key in ["wall_seconds", "active_seconds", "approval_seconds", "input_tokens", "output_tokens", "cost", "model_requests", "repair_attempts", "human_interventions"]:
-        value = metrics.get(key)
-        if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
+    for key in METRICS:
+        if metric_state(metrics, key) == "invalid":
             errors.append("invalid metric: " + key)
-    if metrics.get("usage_status") not in ["unknown", "partial", "reported", "invalid"]:
+    if metrics.get("usage_status") not in USAGE_STATUSES:
         errors.append("invalid usage_status")
-    if metrics.get("cost") is not None and not metrics.get("currency"):
-        errors.append("cost requires currency")
-    if metrics.get("usage_status") == "unknown" and any(metrics.get(k) is not None for k in ["input_tokens", "output_tokens"]):
-        errors.append("unknown usage must retain null token counts")
+    if metrics.get("cost") is not None and not valid_currency(metrics.get("currency")):
+        errors.append("cost requires a nonempty currency string")
+    if metrics.get("usage_status") == "unknown" and any(metrics.get(k) is not None for k in ["input_tokens", "output_tokens", "cost"]):
+        errors.append("unknown usage must retain null token counts and cost")
     if metrics.get("usage_status") == "reported" and any(metrics.get(k) is None for k in ["input_tokens", "output_tokens"]):
         errors.append("reported usage requires input/output counts")
-    if record.get("execution_kind") == "live_model" and metrics.get("model_requests") == 0:
-        errors.append("live_model contradicts zero model requests")
+    if record.get("execution_kind") == "live_model":
+        if metrics.get("model_requests") == 0:
+            errors.append("live_model contradicts zero model requests")
+        if record.get("status") == "not_run":
+            errors.append("live_model contradicts not_run status")
+    if record.get("execution_kind") == "not_run" and record.get("status") not in ("not_run", "blocked"):
+        errors.append("not_run execution kind contradicts attempted status")
+    if metric_state(metrics, "human_repairs") == "known" and metrics["human_repairs"] > 0:
+        for key in ("repair_attempts", "human_interventions"):
+            if metric_state(metrics, key) == "known" and metrics[key] == 0:
+                errors.append("human_repairs contradicts zero " + key)
+    category = record.get("failure_category")
+    if category is not None and (not isinstance(category, str) or not category.strip()):
+        errors.append("failure_category must be a nonempty string or null")
     evidence = record.get("evidence", [])
     if not isinstance(evidence, list):
         raise ValueError("evidence must be an array")
@@ -405,9 +418,106 @@ def score(root, record_path, allow_exec=False, rustc=None):
     return {"schema": "cayw.product-eval.score.v1", "run_id": meta["run_id"], "case": meta["case"],
             "fixture_version": VERSION, "outcome": outcome, "machine_checks": checks,
             "invalid_reasons": errors, "missing_evidence": missing,
-            "false_completion": bool(record.get("claimed_complete") and (failed or unsafe or terminal_failed or record["status"] in ("failed", "cancelled"))),
+            "false_completion": bool(record.get("claimed_complete") and (failed or unsafe or terminal_failed or record.get("status") in ("failed", "cancelled"))),
             "record": record,
             "limitations": "Human-attested evidence, not an authenticated Runtime trace verifier. Synthetic task corpus; not field success or causal proof."}
+
+
+def valid_currency(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def metric_state(metrics, key):
+    value = metrics.get(key)
+    if value is None:
+        return "unknown"
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)) or value < 0:
+        return "invalid"
+    if key in COUNTERS and type(value) is not int:
+        return "invalid"
+    if key in ("input_tokens", "output_tokens", "cost") and metrics.get("usage_status") not in ("reported", "partial"):
+        return "invalid"
+    if key == "cost" and not valid_currency(metrics.get("currency")):
+        return "invalid"
+    return "known"
+
+
+def numeric_summary(records, key):
+    states = [metric_state(r["metrics"], key) for r in records]
+    values = [r["metrics"][key] for r, state in zip(records, states) if state == "known"]
+    return {"known_cells": len(values), "unknown_cells": states.count("unknown"),
+            "invalid_cells": states.count("invalid"), "zero_cells": values.count(0),
+            "positive_cells": sum(v > 0 for v in values),
+            "observed_sum": sum(values) if values else None,
+            "min": min(values) if values else None, "max": max(values) if values else None}
+
+
+def score_distribution(records, rubric, dimension):
+    values = [r["review"].get(rubric, {}).get(dimension) for r in records]
+    known = [v for v in values if type(v) is int and 0 <= v <= 4]
+    return {"scores": {str(n): known.count(n) for n in range(5)},
+            "unknown_cells": values.count(None),
+            "invalid_cells": len(values) - len(known) - values.count(None)}
+
+
+def population_summary(scores):
+    # These are recorded observations, not authenticated evidence. Keep every
+    # outcome in its population; missing measurements never become zero.
+    records = [s["record"] for s in scores]
+    metrics = {k: numeric_summary(records, k) for k in METRICS if k != "cost"}
+    cost = {state + "_cells": sum(metric_state(r["metrics"], "cost") == state for r in records)
+            for state in ("known", "unknown", "invalid")}
+    currencies = sorted({r["metrics"]["currency"] for r in records if metric_state(r["metrics"], "cost") == "known"})
+    # Never add different currencies, or partial receipts to complete receipts.
+    cost["by_currency"] = {currency: {
+        status: numeric_summary([r for r in records if r["metrics"].get("currency") == currency
+                                 and r["metrics"].get("usage_status") == status], "cost")
+        for status in ("reported", "partial")} for currency in currencies}
+    metrics["cost"] = cost
+    rubrics = {}
+    for case in sorted({s["case"] for s in scores}):
+        group = [s["record"] for s in scores if s["case"] == case]
+        rubrics[case] = {"cells": len(group),
+                         "rubric": {k: score_distribution(group, "rubric", k) for k in RUBRICS}}
+        if case == "U01":
+            rubrics[case]["ui_rubric"] = {k: score_distribution(group, "ui_rubric", k) for k in UI_RUBRICS}
+    categories, unknown_categories, no_category_needed = {}, 0, 0
+    for s in scores:
+        category = s["record"].get("failure_category")
+        if isinstance(category, str) and category.strip():
+            categories[category] = categories.get(category, 0) + 1
+        elif s["outcome"] == "accepted":
+            no_category_needed += 1
+        else:
+            unknown_categories += 1
+    return {"cells": len(scores), "counts": {o: sum(s["outcome"] == o for s in scores) for o in OUTCOMES},
+            "rubric_by_case": rubrics, "metrics": metrics,
+            "usage_status_counts": {status: sum(r["metrics"].get("usage_status") == status for r in records) for status in USAGE_STATUSES},
+            "missing_or_invalid_usage_status_cells": sum(r["metrics"].get("usage_status") not in USAGE_STATUSES for r in records),
+            "failure_categories": {"counts": categories, "unknown_cells": unknown_categories,
+                                   "not_applicable_cells": no_category_needed},
+            "missing_evidence_cells": sum(bool(s["missing_evidence"]) for s in scores),
+            "invalid_record_cells": sum(bool(s["invalid_reasons"]) for s in scores)}
+
+
+def live_success_summary(scores):
+    # live_model means an attempted real run, even when its record is invalid,
+    # execution was cancelled, or a later approval/budget block stopped it.
+    live = [s for s in scores if s["record"].get("execution_kind") == "live_model"]
+    accepted = [s for s in live if s["outcome"] == "accepted"]
+    result = {"attempted_live_cells": len(live), "accepted_live_cells": len(accepted),
+              "conservative_success_rate": len(accepted) / len(live) if live else None}
+    for label, metric in [("first_attempt", "repair_attempts"),
+                          ("without_human_repairs", "human_repairs"),
+                          ("unassisted", "human_interventions")]:
+        # An explicit zero in another counter cannot stand in for an unknown
+        # human repair count, or contradict a disclosed manual repair.
+        required = {metric, "human_repairs"}
+        successes = sum(all(metric_state(s["record"]["metrics"], key) == "known"
+                            and s["record"]["metrics"][key] == 0 for key in required) for s in accepted)
+        result[label + "_accepted_live_cells"] = successes
+        result[label + "_success_rate"] = successes / len(live) if live else None
+    return result
 
 
 def report(scores):
@@ -415,8 +525,9 @@ def report(scores):
     ids = [s["run_id"] for s in scores]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate run IDs")
-    counts = {s: sum(r["outcome"] == s for r in scores) for s in ["accepted", "failed", "unverified", "blocked", "not_run", "invalid"]}
-    eligible = [s for s in scores if s["record"]["execution_kind"] == "live_model" and s["outcome"] in ["accepted", "failed", "unverified"]]
+    counts = {s: sum(r["outcome"] == s for r in scores) for s in OUTCOMES}
+    populations = {kind: population_summary([s for s in scores if s["record"].get("execution_kind") == kind]) for kind in KINDS}
+    populations["unknown"] = population_summary([s for s in scores if s["record"].get("execution_kind") not in KINDS])
     strata = {}
     for s in scores:
         r = s["record"]
@@ -427,26 +538,37 @@ def report(scores):
         strata.setdefault(key, []).append(s)
     paired = []
     for key, group in strata.items():
-        variants = sorted(set(s["record"].get("variant", "") for s in group))
-        repetitions = {v: [s["record"]["repetition"] for s in group if s["record"].get("variant") == v] for v in variants}
+        comparable = [s for s in group if isinstance(s["record"].get("variant"), str)
+                      and s["record"]["variant"].strip()
+                      and type(s["record"].get("repetition")) is int and s["record"]["repetition"] > 0
+                      and (s["record"].get("seed") is None or type(s["record"]["seed"]) is int)]
+        variants = sorted({s["record"]["variant"] for s in comparable})
+        repetitions = {v: [s["record"]["repetition"] for s in comparable if s["record"]["variant"] == v] for v in variants}
         if any(len(set(v)) != len(v) for v in repetitions.values()):
             raise ValueError("duplicate case/variant/repetition in comparison")
         repeated = len(variants) > 1 and all(len(v) >= 3 for v in repetitions.values()) and len({tuple(sorted(v)) for v in repetitions.values()}) == 1
-        seed_pairs = {v: sorted((s["record"]["repetition"], s["record"].get("seed")) for s in group if s["record"].get("variant") == v) for v in variants}
+        seed_pairs = {v: sorted((s["record"]["repetition"], s["record"].get("seed")) for s in comparable if s["record"]["variant"] == v) for v in variants}
         seeds_match = len({pretty(v) for v in seed_pairs.values()}) == 1
         paired.append({"conditions": json.loads(key), "variants": variants, "runs": [s["run_id"] for s in group],
-                       "comparison": "descriptive_only" if len(variants) > 1 and repeated and seeds_match and all(s["record"]["execution_kind"] == "live_model" and s["outcome"] in ("accepted", "failed") and not s["missing_evidence"] and not s["invalid_reasons"] and s["record"]["model"].get("revision") not in (None, "unknown") for s in group) else "pending",
+                       "invalid_comparison_run_ids": [s["run_id"] for s in group if s not in comparable],
+                       "variant_summaries": {v: {**live_success_summary([s for s in group if s["record"].get("variant") == v]),
+                           "live_model": population_summary([s for s in group if s["record"].get("variant") == v and s["record"].get("execution_kind") == "live_model"])} for v in variants},
+                       "comparison": "descriptive_only" if len(comparable) == len(group) and len(variants) > 1 and repeated and seeds_match and all(s["record"].get("execution_kind") == "live_model" and s["outcome"] in ("accepted", "failed") and not s["missing_evidence"] and not s["invalid_reasons"] and s["record"]["model"].get("revision") not in (None, "unknown") for s in group) else "pending",
                        "note": "No significance claim. Inspect treatment, source/features, tool catalogs, order and paired repetitions before attributing effects."})
     return {"schema": "cayw.product-eval.summary.v1", "counts": counts,
-            "attempted_live_cells": len(eligible), "accepted_live_cells": sum(s["outcome"] == "accepted" for s in eligible),
-            "conservative_success_rate": sum(s["outcome"] == "accepted" for s in eligible) / len(eligible) if eligible else None,
-            "false_completions": sum(s["false_completion"] for s in scores if s["record"]["execution_kind"] == "live_model"),
-            "fixture_false_completions": sum(s["false_completion"] for s in scores if s["record"]["execution_kind"] == "fixture"),
+            "submitted_cells": len(scores), "by_execution_kind": populations,
+            **live_success_summary(scores),
+            "false_completions": sum(s["false_completion"] for s in scores if s["record"].get("execution_kind") == "live_model"),
+            "fixture_false_completions": sum(s["false_completion"] for s in scores if s["record"].get("execution_kind") == "fixture"),
             "comparison": "incomparable" if len(strata) > 1 else (paired[0]["comparison"] if paired else "pending"),
             "comparison_reason": "Known condition differences are not pooled. Plugin/model ablations with deliberately different catalogs/configurations require the runbook's explicit treatment review, not this strict same-condition summary.",
             "strata": paired,
-            "runs": [{"run_id": s["run_id"], "case": s["case"], "outcome": s["outcome"], "variant": s["record"].get("variant"), "metrics": s["record"]["metrics"], "candidate": s["record"]["candidate"], "conditions": s["record"]["conditions"]} for s in scores],
-            "warning": "Blocked/not-run/invalid are reported separately, never counted as passes. Costs with null remain unknown; no synthetic scores are product results."}
+            "runs": [{"run_id": s["run_id"], "case": s["case"], "outcome": s["outcome"], "variant": s["record"].get("variant"), "execution_kind": s["record"].get("execution_kind"), "status": s["record"].get("status"),
+                      "metrics": s["record"]["metrics"], "failure_category": s["record"].get("failure_category"),
+                      "rubric": s["record"]["review"].get("rubric"), "ui_rubric": s["record"]["review"].get("ui_rubric"),
+                      "invalid_reasons": s["invalid_reasons"], "missing_evidence": s["missing_evidence"],
+                      "notes": s["record"].get("notes"), "review_notes": s["record"]["review"].get("notes"), "candidate": s["record"]["candidate"], "conditions": s["record"]["conditions"]} for s in scores],
+            "warning": "Every declared live_model run, including invalid and blocked, stays in the success denominator. Preflight blocks use execution_kind=not_run. Missing repair counts cannot qualify as first-attempt/unassisted success. Distributions and sums describe recorded observations, not verified measurements; observed_sum is not a full-run total when values are unknown, invalid or partial. Overall rates are sample accounting, not a pooled comparison across strata. Fixtures and unknown execution kinds are separate, never product results."}
 
 
 def main():

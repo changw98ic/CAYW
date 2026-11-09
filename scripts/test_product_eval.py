@@ -5,6 +5,8 @@ No acceptance result here is a measurement of CAYW or a real model.
 import copy
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -179,6 +181,261 @@ class ScorerTests(unittest.TestCase):
         self.reviewed_record()["metrics"]["input_tokens"] = 0
         self.assertEqual(self.score()["outcome"], "invalid")
 
+    def test_unknown_cost_cannot_be_zero_or_positive(self):
+        self.outputs()
+        self.reviewed_record()
+        for cost in (0, 1.25):
+            with self.subTest(cost=cost):
+                self.record["metrics"].update(usage_status="unknown", cost=cost, currency="USD")
+                result = self.score()
+                self.assertEqual(result["outcome"], "invalid")
+                self.assertIn("unknown usage must retain null token counts and cost", result["invalid_reasons"])
+                summary = pe.report([result])["by_execution_kind"]["live_model"]["metrics"]["cost"]
+                self.assertEqual(summary, {"known_cells": 0, "unknown_cells": 0, "invalid_cells": 1, "by_currency": {}})
+
+    def test_reported_zero_cost_and_unknown_null_remain_distinct(self):
+        self.outputs()
+        self.reviewed_record()
+        self.assertEqual(self.score()["outcome"], "accepted")
+        self.record["metrics"].update(usage_status="reported", cost=0, currency="USD", input_tokens=5, output_tokens=3)
+        result = self.score()
+        self.assertEqual(result["outcome"], "accepted")
+        cost = pe.report([result])["by_execution_kind"]["live_model"]["metrics"]["cost"]
+        self.assertEqual(cost["by_currency"]["USD"]["reported"]["zero_cells"], 1)
+
+    def test_invalid_live_record_stays_in_success_denominator(self):
+        self.outputs()
+        self.reviewed_record()
+        accepted = self.score()
+        self.record["repetition"] = 2
+        self.record["metrics"]["input_tokens"] = 0
+        invalid = self.score()
+        invalid["run_id"] = "synthetic-second-run"
+        result = pe.report([accepted, invalid])
+        self.assertEqual(result["counts"]["invalid"], 1)
+        self.assertEqual(result["attempted_live_cells"], 2)
+        self.assertEqual(result["accepted_live_cells"], 1)
+        self.assertEqual(result["conservative_success_rate"], 0.5)
+        self.assertEqual(result["strata"][0]["variant_summaries"]["plain"]["conservative_success_rate"], 0.5)
+        self.assertTrue(result["runs"][1]["invalid_reasons"])
+
+    def test_live_block_and_contradictory_not_run_remain_attempts(self):
+        self.outputs()
+        self.reviewed_record()
+        for status in ("blocked", "not_run", "failed", "cancelled"):
+            with self.subTest(status=status):
+                self.record["status"] = status
+                summary = pe.report([self.score()])
+                self.assertEqual(summary["attempted_live_cells"], 1)
+                self.assertEqual(summary["conservative_success_rate"], 0)
+        self.record.update(execution_kind="not_run", status="blocked")
+        summary = pe.report([self.score()])
+        self.assertEqual(summary["attempted_live_cells"], 0)
+        self.assertIsNone(summary["conservative_success_rate"])
+        self.assertEqual(summary["by_execution_kind"]["not_run"]["cells"], 1)
+
+    def test_target_files_never_ignored_in_coding_cases(self):
+        for case in ("C02", "C03"):
+            with self.subTest(case=case):
+                self.root = Path(self.temp.name) / case
+                pe.prepare(case, self.root)
+                self.record = pe.read_json(self.root / "review/record.template.json")
+                self.outputs(case)
+                self.reviewed_record()
+                for name in ("target/extra", "target/debug/extra", "target/release/deps/extra"):
+                    p = self.root / "workspace" / name
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("unapproved")
+                result = self.score()
+                self.assertEqual(result["outcome"], "failed")
+                failures = {c["criterion"] for c in result["machine_checks"] if c["status"] == "failed"}
+                self.assertTrue({"scope:target/extra", "scope:target/debug/extra", "scope:target/release/deps/extra"} <= failures)
+
+    def test_coding_lockfile_is_fixed_input(self):
+        for case in ("C02", "C03"):
+            root = Path(self.temp.name) / case
+            pe.prepare(case, root)
+            meta, files, outputs, expected = pe.validate_run(root)
+            checks = pe.machine_checks(root, meta, files, outputs, expected)
+            self.assertIn(pe.check("input_unchanged:Cargo.lock", True), checks)
+            (root / "workspace/Cargo.lock").write_text("unrelated content")
+            checks = pe.machine_checks(root, meta, files, outputs, expected)
+            self.assertIn(pe.check("input_unchanged:Cargo.lock", False), checks)
+
+    def test_summary_rubric_distribution_keeps_missing_and_invalid(self):
+        self.outputs()
+        self.reviewed_record()
+        scores = []
+        for i, value in enumerate((4, 0, None, "3"), 1):
+            self.record["repetition"] = i
+            self.record["review"]["rubric"]["clarity"] = value
+            s = self.score()
+            s["run_id"] = "synthetic-" + str(i)
+            scores.append(s)
+        result = pe.report(scores)
+        distribution = result["by_execution_kind"]["live_model"]["rubric_by_case"]["C01"]["rubric"]["clarity"]
+        self.assertEqual(distribution, {"scores": {"0": 1, "1": 0, "2": 0, "3": 0, "4": 1}, "unknown_cells": 1, "invalid_cells": 1})
+        self.assertEqual(result["runs"][0]["rubric"]["clarity"], 4)
+        self.assertIsNone(result["runs"][2]["rubric"]["clarity"])
+
+    def test_summary_ui_scores_and_fixture_population_are_separate(self):
+        self.root = Path(self.temp.name) / "ui"
+        pe.prepare("U01", self.root)
+        self.record = pe.read_json(self.root / "review/record.template.json")
+        self.outputs("U01")
+        self.reviewed_record()
+        self.record["review"]["ui_rubric"]["control"] = 2
+        live = self.score()
+        self.record.update(execution_kind="fixture", repetition=2)
+        self.record["review"]["ui_rubric"]["control"] = 4
+        fixture = self.score()
+        fixture["run_id"] = "synthetic-fixture"
+        result = pe.report([live, fixture])
+        self.assertEqual(result["attempted_live_cells"], 1)
+        for kind, expected_score in (("live_model", "2"), ("fixture", "4")):
+            summary = result["by_execution_kind"][kind]
+            self.assertEqual(summary["cells"], 1)
+            ui = summary["rubric_by_case"]["U01"]["ui_rubric"]
+            self.assertEqual(ui["control"]["scores"][expected_score], 1)
+            self.assertEqual(ui["progress"]["unknown_cells"], 1)
+        self.assertEqual(result["runs"][1]["execution_kind"], "fixture")
+
+    def test_summary_repairs_failure_categories_and_original_reasons(self):
+        self.outputs()
+        self.reviewed_record()
+        self.record["metrics"].update(repair_attempts=0, human_interventions=0, human_repairs=0)
+        original = self.score()
+        self.record.update(repetition=2, failure_category="incorrect_result")
+        self.record["review"]["rubric"]["correctness"] = 1
+        self.record["metrics"].update(repair_attempts=None, human_interventions=None, human_repairs=None)
+        failed = self.score()
+        failed["run_id"] = "synthetic-failed"
+        self.record["repetition"] = 3
+        self.record["review"]["rubric"]["correctness"] = 3
+        self.record["metrics"].update(repair_attempts=2, human_interventions=1, human_repairs=1)
+        repaired = self.score()
+        repaired["run_id"] = "synthetic-repaired"
+        result = pe.report([original, failed, repaired])
+        self.assertEqual(result["conservative_success_rate"], 2 / 3)
+        for label in ("first_attempt", "without_human_repairs", "unassisted"):
+            self.assertEqual(result[label + "_accepted_live_cells"], 1)
+            self.assertEqual(result[label + "_success_rate"], 1 / 3)
+        summary = result["by_execution_kind"]["live_model"]
+        self.assertEqual(summary["failure_categories"]["counts"], {"incorrect_result": 2})
+        self.assertEqual(summary["metrics"]["human_repairs"]["unknown_cells"], 1)
+        self.assertEqual(summary["metrics"]["human_repairs"]["positive_cells"], 1)
+        self.assertEqual(summary["metrics"]["repair_attempts"]["observed_sum"], 2)
+        self.assertEqual(result["runs"][1]["failure_category"], "incorrect_result")
+        self.assertEqual(result["runs"][1]["review_notes"], failed["record"]["review"]["notes"])
+
+    def test_missing_repair_counts_never_claim_unassisted_success(self):
+        self.outputs()
+        self.reviewed_record()
+        result = pe.report([self.score()])
+        self.assertEqual(result["conservative_success_rate"], 1)
+        for label in ("first_attempt", "without_human_repairs", "unassisted"):
+            self.assertEqual(result[label + "_success_rate"], 0)
+        self.assertIsNone(result["by_execution_kind"]["live_model"]["metrics"]["human_repairs"]["observed_sum"])
+
+    def test_cost_summary_separates_currency_partial_unknown_and_invalid(self):
+        self.outputs()
+        self.reviewed_record()
+        scores = []
+        for i, (usage, cost, currency) in enumerate((("reported", 5, "USD"), ("partial", 2, "USD"),
+                                                   ("reported", 3, "EUR"), ("unknown", None, None),
+                                                   ("unknown", 0, "USD")), 1):
+            self.record["repetition"] = i
+            self.record["metrics"].update(usage_status=usage, cost=cost, currency=currency,
+                                          input_tokens=None if usage == "unknown" else 10,
+                                          output_tokens=None if usage == "unknown" else 5)
+            s = self.score()
+            s["run_id"] = "synthetic-cost-" + str(i)
+            scores.append(s)
+        result = pe.report(scores)
+        summary = result["by_execution_kind"]["live_model"]
+        cost = summary["metrics"]["cost"]
+        self.assertEqual([cost[k] for k in ("known_cells", "unknown_cells", "invalid_cells")], [3, 1, 1])
+        self.assertNotIn("observed_sum", cost)
+        self.assertEqual(cost["by_currency"]["USD"]["reported"]["observed_sum"], 5)
+        self.assertEqual(cost["by_currency"]["USD"]["partial"]["observed_sum"], 2)
+        self.assertEqual(cost["by_currency"]["EUR"]["reported"]["observed_sum"], 3)
+        self.assertEqual(summary["usage_status_counts"]["unknown"], 2)
+        self.assertEqual(result["conservative_success_rate"], 4 / 5)
+
+    def test_bad_counts_and_failure_category_are_invalid(self):
+        self.outputs()
+        self.reviewed_record()
+        for metric in pe.COUNTERS:
+            for value in (True, -1, 0.5):
+                with self.subTest(metric=metric, value=value):
+                    self.record["metrics"][metric] = value
+                    self.assertEqual(self.score()["outcome"], "invalid")
+            self.record["metrics"][metric] = None
+        for category in ([], 3, ""):
+            self.record["failure_category"] = category
+            self.assertEqual(self.score()["outcome"], "invalid")
+
+    def test_manual_repairs_cannot_claim_first_attempt_or_unassisted(self):
+        self.outputs()
+        self.reviewed_record()
+        self.record["metrics"].update(human_repairs=1, human_interventions=0, repair_attempts=0)
+        scored = self.score()
+        self.assertEqual(scored["outcome"], "invalid")
+        self.assertIn("human_repairs contradicts zero human_interventions", scored["invalid_reasons"])
+        self.assertIn("human_repairs contradicts zero repair_attempts", scored["invalid_reasons"])
+        result = pe.report([scored])
+        self.assertEqual(result["attempted_live_cells"], 1)
+        for label in ("first_attempt", "without_human_repairs", "unassisted"):
+            self.assertEqual(result[label + "_success_rate"], 0)
+        self.record["metrics"]["human_repairs"] = None
+        scored = self.score()
+        self.assertEqual(scored["outcome"], "accepted")
+        result = pe.report([scored])
+        self.assertEqual(result["first_attempt_success_rate"], 0)
+        self.assertEqual(result["unassisted_success_rate"], 0)
+
+    def test_invalid_comparison_fields_remain_in_live_denominator(self):
+        self.outputs()
+        self.reviewed_record()
+        original = copy.deepcopy(self.record)
+        for key, value in (("variant", []), ("variant", None), ("repetition", []),
+                           ("repetition", None), ("repetition", True), ("seed", {})):
+            with self.subTest(key=key, value=value):
+                self.record = copy.deepcopy(original)
+                self.record[key] = value
+                scored = self.score()
+                self.assertEqual(scored["outcome"], "invalid")
+                result = pe.report([scored])
+                self.assertEqual(result["attempted_live_cells"], 1)
+                self.assertEqual(result["conservative_success_rate"], 0)
+                self.assertEqual(result["comparison"], "pending")
+                self.assertEqual(result["strata"][0]["invalid_comparison_run_ids"], [scored["run_id"]])
+        del self.record["execution_kind"]
+        result = pe.report([self.score()])
+        self.assertEqual(result["by_execution_kind"]["unknown"]["cells"], 1)
+        self.assertEqual(result["attempted_live_cells"], 0)
+
+    def test_report_cli_recomputes_and_retains_invalid_live_run(self):
+        self.outputs()
+        self.reviewed_record()
+        self.score()
+        first = self.root
+        self.root = Path(self.temp.name) / "second"
+        pe.prepare("C01", self.root)
+        self.record = pe.read_json(self.root / "review/record.template.json")
+        self.outputs()
+        self.reviewed_record()
+        self.record["repetition"] = 2
+        self.record["metrics"].update(cost=0, currency="USD")
+        self.score()
+        command = [sys.executable, str(Path(pe.__file__).resolve()), "report", "--runs", str(first), str(self.root)]
+        completed = subprocess.run(command, text=True, capture_output=True, check=True)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["counts"]["invalid"], 1)
+        self.assertEqual(result["attempted_live_cells"], 2)
+        self.assertEqual(result["conservative_success_rate"], 0.5)
+        self.assertEqual(result["by_execution_kind"]["live_model"]["metrics"]["cost"]["invalid_cells"], 1)
+
     def test_negative_metric_invalid(self):
         self.reviewed_record()["metrics"]["cost"] = -1
         self.assertEqual(self.score()["outcome"], "invalid")
@@ -333,6 +590,21 @@ class RustScorerTests(unittest.TestCase):
 
     def grade(self, root, case):
         return pe.grade_rust(root, case, True, self.rustc)["status"]
+
+    def test_locked_cargo_build_uses_host_cache_not_workspace_target(self):
+        cargo = str(Path(self.rustc).with_name("cargo"))
+        for case in ("C02", "C03"):
+            root = self.prepare(case)
+            target = Path(self.temp.name) / (case + "-host-cache")
+            completed = subprocess.run([cargo, "test", "--locked", "--offline", "--target-dir", str(target)],
+                                       cwd=root / "workspace", env={**os.environ, "RUSTC": self.rustc},
+                                       text=True, capture_output=True, timeout=90)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertFalse((root / "workspace/target").exists())
+            meta, files, outputs, expected = pe.validate_run(root)
+            checks = pe.machine_checks(root, meta, files, outputs, expected)
+            self.assertIn(pe.check("input_unchanged:Cargo.lock", True), checks)
+            self.assertFalse(any(c["criterion"].startswith("scope:") for c in checks))
 
     def test_both_buggy_baselines_fail(self):
         for case in ["C02", "C03"]:

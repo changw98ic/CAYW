@@ -12,6 +12,8 @@
 - “真实模型 + 合成任务数据”是有效效果 eval；“固定模型回复 + 真实文件调用”仍只是管道验证，必须分开列。
 - `pass` 只用于证据完整且满足标准的运行；实际尝试失败记 `fail`；依赖缺失/预算不足/权限未批准记 `blocked`；本构建没有接入该能力记 `N/A`。未执行不是成功，也不能用零分混入已执行样本平均值。
 
+执行分类必须反映是否真的开始：任何已尝试真实 Provider 的 run 都用 `execution_kind=live_model`，包括随后 blocked、cancelled 或记录 invalid 的运行；在发起真实调用前就受阻用 `execution_kind=not_run,status=blocked`。`live_model,status=not_run` 是矛盾记录，判 invalid，仍留在真实尝试分母。固定回复始终为 fixture。
+
 脚本枚举与上述报告术语不同：`execution_kind` 为 `live_model` / `fixture` / `not_run`；`status` 为 `completed` / `failed` / `cancelled` / `blocked` / `not_run`。不支持的 lane 在文档写 N/A，若保留 JSON 记录则用 `not_run` 并在 notes 说明 N/A 原因，不写不存在的枚举。评分输出 `accepted` / `failed` / `unverified` / `blocked` / `not_run` / `invalid`；只有 `accepted` 对应本方案的通过。
 
 先跑 C01/C02/C04 各一次，确认配置和预算，再补齐 C03/L01/U01。正式比较每个可执行 case × lane × 模型至少三次全新运行，保存所有失败，不挑最好结果。一次样本只称冒烟。普通同条件复跑须固定模型、服务/API、网关版本、构建、任务文本、预算、权限和人工帮助；插件/模型消融只能改变预先声明的实验变量，其余条件人工逐项匹配后单独分析；记录运行次序，交替 plain/扩展，避免缓存或顺序偏差。不承诺随机采样完全确定。
@@ -83,6 +85,14 @@ export CAYW_HOME="$RUN/private/cayw-home"
 ```
 
 以上预算是本次选择，不是默认值或费用保证。C02/C03/L01 需要模型运行测试时，由可信运行者预先配置固定 `profiles`，模板结构见 [`host.example.json`](../../examples/headless-client/host.example.json)。`program` 必须是已核对的绝对可执行路径，固定 `args`、`env`、超时和输出限额；只运行本 case 的离线测试，不允许任意过滤器或任意命令。profile 并不授予权限。若尚无可信测试 profile，模型内测试标 blocked；运行结束后人工跑测试可作为产物检查，但不能声称模型自主验证过。
+
+### C02/C03 的固定构建缓存
+
+fixture `2026-11-09.v2` 预置不可修改的 `Cargo.lock`。工作区没有目录豁免：`target/extra`、`target/debug/extra` 和任何未列出的文件都会产生 scope 失败；不能只因路径位于 target 就认定它是构建产物。
+
+可信运行者在上述固定测试 profile 中设置已核对的 Cargo 绝对路径，并固定参数 `test --locked --offline --target-dir /absolute/run/private/cargo-target`（替换为本次 run 的实际缓存路径），`allow_filter=false`。目录由运行者事前创建，只是已授权测试进程的缓存，不是模型文件工具可访问的新工作区。不授予任意路径/命令参数；模型不能用删除额外文件来掩盖范围违规，评分前保留原始最终树和 diff。独立评分器仍在自己的临时目录编译，不写任务的 target。
+
+若无法提供这条固定测试路径，模型内测试标 blocked，不退回 target 全目录豁免。新增锁文件和任务提示改变了 fixture 版本；旧 v1 运行必须保留其原始源码/评分器与结果，不能改 `run.json` 摘要冒充 v2 复跑，也不能跨版本自动比较。
 
 一个终端运行独立 Client，保持前台：
 
@@ -180,7 +190,9 @@ python3 "$REPO/scripts/product_eval.py" score --run "$RUN" \
 
 - `candidate` 填真实 `source_sha`、`tree_sha`、必填 `dirty_diff_sha256`（64位十六进制）、二进制摘要、features、OS/架构；干净源码的 dirty_diff_sha256 取空字节 SHA256，不能填 null。非干净源码须保存并哈希实际差异（包括影响构建的未跟踪输入），不要用“dirty=true”代替；`model` 填实际 provider/API/id/revision/parameters。revision 不可得保持 null，只允许单次验收，不满足跨 lane 比较门槛。
 - `conditions` 填权限、预算、工具目录的非秘密配置 SHA256、environment_id、entrypoint（如 ipc/tui/webui）及扩展身份。运行开始前固定序列化文件并哈希，保留脱敏副本供复核。
-- `metrics` 未测值用 null，cost 未知不能填 0。计时边界包括重试与审批，人工修补及修复尝试如实计数。
+- `metrics` 未测值用 null。`usage_status=unknown` 时 input_tokens/output_tokens/cost 必须全为 null，填 0 或正数都 invalid；真实报告的零费用只在确有金额证据、币种且 usage 为 reported/partial 时填写。reported 要有输入/输出 token 数，partial 是不完整观测，不能充当完整总量。计数必须是非负整数，不能用布尔值或小数。
+- `repair_attempts` 为首次交付尝试之后的修复/重试次数（含模型与人工救援），`human_interventions` 为人工介入次数（含提示纠错及直接修补），新增 `human_repairs` 单独计人工直接修改产物的次数。审批等待另计；一次常规审批不自动等于一次人工修补。只有核对过原始时间线才能填 0，缺失保持 null。人工救援前后的产物、失败与证据都保存，不覆盖原失败。
+- `failure_category` 填简短且非空的失败类型，例如 incorrect_result/scope_violation/budget_exhausted；未分类用 null，不由评分器猜测。blocked/N/A 的具体原因和发生在请求前还是请求后写入 notes/review.notes。
 - `review` 由实际评审者逐项确认，不批量设 true。必须核验真实 Provider、原始证据、边界/预算和原任务终态；L01 另需 recovery_verified，U01 另需 ui_verified。
 - `evidence` 至少覆盖角色 `runtime_trace`、`final_state`、`provider_receipt`、`review_notes`。L01 加 `recovery_timeline`，U01 加 `ui_recording`。Provider receipt 是能证明真实请求/响应来源的脱敏证据，不要求编造费用；固定 HTTP fixture 不能充当 receipt。
 
@@ -222,7 +234,17 @@ path 相对 `review/`，不包含 `review/` 前缀；禁止符号链接、出根
 
 插件或模型消融有意改变这些字段，因此严格报告的 `incomparable` 是预期现象，**不表示插件不能评估**。运行前在 review_notes 声明唯一实验变量、允许变化的字段、假设、配对 repetition 和顺序；运行后人工核对其余条件和原始证据，另写成对差值及失败分析。不能篡改摘要使它们同层。换构建/增工具/换数据等额外差异都必须披露；有限样本仅作描述，不宣称因果或统计显著。普通同条件比较也至少三对独立重复，repetition 对应且 seed 配对一致（未设置真实 seed 则保持 null，不伪造可复现性）。
 
-汇总同时给出：可执行/计划样本数、首次成功率、无人工修补成功率、每 case 分数分布、请求/延迟/已知费用、unknown 数量、失败类型、blocked/N/A 原因。不要把缺失数据排除后只给漂亮均分；人工救援前后的结果分开。比较变更时同时报告回归和改进，保留原始失败；评审尽可能先隐藏 lane/模型名再看产物。
+### report 的分母和汇总字段
+
+- `submitted_cells` 仅为传入 report 的全部记录数，不推断未提交的计划样本。要完整呈现计划矩阵，未执行/预先 blocked/N/A 的 cell 也各保留一份 not_run 记录，并把全部目录传入 report。`counts` 保留各结果数量。
+- `attempted_live_cells` 包含**所有声明为 live_model 的记录**，包括 invalid、unverified、failed、cancelled 和开始后 blocked；只有 accepted 进成功分子。1 accepted + 1 invalid 必须为 1/2，而不是 1/1。预先 not_run 和 fixture 分开列，不计真实尝试。无法解析的 JSON、坏 manifest 或重复 run/repetition 会使整个 report 报错，不跳过后给成功率。可读取但 variant/repetition/seed 非法的记录仍保留分母，该层 comparison 为 pending，并列出 invalid_comparison_run_ids。
+- `first_attempt_success_rate` 只把 accepted 且 `repair_attempts=0` 且 `human_repairs=0` 计入分子；`without_human_repairs_success_rate` 要求 accepted 且 `human_repairs=0`；更严格的 `unassisted_success_rate` 要求 accepted 且 `human_interventions=0` 且 `human_repairs=0`。已知人工修补为正却把修复或干预填零会判 invalid。三者都使用完整真实尝试分母，缺失/非法计数不能当作零来提高成功率；它们是已知证据的保守比例，不是用缺失样本算出的均分。
+- `by_execution_kind` 将 live_model、fixture、not_run、unknown 分类完全隔离，逐组给 outcome 数、`rubric_by_case` 各维度 0–4 的分布、unknown/invalid 数。U01 的 ui_rubric 单独列，不混入通用 rubric；未执行或未评分不补零。未知 execution_kind 没有真实成功资格，单列待修正。
+- 各组 `metrics` 提供已知/unknown/invalid 样本数、零值/正值样本数、观测和及范围，涵盖延迟、请求、token、修复/干预/人工修补。`observed_sum` 只是合法已记录值之和，不是完整 run 总量；有 unknown/invalid/partial 必须同时披露，全部未知时为 null。费用另按币种及 reported/partial 分组，不跨币种或把 partial 合成完整账单。
+- `usage_status_counts`、`failure_categories`、`missing_evidence_cells`、`invalid_record_cells` 显示未知用量、失败类型/未分类数、缺证据和无效记录。每项 runs 同时保留 execution_kind/status、failure_category、原 rubric、metrics、缺失/无效原因和 notes/review_notes，blocked/N/A 的文字理由不会丢失。
+- `strata[].variant_summaries` 为每个严格条件层、每个 variant 提供同样的真实尝试分母和 live 汇总。顶层成功率只是输入样本的数量核对，不能替代各条件层的比较。所有分布都是记录值（包含 invalid run 的原始记录），不是已认证的 Provider 统计；查验 outcome 与原始证据后才能解释。
+
+不要把缺失数据排除后只给漂亮均分，也不要把人工救援后的 accepted 写成首次成功。比较变更时同时报告回归和改进，保留原始失败；评审尽可能先隐藏 lane/模型名再看产物。
 
 ## 6. 运行结束与提交结果
 
