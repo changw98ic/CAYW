@@ -47,6 +47,11 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      # Exercise the partial-recording cancellation barrier before the slow
+      # workspace suite. This uses only the local fake curl, never a Provider.
+      - name: Vision cancellation readiness regressions (offline)
+        run: cargo test -p cayw-vision --lib --locked backends::http_describe_cancel
+
       - name: cargo check
         run: cargo check --workspace --all-targets --locked
 

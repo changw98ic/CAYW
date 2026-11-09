@@ -55,3 +55,13 @@ git diff --check
 结果：**55 项 Python 测试通过，6 项 native 测试跳过**；另重跑既有 WebUI Node 测试 122/122 通过、Python compile/相对文档链接/git diff --check 通过。第 6 项 native 测试使用真实 Cargo 检查两份 fixture 的固定 Cargo.lock、`--locked --offline` 及宿主缓存目录配置，断言未产生 workspace/target、锁文件未变；这仅验证构建路径，不能替代已有 Rust 行为检查。它将在 macOS CI 同一评分器步骤执行。本记录不提前宣称本次 CI 已通过；以新推送精确 SHA 的 job/step 结果为准。
 
 所有 live_model、Provider receipt、reviewer 和成功率样例均为**合成的评分器反例/正例**。本次没有调用真实/付费模型，没有进行产品效果测量；未把 Linux 上的 Python 检查当作 macOS 产品验收。fixture 更新到 `2026-11-09.v2`，旧 v1 记录不改写、不与新运行自动合并。
+
+## 同一 PR 的 CI 阻塞：取消测试的就绪竞态
+
+修复提交 `3f21ccedd7dafaa0edc52d3d18cb6b568d95ba56` 的 [CI #153](https://github.com/changw98ic/CAYW/actions/runs/42563947100) 已到终态：新增评分器 **61/61 通过，无跳过**，含 6 项 Rust/Cargo fixture 检查。Ubuntu workspace、macOS 产品 feature/故障恢复、arm64 打包/安装/升级三组通过；macOS workspace 在既有 `cayw-vision::backends::http_describe_cancel_cleans_temp_files` 失败，不能称全绿。
+
+日志位于 [macOS workspace job](https://github.com/changw98ic/CAYW/actions/runs/42563947100/job/128986235743)：两个权限记录的断言实际只读到一个。FakeCurl 先追加第二个临时文件路径，再写第二条权限；原测试只等两个路径就取消，因此可打断后续记录。失败不是评分器计分错误，也不能用一次重跑成功将它抹掉。
+
+后续修复仅调整测试 fixture：所有记录完成后发布显式就绪标记，正常取消测试等待该标记，原两条权限和临时文件清理断言全部保留。另加受控停点，在第二个路径已记录、第二条权限未记录时保持子进程，用确定性反例验证此时两条路径不等于记录齐全；取消后仍须清理两个临时文件。停点只用 shell builtin，不启动长寿命辅助子进程。
+
+macOS CI 在完整 workspace 检查前执行针对性的 `cargo test -p cayw-vision --lib --locked backends::http_describe_cancel`，便于尽早发现本类回归；完整 workspace test 仍照常执行。当前本地无 Rust/Cargo，且可用列表中的 Mac 离线，未在本地执行或外推 macOS 结果；新提交的 CI 状态须按其精确 SHA 另查。
