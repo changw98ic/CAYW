@@ -27,7 +27,9 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
     match config_file.try_exists() {
         Ok(true) => match HeadlessConfig::load(config_file) {
             Ok(config) => {
-                selected = config.model().cloned();
+                if explicit_config.is_some() {
+                    selected = config.model().cloned();
+                }
                 checks.push(ok("configuration", "配置文件可以解析"));
             }
             Err(error) => checks.push(failed("configuration", error.to_string())),
@@ -38,8 +40,7 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
 
     if explicit_config.is_none() {
         match cli_settings::selected_model(&paths) {
-            Ok(model) if model.is_some() => selected = model,
-            Ok(_) => {}
+            Ok(model) => selected = model,
             Err(error) => checks.push(failed("model_profiles", error.to_string())),
         }
     }
@@ -56,6 +57,11 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
             "尚未选择模型；启动仍可继续，首次对话会提示运行 `cayw conf`",
         )),
     }
+
+    checks.push(cayw_runtime::recovery_points::doctor_check(
+        &paths.workspace,
+        paths.state_dir(),
+    ));
 
     let cleanup_path = paths.data_dir.join("client-plugin-cleanup.json");
     match crate::cli_client_plugins::inspect_cleanup(&cleanup_path) {

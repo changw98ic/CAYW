@@ -2,7 +2,7 @@
 
 CAYW 可以安装为独立的 `cayw` Runtime 和 `cayw-client` Rust 客户端。默认本地模式下，`cayw serve` 运行设备上唯一的 Client；所有工作区共享它的连接、重连和进程监管，客户端通过认证本机 IPC 选择工作区。完全显式 Headless 仍可通过公开 Rust SDK 或独立 IPC 管理单个持久会话库。模型通过 Luau 调用实际 Rust 能力；宿主逐次检查权限、预算、取消和结果。默认不需要手动指定数据库，Client 使用默认数据根并自动初始化。
 
-本地产品通过每工作区 `models.json` 的选中方案选择模型服务与 API；完全显式 Headless 通过 `--config` 的 `model` 对象选择。Magpie 的四种格式已分别在 macOS ARM64 完成两个真实用户回合：Chat Completions / `opencode-go/deepseek-v4.1-flash`、Responses / `codex/gpt-6-luna`、Messages / `factory/claude-haiku-5-5`、Gemini 流式 / `antigravity/gemini-3.8-flash`。Chat、Responses 和 Gemini 的成功记录来自 r02，Haiku 来自修复后的独立 r03 重试；每行只证明自己的源码、配置与实际传输，见[四格式矩阵及证据](validation/issue-10-provider-protocols-macos.md)。官方服务直连和旧 group 路由未纳入本次验收。此前 #6 的[首个真实闭环记录](validation/issue-6-headless-chat-macos.md)仍只证明当时的源码和场景。
+本地产品通过设备模型列表 `<CAYW_HOME>/models.json` 和各工作区的选用选择模型服务与 API；完全显式 Headless 通过 `--config` 的 `model` 对象选择。Magpie 的四种格式已分别在 macOS ARM64 完成两个真实用户回合：Chat Completions / `opencode-go/deepseek-v4.1-flash`、Responses / `codex/gpt-6-luna`、Messages / `factory/claude-haiku-5-5`、Gemini 流式 / `antigravity/gemini-3.8-flash`。Chat、Responses 和 Gemini 的成功记录来自 r02，Haiku 来自修复后的独立 r03 重试；每行只证明自己的源码、配置与实际传输，见[四格式矩阵及证据](validation/issue-10-provider-protocols-macos.md)。官方服务直连和旧 group 路由未纳入本次验收。此前 #6 的[首个真实闭环记录](validation/issue-6-headless-chat-macos.md)仍只证明当时的源码和场景。
 
 ## 安装
 
@@ -64,7 +64,7 @@ cayw tui
 
 `cayw init` 可以提前初始化，但不是启动前提。使用默认位置且缺少文件时，`cayw serve` 会自动完成同样的初始化：在根目录创建 `config.json`（内容为 `{"permissions":[]}`）和 `ipc.token`，并初始化当前工作区的 SQLite 数据库。已有的私有文件不会被替换。根目录的 `init.lock` 串行处理首次配置和访问码创建；完整文件写入后才发布到正式路径。
 
-没有配置模型时，Client 照常启动并报告 `model_configured=false`。TUI 和 WebUI 也可以打开。创建和查询会话可用；`prompt`、`enqueue` 和 `resume` 在入队前返回 `model_not_configured`，不发送模型请求。启动不会弹出配置向导。要使用真实模型，运行 `cayw conf`。它把当前工作区的模型写入私有 `models.json`。可选 `api_key` 直接以明文保存在这个普通本地文件中；留空表示服务不需要认证。CAYW 不使用 Keychain、加密或 OAuth，也不会在启动输出、doctor 或 Settings RPC 中回显密钥。
+没有配置模型时，Client 照常启动并报告 `model_configured=false`。TUI 和 WebUI 也可以打开。创建和查询会话可用；`prompt`、`enqueue` 和 `resume` 在入队前返回 `model_not_configured`，不发送模型请求。启动不会弹出配置向导。要使用真实模型，运行 `cayw conf`。它把方案写入设备上的私有 `models.json`，并把该方案设为当前工作区的选用。可选 `api_key` 直接以明文保存在这个普通本地文件中；留空表示服务不需要认证。可选 `context_window` 不填就保持空缺。CAYW 不使用 Keychain、加密或 OAuth，也不会在启动输出、doctor 或 Settings RPC 中回显密钥。可发现的 Client 还会打开主 session 工作区，默认是 `$HOME/CodeAsYouWish`；绝对路径 `CAYW_MAIN_SESSION` 优先。`cayw init` 和 `cayw conf` 不创建这个目录。
 
 `--db`、`--workspace`、`--listen`、`--token-env` 和 `--config` 仍可显式提供，用于精确控制宿主；显式路径不会被默认根替换。省略这些选项时使用默认位置。默认模式发布一份 Client 级 `client.json`，不是每工作区一份连接记录。完整显式提供 `--db`、`--token-env` 和 `--config` 时，服务不读取或创建 `HOME`/`CAYW_HOME` 下的状态，`--config` 是模型配置的唯一来源；本地模型、plugin 和工作区设置不可用，`settings.*` 请求返回 `settings_unavailable`。显式令牌模式不发布自动发现连接，启动信息中的 `token_file` 为 `null`；客户端应显式提供地址和 IPC 令牌环境变量。
 
@@ -82,7 +82,7 @@ cp examples/headless-client/host.example.json "$CAYW_CHAT_ROOT/host.json"
 
 | 字段 | 含义 |
 | --- | --- |
-| `model` | 完全显式 Headless 的单一模型服务配置；包含服务、API、模型、端点、版本、输出限制和可选明文 `api_key` |
+| `model` | 完全显式 Headless 的单一模型服务配置；包含服务、API、模型、端点、版本、输出限制、可选上下文窗口、可选 tokenizer 和可选明文 `api_key` |
 | `scheduler` | 本机执行名额、全部活动任务容量、优先级提升窗口和首次排队期限；省略时使用下文默认值 |
 | `resources` | 同一数据库全部任务的内存声明总额；用于软件准入，不测量或强制限制实际内存 |
 | `content` | 可选的权威内容目录、Device 标识和存放限额；必须与模型工作区分离 |

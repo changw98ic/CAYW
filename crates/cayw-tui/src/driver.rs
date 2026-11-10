@@ -9,9 +9,26 @@ use std::collections::BTreeSet;
 pub struct Driver {
     next_tag: u64,
     paused_events: BTreeSet<String>,
+    question_requests: BTreeSet<String>,
 }
 
 impl Driver {
+    fn request_questions(&mut self, app: &mut App, commands: &mut Vec<Command>) {
+        for command in app.pending_question_commands() {
+            let Command::ApprovalQuestion {
+                session_id,
+                approval_id,
+            } = &command
+            else {
+                continue;
+            };
+            let key = format!("{session_id}/{approval_id}");
+            if self.question_requests.insert(key) {
+                commands.push(command);
+            }
+        }
+    }
+
     pub fn watch(&self, app: &App) -> Option<Watch> {
         app.selected()
             .filter(|session| !self.paused_events.contains(&session.id))
@@ -40,12 +57,17 @@ impl Driver {
             };
             self.next_tag = self.next_tag.wrapping_add(1);
             let id = params["session_id"].as_str().unwrap_or("").to_owned();
+            let question_key = (method == "approval.question")
+                .then(|| format!("{}/{}", id, params["approval_id"].as_str().unwrap_or("")));
             if let Err(error) = transport.call(Request {
                 tag: self.next_tag,
                 method,
                 params,
             }) {
                 app.request_failed(&id, method, error);
+                if let Some(key) = question_key {
+                    self.question_requests.remove(&key);
+                }
                 // Failed prompt admission stays blocked until a get confirms state.
                 if matches!(method, "session.prompt") {
                     self.next_tag = self.next_tag.wrapping_add(1);
@@ -63,6 +85,7 @@ impl Driver {
         match update {
             Update::Connected => {
                 self.paused_events.clear();
+                self.question_requests.clear();
                 app.set_connected();
                 let mut commands = vec![Command::List];
                 if let Some(session) = app.selected() {
@@ -70,6 +93,7 @@ impl Driver {
                         session_id: session.id.clone(),
                     });
                 }
+                self.request_questions(app, &mut commands);
                 commands
             }
             Update::Disconnected(reason) => {
@@ -90,15 +114,18 @@ impl Driver {
                 match result {
                     Ok(value) => match app.apply_events(&watch.session_id, value) {
                         Ok(()) => {
-                            if app.selected().is_some_and(|session| !session.synced)
-                                && app.connected
-                            {
-                                vec![Command::Get {
-                                    session_id: watch.session_id,
-                                }]
-                            } else {
-                                vec![]
-                            }
+                            let mut commands =
+                                if app.selected().is_some_and(|session| !session.synced)
+                                    && app.connected
+                                {
+                                    vec![Command::Get {
+                                        session_id: watch.session_id,
+                                    }]
+                                } else {
+                                    vec![]
+                                };
+                            self.request_questions(app, &mut commands);
+                            commands
                         }
                         Err(error) => {
                             app.invalidate_events(&watch.session_id);
@@ -126,10 +153,18 @@ impl Driver {
                     Ok(value) => value,
                     Err(error) => {
                         app.request_failed(&id, request.method, &error);
+                        if request.method == "approval.question" {
+                            let approval_id = request.params["approval_id"].as_str().unwrap_or("");
+                            self.question_requests
+                                .remove(&format!("{id}/{approval_id}"));
+                        }
                         if app.connected
                             && matches!(
                                 request.method,
-                                "session.prompt" | "approval.decide" | "session.cancel"
+                                "session.prompt"
+                                    | "approval.decide"
+                                    | "approval.reply"
+                                    | "session.cancel"
                             )
                         {
                             return vec![Command::Get { session_id: id }];
@@ -168,6 +203,23 @@ impl Driver {
                             Ok(())
                         }
                     }
+                    "approval.question" => {
+                        let approval_id = request.params["approval_id"].as_str().unwrap_or("");
+                        self.question_requests
+                            .remove(&format!("{id}/{approval_id}"));
+                        app.apply_approval_question(&id, value)
+                    }
+                    "approval.reply" => {
+                        let approval_id = request.params["approval_id"].as_str().unwrap_or("");
+                        if value["id"].as_str() != Some(approval_id)
+                            || value["session_id"].as_str() != Some(id.as_str())
+                        {
+                            Err("Approval answer belongs to another request".into())
+                        } else {
+                            app.approval_acknowledged(&id, approval_id);
+                            Ok(())
+                        }
+                    }
                     _ => Ok(()),
                 };
                 if let Err(error) = applied {
@@ -180,16 +232,21 @@ impl Driver {
                     }
                     return vec![];
                 }
-                if app.connected
+                let mut commands = if app.connected
                     && matches!(
                         request.method,
-                        "session.prompt" | "session.cancel" | "approval.decide"
+                        "session.prompt"
+                            | "session.cancel"
+                            | "approval.decide"
+                            | "approval.reply"
                     )
                 {
                     vec![Command::Get { session_id: id }]
                 } else {
                     vec![]
-                }
+                };
+                self.request_questions(app, &mut commands);
+                commands
             }
         }
     }

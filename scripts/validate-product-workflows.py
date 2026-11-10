@@ -23,7 +23,8 @@ workspace = evidence / 'workspace'
 workspace.mkdir()
 root = evidence / 'home'
 root.mkdir(mode=0o700)
-env = {'PATH': os.environ['PATH'], 'HOME': str(root), 'CAYW_HOME': str(root / 'cayw')}
+env = {'PATH': os.environ['PATH'], 'HOME': str(root), 'CAYW_HOME': str(root / 'cayw'),
+       'CAYW_MAIN_SESSION': str(evidence / 'main-session')}
 processes = []
 checks = []
 
@@ -100,8 +101,7 @@ try:
     public_daily = dict(model); public_daily.pop('api_key'); public_daily['authentication'] = 'plain_file'
     assert listed_models['models']['daily'] == public_daily
     assert model_key not in json.dumps(listed_models)
-    state_dir = next((root/'cayw'/'workspaces').iterdir())
-    models_file = state_dir/'models.json'
+    models_file = root/'cayw'/'models.json'
     assert models_file.stat().st_mode & 0o777 == 0o600
     assert json.loads(models_file.read_text())['models']['daily']['api_key'] == model_key
     checks.append('named models keep an optional plain-text key only in private models.json; public settings redact it; invalid update and offline selection are rejected')
@@ -190,7 +190,7 @@ try:
     config = root/'cayw'/'config.json'
     original_config = config.read_bytes()
     original_models = models_file.read_bytes()
-    for partial in ['', 'openai\n', 'openai\n\n', 'openai\n\nhttp://127.0.0.1:9/v1\nmodel\n\n64\nno\n']:
+    for partial in ['', 'openai\n', 'openai\n\n', 'openai\n\nhttp://127.0.0.1:9/v1\nmodel\n\n64\n\n\nno\n']:
         cli('conf', input=partial)
         assert config.read_bytes() == original_config
         assert models_file.read_bytes() == original_models
@@ -248,11 +248,11 @@ try:
     cli('models','add','from-cli','--file',str(model_file))
     cli('models','use','from-cli')
     assert rpc(online, token, 'runtime.health')['model'] == 'from-cli'
-    configured = json.loads(cli('conf', input='openai\n\nhttp://127.0.0.1:9/v1\nfrom-conf\nsynthetic-local-fixture-key\n64\ny\n').stdout)
+    configured = json.loads(cli('conf', input='openai\n\nhttp://127.0.0.1:9/v1\nfrom-conf\nsynthetic-local-fixture-key\n64\n\n\ny\n').stdout)
     assert configured['activation']['applied']
     assert rpc(online, token, 'runtime.health')['model'] == 'from-conf'
     configured_private = json.loads(models_file.read_text())
-    assert configured_private['selected'] == 'configured'
+    assert configured_private['default'] == 'configured'
     assert configured_private['models']['configured']['api_key'] == model_key
     configured_public = rpc(online, token, 'settings.models.list')
     assert configured_public['models']['configured']['authentication'] == 'plain_file'
@@ -264,16 +264,16 @@ try:
     checks.append('models add/use and conf hot-apply one workspace profile; public status never returns its plain-text key')
     stop(child)
     # A blank key is a real no-authentication profile, not an environment lookup.
-    no_auth = json.loads(cli('conf', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-no-key\n\n64\ny\n').stdout)
+    no_auth = json.loads(cli('conf', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-no-key\n\n64\n\n\ny\n').stdout)
     assert no_auth['activation'] is None
     no_auth_private = json.loads(models_file.read_text())
-    assert no_auth_private['selected'] == 'configured'
+    assert no_auth_private['default'] == 'configured'
     assert 'api_key' not in no_auth_private['models']['configured']
     child, rebooted, token = launch()
     assert rpc(rebooted, token, 'runtime.health')['model'] == 'offline-no-key'
     no_auth_public = rpc(rebooted, token, 'settings.models.list')['models']['configured']
     assert no_auth_public['authentication'] == 'none' and 'api_key' not in no_auth_public
-    keyed = json.loads(cli('conf', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-B\nsynthetic-local-fixture-key\n64\ny\n').stdout)
+    keyed = json.loads(cli('conf', input='openai\n\nhttp://127.0.0.1:9/v1\noffline-B\nsynthetic-local-fixture-key\n64\n\n\ny\n').stdout)
     assert keyed['activation']['applied']
     assert rpc(rebooted, token, 'runtime.health')['model'] == 'offline-B'
     assert json.loads(models_file.read_text())['models']['configured']['api_key'] == model_key
@@ -292,14 +292,16 @@ try:
     assert any(entry['id'] == other_id and entry['path'] == str(alternate) for entry in catalog['workspaces'])
     opened = rpc(rebooted, token, 'settings.workspaces.open', {'id':other_id})
     assert opened['id'] == other_id
-    assert not rpc(rebooted, token, 'settings.models.list', workspace_id=other_id)['models']
+    other_models = rpc(rebooted, token, 'settings.models.list', workspace_id=other_id)
+    assert other_models['default'] == 'configured' and other_models['selected'] == 'configured'
+    assert other_models['models']['configured']['id'] == 'offline-B'
     assert not rpc(rebooted, token, 'session.list', workspace_id=other_id)
     known = rpc(rebooted, token, 'settings.workspace', workspace_id=other_id)['known_workspaces']
     assert str(workspace) in known and str(alternate) in known
     assert rpc(rebooted, token, 'runtime.health')['model'] == 'offline-B'
     stop(other_command)
     stop(owner)
-    checks.append('one Client and one WebUI route two workspaces with isolated model and Session state; selecting the second workspace does not change the first')
+    checks.append('one Client and one WebUI route two workspaces; they share the device model list and keep separate sessions; opening the second workspace does not change the first')
     def digest(path):
         value = hashlib.sha256()
         with open(path,'rb') as stream:

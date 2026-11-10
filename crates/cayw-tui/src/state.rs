@@ -65,12 +65,37 @@ pub enum Decision {
     Deny,
 }
 
+pub const ALLOW_ONCE_REPLY: &str = "允许一次";
+pub const ALLOW_TASK_REPLY: &str = "本任务允许";
+pub const DENY_REPLY: &str = "拒绝";
+
 impl Decision {
+    /// Wire value for explicit Headless/SDK decisions. Product UI surfaces use
+    /// `reply` and the exact option text instead.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AllowOnce => "allow_once",
             Self::AllowTask => "allow_task",
             Self::Deny => "deny",
+        }
+    }
+
+    /// The exact option text offered by `approval.question`. The runtime
+    /// matches it without a model; partial or mixed text never decides.
+    pub fn reply(self) -> &'static str {
+        match self {
+            Self::AllowOnce => ALLOW_ONCE_REPLY,
+            Self::AllowTask => ALLOW_TASK_REPLY,
+            Self::Deny => DENY_REPLY,
+        }
+    }
+
+    pub fn from_reply(reply: &str) -> Option<Self> {
+        match reply {
+            ALLOW_ONCE_REPLY => Some(Self::AllowOnce),
+            ALLOW_TASK_REPLY => Some(Self::AllowTask),
+            DENY_REPLY => Some(Self::Deny),
+            _ => None,
         }
     }
 }
@@ -96,6 +121,15 @@ pub enum Command {
         session_id: String,
         approval_id: String,
         decision: Decision,
+    },
+    ApprovalQuestion {
+        session_id: String,
+        approval_id: String,
+    },
+    Reply {
+        session_id: String,
+        approval_id: String,
+        reply: String,
     },
     Fork {
         session_id: String,
@@ -130,6 +164,21 @@ impl Command {
             } => (
                 "approval.decide",
                 json!({"session_id":session_id,"approval_id":approval_id,"decision":decision.as_str()}),
+            ),
+            Self::ApprovalQuestion {
+                session_id,
+                approval_id,
+            } => (
+                "approval.question",
+                json!({"session_id":session_id,"approval_id":approval_id}),
+            ),
+            Self::Reply {
+                session_id,
+                approval_id,
+                reply,
+            } => (
+                "approval.reply",
+                json!({"session_id":session_id,"approval_id":approval_id,"reply":reply}),
             ),
             Self::Fork { session_id, label } => (
                 "session.fork",
@@ -275,6 +324,9 @@ pub struct SessionView {
     pub messages: Vec<Value>,
     pub streaming_text: Option<String>,
     pub approvals: Vec<Value>,
+    /// Exact `approval.question` response for each pending approval, shown in
+    /// the conversation with its three options.
+    pub approval_questions: BTreeMap<String, Value>,
     pub unresolved_calls: Vec<Value>,
     pub frozen: bool,
     pub binding: Option<Value>,
@@ -343,6 +395,7 @@ impl SessionView {
             messages,
             streaming_text: None,
             approvals,
+            approval_questions: BTreeMap::new(),
             unresolved_calls,
             frozen,
             binding,
@@ -470,6 +523,7 @@ impl SessionView {
                 let approval = event.get("approval").ok_or("Missing approval")?;
                 let id = required_string(approval, "id")?;
                 self.approvals.retain(|value| value["id"] != id);
+                self.approval_questions.remove(id);
                 self.approvals.push(approval.clone());
                 self.state = "awaiting_approval".into();
             }
@@ -477,6 +531,7 @@ impl SessionView {
                 let approval = event.get("approval").ok_or("Missing approval")?;
                 let id = required_string(approval, "id")?;
                 self.approvals.retain(|value| value["id"] != id);
+                self.approval_questions.remove(id);
                 self.decisions_pending.remove(id);
                 if self.state == "awaiting_approval" && self.approvals.is_empty() {
                     self.state = "running".into();
@@ -656,6 +711,17 @@ impl App {
                 })
                 .cloned()
                 .collect();
+            incoming.approval_questions = old
+                .approval_questions
+                .iter()
+                .filter(|(id, _)| {
+                    incoming
+                        .approvals
+                        .iter()
+                        .any(|approval| approval["id"] == id.as_str())
+                })
+                .map(|(id, question)| (id.clone(), question.clone()))
+                .collect();
             incoming.rebuild_inspectors();
             self.sessions[index] = incoming;
         } else {
@@ -834,11 +900,77 @@ impl App {
         if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
             session.decisions_pending.remove(approval_id);
             session.approvals.retain(|value| value["id"] != approval_id);
+            session.approval_questions.remove(approval_id);
             if session.approvals.is_empty() && session.state == "awaiting_approval" {
                 session.state = "running".into();
             }
         }
-        self.status = "Approval decision recorded by the runtime.".into();
+        self.status = "Approval answer recorded by the runtime.".into();
+    }
+
+    /// Store the exact question text and options returned for one pending
+    /// approval. The question is rendered as part of the conversation.
+    pub fn apply_approval_question(&mut self, id: &str, value: Value) -> Result<(), String> {
+        let approval_id = value["approval_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or("Approval question is missing its approval id")?;
+        if value["session_id"].as_str() != Some(id) {
+            return Err("Approval question belongs to another session".into());
+        }
+        let options = value["options"]
+            .as_array()
+            .filter(|options| options.len() == 3)
+            .ok_or("Approval question must offer exactly three options")?;
+        for expected in [
+            Decision::AllowOnce.reply(),
+            Decision::AllowTask.reply(),
+            Decision::Deny.reply(),
+        ] {
+            if !options
+                .iter()
+                .any(|option| option.as_str() == Some(expected))
+            {
+                return Err("Approval question options do not match the shared contract".into());
+            }
+        }
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or("Approval question references an unknown session")?;
+        if !session
+            .approvals
+            .iter()
+            .any(|approval| approval["id"] == approval_id)
+        {
+            return Ok(());
+        }
+        session
+            .approval_questions
+            .insert(approval_id.to_string(), value);
+        Ok(())
+    }
+
+    /// Read the question for the first pending approval that has not received
+    /// one. Requests are read-only and never decide anything.
+    pub fn pending_question_commands(&self) -> Vec<Command> {
+        let Some(session) = self.selected().filter(|session| session.synced) else {
+            return vec![];
+        };
+        session
+            .approvals
+            .iter()
+            .filter_map(|approval| {
+                let approval_id = approval["id"].as_str()?;
+                (!session.approval_questions.contains_key(approval_id)).then(|| {
+                    Command::ApprovalQuestion {
+                        session_id: session.id.clone(),
+                        approval_id: approval_id.to_owned(),
+                    }
+                })
+            })
+            .collect()
     }
 
     pub fn request_failed(&mut self, id: &str, method: &str, error: &str) {
@@ -854,7 +986,7 @@ impl App {
             )
         };
         if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
-            if method == "approval.decide" {
+            if matches!(method, "approval.decide" | "approval.reply") {
                 session.decisions_pending.clear();
             }
             if method == "session.cancel" {
@@ -984,7 +1116,7 @@ impl App {
                 _ => None,
             };
             if let Some(decision) = decision {
-                return self.decide(decision);
+                return self.answer(decision.reply());
             }
         }
         match key.code {
@@ -1078,6 +1210,17 @@ impl App {
         if !self.connected || self.input.text().trim().is_empty() {
             return vec![];
         }
+        // While the main-session conversation shows an approval question, an
+        // exact option typed as the whole message is the user's answer. It is
+        // matched by the program and never sent to the model.
+        if self
+            .selected()
+            .is_some_and(|session| !session.approvals.is_empty())
+            && let Some(reply) = Decision::from_reply(self.input.text()).map(Decision::reply)
+        {
+            self.input.clear();
+            return self.answer(reply);
+        }
         let Some(session) = self.selected().filter(|session| session.can_prompt()) else {
             self.status = "Send blocked: wait for completion, approval, or reconnection.".into();
             return vec![];
@@ -1104,27 +1247,31 @@ impl App {
         }]
     }
 
-    fn decide(&mut self, decision: Decision) -> Vec<Command> {
-        let Some(session) = self
-            .selected_mut()
-            .filter(|session| session.synced && !session.frozen)
-        else {
-            return vec![];
+    fn answer(&mut self, reply: &'static str) -> Vec<Command> {
+        let command = {
+            let Some(session) = self
+                .selected_mut()
+                .filter(|session| session.synced && !session.frozen)
+            else {
+                return vec![];
+            };
+            let Some(approval) = session.approvals.first() else {
+                return vec![];
+            };
+            let Some(id) = approval["id"].as_str().map(str::to_owned) else {
+                return vec![];
+            };
+            if !session.decisions_pending.insert(id.clone()) {
+                return vec![];
+            }
+            Command::Reply {
+                session_id: session.id.clone(),
+                approval_id: id,
+                reply: reply.to_owned(),
+            }
         };
-        let Some(approval) = session.approvals.first() else {
-            return vec![];
-        };
-        let Some(id) = approval["id"].as_str().map(str::to_owned) else {
-            return vec![];
-        };
-        if !session.decisions_pending.insert(id.clone()) {
-            return vec![];
-        }
-        vec![Command::Decide {
-            session_id: session.id.clone(),
-            approval_id: id,
-            decision,
-        }]
+        self.status = "Sending your exact approval option.".into();
+        vec![command]
     }
 
     fn dialog_key(&mut self, key: KeyEvent) -> Vec<Command> {

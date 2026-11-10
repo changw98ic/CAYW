@@ -109,6 +109,7 @@ pub(crate) fn operation_definitions_for_config(
         &config.host.profiles,
     ));
     definitions.extend(crate::results::definitions(config.content.as_ref()));
+    definitions.extend(crate::work_tools::definitions(config));
     definitions
 }
 fn permission_list(permissions: &[crate::ScopedPermission]) -> Vec<Value> {

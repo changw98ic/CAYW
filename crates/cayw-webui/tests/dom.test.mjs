@@ -312,23 +312,29 @@ test('interrupted tool calls do not prevent forking a frozen StrongFlow session'
   assert.equal(app.calls.filter(call => call.method === 'session.fork').length, 1);
 });
 
-test('binding metadata and plain approval scope are consumed without showing system instructions', async t => {
-  const approval = { id: 'approval-1', session_id: 's1', attempt_id: 'attempt-1', requested_at: 1, decision: null, input: { task_id: 'task-1', call_id: 'call-1', capability: 'fs.write', scope: '{"path":"notes.txt","content":"hello"}', reason: 'opaque internal implementation reason' } };
+test('approval questions and options appear in the conversation without system instructions', async t => {
+  const approval = { id: 'approval-1', session_id: 's1', attempt_id: 'attempt-1', requested_at: 1, decision: null, input: { task_id: 'task-1', call_id: 'call-1', capability: 'fs.write', scope: '{"path":"notes.txt","content":"hello"}', reason: 'write notes' } };
   const current = snapshot({ cursor: 12, state: 'awaiting_approval', attempt: lease(), pending_approvals: [approval], messages: [{ role: 'system', content: 'private system instruction' }, { role: 'system', content: [] }, { role: 'user', content: '更新笔记' }] });
   const app = await page(t, async method => {
     if (method === 'session.list') return [current];
     if (method === 'session.get') return current;
     if (method === 'session.events') return [];
+    if (method === 'approval.question') return {
+      session_id: 's1', approval_id: 'approval-1', capability: 'fs.write',
+      scope: '{"path":"notes.txt","content":"hello"}', reason: 'write notes',
+      text: '请求你的授权：fs.write。参数：{"path":"notes.txt","content":"hello"}。请只回复以下选项之一：允许一次 / 本任务允许 / 拒绝',
+      options: ['允许一次', '本任务允许', '拒绝'],
+    };
   });
+  await app.poll();
   assert.doesNotMatch(app.ui.messages.textContent, /private system instruction|系统/);
-  assert.equal(app.ui.messages.children.length, 1);
-  const card = app.ui.approvals.children[0];
-  const primary = card.children.filter(child => child.tagName !== 'details').map(child => child.textContent).join(' ');
-  assert.match(primary, /写入|修改/);
-  assert.match(primary, /notes\.txt/);
-  assert.match(primary, /范围/);
-  assert.doesNotMatch(primary, /opaque internal|task-1|call-1|attempt-1/);
-  assert.ok(card.children.some(child => child.tagName === 'details'), 'raw approval belongs in closed details');
+  assert.equal(app.ui.messages.children.length, 2, 'one user message and one question in the conversation');
+  const question = app.ui.messages.children.find(child => String(child.className).includes('approval-question'));
+  assert.ok(question, 'the approval question is part of the conversation');
+  assert.match(question.textContent, /fs\.write/);
+  assert.match(question.textContent, /notes\.txt/);
+  const actions = question.children.find(child => String(child.className).includes('approval-actions'));
+  assert.deepEqual(actions.children.map(button => button.textContent), ['允许一次', '本任务允许', '拒绝']);
 });
 
 test('frozen Runtime binding locks both prompt and fork until the active attempt settles', async t => {
@@ -412,36 +418,46 @@ test('an incomplete fork receipt cannot enable a second fork', async t => {
   assert.equal(app.ui['open-fork'].disabled,true);
 });
 
-test('two approvals use their own consumed decision facts while a prompt is still pending', async t => {
+for (const interrupted of [false, true]) {
+test(`two approvals settle independently during a pending prompt (interrupted history: ${interrupted})`, async t => {
+  const interruptedCalls = interrupted ? [{ call: { id: 'old-call' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] : [];
   const approval = id => ({id,session_id:'s1',attempt_id:'attempt-1',requested_at:1,decision:null,input:{task_id:'task-1',call_id:'call-1',capability:'fs.write',scope:'{"path":"notes.txt","content":"hello"}',reason:'internal'}});
+  const question = id => ({session_id:'s1',approval_id:id,capability:'fs.write',scope:'{"path":"notes.txt","content":"hello"}',reason:'internal',text:`请求你的授权：fs.write。请只回复以下选项之一：允许一次 / 本任务允许 / 拒绝（${id}）`,options:['允许一次','本任务允许','拒绝']});
   let current = snapshot();
   let events = [];
   let started;
   let resolvePrompt;
   const promptStarted = new Promise(resolve=>{started=resolve;});
+  const questionButton = app => {
+    const card = app.ui.messages.children.find(child => String(child.className).includes('approval-question'));
+    assert.ok(card, 'pending approval question is in the conversation');
+    return card.children.find(child => String(child.className).includes('approval-actions')).children[0];
+  };
   const app = await page(t,async(method,params)=>{
     if(method==='session.list') return [current];
     if(method==='session.get') return current;
     if(method==='session.events') return events.filter(event=>event.cursor>params.after);
     if(method==='session.prompt') {started();return await new Promise(resolve=>{resolvePrompt=resolve;});}
-    if(method==='approval.decide') {
+    if(method==='approval.question') return question(params.approval_id);
+    if(method==='approval.reply') {
       const cursor=params.approval_id==='p1'?13:15;
       const decided={...approval(params.approval_id),decision:{decision:'approve',actor:'rpc-user',decided_at:2}};
       events.push(record(cursor,{type:'approval_decided',approval:decided}));
-      current=snapshot({cursor:cursor+1,state:params.approval_id==='p1'?'awaiting_approval':'running',attempt:lease(),pending_approvals:params.approval_id==='p1'?[approval('p2')]:[]});
+      current=snapshot({cursor:cursor+1,state:params.approval_id==='p1'?'awaiting_approval':'running',attempt:lease(),pending_approvals:params.approval_id==='p1'?[approval('p2')]:[],unresolved_calls:interruptedCalls});
       return decided;
     }
   });
   const pending=app.send();
   await promptStarted;
   events=[record(11,{type:'attempt_started',lease:lease()}),record(12,{type:'approval_requested',approval:approval('p1')})];
-  current=snapshot({cursor:12,state:'awaiting_approval',attempt:lease(),pending_approvals:[approval('p1')]});
+  current=snapshot({cursor:12,state:'awaiting_approval',attempt:lease(),pending_approvals:[approval('p1')],unresolved_calls:interruptedCalls});
   await app.poll();
-  const first=app.ui.approvals.children[0].children.at(-1).children[0];
+  const first=questionButton(app);
   assert.equal(first.disabled,false);
+  assert.equal(first.textContent,'允许一次');
   await first.dispatch('click');
   await app.poll();
-  const second=app.ui.approvals.children[0].children.at(-1).children[0];
+  const second=questionButton(app);
   assert.equal(second.disabled,false);
   await second.dispatch('click');
   current=snapshot({cursor:17});
@@ -450,8 +466,11 @@ test('two approvals use their own consumed decision facts while a prompt is stil
   await pending;
   await app.poll();
   assert.equal(app.ui.prompt.disabled,false);
-  assert.deepEqual(app.calls.filter(call=>call.method==='approval.decide').map(call=>call.params.approval_id),['p1','p2']);
+  assert.deepEqual(app.calls.filter(call=>call.method==='approval.reply').map(call=>call.params.approval_id),['p1','p2']);
+  assert.deepEqual(app.calls.filter(call=>call.method==='approval.reply').map(call=>call.params.reply),['允许一次','允许一次']);
+  assert.ok(app.calls.filter(call=>call.method==='approval.reply').every(call=>call.workspace_id === undefined || call.workspace_id === 'local'), 'the Client routes the answer back to the original workspace');
 });
+}
 
 test('a lost prompt response cannot borrow the first execution from another client', async t => {
   let current = snapshot();

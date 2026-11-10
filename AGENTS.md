@@ -41,7 +41,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 - `cayw-ai::Provider` 接收请求和取消令牌，返回可消费的事件流；错误必须有终态。HTTP 适配不读取本机模型凭据，默认不重试或跟随跳转。
 - `cayw-agent::Agent` 维护内存中的历史；`AgentControl` 可在运行中读取快照、插入消息和取消。事件订阅按注册顺序等待；回调不要等待同一次运行的 `wait_for_idle()`，以免等待自身。
 - 工具全部由宿主显式注册。参数严格校验，不隐式转换；有转换需要时实现工具自己的 `prepare_arguments`。工具可以进度更新，整批结果按调用原顺序入历史。
-- `outcome_unknown` 表示可能已发生副作用；当前运行和后续运行都停止，`reset()` 也不能清除该状态。宿主核对后通过 `replace_messages()` 提供完整且已配对的历史。工具的普通 `Err` 应表示已知失败；无法确认副作用时必须返回带 `outcome_unknown` 的结果。
+- `outcome_unknown` 只表示副作用结果不明，不能被改写成取消、失败或成功。保留原始记录和工具调用配对；中断后等待实际执行清理完成，再允许后续任务，不把不明结果变成永久 Session 冻结。
 - `cayw-agent` 的运行 Future 被 Drop 时会取消令牌并释放其内存运行状态；这不证明外部副作用已撤销。持久化 Runtime 必须另外核对 Core/Cells/Requests 记录和原执行者身份，等待 Device 清理确认后才能释放执行名额；清理或持久化失败时保留未知状态，不自动重放。
 - Core 协议/存储当前为 v3；`cayw-ipc` 的帧协议当前为 v1。这是不同层的版本，不能为统一数字而修改。Core 能力序号从 0 开始，Cells 从 1 开始，转换必须检查边界。
 - Workspace 执行器本身不是权限边界，不能直接暴露给模型；经 Host 完成严格校验、授权、调用开始、预算和终态记录后再执行。`fs.grep`/`fs.glob`/`code.outline`/`code.diff_hunks` 只有这一条实际分发路径。
@@ -52,6 +52,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 - `README.md`：面向使用者与开发者，介绍项目自身的愿景、核心思路、运行示例与文档入口；不堆放项目来源或替代关系、Issue/PR 流水账、内部验收细节或具体模型测试结果。
 - `docs/architecture.md`：组件职责与依赖方向、部署形态、身份与生命周期、执行/恢复/权限约束。改动组件边界或执行语义前先读它。
 - `docs/issue1-sdk-ipc-contract.md`：公开 SDK 与 IPC 的身份、事件游标、错误、版本和断连约定；各包边界见 `crates/*/README.md`。
+- `docs/memory-context-work.md`：主 session、WorkItem、记忆、上下文压缩、审批询问、Git 恢复点与主动工作的目标设计；不记录进度。
 - `docs/development-map.md`：21 个 GitHub Issues 的分阶段路线图（A–E 及后续平台支持）、硬依赖表和 mermaid 依赖图。
 - GitHub Issues（https://github.com/changw98ic/CAYW/issues）：每个任务功能范围、交付和验收的权威来源；平台范围以本文件的首发决定为准。路线图维护依赖、阶段、入口及本地状态，远端 Issue 未同步时须明确说明。
 - `docs/validation/`：各次验收的命令、环境和结果记录。
@@ -66,10 +67,12 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 ## 架构约束与后续方向
 
 - **Headless Core 为中心**：Core 独立运行，不依赖 UI、Server、VerifyTool 或任何 plugin。TUI / WebUI / Server 可单独安装；StrongFlow / JEv / Fusion / Observer 及第三方扩展统一称为 plugin，都可插拔，普通 Chat 不依赖它们。
-- **macOS 本地产品只有一个 Client**：一台设备共享 Client 的 IPC 地址、访问码、连接、重连、工作区路由和进程监管。工作区保留独立目录、SQLite、Runtime、Session、`models.json`、MCP/Pi 实例和架构 plugin 启用关系，但不能持有独立 Client 连接状态或 plugin 进程生命周期。TUI 与 WebUI 始终经唯一 Client 路由。
-- **本地启动不依赖模型配置**：没有模型时 Client、TUI 和 WebUI 仍能启动，也能创建和查询 Session；第一次执行 `prompt`、`enqueue` 或 `resume` 才返回 `model_not_configured`。`cayw conf` 是唯一交互式首次配置入口，每工作区 `models.json` 是本地权威配置；完全显式 Headless 只使用显式 `--config`，不读取本地 Client 状态。模型密钥是可选明文 `api_key`，公开输出不得回显。
+- **macOS 本地产品只有一个 Client**：一台设备共享 Client 的 IPC 地址、访问码、连接、重连、工作区路由和进程监管。工作区保留独立目录、SQLite、Runtime、Session、模型选用、MCP/Pi 实例和架构 plugin 启用关系，但不能持有独立 Client 连接状态或 plugin 进程生命周期。TUI 与 WebUI 始终经唯一 Client 路由。
+- **本地启动不依赖模型配置**：没有模型时 Client、TUI 和 WebUI 仍能启动，也能创建和查询 Session；第一次执行 `prompt`、`enqueue` 或 `resume` 才返回 `model_not_configured`。`cayw conf` 是唯一交互式首次配置入口。模型方案每台设备一份（`<CAYW_HOME>/models.json`），各工作区（含主 session 工作区）选用其中一个；工作区只保存方案选用，不读取或迁移旧配置。完全显式 Headless 只使用显式 `--config`，不读取本地 Client 状态。模型密钥是可选明文 `api_key`，公开输出不得回显。
 - **先夯实 Stage A，#6 全链不抢跑**：先按路线图补齐 Stage A 底座（SDK/IPC、验证基线、Luau、Device、预置 CodeMode）的验收，再做 #6 的真实模型、统一权限、持久化和取消全链；早期原型或单项测试不能替代这些交付。
 - **CodeMode 是统一工具编排入口**：优先用 Luau 实现（Monty 只作可选对照），底层由受控的 Rust 能力执行；所有执行路径共用权限、调用配对、取消和预算。
+- **模型 auto 审批**：本地 Client 使用 `ModelAuto`，模型通过 CodeMode 的 `approval.pending`、`approval.decide` 和独立的 `capability.decide` 决定原操作，不要求用户人工审批。SDK 默认 `Explicit`，由调用者决定。操作许可、执行结果与用户验收是不同事实，不能互相代填。Git 恢复点用于误删误改恢复，不是审批前置条件。
+- **记忆、上下文与主动工作**（目标设计，见 `docs/memory-context-work.md`）：主 session 是默认工作区 `~/CodeAsYouWish`，状态仍在 `CAYW_HOME/workspaces/<目录摘要>/`，不另建数据根；上下文管理是 Runtime 内置组件，不是 plugin；不设用量上限；用户要求忘掉后以后不再使用，不擦日志；Git 恢复点使用 CAYW 私有快照仓库，不在用户目录创建 `.git`，也不读写用户仓库。
 - **默认不向 Agent 暴露 Bash/Shell/Node/Python 通用执行入口**。常规文件、检索、Git、构建/测试需求由预置 CodeMode 能力覆盖；真实缺口按任务申请开放（#8），申请次数不能自动授权。这条限制只针对 Agent 的工具暴露，不限制开发本项目时使用的工具链。
 - **Session 与 Worker 解耦**：Session 是持久逻辑，Worker 是可更换的执行者。恢复时先核对 unknown 副作用，不能盲目重放。
 - **plugin 同时按角色和实现方式分类**：Client plugin 包括 TUI、WebUI；WorkspaceArchitecture plugin 包括 StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin。所有 plugin 进程由唯一 Client 启停和监管，架构 plugin 仅按工作区启用，不能绕过 Client 直连工作区。可信 Native plugin 通过 Cargo feature 静态链接（`cayw-plugins`）；External plugin 通过独立进程 IPC 接入（进程隔离不等于安全沙箱）。plugin 不能直接读写 Core 数据库，不能绕过审批、调用配对、取消和预算。普通架构 plugin 不绑定或冻结普通 Session；StrongFlow 保留专用 binding、冻结、恢复和显式 Fork 合同。卸载必须等待原 supervisor 和外部进程确认退出；清理未知时不自动重启或重放。

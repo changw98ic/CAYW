@@ -145,7 +145,7 @@ test('a known prompt receipt cannot unlock against a read issued before consumin
 
 test('approval terminal releases only that decision so the next approval can be presented', () => {
   let view = initial({state:'awaiting_approval',attempt:lease,pending_approvals:[{id:'p1'}]});
-  view = beginWrite(view, 1, 'approval.decide', {approval_id:'p1'});
+  view = beginWrite(view, 1, 'approval.reply', {approval_id:'p1'});
   view = finishWrite(view, 1);
   view = consumeEvents(view, [fact(11,{type:'approval_decided',approval:{id:'p1',attempt_id:'a1'}})]);
   view = applySnapshot(view,snapshot({cursor:11,state:'awaiting_approval',attempt:lease,pending_approvals:[{id:'p2'}]}));

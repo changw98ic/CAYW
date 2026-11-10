@@ -37,6 +37,13 @@ pub struct ProviderConfig {
     base_url: String,
     api_version: String,
     max_output_tokens: u64,
+    /// Model context window in tokens. Absent values stay absent; a later
+    /// context budget may apply its own conservative default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    /// Optional tokenizer id. This stores the name only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokenizer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
 }
@@ -86,6 +93,24 @@ impl ProviderConfig {
         }
         if self.max_output_tokens == 0 {
             return Err(invalid("max_output_tokens must be positive"));
+        }
+        if let Some(window) = self.context_window
+            && !(1..=10_000_000).contains(&window)
+        {
+            return Err(invalid(
+                "context_window must be from 1 to 10000000 tokens when set",
+            ));
+        }
+        if let Some(tokenizer) = &self.tokenizer
+            && (tokenizer.is_empty()
+                || tokenizer.len() > 80
+                || !tokenizer.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/')
+                }))
+        {
+            return Err(invalid(
+                "tokenizer must contain 1..80 letters, digits, '.', '_', '-' or '/'",
+            ));
         }
         if self.id.is_empty()
             || self.id.len() > 256
@@ -186,7 +211,7 @@ impl ProviderConfig {
 
     /// A diagnostic/settings view that never returns the stored credential.
     pub fn public_view(&self) -> Value {
-        json!({
+        let mut view = json!({
             "service": self.service,
             "api": self.api,
             "id": self.id,
@@ -194,7 +219,14 @@ impl ProviderConfig {
             "api_version": self.api_version,
             "max_output_tokens": self.max_output_tokens,
             "authentication": if self.api_key.is_some() { "plain_file" } else { "none" },
-        })
+        });
+        if let Some(window) = self.context_window {
+            view["context_window"] = json!(window);
+        }
+        if let Some(tokenizer) = &self.tokenizer {
+            view["tokenizer"] = json!(tokenizer);
+        }
+        view
     }
 
     /// Construct a lazy adapter without making a model request. A missing key means
@@ -256,6 +288,7 @@ impl ProviderConfig {
         };
         let mut model = Model::new(name, &self.id);
         model.max_output_tokens = Some(self.max_output_tokens);
+        model.context_window = self.context_window;
         Ok(ConfiguredProvider { provider, model })
     }
 }
@@ -272,8 +305,20 @@ mod tests {
             base_url: base_url.into(),
             api_version: "v1".into(),
             max_output_tokens: 4096,
+            context_window: None,
+            tokenizer: None,
             api_key: api_key.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn build_carries_the_configured_context_window_into_the_model() {
+        let mut configured = profile("https://api.example/v1", None);
+        configured.context_window = Some(65_536);
+        configured.max_output_tokens = 8_192;
+        let built = configured.build().unwrap();
+        assert_eq!(built.model.context_window, Some(65_536));
+        assert_eq!(built.model.max_output_tokens, Some(8_192));
     }
 
     #[test]

@@ -9,8 +9,8 @@ mod resources;
 pub use cancel::CancelTarget;
 pub use input::{ImageInput, TaskInput};
 pub use queue::{
-    Queue, QueuePolicy, TaskLease, TaskPriority, TaskRecord, TaskState, TaskTerminal, adopt_policy,
-    read_policy,
+    Queue, QueuePolicy, TaskDispatch, TaskLease, TaskPriority, TaskRecord, TaskState, TaskTerminal,
+    adopt_policy, read_policy,
 };
 pub use resources::{ResourcePolicy, ResourceUsage, TaskResources};
 
@@ -55,6 +55,8 @@ pub enum QueueError {
     QueueFull,
     #[error("task cancelled before execution")]
     Cancelled,
+    #[error("dispatch key was already used for different input, session, or work_id")]
+    DispatchConflict,
     #[error("queue worker failed: {0}")]
     Worker(String),
     #[error("cancellation does not match the original task execution identity")]

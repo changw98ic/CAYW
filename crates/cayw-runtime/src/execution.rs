@@ -488,6 +488,56 @@ impl Runtime {
         self.inner.changed.notify_waiters();
         Ok(task)
     }
+    /// Create a task with its `work_id` and `dispatch_key` in the same durable
+    /// transaction. A repeated key with the same input, session and work_id
+    /// returns the original task; a different identity is a conflict.
+    pub fn enqueue_dispatched(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        intent: cayw_requests::TaskIntent,
+        priority: crate::TaskPriority,
+        resources: crate::TaskResources,
+        dispatch: crate::TaskDispatch,
+    ) -> Result<TaskRecord, RuntimeError> {
+        resources.validate(&self.inner.config.resources)?;
+        input.validate(
+            &lock(&self.inner.selection).model,
+            self.inner.config.max_prompt_bytes,
+        )?;
+        dispatch.validate()?;
+        // A retry after a lost response must return the original task even if
+        // that task already started and the session is now busy. The durable
+        // queue repeats this check inside the create transaction for races.
+        if let Some(existing) = self
+            .inner
+            .queue
+            .find_by_dispatch_key(&dispatch.dispatch_key)?
+        {
+            if existing.input != input
+                || existing.session_id != session
+                || existing.work_id.as_deref() != Some(dispatch.work_id.as_str())
+            {
+                return Err(RuntimeError::InvalidInput(
+                    "dispatch_key was already used for different input, session, or work_id".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let _coordinate = self.inner.coordination.enter()?;
+        self.check_ready(session)?;
+        let task = self.inner.queue.enqueue_dispatched_with_resources(
+            session,
+            &input,
+            &intent,
+            priority,
+            &resources,
+            self.inner.config.max_queued_runs,
+            Some(&dispatch),
+        )?;
+        self.inner.changed.notify_waiters();
+        Ok(task)
+    }
     /// Runs to a durable terminal. Dropping the caller cancels this worker; the
     /// owned cleanup continues to hold the persisted admission slot until done.
     pub async fn prompt(
@@ -1190,10 +1240,21 @@ async fn execute_with_cells(
             Ok(())
         }
     });
-    const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never approve your own request or replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
+    const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
     let run = async {
+        let approval_instruction = match inner.config.approval_mode {
+            crate::ApprovalMode::ModelAuto => "You decide operation approvals yourself through CodeMode. If a cell waits for permission, call approval.pending, review the exact operation, then call approval.decide with its approval_id and your decision. Continue waiting for the original cell, never replay it. For capability.request use capability.decide with the separate request_id. Approval is permission to execute, not successful execution or user acceptance.",
+            crate::ApprovalMode::Explicit => "Operation approvals are supplied by the caller. Do not claim to approve your own request.",
+        };
         let instruction = Message::System(cayw_ai::SystemMessage {
-            sections: [("cayw-runtime-codemode".into(), Some(INSTRUCTION.into()))].into(),
+            sections: [
+                ("cayw-runtime-codemode".into(), Some(INSTRUCTION.into())),
+                (
+                    "cayw-runtime-approval".into(),
+                    Some(approval_instruction.into()),
+                ),
+            ]
+            .into(),
             ..Default::default()
         });
         // F08: fold Applied plannotator feedback into the next Agent attempt.

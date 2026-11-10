@@ -1,4 +1,5 @@
 //! Headless runtime with one durable session history and explicit host authority.
+mod approval_rules;
 mod artifacts;
 mod audit;
 mod background;
@@ -18,6 +19,8 @@ mod fleet;
 mod input;
 pub mod launch;
 pub mod local_cli;
+mod main_memory;
+mod model_approvals;
 mod model_requests;
 mod permissions;
 mod plannotator;
@@ -30,6 +33,7 @@ mod provider;
 mod queue;
 mod reconciliation;
 mod recovery;
+pub mod recovery_points;
 #[cfg(feature = "remote")]
 mod remote;
 mod request_recovery;
@@ -39,9 +43,17 @@ mod results;
 mod rpc;
 mod scheduler;
 mod session;
+mod session_context;
 mod shared_read;
 mod values;
+mod work_items;
+mod work_router;
+mod work_tools;
 
+pub use approval_rules::{
+    ApprovalRule, ApprovalRuleSource, ApprovalRulesFile, FileRules, RecoveryScope,
+    RuleChangeOutcome, RuleChangeQuestion, RuleContext, RuleDecision, RulesSnapshot, device_rules,
+};
 pub use artifacts::RuntimeHostDispatch;
 pub use audit::{AuditRecord, GrantRecord};
 pub use background::{
@@ -58,7 +70,7 @@ pub use cayw_artifacts::{
 };
 pub use cayw_context::{CostStatus, SessionLedgerSnapshot, SessionOverview};
 pub use cayw_plannotator::{FeedbackDecision, FeedbackDraft, LiveFileVersion, StructuredFeedback};
-pub use cayw_queue::{QueueError, TaskIntent};
+pub use cayw_queue::{QueueError, TaskDispatch, TaskIntent};
 pub use children::LocalAgents;
 pub use collaboration::{
     PlanStep, PlanStepStatus, PlanView, QuestionAnswer, QuestionState, QuestionView,
@@ -69,13 +81,19 @@ pub use error::{RuntimeError, StorageFailure, WorkerFailure};
 pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::{HeadlessConfig, PiCompatConfig};
+pub use main_memory::{
+    ApplyReport, MainMemory, MemoryCandidate, MemoryEntry, MemoryEvent, MemoryOperation,
+    MemoryOrigin, MemoryQuery, MemoryQueryEntry, MemoryQueryView, MemoryScan, MemoryStatus,
+    MemoryStatusView, RejectedCandidate, SourceType, UserEvidence, UserSource, user_evidence,
+};
+pub use model_approvals::ApprovalMode;
 pub use model_requests::{
     ModelCostStatus, ModelRequestIdentity, ModelRequestLedger, ModelRequestObservation,
     ModelRequestOrigin, ModelRequestReconciledOutcome, ModelRequestReconciliation,
     ModelRequestReconciliationRecord, ModelRequestReconciliationVerifier, ModelRequestRecord,
     ModelRequestTerminal, ModelUsageObservation,
 };
-pub use permissions::{ApprovalChoice, ScopedPermission};
+pub use permissions::{ApprovalChoice, ApprovalQuestion, ScopedPermission};
 pub use plannotator::PlanFeedbackInput;
 pub use processes::{ProcessCleanupInspection, ProcessCleanupProcess};
 pub use provider::{ConfiguredProvider, ProviderApi, ProviderConfig, ProviderService};
@@ -91,6 +109,17 @@ pub use results::{
 };
 pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
+pub use session_context::{MaintenanceReconciliation, MaintenanceReconciliationRecord};
+pub use work_items::{
+    AcceptanceCheck, AcceptanceCriterion, AcceptanceRecord, AcceptanceResult, AcceptanceSource,
+    InputRecord, InputState, InputStateEvent, LateWorkResult, Notification, NotificationDecision,
+    NotificationStatus, ProactiveMode, ProactiveTriggerOutcome, WorkItem, WorkItemSpec, WorkItems,
+    WorkLifecycle, WorkSessionRef, WorkTaskRef,
+};
+pub use work_router::{
+    WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkRouter, WorkRouterError,
+    WorkTargetOutcome, WorkTaskQuery,
+};
 
 use cayw_ai::{CancellationToken, Model, Provider, ToolDefinition};
 use cayw_core::{ApprovalRequest, EventRecord, SessionStore};
@@ -144,7 +173,30 @@ pub struct RuntimeConfig {
     /// Cannot be combined with host.external, the raw platform service boundary.
     pub bridge: Option<cayw_bridge::Bridge>,
     /// Exact capability + canonical JSON arguments, supplied by the trusted host.
+    /// This remains only a one-time exact pre-authorization for this Runtime.
     pub permissions: Vec<ScopedPermission>,
+    /// Who decides pending operations. The local Client selects ModelAuto;
+    /// explicit SDK runtimes keep host-controlled decisions by default.
+    pub approval_mode: ApprovalMode,
+    /// Device-level approval rules. With `None`, pending operations use the
+    /// configured approval mode. The Client captures the current rule version
+    /// for each dispatched task.
+    pub approval_rules: Option<Arc<dyn approval_rules::ApprovalRuleSource>>,
+    /// This Runtime serves the main-session workspace. Only then may the
+    /// built-in rules release its own local reads, memory and dispatches.
+    pub main_session: bool,
+    /// Proactive work mode. It is separate from approval rules: changing it
+    /// never changes which operations are allowed or asked about.
+    pub proactive_mode: work_items::ProactiveMode,
+    /// User-configured notification targets that `notify.send` may use.
+    pub notification_targets: Vec<String>,
+    /// Directories covered by the current recovery points. This is recovery
+    /// information, not a prerequisite for operation approval.
+    pub recovery_scope: Option<approval_rules::RecoveryScope>,
+    /// Private Git recovery points. `None` (SDK and fully explicit Headless)
+    /// leaves the workspace without automatic snapshots; the local Client
+    /// supplies a default configuration.
+    pub recovery: Option<recovery_points::RecoveryConfig>,
     /// Additional task request approval for these exact existing Host operations.
     pub request_policy: Option<RequestPolicy>,
     /// Persisted authority configuration must agree across Runtime connections.
@@ -188,6 +240,13 @@ impl Default for RuntimeConfig {
             local_agents: None,
             bridge: None,
             permissions: vec![],
+            approval_mode: ApprovalMode::Explicit,
+            approval_rules: None,
+            main_session: false,
+            proactive_mode: work_items::ProactiveMode::Off,
+            notification_targets: Vec::new(),
+            recovery_scope: None,
+            recovery: None,
             request_policy: None,
             request_limits: Default::default(),
             reconciliation_verifier: None,
@@ -305,6 +364,13 @@ pub(crate) struct Inner {
     /// disabled. Opening succeeds; using one reports the reason.
     disabled_operations: BTreeMap<String, String>,
     selection: Mutex<ConfiguredProvider>,
+    context: Mutex<session_context::SessionContexts>,
+    memory: main_memory::MainMemory,
+    work_items: work_items::WorkItems,
+    /// Injected by the unique local Client. Headless/SDK Runtimes have none and
+    /// cannot claim another workspace was updated.
+    work_router: Mutex<Option<Arc<dyn work_router::WorkRouter>>>,
+    recovery: Option<recovery_points::RecoveryPoints>,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
     budget_locks: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
@@ -315,6 +381,11 @@ pub(crate) struct Inner {
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
+    /// Rule modifications shown in a main-session conversation, never saved
+    /// until the user's exact confirmation. Keyed by session id.
+    pending_rule_changes: Mutex<BTreeMap<String, approval_rules::PendingRuleChange>>,
+    /// Serializes reading the device rule version, appending, and writing it.
+    rule_edit: Mutex<()>,
     plannotator: Mutex<plannotator::PlannotatorState>,
     artifacts: Mutex<artifacts::ArtifactState>,
     #[cfg(feature = "plugins")]
@@ -350,6 +421,17 @@ impl Inner {
     pub(crate) fn clear_in_flight(&self, request_id: &str) {
         lock(&self.in_flight).remove(request_id);
     }
+
+    /// Current recovery coverage for approval decisions. Disabling recovery
+    /// turns this into `None`, so rewrites and deletions ask again. The
+    /// snapshot state's out-of-scope sample is added as explicit exclusions.
+    pub(crate) fn recovery_scope(&self) -> Option<RecoveryScope> {
+        let base = self.config.recovery_scope.as_ref()?;
+        match self.recovery.as_ref() {
+            Some(recovery) => recovery.approval_scope(base),
+            None => Some(base.clone()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -358,6 +440,33 @@ pub struct Runtime {
 }
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn recovery_outcome(outcome: &recovery_points::SnapshotOutcome) -> serde_json::Value {
+    match outcome {
+        recovery_points::SnapshotOutcome::Disabled => {
+            serde_json::json!({"status":"disabled"})
+        }
+        recovery_points::SnapshotOutcome::Unavailable { warning } => {
+            serde_json::json!({"status":"unavailable","warning":warning})
+        }
+        recovery_points::SnapshotOutcome::Ready {
+            id,
+            created,
+            complete,
+            out_of_scope,
+            out_of_scope_sample,
+            warning,
+        } => serde_json::json!({
+            "status":"ready",
+            "snapshot":id,
+            "created":created,
+            "complete":complete,
+            "out_of_scope":out_of_scope,
+            "out_of_scope_sample":out_of_scope_sample,
+            "warning":warning,
+        }),
+    }
 }
 
 impl Runtime {
@@ -552,6 +661,27 @@ impl Runtime {
         if cayw_requests::RequestStore::persisted_config(requests.path())? != requests.config() {
             return Err(cayw_requests::RequestError::PolicyMismatch.into());
         }
+        let recovery = match &config.recovery {
+            Some(recovery) => {
+                let state_dir = store_path
+                    .as_ref()
+                    .parent()
+                    .ok_or_else(|| {
+                        RuntimeError::Workspace(
+                            "runtime database path has no recovery state directory".into(),
+                        )
+                    })?
+                    .to_path_buf();
+                Some(recovery_points::RecoveryPoints::open(
+                    &root,
+                    state_dir,
+                    recovery.clone(),
+                ))
+            }
+            None => None,
+        };
+        let memory = main_memory::MainMemory::open(&root);
+        let work_items = work_items::WorkItems::open(store_path.as_ref())?;
         let rt = Self {
             inner: Arc::new(Inner {
                 store,
@@ -570,6 +700,13 @@ impl Runtime {
                 disabled_services,
                 disabled_operations,
                 selection: Mutex::new(ConfiguredProvider { provider, model }),
+                context: Mutex::new(session_context::SessionContexts::new(
+                    store_path.as_ref().parent().map(Path::to_path_buf),
+                )),
+                memory,
+                work_items,
+                work_router: Mutex::new(None),
+                recovery,
                 active: Mutex::new(BTreeMap::new()),
                 budget_locks: Mutex::new(BTreeMap::new()),
                 in_flight: Mutex::new(BTreeMap::new()),
@@ -577,6 +714,8 @@ impl Runtime {
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
+                pending_rule_changes: Mutex::new(BTreeMap::new()),
+                rule_edit: Mutex::new(()),
                 plannotator: Mutex::new(plannotator::PlannotatorState::default()),
                 // Placeholder; replaced immediately after Arc construction with Weak dispatch.
                 artifacts: Mutex::new(artifacts::ArtifactState {
@@ -607,8 +746,479 @@ impl Runtime {
     ) -> Result<ApprovalRequest, RuntimeError> {
         Ok(self.inner.store.approval(session_id, approval_id)?)
     }
+    /// The exact question and three reply options to show in the main-session
+    /// conversation for one still-pending original request.
+    pub fn approval_question(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+    ) -> Result<permissions::ApprovalQuestion, RuntimeError> {
+        let approval = self.approval(session_id, approval_id)?;
+        if approval.decision.is_some() {
+            return Err(RuntimeError::StaleApproval);
+        }
+        Ok(permissions::question(&approval))
+    }
+    /// Apply one main-session text answer to the original request. The reply must
+    /// exactly equal one of the three option labels; it never goes through a
+    /// model and cannot be supplied by tool output.
+    pub fn answer_approval(
+        &self,
+        session_id: &str,
+        approval_id: &str,
+        reply: &str,
+        actor: &str,
+    ) -> Result<ApprovalRequest, RuntimeError> {
+        let choice = ApprovalChoice::from_reply(reply).ok_or_else(|| {
+            RuntimeError::InvalidInput(
+                "approval reply must exactly match one of the offered options".into(),
+            )
+        })?;
+        self.approve(session_id, approval_id, choice, actor)
+    }
     pub fn workspace(&self) -> &Path {
         &self.inner.root
+    }
+    /// Durable base memory and preferences. The authoritative directory exists
+    /// only in the main-session workspace.
+    pub fn memory(&self) -> &main_memory::MainMemory {
+        &self.inner.memory
+    }
+    fn require_main_session(&self) -> Result<(), RuntimeError> {
+        if self.inner.config.main_session {
+            Ok(())
+        } else {
+            Err(RuntimeError::InvalidInput(
+                "memory is only available in the main session workspace".into(),
+            ))
+        }
+    }
+    pub fn memory_status(&self) -> Result<main_memory::MemoryStatusView, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.memory.status()
+    }
+    pub fn memory_entries(&self) -> Result<Vec<main_memory::MemoryEntry>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.memory.visible_entries()
+    }
+    /// Read conversation, work and recorded decisions inside one source range.
+    /// This is read-only and omits forgotten ranges; `session.events` still
+    /// returns the original records by cursor.
+    pub fn query_memory(
+        &self,
+        query: main_memory::MemoryQuery,
+    ) -> Result<main_memory::MemoryQueryView, RuntimeError> {
+        self.require_main_session()?;
+        let events = self.session_events(&query.session_id)?;
+        self.inner.memory.query(&query, &events)
+    }
+    /// The verified user-input source set for one session's durable log.
+    pub fn memory_user_evidence(
+        &self,
+        session_id: &str,
+    ) -> Result<main_memory::UserEvidence, RuntimeError> {
+        self.require_main_session()?;
+        Ok(main_memory::user_evidence(
+            &self.session_events(session_id)?,
+        ))
+    }
+    /// Complete durable event log for one session, in cursor order.
+    pub(crate) fn session_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<cayw_core::EventRecord>, RuntimeError> {
+        let cursor = self.get(session_id)?.cursor;
+        let mut events = Vec::new();
+        let mut after = 0;
+        while after < cursor {
+            let page = self
+                .inner
+                .store
+                .events(session_id, after, cayw_core::MAX_EVENT_PAGE)?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().expect("nonempty page").cursor;
+            events.extend(page);
+        }
+        Ok(events)
+    }
+    /// Apply proposed memory writes. Every cited source must be a verified
+    /// user-input turn; tool output, web pages and execution results are refused.
+    pub fn apply_memory_candidates(
+        &self,
+        session_id: &str,
+        candidates: &[main_memory::MemoryCandidate],
+    ) -> Result<main_memory::ApplyReport, RuntimeError> {
+        self.require_main_session()?;
+        let evidence = self.memory_user_evidence(session_id)?;
+        self.inner.memory.apply(&evidence, candidates)
+    }
+    /// Record a forget range. Original events and raw logs stay unchanged; later
+    /// context and memory reads skip the range.
+    pub fn forget_memory_range(
+        &self,
+        range: cayw_context::SourceRange,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        self.require_main_session()?;
+        self.inner
+            .memory
+            .forget(range, reason, main_memory::now_ms())
+    }
+    /// Dream organizes references of existing summaries only. Without explicit
+    /// model text the body stays empty and no model call is made.
+    pub fn dream_memory(
+        &self,
+        summaries: &[cayw_context::SummaryRecord],
+        model_text: Option<&str>,
+    ) -> Result<cayw_context::DreamPlan, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.memory.dream(summaries, model_text)
+    }
+    pub fn memory_context_block(&self) -> Result<Option<String>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.memory.context_block()
+    }
+    /// Create a durable WorkItem in the main-session workspace. Acceptance
+    /// criteria with an executable check are fixed here; the rest depend on the
+    /// user's answer.
+    pub fn create_work_item(
+        &self,
+        spec: work_items::WorkItemSpec,
+    ) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.create(spec)
+    }
+    pub fn work_item(&self, work_id: &str) -> Result<Option<work_items::WorkItem>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.get(work_id)
+    }
+    /// Install the unique local Client's workspace router. Only the main-session
+    /// Runtime may receive one. Headless/SDK paths keep `None`, so a main session
+    /// never claims that a dispatched workspace was updated without the Client.
+    pub fn set_work_router(
+        &self,
+        router: Arc<dyn work_router::WorkRouter>,
+    ) -> Result<(), RuntimeError> {
+        self.require_main_session()?;
+        let mut slot = lock(&self.inner.work_router);
+        if slot.is_some() {
+            return Err(RuntimeError::InvalidInput(
+                "a work router is already installed".into(),
+            ));
+        }
+        *slot = Some(router);
+        Ok(())
+    }
+    pub fn list_work_items(&self) -> Result<Vec<work_items::WorkItem>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.list()
+    }
+    /// Pause increments the version that is written into already-dispatched
+    /// tasks. The target workspace refuses later capability calls at once.
+    pub fn pause_work_item(&self, work_id: &str) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        let item = self.inner.work_items.pause(work_id)?;
+        self.inner
+            .queue
+            .pause_work(&item.work_id, item.pause_version)?;
+        Ok(item)
+    }
+    pub fn resume_work_item(&self, work_id: &str) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.resume(work_id)
+    }
+    /// Stop is terminal for this WorkItem and cancels every live task that was
+    /// dispatched for it. Late results stay as facts and never redispatch.
+    pub fn stop_work_item(&self, work_id: &str) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        let item = self.inner.work_items.stop(work_id)?;
+        self.inner
+            .queue
+            .stop_work(&item.work_id, item.stop_version)?;
+        Ok(item)
+    }
+    /// Run the fixed program check for one criterion. The result is observed
+    /// here, so a model cannot map arbitrary tool output to a pass.
+    pub fn evaluate_work_acceptance(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+    ) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        self.inner
+            .work_items
+            .evaluate_acceptance(work_id, criterion_id, &self.inner.root)
+    }
+    /// Write the user's own answer to a condition that cannot be checked by a
+    /// program. The reference identifies the main-session answer.
+    pub fn record_work_user_acceptance(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+        passed: bool,
+        answer_ref: &str,
+    ) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        let item = self
+            .inner
+            .work_items
+            .get(work_id)?
+            .ok_or_else(|| RuntimeError::InvalidInput("WorkItem not found".into()))?;
+        // The answer must be a real user-input log record in the owner main
+        // session. Model text, tool output and web content are not answers.
+        let evidence = self.memory_user_evidence(&item.owner_main_session_id)?;
+        if !evidence
+            .sources()
+            .any(|source| source.log_id() == answer_ref)
+        {
+            return Err(RuntimeError::InvalidInput(
+                "acceptance answer is not a verified main-session user input".into(),
+            ));
+        }
+        self.inner
+            .work_items
+            .record_user_acceptance(work_id, criterion_id, passed, answer_ref)
+    }
+    /// Model completion reports are hints only. This always refuses to write a
+    /// passing acceptance record.
+    pub fn record_work_model_report(&self, work_id: &str, text: &str) -> Result<(), RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.record_model_report(work_id, text)
+    }
+    /// Persist a late result. It never reopens a paused/stopped WorkItem and
+    /// never starts a second dispatch.
+    pub fn record_work_late_result(
+        &self,
+        work_id: &str,
+        task_id: &str,
+        result_ref: &str,
+        pause_version_at_dispatch: u64,
+        stop_version_at_dispatch: u64,
+    ) -> Result<work_items::LateWorkResult, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.record_late_result(
+            work_id,
+            task_id,
+            result_ref,
+            pause_version_at_dispatch,
+            stop_version_at_dispatch,
+        )
+    }
+    pub fn ingest_input(
+        &self,
+        source: &str,
+        source_event_id: &str,
+        log_id: &str,
+        session_id: &str,
+    ) -> Result<work_items::InputRecord, RuntimeError> {
+        self.require_main_session()?;
+        self.inner
+            .work_items
+            .ingest_input(source, source_event_id, log_id, session_id)
+    }
+    pub fn transition_input(
+        &self,
+        log_id: &str,
+        state: work_items::InputState,
+        work_id: Option<&str>,
+        result_ref: Option<&str>,
+    ) -> Result<work_items::InputRecord, RuntimeError> {
+        self.require_main_session()?;
+        self.inner
+            .work_items
+            .transition_input(log_id, state, work_id, result_ref)
+    }
+    pub fn input_record(
+        &self,
+        log_id: &str,
+    ) -> Result<Option<work_items::InputRecord>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.input(log_id)
+    }
+    /// Record a proactive trigger and its usage once. It never changes approval
+    /// rules and never imposes a usage cap.
+    pub fn trigger_proactive(
+        &self,
+        mode: work_items::ProactiveMode,
+        rule_id: &str,
+        condition_version: u64,
+        work_id: &str,
+        usage_tokens: u64,
+    ) -> Result<work_items::ProactiveTriggerOutcome, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.trigger_proactive(
+            mode,
+            rule_id,
+            condition_version,
+            work_id,
+            usage_tokens,
+        )
+    }
+    pub fn proactive_mode(&self) -> work_items::ProactiveMode {
+        self.inner.config.proactive_mode
+    }
+    /// Apply the configured proactive mode. This never touches approval rules.
+    pub fn trigger_configured_proactive(
+        &self,
+        rule_id: &str,
+        condition_version: u64,
+        work_id: &str,
+        usage_tokens: u64,
+    ) -> Result<work_items::ProactiveTriggerOutcome, RuntimeError> {
+        self.trigger_proactive(
+            self.inner.config.proactive_mode,
+            rule_id,
+            condition_version,
+            work_id,
+            usage_tokens,
+        )
+    }
+    /// Save a notification intent. Only a target from user configuration is
+    /// accepted.
+    pub fn prepare_notification(
+        &self,
+        work_id: &str,
+        work_version: u64,
+        target: &str,
+        content_ref: Option<&str>,
+        artifact_refs: &[String],
+    ) -> Result<work_items::Notification, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.prepare_notification(
+            work_id,
+            work_version,
+            target,
+            content_ref,
+            artifact_refs,
+            &self.inner.config.notification_targets,
+        )
+    }
+    pub fn record_notification_receipt(
+        &self,
+        notification_id: &str,
+        status: work_items::NotificationStatus,
+        receipt_ref: &str,
+    ) -> Result<work_items::Notification, RuntimeError> {
+        self.require_main_session()?;
+        self.inner
+            .work_items
+            .record_notification_receipt(notification_id, status, receipt_ref)
+    }
+    pub fn notification_decision(
+        &self,
+        notification_id: &str,
+    ) -> Result<work_items::NotificationDecision, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.notification_decision(notification_id)
+    }
+    pub fn notification(
+        &self,
+        notification_id: &str,
+    ) -> Result<Option<work_items::Notification>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.notification(notification_id)
+    }
+    /// Push a pause version received from the Client to this workspace's live
+    /// tasks. The WorkItem body stays in the main-session workspace.
+    pub fn apply_work_pause(
+        &self,
+        work_id: &str,
+        pause_version: u64,
+    ) -> Result<usize, RuntimeError> {
+        Ok(self.inner.queue.pause_work(work_id, pause_version)?)
+    }
+    pub fn apply_work_stop(&self, work_id: &str, stop_version: u64) -> Result<usize, RuntimeError> {
+        Ok(self.inner.queue.stop_work(work_id, stop_version)?)
+    }
+    /// Read-only Git recovery status for this workspace. `None` when the host
+    /// did not opt in (SDK or fully explicit Headless).
+    pub fn recovery_status(&self) -> Option<serde_json::Value> {
+        self.inner
+            .recovery
+            .as_ref()
+            .map(|recovery| recovery.status())
+    }
+    /// Read-only inspection of an unfinished restore. It never rewrites the
+    /// intent, reports success, or replays a file write.
+    pub fn recovery_reconciliation(&self) -> Option<serde_json::Value> {
+        self.inner
+            .recovery
+            .as_ref()
+            .map(|recovery| recovery.reconciliation())
+    }
+    /// Disable Git recovery for this workspace through the runtime API. Calls
+    /// after this stop creating points and local backups, and existing-file
+    /// rewrites or deletions ask again. Existing points and backups stay.
+    pub fn disable_git_recovery(&self) -> Result<serde_json::Value, RuntimeError> {
+        let recovery =
+            self.inner.recovery.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidInput("Git recovery is not configured".into())
+            })?;
+        recovery.disable().map_err(|error| {
+            if error.outcome_unknown {
+                RuntimeError::RecoveryRequired {
+                    cause: Box::new(RuntimeError::Workspace(error.message)),
+                    cleanup: None,
+                    outcome_unknown: true,
+                }
+            } else {
+                RuntimeError::Workspace(error.message)
+            }
+        })?;
+        let retained = recovery.point_ids().map_or(0, |points| points.len());
+        Ok(serde_json::json!({
+            "enabled":false,
+            "points_retained":retained,
+            "snapshots_stopped":true,
+            "existing_file_changes":"ask",
+            "deleted_existing_points":0,
+        }))
+    }
+    /// Newest-first ids of points this workspace created. The program never
+    /// deletes a point or collects its old objects.
+    pub fn recovery_points(&self) -> Result<Vec<String>, RuntimeError> {
+        let recovery =
+            self.inner.recovery.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidInput("Git recovery is not configured".into())
+            })?;
+        recovery.point_ids().map_err(RuntimeError::Workspace)
+    }
+    /// Explicitly establish a point now; identical content is not committed
+    /// again. Git unavailability is reported instead of blocking work.
+    pub fn create_recovery_point(&self) -> Result<serde_json::Value, RuntimeError> {
+        let recovery =
+            self.inner.recovery.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidInput("Git recovery is not configured".into())
+            })?;
+        let outcome = recovery
+            .ensure_point("explicit request")
+            .map_err(|error| RuntimeError::Workspace(error.message))?;
+        serde_json::to_value(recovery_outcome(&outcome)).map_err(RuntimeError::Json)
+    }
+    /// Restore exact workspace-relative files from one CAYW recovery point.
+    /// Conflicting files are reported and are not overwritten until the caller
+    /// repeats those exact paths in `confirm_overwrite`.
+    pub fn restore_recovery_point(
+        &self,
+        request: recovery_points::RestoreRequest,
+    ) -> Result<recovery_points::RestoreReport, RuntimeError> {
+        let recovery =
+            self.inner.recovery.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidInput("Git recovery is not configured".into())
+            })?;
+        recovery.restore(request).map_err(|error| {
+            if error.outcome_unknown {
+                RuntimeError::RecoveryRequired {
+                    cause: Box::new(RuntimeError::Workspace(error.message)),
+                    cleanup: None,
+                    outcome_unknown: true,
+                }
+            } else {
+                RuntimeError::Workspace(error.message)
+            }
+        })
     }
     /// Trusted host selection for future task attempts. Running attempts retain
     /// their exact provider/model snapshot, including accounting and output limits.
@@ -811,6 +1421,11 @@ impl Runtime {
     }
     pub fn task(&self, id: &str) -> Result<TaskRecord, RuntimeError> {
         self.inner.queue.get(id)
+    }
+    /// Lost-response lookup for a dispatched task. The caller asks by the stable
+    /// `dispatch_key` instead of creating a second task.
+    pub fn task_by_dispatch_key(&self, key: &str) -> Result<Option<TaskRecord>, RuntimeError> {
+        Ok(self.inner.queue.find_by_dispatch_key(key)?)
     }
     pub async fn wait_idle(&self, id: &str) {
         loop {

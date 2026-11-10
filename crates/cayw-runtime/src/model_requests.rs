@@ -1736,10 +1736,14 @@ impl RequestGuard {
         if !has_request_room {
             return Err(RuntimeError::Budget("model accounting event capacity"));
         }
-        request.messages = Runtime {
+        let runtime = Runtime {
             inner: context.inner.clone(),
-        }
-        .model_input_messages(&context.lease.session_id, &request.messages)?;
+        };
+        request.messages = if context.inner.config.main_session {
+            runtime.main_session_input_messages(&context.lease.session_id, &request.messages)?
+        } else {
+            runtime.model_input_messages(&context.lease.session_id, &request.messages)?
+        };
         // The serialized request (system prompt and tool definitions included)
         // is a conservative upper bound on input tokens, never an estimate below
         // the real cost.

@@ -239,6 +239,8 @@ pub(crate) struct RunScope {
     children: Mutex<BTreeMap<String, ChildHandle>>,
     depth: usize,
     permissions: Vec<ScopedPermission>,
+    /// Device approval-rule version captured when this task tree was dispatched.
+    rules: crate::approval_rules::RulesSnapshot,
     config: Option<LocalAgents>,
     deadline: Option<std::time::Instant>,
     max_capability_calls: Option<usize>,
@@ -271,6 +273,7 @@ impl RunScope {
             children: Mutex::new(BTreeMap::new()),
             depth: 0,
             permissions: inner.config.permissions.clone(),
+            rules: inner.approval_rules_snapshot(),
             config,
             deadline,
             max_capability_calls: inner.config.max_capability_calls,
@@ -294,6 +297,7 @@ impl RunScope {
             children: Mutex::new(BTreeMap::new()),
             depth: self.depth + 1,
             permissions: config.permissions.clone(),
+            rules: self.rules.clone(),
             config: Some(config.clone()),
             deadline: self.deadline,
             max_capability_calls: self.max_capability_calls,
@@ -307,6 +311,10 @@ impl RunScope {
 
     pub(crate) fn permissions(&self) -> &[ScopedPermission] {
         &self.permissions
+    }
+
+    pub(crate) fn rules(&self) -> &crate::approval_rules::RulesSnapshot {
+        &self.rules
     }
 
     pub(crate) fn tokens(&self) -> &Arc<AtomicU64> {
@@ -1532,6 +1540,7 @@ impl RunScope {
             children: Mutex::new(BTreeMap::new()),
             depth: 0,
             permissions: vec![],
+            rules: crate::approval_rules::RulesSnapshot::ExplicitOnly,
             config: Some(LocalAgents::default()),
             deadline: Some(std::time::Instant::now() + Duration::from_secs(60)),
             max_capability_calls: Some(1024),

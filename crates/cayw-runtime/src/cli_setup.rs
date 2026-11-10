@@ -30,7 +30,7 @@ fn configure_local_with(
     if let Some(existing) = crate::cli_settings::selected_model(paths)? {
         writeln!(
             output,
-            "当前工作区已选择模型：{}。继续填写可替换 configured 方案，取消会保留原方案。",
+            "当前工作区已选择模型：{}。继续填写可替换设备上的 configured 方案，并把它设为这个工作区的选用方案。取消会保留原方案。",
             existing.id()
         )?;
     }
@@ -38,8 +38,8 @@ fn configure_local_with(
         writeln!(output, "已取消配置，原模型方案未改动。")?;
         return Ok(false);
     };
-    let path = paths.state_file("models.json");
-    writeln!(output, "将保存当前工作区模型方案：{}", path.display())?;
+    let path = paths.data_dir.join("models.json");
+    writeln!(output, "将保存设备模型方案：{}", path.display())?;
     if !confirm(input, output, "保存配置吗？[Y/n] ")? {
         writeln!(output, "已取消配置，原模型方案未改动。")?;
         return Ok(false);
@@ -232,10 +232,36 @@ fn read_model(
         }
         writeln!(output, "请输入大于 0 的整数。")?;
     };
-    let model: ProviderConfig = serde_json::from_value(json!({
+    let context_window = loop {
+        let Some(value) = answer(
+            input,
+            output,
+            "上下文窗口 token 数 [128000]：",
+            Some("128000"),
+        )?
+        else {
+            return Ok(None);
+        };
+        if let Ok(limit) = value.parse::<u64>()
+            && (1..=10_000_000).contains(&limit)
+        {
+            break limit;
+        }
+        writeln!(output, "请输入 1 到 10000000 的整数。")?;
+    };
+    let Some(tokenizer) = answer(input, output, "tokenizer 标识（可留空）：", Some(""))?
+    else {
+        return Ok(None);
+    };
+    let mut model = json!({
         "service":service, "api":api, "base_url":base_url, "id":id,
-        "api_version":version, "api_key":api_key, "max_output_tokens":max_output_tokens
-    }))?;
+        "api_version":version, "api_key":api_key, "max_output_tokens":max_output_tokens,
+        "context_window":context_window
+    });
+    if !tokenizer.is_empty() {
+        model["tokenizer"] = json!(tokenizer);
+    }
+    let model: ProviderConfig = serde_json::from_value(model)?;
     model.validate()?;
     Ok(Some(model))
 }

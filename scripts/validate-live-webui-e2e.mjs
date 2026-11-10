@@ -115,6 +115,7 @@ async function launch() {
       LANG: 'en_US.UTF-8',
       HOME: home,
       CAYW_HOME: caywHome,
+      CAYW_MAIN_SESSION: resolve(work, 'main-session'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -277,8 +278,7 @@ try {
   assert.equal(models.models['live-browser-e2e'].authentication, 'none');
   assert.equal(models.health.provider, 'magpie');
   assert.equal(models.health.model, modelId);
-  const workspaceKey = sha(await realpath(workspace));
-  const storedModelsPath = resolve(caywHome, 'workspaces', workspaceKey, 'models.json');
+  const storedModelsPath = resolve(caywHome, 'models.json');
   const storedModels = JSON.parse(await readFile(storedModelsPath, 'utf8'));
   assert.equal(Object.hasOwn(storedModels.models['live-browser-e2e'], 'api_key'), false);
   await record('model-configuration', {

@@ -34,6 +34,7 @@ fn command(home: &Path, workspace: &Path, cayw_home: Option<&OsStr>) -> Command 
     command
         .env_clear()
         .env("HOME", home)
+        .env("CAYW_MAIN_SESSION", home.join("main-session"))
         .current_dir(workspace)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -914,16 +915,29 @@ async fn legacy_local_model_moves_once_to_the_workspace_profile_file() {
     let config: Value =
         serde_json::from_slice(&std::fs::read(root.path().join("config.json")).unwrap()).unwrap();
     assert_eq!(config, json!({"permissions":[]}));
-    let models_path = root
-        .path()
-        .join("workspaces")
-        .join(workspace_key(workspace.path()))
-        .join("models.json");
+    let models_path = root.path().join("models.json");
     let models: Value = serde_json::from_slice(&std::fs::read(&models_path).unwrap()).unwrap();
-    assert_eq!(models["selected"], "configured");
+    assert_eq!(models["default"], "configured");
     assert_eq!(models["models"]["configured"]["id"], "legacy-local-model");
     assert_eq!(models["models"]["configured"]["api_key"], key);
     assert_private_file(&models_path);
+    let selection_path = root
+        .path()
+        .join("workspaces")
+        .join(workspace_key(workspace.path()))
+        .join("model-selection.json");
+    let selection: Value =
+        serde_json::from_slice(&std::fs::read(&selection_path).unwrap()).unwrap();
+    assert_eq!(selection["name"], "configured");
+    assert_private_file(&selection_path);
+    assert!(
+        !root
+            .path()
+            .join("workspaces")
+            .join(workspace_key(workspace.path()))
+            .join("models.json")
+            .exists()
+    );
 
     let client = connect(&ready).await;
     let public = client
@@ -1064,13 +1078,28 @@ async fn model_cli_routes_to_the_requested_nonprimary_workspace() {
             .join("models.json")
             .exists()
     );
-    let second_models = root
+    let device_models = root.path().join("models.json");
+    assert!(device_models.is_file());
+    let stored = String::from_utf8(std::fs::read(&device_models).unwrap()).unwrap();
+    assert!(stored.contains(key));
+    let catalog: Value = serde_json::from_str(&stored).unwrap();
+    assert!(catalog.get("default").is_none() || catalog["default"].is_null());
+    let selection_path = root
         .path()
         .join("workspaces")
         .join(workspace_key(second_workspace.path()))
-        .join("models.json");
-    assert!(second_models.is_file());
-    assert!(String::from_utf8_lossy(&std::fs::read(second_models).unwrap()).contains(key));
+        .join("model-selection.json");
+    let selection: Value =
+        serde_json::from_slice(&std::fs::read(&selection_path).unwrap()).unwrap();
+    assert_eq!(selection["name"], "secondary");
+    assert!(
+        !root
+            .path()
+            .join("workspaces")
+            .join(workspace_key(first_workspace.path()))
+            .join("model-selection.json")
+            .exists()
+    );
 
     client.close().await;
     server.kill().await.unwrap();

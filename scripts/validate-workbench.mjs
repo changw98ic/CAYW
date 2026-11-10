@@ -190,7 +190,7 @@ try {
   });
   provider.listen(0, '127.0.0.1');
   await once(provider, 'listening');
-  const localEnv = {HOME: home, CAYW_HOME: caywHome};
+  const localEnv = {HOME: home, CAYW_HOME: caywHome, CAYW_MAIN_SESSION: resolve(work, 'main-session')};
   execFileSync(binaries.cayw, ['init', '--workspace', workspace], {
     cwd: root,
     env: {PATH: process.env.PATH, ...localEnv},

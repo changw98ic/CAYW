@@ -1226,3 +1226,52 @@ fn recovered_dead_claim_is_detached_and_unrelated_work_runs() {
         Some(retaken.worker.as_str())
     );
 }
+
+#[test]
+fn dispatch_key_reuse_preserves_work_and_session_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("queue.sqlite");
+    let _audit = AuditDb::open(&path);
+    let queue = Queue::open(&path, 1, 4, 0).unwrap();
+    let input = TaskInput {
+        text: "same input".into(),
+        images: vec![],
+    };
+    let dispatch = TaskDispatch {
+        work_id: "work-a".into(),
+        dispatch_key: "dispatch-a".into(),
+        pause_version: 0,
+        stop_version: 0,
+    };
+    let enqueue = |session: &str, dispatch: &TaskDispatch| {
+        queue.enqueue_dispatched_with_resources(
+            session,
+            &input,
+            &TaskIntent::General,
+            TaskPriority::default(),
+            &TaskResources::default(),
+            4,
+            Some(dispatch),
+        )
+    };
+    let original = enqueue("session-a", &dispatch).unwrap();
+    assert_eq!(enqueue("session-a", &dispatch).unwrap().id, original.id);
+    assert!(matches!(
+        enqueue("session-b", &dispatch),
+        Err(QueueError::DispatchConflict)
+    ));
+    let different_work = TaskDispatch {
+        work_id: "work-b".into(),
+        ..dispatch.clone()
+    };
+    assert!(matches!(
+        enqueue("session-a", &different_work),
+        Err(QueueError::DispatchConflict)
+    ));
+    let stored = queue
+        .find_by_dispatch_key(&dispatch.dispatch_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.session_id, "session-a");
+    assert_eq!(stored.work_id.as_deref(), Some("work-a"));
+}

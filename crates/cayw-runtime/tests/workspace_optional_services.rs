@@ -40,6 +40,7 @@ fn command(home: &Path, workspace: &Path, cayw_home: &OsStr) -> Command {
         .env_clear()
         .env("HOME", home)
         .env("CAYW_HOME", cayw_home)
+        .env("CAYW_MAIN_SESSION", home.join("main-session"))
         .current_dir(workspace)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

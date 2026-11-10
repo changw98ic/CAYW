@@ -106,6 +106,9 @@ impl From<QueueError> for RuntimeError {
             QueueError::Cancelled => Self::Cancelled,
             QueueError::Worker(message) => Self::Worker(message),
             QueueError::StaleCancellation => Self::StaleCancellation,
+            QueueError::DispatchConflict => {
+                Self::InvalidInput("dispatch_key was already used for different input".into())
+            }
             QueueError::Database(error) => Self::Journal(error),
             QueueError::Json(error) => Self::Json(error),
         }
