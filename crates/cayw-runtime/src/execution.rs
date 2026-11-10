@@ -457,6 +457,53 @@ impl Runtime {
         self.inner.changed.notify_waiters();
         Ok(task)
     }
+    /// Create a task with its `work_id` and `dispatch_key` in the same durable
+    /// transaction. A repeated key with the same input returns the original
+    /// task; a different input under the same key is a conflict.
+    pub fn enqueue_dispatched(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        intent: cayw_requests::TaskIntent,
+        priority: crate::TaskPriority,
+        resources: crate::TaskResources,
+        dispatch: crate::TaskDispatch,
+    ) -> Result<TaskRecord, RuntimeError> {
+        resources.validate(&self.inner.config.resources)?;
+        input.validate(
+            &lock(&self.inner.selection).model,
+            self.inner.config.max_prompt_bytes,
+        )?;
+        dispatch.validate()?;
+        // A retry after a lost response must return the original task even if
+        // that task already started and the session is now busy. The durable
+        // queue repeats this check inside the create transaction for races.
+        if let Some(existing) = self
+            .inner
+            .queue
+            .find_by_dispatch_key(&dispatch.dispatch_key)?
+        {
+            if existing.input != input {
+                return Err(RuntimeError::InvalidInput(
+                    "dispatch_key was already used for different input".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let _coordinate = self.inner.coordination.enter()?;
+        self.check_ready(session)?;
+        let task = self.inner.queue.enqueue_dispatched_with_resources(
+            session,
+            &input,
+            &intent,
+            priority,
+            &resources,
+            self.inner.config.max_queued_runs,
+            Some(&dispatch),
+        )?;
+        self.inner.changed.notify_waiters();
+        Ok(task)
+    }
     /// Runs to a durable terminal. Dropping the caller cancels this worker; the
     /// owned cleanup continues to hold the persisted admission slot until done.
     pub async fn prompt(

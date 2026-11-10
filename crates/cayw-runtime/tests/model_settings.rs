@@ -103,6 +103,7 @@ async fn edits_preserve_persisted_and_live_auth_for_selected_and_other_profiles(
         .env_clear()
         .env("HOME", home.path())
         .env("CAYW_HOME", state.path())
+        .env("CAYW_MAIN_SESSION", home.path().join("main-session"))
         .current_dir(workspace.path())
         .arg("serve")
         .stdin(Stdio::null())
@@ -127,13 +128,7 @@ async fn edits_preserve_persisted_and_live_auth_for_selected_and_other_profiles(
     )
     .await
     .unwrap();
-    let models_file = std::fs::read_dir(state.path().join("workspaces"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
-        .join("models.json");
+    let models_file = state.path().join("models.json");
     let model = |id: &str| {
         json!({
             "service":"openai", "api":"chat_completions", "base_url":base_url,

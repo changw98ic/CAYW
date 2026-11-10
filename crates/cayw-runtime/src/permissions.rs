@@ -25,6 +25,72 @@ impl ApprovalChoice {
             Self::Deny => "deny",
         }
     }
+
+    /// The only surface text a user may send for this choice. The answer is
+    /// matched exactly and never passed through a model.
+    pub fn reply(self) -> &'static str {
+        match self {
+            Self::AllowOnce => ALLOW_ONCE_REPLY,
+            Self::AllowTask => ALLOW_TASK_REPLY,
+            Self::Deny => DENY_REPLY,
+        }
+    }
+
+    /// Exact option matching. Partial text, mixed wording and model-authored
+    /// "approval" strings do not match.
+    pub fn from_reply(reply: &str) -> Option<Self> {
+        match reply {
+            ALLOW_ONCE_REPLY => Some(Self::AllowOnce),
+            ALLOW_TASK_REPLY => Some(Self::AllowTask),
+            DENY_REPLY => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+pub const ALLOW_ONCE_REPLY: &str = "允许一次";
+pub const ALLOW_TASK_REPLY: &str = "本任务允许";
+pub const DENY_REPLY: &str = "拒绝";
+
+/// One approval shown in the main-session conversation. `text` already contains
+/// the question, the exact capability scope and the three reply options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalQuestion {
+    pub session_id: String,
+    pub approval_id: String,
+    pub task_id: String,
+    pub capability: String,
+    pub scope: String,
+    pub reason: String,
+    pub text: String,
+    pub options: Vec<&'static str>,
+}
+
+pub(crate) fn question(approval: &ApprovalRequest) -> ApprovalQuestion {
+    let options = vec![
+        ApprovalChoice::AllowOnce.reply(),
+        ApprovalChoice::AllowTask.reply(),
+        ApprovalChoice::Deny.reply(),
+    ];
+    let text = format!(
+        "请求你的授权：{}。参数：{}。原因：{}。请只回复以下选项之一：{} / {} / {}",
+        approval.input.capability,
+        approval.input.scope,
+        approval.input.reason,
+        options[0],
+        options[1],
+        options[2],
+    );
+    ApprovalQuestion {
+        session_id: approval.session_id.clone(),
+        approval_id: approval.id.clone(),
+        task_id: approval.input.task_id.clone(),
+        capability: approval.input.capability.clone(),
+        scope: approval.input.scope.clone(),
+        reason: approval.input.reason.clone(),
+        text,
+        options,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +273,21 @@ impl Gate {
             ));
         }
         let inner = &context.inner;
+        // The approval rules file is user-owned configuration. Even an exact
+        // RuntimeConfig permission, a durable grant, or a user rule must never
+        // let a capability rewrite the file that decides future releases.
+        if crate::approval_rules::is_workspace_mutation(name)
+            && let Some(protected) = inner
+                .config
+                .approval_rules
+                .as_ref()
+                .and_then(|source| source.protected_path())
+            && crate::approval_rules::mutation_targets_protected(name, args, &inner.root, protected)
+        {
+            return Err(RuntimeError::InvalidInput(
+                "the user-owned approval rules file cannot be changed by a capability".into(),
+            ));
+        }
         let scope = canonical_scope(args);
         if context
             .scope
@@ -237,6 +318,53 @@ impl Gate {
             })?;
             return context.check(&cancel);
         }
+        let rules = context.scope.rules();
+        let recovery_scope = inner.recovery_scope();
+        let reason = match rules.evaluate(
+            name,
+            args,
+            &crate::approval_rules::RuleContext {
+                workspace: &inner.root,
+                recovery: recovery_scope.as_ref(),
+                main_session: inner.config.main_session,
+                notification_targets: &inner.config.notification_targets,
+            },
+        ) {
+            crate::approval_rules::RuleDecision::Allow {
+                kind,
+                rule_version,
+                rule_index,
+            } => {
+                context
+                    .host_event(
+                        "permission_rule_allowed",
+                        serde_json::json!({
+                            "task_id": context.task.id,
+                            "key": self.scope.key,
+                            "capability": name,
+                            "scope": scope,
+                            "rule": kind,
+                            "rule_version": rule_version,
+                            "rule_index": rule_index,
+                        }),
+                    )
+                    .map_err(|error| RuntimeError::Worker(error.to_string()))?;
+                self.scope.authorize(Authorization {
+                    proof: self.scope.proof("approval-rule".into(), None),
+                    grant: None,
+                })?;
+                return context.check(&cancel);
+            }
+            crate::approval_rules::RuleDecision::Ask { reason }
+                if !matches!(rules, crate::approval_rules::RulesSnapshot::ExplicitOnly) =>
+            {
+                reason.to_string()
+            }
+            crate::approval_rules::RuleDecision::Ask { .. } => format!(
+                "Execution {} call {} requires explicit permission for this exact capability",
+                self.scope.key.execution_id, self.scope.key.sequence
+            ),
+        };
         let request = inner.store.request_approval(
             &context.lease,
             ApprovalInput {
@@ -246,10 +374,7 @@ impl Gate {
                 },
                 capability: name.into(),
                 scope: scope.clone(),
-                reason: format!(
-                    "Execution {} call {} requires explicit permission for this exact capability",
-                    self.scope.key.execution_id, self.scope.key.sequence
-                ),
+                reason,
             },
         )?;
         if self.scope.has_started() {
@@ -334,5 +459,39 @@ impl Gate {
             grant: Some(grant),
         })?;
         self.scope.context.check(cancel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_option_text_maps_to_a_choice() {
+        assert_eq!(
+            ApprovalChoice::from_reply("允许一次"),
+            Some(ApprovalChoice::AllowOnce)
+        );
+        assert_eq!(
+            ApprovalChoice::from_reply("本任务允许"),
+            Some(ApprovalChoice::AllowTask)
+        );
+        assert_eq!(
+            ApprovalChoice::from_reply("拒绝"),
+            Some(ApprovalChoice::Deny)
+        );
+        for reply in [
+            "允许",
+            "批准",
+            "已批准",
+            "允许一次 ",
+            " 允许一次",
+            "允许此任务",
+            "本任务允许。",
+            "allow_once",
+            "",
+        ] {
+            assert_eq!(ApprovalChoice::from_reply(reply), None, "{reply:?}");
+        }
     }
 }

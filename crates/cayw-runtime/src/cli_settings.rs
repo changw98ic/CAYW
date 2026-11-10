@@ -3,11 +3,16 @@ use cayw_ai::CancellationToken;
 use cayw_ipc::{Client, RpcError};
 use cayw_runtime::{
     HeadlessConfig, ProviderConfig, Runtime,
-    local_cli::{LocalPaths, read_private, save_config},
+    local_cli::{LocalPaths, read_private, save_config, save_config_locked},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, error::Error, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -76,11 +81,41 @@ fn settings_error_code(error: &(dyn Error + 'static)) -> &'static str {
     }
 }
 
+/// Device catalog at `<CAYW_HOME>/models.json`. One list for every workspace.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Models {
-    selected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
+    #[serde(default)]
     models: BTreeMap<String, ProviderConfig>,
+}
+
+/// Per-workspace file that existed before the device catalog.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyModels {
+    #[serde(default)]
+    selected: Option<String>,
+    #[serde(default)]
+    models: BTreeMap<String, ProviderConfig>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionFile {
+    name: String,
+}
+
+enum SelectionState {
+    Missing,
+    Present(String),
+}
+
+/// The profile this workspace will actually use.
+pub struct ModelChoice {
+    pub model: Option<ProviderConfig>,
+    pub fallback: Option<String>,
 }
 
 pub struct Settings {
@@ -209,86 +244,365 @@ fn put_model_profile(models: &mut Models, put: Put) -> Result<ProviderConfig> {
     Ok(model)
 }
 
-fn read_models(paths: &LocalPaths) -> Result<(Option<Vec<u8>>, Models)> {
-    let original = match read_private(&paths.state_file("models.json"), 1024 * 1024) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
-    };
-    let models: Models = original
-        .as_deref()
-        .map(serde_json::from_slice)
-        .transpose()?
-        .unwrap_or_default();
+const MODEL_FILE_LIMIT: u64 = 1024 * 1024;
+
+fn device_models_path(paths: &LocalPaths) -> PathBuf {
+    paths.data_dir.join("models.json")
+}
+
+fn selection_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("model-selection.json")
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    match read_private(path, MODEL_FILE_LIMIT) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn pretty(value: &impl Serialize) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn validate_catalog(models: &Models) -> Result<()> {
     for (id, model) in &models.models {
         name(id)?;
         model.validate()?;
     }
     if models
-        .selected
+        .default
         .as_ref()
         .is_some_and(|id| !models.models.contains_key(id))
     {
-        return Err("selected model profile is missing".into());
+        return Err("device default model profile is missing".into());
     }
+    if models.models.len() > 64 {
+        return Err("at most 64 model profiles are supported".into());
+    }
+    Ok(())
+}
+
+fn read_catalog_bytes(path: &Path) -> Result<(Option<Vec<u8>>, Models)> {
+    let original = read_optional(path)?;
+    let models: Models = original
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?
+        .unwrap_or_default();
+    validate_catalog(&models)?;
     Ok((original, models))
 }
 
-pub fn selected_model(paths: &LocalPaths) -> Result<Option<ProviderConfig>> {
-    let (_, models) = read_models(paths)?;
-    models
-        .selected
-        .as_ref()
-        .map(|id| {
-            models
-                .models
-                .get(id)
-                .cloned()
-                .ok_or_else(|| "selected model profile is missing".into())
-        })
-        .transpose()
+fn read_catalog(paths: &LocalPaths) -> Result<(Option<Vec<u8>>, Models)> {
+    read_catalog_bytes(&device_models_path(paths))
 }
 
-/// Move the removed local `config.json.model` field into this workspace's one
-/// canonical model profile file. A previously selected profile wins; the old
-/// field is still removed so later starts have only one source of truth.
-pub fn migrate_legacy_model(paths: &LocalPaths, config_path: &std::path::Path) -> Result<bool> {
-    let original = read_private(config_path, 1024 * 1024)?;
+fn selection_state(path: &Path) -> Result<SelectionState> {
+    match read_optional(path)? {
+        None => Ok(SelectionState::Missing),
+        Some(bytes) => {
+            let file: SelectionFile = serde_json::from_slice(&bytes)?;
+            name(&file.name)?;
+            Ok(SelectionState::Present(file.name))
+        }
+    }
+}
+
+fn profiles_match(left: &ProviderConfig, right: &ProviderConfig) -> Result<bool> {
+    Ok(serde_json::to_value(left)? == serde_json::to_value(right)?)
+}
+
+fn assign_profile(models: &mut Models, preferred: &str, model: &ProviderConfig) -> Result<String> {
+    name(preferred)?;
+    model.validate()?;
+    for (id, existing) in &models.models {
+        if profiles_match(existing, model)? {
+            return Ok(id.clone());
+        }
+    }
+    let mut candidate = preferred.to_owned();
+    let mut suffix = 2u32;
+    while models.models.contains_key(&candidate) {
+        candidate = format!("{preferred}-{suffix}");
+        name(&candidate)?;
+        suffix += 1;
+        if suffix > 128 {
+            return Err("cannot assign a unique model profile name".into());
+        }
+    }
+    if models.models.len() >= 64 {
+        return Err("at most 64 model profiles are supported".into());
+    }
+    models.models.insert(candidate.clone(), model.clone());
+    Ok(candidate)
+}
+
+fn resolve_choice(models: &Models, requested: Option<&str>) -> Result<ModelChoice> {
+    match requested {
+        Some(id) if models.models.contains_key(id) => Ok(ModelChoice {
+            model: models.models.get(id).cloned(),
+            fallback: None,
+        }),
+        Some(id) => {
+            let fallback = match models.default.as_deref() {
+                Some(default) if models.models.contains_key(default) => {
+                    format!("模型方案 {id} 不存在，已改用设备默认方案 {default}")
+                }
+                Some(_) => return Err("device default model profile is missing".into()),
+                None => format!("模型方案 {id} 不存在，设备没有默认方案"),
+            };
+            let model = models
+                .default
+                .as_ref()
+                .and_then(|default| models.models.get(default).cloned());
+            Ok(ModelChoice {
+                model,
+                fallback: Some(fallback),
+            })
+        }
+        None => {
+            if models
+                .default
+                .as_ref()
+                .is_some_and(|id| !models.models.contains_key(id))
+            {
+                return Err("device default model profile is missing".into());
+            }
+            Ok(ModelChoice {
+                model: models
+                    .default
+                    .as_ref()
+                    .and_then(|id| models.models.get(id).cloned()),
+                fallback: None,
+            })
+        }
+    }
+}
+
+fn effective_name(models: &Models, requested: Option<&str>) -> Option<String> {
+    match requested {
+        Some(id) if models.models.contains_key(id) => Some(id.to_owned()),
+        _ => models
+            .default
+            .clone()
+            .filter(|id| models.models.contains_key(id)),
+    }
+}
+
+fn read_legacy(path: &Path) -> Result<Option<LegacyModels>> {
+    let Some(bytes) = read_optional(path)? else {
+        return Ok(None);
+    };
+    let legacy: LegacyModels = serde_json::from_slice(&bytes)?;
+    for (id, model) in &legacy.models {
+        name(id)?;
+        model.validate()?;
+    }
+    if legacy
+        .selected
+        .as_ref()
+        .is_some_and(|id| !legacy.models.contains_key(id))
+    {
+        return Err("selected model profile is missing".into());
+    }
+    Ok(Some(legacy))
+}
+
+/// Profile this workspace uses. A missing device catalog still reads the old
+/// per-workspace file, so doctor and conf see the previous choice before the
+/// first Client start. This function does not migrate or delete files.
+pub fn model_choice(paths: &LocalPaths) -> Result<ModelChoice> {
+    if read_optional(&device_models_path(paths))?.is_none() {
+        let legacy = read_legacy(&paths.state_file("models.json"))?;
+        let requested = legacy.as_ref().and_then(|models| models.selected.clone());
+        let models = Models {
+            default: None,
+            models: legacy.map(|models| models.models).unwrap_or_default(),
+        };
+        return resolve_choice(&models, requested.as_deref());
+    }
+    let (_, models) = read_catalog(paths)?;
+    let requested = match selection_state(&paths.state_file("model-selection.json"))? {
+        SelectionState::Present(name) => Some(name),
+        SelectionState::Missing => read_legacy(&paths.state_file("models.json"))?
+            .and_then(|legacy| legacy.selected)
+            .filter(|name| models.models.contains_key(name)),
+    };
+    resolve_choice(&models, requested.as_deref())
+}
+
+pub fn selected_model(paths: &LocalPaths) -> Result<Option<ProviderConfig>> {
+    Ok(model_choice(paths)?.model)
+}
+
+fn import_config_model(
+    paths: &LocalPaths,
+    catalog: &mut Models,
+    pending: &mut Vec<(PathBuf, String)>,
+    selected_names: &mut Vec<String>,
+) -> Result<Option<(Vec<u8>, Value)>> {
+    let Some(original) = read_optional(&paths.config_file)? else {
+        return Ok(None);
+    };
     let mut configuration: Value = serde_json::from_slice(&original)?;
     let object = configuration
         .as_object_mut()
         .ok_or("configuration must be a JSON object")?;
     let Some(raw_model) = object.get("model").cloned() else {
-        return Ok(false);
+        return Ok(None);
     };
-    if selected_model(paths)?.is_none() {
+    let selection = paths.state_file("model-selection.json");
+    let already = pending
+        .iter()
+        .any(|(pending_path, _)| pending_path == &selection)
+        || matches!(selection_state(&selection)?, SelectionState::Present(_));
+    // A workspace that already chose a profile drops an unusable legacy field.
+    // With no choice, a bad field fails before any file is written.
+    let parsed = (|| -> Result<ProviderConfig> {
         let model: ProviderConfig = serde_json::from_value(raw_model)?;
         model.validate()?;
-        save_configured_model(paths, model)?;
+        Ok(model)
+    })();
+    match parsed {
+        Ok(model) => {
+            let assigned = assign_profile(catalog, "configured", &model)?;
+            if !already {
+                pending.push((selection, assigned.clone()));
+                selected_names.push(assigned);
+            }
+        }
+        Err(error) if !already => return Err(error),
+        Err(_) => {}
     }
     object.remove("model");
     let checked: HeadlessConfig = serde_json::from_value(configuration.clone())?;
     checked.into_runtime_config()?;
-    let mut bytes = serde_json::to_vec_pretty(&configuration)?;
-    bytes.push(b'\n');
-    save_config(config_path, Some(&original), &bytes).map_err(uncertain)?;
-    Ok(true)
+    Ok(Some((original, configuration)))
 }
 
-fn public_models(models: &Models) -> Value {
+/// Merge per-workspace `models.json` files and `config.json.model` into the
+/// device catalog. Old files are deleted only after every new file is durable.
+/// A failure leaves the old files in place.
+pub fn migrate_device_models(paths: &LocalPaths) -> Result<()> {
+    let _lock = paths.lock_data_dir().map_err(uncertain)?;
+    let device_path = device_models_path(paths);
+    let (device_original, mut catalog) = read_catalog_bytes(&device_path)?;
+    let mut pending = Vec::new();
+    let mut legacy_files = Vec::new();
+    let mut selected_names = Vec::new();
+    for state_dir in paths.workspace_state_dirs()? {
+        let legacy_path = state_dir.join("models.json");
+        let Some(legacy) = read_legacy(&legacy_path)? else {
+            continue;
+        };
+        let mut remap = BTreeMap::new();
+        for (profile_name, model) in &legacy.models {
+            remap.insert(
+                profile_name.clone(),
+                assign_profile(&mut catalog, profile_name, model)?,
+            );
+        }
+        let path = selection_path(&state_dir);
+        match selection_state(&path)? {
+            SelectionState::Present(_) => {}
+            SelectionState::Missing => {
+                if let Some(selected) = legacy.selected.as_ref() {
+                    let assigned = remap
+                        .get(selected)
+                        .cloned()
+                        .ok_or("selected model profile is missing")?;
+                    pending.push((path, assigned.clone()));
+                    selected_names.push(assigned);
+                }
+            }
+        }
+        legacy_files.push(legacy_path);
+    }
+    let config_strip = import_config_model(paths, &mut catalog, &mut pending, &mut selected_names)?;
+    if legacy_files.is_empty() && config_strip.is_none() {
+        return Ok(());
+    }
+    if catalog.default.is_none()
+        && let Some(first) = selected_names.first()
+        && selected_names.iter().all(|name| name == first)
+    {
+        catalog.default = Some(first.clone());
+    }
+    validate_catalog(&catalog)?;
+    if !catalog.models.is_empty() || catalog.default.is_some() {
+        save_config_locked(&device_path, device_original.as_deref(), &pretty(&catalog)?)
+            .map_err(uncertain)?;
+    }
+    for (path, profile_name) in &pending {
+        if !matches!(selection_state(path)?, SelectionState::Missing) {
+            continue;
+        }
+        save_config(
+            path,
+            None,
+            &pretty(&SelectionFile {
+                name: profile_name.clone(),
+            })?,
+        )
+        .map_err(uncertain)?;
+    }
+    if let Some((original, configuration)) = config_strip {
+        save_config_locked(
+            &paths.config_file,
+            Some(&original),
+            &pretty(&configuration)?,
+        )
+        .map_err(uncertain)?;
+    }
+    for path in &legacy_files {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn public_models(models: &Models, selected: Option<&str>, fallback: Option<&str>) -> Value {
     let profiles = models
         .models
         .iter()
         .map(|(name, model)| (name.clone(), model.public_view()))
         .collect::<serde_json::Map<_, _>>();
-    json!({"selected":models.selected,"models":profiles})
+    let mut response = json!({
+        "selected": selected,
+        "default": models.default,
+        "models": profiles,
+    });
+    if let Some(fallback) = fallback {
+        response["fallback"] = json!(fallback);
+    }
+    response
 }
 
-/// `cayw conf` and live management share the same persisted selected profile.
-/// This stores metadata only; an offline CLI never reads model credentials.
+fn write_selection(paths: &LocalPaths, profile_name: &str) -> Result<()> {
+    name(profile_name)?;
+    let path = paths.state_file("model-selection.json");
+    let original = read_optional(&path)?;
+    save_config(
+        &path,
+        original.as_deref(),
+        &pretty(&SelectionFile {
+            name: profile_name.to_owned(),
+        })?,
+    )
+    .map_err(uncertain)?;
+    Ok(())
+}
+
+/// `cayw conf` writes the device catalog, sets its default, and selects that
+/// profile for this workspace. An offline CLI never reads model credentials.
 pub fn save_configured_model(paths: &LocalPaths, model: ProviderConfig) -> Result<()> {
     model.validate()?;
-    let (original, mut models) = read_models(paths)?;
+    migrate_device_models(paths)?;
+    let _lock = paths.lock_data_dir().map_err(uncertain)?;
+    let (original, mut models) = read_catalog(paths)?;
     if models.models.len() >= 64 && !models.models.contains_key("configured") {
         return Err(
             "at most 64 model profiles are supported; remove an unused profile before configuring"
@@ -296,13 +610,52 @@ pub fn save_configured_model(paths: &LocalPaths, model: ProviderConfig) -> Resul
         );
     }
     models.models.insert("configured".into(), model);
-    models.selected = Some("configured".into());
-    Ok(save_config(
-        &paths.state_file("models.json"),
+    models.default = Some("configured".into());
+    validate_catalog(&models)?;
+    save_config_locked(
+        &device_models_path(paths),
         original.as_deref(),
-        &serde_json::to_vec_pretty(&models)?,
+        &pretty(&models)?,
     )
-    .map_err(uncertain)?)
+    .map_err(uncertain)?;
+    drop(_lock);
+    write_selection(paths, "configured")
+}
+
+/// Remember the one main session for this workspace. A missing record adopts
+/// the only existing session, or creates one. Several sessions and no record
+/// is an error: this does not pick or create another.
+pub fn ensure_main_session(runtime: &Runtime, paths: &LocalPaths) -> Result<String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Record {
+        session_id: String,
+    }
+    let path = paths.state_file("main-session.json");
+    match read_optional(&path)? {
+        Some(bytes) => {
+            let record: Record = serde_json::from_slice(&bytes)?;
+            runtime.get(&record.session_id).map_err(|_| {
+                format!(
+                    "主 session {} 不在这个工作区里，未另建会话",
+                    record.session_id
+                )
+            })?;
+            Ok(record.session_id)
+        }
+        None => {
+            let sessions = runtime.list()?;
+            let id = match sessions.len() {
+                0 => runtime.create(Some("主 session".into()))?.id,
+                1 => sessions.into_iter().next().expect("one session").id,
+                _ => {
+                    return Err("主 session 工作区里已有多个会话，未自动挑选或新建".into());
+                }
+            };
+            save_config(&path, None, &pretty(&json!({"session_id": id}))?).map_err(uncertain)?;
+            Ok(id)
+        }
+    }
 }
 
 async fn request_for_workspace(
@@ -370,12 +723,6 @@ pub async fn reload_running_model(paths: &LocalPaths) -> Value {
 }
 
 impl Settings {
-    fn model_path(&self) -> PathBuf {
-        self.paths.state_file("models.json")
-    }
-    fn models(&self) -> Result<(Option<Vec<u8>>, Models)> {
-        read_models(&self.paths)
-    }
     pub async fn call(
         &mut self,
         runtime: &Runtime,
@@ -421,8 +768,16 @@ impl Settings {
                     .into(),
             );
         }
-        let (original, mut models) = self.models()?;
-        let mut selection = None;
+        migrate_device_models(&self.paths)?;
+        let _lock = self.paths.lock_data_dir().map_err(uncertain)?;
+        let (original, mut models) = read_catalog(&self.paths)?;
+        let requested = match selection_state(&self.paths.state_file("model-selection.json"))? {
+            SelectionState::Present(name) => Some(name),
+            SelectionState::Missing => None,
+        };
+        let mut write_catalog = false;
+        let mut next_selection = None;
+        let mut hot_reload = None;
         match method {
             "settings.models.list" => {
                 let _: Empty = parse(params)?;
@@ -432,26 +787,26 @@ impl Settings {
                 if self.offline {
                     return Err("offline fixture cannot select a real model".into());
                 }
-                let id = models
-                    .selected
-                    .as_ref()
+                let id = effective_name(&models, requested.as_deref())
                     .ok_or("no selected model profile")?;
                 let model = models
                     .models
-                    .get(id)
+                    .get(&id)
                     .ok_or("selected model profile is missing")?;
-                runtime.select_model(model.build()?)?;
-                self.available = true;
+                hot_reload = Some(model.build()?);
             }
             "settings.models.put" => {
                 let put: Put = parse(params)?;
                 let selected_name = put.name.clone();
                 let model = put_model_profile(&mut models, put)?;
-                if models.selected.as_ref() == Some(&selected_name) {
+                write_catalog = true;
+                if effective_name(&models, requested.as_deref()).as_deref()
+                    == Some(selected_name.as_str())
+                {
                     if self.offline {
                         return Err("offline fixture cannot select a real model".into());
                     }
-                    selection = Some(model.build()?);
+                    hot_reload = Some(model.build()?);
                 }
             }
             "settings.models.use" => {
@@ -462,34 +817,52 @@ impl Settings {
                 let model = models
                     .models
                     .get(&selected.name)
-                    .ok_or("model profile not found")?;
-                selection = Some(model.build()?);
-                models.selected = Some(selected.name);
+                    .ok_or("model profile not found")?
+                    .clone();
+                hot_reload = Some(model.build()?);
+                next_selection = Some(selected.name);
             }
             "settings.models.remove" => {
                 let selected: Name = parse(params)?;
-                if models.selected.as_ref() == Some(&selected.name) {
+                if effective_name(&models, requested.as_deref()).as_deref()
+                    == Some(selected.name.as_str())
+                {
                     return Err("select another model before removing the active profile".into());
+                }
+                if models.default.as_deref() == Some(selected.name.as_str()) {
+                    return Err("choose another device default before removing this profile".into());
                 }
                 if models.models.remove(&selected.name).is_none() {
                     return Err("model profile not found".into());
                 }
+                write_catalog = true;
             }
             _ => return Err("unsupported model settings method".into()),
         }
-        if !matches!(method, "settings.models.list" | "settings.models.reload") {
-            save_config(
-                &self.model_path(),
+        if write_catalog {
+            validate_catalog(&models)?;
+            save_config_locked(
+                &device_models_path(&self.paths),
                 original.as_deref(),
-                &serde_json::to_vec_pretty(&models)?,
+                &pretty(&models)?,
             )
             .map_err(uncertain)?;
-            if let Some(selection) = selection {
-                runtime.select_model(selection)?;
-                self.available = true;
-            }
         }
-        let mut response = public_models(&models);
+        drop(_lock);
+        if let Some(profile_name) = next_selection.as_deref() {
+            write_selection(&self.paths, profile_name)?;
+        }
+        if let Some(selection) = hot_reload {
+            runtime.select_model(selection)?;
+            self.available = true;
+        }
+        let shown = next_selection.or(requested);
+        let choice = resolve_choice(&models, shown.as_deref())?;
+        let mut response = public_models(
+            &models,
+            effective_name(&models, shown.as_deref()).as_deref(),
+            choice.fallback.as_deref(),
+        );
         response["health"] = serde_json::to_value(runtime.health()?)?;
         response["offline"] = json!(self.offline);
         Ok(response)
@@ -600,7 +973,7 @@ mod model_tests {
         )
         .unwrap();
         assert!(models.models["local"].has_api_key());
-        let public = public_models(&models);
+        let public = public_models(&models, None, None);
         assert_eq!(public["models"]["local"]["authentication"], "plain_file");
         assert!(!public.to_string().contains("saved-secret"));
 
@@ -611,7 +984,7 @@ mod model_tests {
         .unwrap();
         assert!(!models.models["local"].has_api_key());
         assert_eq!(
-            public_models(&models)["models"]["local"]["authentication"],
+            public_models(&models, None, None)["models"]["local"]["authentication"],
             "none"
         );
     }

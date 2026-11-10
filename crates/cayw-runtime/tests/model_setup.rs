@@ -30,6 +30,7 @@ fn cli(home: &Path, workspace: &Path, cayw_home: &Path) -> Command {
         .env_clear()
         .env("HOME", home)
         .env("CAYW_HOME", cayw_home)
+        .env("CAYW_MAIN_SESSION", home.join("main-session"))
         .current_dir(workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -164,7 +165,7 @@ async fn pipe_conf_saves_workspace_profile_and_preserves_host_settings() {
     command.env("OPENAI_API_KEY", SECRET);
     let output = run_with_input(
         command,
-        b"openai\n\nhttp://127.0.0.1:9/v1\nfixture-model\n\n\n\n",
+        b"openai\n\nhttp://127.0.0.1:9/v1\nfixture-model\n\n\n\n\n\n",
     )
     .await;
     assert!(
@@ -177,12 +178,23 @@ async fn pipe_conf_saves_workspace_profile_and_preserves_host_settings() {
     assert_eq!(report["configured"], true);
     assert_eq!(report["model_configured"], true);
     let models_file = PathBuf::from(report["models_file"].as_str().unwrap());
-    assert_eq!(models_file, only_state_dir(root.path()).join("models.json"));
+    assert_eq!(models_file, root.path().join("models.json"));
     let saved: Value = serde_json::from_slice(&std::fs::read(&models_file).unwrap()).unwrap();
-    assert_eq!(saved["selected"], "configured");
+    assert_eq!(saved["default"], "configured");
+    let mut expected = model_config("fixture-model", 4096);
+    expected["context_window"] = json!(128000);
+    assert_eq!(saved["models"]["configured"], expected);
+    let selection_file = only_state_dir(root.path()).join("model-selection.json");
+    let selection: Value =
+        serde_json::from_slice(&std::fs::read(&selection_file).unwrap()).unwrap();
+    assert_eq!(selection["name"], "configured");
     assert_eq!(
-        saved["models"]["configured"],
-        model_config("fixture-model", 4096)
+        std::fs::metadata(&selection_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
     );
     assert!(saved["models"]["configured"].get("api_key").is_none());
     assert_eq!(
@@ -211,7 +223,7 @@ async fn cancel_or_eof_does_not_create_or_replace_a_workspace_profile() {
 
     let cancel = run_with_input(
         conf_command(home.path(), workspace.path(), root.path()),
-        b"openai\n\nhttp://127.0.0.1:9/v1\ncancelled-model\n\n\nn\n",
+        b"openai\n\nhttp://127.0.0.1:9/v1\ncancelled-model\n\n\n\n\nn\n",
     )
     .await;
     assert!(cancel.status.success());
@@ -250,7 +262,7 @@ async fn init_after_conf_does_not_require_a_model_key() {
 
     let configured = run_with_input(
         conf_command(home.path(), workspace.path(), root.path()),
-        b"openai\n\nhttp://127.0.0.1:9/v1\nfixture-model\n\n\n\n",
+        b"openai\n\nhttp://127.0.0.1:9/v1\nfixture-model\n\n\n\n\n\n",
     )
     .await;
     assert!(
@@ -287,7 +299,7 @@ async fn missing_model_reports_conf_and_workspace_profile_path_without_blocking(
         "init failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let models_file = only_state_dir(root.path()).join("models.json");
+    let models_file = root.path().join("models.json");
     let models_text = models_file.to_str().unwrap();
     let report = first_json(&output).expect("init prints one JSON line");
     assert_eq!(report["model_configured"], false);
@@ -398,7 +410,18 @@ async fn selected_profile_wins_and_malformed_legacy_model_is_removed() {
     let report = first_json(&output).unwrap();
     assert_eq!(report["configured"], false);
     assert_eq!(report["model_configured"], true);
-    assert_eq!(std::fs::read(&models_file).unwrap(), profile_bytes);
+    assert!(
+        !models_file.exists(),
+        "legacy workspace models.json must be removed"
+    );
+    let device_file = root.path().join("models.json");
+    let saved: Value = serde_json::from_slice(&std::fs::read(&device_file).unwrap()).unwrap();
+    assert_eq!(saved["default"], "keep");
+    assert_eq!(saved["models"]["keep"], model_config("keep-model", 64));
+    let selection: Value =
+        serde_json::from_slice(&std::fs::read(state_dir.join("model-selection.json")).unwrap())
+            .unwrap();
+    assert_eq!(selection["name"], "keep");
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&config_file).unwrap()).unwrap(),
         remaining
@@ -433,7 +456,7 @@ async fn explicit_conf_cancel_and_save_do_not_create_local_state() {
     configured.args(["conf", "--config"]).arg(&config_file);
     let output = run_with_input(
         configured,
-        b"openai\n\nhttp://127.0.0.1:9/v1\nheadless-model\n\n128\n\n",
+        b"openai\n\nhttp://127.0.0.1:9/v1\nheadless-model\n\n128\n\n\n\n",
     )
     .await;
     assert!(
@@ -445,7 +468,9 @@ async fn explicit_conf_cancel_and_save_do_not_create_local_state() {
     assert_eq!(report["configured"], true);
     assert_eq!(report["model_configured"], true);
     let saved: Value = serde_json::from_slice(&std::fs::read(&config_file).unwrap()).unwrap();
-    assert_eq!(saved["model"], model_config("headless-model", 128));
+    let mut expected = model_config("headless-model", 128);
+    expected["context_window"] = json!(128000);
+    assert_eq!(saved["model"], expected);
     assert!(!root.path().join("workspaces").exists());
     assert!(!home.path().join(".cayw").exists());
 }

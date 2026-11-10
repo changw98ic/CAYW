@@ -185,6 +185,19 @@ impl LocalPaths {
         self.state_dir.join(name)
     }
 
+    /// Private state directory for this workspace (database, recovery points).
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    /// Hold the device initialization lock. Drop the file to release it.
+    /// Do not call `save_config` on a file in `data_dir` while this lock is held.
+    pub fn lock_data_dir(&self) -> io::Result<File> {
+        let file = private_lock(&self.data_dir.join("init.lock"))?;
+        file.lock()?;
+        Ok(file)
+    }
+
     /// Serialize foreground commands while one of them starts the unique Client.
     pub fn try_acquire_client_start(&self) -> io::Result<Option<ClientStartLock>> {
         check_directory(&self.data_dir)?;
@@ -413,13 +426,91 @@ fn private_lock(path: &Path) -> io::Result<File> {
     }
 }
 
-/// Explain how to configure the one model profile selected by a local workspace.
+/// Explain how to configure the device model list used by every local workspace.
 pub fn local_model_setup_hint(paths: &LocalPaths) -> String {
     format!(
-        "尚未配置模型。当前工作区的模型方案文件：{}。运行 `cayw conf --workspace {}` 逐项配置模型，或进入 WebUI 的模型设置。密钥可以明文保存在普通本地配置文件中；无需认证的本地服务可留空。",
-        paths.state_file("models.json").display(),
+        "尚未配置模型。设备模型方案文件：{}。运行 `cayw conf --workspace {}` 逐项配置模型，或进入 WebUI 的模型设置。密钥可以明文保存在普通本地配置文件中；无需认证的本地服务可留空。",
+        paths.data_dir.join("models.json").display(),
         shell_path(&paths.workspace)
     )
+}
+
+/// Resolve the main-session workspace directory without creating it.
+/// `CAYW_MAIN_SESSION` wins, then the device configuration, then `$HOME/CodeAsYouWish`.
+pub fn main_session_directory(configured: Option<&Path>) -> io::Result<PathBuf> {
+    if let Some(value) = std::env::var_os("CAYW_MAIN_SESSION") {
+        if value.is_empty() {
+            return Err(invalid(
+                "CAYW_MAIN_SESSION must be an absolute nonempty path",
+            ));
+        }
+        let path = PathBuf::from(value);
+        if !path.is_absolute() {
+            return Err(invalid("CAYW_MAIN_SESSION must be an absolute path"));
+        }
+        return Ok(path);
+    }
+    if let Some(path) = configured {
+        if !path.is_absolute() {
+            return Err(invalid("main_session_dir must be an absolute path"));
+        }
+        return Ok(path.to_path_buf());
+    }
+    let home = PathBuf::from(
+        std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                invalid("HOME is unavailable; set CAYW_MAIN_SESSION to an absolute path")
+            })?,
+    );
+    if !home.is_absolute() {
+        return Err(invalid("HOME must be an absolute path"));
+    }
+    Ok(home.join("CodeAsYouWish"))
+}
+
+/// Create the main-session directory when it is missing. An existing directory
+/// that cannot be read is reported in place and is not replaced.
+pub fn prepare_main_session_directory(configured: Option<&Path>) -> io::Result<PathBuf> {
+    prepare_main_session_at(&main_session_directory(configured)?)
+}
+
+pub fn prepare_main_session_at(path: &Path) -> io::Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(invalid(
+                    "主 session 工作区必须是已有目录，不能是符号链接或其他文件，未重新创建",
+                ));
+            }
+            fs::read_dir(path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("主 session 工作区无法读取，未重新创建：{}", path.display()),
+                )
+            })?;
+            Ok(path.to_path_buf())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            else {
+                return Err(invalid("主 session 工作区的上级目录不存在，未创建"));
+            };
+            if fs::symlink_metadata(parent).map_or(true, |metadata| !metadata.is_dir()) {
+                return Err(invalid("主 session 工作区的上级目录不存在，未创建"));
+            }
+            fs::DirBuilder::new().mode(0o700).create(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            let created = fs::symlink_metadata(path)?;
+            if !created.is_dir() || created.permissions().mode() & 0o777 != 0o700 {
+                return Err(invalid("主 session 工作区未能按 0700 创建"));
+            }
+            Ok(path.to_path_buf())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Explain how a fully explicit Headless host selects its model.
@@ -449,6 +540,15 @@ pub fn save_config(path: &Path, expected: Option<&[u8]>, bytes: &[u8]) -> io::Re
         .unwrap_or(Path::new("."));
     let initialization = private_lock(&parent.join("init.lock"))?;
     initialization.lock()?;
+    save_config_locked(path, expected, bytes)
+}
+
+/// Same compare-and-swap as `save_config`, for a caller that already holds the
+/// parent `init.lock`. A second lock on that file from this process would wait forever.
+pub fn save_config_locked(path: &Path, expected: Option<&[u8]>, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > 1024 * 1024 {
+        return Err(invalid("配置文件超过 1 MiB，未修改文件"));
+    }
     let current = match read_private(path, 1024 * 1024) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -496,4 +596,32 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn main_session_directory_is_created_private_and_an_unreadable_directory_stays() {
+        let root = tempfile::tempdir().unwrap();
+        let created = root.path().join("main");
+        let path = prepare_main_session_at(&created).unwrap();
+        let mode = fs::symlink_metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert!(path.is_dir());
+
+        let blocked = root.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let error = prepare_main_session_at(&blocked).unwrap_err();
+        assert!(error.to_string().contains("未重新创建"));
+        assert!(fs::symlink_metadata(&blocked).unwrap().is_dir());
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let parent = root.path().join("missing-parent");
+        let error = prepare_main_session_at(&parent.join("child")).unwrap_err();
+        assert!(error.to_string().contains("上级目录不存在"));
+        assert!(!parent.exists());
+    }
 }

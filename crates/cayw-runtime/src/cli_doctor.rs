@@ -57,6 +57,11 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
         )),
     }
 
+    checks.push(cayw_runtime::recovery_points::doctor_check(
+        &paths.workspace,
+        paths.state_dir(),
+    ));
+
     let cleanup_path = paths.data_dir.join("client-plugin-cleanup.json");
     match crate::cli_client_plugins::inspect_cleanup(&cleanup_path) {
         Ok(details) if details["exists"] == true => {

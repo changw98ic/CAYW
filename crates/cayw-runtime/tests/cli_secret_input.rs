@@ -222,18 +222,24 @@ fn terminal_conf_hides_key_and_restores_echo_for_local_and_explicit_config() {
             "echo must be restored after key input"
         );
         terminal.send("64\n");
+        terminal.read_until("上下文窗口");
+        terminal.send("\n");
+        terminal.read_until("tokenizer");
+        terminal.send("\n");
         terminal.read_until("保存配置吗");
         terminal.send("y\n");
         terminal.read_until("\"configured\":true");
         assert!(terminal.finish().success());
         assert!(!String::from_utf8_lossy(&terminal.transcript).contains(SECRET));
+        if !explicit {
+            let mut entries = std::fs::read_dir(state.path().join("workspaces")).unwrap();
+            assert!(entries.next().unwrap().is_ok());
+            assert!(entries.next().is_none());
+        }
         let models = if explicit {
             config
         } else {
-            let mut entries = std::fs::read_dir(state.path().join("workspaces")).unwrap();
-            let models = entries.next().unwrap().unwrap().path().join("models.json");
-            assert!(entries.next().is_none());
-            models
+            state.path().join("models.json")
         };
         let saved: Value = serde_json::from_slice(&std::fs::read(models).unwrap()).unwrap();
         let model = if explicit {
@@ -257,6 +263,10 @@ fn terminal_conf_accepts_empty_key_without_authentication() {
     terminal.send("\n");
     terminal.read_until("单次输出 token");
     assert!(terminal.echo_enabled());
+    terminal.send("\n");
+    terminal.read_until("上下文窗口");
+    terminal.send("\n");
+    terminal.read_until("tokenizer");
     terminal.send("\n");
     terminal.read_until("保存配置吗");
     terminal.send("y\n");
@@ -292,7 +302,8 @@ async fn redirected_conf_reads_synthetic_key_from_its_pipe() {
         .take()
         .unwrap()
         .write_all(
-            format!("openai\n\nhttp://127.0.0.1:9/v1\npipe-fixture\n{SECRET}\n64\ny\n").as_bytes(),
+            format!("openai\n\nhttp://127.0.0.1:9/v1\npipe-fixture\n{SECRET}\n64\n\n\ny\n")
+                .as_bytes(),
         )
         .await
         .unwrap();

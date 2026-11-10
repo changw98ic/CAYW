@@ -6,7 +6,9 @@ use cayw_ai::{CancellationToken, Model, Provider};
 use cayw_bridge::{AccessRequest, Limits, Provenance, Registry, RegistryPolicy, Visibility};
 use cayw_codemode::CapabilityError;
 use cayw_runtime::{
-    HeadlessConfig, PiCompatConfig, Runtime, RuntimeConfig,
+    HeadlessConfig, PiCompatConfig, Runtime, RuntimeConfig, TaskDispatch, TaskInput, TaskIntent,
+    TaskResources, WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkRouter,
+    WorkRouterError, WorkTargetOutcome, WorkTaskQuery,
     local_cli::{LocalPaths, local_model_setup_hint},
 };
 use cayw_sources::{InstalledServer, install_mcp_servers_file};
@@ -14,7 +16,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap, error::Error, os::unix::ffi::OsStrExt, path::Path, sync::Arc,
+    collections::BTreeMap,
+    error::Error,
+    os::unix::ffi::OsStrExt,
+    path::Path,
+    sync::{Arc, Weak},
     time::Duration,
 };
 
@@ -304,6 +310,10 @@ impl Workspaces {
         }
     }
 
+    pub fn id_for(&self, path: &Path) -> String {
+        self.id(path)
+    }
+
     fn id(&self, path: &Path) -> String {
         if path == self.inner.paths.workspace {
             "local".into()
@@ -317,6 +327,245 @@ impl Workspaces {
 
     pub async fn open_count(&self) -> usize {
         self.inner.hosts.read().await.len()
+    }
+
+    /// The router installed into the main-session Runtime. It holds only a weak
+    /// reference to the Client catalog, so the Runtime cannot keep the Client
+    /// and its workspace processes alive after shutdown.
+    pub(crate) fn work_router(&self) -> Arc<dyn WorkRouter> {
+        Arc::new(ClientWorkRouter {
+            inner: Arc::downgrade(&self.inner),
+        })
+    }
+
+    async fn router_resolve(
+        &self,
+        workspace: &str,
+    ) -> std::result::Result<String, WorkRouterError> {
+        if workspace.trim().is_empty() {
+            return Err(WorkRouterError::known("workspace must not be empty"));
+        }
+        if self.inner.hosts.read().await.contains_key(workspace) {
+            return Ok(workspace.to_string());
+        }
+        let known = self
+            .inner
+            .paths
+            .known_workspaces()
+            .map_err(|error| WorkRouterError::known(error.to_string()))?;
+        if let Some(path) = known
+            .iter()
+            .find(|path| path.to_string_lossy() == workspace)
+        {
+            return Ok(self.id(path));
+        }
+        if let Ok(candidate) = Path::new(workspace).canonicalize()
+            && let Some(path) = known.iter().find(|path| **path == candidate)
+        {
+            return Ok(self.id(path));
+        }
+        Err(WorkRouterError::known(
+            "workspace is not registered; register it locally with cayw init --workspace DIR",
+        ))
+    }
+
+    async fn router_open(
+        &self,
+        id: &str,
+    ) -> std::result::Result<Arc<WorkspaceHost>, WorkRouterError> {
+        if let Some(host) = self.inner.hosts.read().await.get(id).cloned() {
+            return Ok(host);
+        }
+        if !self.inner.discoverable {
+            return Err(WorkRouterError::known(
+                "workspace routing requires the default local Client",
+            ));
+        }
+        self.call(
+            "settings.workspaces.open",
+            json!({"id":id}),
+            CancellationToken::new(),
+        )
+        .await
+        .map_err(|error| WorkRouterError::known(error.to_string()))?;
+        self.host(id)
+            .await
+            .map_err(|error| WorkRouterError::known(error.to_string()))
+    }
+
+    async fn router_workspaces(&self) -> std::result::Result<Vec<Value>, WorkRouterError> {
+        let value = self
+            .call(
+                "settings.workspaces.list",
+                json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .map_err(|error| WorkRouterError::known(error.to_string()))?;
+        Ok(value
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn router_sessions(
+        &self,
+        workspace: &str,
+    ) -> std::result::Result<Vec<Value>, WorkRouterError> {
+        let workspace = self.router_resolve(workspace).await?;
+        let host = self.router_open(&workspace).await?;
+        host.runtime
+            .list()
+            .map_err(router_runtime_error)?
+            .into_iter()
+            .map(|session| {
+                serde_json::to_value(session)
+                    .map_err(|error| WorkRouterError::known(error.to_string()))
+            })
+            .collect()
+    }
+
+    async fn router_create_session(
+        &self,
+        workspace: &str,
+        label: &str,
+    ) -> std::result::Result<Value, WorkRouterError> {
+        if label.trim().is_empty() || label.len() > 1024 {
+            return Err(WorkRouterError::known(
+                "session label must contain 1..1024 bytes",
+            ));
+        }
+        let workspace = self.router_resolve(workspace).await?;
+        let host = self.router_open(&workspace).await?;
+        let session = host
+            .runtime
+            .create(Some(label.to_string()))
+            .map_err(router_runtime_error)?;
+        serde_json::to_value(session).map_err(|error| WorkRouterError::known(error.to_string()))
+    }
+
+    async fn router_dispatch(
+        &self,
+        request: WorkDispatchRequest,
+    ) -> std::result::Result<WorkDispatchReply, WorkRouterError> {
+        let workspace = self.router_resolve(&request.workspace).await?;
+        let host = self.router_open(&workspace).await?;
+        let session_id = request.session_id.clone().ok_or_else(|| {
+            WorkRouterError::known("dispatch requires an existing target session_id")
+        })?;
+        host.runtime
+            .get(&session_id)
+            .map_err(|error| WorkRouterError::known(error.to_string()))?;
+        let reused = host
+            .runtime
+            .task_by_dispatch_key(&request.dispatch_key)
+            .map_err(|error| WorkRouterError::known(error.to_string()))?
+            .is_some();
+        let task = host
+            .runtime
+            .enqueue_dispatched(
+                &session_id,
+                TaskInput {
+                    text: request.text,
+                    images: Vec::new(),
+                },
+                TaskIntent::General,
+                request.priority,
+                TaskResources {
+                    declared_memory_bytes: request.declared_memory_bytes,
+                    ..Default::default()
+                },
+                TaskDispatch {
+                    work_id: request.work_id.clone(),
+                    dispatch_key: request.dispatch_key.clone(),
+                    pause_version: request.pause_version,
+                    stop_version: request.stop_version,
+                },
+            )
+            .map_err(router_runtime_error)?;
+        Ok(WorkDispatchReply {
+            workspace,
+            session_id,
+            task_id: task.id,
+            state: task.state,
+            work_id: request.work_id,
+            dispatch_key: request.dispatch_key,
+            reused,
+        })
+    }
+
+    async fn router_task(
+        &self,
+        query: WorkTaskQuery,
+    ) -> std::result::Result<Option<cayw_runtime::TaskRecord>, WorkRouterError> {
+        let workspace = self.router_resolve(&query.workspace).await?;
+        let host = self.router_open(&workspace).await?;
+        if let Some(task_id) = query.task_id {
+            return match host.runtime.task(&task_id) {
+                Ok(task) => Ok(Some(task)),
+                Err(cayw_runtime::RuntimeError::InvalidInput(message))
+                    if message == "task not found" =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(router_runtime_error(error)),
+            };
+        }
+        let key = query
+            .dispatch_key
+            .ok_or_else(|| WorkRouterError::known("task query needs task_id or dispatch_key"))?;
+        host.runtime
+            .task_by_dispatch_key(&key)
+            .map_err(router_runtime_error)
+    }
+
+    async fn router_control(
+        &self,
+        action: WorkControl,
+        work_id: &str,
+        version: u64,
+        workspaces: &[String],
+    ) -> std::result::Result<Vec<WorkTargetOutcome>, WorkRouterError> {
+        let mut outcomes = Vec::new();
+        for workspace in workspaces {
+            let result = match self.router_resolve(workspace).await {
+                Ok(id) => match self.router_open(&id).await {
+                    Ok(host) => match action {
+                        WorkControl::Pause => host.runtime.apply_work_pause(work_id, version),
+                        WorkControl::Stop => host.runtime.apply_work_stop(work_id, version),
+                    }
+                    .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error.to_string()),
+            };
+            outcomes.push(match result {
+                Ok(updated) => WorkTargetOutcome {
+                    workspace: workspace.clone(),
+                    updated: Some(updated),
+                    error: None,
+                },
+                Err(error) => WorkTargetOutcome {
+                    workspace: workspace.clone(),
+                    updated: None,
+                    error: Some(error),
+                },
+            });
+        }
+        Ok(outcomes)
+    }
+
+    async fn router_evaluate_check(
+        &self,
+        workspace: &str,
+        check: &cayw_runtime::AcceptanceCheck,
+    ) -> std::result::Result<bool, WorkRouterError> {
+        let workspace = self.router_resolve(workspace).await?;
+        let host = self.router_open(&workspace).await?;
+        check
+            .evaluate(host.runtime.workspace())
+            .map_err(router_runtime_error)
     }
 
     pub async fn host(&self, id: &str) -> Result<Arc<WorkspaceHost>> {
@@ -436,15 +685,95 @@ impl Workspaces {
     }
 }
 
+/// Runtime-facing router. It upgrades the Client catalog only for the duration
+/// of one call and never owns it.
+struct ClientWorkRouter {
+    inner: Weak<Inner>,
+}
+
+impl ClientWorkRouter {
+    fn client(&self) -> std::result::Result<Workspaces, WorkRouterError> {
+        self.inner
+            .upgrade()
+            .map(|inner| Workspaces { inner })
+            .ok_or_else(|| WorkRouterError::known("the local Client is shut down"))
+    }
+}
+
+#[async_trait]
+impl WorkRouter for ClientWorkRouter {
+    async fn workspaces(&self) -> std::result::Result<Vec<Value>, WorkRouterError> {
+        self.client()?.router_workspaces().await
+    }
+
+    async fn sessions(&self, workspace: &str) -> std::result::Result<Vec<Value>, WorkRouterError> {
+        self.client()?.router_sessions(workspace).await
+    }
+
+    async fn create_session(
+        &self,
+        workspace: &str,
+        label: &str,
+    ) -> std::result::Result<Value, WorkRouterError> {
+        self.client()?.router_create_session(workspace, label).await
+    }
+
+    async fn dispatch(
+        &self,
+        request: WorkDispatchRequest,
+    ) -> std::result::Result<WorkDispatchReply, WorkRouterError> {
+        self.client()?.router_dispatch(request).await
+    }
+
+    async fn task(
+        &self,
+        query: WorkTaskQuery,
+    ) -> std::result::Result<Option<cayw_runtime::TaskRecord>, WorkRouterError> {
+        self.client()?.router_task(query).await
+    }
+
+    async fn control(
+        &self,
+        action: WorkControl,
+        work_id: &str,
+        version: u64,
+        workspaces: &[String],
+    ) -> std::result::Result<Vec<WorkTargetOutcome>, WorkRouterError> {
+        self.client()?
+            .router_control(action, work_id, version, workspaces)
+            .await
+    }
+
+    async fn evaluate_check(
+        &self,
+        workspace: &str,
+        check: &cayw_runtime::AcceptanceCheck,
+    ) -> std::result::Result<bool, WorkRouterError> {
+        self.client()?.router_evaluate_check(workspace, check).await
+    }
+}
+
+fn router_runtime_error(error: cayw_runtime::RuntimeError) -> WorkRouterError {
+    if error.outcome_unknown() {
+        WorkRouterError::unknown(error.to_string())
+    } else {
+        WorkRouterError::known(error.to_string())
+    }
+}
+
 async fn open_workspace(
     paths: LocalPaths,
     offline: bool,
     #[cfg(feature = "plugins")] plugins: crate::cli_plugins::Plugins,
 ) -> Result<WorkspaceHost> {
     paths.validate_existing()?;
-    cli_settings::migrate_legacy_model(&paths, &paths.config_file)?;
+    cli_settings::migrate_device_models(&paths)?;
     let headless = HeadlessConfig::load(&paths.config_file)?;
-    let selected = cli_settings::selected_model(&paths)?;
+    let choice = cli_settings::model_choice(&paths)?;
+    if let Some(message) = &choice.fallback {
+        eprintln!("{message}");
+    }
+    let selected = choice.model;
     if offline && selected.is_some() {
         return Err(
             "model configuration conflicts with the Client's offline mode for this workspace"
@@ -455,7 +784,30 @@ async fn open_workspace(
     let mcp_servers_file = headless.mcp_servers_file().map(Path::to_path_buf);
     let pi_compat = headless.pi_compat().cloned();
     let pi_enabled = pi_compat.as_ref().is_some_and(|config| config.enabled);
+    let configured_main_session = headless.main_session_dir().map(Path::to_path_buf);
     let mut config = headless.into_runtime_config()?;
+    // The discoverable local Client owns the device rule file. Fully explicit
+    // Headless never opens this workspace path and keeps approval.decide.
+    config.approval_rules = Some(cayw_runtime::device_rules(&paths.data_dir));
+    config.main_session =
+        cayw_runtime::local_cli::main_session_directory(configured_main_session.as_deref())
+            .ok()
+            .and_then(|directory| std::fs::canonicalize(directory).ok())
+            .is_some_and(|directory| directory == paths.workspace);
+    // Git recovery is a local-Client product default. The private repository
+    // lives in this workspace's CAYW state directory, never in the project.
+    config.recovery = Some(cayw_runtime::recovery_points::RecoveryConfig {
+        data_dir: Some(paths.data_dir.clone()),
+        ..Default::default()
+    });
+    if let Some(warning) =
+        cayw_runtime::recovery_points::availability_warning(&paths.workspace, paths.state_dir())
+    {
+        eprintln!("{warning}");
+    }
+    if cayw_runtime::recovery_points::workspace_enabled(&paths.workspace, paths.state_dir()) {
+        config.recovery_scope = Some(cayw_runtime::RecoveryScope::new([paths.workspace.clone()]));
+    }
     let request_timeout = config
         .max_run_time
         .checked_add(Duration::from_secs(60))
@@ -492,6 +844,11 @@ async fn open_workspace(
         Ok(runtime) => Arc::new(runtime),
         Err(error) => return cleanup_failed_setup(resources, error.to_string()).await,
     };
+    // First access establishes the initial point, including uncommitted files.
+    // A failure is a warning; the workspace still opens.
+    if let Err(error) = runtime.create_recovery_point() {
+        eprintln!("首次恢复点未能建立：{error}；工作继续");
+    }
     let settings = cli_settings::Settings {
         #[cfg(feature = "plugins")]
         plugins,

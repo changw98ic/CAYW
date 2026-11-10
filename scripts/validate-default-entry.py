@@ -9,7 +9,8 @@ fixture=sys.argv[1]=='--account-fixture'
 args=sys.argv[2:] if fixture else sys.argv[1:]
 bin_dir=pathlib.Path(args[0]).resolve();out=pathlib.Path(args[1]).resolve();out.mkdir()
 home=out/'home';home.mkdir(mode=0o700);a=out/'cwd';a.mkdir();b=out/'explicit';b.mkdir()
-env={'PATH':os.environ['PATH'],'TERM':'xterm-256color','HOME':str(home),'CAYW_HOME':str(home/'cayw')}
+env={'PATH':os.environ['PATH'],'TERM':'xterm-256color','HOME':str(home),'CAYW_HOME':str(home/'cayw'),
+     'CAYW_MAIN_SESSION':str(out/'main-session')}
 password='synthetic-password-for-isolated-tests';children=[];checks=[]
 class Terminal:
  def __init__(self,argv,cwd=a):
@@ -52,7 +53,10 @@ try:
   # No arguments: inherited cwd is the workspace, even without any model setup.
   first=Terminal([]).until(r'CAYW\s+•\s+connected')
   states=list((home/'cayw'/'workspaces').glob('*/workspace.json'))
-  assert len(states)==1 and str(a) in states[0].read_text()
+  texts=[item.read_text() for item in states]
+  main=pathlib.Path(env['CAYW_MAIN_SESSION'])
+  assert len(states)==2 and any(str(a) in text for text in texts) and any(str(main) in text for text in texts)
+  assert main.is_dir() and main.stat().st_mode & 0o777 == 0o700
   assert not list((home/'cayw').rglob('launcher-web.json'))
   assert not list((home/'cayw').rglob('web.token'))
   checks.append('bare cayw opens actual TUI at cwd without starting WebUI, browser or web token setup')

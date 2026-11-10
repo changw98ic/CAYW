@@ -17,19 +17,33 @@
 //! and TUI/WebUI rendering are out of scope for this slice. Runtime adapts the
 //! durable `model_requests` ledger into these snapshots (see cayw-runtime).
 //!
+//! `assembly` estimates provider input with UTF-8 bytes and builds a local
+//! replacement. It does not price usage, delete logs, or rewrite that ledger.
+//!
 //! Design reference (not a code transplant):
 //! [bowenliang123/dsh-context](https://github.com/bowenliang123/dsh-context).
 //! See `docs/sources/f05-context-usage.md` for the source record.
 #![forbid(unsafe_code)]
 
+mod assembly;
 mod evolution;
 mod fleet;
+mod main_session;
 mod overview;
 mod tokens;
 mod types;
 
+pub use assembly::{
+    Assembly, CompressionRecord, ContextInput, DEFAULT_OUTPUT_RESERVE, DEFAULT_PROTOCOL_MARGIN,
+    Piece, SourceUnit, SummaryKind, SummaryRecord, UnitKind, VersionDecision, accept_compression,
+    accept_summary, advance_frontier, input_budget, plan,
+};
 pub use evolution::{EvolutionStep, build_evolution};
 pub use fleet::{FleetMember, FleetOverview, build_fleet_overview};
+pub use main_session::{
+    CursorRange, DreamPlan, DreamReference, MainSessionInput, MainSessionPlan, SourceRange,
+    organize_dream, plan_main_session,
+};
 pub use overview::{
     CrossSessionOverview, SessionOverview, build_cross_session_overview, build_session_overview,
 };

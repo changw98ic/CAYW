@@ -110,9 +110,178 @@ struct Approval {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ApprovalQuestionRequest {
+    session_id: String,
+    approval_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalReply {
+    session_id: String,
+    approval_id: String,
+    reply: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RulePropose {
+    session_id: String,
+    capability: String,
+    arguments: Value,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleConfirm {
+    session_id: String,
+    pending_id: String,
+    reply: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Revoke {
     session_id: String,
     grant_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryApply {
+    session_id: String,
+    candidates: Vec<crate::main_memory::MemoryCandidate>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryForget {
+    session_id: String,
+    start_cursor: u64,
+    end_cursor: u64,
+    reason: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryDream {
+    summaries: Vec<cayw_context::SummaryRecord>,
+    #[serde(default)]
+    model_text: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkCreate {
+    spec: crate::WorkItemSpec,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkId {
+    work_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkAcceptProgram {
+    work_id: String,
+    criterion_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkAcceptUser {
+    work_id: String,
+    criterion_id: String,
+    passed: bool,
+    answer_ref: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkReport {
+    work_id: String,
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkLateResult {
+    work_id: String,
+    task_id: String,
+    result_ref: String,
+    pause_version_at_dispatch: u64,
+    stop_version_at_dispatch: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputIngest {
+    source: String,
+    source_event_id: String,
+    log_id: String,
+    session_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputTransition {
+    log_id: String,
+    state: crate::InputState,
+    #[serde(default)]
+    work_id: Option<String>,
+    #[serde(default)]
+    result_ref: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputQuery {
+    log_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProactiveTrigger {
+    mode: crate::ProactiveMode,
+    rule_id: String,
+    condition_version: u64,
+    work_id: String,
+    #[serde(default)]
+    usage_tokens: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifyPrepare {
+    work_id: String,
+    work_version: u64,
+    target: String,
+    #[serde(default)]
+    content_ref: Option<String>,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifyReceipt {
+    notification_id: String,
+    status: crate::NotificationStatus,
+    receipt_ref: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifyId {
+    notification_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchTask {
+    session_id: String,
+    text: String,
+    #[serde(default)]
+    images: Vec<ImageInput>,
+    #[serde(default)]
+    intent: Option<crate::TaskIntent>,
+    #[serde(default)]
+    priority: Option<crate::TaskPriority>,
+    #[serde(default)]
+    resources: Option<crate::TaskResources>,
+    dispatch: crate::TaskDispatch,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchKey {
+    dispatch_key: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkVersion {
+    work_id: String,
+    version: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,6 +520,176 @@ impl Runtime {
                 let _: Empty = parse(params)?;
                 encode(self.resources()?)
             }
+            "recovery.status" => {
+                let _: Empty = parse(params)?;
+                encode(self.recovery_status())
+            }
+            "recovery.reconciliation" => {
+                let _: Empty = parse(params)?;
+                encode(self.recovery_reconciliation())
+            }
+            "recovery.disable" => {
+                let _: Empty = parse(params)?;
+                encode(self.disable_git_recovery()?)
+            }
+            "recovery.points" => {
+                let _: Empty = parse(params)?;
+                encode(self.recovery_points()?)
+            }
+            "recovery.create" => {
+                let _: Empty = parse(params)?;
+                Ok(self.create_recovery_point()?)
+            }
+            "recovery.restore" => {
+                let request: crate::recovery_points::RestoreRequest = parse(params)?;
+                encode(self.restore_recovery_point(request)?)
+            }
+            "memory.status" => {
+                let _: Empty = parse(params)?;
+                encode(self.memory_status()?)
+            }
+            "memory.entries" => {
+                let _: Empty = parse(params)?;
+                encode(self.memory_entries()?)
+            }
+            "memory.query" => {
+                let p: crate::MemoryQuery = parse(params)?;
+                encode(self.query_memory(p)?)
+            }
+            "memory.apply" => {
+                let p: MemoryApply = parse(params)?;
+                encode(self.apply_memory_candidates(&p.session_id, &p.candidates)?)
+            }
+            "memory.forget" => {
+                let p: MemoryForget = parse(params)?;
+                let range =
+                    cayw_context::SourceRange::new(p.session_id, p.start_cursor, p.end_cursor)
+                        .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+                self.forget_memory_range(range, &p.reason)?;
+                encode(serde_json::json!({"status":"recorded"}))
+            }
+            "memory.dream" => {
+                let p: MemoryDream = parse(params)?;
+                encode(self.dream_memory(&p.summaries, p.model_text.as_deref())?)
+            }
+            "work.create" => {
+                let p: WorkCreate = parse(params)?;
+                encode(self.create_work_item(p.spec)?)
+            }
+            "work.get" => {
+                let p: WorkId = parse(params)?;
+                encode(self.work_item(&p.work_id)?)
+            }
+            "work.list" => {
+                let _: Empty = parse(params)?;
+                encode(self.list_work_items()?)
+            }
+            "work.pause" => {
+                let p: WorkId = parse(params)?;
+                encode(self.pause_work_item(&p.work_id)?)
+            }
+            "work.resume" => {
+                let p: WorkId = parse(params)?;
+                encode(self.resume_work_item(&p.work_id)?)
+            }
+            "work.stop" => {
+                let p: WorkId = parse(params)?;
+                encode(self.stop_work_item(&p.work_id)?)
+            }
+            "work.accept.program" => {
+                let p: WorkAcceptProgram = parse(params)?;
+                encode(self.evaluate_work_acceptance(&p.work_id, &p.criterion_id)?)
+            }
+            "work.accept.user" => {
+                let p: WorkAcceptUser = parse(params)?;
+                encode(self.record_work_user_acceptance(
+                    &p.work_id,
+                    &p.criterion_id,
+                    p.passed,
+                    &p.answer_ref,
+                )?)
+            }
+            "work.report" => {
+                let p: WorkReport = parse(params)?;
+                self.record_work_model_report(&p.work_id, &p.text)?;
+                Ok(json!({"recorded":false}))
+            }
+            "work.late_result" => {
+                let p: WorkLateResult = parse(params)?;
+                encode(self.record_work_late_result(
+                    &p.work_id,
+                    &p.task_id,
+                    &p.result_ref,
+                    p.pause_version_at_dispatch,
+                    p.stop_version_at_dispatch,
+                )?)
+            }
+            "input.ingest" => {
+                let p: InputIngest = parse(params)?;
+                encode(self.ingest_input(
+                    &p.source,
+                    &p.source_event_id,
+                    &p.log_id,
+                    &p.session_id,
+                )?)
+            }
+            "input.transition" => {
+                let p: InputTransition = parse(params)?;
+                encode(self.transition_input(
+                    &p.log_id,
+                    p.state,
+                    p.work_id.as_deref(),
+                    p.result_ref.as_deref(),
+                )?)
+            }
+            "input.get" => {
+                let p: InputQuery = parse(params)?;
+                encode(self.input_record(&p.log_id)?)
+            }
+            "proactive.trigger" => {
+                let p: ProactiveTrigger = parse(params)?;
+                encode(self.trigger_proactive(
+                    p.mode,
+                    &p.rule_id,
+                    p.condition_version,
+                    &p.work_id,
+                    p.usage_tokens,
+                )?)
+            }
+            "notify.prepare" => {
+                let p: NotifyPrepare = parse(params)?;
+                encode(self.prepare_notification(
+                    &p.work_id,
+                    p.work_version,
+                    &p.target,
+                    p.content_ref.as_deref(),
+                    &p.artifact_refs,
+                )?)
+            }
+            "notify.receipt" => {
+                let p: NotifyReceipt = parse(params)?;
+                encode(self.record_notification_receipt(
+                    &p.notification_id,
+                    p.status,
+                    &p.receipt_ref,
+                )?)
+            }
+            "notify.next" => {
+                let p: NotifyId = parse(params)?;
+                encode(self.notification_decision(&p.notification_id)?)
+            }
+            "notify.get" => {
+                let p: NotifyId = parse(params)?;
+                encode(self.notification(&p.notification_id)?)
+            }
+            "work.apply_pause" => {
+                let p: WorkVersion = parse(params)?;
+                Ok(json!({"updated":self.apply_work_pause(&p.work_id, p.version)?}))
+            }
+            "work.apply_stop" => {
+                let p: WorkVersion = parse(params)?;
+                Ok(json!({"updated":self.apply_work_stop(&p.work_id, p.version)?}))
+            }
             "task.enqueue_with_resources" => {
                 let p: ResourceTask = parse(params)?;
                 encode(self.enqueue_with_resources(
@@ -548,6 +887,10 @@ impl Runtime {
                 let p: Session = parse(params)?;
                 encode(self.recover(&p.session_id)?)
             }
+            "session.maintenance.reconcile" => {
+                let p: crate::MaintenanceReconciliation = parse(params)?;
+                encode(self.reconcile_maintenance(p)?)
+            }
             "session.reconcile" => {
                 let mut p: Reconcile = parse(params)?;
                 p.reconciliation.actor = "rpc-user".into();
@@ -568,6 +911,28 @@ impl Runtime {
             "approval.decide" => {
                 let p: Approval = parse(params)?;
                 encode(self.approve(&p.session_id, &p.approval_id, p.decision, "rpc-user")?)
+            }
+            "approval.question" => {
+                let p: ApprovalQuestionRequest = parse(params)?;
+                encode(self.approval_question(&p.session_id, &p.approval_id)?)
+            }
+            "approval.reply" => {
+                let p: ApprovalReply = parse(params)?;
+                encode(self.answer_approval(&p.session_id, &p.approval_id, &p.reply, "rpc-user")?)
+            }
+            "approval.rule.propose" => {
+                let p: RulePropose = parse(params)?;
+                encode(self.propose_approval_rule(
+                    &p.session_id,
+                    crate::ApprovalRule {
+                        capability: p.capability,
+                        arguments: p.arguments,
+                    },
+                )?)
+            }
+            "approval.rule.confirm" => {
+                let p: RuleConfirm = parse(params)?;
+                encode(self.confirm_approval_rule(&p.session_id, &p.pending_id, &p.reply)?)
             }
             "approval.revoke" => {
                 let p: Revoke = parse(params)?;
@@ -620,6 +985,24 @@ impl Runtime {
                     images: p.images,
                 };
                 encode(self.enqueue_input(&p.session_id, input)?)
+            }
+            "task.enqueue_dispatched" => {
+                let p: DispatchTask = parse(params)?;
+                encode(self.enqueue_dispatched(
+                    &p.session_id,
+                    TaskInput {
+                        text: p.text,
+                        images: p.images,
+                    },
+                    p.intent.unwrap_or(crate::TaskIntent::General),
+                    p.priority.unwrap_or(crate::TaskPriority::Normal),
+                    p.resources.unwrap_or_default(),
+                    p.dispatch,
+                )?)
+            }
+            "task.by_dispatch_key" => {
+                let p: DispatchKey = parse(params)?;
+                encode(self.task_by_dispatch_key(&p.dispatch_key)?)
             }
             "task.enqueue_with_intent" => {
                 let p: EnqueueWithIntent = parse(params)?;

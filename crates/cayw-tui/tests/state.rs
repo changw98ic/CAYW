@@ -162,15 +162,65 @@ fn approval_choices_use_pending_id_and_remain_pending_until_server_acknowledges(
         let commands = app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT));
         assert_eq!(
             commands,
-            vec![Command::Decide {
+            vec![Command::Reply {
                 session_id: "s1".into(),
                 approval_id: "a1".into(),
-                decision
+                reply: decision.reply().into()
             }]
         );
         assert_eq!(app.selected().unwrap().approvals.len(), 1);
-        app.request_failed("s1", "approval.decide", "fixture rejection");
+        app.request_failed("s1", "approval.reply", "fixture rejection");
     }
+    // Text that exactly matches a displayed option is also an answer, not a
+    // model prompt, and the pending request remains until the server answers.
+    app.input.insert("本任务允许");
+    assert_eq!(
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        vec![Command::Reply {
+            session_id: "s1".into(),
+            approval_id: "a1".into(),
+            reply: "本任务允许".into()
+        }]
+    );
+    assert_eq!(app.input.text(), "");
+}
+
+#[test]
+fn approval_question_is_rendered_from_the_runtime_answer_and_wrong_text_asks_again() {
+    let mut app = app("awaiting_approval");
+    let mut value = snapshot("awaiting_approval", 1);
+    value["pending_approvals"] = json!([{"id":"a1", "input":{"capability":"fs.write"}}]);
+    app.upsert_snapshot(value, true).unwrap();
+    assert_eq!(
+        app.pending_question_commands(),
+        vec![Command::ApprovalQuestion {
+            session_id: "s1".into(),
+            approval_id: "a1".into()
+        }]
+    );
+    let question = json!({
+        "session_id":"s1",
+        "approval_id":"a1",
+        "capability":"fs.write",
+        "scope":"{}",
+        "reason":"write",
+        "text":"请求你的授权：fs.write。请只回复以下选项之一：允许一次 / 本任务允许 / 拒绝",
+        "options":["允许一次","本任务允许","拒绝"]
+    });
+    app.apply_approval_question("s1", question.clone()).unwrap();
+    assert_eq!(
+        app.selected().unwrap().approval_questions.get("a1"),
+        Some(&question)
+    );
+    assert!(app.pending_question_commands().is_empty());
+    // Text that is not exactly an option stays a normal draft and sends no
+    // approval command.
+    app.input.insert("已批准");
+    assert!(
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .iter()
+            .all(|command| !matches!(command, Command::Reply { .. }))
+    );
 }
 
 #[test]

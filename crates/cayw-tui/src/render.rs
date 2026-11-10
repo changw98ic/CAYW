@@ -267,36 +267,45 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 append(&mut lines, status, inner.width, Color::Gray);
             }
             for approval in &session.approvals {
-                let details = if approval["input"].is_object() {
-                    &approval["input"]
-                } else {
-                    approval
-                };
+                let id = string(approval, "id");
                 append(
                     &mut lines,
-                    &format!(
-                        "Approval {} · {}",
-                        string(approval, "id"),
-                        string(details, "capability")
-                    ),
+                    "询问 · 需要你的回答",
                     inner.width,
                     Color::Yellow,
                 );
-                append(
-                    &mut lines,
-                    &format!(
-                        "Scope: {}\nReason: {}",
-                        string(details, "scope"),
-                        string(details, "reason")
+                match session.approval_questions.get(id) {
+                    Some(question) => {
+                        append(
+                            &mut lines,
+                            string(question, "text"),
+                            inner.width,
+                            Color::Reset,
+                        );
+                        let options = question["options"]
+                            .as_array()
+                            .map(|options| {
+                                options
+                                    .iter()
+                                    .filter_map(|option| option.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" / ")
+                            })
+                            .unwrap_or_default();
+                        append(&mut lines, &options, inner.width, Color::Yellow);
+                    }
+                    None => append(
+                        &mut lines,
+                        "正在读取这条询问的完整选项…",
+                        inner.width,
+                        Color::Gray,
                     ),
-                    inner.width,
-                    Color::Reset,
-                );
+                }
                 append(
                     &mut lines,
-                    "Alt+O allow once · Alt+T allow this task · Alt+D deny",
+                    "Alt+O 允许一次 · Alt+T 本任务允许 · Alt+D 拒绝；也可直接输入选项后回车",
                     inner.width,
-                    Color::Yellow,
+                    Color::Gray,
                 );
             }
             if lines.is_empty() {

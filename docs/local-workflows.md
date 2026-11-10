@@ -6,7 +6,7 @@
 
 一台设备只运行一个本地 Client。所有工作区共享它的 IPC 地址、访问码、连接、重连和进程监管。工作区不保存自己的连接状态或 Runtime 地址。
 
-每个工作区仍有独立的规范目录、SQLite、Session、模型方案、MCP/Pi 实例和架构插件启用关系。Client 在进程内打开这些工作区，并按 `workspace_id` 路由请求。一个页面选择工作区，不会改变其他页面的选择，也不会把已经提交的任务换到另一个工作区。
+每个工作区仍有独立的规范目录、SQLite、Session、模型选用、MCP/Pi 实例和架构插件启用关系。模型方案本身是设备上一份列表。Client 在进程内打开这些工作区，并按 `workspace_id` 路由请求。一个页面选择工作区，不会改变其他页面的选择，也不会把已经提交的任务换到另一个工作区。
 
 ```sh
 cd /你的项目
@@ -45,7 +45,9 @@ Client、TUI 和 WebUI 不要求先配置模型。启动不发送模型请求，
 cayw conf --workspace /你的项目
 ```
 
-`cayw conf` 是本地产品唯一的首次模型配置命令。没有 `cayw configure` 兼容入口。它把当前工作区的 `configured` 方案写入私有 `models.json` 并选中该方案。模型字段包括服务、API、模型名称、端点、版本、输出上限和可选 `api_key`。新建方案时密钥可以留空，表示服务不需要认证。编辑已有方案时，同一服务地址下留空会保留原密钥；删除必须明确选择清除。更换服务或端点时必须填写新密钥或明确清除，旧密钥不会自动转移。填写后，密钥以明文保存在普通本地文件中。CAYW 不使用 Keychain、加密或 OAuth。
+`cayw conf` 是本地产品唯一的首次模型配置命令。没有 `cayw configure` 兼容入口。它把 `configured` 方案写入设备上的私有 `<CAYW_HOME>/models.json`（权限 0600），把设备默认设为这个方案，并把当前工作区的选用设为它。各工作区的选用写在自己的 `model-selection.json`，里面只有方案名。没有这份文件时跟随设备默认，读取时不补写。`cayw models use` 只改当前工作区的选用，不改设备默认。新建工作区跟随设备默认；已有工作区保留自己的选用。
+
+模型字段包括服务、API、模型名称、端点、版本、输出上限、可选 `context_window`、可选 tokenizer 标识和可选 `api_key`。`context_window` 是 1 到 10000000 的模型 token 数。不填时字段保持空缺，迁移不会补上默认值。`cayw conf` 会询问上下文窗口，建议值是 128000，也会询问可留空的 tokenizer。新建方案时密钥可以留空，表示服务不需要认证。编辑已有方案时，同一服务地址下留空会保留原密钥；删除必须明确选择清除。更换服务或端点时必须填写新密钥或明确清除，旧密钥不会自动转移。填写后，密钥以明文保存在普通本地文件中。CAYW 不使用 Keychain、加密或 OAuth。没有模型时，启动不创建 `models.json`。
 
 模型方案示例：
 
@@ -74,7 +76,9 @@ cayw models remove unused --workspace /你的项目
 
 如果先前模型请求已经发出，但 Runtime 没有收到完整用量，原 token 预留和未知费用继续保留。TUI 和 WebUI 会在发送下一条消息前显示精确的未知请求数量、原预留、一次性新增额度和累计上限。用户确认前不会创建 Task。确认后才按 `task.enqueue`、`model.budget.continue`、`task.resume` 的顺序执行；拒绝会保留草稿。授权失败时只取消刚创建且尚未派发的 Task，不能把额度转给另一个任务。
 
-本地 `config.json.model` 不是长期配置源。发现旧字段时，Client 把它单向迁移到当前工作区的 `models.json`，然后删除旧字段。已有选中方案优先，损坏的旧字段不会覆盖它。
+本地 `config.json.model` 不是长期配置源。发现旧的工作区 `models.json` 或这个字段时，Client 单向合并进设备列表。内容完全相同的方案只保留一份；同名但内容不同时，后出现的改名为 `name-2`、`name-3`。设备列表、各工作区选用和去掉 `model` 字段的配置都写成功之后，才删除旧的工作区 `models.json`。中途失败就保留旧文件。当前工作区已有选用时，损坏的 `config.json.model` 只被去掉，不覆盖选用；没有选用时，损坏字段会使这次迁移失败，并且不改文件。可用的旧字段会以 `configured` 这个名字进入设备列表；已有选用不变。
+
+可发现的本地 Client 启动时会打开主 session 工作区。目录默认是 `$HOME/CodeAsYouWish`。绝对路径 `CAYW_MAIN_SESSION` 优先，其次是设备配置里的绝对路径 `main_session_dir`。`cayw init` 和 `cayw conf` 不创建这个目录。目录不存在且上级目录存在时，Client 按 0700 创建。已有目录读不了就原地报错，不重新创建。这个工作区里没有会话时新建一个，标签是「主 session」，并把同一个 id 写在该工作区状态目录的 `main-session.json`。已有这份记录时继续用它，不另建会话。完整显式 Headless 不读设备模型列表，也不创建这个目录。
 
 完整显式 Headless 是另一条系统边界：同时提供 `--db`、`--token-env` 和 `--config` 时，不读写默认数据根，`--config` 中的 `model` 是唯一模型来源，本地 Settings 接口不可用。它仍使用相同的可选明文 `api_key` 字段。
 

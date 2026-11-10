@@ -131,6 +131,11 @@ impl CallScope {
                 .map_err(known)?;
         }
         self.request.check(&self.context)?;
+        // Recovery points are internal evidence and never a capability. A
+        // failure warns and continues; it must not block the authorized call.
+        if let Some(recovery) = &self.context.inner.recovery {
+            let _ = recovery.before_capability(&self.context.task.id, &self.name, &self.arguments);
+        }
         if crate::processes::is_process(&self.name) {
             self.context
                 .inner
@@ -480,6 +485,17 @@ impl CellBackend for Backend {
         cancel: CancellationToken,
     ) -> Result<cayw_cells::BackendResponse, CapabilityError> {
         self.verify(execution).map_err(known)?;
+        if self.context.inner.config.main_session
+            && self
+                .context
+                .inner
+                .memory
+                .model_write_blocked(name, &arguments)
+        {
+            return Err(CapabilityError::new(
+                "main session memory/ is read-only for model file capabilities",
+            ));
+        }
         self.context
             .activity
             .resume_cell(&self.context, &execution.cell_id, &cancel)
@@ -574,6 +590,9 @@ impl CellBackend for Backend {
             }
             Ok(()) if crate::results::is_tool(name) => {
                 crate::results::invoke(&scope, &self.base, arguments, cancel).await
+            }
+            Ok(()) if crate::work_tools::is_tool(name) => {
+                crate::work_tools::invoke(&scope, &self.base, arguments, cancel).await
             }
             Ok(())
                 if crate::children::is_capability(name)

@@ -39,6 +39,14 @@ pub struct HeadlessConfig {
     vision: Option<cayw_vision::Limits>,
     /// Optional Pi extension compatibility host options.
     pi_compat: Option<PiCompatConfig>,
+    /// Optional main-session workspace directory for the discoverable local Client.
+    /// Fully explicit Headless ignores this field and does not create the directory.
+    #[serde(default)]
+    main_session_dir: Option<PathBuf>,
+    /// Targets the user has configured for `notify.send`. Read only from this
+    /// private, model-unwritable file; absent configuration means no target.
+    #[serde(default)]
+    notification_targets: Vec<String>,
 }
 
 /// Configuration for the optional Pi extension compatibility host (`cayw-pi-compat`).
@@ -179,12 +187,28 @@ impl HeadlessConfig {
                 "mcp_servers_file must be an absolute existing regular file",
             ));
         }
+        for target in &config.notification_targets {
+            if target.trim().is_empty()
+                || target.len() > 256
+                || target.chars().any(char::is_control)
+            {
+                return Err(invalid(
+                    "notification_targets must contain 1..256 ordinary bytes each",
+                ));
+            }
+        }
         Ok(config)
     }
 
     /// Explicit model selection, without reading credentials or making a request.
     pub fn model(&self) -> Option<&ProviderConfig> {
         self.model.as_ref()
+    }
+
+    /// Directory override for the discoverable Client's main session.
+    /// `CAYW_MAIN_SESSION` still wins. Explicit Headless does not use this.
+    pub fn main_session_dir(&self) -> Option<&Path> {
+        self.main_session_dir.as_deref()
     }
 
     /// External MCP servers config file for the product import → prepare → Registry path.
@@ -229,6 +253,7 @@ impl HeadlessConfig {
             resources: self.resources,
             content: self.content,
             background: self.background,
+            notification_targets: self.notification_targets,
             ..RuntimeConfig::default()
         };
         if let Some(bg) = &config.background {

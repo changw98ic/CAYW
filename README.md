@@ -73,7 +73,7 @@ return { files = files, matches = matches }
 
 macOS Apple Silicon 发行包解压后，在包目录运行 `sh install.sh` 即可安装 `cayw`、`cayw-tui`、`cayw-webui` 和 `cayw-client`，默认位置为 `~/.local/bin`。用 `--prefix DIR` 改到 `DIR/bin`；目标已有不同程序时需加 `--force`。脚本会核对 `SHA256SUMS`，不联网、不使用 sudo、不修改 shell 配置。`scripts/install-cli.sh` 是发行包安装入口，发布时位于包根目录并命名为 `install.sh`；从源码构建仍需下面的 Cargo 命令。
 
-安装完整发行包后，在项目目录直接运行 `cayw` 即可启动或复用设备上唯一的 Client，并进入 TUI；`cayw start` 是同一入口。TUI 和 WebUI 都由这个 Client 统一连接和监管，不为每个工作区保存独立连接状态。网页是可选界面，使用 `cayw --ui web` 显式启动，本地默认免登录。显式 `--lan IP:PORT` 开放局域网访问，未配置账号时直接放行；在本机网页“设置 → 局域网访问账号”中可配置或修改可选账号，保存后立即应用于当前局域网入口；本地访问仍免登录。局域网启动同时提供仅回环可达的本机管理地址，普通远端访客不能配置账号。CLI 账户命令保留为备用。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立的目录、SQLite、会话、模型方案和架构插件启用关系。网页“设置”可管理模型方案和本地 External 架构插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再按工作区经显式批准启用；其进程仍由唯一 Client 统一启动和停止。普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
+安装完整发行包后，在项目目录直接运行 `cayw` 即可启动或复用设备上唯一的 Client，并进入 TUI；`cayw start` 是同一入口。TUI 和 WebUI 都由这个 Client 统一连接和监管，不为每个工作区保存独立连接状态。网页是可选界面，使用 `cayw --ui web` 显式启动，本地默认免登录。显式 `--lan IP:PORT` 开放局域网访问，未配置账号时直接放行；在本机网页“设置 → 局域网访问账号”中可配置或修改可选账号，保存后立即应用于当前局域网入口；本地访问仍免登录。局域网启动同时提供仅回环可达的本机管理地址，普通远端访客不能配置账号。CLI 账户命令保留为备用。`--workspace DIR` 选择初始工作区；网页侧栏可连接或切换已经通过 `cayw init --workspace DIR` 登记的项目，旧工作区任务继续运行。各工作区保存独立的目录、SQLite、会话、模型选用和架构插件启用关系。网页“设置”可管理模型方案和本地 External 架构插件；模型切换用于后续任务，运行中任务保留原模型。插件先登记，再按工作区经显式批准启用；其进程仍由唯一 Client 统一启动和停止。普通聊天无需插件。详见[本地工作流](docs/local-workflows.md)。源码打包入口为 `sh scripts/package-cli.sh OUTPUT_DIRECTORY`（macOS arm64）。
 
 
 需要 **Rust 1.95+** 从源码运行离线示例：
@@ -102,12 +102,13 @@ cayw-client create
 cayw-client prompt --session SESSION_ID --text 'Run the offline demo'
 ```
 
-演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。本地产品只通过 `cayw conf` 首次配置模型。它把当前工作区的 `configured` 方案写入私有 `models.json`，并允许把可选密钥作为普通明文字段 `api_key` 保存；新建方案时留空表示模型服务不需要认证。编辑已有方案时，密钥留空会保留同一服务地址的原值，删除密钥需要明确选择清除；更换服务地址时必须提供新密钥或明确清除，旧密钥不会自动转移。启动不会弹出配置向导。旧 `config.json.model` 只在迁移时读取，迁移后删除。只有完整显式 Headless 的 `--config` 继续以 `config.model` 为权威来源。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
+演示只预先授权两个精确文件调用（写入并读取 `cayw-demo.txt`）。本地产品只通过 `cayw conf` 首次配置模型。模型方案写在设备级的 `<CAYW_HOME>/models.json`。各工作区只在自己的 `model-selection.json` 里保存选用。发现旧的工作区 `models.json` 时，Client 单向合并进设备列表，新文件都写成功后才删除旧文件。密钥作为可选普通明文字段 `api_key` 保存；新建方案时留空表示模型服务不需要认证。编辑已有方案时，密钥留空会保留同一服务地址的原值，删除密钥需要明确选择清除；更换服务地址时必须提供新密钥或明确清除，旧密钥不会自动转移。启动不会弹出配置向导。旧 `config.json.model` 只在迁移时读取，迁移后删除。可发现的本地 Client 还会打开主 session 工作区，默认目录是 `$HOME/CodeAsYouWish`，绝对路径 `CAYW_MAIN_SESSION` 优先。只有完整显式 Headless 的 `--config` 继续以 `config.model` 为权威来源，并且不创建主 session 目录。安装、宿主配置、两回合文件任务、审批与取消见[无界面对话指南](docs/headless-chat.md)。
 
 ## 文档与参与
 
 - [架构设计](docs/architecture.md)：组件职责、执行流程与恢复规则。
 - [开发路线图](docs/development-map.md)：交付计划、当前进度与验收记录。
+- [记忆、上下文与主动工作设计](docs/memory-context-work.md)：主 session、WorkItem、上下文压缩、审批询问与恢复点的目标设计。
 - [可视化编辑](docs/visual-editor.md)：HTML/CSS、Vite React 与 Vue 3 页面的直接编辑和源码保存。
 - [贡献指南](CONTRIBUTING.md)：开发环境、构建、测试与提交要求。
 - [AI 编程助手说明](AGENTS.md)：在本仓库工作时需要遵守的规则。

@@ -407,7 +407,9 @@ impl Server {
             .arg(&workspace)
             .args(["--listen", "127.0.0.1:0", "--offline"])
             .env_clear()
+            .env("HOME", root)
             .env("CAYW_HOME", root.join("cayw-home"))
+            .env("CAYW_MAIN_SESSION", root.join("main-session"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -904,7 +906,7 @@ async fn run_conf(workspace: &Path, config: &Path) -> std::process::Output {
         .spawn()
         .unwrap();
     if let Some(mut input) = child.stdin.take() {
-        let _ = input.write_all(b"1\n\n\nfixture-model\n\n\n\n").await;
+        let _ = input.write_all(b"1\n\n\nfixture-model\n\n\n\n\n\n").await;
     }
     tokio::time::timeout(WATCHDOG, child.wait_with_output())
         .await

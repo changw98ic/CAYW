@@ -79,7 +79,8 @@ def main():
         workspace = root / 'workspace'
         workspace.mkdir()
         installed = home / '.local/bin'
-        env = {'PATH': os.environ['PATH'], 'HOME': str(home), 'CAYW_HOME': str(state)}
+        env = {'PATH': os.environ['PATH'], 'HOME': str(home), 'CAYW_HOME': str(state),
+               'CAYW_MAIN_SESSION': str(root / 'main-session')}
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
         def command(args, good=True):

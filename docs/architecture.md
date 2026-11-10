@@ -57,7 +57,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | 形态 | 必需组成 | 可选接入 | 权威内容与限制 |
 | --- | --- | --- | --- |
 | Core Only | Runtime、持久化 Core、Agent/Provider、Cells/CodeMode、宿主受控能力及所需 Device 底座 | 独立 Rust API 客户端；需要进程边界时使用显式 Headless IPC | 不读取本地 Client 状态；显式 `--config` 中的模型是权威配置；不需要 UI/Server/VerifyTool/工作流 |
-| Local | 一台设备上的唯一 Client，以及由它路由的一个或多个工作区 Runtime | 由 Client 监管的 TUI、WebUI 和工作区架构 plugin | 所有工作区共享 Client 的 IPC 地址、访问码、连接、重连和进程监管；每个工作区仍保留独立目录、SQLite、模型方案、MCP/Pi 实例和架构 plugin 启用关系 |
+| Local | 一台设备上的唯一 Client，以及由它路由的一个或多个工作区 Runtime | 由 Client 监管的 TUI、WebUI 和工作区架构 plugin | 所有工作区共享 Client 的 IPC 地址、访问码、连接、重连和进程监管；每个工作区仍保留独立目录、SQLite、模型选用、MCP/Pi 实例和架构 plugin 启用关系；模型方案列表的目标位置是设备级（见本地模型配置） |
 | Remote | Device 上的同一运行底座，外加远程绑定与路由 | 远端 Server、客户端及 TLS 代理 | Device 主动连出，无需对外入站端口；Server 不因转发任务而取得执行或内容权威 |
 
 以下是部署与数据流图，不是每个节点都已完成验收的声明。
@@ -98,7 +98,7 @@ Core Only 是可嵌入库的组合，不要求每个 crate 都成为独立进程
 
 本地产品无需先配置模型。唯一 Client、TUI 和 WebUI 在工作区没有模型时仍可启动，也可创建和查询 Session；第一次执行 `prompt`、`enqueue` 或 `resume` 时才返回 `model_not_configured`。启动过程不弹出模型向导。`cayw conf` 是唯一交互式首次配置入口，不保留 `cayw configure`。
 
-每个工作区的 `models.json` 是本地模型配置的唯一权威文件。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。新建方案时省略密钥表示模型服务不需要认证。编辑已有方案时，同一 `service`、`api`、`base_url` 和 `api_version` 下省略密钥保留原值；可用 `credential: keep/replace/remove` 显式控制凭据，兼容 `clear_api_key: true` 或 `api_key: null` 删除。删除不能同时提供新密钥，`clear_api_key` 不能与 keep/replace 冲突。凭据目标改变时，必须提供新密钥或显式清除，不能把旧密钥静默搬到新地址。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
+本地模型方案的目标权威位置是设备级的 `<CAYW_HOME>/models.json`：所有工作区（包括主 session 工作区）共用这一份列表，各自的选用保存在 `<CAYW_HOME>/workspaces/<目录摘要>/model-selection.json`。当前实现仍把方案和选用写在每个工作区的 `models.json`；切换时把方案单向合并进设备列表、把选用写入上述文件后删除旧文件，不保留按工作区的配置路径（见[记忆、上下文与主动工作设计](memory-context-work.md#设备模型列表)）。旧 `config.json.model` 只允许单向迁移，迁移完成后删除旧字段；已有选中方案优先于旧字段。模型密钥使用可选普通字段 `api_key`，可以明文保存在权限为 0600 的本地私有文件中；不使用 Keychain、加密、OAuth、`api_key_env` 或进程环境回填。新建方案时省略密钥表示模型服务不需要认证。编辑已有方案时，同一 `service`、`api`、`base_url` 和 `api_version` 下省略密钥保留原值；可用 `credential: keep/replace/remove` 显式控制凭据，兼容 `clear_api_key: true` 或 `api_key: null` 删除。删除不能同时提供新密钥，`clear_api_key` 不能与 keep/replace 冲突。凭据目标改变时，必须提供新密钥或显式清除，不能把旧密钥静默搬到新地址。启动输出、doctor、Settings RPC、Headless 客户端运行信息和公开模型视图都不能回显密钥。
 
 完全显式 Headless 与本地 Client 状态分开。显式 `--db`、`--token-env` 和 `--config` 运行只使用该配置中的 `model`，不读取或创建 `CAYW_HOME` 下的工作区模型状态。
 
@@ -107,7 +107,9 @@ Core Only 是可嵌入库的组合，不要求每个 crate 都成为独立进程
 | 身份 | 含义与生命周期 | 不可混用的标识 |
 | --- | --- | --- |
 | Client | 一台设备唯一的本地连接与进程监管者；持有共享 IPC 地址、访问码、重连和工作区路由 | 不等于工作区、Runtime、Session 或某个 TUI/WebUI 进程 |
-| Workspace | 独立目录、SQLite、Runtime、模型方案、MCP/Pi 实例和架构 plugin 启用关系 | 不持有独立 Client 连接状态、IPC 地址或 plugin 进程监管权 |
+| Workspace | 独立目录、SQLite、Runtime、模型选用、MCP/Pi 实例和架构 plugin 启用关系 | 不持有独立 Client 连接状态、IPC 地址或 plugin 进程监管权 |
+| 主 session（目标设计） | 默认工作区 `~/CodeAsYouWish` 中长期存在的用户入口；负责对话、记忆、工作路由、询问和结果交付 | 不是 Client，也不是第二个数据根；不直接操作其他工作区的文件 |
+| WorkItem（目标设计） | 主 session 工作区中的一项持续工作，关联多次 Task、Session、等待和交付 | 不等于 Task 或 Session；Task 结束、Session idle 都不代表工作完成 |
 | Session | 持久对话、历史、游标、待处理义务与来源关系；可以跨进程退出继续存在 | 不等于一次模型请求、Worker 或 PID |
 | Task | 一次显式 prompt/任务准入，绑定 Session、意图、队列与预算 | 断线续读不是新 Task；重新提交可能产生新副作用 |
 | Attempt | Task 的一次受围栏执行；lease 含 `session_id/attempt_id/worker_id/fence` | 旧 attempt 不能更新新执行，fence 必须随接管推进 |
@@ -133,6 +135,17 @@ Provider 接收明确的模型请求和取消令牌，返回文本、思考、�
 Agent 的内存历史由 Runtime 与持久记录衔接。上下文包含消息、已配对工具结果、显式系统/能力说明及本轮选取的技能内容；不默认把所有 Skills、Schema 或代码库灌入每轮。Runtime 在共享预算准入通过后，才构造本次 Provider 输入；旧用量未知时，必须先有绑定新 Task 的宿主有限额度授权，原未知预留继续保留。失败的 assistant 和因输出截断而未执行的工具提议，以明确的 Runtime 失败说明发送；原消息、参数错误、配对结果和事件均保留。截断调用须有同序、已知且未执行的错误结果，并核对 Core 的 `ToolStarted`，包括 Fork 原历史中的执行事实；发生过执行或结果未知时拒绝省略。已经执行的工具调用和结果完整保留，这条输入投影不重放旧 Task，也不释放未知模型预留。长会话读取优化、裁剪/摘要策略仍需验证，不得为缩短上下文丢弃调用配对、原始执行证据或未知状态。依赖快照冻结的是执行读取依据，不等同完整对话快照或冻结外部文件系统。
 
 早期有限 Magpie 记录仅证明原始 Agent 循环的相应场景；当前持久化模型全链、协议兼容矩阵与模型真实任务成本分别按 [#6](https://github.com/changw98ic/CAYW/issues/6)、[#10](https://github.com/changw98ic/CAYW/issues/10) 验收。参见[原始内核说明](rust-pi-core.md)、[Provider 代码](../crates/cayw-ai/src/providers/openai.rs)和[适配器边界](../crates/cayw-providers/README.md)。
+
+## 主 session、上下文管理与恢复点（目标设计）
+
+本节是目标约束，尚未实现；完整设计见[记忆、上下文与主动工作设计](memory-context-work.md)。
+
+- 主 session 是默认工作区 `~/CodeAsYouWish` 中长期存在的用户入口。它的状态与其他工作区一样位于 `CAYW_HOME/workspaces/<目录摘要>/`，不形成第二个数据根。它只操作自己的工作区；其他工作区的工作派给对应的执行 session，并经唯一 Client 路由。
+- WorkItem 保存在主 session 工作区。被派工的工作区只在 Task 上记录 `work_id` 和唯一的 `dispatch_key`，重复派工返回原 Task。只有程序核对的结果或用户确认才能把验收记为通过；模型自报不算。
+- 上下文管理是 Runtime 内置组件，不是 plugin。它接在现有的请求准备链上，用持续摘要、后台压缩和本地装配控制输入大小；装配不拆开调用与结果，不改写原始记录和 unknown 状态。JEv plugin 以后可以提供增强压缩，失败时回退到内置组件。
+- 摘要、压缩、记忆写入和 Dream 的模型调用是单独的维护请求类别：只记这次调用的用量上界，不设用量上限；在途记录和未知用量不阻塞前台，用量计入来源 session 的预算树。维护请求没有执行 lease 和 Task，不能直接复用 `reconcile_model_request`，需要独立的核对入口。用户说忘掉后，以后不再使用那段内容，日志不擦除。
+- 需要询问的操作由主 session 在对话中询问用户。放行只来自用户设定的放行规则或用户的回答；规则放行沿用精确能力名和完整参数匹配，并记录规则编号和版本。现有的 `RuntimeConfig.permissions` 只做每次调用的精确预授权，不保存规则版本。模型、plugin 或工具输出中的“批准”仍只是数据。
+- Git 恢复点使用 CAYW 私有的快照仓库，不在用户目录创建 `.git`，也不读写用户自己的仓库。它是程序内部步骤，不向模型开放 Git 命令，也不改变 Host 为模型提供 Git 能力的配置要求。没有 Git 时警告并继续工作。
 
 ## 一轮持久执行
 

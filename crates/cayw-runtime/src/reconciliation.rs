@@ -161,9 +161,78 @@ impl Runtime {
         id: &str,
         messages: &[Message],
     ) -> Result<Vec<Message>, RuntimeError> {
-        if !messages.iter().any(needs_input_notice) {
-            return Ok(messages.to_vec());
+        let projected = self.projected_model_input(id, messages)?;
+        let (window, output) = {
+            let selected = crate::lock(&self.inner.selection);
+            (
+                selected.model.context_window,
+                selected
+                    .model
+                    .max_output_tokens
+                    .unwrap_or(cayw_context::DEFAULT_OUTPUT_RESERVE),
+            )
+        };
+        crate::session_context::prepare_provider_input(
+            &self.inner.context,
+            id,
+            &projected,
+            window,
+            output,
+        )
+    }
+
+    fn projected_model_input(
+        &self,
+        id: &str,
+        messages: &[Message],
+    ) -> Result<Vec<Message>, RuntimeError> {
+        if messages.iter().any(needs_input_notice) {
+            self.project_failed_input(id, messages)
+        } else {
+            Ok(messages.to_vec())
         }
+    }
+
+    /// The main session keeps durable memory, preferences, the current request
+    /// and active work. It evicts older raw turns at the threshold instead of
+    /// running cumulative compression.
+    pub(crate) fn main_session_input_messages(
+        &self,
+        id: &str,
+        messages: &[Message],
+    ) -> Result<Vec<Message>, RuntimeError> {
+        let projected = self.projected_model_input(id, messages)?;
+        let (window, output) = {
+            let selected = crate::lock(&self.inner.selection);
+            (
+                selected.model.context_window,
+                selected
+                    .model
+                    .max_output_tokens
+                    .unwrap_or(cayw_context::DEFAULT_OUTPUT_RESERVE),
+            )
+        };
+        let forgotten = self.inner.memory.forgotten_ranges()?;
+        let forgotten_messages = if forgotten.is_empty() {
+            Vec::new()
+        } else {
+            let events = self.session_events(id)?;
+            crate::main_memory::forgotten_messages(&forgotten, &events)
+        };
+        crate::main_memory::prepare_main_session_input(
+            &self.inner.memory,
+            &projected,
+            window,
+            output,
+            &forgotten_messages,
+        )
+    }
+
+    fn project_failed_input(
+        &self,
+        id: &str,
+        messages: &[Message],
+    ) -> Result<Vec<Message>, RuntimeError> {
         let snapshot = self.inner.store.snapshot(id)?;
         if snapshot.state == SessionState::NeedsReconciliation
             || snapshot

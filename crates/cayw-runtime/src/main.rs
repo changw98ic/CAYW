@@ -21,9 +21,15 @@ use cayw_runtime::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, error::Error, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-const USAGE: &str = "cayw [--workspace DIR] [--offline]                 # defaults to TUI\ncayw --ui web [--workspace DIR] [--no-open]       # optional local WebUI\ncayw --ui web --lan IP:PORT [--account-file FILE] # LAN access; account optional\ncayw account --username NAME [--workspace DIR]\ncayw start [--workspace DIR] [--ui web|tui|none] [--offline]\ncayw models --help\ncayw plugins --help\ncayw init [--workspace DIR]\ncayw conf [--workspace DIR] [--config PATH]\ncayw doctor [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nUsing default locations automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nOne local Client owns the shared IPC endpoint, reconnect state, workspace routing and UI/plugin process supervision. Local discovery uses <CAYW_HOME>/client.json.\nThe workspace defaults to the current directory. Each workspace keeps its own SQLite database, models.json, Runtime, Sessions, MCP/Pi instances and architecture plugin activation state.\ninit creates private Client/workspace state and the workspace database without starting a service. Existing files are kept.\nserve also initializes automatically when it uses default locations and joins the same device-wide Client state.\nA serve with explicit --db, --token-env and --config is a separate Headless boundary: it does not read or create HOME/CAYW_HOME state, live settings are unavailable and --config is authoritative.\nRun `cayw` to start or reuse the unique Client, open the current workspace and show TUI. `cayw tui` remains an attach-only command. WebUI starts only with --ui web. Local browser access has no login; explicit --lan allows network access without login unless an optional password account is configured.\nRun `cayw conf` to set up the current workspace model in its private models.json. It is the only interactive first-time model setup command. Use `cayw conf --config PATH` only for a fully explicit Headless configuration.\nStartup never opens a model setup wizard. Without a model, Client, TUI and WebUI still start and Sessions can be created or queried; prompt, enqueue and resume return model_not_configured before task admission.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens and an optional plain-text api_key. Omitting api_key selects a service that needs no authentication.\nStarting the Client or a UI and creating Sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nClient and Headless IPC bind loopback only. Disconnects cancel that connection's in-flight prompts.";
+const USAGE: &str = "cayw [--workspace DIR] [--offline]                 # defaults to TUI\ncayw --ui web [--workspace DIR] [--no-open]       # optional local WebUI\ncayw --ui web --lan IP:PORT [--account-file FILE] # LAN access; account optional\ncayw account --username NAME [--workspace DIR]\ncayw start [--workspace DIR] [--ui web|tui|none] [--offline]\ncayw models --help\ncayw plugins --help\ncayw init [--workspace DIR]\ncayw conf [--workspace DIR] [--config PATH]\ncayw doctor [--workspace DIR] [--config PATH]\ncayw tui [--workspace DIR]\ncayw serve [--workspace DIR] [--db PATH] [--listen 127.0.0.1:PORT] [--token-env ENV] [--config PATH] [--offline] [--demo-authorized] [--pi-compat]\n\nUsing default locations automatically initializes ~/.cayw (override with an absolute CAYW_HOME).\nOne local Client owns the shared IPC endpoint, reconnect state, workspace routing and UI/plugin process supervision. Local discovery uses <CAYW_HOME>/client.json.\nThe workspace defaults to the current directory. Each workspace keeps its own SQLite database, model selection, Runtime, Sessions, MCP/Pi instances and architecture plugin activation state. Model profiles are one device list at <CAYW_HOME>/models.json. The discoverable Client also opens the main-session workspace at $HOME/CodeAsYouWish. An absolute CAYW_MAIN_SESSION wins; otherwise an absolute main_session_dir in the device config is used.\ninit creates private Client/workspace state and the workspace database without starting a service. Existing files are kept.\nserve also initializes automatically when it uses default locations and joins the same device-wide Client state.\nA serve with explicit --db, --token-env and --config is a separate Headless boundary: it does not read or create HOME/CAYW_HOME state, live settings are unavailable and --config is authoritative.\nRun `cayw` to start or reuse the unique Client, open the current workspace and show TUI. `cayw tui` remains an attach-only command. WebUI starts only with --ui web. Local browser access has no login; explicit --lan allows network access without login unless an optional password account is configured.\nRun `cayw conf` to set up the device model list and select it for the current workspace. It is the only interactive first-time model setup command. Use `cayw conf --config PATH` only for a fully explicit Headless configuration; that path does not read the device model list.\nStartup never opens a model setup wizard. Without a model, Client, TUI and WebUI still start and Sessions can be created or queried; prompt, enqueue and resume return model_not_configured before task admission.\nA model object specifies service, api, id, base_url, api_version, max_output_tokens, context_window, an optional tokenizer id and an optional plain-text api_key. Omitting api_key selects a service that needs no authentication. context_window is the model context window in tokens; omitting it leaves the field absent.\nStarting the Client or a UI and creating Sessions make no model request.\n--config also reads host-owned budgets, fixed process profiles, exact permissions, request policy, optional web_access / vision / pi_compat options and an absolute mcp_servers_file. Profiles and request scopes alone grant no permission.\nOffline mode is explicit and uses a synthetic provider with real bounded Luau and Host file operations.\n--demo-authorized requires --offline and grants only the two exact demo file calls.\nClient and Headless IPC bind loopback only. Disconnects cancel that connection's in-flight prompts.";
 
 pub(crate) struct WorkspaceHost {
     runtime: Arc<Runtime>,
@@ -320,6 +326,36 @@ impl RpcHandler for CliRpcHandler {
     }
 }
 
+/// Open the main-session workspace and remember its one session before IPC accepts traffic.
+/// Fully explicit Headless never reaches this; `init` and `conf` return earlier.
+async fn open_main_session(
+    handler: &CliRpcHandler,
+    configured: Option<&Path>,
+) -> Result<(), Box<dyn Error>> {
+    let directory = cayw_runtime::local_cli::prepare_main_session_directory(configured)?;
+    let paths = LocalPaths::from_environment(&directory)?;
+    paths.initialize()?;
+    let workspaces = handler
+        .workspaces
+        .as_ref()
+        .expect("discoverable Client owns workspace routing");
+    let id = workspaces.id_for(&paths.workspace);
+    workspaces
+        .call(
+            "settings.workspaces.open",
+            json!({"id": id}),
+            CancellationToken::new(),
+        )
+        .await?;
+    let host = workspaces.host(&id).await?;
+    cli_settings::ensure_main_session(&host.runtime, &paths)?;
+    // The main session can dispatch, pause, stop and observe Tasks in the
+    // Client's registered workspaces. The router owns only a weak reference to
+    // the Client catalog, so shutdown is not held open by the Runtime.
+    host.runtime.set_work_router(workspaces.work_router())?;
+    Ok(())
+}
+
 async fn shutdown_handler(handler: &CliRpcHandler) -> Result<(), Box<dyn Error>> {
     let client_cleanup = match handler.client_plugins.as_ref() {
         Some(plugins) => plugins.shutdown().await.map_err(|error| error.to_string()),
@@ -468,10 +504,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let config_file =
         explicit_config.or_else(|| local.as_ref().map(|paths| paths.config_file.clone()));
     let settings_paths = local.as_ref().cloned();
-    if let (Some(paths), Some(path)) = (settings_paths.as_ref(), config_file.as_ref())
-        && path.try_exists()?
-    {
-        cli_settings::migrate_legacy_model(paths, path)?;
+    if let Some(paths) = settings_paths.as_ref() {
+        cli_settings::migrate_device_models(paths)?;
     }
     let mut headless = match config_file.as_ref() {
         Some(path) if !configure_only || path.try_exists()? => HeadlessConfig::load(path)?,
@@ -488,7 +522,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 (
                     configured,
                     cli_settings::selected_model(paths)?.is_some(),
-                    paths.state_file("models.json"),
+                    paths.data_dir.join("models.json"),
                     "models_file",
                 )
             } else {
@@ -509,7 +543,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         report[path_kind] = json!(output_path);
         println!("{report}");
         if activation["error"].is_string() {
-            return Err(format!("模型方案已保存，但运行服务的应用结果未确认：{}。请核对当前工作区的 models.json 和 Client 状态，再决定是否重试或重启。", activation["error"].as_str().unwrap_or("unknown activation error")).into());
+            return Err(format!("模型方案已保存，但运行服务的应用结果未确认：{}。请核对设备模型列表和 Client 状态，再决定是否重试或重启。", activation["error"].as_str().unwrap_or("unknown activation error")).into());
         }
         return Ok(());
     }
@@ -521,8 +555,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .or_else(|| local.as_ref().map(|paths| paths.database.clone()))
         .expect("explicit or local database");
     if initialize_only {
-        let config = headless.clone().into_runtime_config()?;
+        let mut config = headless.clone().into_runtime_config()?;
         let paths = local.as_ref().expect("local initialization paths");
+        config.recovery = Some(cayw_runtime::recovery_points::RecoveryConfig {
+            data_dir: Some(paths.data_dir.clone()),
+            ..Default::default()
+        });
+        if let Some(warning) =
+            cayw_runtime::recovery_points::availability_warning(&paths.workspace, paths.state_dir())
+        {
+            eprintln!("{warning}");
+        }
         let runtime = Runtime::open(
             &db,
             &workspace,
@@ -530,6 +573,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
             Model::new("unconfigured", "unconfigured"),
             config,
         )?;
+        if let Err(error) = runtime.create_recovery_point() {
+            eprintln!("首次恢复点未能建立：{error}；工作继续");
+        }
         drop(runtime);
         if headless.model().is_none() && !stored_model_configured {
             eprintln!("{}", local_model_setup_hint(paths));
@@ -556,8 +602,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if pi_compat {
         headless.enable_pi_compat();
     }
+    let main_session_override = headless.main_session_dir().map(PathBuf::from);
     let selected = match settings_paths.as_ref() {
-        Some(paths) => cli_settings::selected_model(paths)?,
+        Some(paths) => {
+            let choice = cli_settings::model_choice(paths)?;
+            if let Some(message) = choice.fallback {
+                eprintln!("{message}");
+            }
+            choice.model
+        }
         None => headless.model().cloned(),
     };
     if offline && selected.is_some() {
@@ -585,6 +638,37 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let mcp_servers_file = headless.mcp_servers_file().map(PathBuf::from);
     let pi_compat_cfg = headless.pi_compat().cloned();
     let mut config = headless.into_runtime_config()?;
+    if let Some(paths) = local.as_ref() {
+        // The discoverable local Client owns the device rule file. A fully
+        // explicit Headless process has no `local` state and keeps
+        // approval.decide as its only release path.
+        config.approval_rules = Some(cayw_runtime::device_rules(&paths.data_dir));
+        config.main_session =
+            cayw_runtime::local_cli::main_session_directory(main_session_override.as_deref())
+                .ok()
+                .and_then(|directory| std::fs::canonicalize(directory).ok())
+                .is_some_and(|directory| directory == paths.workspace);
+        // The discoverable local Client enables private Git recovery by
+        // default. Fully explicit Headless keeps its SDK behavior.
+        config.recovery = Some(cayw_runtime::recovery_points::RecoveryConfig {
+            data_dir: Some(paths.data_dir.clone()),
+            ..Default::default()
+        });
+        if let Some(warning) =
+            cayw_runtime::recovery_points::availability_warning(&paths.workspace, paths.state_dir())
+        {
+            eprintln!("{warning}");
+        }
+        // A serve with an explicit --db is a separate persistence boundary,
+        // not the unique local Client. It still creates recovery points, but
+        // file rewrites keep asking instead of receiving the local default.
+        if default_database
+            && cayw_runtime::recovery_points::workspace_enabled(&paths.workspace, paths.state_dir())
+        {
+            config.recovery_scope =
+                Some(cayw_runtime::RecoveryScope::new([paths.workspace.clone()]));
+        }
+    }
     let model_configuration = selected.as_ref().map(|model| model.public_view());
     let (provider, model): (Arc<dyn Provider>, Model) = if let Some(selected) = selected {
         let configured = selected.build()?;
@@ -713,6 +797,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .await;
         }
     };
+    if let Err(error) = runtime.create_recovery_point() {
+        eprintln!("首次恢复点未能建立：{error}；工作继续");
+    }
     #[cfg(feature = "plugins")]
     if let Some(settings) = settings.as_ref()
         && let Err(error) = settings.plugins.restore(&settings.paths, &runtime).await
@@ -813,6 +900,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
         workspaces,
         client_plugins: client_role_plugins,
     });
+    if discoverable
+        && let Err(error) = open_main_session(&handler, main_session_override.as_deref()).await
+    {
+        let primary_error = error.to_string();
+        return match shutdown_handler(&handler).await {
+            Ok(()) => Err(primary_error.into()),
+            Err(cleanup) => {
+                Err(format!("{primary_error}; Client cleanup also failed: {cleanup}").into())
+            }
+        };
+    }
     if discoverable
         && let Err(error) = local_server
             .as_mut()

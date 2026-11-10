@@ -128,7 +128,7 @@ export function messagePresentation(message) {
 }
 
 export function createView(id) {
-  return { id, cursor: 0, snapshot: null, events: [], liveText: '', totalMessages: 0, snapshotAfter: 0, proofEpoch: 0, snapshotEpoch: 0, writes: [], faults: {}, activeAttempt: null };
+  return { id, cursor: 0, snapshot: null, events: [], liveText: '', totalMessages: 0, snapshotAfter: 0, proofEpoch: 0, snapshotEpoch: 0, writes: [], faults: {}, activeAttempt: null, approvalQuestions: {} };
 }
 
 const validLease = lease => object(lease) && ['session_id', 'attempt_id', 'worker_id'].every(key => typeof lease[key] === 'string' && lease[key].length > 0) && safeCursor(lease.fence) && lease.fence > 0;
@@ -152,6 +152,7 @@ const readMethods = new Set([
   'session.context_overview',
   'session.run_inspector',
   'model.budget.status',
+  'approval.question',
   'artifacts.list',
   'artifacts.preview',
   'artifacts.action_list',
@@ -252,7 +253,7 @@ function settleView(view) {
   const faults = { ...view.faults };
   if (idle && covered(faults.reconciliation)) delete faults.reconciliation;
   const writes = view.writes.map(write => write.method === 'session.cancel' && write.cancelled && safeCursor(write.promptReceipt) && write.promptTerminal?.cursor === write.promptReceipt ? { ...write, terminal: write.promptReceipt, terminalEpoch: write.promptTerminal.epoch ?? 0 } : write);
-  return { ...view, faults, activeAttempt: idle && covered(view.activeAttempt) ? null : view.activeAttempt, writes: writes.filter(write => write.phase === 'pending' || (write.method === 'session.cancel' && write.phase === 'uncertain') || !covered(write) || (!idle && write.method !== 'approval.decide')) };
+  return { ...view, faults, activeAttempt: idle && covered(view.activeAttempt) ? null : view.activeAttempt, writes: writes.filter(write => write.phase === 'pending' || (write.method === 'session.cancel' && write.phase === 'uncertain') || !covered(write) || (!idle && write.method !== 'approval.reply')) };
 }
 
 function consumeWriteFact(view, record) {
@@ -271,7 +272,7 @@ function consumeWriteFact(view, record) {
     // An observed attempt still requires its complete original lease. Every
     // cancel also needs its own receipt; a lost cancel may still arrive later.
     const attemptTerminal = next.method === 'session.cancel' && isAttemptTerminal && sameLease(next.lease, terminalLease);
-    const approvalTerminal = next.method === 'approval.decide' && event.type === 'approval_decided' && event.approval?.id === next.approvalId && event.approval?.attempt_id === next.lease?.attempt_id;
+    const approvalTerminal = next.method === 'approval.reply' && event.type === 'approval_decided' && event.approval?.id === next.approvalId && event.approval?.attempt_id === next.lease?.attempt_id;
     if (attemptTerminal || approvalTerminal) next.terminal = record.cursor;
     return next;
   });
@@ -337,9 +338,11 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
   }
   // A Core snapshot may predate the runtime binding view. Its missing metadata
   // never clears an explicit frozen rejection, even at the same durable cursor.
+  const pendingIds = new Set(array(snapshot.pending_approvals).map(approval => approval.id).filter(id => typeof id === 'string'));
   return settleView({
     ...view,
     faults,
+    approvalQuestions: Object.fromEntries(Object.entries(view.approvalQuestions ?? {}).filter(([id]) => pendingIds.has(id))),
     activeAttempt: object(snapshot.attempt) && !sameLease(snapshot.attempt,view.activeAttempt?.lease) ? { lease:snapshot.attempt, after:snapshot.cursor, terminal:null } : view.activeAttempt,
     snapshot: { ...snapshot, messages: snapshot.messages.slice(-MAX_MESSAGES) },
     totalMessages: snapshot.messages.length,
@@ -431,7 +434,7 @@ function boot() {
     'login-panel', 'login-form', 'login-error', 'login-button', 'username', 'password', 'account-fields', 'workspace', 'logout', 'connection-status',
     'create-form', 'session-label', 'session-device', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
-    'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
+    'blocked-notice', 'blocked-text', 'open-fork', 'live-section', 'live-text', 'event-log', 'event-count',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork',
     'model-budget-dialog', 'model-budget-form', 'model-budget-summary', 'model-budget-confirm', 'model-budget-error', 'continue-model-budget', 'close-model-budget',
@@ -1440,7 +1443,6 @@ function boot() {
     ui['password'].value = '';
     ui['messages'].replaceChildren();
     ui['event-log'].replaceChildren();
-    ui['approvals'].replaceChildren();
     ui['live-text'].textContent = '';
     ui['session-list'].replaceChildren();
     ui['session-picker'].open = true;
@@ -1577,7 +1579,6 @@ function boot() {
     ui['blocked-notice'].hidden = !attention;
     ui['open-fork'].hidden = !snapshot || !frozen(snapshot, view);
     ui['open-fork'].disabled = !canFork(view);
-    renderApprovals(snapshot);
     renderMessages(view);
     renderEvents(view);
     renderComposer();
@@ -1586,7 +1587,8 @@ function boot() {
   function renderMessages(view) {
     const fragment = document.createDocumentFragment();
     const messages = array(view?.snapshot?.messages).filter(message => message.role !== 'system' && messageText(message).trim());
-    if (!messages.length) {
+    const pendingApprovals = array(view?.snapshot?.pending_approvals).slice(0, 30);
+    if (!messages.length && !pendingApprovals.length) {
       const empty = el('div', 'empty');
       empty.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '继续一段对话'), el('p', '', view?.snapshot ? '输入任务，Runtime 会在这里保留对话和工具记录。' : '从左侧选择已有会话，或创建新会话。'));
       fragment.append(empty);
@@ -1635,6 +1637,29 @@ function boot() {
       if (message.outcome_unknown) card.append(el('p', 'effect-warning', '此工具调用的真实结果待宿主核对。'));
       fragment.append(card);
     }
+    for (const approval of pendingApprovals) {
+      const approvalId = approval.id ?? approval.approval_id;
+      const question = view?.approvalQuestions?.[approvalId];
+      const card = el('article', 'message system approval-question');
+      card.append(el('div', 'role', '询问'));
+      if (!question) {
+        card.append(el('div', 'body', '正在读取这条询问的完整选项…'));
+        fragment.append(card);
+        continue;
+      }
+      card.append(el('div', 'body', typeof question.text === 'string' ? question.text : ''));
+      const actions = el('div', 'approval-actions');
+      for (const option of array(question.options)) {
+        if (typeof option !== 'string' || !option) continue;
+        const button = el('button', option === '拒绝' ? 'secondary deny' : option === '本任务允许' ? 'secondary' : '', approvalPending.has(`${view.id}/${approvalId}`) ? '正在记录…' : option);
+        button.type = 'button';
+        button.disabled = approvalPending.has(`${view.id}/${approvalId}`) || unresolved(view?.snapshot) || frozen(view?.snapshot, view) || Boolean(view?.faults.reconciliation) || view?.writes.some(write => write.phase === 'uncertain');
+        button.addEventListener('click', () => replyApproval(view.id, approvalId, option));
+        actions.append(button);
+      }
+      card.append(actions);
+      fragment.append(card);
+    }
     ui['messages'].replaceChildren(fragment);
     const total = view?.totalMessages ?? 0;
     ui['history-note'].textContent = total > MAX_MESSAGES ? '显示最近的对话，完整记录保存在本机。' : (messages.length ? `${messages.length} 条消息` : '');
@@ -1665,58 +1690,55 @@ function boot() {
     ui['send-button'].disabled = ui['prompt'].disabled || !ui['prompt'].value.trim();
     ui['send-button'].textContent = pending ? '等待完成…' : '发送';
     ui['cancel-button'].disabled = !snapshot || (!taskAdmissions.has(selected) && !view?.originalTaskId) || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
-    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !unresolved(snapshot) && !view?.writes.some(write => write.phase === 'uncertain') ? '请确认上方的操作请求，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
+    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !unresolved(snapshot) && !view?.writes.some(write => write.phase === 'uncertain') ? '请在对话中的询问里选择选项，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
   }
 
-  function renderApprovals(snapshot) {
-    const approvals = array(snapshot?.pending_approvals);
-    const fragment = document.createDocumentFragment();
-    for (const approval of approvals.slice(0, 30)) {
-      const id = approval.id ?? approval.approval_id;
-      const card = el('article', 'approval-card');
-      const input = approval.input ?? {};
-      const capability = input.capability ?? '';
-      let scope;
-      try { scope = JSON.parse(input.scope); } catch { scope = null; }
-      const operation = ({ 'fs.read': '读取文件', 'fs.write': '写入文件', 'fs.patch': '修改文件', 'fs.list': '列出文件', 'fs.stat': '查看文件信息', 'search.query': '检索内容', 'git.status': '查看 Git 状态', 'git.diff': '查看代码改动', 'git.log': '查看提交记录', 'git.show': '查看指定提交', 'build.run': '运行预设构建', 'test.run': '运行预设测试', 'mcp.call': '调用宿主连接的工具', 'mcp.discover': '查看宿主连接的工具', 'mcp.describe': '读取工具说明', 'skills.list': '查看可用技能', 'skills.read': '读取指定技能' })[capability] ?? `使用能力：${clip(capability || '宿主未说明', 100)}`;
-      card.append(el('h3', '', '请求你的授权'), el('p', '', `操作：${operation}`));
-      const scopeLine = (label, value, limit = 400) => card.append(el('p', 'small', `${label}：${clip(value, limit)}`));
-      if (object(scope)) {
-        if (scope.path !== undefined) scopeLine('文件', scope.path);
-        if (scope.profile !== undefined) scopeLine('预设任务', scope.profile);
-        if (scope.query !== undefined) scopeLine('检索内容', scope.query);
-        if (scope.filter !== undefined) scopeLine('测试范围', scope.filter);
-        if (scope.server !== undefined) scopeLine('工具连接', scope.server);
-        if (scope.tool !== undefined) scopeLine('工具', scope.tool);
-        if (scope.name !== undefined) scopeLine('名称', scope.name);
-        if (scope.commit !== undefined) scopeLine('提交', scope.commit);
-        if (scope.overwrite === true) scopeLine('文件操作', '覆盖现有文件，并核对原内容摘要。');
-        if (typeof scope.content === 'string') scopeLine('写入内容', scope.content, 600);
-        if (typeof scope.old === 'string') scopeLine('替换原文', scope.old, 400);
-        if (typeof scope.new === 'string') scopeLine('替换为', scope.new, 400);
-      }
-      scopeLine('授权范围', '仅限本次列明的能力和完全相同的参数；允许此任务也不会扩展到其他文件或内容。');
-      const details = el('details');
-      details.append(el('summary', '', '查看完整授权参数'), el('pre', '', recordText(approval)));
-      card.append(details);
-      if (typeof id !== 'string') {
-        card.append(el('p', 'error', '审批记录缺少 ID，请在宿主中处理。'));
-      } else {
-        const actions = el('div', 'approval-actions');
-        for (const [decision, label, className] of [['allow_once', '允许一次', ''], ['allow_task', '允许此任务', 'secondary'], ['deny', '拒绝', 'secondary deny']]) {
-          const button = el('button', className, approvalPending.has(`${snapshot.id}/${id}`) ? '正在记录…' : label);
-          button.type = 'button';
-          const view = views.get(snapshot.id);
-          button.disabled = approvalPending.has(`${snapshot.id}/${id}`) || unresolved(snapshot) || frozen(snapshot, view) || Boolean(view?.faults.reconciliation) || view?.writes.some(write => write.phase === 'uncertain' || write.method === 'approval.decide');
-          button.addEventListener('click', () => decide(snapshot.id, id, decision));
-          actions.append(button);
+  // Read the exact question and three options that the runtime prepared for
+  // each pending approval. This is a read-only call; it never decides.
+  async function refreshApprovalQuestions(id, login) {
+    const view = views.get(id);
+    if (!view?.snapshot) return;
+    const pending = array(view.snapshot.pending_approvals).map(approval => approval.id).filter(id => typeof id === 'string');
+    const questions = {};
+    for (const approvalId of pending) {
+      const cached = view.approvalQuestions?.[approvalId];
+      if (cached) { questions[approvalId] = cached; continue; }
+      try {
+        const question = await rpc('approval.question', { session_id: id, approval_id: approvalId });
+        if (login !== loginGeneration) return;
+        if (question?.session_id !== id || question?.approval_id !== approvalId || array(question.options).length !== 3) {
+          throw new RpcError('invalid_response', 'Runtime 返回的审批询问不完整；页面未显示选项。', false);
         }
-        card.append(actions);
+        questions[approvalId] = question;
+      } catch (error) {
+        if (error?.code === 'stale_approval') continue;
+        throw error;
       }
-      fragment.append(card);
     }
-    ui['approvals'].replaceChildren(fragment);
-    ui['approvals'].hidden = !approvals.length;
+    if (login !== loginGeneration) return;
+    const current = views.get(id);
+    if (current) rememberView({ ...current, approvalQuestions: questions });
+  }
+
+  async function replyApproval(id, approvalId, reply) {
+    const key = `${id}/${approvalId}`;
+    if (approvalPending.has(key)) return;
+    const login = loginGeneration;
+    approvalPending.add(key);
+    report(null);
+    renderView();
+    try {
+      await writeRpc(id, 'approval.reply', { session_id: id, approval_id: approvalId, reply });
+      if (login !== loginGeneration) return;
+      await freshSnapshot(id, login);
+    } catch (error) {
+      if (login === loginGeneration) handleError(error);
+    } finally {
+      if (login === loginGeneration) {
+        approvalPending.delete(key);
+        renderView();
+      }
+    }
   }
 
   function schedulePoll(delay, generation = selectionGeneration) {
@@ -1760,6 +1782,8 @@ function boot() {
       const snapshot = await rpc('session.get', { session_id: id });
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       rememberView(applySnapshot(views.get(id), snapshot, false, requestedAfter, requestedEpoch));
+      try { await refreshApprovalQuestions(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; rememberError(id, error); }
+      if (login !== loginGeneration || generation !== selectionGeneration) return;
       updateSessionSummary(snapshot);
       renderView();
       pollFailures = 0;
@@ -1860,30 +1884,10 @@ function boot() {
     if (login !== loginGeneration) return;
     const previous = views.get(id);
     if (previous) rememberView(applySnapshot(previous, snapshot, false, requestedAfter, requestedEpoch));
+    try { await refreshApprovalQuestions(id, login); } catch (error) { if (login === loginGeneration) rememberError(id, error); }
+    if (login !== loginGeneration) return;
     updateSessionSummary(snapshot);
     if (id === selected) renderView();
-  }
-
-  async function decide(id, approvalId, decision) {
-    const key = `${id}/${approvalId}`;
-    if (approvalPending.has(key)) return;
-    const login = loginGeneration;
-    approvalPending.add(key);
-    report(null);
-    renderApprovals(activeView()?.snapshot);
-    try {
-      await writeRpc(id, 'approval.decide', { session_id: id, approval_id: approvalId, decision });
-      if (login !== loginGeneration) return;
-      await freshSnapshot(id, login);
-    } catch (error) {
-      if (login === loginGeneration) handleError(error);
-    } finally {
-      if (login === loginGeneration) {
-        approvalPending.delete(key);
-        renderApprovals(activeView()?.snapshot);
-        renderComposer();
-      }
-    }
   }
 
   async function activateLaunchWorkspace() {
@@ -2097,6 +2101,16 @@ function boot() {
     const scope = workspaceId;
     const requestedAfter = views.get(id)?.cursor ?? 0;
     const requestedEpoch = views.get(id)?.proofEpoch ?? 0;
+    // An exact option typed as the whole message answers the displayed
+    // approval question. The program matches it; it never reaches the model.
+    const pendingApproval = array(views.get(id)?.snapshot?.pending_approvals)[0];
+    const pendingQuestion = pendingApproval ? views.get(id)?.approvalQuestions?.[pendingApproval.id ?? pendingApproval.approval_id] : null;
+    const exactOption = pendingQuestion ? array(pendingQuestion.options).find(option => option === text) : null;
+    if (exactOption && login === loginGeneration) {
+      setPromptValue('');
+      await replyApproval(id, pendingApproval.id ?? pendingApproval.approval_id, exactOption);
+      return;
+    }
     promptPending.add(id);
     report(null);
     renderComposer();

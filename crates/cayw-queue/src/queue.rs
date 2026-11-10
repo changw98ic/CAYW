@@ -71,6 +71,45 @@ pub struct TaskRecord {
     pub ready_since_dispatch: Option<u64>,
     pub dispatches: u64,
     pub resources: TaskResources,
+    /// WorkItem this task was dispatched for, if any. The WorkItem itself stays
+    /// in the owner main-session workspace; only this reference is recorded here.
+    pub work_id: Option<String>,
+    /// Stable dispatch identity used to recognize a repeated delivery.
+    pub dispatch_key: Option<String>,
+    /// Pause version enforced by the owner when this task was dispatched.
+    pub pause_version: u64,
+    /// Stop version enforced by the owner when this task was dispatched.
+    pub stop_version: u64,
+    /// Set when a new pause version reaches this workspace. Every later
+    /// capability call is refused; the running task stops at its next boundary.
+    pub dispatch_paused: bool,
+}
+
+/// Trusted dispatch identity recorded in the same transaction as the Task row.
+/// The target workspace never stores the WorkItem body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDispatch {
+    pub work_id: String,
+    pub dispatch_key: String,
+    pub pause_version: u64,
+    pub stop_version: u64,
+}
+
+impl TaskDispatch {
+    pub fn validate(&self) -> Result<(), QueueError> {
+        if self.work_id.trim().is_empty() || self.work_id.len() > 256 {
+            return Err(QueueError::InvalidInput(
+                "work_id must contain 1..256 bytes".into(),
+            ));
+        }
+        if self.dispatch_key.trim().is_empty() || self.dispatch_key.len() > 512 {
+            return Err(QueueError::InvalidInput(
+                "dispatch_key must contain 1..512 bytes".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +189,11 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
             declared_memory_bytes: read_u64(row, 16)?,
             ..Default::default()
         },
+        work_id: row.get(17)?,
+        dispatch_key: row.get(18)?,
+        pause_version: read_u64(row, 19)?,
+        stop_version: read_u64(row, 20)?,
+        dispatch_paused: row.get(21)?,
     })
 }
 fn priority(value: &str) -> Result<TaskPriority, rusqlite::Error> {
@@ -184,7 +228,7 @@ fn checked_queue_u64(value: i64, field: &str) -> Result<u64, QueueError> {
     u64::try_from(value)
         .map_err(|_| QueueError::InvalidInput(format!("corrupt queue {field} value")))
 }
-const COLUMNS: &str = "id,session,input_json,state,queued_at,worker,attempt,fence,cancel_requested,error,intent,priority,holds_slot,ready_order,ready_since_dispatch,dispatches,declared_memory_bytes";
+const COLUMNS: &str = "id,session,input_json,state,queued_at,worker,attempt,fence,cancel_requested,error,intent,priority,holds_slot,ready_order,ready_since_dispatch,dispatches,declared_memory_bytes,work_id,dispatch_key,pause_version,stop_version,dispatch_paused";
 
 fn resource_policy_in(db: &Connection) -> Result<ResourcePolicy, QueueError> {
     let policy = ResourcePolicy {
@@ -597,6 +641,44 @@ impl Queue {
                 [counter_sql(resources.max_declared_memory_bytes)?],
             )?;
         }
+        let work_columns: Vec<bool> = {
+            let mut statement = tx.prepare(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='work_id'),
+                 EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='dispatch_key'),
+                 EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='pause_version'),
+                 EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='stop_version'),
+                 EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='dispatch_paused')",
+            )?;
+            statement.query_row([], |row| {
+                (0..5).map(|index| row.get(index)).collect::<Result<_, _>>()
+            })?
+        };
+        if !work_columns[0] {
+            tx.execute_batch("ALTER TABLE runtime_tasks ADD COLUMN work_id TEXT;")?;
+        }
+        if !work_columns[1] {
+            tx.execute_batch("ALTER TABLE runtime_tasks ADD COLUMN dispatch_key TEXT;")?;
+        }
+        if !work_columns[2] {
+            tx.execute_batch(
+                "ALTER TABLE runtime_tasks ADD COLUMN pause_version INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !work_columns[3] {
+            tx.execute_batch(
+                "ALTER TABLE runtime_tasks ADD COLUMN stop_version INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        if !work_columns[4] {
+            tx.execute_batch(
+                "ALTER TABLE runtime_tasks ADD COLUMN dispatch_paused INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        // A dispatch key is the durable duplicate-suppression identity. Old rows
+        // have none and stay distinct; one key can never name two tasks.
+        tx.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS runtime_dispatch_key ON runtime_tasks(dispatch_key) WHERE dispatch_key IS NOT NULL;",
+        )?;
         let (has_fairness, has_dispatch_count, has_next_ready): (bool, bool, bool) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_queue_config') WHERE name='fairness_after'),
              EXISTS(SELECT 1 FROM pragma_table_info('runtime_queue_config') WHERE name='dispatch_count'),
@@ -740,10 +822,48 @@ impl Queue {
         resources: &TaskResources,
         capacity: usize,
     ) -> Result<TaskRecord, QueueError> {
+        self.enqueue_dispatched_with_resources(
+            session, input, intent, priority, resources, capacity, None,
+        )
+    }
+    /// Create a dispatched task and its `work_id`/`dispatch_key` binding in one
+    /// transaction. A repeated delivery of the same key and input returns the
+    /// original task; the same key with different input is a conflict. The
+    /// caller may therefore retry after a lost response without duplicating work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_dispatched_with_resources(
+        &self,
+        session: &str,
+        input: &TaskInput,
+        intent: &TaskIntent,
+        priority: TaskPriority,
+        resources: &TaskResources,
+        capacity: usize,
+        dispatch: Option<&TaskDispatch>,
+    ) -> Result<TaskRecord, QueueError> {
         let input_json = serde_json::to_string(input)?;
         intent.validate()?;
+        if let Some(dispatch) = dispatch {
+            dispatch.validate()?;
+        }
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(dispatch) = dispatch {
+            let existing = tx
+                .query_row(
+                    &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE dispatch_key=?1"),
+                    [&dispatch.dispatch_key],
+                    row,
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                tx.commit()?;
+                if existing.input != *input {
+                    return Err(QueueError::DispatchConflict);
+                }
+                return Ok(existing);
+            }
+        }
         resources.validate(&resource_policy_in(&tx)?)?;
         let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE session=?1 AND state IN ('queued','running','waiting_approval','draining'))",[session],|r|r.get(0))?;
         if duplicate {
@@ -758,7 +878,11 @@ impl Queue {
             return Err(QueueError::QueueFull);
         }
         let id = Uuid::new_v4().to_string();
-        tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,intent,priority,declared_memory_bytes) VALUES (?1,?2,?3,'queued',?4,?5,?6,?7)",params![id,session,input_json,sql_u64(timestamp_ms())?,serde_json::to_string(intent)?,priority_sql(priority),counter_sql(resources.declared_memory_bytes)?])?;
+        if let Some(dispatch) = dispatch {
+            tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,intent,priority,declared_memory_bytes,work_id,dispatch_key,pause_version,stop_version) VALUES (?1,?2,?3,'queued',?4,?5,?6,?7,?8,?9,?10,?11)",params![id,session,input_json,sql_u64(timestamp_ms())?,serde_json::to_string(intent)?,priority_sql(priority),counter_sql(resources.declared_memory_bytes)?,dispatch.work_id,dispatch.dispatch_key,counter_sql(dispatch.pause_version)?,counter_sql(dispatch.stop_version)?])?;
+        } else {
+            tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,intent,priority,declared_memory_bytes) VALUES (?1,?2,?3,'queued',?4,?5,?6,?7)",params![id,session,input_json,sql_u64(timestamp_ms())?,serde_json::to_string(intent)?,priority_sql(priority),counter_sql(resources.declared_memory_bytes)?])?;
+        }
         let task = tx.query_row(
             &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE id=?1"),
             [id],
@@ -766,6 +890,41 @@ impl Queue {
         )?;
         tx.commit()?;
         Ok(task)
+    }
+    /// Response-loss lookup. A dispatcher that did not receive the create result
+    /// asks here first instead of creating a second task.
+    pub fn find_by_dispatch_key(&self, key: &str) -> Result<Option<TaskRecord>, QueueError> {
+        Ok(lock(&self.connection)
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE dispatch_key=?1"),
+                [key],
+                row,
+            )
+            .optional()?)
+    }
+    /// Push a pause version to every live task of one WorkItem. Later capability
+    /// calls are refused; already-started effects keep their actual result.
+    pub fn pause_work(&self, work_id: &str, pause_version: u64) -> Result<usize, QueueError> {
+        if work_id.trim().is_empty() {
+            return Err(QueueError::InvalidInput("work_id is required".into()));
+        }
+        let changed = lock(&self.connection).execute(
+            "UPDATE runtime_tasks SET pause_version=?2,dispatch_paused=1 WHERE work_id=?1 AND pause_version<?2 AND state IN ('queued','running','waiting_approval','draining')",
+            params![work_id, counter_sql(pause_version)?],
+        )?;
+        Ok(changed)
+    }
+    /// Push a stop version to every live task of one WorkItem. Unclaimed queued
+    /// rows become terminal immediately; claimed work stops at its next boundary.
+    pub fn stop_work(&self, work_id: &str, stop_version: u64) -> Result<usize, QueueError> {
+        if work_id.trim().is_empty() {
+            return Err(QueueError::InvalidInput("work_id is required".into()));
+        }
+        let changed = lock(&self.connection).execute(
+            "UPDATE runtime_tasks SET stop_version=?2,dispatch_paused=1,cancel_requested=1,state=CASE WHEN state='queued' AND worker IS NULL THEN 'cancelled' ELSE state END WHERE work_id=?1 AND stop_version<?2 AND state IN ('queued','running','waiting_approval','draining')",
+            params![work_id, counter_sql(stop_version)?],
+        )?;
+        Ok(changed)
     }
     /// Read-only child precheck for the host: live capacity, held execution
     /// slots, and any ready queued work are checked from one consistent read.
@@ -888,10 +1047,10 @@ impl Queue {
         })
     }
     pub fn check(&self, lease: &TaskLease) -> Result<(), QueueError> {
-        let valid: Option<bool> = lock(&self.connection).query_row("SELECT cancel_requested FROM runtime_tasks WHERE id=?1 AND worker=?2 AND fence=?3 AND state IN ('queued','running','waiting_approval')",params![lease.id,lease.worker,sql_u64(lease.fence)?],|r|r.get(0)).optional()?;
+        let valid: Option<(bool, bool)> = lock(&self.connection).query_row("SELECT cancel_requested,dispatch_paused FROM runtime_tasks WHERE id=?1 AND worker=?2 AND fence=?3 AND state IN ('queued','running','waiting_approval')",params![lease.id,lease.worker,sql_u64(lease.fence)?],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         match valid {
-            Some(false) => Ok(()),
-            Some(true) => Err(QueueError::Cancelled),
+            Some((false, false)) => Ok(()),
+            Some((_, _)) => Err(QueueError::Cancelled),
             None => Err(QueueError::Worker("task worker was fenced".into())),
         }
     }

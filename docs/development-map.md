@@ -1,12 +1,12 @@
 # CAYW 开发路线图
 
-本路线图覆盖 Stage A–E 的交付 Issues，以及独立跟踪的当前页面可视化编辑 [#30](https://github.com/changw98ic/CAYW/issues/30) 与 Trace Debug [#31](https://github.com/changw98ic/CAYW/issues/31)。原 [#22](https://github.com/changw98ic/CAYW/issues/22) 与 [#23](https://github.com/changw98ic/CAYW/issues/23) 是文档 PR，不是功能 Issue；对应的上下文压缩与公开 API 补齐作为尚未建立 Issue 的后续条目保留下文。#30 独立跟踪，不恢复已退出原主线的 #14 完整历史范围；#31 为独立可选调试插件。2026-10-19 起统一用词：测试工具称 VerifyTool（代码包 `cayw-verify-tool`），StrongFlow/JEv/Fusion/Observer 及第三方扩展统一称 plugin，分 Native plugin 与 External plugin（代码包 `cayw-plugins`）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收并关闭；实现、独立客户端和验收说明已由 PR #20 合并到 `main`。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2、#4、#13 正文中原有的三平台要求已于 2026-10-19 收窄为 macOS，Linux/Windows 部分指向 #19。2026-10-18 起先独立实现 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前 workspace 成员以根 `Cargo.toml` 为准。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。各 Issue 状态以 GitHub 为准：2026-10-29 核对为 #1–#4 CLOSED、#5–#10 OPEN、#11–#18 CLOSED、#19 OPEN、#30/#31 CLOSED、#33 OPEN；GitHub 的关闭或开放不等于本路线图的本地验收结论，局部验收也不代替全部 Issue 验收。
+本路线图覆盖 Stage A–E 的交付 Issues，以及独立跟踪的当前页面可视化编辑 [#30](https://github.com/changw98ic/CAYW/issues/30) 与 Trace Debug [#31](https://github.com/changw98ic/CAYW/issues/31)。原 [#22](https://github.com/changw98ic/CAYW/issues/22) 与 [#23](https://github.com/changw98ic/CAYW/issues/23) 是文档 PR，不是功能 Issue；对应的公开 API 补齐作为尚未建立 Issue 的后续条目保留下文。记忆、上下文与主动工作已建立 [#57](https://github.com/changw98ic/CAYW/issues/57)–[#62](https://github.com/changw98ic/CAYW/issues/62)。#30 独立跟踪，不恢复已退出原主线的 #14 完整历史范围；#31 为独立可选调试插件。2026-10-19 起统一用词：测试工具称 VerifyTool（代码包 `cayw-verify-tool`），StrongFlow/JEv/Fusion/Observer 及第三方扩展统一称 plugin，分 Native plugin 与 External plugin（代码包 `cayw-plugins`）。**当前首发只面向 macOS；2026-10-19 用户明确取消本阶段 Windows、Linux 的适配与验收要求。** #1 已完成 macOS ARM64 首发范围的本地功能验收并关闭；实现、独立客户端和验收说明已由 PR #20 合并到 `main`。Linux 与 Windows 的后续支持已独立建立 [#19](https://github.com/changw98ic/CAYW/issues/19)，不阻塞 macOS 首发，也不表示现在恢复平台工作。其他任务继续按依赖推进；#2、#4、#13 正文中原有的三平台要求已于 2026-10-19 收窄为 macOS，Linux/Windows 部分指向 #19。2026-10-18 起先独立实现 Rust 消息、模型流与工具循环，随后已加入持久化 Core、Runtime/版本化 IPC、Luau/Cells、Host、Device 和其他可选组件；当前 workspace 成员以根 `Cargo.toml` 为准。早期 macOS / Linux 离线结果及 macOS 的有限 Magpie + DS Flash 检查，只覆盖当时的内核（见 [内核边界](rust-pi-core.md)、[离线验收](validation/rust-pi-core.md) 和 [真实模型记录](validation/rust-pi-core-magpie.md)）。后续 [Core 修复验收](validation/core-boundary-repairs.md)、[Runtime 宿主接入](validation/runtime-bridge.md)、[SDK / IPC 早期离线验证](validation/sdk-ipc-harness.md)、[Issue #1 客户端与取消修复验收](validation/issue1-sdk-ipc.md)、[Workspace 读取接口](../crates/cayw-workspace/README.md)、[diff 文件结束标记修复](validation/workspace-diff-eof.md)、[共享读取接线复核](validation/shared-read-runtime.md)、[Device 交互进程验证](validation/device-interactive-process.md) 与 [网页本地运行验证](validation/webui-runtime.md) 有单独范围；当前源码也已包含 SDK、持久化、Luau 和权限链实现，不能继续写成全部未实现。其余 Issue 的 macOS 验证、真实模型与持久化 Runtime 全链等仍需补齐，不能据局部通过认定全部任务完成。每项任务的功能范围和验收仍以对应 Issue 为准；平台范围采用上述用户最新决定，不再沿用原三平台首发要求。各 Issue 状态以 GitHub 为准：2026-10-29 核对为 #1–#4 CLOSED、#5–#10 OPEN、#11–#18 CLOSED、#19 OPEN、#30/#31 CLOSED、#33 OPEN；2026-11-09 新增 #57–#62，均为 OPEN。GitHub 的关闭或开放不等于本路线图的本地验收结论，局部验收也不代替全部 Issue 验收。
 
 [返回项目说明](../README.md) · [架构文档](architecture.md) · [查看全部 Issues](https://github.com/changw98ic/CAYW/issues)
 
-当前 macOS 本地产品采用一台设备一个 Client。所有工作区共享 Client 的 IPC 地址、访问码、连接、重连和进程监管；工作区各自保留目录、SQLite、Runtime、Session、`models.json`、MCP/Pi 实例和 WorkspaceArchitecture plugin 启用关系。TUI 与 WebUI 是 Client plugin，StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin 是按工作区启用的 WorkspaceArchitecture plugin；所有 plugin 进程都由 Client 监管。普通架构 plugin 不绑定或冻结普通 Session，StrongFlow 保留专用绑定、冻结和显式 Fork 合同。该产品合同不改变下表的 Issue 硬依赖或远端状态。
+当前 macOS 本地产品采用一台设备一个 Client。所有工作区共享 Client 的 IPC 地址、访问码、连接、重连和进程监管；工作区各自保留目录、SQLite、Runtime、Session、模型选用、MCP/Pi 实例和 WorkspaceArchitecture plugin 启用关系。TUI 与 WebUI 是 Client plugin，StrongFlow、JEv、Fusion、Observer 和本地 External 架构 plugin 是按工作区启用的 WorkspaceArchitecture plugin；所有 plugin 进程都由 Client 监管。普通架构 plugin 不绑定或冻结普通 Session，StrongFlow 保留专用绑定、冻结和显式 Fork 合同。该产品合同不改变下表的 Issue 硬依赖或远端状态。
 
-本地产品在没有模型时也能启动、创建和查询 Session；第一次执行任务时才返回 `model_not_configured`。`cayw conf` 是唯一交互式首次配置入口，每工作区 `models.json` 是本地模型配置的唯一权威文件。完全显式 Headless 继续只使用显式 `--config`，与本地 Client 状态分开。模型密钥是可选明文 `api_key`；公开状态和诊断不得回显密钥。
+本地产品在没有模型时也能启动、创建和查询 Session；第一次执行任务时才返回 `model_not_configured`。`cayw conf` 是唯一交互式首次配置入口。模型方案的目标是每台设备一份（`<CAYW_HOME>/models.json`），各工作区选用；当前实现仍按工作区保存 `models.json`，迁移时单向合并进设备列表后删除。完全显式 Headless 继续只使用显式 `--config`，与本地 Client 状态分开。模型密钥是可选明文 `api_key`；公开状态和诊断不得回显密钥。
 
 2026-10-24 的 [macOS 无界面主线最终组合验收](validation/macos-headless-mainline-final.md) 汇总 #2、#3、#4、#5、#6、#7、#8、#9、#10、#11、#18 共 11 项：同一测试源码上的 22 步离线回归、14 步正式 VerifyTool 检查，以及各项原证据的重新核对。该记录保留构建来源完整性 pending、#18 原 19 步及其他历史场景未在本次树重跑等限制；各项旧验收只证明各自源码，不据此更新远端 Issue 状态。
 
@@ -41,7 +41,6 @@
 - Session 是持久逻辑，Worker 是可更换执行者。恢复先核对 unknown 副作用，不能盲重放；取消、审批与结果终态要有执行围栏。
 - [#10](https://github.com/changw98ic/CAYW/issues/10) 按 2026-10-23 用户决定验收本机 Magpie 四格式：Chat Completions、Responses、Anthropic Messages 和 Gemini 流式调用，固定模型及实际 SDK/认证 IPC 路径见[服务与证据矩阵](validation/issue-10-provider-protocols-macos.md)。官方服务直连和旧 group 路由保留未验证，移出本项关闭范围。新增服务只加适配器、不改 Core；支持声明限于实际模型、配置、源码和场景。
 - [#11](https://github.com/changw98ic/CAYW/issues/11) 已完成 [macOS ARM64 整项本地验收](validation/issue-11-scheduler-macos.md)：容量、优先级、公平派发、安全审批等待、真实双进程独立取消、会话隔离和恢复均有实际证据。主十五步与独立二十步使用同一份源码。持续可执行且名额持续释放时，任务至多被 A+C-1 次其他派发越过；清理未确认的原名额继续保留。GitHub 已关闭（2026-10-29 核对）。
-- 上下文压缩（尚未建立 Issue，功能描述保留）：在 #6 之后交付 Core 基础上下文压缩——不拆开调用与结果，不改写原始执行记录和 unknown 状态；JEv plugin 可提供增强压缩，失败时回退到 Core 基础压缩。原 #22 为文档 PR，不是功能 Issue。
 - 公开 API 补齐（尚未建立 Issue，功能描述保留）：在 #1 已有接口上补齐 Session 分叉、模型配置、工具注册与授权、上下文读取与受控修改、资源查询与预算申请；只提供 Rust SDK 与 IPC，不做 TypeScript/Python SDK。原 #23 为文档 PR，不是功能 Issue。
 - 宿主统一接入 MCP 与 Skills，CodeMode 按需发现/读取/调用。Core 不重复创建 loader 或 MCP 连接；CodeGraph、跨文件语义分析和外部 search 由宿主提供。Workspace 的有界文本检索和 Rust 单文件语法大纲不替代这些能力。
 - 默认不暴露 Bash/Shell/Node/Python 或任意进程旁路。常规开发与受控构建/测试需求优先由 [#5](https://github.com/changw98ic/CAYW/issues/5) 已经做好的 CodeMode 能力集覆盖；出现真实能力缺口时，模型按用途申请，持续有效申请触发评估，次数不能自动授权。两次阈值只是建议参数，明确项目测试/脚本需求可首轮开放。能力限定于任务，底层权限不扩大，取消和预算保持统一。
@@ -64,6 +63,17 @@
 ### 新增：Trace Debug
 
 [#31](https://github.com/changw98ic/CAYW/issues/31) 是独立、可选的实时调试插件。它消费 #1 的认证 IPC 事件，复用 #6 的执行记录和已有 CodeMode。节点保存后在插件内自动重新计算，保留原始运行、内容版本与对比结果。它不依赖 #30 的页面编辑器，也不要求可选远程 Server。当前实现、启动入口和边界见 [Trace Debug](../crates/cayw-trace-debug/README.md)；本地验收状态见下表。
+
+### 记忆、上下文与主动工作
+
+[设计文档](memory-context-work.md)给出主 session、WorkItem、记忆、上下文压缩、审批询问、Git 恢复点与主动工作的目标设计。原 [#22](https://github.com/changw98ic/CAYW/issues/22) 文档 PR 中的上下文压缩并入 [#58](https://github.com/changw98ic/CAYW/issues/58)；#22 不是功能 Issue。本组按 #57、#58、#59、#60、#61、#62 交付。#60 可与 #58、#59 并行。不设用量上限。忘掉不擦日志。恢复点不自动删除。
+
+- [#57](https://github.com/changw98ic/CAYW/issues/57) 设备模型列表与主 session 工作区：模型方案每台设备一份，各工作区选用；每工作区 `models.json` 单向迁移后删除。主 session 是默认工作区 `~/CodeAsYouWish`，状态仍在 `CAYW_HOME/workspaces/<目录摘要>/`。
+- [#58](https://github.com/changw98ic/CAYW/issues/58) 上下文：持续摘要、后台压缩、本地装配，以及独立的维护请求类别。维护用量只记账，不设用量上限。上下文管理是 Runtime 内置组件，不拆开调用与结果，不改写原始执行记录和 unknown 状态；JEv plugin 只能提供由 Runtime 选用的增强压缩实现，不能接入请求准备链，失败时回退到内置压缩。
+- [#59](https://github.com/changw98ic/CAYW/issues/59) 审批：放行只来自用户设定的放行规则或用户在主 session 中的回答。TUI 和 WebUI 在主 session 对话中显示询问，不再保留单独的审批卡片。
+- [#60](https://github.com/changw98ic/CAYW/issues/60) Git 恢复点：CAYW 私有快照仓库，默认开启，不碰用户仓库；没有 Git 时警告并继续工作。恢复点不自动删除。
+- [#61](https://github.com/changw98ic/CAYW/issues/61) 主 session 记忆与查询：基础记忆与偏好、淘汰与查询、Dream。忘掉只让以后不再使用，不擦日志。
+- [#62](https://github.com/changw98ic/CAYW/issues/62) WorkItem 与主动工作：验收记录、幂等派工、输入四态、主动模式与通知。
 
 ### E：Device 资源与内容部署深化
 
@@ -99,7 +109,12 @@
 | [[StrongFlow] 交付可插拔强流程、卸载不可用提示与 Fork 转换选项](https://github.com/changw98ic/CAYW/issues/16) | D | [#7](https://github.com/changw98ic/CAYW/issues/7)、[#12](https://github.com/changw98ic/CAYW/issues/12) | [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14)、[#15](https://github.com/changw98ic/CAYW/issues/15)、[#17](https://github.com/changw98ic/CAYW/issues/17) | GitHub 已关闭（2026-10-29 核对） |
 | [[扩展] 交付 JEv/Fusion/Observer 的可插拔最小适配与非阻塞诊断](https://github.com/changw98ic/CAYW/issues/17) | D | [#12](https://github.com/changw98ic/CAYW/issues/12) | [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14)、[#15](https://github.com/changw98ic/CAYW/issues/15)、[#16](https://github.com/changw98ic/CAYW/issues/16) | GitHub 已关闭（2026-10-29 核对） |
 | [[Device] 交付本机资源策略与权威内容存放、恢复](https://github.com/changw98ic/CAYW/issues/18) | E | [#4](https://github.com/changw98ic/CAYW/issues/4)、[#7](https://github.com/changw98ic/CAYW/issues/7)、[#11](https://github.com/changw98ic/CAYW/issues/11) | —；无 #15 条件依赖 | [已完成 macOS ARM64 整项本地验收](validation/issue-18-local-resources-macos.md)：同库声明总额准入、实际进程输出/时间预算、权威内容与四窗口两恢复入口、独立行为和文档复核；GitHub 已关闭（2026-10-29 核对） |
-| 上下文压缩：Core 基础压缩与 plugin 增强回退（尚未建立 Issue） | C | [#6](https://github.com/changw98ic/CAYW/issues/6) | [#7](https://github.com/changw98ic/CAYW/issues/7)、[#10](https://github.com/changw98ic/CAYW/issues/10)；JEv 增强压缩验收另需 [#17](https://github.com/changw98ic/CAYW/issues/17) | 尚未建立 Issue；原 #22 为文档 PR，功能描述保留待建 Issue |
+| [[模型] 交付设备模型列表与主 session 工作区](https://github.com/changw98ic/CAYW/issues/57) | 记忆与上下文 | [#6](https://github.com/changw98ic/CAYW/issues/6) | 界面显示需要 [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14) | 计划；GitHub OPEN（2026-11-09 建立） |
+| [[上下文] 交付持续摘要、后台压缩与本地装配](https://github.com/changw98ic/CAYW/issues/58) | 记忆与上下文 | [#6](https://github.com/changw98ic/CAYW/issues/6) | [#7](https://github.com/changw98ic/CAYW/issues/7)、[#10](https://github.com/changw98ic/CAYW/issues/10)；JEv 增强压缩验收另需 [#17](https://github.com/changw98ic/CAYW/issues/17)。没有 `context_window` 时用保守默认窗口，不阻塞 [#57](https://github.com/changw98ic/CAYW/issues/57) | 计划；GitHub OPEN（2026-11-09 建立）。原 #22 为文档 PR，其中的上下文压缩并入本项 |
+| [[审批] 交付放行规则与主 session 询问](https://github.com/changw98ic/CAYW/issues/59) | 记忆与上下文 | [#6](https://github.com/changw98ic/CAYW/issues/6)、[#8](https://github.com/changw98ic/CAYW/issues/8)、[#57](https://github.com/changw98ic/CAYW/issues/57) | 界面显示需要 [#13](https://github.com/changw98ic/CAYW/issues/13)、[#14](https://github.com/changw98ic/CAYW/issues/14) | 计划；GitHub OPEN（2026-11-09 建立） |
+| [[恢复] 交付私有 Git 快照恢复点](https://github.com/changw98ic/CAYW/issues/60) | 记忆与上下文 | [#5](https://github.com/changw98ic/CAYW/issues/5)、[#7](https://github.com/changw98ic/CAYW/issues/7) | 可与 [#58](https://github.com/changw98ic/CAYW/issues/58)、[#59](https://github.com/changw98ic/CAYW/issues/59) 并行 | 计划；GitHub OPEN（2026-11-09 建立） |
+| [[记忆] 交付主 session 记忆、查询与忘掉](https://github.com/changw98ic/CAYW/issues/61) | 记忆与上下文 | [#6](https://github.com/changw98ic/CAYW/issues/6)、[#18](https://github.com/changw98ic/CAYW/issues/18)、[#57](https://github.com/changw98ic/CAYW/issues/57)、[#58](https://github.com/changw98ic/CAYW/issues/58) | — | 计划；GitHub OPEN（2026-11-09 建立） |
+| [[工作] 交付 WorkItem、幂等派工与主动工作](https://github.com/changw98ic/CAYW/issues/62) | 记忆与上下文 | [#6](https://github.com/changw98ic/CAYW/issues/6)、[#7](https://github.com/changw98ic/CAYW/issues/7)、[#11](https://github.com/changw98ic/CAYW/issues/11)、[#57](https://github.com/changw98ic/CAYW/issues/57)、[#58](https://github.com/changw98ic/CAYW/issues/58)、[#59](https://github.com/changw98ic/CAYW/issues/59) | — | 计划；GitHub OPEN（2026-11-09 建立） |
 | 公开 API 补齐：Session 分叉、模型配置、工具授权、上下文与预算（尚未建立 Issue） | C | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#6](https://github.com/changw98ic/CAYW/issues/6) | [#10](https://github.com/changw98ic/CAYW/issues/10)、[#11](https://github.com/changw98ic/CAYW/issues/11)、[#12](https://github.com/changw98ic/CAYW/issues/12) | 尚未建立 Issue；原 #23 为文档 PR，功能描述保留待建 Issue |
 | [[页面编辑] 当前 UI 的可视化转换、拖拽、组件插入、右键修改与源码回写](https://github.com/changw98ic/CAYW/issues/30) | 独立应用 | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#6](https://github.com/changw98ic/CAYW/issues/6) | 不恢复 #12/#14 的完整历史范围 | [HTML/CSS 已本地验收；React JSX/TSX、Vue 3 已适配并通过合成项目完整编辑流程](validation/issue-30-framework-editor-macos.md)；已授权 Magpie 100M，缺少凭据，真实请求 0，生成验收待完成；GitHub 已关闭（2026-10-29 核对） |
 | [[Plugin] 实时 Trace 架构图与节点调试](https://github.com/changw98ic/CAYW/issues/31) | 新增 plugin | [#1](https://github.com/changw98ic/CAYW/issues/1)、[#6](https://github.com/changw98ic/CAYW/issues/6) | #30 仅是可选定位入口，不作为依赖 | [已完成 macOS ARM64 首版本地验收](validation/issue-31-trace-debug-macos.md)：实际追踪与审批等待、节点保存自动重新计算、分支/输出变化、对比撤销及停用后普通 IPC 任务；已补充 [Magpie 真实模型验证](validation/issue-31-magpie-macos.md)，原始失败与预算保留均记录；GitHub 已关闭（2026-10-29 核对） |
@@ -107,7 +122,7 @@
 
 ## 依赖图
 
-实线是硬依赖。#18 仅包含本机资源与内容，不依赖 #15。上下文压缩与公开 API 补齐尚未建立 Issue，未纳入依赖图。具体验收与可并行关系见上表和各 Issue。
+实线是硬依赖。#18 仅包含本机资源与内容，不依赖 #15。公开 API 补齐尚未建立 Issue，未纳入依赖图。#57–#62 的硬依赖已纳入依赖图；#60 与 #58、#59 的并行关系不是依赖边。具体验收与可并行关系见上表和各 Issue。
 
 ```mermaid
 flowchart TD
@@ -174,6 +189,29 @@ flowchart TD
   I4 --> I18
   I7 --> I18
   I11 --> I18
+  I57["#57 设备模型列表 / 主 session"]
+  I58["#58 持续摘要 / 压缩 / 装配"]
+  I59["#59 放行规则 / 主 session 询问"]
+  I60["#60 私有 Git 恢复点"]
+  I61["#61 主 session 记忆 / 忘掉"]
+  I62["#62 WorkItem / 派工 / 主动工作"]
+  I6 --> I57
+  I6 --> I58
+  I6 --> I59
+  I8 --> I59
+  I57 --> I59
+  I5 --> I60
+  I7 --> I60
+  I6 --> I61
+  I18 --> I61
+  I57 --> I61
+  I58 --> I61
+  I6 --> I62
+  I7 --> I62
+  I11 --> I62
+  I57 --> I62
+  I58 --> I62
+  I59 --> I62
 ```
 
 ## 证据与完成标准
