@@ -156,22 +156,15 @@ fn text(bytes: &[u8]) -> Result<String, CapabilityError> {
 
 /// Trims an incomplete trailing character and, when possible, cuts the preview
 /// at the last complete line so the next line range starts cleanly.
-fn preview(mut bytes: Vec<u8>) -> Result<(String, usize), CapabilityError> {
+fn preview(mut bytes: Vec<u8>) -> Result<(String, usize, usize), CapabilityError> {
     trim_incomplete_utf8(&mut bytes)?;
+    let complete_lines = bytes.iter().filter(|&&byte| byte == b'\n').count();
     if let Some(at) = bytes.iter().rposition(|byte| *byte == b'\n') {
         bytes.truncate(at + 1);
     }
     let content = text(&bytes)?;
     let consumed = content.len();
-    Ok((content, consumed))
-}
-
-fn line_count(text: &str) -> usize {
-    if text.is_empty() {
-        0
-    } else {
-        text.bytes().filter(|byte| *byte == b'\n').count() + usize::from(!text.ends_with('\n'))
-    }
+    Ok((content, consumed, complete_lines))
 }
 
 fn read_bytes(
@@ -271,6 +264,11 @@ fn read_byte_range(
     let (mut bytes, truncated) = read_up_to(&mut file, window, true, cancel, deadline)?;
     if truncated {
         trim_incomplete_utf8(&mut bytes)?;
+        if bytes.is_empty() {
+            return Err(failure(
+                "byte window is too small to hold the next UTF-8 character",
+            ));
+        }
     }
     let content = text(&bytes)?;
     Ok((content, start, total_bytes, truncated))
@@ -576,20 +574,22 @@ pub(crate) async fn execute(
                 );
             }
             let (bytes, _) = read_up_to(&mut file, DEFAULT_PREVIEW_BYTES, false, cancel, deadline)?;
-            let (content, consumed) = preview(bytes)?;
-            let returned = line_count(&content);
-            Ok(json!({
+            let (content, consumed, returned) = preview(bytes)?;
+            let mut result = json!({
                 "path":path,
                 "content":content,
                 "bytes":consumed,
                 "total_bytes":total,
                 "start_line":1,
                 "lines_returned":returned,
-                "next_start_line":1 + returned as u64,
                 "offset_bytes":0,
                 "next_offset_bytes":consumed,
                 "truncated":true,
-            }))
+            });
+            if returned > 0 {
+                result["next_start_line"] = json!(1 + returned as u64);
+            }
+            Ok(result)
         }
         "fs.stat" => {
             let metadata = if components.is_empty() {

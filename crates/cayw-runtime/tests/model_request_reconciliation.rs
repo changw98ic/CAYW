@@ -1654,6 +1654,68 @@ async fn cancelled_response_is_not_a_complete_capture_and_zero_defaults_do_not_s
 }
 
 #[tokio::test]
+async fn reported_usage_settles_unlimited_requests_when_output_max_tokens_is_none() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let receipts = Arc::new(Receipts::default());
+    let provider = Arc::new(CapturedResponse {
+        previous: response_prefix(),
+        abort: false,
+        calls: AtomicUsize::new(0),
+    });
+    let model = Model::new("fixture", "request-reconciliation");
+    assert_eq!(model.max_output_tokens, None);
+    let runtime = Runtime::open(
+        root.path().join("sessions.db"),
+        &workspace,
+        provider.clone(),
+        model.clone(),
+        RuntimeConfig {
+            model_request_reconciliation_verifier: Some(receipts.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let session = runtime.create(None).unwrap().id;
+    runtime
+        .prompt(&session, "unlimited output cap", CancellationToken::new())
+        .await
+        .unwrap();
+    runtime.wait_idle(&session).await;
+    let record = runtime.model_requests(&session).unwrap().requests[0].clone();
+    assert_eq!(record.token_limit, None);
+    assert_eq!(record.output_max_tokens, None);
+    assert_eq!(record.settled_tokens, None);
+
+    let input = reported_decision(&record);
+    receipts.accept(&input);
+    let result = runtime
+        .reconcile_model_request(input.clone())
+        .await
+        .unwrap();
+    let ledger = runtime.model_requests(&session).unwrap();
+    assert_eq!(ledger.requests[0].settled_tokens, Some(97));
+    assert_eq!(ledger.requests[0].charged_tokens, Some(97));
+    assert_eq!(ledger.requests[0].reconciliation.as_ref(), Some(&result));
+    assert_eq!(ledger.settled_tokens, 97);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, None);
+    assert!(!ledger.usage_unknown);
+
+    drop(runtime);
+    let reopened = Runtime::open(
+        root.path().join("sessions.db"),
+        &workspace,
+        provider,
+        model,
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(reopened.model_requests(&session).unwrap(), ledger);
+}
+
+#[tokio::test]
 async fn reported_usage_write_failure_and_owner_lock_keep_the_original_hold() {
     let f = reported_fixture().await;
     let input = reported_decision(&f.record);

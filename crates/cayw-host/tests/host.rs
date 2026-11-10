@@ -1698,6 +1698,11 @@ async fn un_ranged_large_read_returns_a_bounded_preview_instead_of_the_whole_fil
     let root = Workspace::new();
     let total = 9 * 1024 * 1024;
     std::fs::write(root.path().join("huge.txt"), "a".repeat(total)).unwrap();
+    std::fs::write(
+        root.path().join("huge-lines.txt"),
+        format!("line1\nline2\n{}", "b".repeat(total)),
+    )
+    .unwrap();
     let (host, _, _) = host(root.path(), Default::default());
     let result = call(&host, "fs.read", json!({"path":"huge.txt"}))
         .await
@@ -1709,7 +1714,29 @@ async fn un_ranged_large_read_returns_a_bounded_preview_instead_of_the_whole_fil
     assert_eq!(result["offset_bytes"], 0);
     assert_eq!(result["next_offset_bytes"].as_u64().unwrap(), 256 * 1024);
     assert_eq!(result["start_line"], 1);
-    assert_eq!(result["next_start_line"], 2);
+    assert_eq!(result["lines_returned"], 0);
+    assert!(result.get("next_start_line").is_none());
+
+    let next_chunk = call(
+        &host,
+        "fs.read",
+        json!({"path":"huge.txt","offset_bytes":result["next_offset_bytes"],"max_bytes":16}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(next_chunk["content"], "a".repeat(16));
+    assert_eq!(next_chunk["offset_bytes"], 256 * 1024);
+
+    let multiline = call(&host, "fs.read", json!({"path":"huge-lines.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(multiline["truncated"], true);
+    assert_eq!(multiline["content"], "line1\nline2\n");
+    assert_eq!(multiline["bytes"], 12);
+    assert_eq!(multiline["start_line"], 1);
+    assert_eq!(multiline["lines_returned"], 2);
+    assert_eq!(multiline["next_start_line"], 3);
+    assert_eq!(multiline["next_offset_bytes"], 12);
 }
 
 #[tokio::test]
@@ -1721,6 +1748,7 @@ async fn explicit_line_and_byte_ranges_read_only_the_requested_window() {
     )
     .unwrap();
     std::fs::write(root.path().join("digits.txt"), "0123456789").unwrap();
+    std::fs::write(root.path().join("utf8.txt"), "éx").unwrap();
     let (host, _, _) = host(root.path(), Default::default());
 
     let lines = call(
@@ -1761,6 +1789,36 @@ async fn explicit_line_and_byte_ranges_read_only_the_requested_window() {
     assert_eq!(complete["content"], "0123456789");
     assert_eq!(complete["truncated"], false);
     assert_eq!(complete["sha256"].as_str().unwrap().len(), 64);
+
+    let too_small_utf8 = call(
+        &host,
+        "fs.read",
+        json!({"path":"utf8.txt","offset_bytes":0,"max_bytes":1}),
+    )
+    .await
+    .unwrap_err();
+    assert!(too_small_utf8.message.contains("too small"));
+
+    let utf8_first = call(
+        &host,
+        "fs.read",
+        json!({"path":"utf8.txt","offset_bytes":0,"max_bytes":2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(utf8_first["content"], "é");
+    assert_eq!(utf8_first["truncated"], true);
+    assert_eq!(utf8_first["next_offset_bytes"], 2);
+
+    let utf8_second = call(
+        &host,
+        "fs.read",
+        json!({"path":"utf8.txt","offset_bytes":utf8_first["next_offset_bytes"],"max_bytes":2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(utf8_second["content"], "x");
+    assert_eq!(utf8_second["truncated"], false);
 
     let mixed = call(
         &host,

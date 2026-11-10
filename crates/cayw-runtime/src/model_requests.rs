@@ -1186,7 +1186,7 @@ fn reconciliation_tokens(
             if record.started_cursor.is_none()
                 || record
                     .output_max_tokens
-                    .is_none_or(|limit| report.usage.output > limit)
+                    .is_some_and(|limit| report.usage.output > limit)
             {
                 return Err(invalid_report());
             }
