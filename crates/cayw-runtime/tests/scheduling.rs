@@ -55,7 +55,7 @@ async fn sessions_start_in_fifo_order_and_cancelled_queued_session_never_starts(
     let settings = RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 3,
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         ..Default::default()
     };
     let rt = Runtime::open(

@@ -52,7 +52,7 @@ fn settings() -> RuntimeConfig {
     RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 4,
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         ..Default::default()
     }
 }
@@ -62,8 +62,8 @@ fn patient() -> RuntimeConfig {
     RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 4,
-        max_run_time: Duration::from_secs(120),
-        max_queue_time: Duration::from_secs(60),
+        max_run_time: Some(Duration::from_secs(120)),
+        max_queue_time: Some(Duration::from_secs(60)),
         ..Default::default()
     }
 }
@@ -71,7 +71,7 @@ fn request_settings() -> RuntimeConfig {
     RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 4,
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         request_policy: Some(RequestPolicy {
             permission_policy_id: "durable-queue-fixture".into(),
             operations: vec![OperationScope::exact(
@@ -519,7 +519,7 @@ async fn queue_timeout_behind_an_active_slot_and_dormant_cancellation_release_ca
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
     let p = provider();
     let mut config = settings();
-    config.max_queue_time = Duration::from_millis(100);
+    config.max_queue_time = Some(Duration::from_millis(100));
     let rt = open_with(&dir, p.clone(), config);
     let occupant_session = rt.create(None).unwrap().id;
     let occupant = rt.enqueue(&occupant_session, "occupy slot").unwrap();

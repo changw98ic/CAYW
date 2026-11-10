@@ -71,15 +71,8 @@ pub(crate) fn validate_config(config: &RuntimeConfig) -> Result<(), RuntimeError
     if config.host.external.is_some() {
         return Err(RuntimeError::InvalidInput("configure either bridge or host.external; their execution authority is ambiguous together".into()));
     }
-    // Leave room for the exact call authorization and dispatch envelope. A large
-    // catalog must be reduced by the trusted host before accepting any task.
-    let bindings = serde_json::to_value(bridge.binding_snapshot())?;
-    if serde_json::to_vec(&bindings)?.len() > cayw_core::MAX_METADATA_BYTES / 4 {
-        return Err(RuntimeError::InvalidInput(
-            "Bridge bindings exceed the durable Core metadata budget".into(),
-        ));
-    }
-    metadata_bounds(&bindings).map_err(|error| RuntimeError::InvalidInput(error.to_string()))
+    let _bindings = serde_json::to_value(bridge.binding_snapshot())?;
+    Ok(())
 }
 
 pub(crate) fn permission_policy_id(
@@ -267,7 +260,6 @@ impl Journal {
                 record: record.clone(),
                 outcome: outcome.cloned(),
             })?;
-            metadata_bounds(&data)?;
             context.inner.store.append_host_event(
                 &self.origin.lease,
                 if outcome.is_some() { SETTLED } else { PREPARED },
@@ -280,7 +272,7 @@ impl Journal {
             context.inner.changed.notify_waiters();
             Ok(())
         })();
-        result.map_err(|error: RuntimeError| context.persistence_failed(error))
+        result.map_err(|error: RuntimeError| context.record_error(error))
     }
 }
 #[async_trait]
@@ -313,29 +305,6 @@ impl DispatchJournal for Journal {
     }
 }
 
-fn metadata_bounds(value: &Value) -> Result<(), RuntimeError> {
-    let mut pending = vec![(value, 0usize)];
-    let mut nodes = 0usize;
-    while let Some((value, depth)) = pending.pop() {
-        nodes += 1;
-        if depth > cayw_core::MAX_METADATA_DEPTH || nodes > cayw_core::MAX_METADATA_NODES {
-            return Err(corrupt(
-                "Bridge evidence exceeds Core metadata shape bounds",
-            ));
-        }
-        match value {
-            Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
-            Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, depth + 1)))
-            }
-            _ => {}
-        }
-    }
-    if serde_json::to_vec(value)?.len() > cayw_core::MAX_METADATA_BYTES {
-        return Err(corrupt("Bridge evidence exceeds Core metadata byte bound"));
-    }
-    Ok(())
-}
 fn corrupt(message: &str) -> RuntimeError {
     CoreError::CorruptStore(message.into()).into()
 }

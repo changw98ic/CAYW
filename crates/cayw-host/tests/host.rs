@@ -346,7 +346,7 @@ async fn paths_symlinks_and_byte_limits_are_enforced() {
     let outside = Workspace::new();
     std::fs::write(outside.path().join("secret"), "outside").unwrap();
     let config = HostConfig {
-        max_file_bytes: 8,
+        max_file_bytes: Some(8),
         ..Default::default()
     };
     let (host, _, _) = host(root.path(), config);
@@ -454,7 +454,7 @@ async fn result_and_directory_budgets_prevent_unbounded_data() {
     let (limited, _, _) = host(
         root.path(),
         HostConfig {
-            max_list_entries: 1,
+            max_list_entries: Some(1),
             ..Default::default()
         },
     );
@@ -466,7 +466,7 @@ async fn result_and_directory_budgets_prevent_unbounded_data() {
     let (tiny, _, audit) = host(
         root.path(),
         HostConfig {
-            max_result_bytes: 8,
+            max_result_bytes: Some(8),
             ..Default::default()
         },
     );
@@ -654,7 +654,7 @@ async fn external_error_payload_is_bounded_before_audit_and_return() {
         root.path(),
         HostConfig {
             external: Some(Arc::new(ErrorExternal)),
-            max_result_bytes: 64,
+            max_result_bytes: Some(64),
             ..Default::default()
         },
     );
@@ -729,7 +729,7 @@ async fn external_call_deadline_retains_unknown_and_cancels_child_token() {
             external: Some(external.clone()),
             // Durable generation admission must finish before testing an actual
             // dispatched service timeout, including on a busy test filesystem.
-            call_timeout: Duration::from_secs(2),
+            call_timeout: Some(Duration::from_secs(2)),
             ..Default::default()
         },
     );
@@ -909,8 +909,8 @@ async fn cancelled_and_over_budget_calls_do_not_reach_permission_or_storage() {
     let (host, gate, audit) = host(
         root.path(),
         HostConfig {
-            max_argument_bytes: 64,
-            max_calls: 1,
+            max_argument_bytes: Some(64),
+            max_calls: Some(1),
             ..Default::default()
         },
     );
@@ -1116,14 +1116,14 @@ fn invalid_builtin_config_is_rejected_before_opening_a_store() {
     for config in [
         HostConfig {
             data: Some(cayw_data::Limits {
-                max_depth: 0,
+                max_depth: Some(0),
                 ..Default::default()
             }),
             ..Default::default()
         },
         HostConfig {
             workspace: Some(cayw_workspace::Limits {
-                max_batches: 0,
+                max_batches: Some(0),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1140,22 +1140,25 @@ fn invalid_builtin_config_is_rejected_before_opening_a_store() {
 }
 
 #[tokio::test]
-async fn arbitrary_json_depth_is_rejected_before_permission_or_audit() {
+async fn arbitrary_json_depth_is_accepted_without_a_byte_limit() {
     let root = Workspace::new();
     let (host, gate, audit) = host(root.path(), Default::default());
     let mut value = json!(1);
-    for _ in 0..16_000 {
+    for _ in 0..256 {
         value = Value::Array(vec![value]);
     }
     let mut args = serde_json::Map::new();
     args.insert("format".into(), json!("json"));
     args.insert("value".into(), value);
-    let error = call(&host, "data.serialize", Value::Object(args))
-        .await
-        .unwrap_err();
-    assert!(error.message.contains("nesting"), "{error}");
-    assert!(gate.calls.lock().unwrap().is_empty());
-    assert!(audit.records.lock().unwrap().is_empty());
+    let result = call(&host, "data.serialize", Value::Object(args)).await;
+    assert!(
+        !gate.calls.lock().unwrap().is_empty(),
+        "depth alone must not be rejected before permission: {result:?}"
+    );
+    assert!(
+        !audit.records.lock().unwrap().is_empty(),
+        "depth alone must not be rejected before audit"
+    );
 }
 
 #[tokio::test]
@@ -1165,11 +1168,11 @@ async fn builtin_limits_and_invalid_schemas_reject_before_permission_or_storage(
         root.path(),
         HostConfig {
             data: Some(cayw_data::Limits {
-                input_bytes: 64,
+                input_bytes: Some(64),
                 ..Default::default()
             }),
             workspace: Some(cayw_workspace::Limits {
-                max_argument_bytes: 64,
+                max_argument_bytes: Some(64),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1323,7 +1326,7 @@ async fn pure_builtin_failures_settle_without_stopping_the_host() {
     let (host, _, audit) = host(
         root.path(),
         HostConfig {
-            max_result_bytes: 16,
+            max_result_bytes: Some(16),
             ..Default::default()
         },
     );
@@ -1589,7 +1592,7 @@ async fn builtin_result_or_audit_loss_preserves_unknown_and_blocks_recovery_bypa
             gate,
             audit.clone(),
             HostConfig {
-                max_result_bytes: if fail_settle { 1024 * 1024 } else { 8 },
+                max_result_bytes: Some(if fail_settle { 1024 * 1024 } else { 8 }),
                 ..Default::default()
             },
         )
@@ -1654,6 +1657,223 @@ async fn check_lint_and_format_profiles_use_fixed_commands_and_reject_agent_argv
     }
 }
 
+#[test]
+fn default_host_config_has_no_artificial_limits() {
+    let config = HostConfig::default();
+    assert!(config.max_argument_bytes.is_none());
+    assert!(config.max_result_bytes.is_none());
+    assert!(config.max_total_bytes.is_none());
+    assert!(config.max_calls.is_none());
+    assert!(config.max_file_bytes.is_none());
+    assert!(config.max_list_entries.is_none());
+    assert!(config.call_timeout.is_none());
+    assert!(config.process_timeout.is_none());
+    assert!(config.max_process_output_bytes.is_none());
+    let limits = cayw_host::TerminalLimits::default();
+    assert_eq!(limits.max_sessions, 16);
+    assert!(limits.max_sessions_total.is_none());
+    assert!(limits.max_input_bytes_per_write.is_none());
+    assert!(limits.max_input_bytes_per_session.is_none());
+    assert!(limits.max_output_bytes_per_session.is_none());
+    assert!(limits.max_read_bytes.is_none());
+    assert!(limits.max_wait.is_none());
+}
+
+#[tokio::test]
+async fn default_host_reads_files_larger_than_one_mib_without_a_cap() {
+    let root = Workspace::new();
+    let content = "a".repeat(2 * 1024 * 1024);
+    std::fs::write(root.path().join("large.txt"), &content).unwrap();
+    let (host, _, _) = host(root.path(), Default::default());
+    let result = call(&host, "fs.read", json!({"path":"large.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(result["content"].as_str().unwrap(), content);
+    assert_eq!(result["bytes"].as_u64().unwrap() as usize, content.len());
+    assert_eq!(result["sha256"].as_str().unwrap().len(), 64);
+}
+
+#[tokio::test]
+async fn un_ranged_large_read_returns_a_bounded_preview_instead_of_the_whole_file() {
+    let root = Workspace::new();
+    let total = 9 * 1024 * 1024;
+    std::fs::write(root.path().join("huge.txt"), "a".repeat(total)).unwrap();
+    let (host, _, _) = host(root.path(), Default::default());
+    let result = call(&host, "fs.read", json!({"path":"huge.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["total_bytes"].as_u64().unwrap(), total as u64);
+    assert_eq!(result["bytes"].as_u64().unwrap(), 256 * 1024);
+    assert_eq!(result["content"].as_str().unwrap().len(), 256 * 1024);
+    assert_eq!(result["offset_bytes"], 0);
+    assert_eq!(result["next_offset_bytes"].as_u64().unwrap(), 256 * 1024);
+    assert_eq!(result["start_line"], 1);
+    assert_eq!(result["next_start_line"], 2);
+}
+
+#[tokio::test]
+async fn explicit_line_and_byte_ranges_read_only_the_requested_window() {
+    let root = Workspace::new();
+    std::fs::write(
+        root.path().join("lines.txt"),
+        "line1\nline2\nline3\nline4\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("digits.txt"), "0123456789").unwrap();
+    let (host, _, _) = host(root.path(), Default::default());
+
+    let lines = call(
+        &host,
+        "fs.read",
+        json!({"path":"lines.txt","start_line":2,"max_lines":2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(lines["content"], "line2\nline3\n");
+    assert_eq!(lines["start_line"], 2);
+    assert_eq!(lines["lines_returned"], 2);
+    assert_eq!(lines["offset_bytes"], 6);
+    assert_eq!(lines["truncated"], true);
+    assert_eq!(lines["next_start_line"], 4);
+    assert!(lines.get("sha256").is_none());
+
+    let bytes = call(
+        &host,
+        "fs.read",
+        json!({"path":"digits.txt","offset_bytes":2,"max_bytes":3}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bytes["content"], "234");
+    assert_eq!(bytes["offset_bytes"], 2);
+    assert_eq!(bytes["truncated"], true);
+    assert_eq!(bytes["next_offset_bytes"], 5);
+    assert!(bytes.get("sha256").is_none());
+
+    let complete = call(
+        &host,
+        "fs.read",
+        json!({"path":"digits.txt","offset_bytes":0,"max_bytes":10}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(complete["content"], "0123456789");
+    assert_eq!(complete["truncated"], false);
+    assert_eq!(complete["sha256"].as_str().unwrap().len(), 64);
+
+    let mixed = call(
+        &host,
+        "fs.read",
+        json!({"path":"digits.txt","start_line":1,"offset_bytes":0}),
+    )
+    .await
+    .unwrap_err();
+    assert!(mixed.message.contains("cannot be combined"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_without_output_limits_spills_large_output_and_reports_its_path() {
+    let root = Workspace::new();
+    let mut profile = process_profile(ProfileKind::Test, "flood");
+    profile.max_output_bytes = None;
+    let config = HostConfig {
+        profiles: BTreeMap::from([("flood".into(), profile)]),
+        ..Default::default()
+    };
+    let (host, _, _) = host(root.path(), config);
+    let result = call(&host, "test.run", json!({"profile":"flood"}))
+        .await
+        .unwrap();
+    assert_eq!(result["success"], true);
+    assert_eq!(result["termination"], "exited");
+    assert_eq!(result["output_complete"], true);
+    let spilled = result
+        .get("spilled_stdout")
+        .expect("large output must spill when no limit is configured");
+    assert!(spilled["total_bytes"].as_u64().unwrap() > 300 * 1024);
+    assert!(!spilled["path"].as_str().unwrap().is_empty());
+    assert_eq!(spilled["sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("full output saved to")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn host_settlement_discards_uncommitted_prepared_batches_before_a_write() {
+    let root = Workspace::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let dir =
+        cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+    let workspace = cayw_workspace::Workspace::open_dir_until(
+        dir,
+        cayw_workspace::Limits::default(),
+        CancellationToken::new(),
+        deadline,
+    )
+    .unwrap();
+    let prepared = workspace
+        .execute_until(
+            "fs.prepare_change_batch",
+            &json!({"operations":[{
+                "op":"write",
+                "path":"prepared.txt",
+                "expected":{"kind":"absent"},
+                "content":"{}",
+                "encoding":"utf8",
+                "language":"json"
+            }]}),
+            CancellationToken::new(),
+            deadline,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared["status"], "prepared");
+    drop(workspace);
+
+    let (host, _, _) = host(root.path(), Default::default());
+    call(
+        &host,
+        "fs.write",
+        json!({"path":"written.txt","content":"committed"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("written.txt")).unwrap(),
+        "committed"
+    );
+    assert!(!root.path().join("prepared.txt").exists());
+
+    let dir =
+        cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+    let workspace = cayw_workspace::Workspace::open_dir_until(
+        dir,
+        cayw_workspace::Limits::default(),
+        CancellationToken::new(),
+        std::time::Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    let status = workspace
+        .execute_until(
+            "fs.batch_status",
+            &json!({}),
+            CancellationToken::new(),
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        status["batches"].as_array().unwrap().is_empty(),
+        "prepared batch should be discarded: {status}"
+    );
+}
+
 fn process_profile(kind: ProfileKind, mode: &str) -> Profile {
     Profile {
         kind,
@@ -1664,8 +1884,8 @@ fn process_profile(kind: ProfileKind, mode: &str) -> Profile {
             "--nocapture".into(),
         ],
         env: BTreeMap::from([("CAYW_HOST_FIXTURE_MODE".into(), mode.into())]),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 8192,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(8192),
         allow_filter: false,
         io: cayw_device::ProcessIo::Pipes,
     }
@@ -1996,8 +2216,8 @@ async fn real_device_timeout_and_output_overflow_remain_unknown() {
     for mode in ["wait", "flood"] {
         let root = Workspace::new();
         let mut profile = process_profile(ProfileKind::Test, mode);
-        profile.timeout = Duration::from_millis(250);
-        profile.max_output_bytes = 2048;
+        profile.timeout = Some(Duration::from_millis(250));
+        profile.max_output_bytes = Some(2048);
         let (host, _, audit) = host(
             root.path(),
             HostConfig {

@@ -161,7 +161,7 @@ fn digest(manifest: &Manifest) -> Result<String, CapabilityError> {
 fn read_json<T: serde::de::DeserializeOwned>(
     dir: &Dir,
     name: &str,
-    limit: usize,
+    limit: Option<usize>,
     context: &Context,
 ) -> Result<T, CapabilityError> {
     serde_json::from_slice(&fs::read(dir, name, limit, context)?)
@@ -188,7 +188,7 @@ fn state_write(dir: &Dir, state: &State, context: &Context) -> Result<(), Capabi
 }
 fn capture(
     anchor: &Anchor,
-    limit: usize,
+    limit: Option<usize>,
     context: &Context,
 ) -> Result<(Option<Blob>, Option<Vec<u8>>), CapabilityError> {
     match fs::metadata(&anchor.dir, &anchor.name)? {
@@ -356,11 +356,10 @@ impl Drop for AliasProbe<'_> {
 impl Workspace {
     fn batch_ids(&self, context: &Context) -> Result<Vec<String>, CapabilityError> {
         let mut ids = vec![];
-        let mut seen = 0;
-        for entry in self.store.entries().map_err(io_error)? {
+        for (index, entry) in self.store.entries().map_err(io_error)?.enumerate() {
             context.check()?;
-            seen += 1;
-            if seen > self.limits.max_batches {
+            let seen = index + 1;
+            if self.limits.max_batches.is_some_and(|limit| seen > limit) {
                 return Err(failure(
                     "journal count limit reached; application must archive settled records",
                 ));
@@ -397,7 +396,10 @@ impl Workspace {
         if manifest.version != 1
             || manifest.batch_id != id
             || manifest.operations.is_empty()
-            || manifest.operations.len() > self.limits.max_batch_operations
+            || self
+                .limits
+                .max_batch_operations
+                .is_some_and(|limit| manifest.operations.len() > limit)
         {
             return Err(failure("invalid journal version, ID or operation count"));
         }
@@ -422,7 +424,12 @@ impl Workspace {
             }
             for descriptor in [&op.old, &op.new].into_iter().flatten() {
                 fs::validate_hash(&descriptor.sha256)?;
-                if descriptor.bytes > self.limits.max_file_bytes || descriptor.mode > 0o7777 {
+                if self
+                    .limits
+                    .max_file_bytes
+                    .is_some_and(|limit| descriptor.bytes > limit)
+                    || descriptor.mode > 0o7777
+                {
                     return Err(failure("invalid journal blob bound or mode"));
                 }
                 bytes = bytes
@@ -430,11 +437,15 @@ impl Workspace {
                     .ok_or_else(|| failure("journal byte overflow"))?;
             }
         }
-        if bytes > self.limits.max_batch_bytes {
+        if self
+            .limits
+            .max_batch_bytes
+            .is_some_and(|limit| bytes > limit)
+        {
             return Err(failure("journal batch byte limit exceeded"));
         }
         let digest = digest(&manifest)?;
-        let state: State = read_json(&dir, "state.json", 4096, context)?;
+        let state: State = read_json(&dir, "state.json", Some(4096), context)?;
         if state.version != 1
             || state.batch_digest != digest
             || state.installed > manifest.operations.len()
@@ -497,6 +508,36 @@ impl Workspace {
         }
         Ok(())
     }
+    pub(crate) fn discard_prepared_batches_inner(
+        &self,
+        context: &Context,
+    ) -> Result<usize, CapabilityError> {
+        let _lock = fs::try_write_lock(&self.root, context)?;
+        let mut discarded = 0;
+        for id in self.batch_ids(context)? {
+            let journal = self.load_journal(&id, context)?;
+            if journal.state.phase == Phase::Prepared {
+                // Nothing was installed for a prepared batch, so its backup and
+                // candidate blobs have no user-visible meaning. Remove the whole
+                // journal to reclaim the batch slot and storage.
+                for entry in journal.dir.entries().map_err(io_error)? {
+                    context.check()?;
+                    let entry = entry.map_err(io_error)?;
+                    let name = entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| failure("invalid journal entry name"))?;
+                    journal.dir.remove_file(&name).map_err(io_error)?;
+                }
+                fs::sync(&journal.dir)?;
+                drop(journal);
+                self.store.remove_dir(&id).map_err(io_error)?;
+                fs::sync(&self.store)?;
+                discarded += 1;
+            }
+        }
+        Ok(discarded)
+    }
     pub(crate) fn ensure_settled(&self, context: &Context) -> Result<(), CapabilityError> {
         for id in self.batch_ids(context)? {
             if self.load_journal(&id, context)?.state.phase.pending() {
@@ -514,7 +555,12 @@ impl Workspace {
     ) -> Result<Value, CapabilityError> {
         self.ensure_settled(context)?;
         let args: PrepareArgs = parse(args)?;
-        if args.operations.is_empty() || args.operations.len() > self.limits.max_batch_operations {
+        if args.operations.is_empty()
+            || self
+                .limits
+                .max_batch_operations
+                .is_some_and(|limit| args.operations.len() > limit)
+        {
             return Err(failure("batch operation count limit exceeded"));
         }
         let paths: Vec<_> = args
@@ -534,12 +580,11 @@ impl Workspace {
         check_target_aliases(&targets, context)?;
         // Count unpublished directories as well, so repeated interrupted prepares
         // cannot grow disk storage without bound.
-        let mut count = 0usize;
-        for entry in self.store.entries().map_err(io_error)? {
+        for (index, entry) in self.store.entries().map_err(io_error)?.enumerate() {
             context.check()?;
             entry.map_err(io_error)?;
-            count += 1;
-            if count >= self.limits.max_batches {
+            let count = index + 1;
+            if self.limits.max_batches.is_some_and(|limit| count >= limit) {
                 return Err(failure("journal count limit reached"));
             }
         }
@@ -610,7 +655,7 @@ impl Workspace {
                         .checked_sub(find.len())
                         .and_then(|size| size.checked_add(new.len()))
                         .ok_or_else(|| failure("patch size overflow"))?;
-                    if size > self.limits.max_file_bytes {
+                    if self.limits.max_file_bytes.is_some_and(|limit| size > limit) {
                         return Err(failure("patched candidate byte limit exceeded"));
                     }
                     let mut bytes = Vec::with_capacity(size);
@@ -632,7 +677,11 @@ impl Workspace {
                 }
             };
             if let Some(bytes) = &candidate {
-                if bytes.len() > self.limits.max_file_bytes {
+                if self
+                    .limits
+                    .max_file_bytes
+                    .is_some_and(|limit| bytes.len() > limit)
+                {
                     return Err(failure("candidate file byte limit exceeded"));
                 }
                 let language = language
@@ -648,7 +697,11 @@ impl Workspace {
                 .checked_add(before.as_ref().map_or(0, Vec::len))
                 .and_then(|size| size.checked_add(candidate.as_ref().map_or(0, Vec::len)))
                 .ok_or_else(|| failure("batch size overflow"))?;
-            if total > self.limits.max_batch_bytes {
+            if self
+                .limits
+                .max_batch_bytes
+                .is_some_and(|limit| total > limit)
+            {
                 return Err(failure("batch backup and candidate byte limit exceeded"));
             }
             let new = candidate
@@ -669,7 +722,12 @@ impl Workspace {
             batch_id: batch_id.clone(),
             operations,
         };
-        if serialize(&manifest)?.len() > self.limits.max_argument_bytes {
+        let manifest_bytes = serialize(&manifest)?;
+        if self
+            .limits
+            .max_argument_bytes
+            .is_some_and(|limit| manifest_bytes.len() > limit)
+        {
             return Err(failure("journal manifest byte limit exceeded"));
         }
         let digest = digest(&manifest)?;
@@ -830,12 +888,12 @@ impl Workspace {
                 dir: target.dir.try_clone().map_err(io_error)?,
                 name: staging.into(),
             },
-            file_limit,
+            Some(file_limit),
             context,
         )?
         .0;
         if let Some(staged) = staged {
-            let staged_bytes = fs::read(&target.dir, staging, file_limit, context)?;
+            let staged_bytes = fs::read(&target.dir, staging, Some(file_limit), context)?;
             if bytes.is_none_or(|bytes| !bytes.starts_with(&staged_bytes))
                 || desired
                     .as_ref()
@@ -855,7 +913,7 @@ impl Workspace {
                 let bytes = bytes.ok_or_else(|| failure("missing install candidate"))?;
                 fs::write_exclusive(&target.dir, staging, bytes, desired.mode, context)?;
             }
-            let (actual, _) = capture(target, file_limit, context)?;
+            let (actual, _) = capture(target, Some(file_limit), context)?;
             if &actual != current {
                 return Err(failure("path changed before installation"));
             }

@@ -75,7 +75,7 @@ fn crash_child() {
             ReadCoordinator::new(vec![], limits.clone()).unwrap(),
             limits,
             Limits {
-                timeout: Duration::from_secs(60),
+                timeout: Some(Duration::from_secs(60)),
                 ..Limits::default()
             },
         )
@@ -276,7 +276,9 @@ fn abrupt_process_exit_recovers_unknown_without_replay() {
             &CellLimits::default(),
         )
         .unwrap();
-    assert!(journal.is_frozen("crash-session").unwrap());
+    // Recovery records the lost VM's uncertain effect per cell; it does not
+    // freeze the session for an explicitly started new attempt.
+    assert!(!journal.is_frozen("crash-session").unwrap());
     let host = Arc::new(CrashHost {
         entered: Semaphore::new(0),
         calls: AtomicUsize::new(0),

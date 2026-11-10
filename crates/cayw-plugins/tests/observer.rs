@@ -80,7 +80,7 @@ async fn reader_failure_close_and_plugin_unload_do_not_block_producer() {
             "observer.stats",
             json!({}),
             CancellationToken::new(),
-            Duration::from_secs(1),
+            Some(Duration::from_secs(1)),
         )
         .await
         .unwrap();

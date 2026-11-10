@@ -264,34 +264,14 @@ json_variants!(ExecutionOutcome,
         | ExecutionOutcome::Interrupted { .. } => [],
 );
 
-pub(super) fn check_values(input: &impl ProtocolPayload) -> Result<(), CoreError> {
-    for value in input.json_values() {
-        bounded_value(value)?;
-    }
+/// Persisted and protocol JSON is limited only by serde_json's own syntax and
+/// recursion checks. String identifiers still have their separate bound.
+pub(super) fn check_values(_input: &impl ProtocolPayload) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Public APIs own some inputs. On rejection, normal serde_json::Value Drop
-/// would still recurse through arbitrarily deep input and could abort a worker.
-pub(crate) fn checked_input<T: ProtocolPayload>(mut input: T) -> Result<T, CoreError> {
-    if let Err(error) = check_values(&input) {
-        for value in input.json_values_mut() {
-            drop_value(std::mem::take(value));
-        }
-        return Err(error);
-    }
+pub(crate) fn checked_input<T: ProtocolPayload>(input: T) -> Result<T, CoreError> {
     Ok(input)
-}
-
-fn drop_value(value: Value) {
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            Value::Array(values) => pending.extend(values),
-            Value::Object(values) => pending.extend(values.into_values()),
-            _ => {}
-        }
-    }
 }
 
 /// Read using the same typed decoder as snapshot/events before committing. This
@@ -299,7 +279,6 @@ fn drop_value(value: Value) {
 pub(super) fn encode_readable<T: Serialize + serde::de::DeserializeOwned + ProtocolPayload>(
     input: &T,
 ) -> Result<String, CoreError> {
-    check_values(input)?;
     let json = serde_json::to_string(input)?;
     let _: T = serde_json::from_str(&json)?;
     Ok(json)

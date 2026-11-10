@@ -69,7 +69,7 @@ fn create_runtime(temp: &tempfile::TempDir, provider: Arc<FleetFixture>) -> Runt
         Model::new("fixture", "local-agents"),
         RuntimeConfig {
             max_concurrent_runs: 8,
-            max_run_time: WATCHDOG,
+            max_run_time: Some(WATCHDOG),
             permissions: vec![
                 ScopedPermission::exact(
                     "agent.run",
@@ -87,10 +87,10 @@ fn create_runtime(temp: &tempfile::TempDir, provider: Arc<FleetFixture>) -> Runt
             local_agents: Some(LocalAgents {
                 max_children: 8,
                 max_depth: 1,
-                shared_total_tokens: 100_000,
-                max_calls: 16,
+                shared_total_tokens: Some(100_000),
+                max_calls: Some(16),
                 max_output_bytes: 64 * 1024,
-                max_time: Duration::from_secs(10),
+                max_time: Some(Duration::from_secs(10)),
                 permissions: vec![ScopedPermission::exact(
                     "user.ask",
                     json!({"question": "Hold fleet child at tool boundary", "options": ["release"]}),
@@ -151,7 +151,7 @@ async fn run_prompt(
                     !runtime
                         .model_requests(&child.child_session_id)
                         .unwrap()
-                        .budget_unknown
+                        .usage_unknown
                 );
                 return question;
             }

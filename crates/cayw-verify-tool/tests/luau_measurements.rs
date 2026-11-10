@@ -202,10 +202,7 @@ fn active_deadline_stops_the_loop_with_a_known_terminal_result() {
         sample.config["codemode"]["timeout_ns"],
         json!(1_000_000_000_u64)
     );
-    assert_eq!(
-        sample.config["codemode"]["host_wait_ns"],
-        json!(60_000_000_000_u64)
-    );
+    assert!(sample.config["codemode"]["host_wait_ns"].is_null());
     assert!(sample.report.calls.is_empty());
     assert!(!sample.host_outcome_unknown && !sample.report.outcome_unknown);
     assert_eq!(

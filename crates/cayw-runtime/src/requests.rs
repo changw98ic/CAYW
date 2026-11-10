@@ -1,7 +1,7 @@
 //! Task request authority shares the original Host and immutable call origins.
 use crate::{Inner, Runtime, RuntimeError, TaskRecord, TaskState, execution::RunContext};
 use cayw_ai::{CancellationToken, ToolDefinition};
-use cayw_codemode::{CapabilityError, CapabilityHost};
+use cayw_codemode::{CapabilityError, CapabilityHost, CapabilityStop};
 use cayw_requests::{
     AuthorizationReceipt, EvaluationTicket, HostActor, HostIdentity, OperationCatalog,
     OperationScope, RequestEvent, RequestRecord, RequestTools, TaskIdentity, TaskOutcome,
@@ -69,8 +69,10 @@ fn request_error(context: &RunContext, error: cayw_requests::RequestError) -> Ca
         | RequestError::Stale
         | RequestError::NotFound
         | RequestError::Denied(_)
-        | RequestError::Budget
         | RequestError::PolicyMismatch => CapabilityError::new(error.to_string()),
+        // A budget refusal is a predictable stop, not an uncertain write.
+        RequestError::Budget => CapabilityError::stopped(CapabilityStop::Budget, error.to_string()),
+        // Clock, authority and storage failures may follow a doubtful commit.
         _ => context.persistence_failed(error),
     }
 }
@@ -143,7 +145,7 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
             "shared_total_tokens": config.shared_total_tokens,
             "max_calls": config.max_calls,
             "max_output_bytes": config.max_output_bytes,
-            "max_time_ns": config.max_time.as_nanos().to_string(),
+            "max_time_ns": config.max_time.map(|time| time.as_nanos().to_string()),
             "permissions": permission_list(&config.permissions),
         })
     });
@@ -166,7 +168,7 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
             "item_bytes": cells.item_bytes,
             "media_bytes": cells.media_bytes,
             "max_output_tokens": cells.max_output_tokens,
-            "max_yield_time_ns": cells.max_yield_time.as_nanos().to_string(),
+            "max_yield_time_ns": cells.max_yield_time.map(|time| time.as_nanos().to_string()),
             "store_bytes": cells.store_bytes,
             "store_keys": cells.store_keys,
             "json_depth": cells.json_depth,
@@ -181,8 +183,8 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
             "max_prompt_bytes": runtime.max_prompt_bytes,
             "max_total_tokens": runtime.max_total_tokens,
             "max_turns": runtime.max_turns,
-            "max_run_time_ns": runtime.max_run_time.as_nanos().to_string(),
-            "max_queue_time_ns": runtime.max_queue_time.as_nanos().to_string(),
+            "max_run_time_ns": runtime.max_run_time.map(|time| time.as_nanos().to_string()),
+            "max_queue_time_ns": runtime.max_queue_time.map(|time| time.as_nanos().to_string()),
             "max_capability_calls": runtime.max_capability_calls,
             "max_capability_bytes": runtime.max_capability_bytes,
             "grant_lifetime_ns": runtime.grant_lifetime.as_nanos().to_string(),
@@ -205,6 +207,11 @@ fn catalog(inner: &Inner, host: &cayw_host::Host) -> Result<OperationCatalog, Ru
         &crate::bridge::effective_host_config(&inner.config),
         &service_policy_id(inner, &base_policy)?,
     )?;
+    if policy.operations.is_empty() {
+        // Every selected operation belongs to a disabled service. The request
+        // tools stay available; Runtime rejects the disabled IDs before dispatch.
+        return Ok(OperationCatalog::empty(identity));
+    }
     Ok(OperationCatalog::bind(
         identity,
         &operation_definitions(inner, host),
@@ -318,6 +325,11 @@ impl cayw_host::ExternalHost for ToolService<'_> {
         self.context
             .check(&cancel)
             .map_err(|error| CapabilityError::new(error.to_string()))?;
+        if name == "capability.request"
+            && let Some(reason) = self.context.inner.disabled_operation_reason(&arguments)
+        {
+            return Err(CapabilityError::new(format!("service disabled: {reason}")));
+        }
         let value = self
             .task
             .tools
@@ -501,11 +513,12 @@ pub(crate) fn finish_session(inner: &Inner, session: &str) -> Result<(), Runtime
         }
         // Recovery never rewrites an ended authority or labels unknown effects
         // completed/cancelled. Core's unknown facts remain independently blocking.
+        let snapshot = inner.store.snapshot(session)?;
         let outcome = if matches!(
             task.state,
             TaskState::OutcomeUnknown | TaskState::Draining | TaskState::Failed
-        ) || inner.store.snapshot(session)?.state
-            == cayw_core::SessionState::NeedsReconciliation
+        ) || !snapshot.unresolved_calls.is_empty()
+            || !snapshot.unresolved_capabilities.is_empty()
         {
             TaskOutcome::Failed
         } else if task.state == TaskState::Completed {
@@ -540,7 +553,7 @@ impl Runtime {
             return Err(RuntimeError::StaleApproval);
         }
         let view = self.get(&task.session_id)?;
-        if view.frozen || view.state == cayw_core::SessionState::NeedsReconciliation {
+        if view.frozen {
             return Err(RuntimeError::StaleApproval);
         }
         let lease = view.attempt.ok_or(RuntimeError::StaleApproval)?;

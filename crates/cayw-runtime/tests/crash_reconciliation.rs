@@ -19,7 +19,7 @@ use cayw_core::{
 };
 use cayw_host::ExternalHost;
 use cayw_ipc::{Client, ClientConfig, ServerConfig};
-use cayw_runtime::{Runtime, RuntimeConfig, RuntimeError, ScopedPermission};
+use cayw_runtime::{Runtime, RuntimeConfig, ScopedPermission};
 use fixture::{Identity, Result, SCRIPT, WATCHDOG};
 use futures::FutureExt;
 use rusqlite::{Connection, OpenFlags, types::ValueRef};
@@ -447,14 +447,14 @@ fn open(
             "search.query",
             fixture::arguments(),
         )],
-        max_run_time: BUDGET,
-        max_queue_time: BUDGET,
+        max_run_time: Some(BUDGET),
+        max_queue_time: Some(BUDGET),
         reconciliation_verifier: verifier,
         ..RuntimeConfig::default()
     };
-    config.cells.max_yield_time = Duration::from_secs(300);
-    config.codemode.timeout = BUDGET;
-    config.host.call_timeout = BUDGET;
+    config.cells.max_yield_time = Some(Duration::from_secs(300));
+    config.codemode.timeout = Some(BUDGET);
+    config.host.call_timeout = Some(BUDGET);
     config.host.external = Some(Arc::new(Service {
         root: root.to_owned(),
         capture,
@@ -513,7 +513,7 @@ impl Server {
         let address = listener.local_addr()?;
         let stop = CancellationToken::new();
         let mut config = ServerConfig::new(TOKEN);
-        config.request_timeout = BUDGET;
+        config.request_timeout = Some(BUDGET);
         let task = tokio::spawn(cayw_ipc::serve(
             listener,
             Arc::new(runtime),
@@ -524,7 +524,7 @@ impl Server {
             address,
             TOKEN,
             ClientConfig {
-                request_timeout: BUDGET,
+                request_timeout: Some(BUDGET),
                 ..ClientConfig::default()
             },
         )
@@ -768,14 +768,9 @@ async fn rejection(
         &json!({"before":before,"after":after}),
     )?;
     assert_eq!(before, after, "{label} changed durable facts on refusal");
-    assert_eq!(
-        runtime.get(&identity.session_id)?.state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(matches!(
-        runtime.enqueue(&identity.session_id, "unknown cannot continue"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    let current = runtime.get(&identity.session_id)?;
+    assert_eq!(current.state, SessionState::Idle);
+    assert_eq!(current.unresolved_capabilities.len(), 1);
     Ok(())
 }
 fn tool_results(messages: &[Message]) -> Vec<Value> {
@@ -880,7 +875,8 @@ async fn window(root: &Path, mode: &str, outcome: &str) -> Result<()> {
         "opening implicitly recovered original worker"
     );
     let session = untrusted.recover(&identity.session_id)?;
-    assert_eq!(session.state, SessionState::NeedsReconciliation);
+    assert_eq!(session.state, SessionState::Idle);
+    assert_eq!(session.unresolved_capabilities.len(), 1);
     let recovered = saved(&untrusted, &identity, root)?;
     fixture::write_json(&root.join("unknown-originals.json"), &recovered)?;
     let verdict = derive_verdict(root)?;

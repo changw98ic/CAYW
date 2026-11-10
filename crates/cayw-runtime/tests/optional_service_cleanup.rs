@@ -73,7 +73,7 @@ fn write_eager_mcp(root: &Path, prefix: &str) -> (std::path::PathBuf, std::path:
 }
 
 #[test]
-fn failed_pi_setup_closes_mcp_started_earlier() {
+fn failed_pi_setup_keeps_mcp_and_reports_reason() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
@@ -92,7 +92,7 @@ fn failed_pi_setup_closes_mcp_started_earlier() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cayw"))
+    let mut server = Command::new(env!("CARGO_BIN_EXE_cayw"))
         .arg("serve")
         .arg("--workspace")
         .arg(&workspace)
@@ -109,15 +109,42 @@ fn failed_pi_setup_closes_mcp_started_earlier() {
             "CAYW_OPTIONAL_CLEANUP_TOKEN",
             "optional-cleanup-token-1234567890",
         )
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The Pi failure must not stop startup. Read the readiness line and check
+    // that the MCP source was prepared while Pi reports its own reason.
+    let mut stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut stdout, &mut line).unwrap();
+    let ready: serde_json::Value =
+        serde_json::from_str(&line).expect("serve must report readiness");
+    assert_eq!(ready["configuration"]["mcp_installed"], 1);
+    let pi_error = ready["configuration"]["pi_error"]
+        .as_str()
+        .expect("Pi failure is reported");
     assert!(
-        stderr.contains("install pi sample extension"),
-        "unexpected stderr: {stderr}"
+        pi_error.contains("install pi sample extension"),
+        "unexpected Pi error: {pi_error}"
+    );
+    assert!(
+        ready["configuration"]["disabled_services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "pi_compat"),
+        "disabled services must include pi_compat: {}",
+        ready["configuration"]
     );
 
+    Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(server.id().to_string())
+        .status()
+        .unwrap();
+    let status = server.wait().unwrap();
+    assert!(status.success(), "shutdown failed with {status}");
     assert_process_stopped(&marker);
 }
 

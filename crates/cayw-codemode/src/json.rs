@@ -8,7 +8,13 @@ use std::{
     io::{self, Write},
 };
 
-const MAX_DEPTH: usize = 64;
+/// Lua tables are converted recursively; keep a generous nesting bound so a
+/// deeply nested Lua table returns a clean `Script` error instead of exhausting
+/// the Rust stack. Cyclic tables are rejected separately by pointer tracking.
+const MAX_LUA_DEPTH: usize = 128;
+/// Host values are already parsed JSON. A configured payload budget also bounds
+/// their nesting, so an oversized value can be rejected before Lua conversion.
+const MAX_HOST_DEPTH: usize = 64;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 fn conversion(message: impl Into<String>) -> Fault {
@@ -19,15 +25,18 @@ fn output_limit() -> Fault {
     Fault::new(ErrorKind::OutputLimit, "JSON payload budget exhausted")
 }
 
-pub(crate) fn size(value: &(impl Serialize + ?Sized), limit: usize) -> Result<usize, Fault> {
+pub(crate) fn size(
+    value: &(impl Serialize + ?Sized),
+    limit: Option<usize>,
+) -> Result<usize, Fault> {
     struct Counter {
         bytes: usize,
-        limit: usize,
+        limit: Option<usize>,
     }
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.bytes = self.bytes.saturating_add(bytes.len());
-            if self.bytes > self.limit {
+            if self.limit.is_some_and(|limit| self.bytes > limit) {
                 return Err(io::Error::other("JSON payload budget exhausted"));
             }
             Ok(bytes.len())
@@ -42,21 +51,24 @@ pub(crate) fn size(value: &(impl Serialize + ?Sized), limit: usize) -> Result<us
 }
 
 struct Budget {
-    remaining: usize,
+    remaining: Option<usize>,
 }
 
 impl Budget {
     fn bytes(&mut self, count: usize) -> Result<(), Fault> {
-        self.remaining = self.remaining.checked_sub(count).ok_or_else(output_limit)?;
+        if let Some(remaining) = &mut self.remaining {
+            *remaining = remaining.checked_sub(count).ok_or_else(output_limit)?;
+        }
         Ok(())
     }
 
     fn value(&mut self, value: &(impl Serialize + ?Sized)) -> Result<(), Fault> {
-        self.bytes(size(value, self.remaining)?)
+        let bytes = size(value, self.remaining)?;
+        self.bytes(bytes)
     }
 }
 
-pub(crate) fn from_lua(lua: &Lua, value: LuaValue, limit: usize) -> Result<Value, Fault> {
+pub(crate) fn from_lua(lua: &Lua, value: LuaValue, limit: Option<usize>) -> Result<Value, Fault> {
     convert(
         lua,
         value,
@@ -73,8 +85,8 @@ fn convert(
     depth: usize,
     budget: &mut Budget,
 ) -> Result<Value, Fault> {
-    if depth > MAX_DEPTH {
-        return Err(conversion("JSON nesting exceeds 64 levels"));
+    if depth > MAX_LUA_DEPTH {
+        return Err(conversion("JSON nesting exceeds 128 levels"));
     }
     match value {
         LuaValue::Nil => {
@@ -212,13 +224,13 @@ fn number(value: f64) -> Result<Value, Fault> {
 }
 
 pub(crate) fn to_lua(lua: &Lua, value: &Value) -> Result<LuaValue, Fault> {
-    validate_host_value(value, usize::MAX)?;
+    validate_host_value(value, None)?;
     lua.to_value(value).map_err(Fault::from_lua)
 }
 
 /// Own the unchecked value until both depth and payload checks have succeeded.
 /// Even rejecting an early sibling must drain every other unchecked descendant.
-pub(crate) fn from_host(value: Value, limit: usize) -> Result<Value, Fault> {
+pub(crate) fn from_host(value: Value, limit: Option<usize>) -> Result<Value, Fault> {
     match validate_host_value(&value, limit) {
         Ok(()) => Ok(value),
         Err(fault) => {
@@ -240,8 +252,10 @@ pub(crate) fn discard(value: Value) {
 }
 
 /// A depth-first walk keeps at most one iterator per permitted nesting level.
-/// Only scalar values reach Serialize; unchecked containers never do.
-pub(crate) fn validate_host_value(value: &Value, limit: usize) -> Result<(), Fault> {
+/// Only scalar values reach Serialize; unchecked containers never do. Depth and
+/// byte caps apply only when a payload budget is configured; numeric precision
+/// is always checked because Luau cannot represent every host integer exactly.
+pub(crate) fn validate_host_value(value: &Value, limit: Option<usize>) -> Result<(), Fault> {
     enum Children<'a> {
         Array(std::slice::Iter<'a, Value>),
         Object(serde_json::map::Iter<'a>),
@@ -256,6 +270,7 @@ pub(crate) fn validate_host_value(value: &Value, limit: usize) -> Result<(), Fau
             }
         }
     }
+    let bounded = limit.is_some();
     let mut budget = Budget { remaining: limit };
     let mut pending = vec![Children::Array(std::slice::from_ref(value).iter())];
     while let Some(children) = pending.last_mut() {
@@ -263,7 +278,7 @@ pub(crate) fn validate_host_value(value: &Value, limit: usize) -> Result<(), Fau
             pending.pop();
             continue;
         };
-        if pending.len() - 1 > MAX_DEPTH {
+        if bounded && pending.len() - 1 > MAX_HOST_DEPTH {
             return Err(conversion("Host JSON nesting exceeds 64 levels"));
         }
         if let Some(key) = key {
@@ -321,11 +336,19 @@ pub(crate) fn bounded_message(message: &str) -> &str {
 
 /// Empty means omitted: even JSON string quotes may exceed a tiny budget.
 /// Use the actual JSON writer so escaping counts exactly as other payloads do.
-pub(crate) fn fit_message(message: &str, limit: usize) -> (String, usize) {
-    if limit < 3 || message.is_empty() {
+/// Without a payload budget, the message is only capped at 2 KiB.
+pub(crate) fn fit_message(message: &str, limit: Option<usize>) -> (String, usize) {
+    let message = bounded_message(message);
+    if message.is_empty() {
         return (String::new(), 0);
     }
-    let message = bounded_message(message);
+    let Some(limit) = limit else {
+        let bytes = size(message, None).expect("unbounded JSON size");
+        return (message.to_owned(), bytes);
+    };
+    if limit < 3 {
+        return (String::new(), 0);
+    }
     let boundaries: Vec<_> = message
         .char_indices()
         .map(|(index, _)| index)
@@ -334,7 +357,7 @@ pub(crate) fn fit_message(message: &str, limit: usize) -> (String, usize) {
     let (mut low, mut high) = (0, boundaries.len() - 1);
     while low < high {
         let middle = low + (high - low).div_ceil(2);
-        if size(&message[..boundaries[middle]], limit).is_ok() {
+        if size(&message[..boundaries[middle]], Some(limit)).is_ok() {
             low = middle;
         } else {
             high = middle - 1;
@@ -344,6 +367,6 @@ pub(crate) fn fit_message(message: &str, limit: usize) -> (String, usize) {
         return (String::new(), 0);
     }
     let message = &message[..boundaries[low]];
-    let bytes = size(message, limit).expect("prefix fits the JSON budget");
+    let bytes = size(message, Some(limit)).expect("prefix fits the JSON budget");
     (message.to_owned(), bytes)
 }

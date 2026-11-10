@@ -293,19 +293,12 @@ fn assert_original(rt: &Runtime, root: &Path, session: &str) -> cayw_core::Capab
     assert_eq!(intent.result.as_ref(), Some(result));
     call
 }
-async fn assert_blocked(rt: &Runtime, session: &str, task: &str) {
-    assert_eq!(
-        rt.get(session).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(matches!(
-        rt.enqueue(session, "blocked"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+async fn assert_unrecovered_task_holds_slot(rt: &Runtime, session: &str, task: &str) {
+    assert_eq!(rt.pending_result_storage(session).unwrap().len(), 1);
     assert!(rt.resume(task, CancellationToken::new()).await.is_err());
     assert!(matches!(
         rt.fork(session, "confirmed fork", true),
-        Err(RuntimeError::NeedsReconciliation)
+        Err(RuntimeError::Busy | RuntimeError::RecoveryRequired { .. })
     ));
 }
 fn inspect(rt: &Runtime, session: &str) -> ResultStorageInspection {
@@ -407,7 +400,7 @@ async fn unknown_case(shared: bool, mode: Mode) {
         "storage obligation must have one independent owner"
     );
     let task = rt.tasks(&session).unwrap()[0].id.clone();
-    assert_blocked(&rt, &session, &task).await;
+    assert_unrecovered_task_holds_slot(&rt, &session, &task).await;
     let pending = rt.pending_result_storage(&session).unwrap();
     assert_eq!(pending[0].state, ResultStorageState::OutcomeUnknown);
     {
@@ -444,12 +437,9 @@ async fn unknown_case(shared: bool, mode: Mode) {
     assert_eq!(effect.calls.load(Ordering::SeqCst), usize::from(!shared));
     drop(rt);
     let rt = open(&root, provider.clone(), cfg.clone());
-    assert_blocked(&rt, &session, &task).await;
-    assert_eq!(
-        rt.recover(&session).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert_blocked(&rt, &session, &task).await;
+    assert_unrecovered_task_holds_slot(&rt, &session, &task).await;
+    assert_eq!(rt.recover(&session).unwrap().state, SessionState::Idle);
+    assert_eq!(rt.pending_result_storage(&session).unwrap().len(), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), model_calls);
     assert_eq!(assert_original(&rt, &root, &session), before);
     let inspection = inspect(&rt, &session);
@@ -484,7 +474,7 @@ async fn unknown_case(shared: bool, mode: Mode) {
         ))
         .is_err()
     );
-    assert_blocked(&rt, &session, &task).await;
+    assert_eq!(rt.pending_result_storage(&session).unwrap().len(), 1);
     reconcile(&rt, &root, &inspection);
     assert!(rt.pending_result_storage(&session).unwrap().is_empty());
     let recovered = rt.recover(&session).unwrap();
@@ -700,12 +690,10 @@ async fn process_exit_after_writes_preserves_preparation_until_independent_host_
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].state, ResultStorageState::Prepared);
     let task = rt.tasks(&session).unwrap()[0].id.clone();
-    assert_blocked(&rt, &session, &task).await;
-    assert_eq!(
-        rt.recover(&session).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert_blocked(&rt, &session, &task).await;
+    assert_eq!(rt.get(&session).unwrap().state, SessionState::Running);
+    assert_unrecovered_task_holds_slot(&rt, &session, &task).await;
+    assert_eq!(rt.recover(&session).unwrap().state, SessionState::Idle);
+    assert_eq!(rt.pending_result_storage(&session).unwrap().len(), 1);
     let before = assert_original(&rt, &root, &session);
     let inspection = inspect(&rt, &session);
     assert_eq!(inspection.observation, ResultStorageObservation::Complete);

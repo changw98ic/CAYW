@@ -80,49 +80,68 @@ async fn spawn_mock_server_with_gate(
     let address = listener.local_addr().unwrap();
     let cancel = CancellationToken::new();
     let mut config = ServerConfig::new(TOKEN);
-    config.request_timeout = Duration::from_secs(10);
+    config.request_timeout = Some(Duration::from_secs(10));
     let handler = Arc::new(MockHealthHandler { health, gate });
     let task = tokio::spawn(serve(listener, handler, config, cancel.clone()));
     (address, cancel, task)
 }
 
 #[tokio::test]
-async fn client_rejects_missing_request_timeout_ms() {
-    let (address, cancel, task) = spawn_mock_server(json!({
-        "status": "ok",
-        "protocol_version": 1,
-        "model": "test-model",
-    }))
-    .await;
+async fn client_accepts_missing_or_null_request_timeout_ms_and_waits() {
+    for health in [
+        json!({
+            "status": "ok",
+            "protocol_version": 1,
+            "model": "test-model",
+        }),
+        json!({
+            "status": "ok",
+            "protocol_version": 1,
+            "model": "test-model",
+            "request_timeout_ms": null,
+        }),
+    ] {
+        let (address, cancel, task) = spawn_mock_server(health).await;
 
-    let output = tokio::time::timeout(
-        WATCHDOG,
-        Command::new(env!("CARGO_BIN_EXE_cayw-client"))
-            .args([
-                "--mode",
-                "ipc",
-                "--address",
-                &address.to_string(),
-                "--token-env",
-                "TEST_TOKEN",
-                "create",
-            ])
-            .env("TEST_TOKEN", TOKEN)
-            .output(),
-    )
-    .await
-    .expect("command must not hang")
-    .unwrap();
+        let output = tokio::time::timeout(
+            WATCHDOG,
+            Command::new(env!("CARGO_BIN_EXE_cayw-client"))
+                .args([
+                    "--mode",
+                    "ipc",
+                    "--address",
+                    &address.to_string(),
+                    "--token-env",
+                    "TEST_TOKEN",
+                    "create",
+                ])
+                .env("TEST_TOKEN", TOKEN)
+                .output(),
+        )
+        .await
+        .expect("command must not hang")
+        .unwrap();
 
-    cancel.cancel();
-    let _ = task.await;
+        cancel.cancel();
+        let _ = task.await;
 
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("server health response missing valid integer request_timeout_ms"),
-        "unexpected stderr: {stderr}"
-    );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "status={} stderr={stderr}",
+            output.status
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("mock-session-001"),
+            "unexpected stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("\"request_timeout_ms\":null")
+                || stdout.contains("\"request_timeout_ms\": null"),
+            "missing or null request timeout must be recorded as null: {stdout}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -200,7 +219,7 @@ async fn client_rejects_non_integer_request_timeout_ms() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("server health response missing valid integer request_timeout_ms"),
+        stderr.contains("server health request_timeout_ms must be a positive integer or null"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -240,7 +259,7 @@ async fn client_rejects_negative_request_timeout_ms() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("server health response missing valid integer request_timeout_ms"),
+        stderr.contains("server health request_timeout_ms must be a positive integer or null"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -280,7 +299,7 @@ async fn client_rejects_float_request_timeout_ms() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("server health response missing valid integer request_timeout_ms"),
+        stderr.contains("server health request_timeout_ms must be a positive integer or null"),
         "unexpected stderr: {stderr}"
     );
 }
@@ -479,7 +498,7 @@ async fn ipc_client_with_custom_request_timeout_enforces_deadline() {
     .await;
 
     let short_config = ClientConfig {
-        request_timeout: Duration::from_millis(500),
+        request_timeout: Some(Duration::from_millis(500)),
         ..ClientConfig::default()
     };
     let client = Client::connect_with_config(address, TOKEN, short_config)

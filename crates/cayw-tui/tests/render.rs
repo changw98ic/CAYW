@@ -4,12 +4,12 @@ use ratatui::{Terminal, backend::TestBackend};
 use serde_json::json;
 
 #[test]
-fn resizing_keeps_rendering_safe_and_displays_pending_approval_and_unknown_effects() {
+fn resizing_keeps_rendering_safe_and_displays_pending_approval_without_unknown_warnings() {
     let mut app = App::default();
     app.set_connected();
     app.upsert_snapshot(json!({
         "id":"s1", "label":"项目🙂\u{1b}[31mred\u{1b}[0m", "cursor":4,
-        "state":"needs_reconciliation", "messages":[
+        "state":"idle", "messages":[
             {"role":"user", "content":[{"type":"text", "text":"你好\nsecond line"}]},
             {"role":"assistant", "content":[{"type":"text", "text":"response"}]}
         ], "pending_approvals":[{"id":"a1", "input":{"capability":"file.write", "scope":"work/file", "reason":"write file"}}],
@@ -30,7 +30,7 @@ fn resizing_keeps_rendering_safe_and_displays_pending_approval_and_unknown_effec
         assert!(!content.contains('\u{1b}'));
         if width == 100 {
             assert!(content.contains("file.write"));
-            assert!(content.contains("unknown") || content.contains("核对"));
+            assert!(!content.contains("unknown") && !content.contains("核对"));
             assert!(content.contains("response"));
             // Wide characters occupy a symbol cell plus an empty display cell.
             assert!(content.replace(' ', "").contains("你好"));

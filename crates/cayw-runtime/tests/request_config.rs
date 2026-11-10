@@ -90,7 +90,7 @@ fn launch_rejects_unavailable_or_expanded_operations_and_forged_authorization() 
         json!({"limits":{"repeated_valid_threshold":0}}),
         json!({"limits":{"evaluation_timeout_ms":0}}),
         json!({"limits":{"max_grant_lifetime_ms":u64::MAX}}),
-        json!({"limits":{"max_state_bytes":1}}),
+        json!({"limits":{"max_state_bytes":0}}),
         json!({"limits":{"automatic_approval":true}}),
     ] {
         let mut input = configuration();

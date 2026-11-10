@@ -59,7 +59,7 @@ impl Provider for ModelFixture {
 
 // Break caught: turning unknown write effects into a normal error would allow another model turn.
 #[tokio::test]
-async fn agent_sees_only_execute_code_and_freezes_on_unknown_effects() {
+async fn agent_sees_only_execute_code_and_stops_on_unknown_effects() {
     let host = Arc::new(Host(AtomicUsize::new(0)));
     let code = CodeMode::new(host.clone(), Limits::default()).unwrap();
     let tool = Arc::new(CodeModeTool::new(code));
@@ -84,7 +84,7 @@ async fn agent_sees_only_execute_code_and_freezes_on_unknown_effects() {
         result.structured_content.as_ref().unwrap()["report"]["calls"][0]["status"],
         "outcome_unknown"
     );
-    assert!(agent.snapshot().needs_reconciliation);
+    assert_eq!(run.last_message.stop_reason, StopReason::Error);
     assert_eq!(host.0.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     assert_eq!(

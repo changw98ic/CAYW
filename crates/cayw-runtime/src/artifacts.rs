@@ -114,12 +114,6 @@ impl RuntimeHostDispatch {
             false
         }
     }
-
-    fn session_has_unknown(&self, runtime: &Runtime, session_id: &str) -> Result<bool, String> {
-        runtime
-            .has_artifact_unknown(session_id)
-            .map_err(|e| e.to_string())
-    }
 }
 
 impl HostActionDispatch for RuntimeHostDispatch {
@@ -132,15 +126,6 @@ impl HostActionDispatch for RuntimeHostDispatch {
         req: FollowUpDispatch<'_>,
     ) -> Result<HostDispatchResult, HostDispatchError> {
         let runtime = self.runtime().map_err(HostDispatchError::rejected)?;
-        if self
-            .session_has_unknown(&runtime, req.session_id)
-            .map_err(HostDispatchError::rejected)?
-        {
-            return Err(HostDispatchError::rejected(format!(
-                "session {} requires reconciliation before dispatching follow-up tasks",
-                req.session_id
-            )));
-        }
         // Session must exist and be ready; same admission path as trusted host prompts.
         let task = runtime
             .enqueue(req.session_id, req.prompt)
@@ -339,13 +324,13 @@ impl HostActionDispatch for RuntimeHostDispatch {
                 }
                 let target = task.cancel_target();
                 let cancelled = runtime.cancel(&target).map_err(|error| {
-                    let unknown = match &error {
-                        RuntimeError::NeedsReconciliation => true,
+                    let unknown = matches!(
+                        &error,
                         RuntimeError::RecoveryRequired {
-                            outcome_unknown, ..
-                        } => *outcome_unknown,
-                        _ => false,
-                    };
+                            outcome_unknown: true,
+                            ..
+                        }
+                    );
                     if unknown {
                         HostDispatchError::unknown(error.to_string())
                     } else {
@@ -552,10 +537,7 @@ pub(crate) fn new_state(inner: Weak<Inner>) -> ArtifactState {
 }
 
 fn map_artifact(error: ArtifactError) -> RuntimeError {
-    match error {
-        ArtifactError::NeedsReconciliation(_) => RuntimeError::NeedsReconciliation,
-        other => RuntimeError::InvalidInput(other.to_string()),
-    }
+    RuntimeError::InvalidInput(error.to_string())
 }
 
 fn record_artifact_audit(
@@ -900,6 +882,7 @@ impl Runtime {
         session_id: &str,
     ) -> Result<(), RuntimeError> {
         let _executor = self.artifact_executor(session_id)?;
+        let _ = self.artifact_unknown(session_id, true)?;
         Ok(())
     }
 
@@ -947,15 +930,21 @@ impl Runtime {
             return Ok(());
         };
         if originals.next().is_some() || action.identity_conflict {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::InvalidInput(
+                "artifact fence pending call conflicts with multiple or mismatched actions".into(),
+            ));
         }
         let Some((tool, arguments)) = action.tool_calls.get(&pending.audit_id) else {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::InvalidInput(
+                "artifact fence pending call has no recorded tool arguments".into(),
+            ));
         };
         if tool != &pending.capability
             || cayw_cells::HostResult::value_hash(arguments) != pending.arguments_sha256
         {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::InvalidInput(
+                "artifact fence pending call does not match recorded tool arguments".into(),
+            ));
         }
         let marker = log.reconciliations.iter().rev().find(|marker| {
             &marker.action_id == action_id
@@ -969,12 +958,16 @@ impl Runtime {
                 })
         });
         let Some(marker) = marker else {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::InvalidInput(
+                "artifact fence pending call has no matching reconciliation record".into(),
+            ));
         };
         if log.pending().iter().any(|fact| {
             fact.action_id == *action_id && fact.call_id.as_ref() == Some(&pending.audit_id)
         }) {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::InvalidInput(
+                "artifact fence pending call still has unreconciled facts".into(),
+            ));
         }
         let call_id = pending.audit_id.clone();
         let evidence = cayw_host::FenceRecovery {
@@ -1027,6 +1020,7 @@ impl Runtime {
             self.recover_artifact_host_fence(session_id, &log)?;
         }
         let actions = self.artifact_actions();
+        let mut any_unknown = false;
         for record in actions
             .list_actions_for_session(session_id)
             .map_err(map_artifact)?
@@ -1035,16 +1029,18 @@ impl Runtime {
                 continue;
             }
             if !executor_idle {
-                return Ok(true);
+                any_unknown = true;
+                continue;
             }
             let Some(reconciled) = log.reconciled_record(&record, &pending) else {
-                return Ok(true);
+                any_unknown = true;
+                continue;
             };
             if !actions.refresh_reconciled(&record, reconciled) {
-                return Ok(true);
+                any_unknown = true;
             }
         }
-        Ok(actions.has_outcome_unknown(session_id))
+        Ok(any_unknown || actions.has_outcome_unknown(session_id))
     }
 
     /// Unpaired starts remain live while their original executor owns the lock.

@@ -42,13 +42,16 @@ fn public_configuration_maps_fixed_profiles_budgets_and_exact_permissions_withou
         .unwrap()
         .into_runtime_config()
         .unwrap();
-    assert_eq!(config.max_total_tokens, 2048);
-    assert_eq!(config.max_turns, 8);
-    assert_eq!(config.max_run_time, Duration::from_millis(90000));
-    assert_eq!(config.max_capability_calls, 8);
-    assert_eq!(config.max_capability_bytes, 1048576);
-    assert_eq!(config.codemode.host_wait, Duration::from_millis(45000));
-    assert_eq!(config.host.call_timeout, Duration::from_millis(50000));
+    assert_eq!(config.max_total_tokens, Some(2048));
+    assert_eq!(config.max_turns, Some(8));
+    assert_eq!(config.max_run_time, Some(Duration::from_millis(90000)));
+    assert_eq!(config.max_capability_calls, Some(8));
+    assert_eq!(config.max_capability_bytes, Some(1048576));
+    assert_eq!(
+        config.codemode.host_wait,
+        Some(Duration::from_millis(45000))
+    );
+    assert_eq!(config.host.call_timeout, Some(Duration::from_millis(50000)));
     let profile = &config.host.profiles["tree"];
     assert_eq!(profile.kind, cayw_host::ProfileKind::Test);
     assert_eq!(
@@ -60,8 +63,8 @@ fn public_configuration_maps_fixed_profiles_budgets_and_exact_permissions_withou
         profile.env["PRIVATE_PROFILE_VALUE"],
         "must-not-appear-in-startup"
     );
-    assert_eq!(profile.timeout, Duration::from_millis(60000));
-    assert_eq!(profile.max_output_bytes, 4096);
+    assert_eq!(profile.timeout, Some(Duration::from_millis(60000)));
+    assert_eq!(profile.max_output_bytes, Some(4096));
     assert!(!profile.allow_filter);
     assert!(matches!(profile.io, cayw_host::ProcessIo::Pipes));
     assert!(config.host.terminal_handoffs.is_none());
@@ -171,7 +174,7 @@ fn omitted_settings_keep_runtime_defaults_and_grant_no_permissions() {
     let defaults = RuntimeConfig::default();
     for (input, tokens) in [
         (json!({}), defaults.max_total_tokens),
-        (json!({"budgets":{"max_total_tokens":73}}), 73),
+        (json!({"budgets":{"max_total_tokens":73}}), Some(73)),
     ] {
         let config = serde_json::from_value::<HeadlessConfig>(input)
             .unwrap()
@@ -1226,8 +1229,29 @@ done
     );
 }
 
+#[test]
+fn configuration_above_one_mib_and_host_wait_over_one_hour_are_accepted() {
+    let root = tempfile::tempdir().unwrap();
+    let large_content = "a".repeat(1024 * 1024 + 1024);
+    let input = json!({
+        "budgets": {"host_wait_ms": 3_600_001},
+        "permissions": [{"capability":"fs.write","arguments":{"path":"large.txt","content": large_content}}]
+    });
+    let path = root.path().join("config.json");
+    std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let config = HeadlessConfig::load(path)
+        .unwrap()
+        .into_runtime_config()
+        .unwrap();
+    assert_eq!(
+        config.codemode.host_wait,
+        Some(Duration::from_millis(3_600_001))
+    );
+    assert_eq!(config.permissions.len(), 1);
+}
+
 #[tokio::test]
-async fn bad_or_oversized_configuration_is_rejected_before_database_or_network() {
+async fn bad_configuration_is_rejected_before_database_or_network() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
     let cases = [
@@ -1237,7 +1261,6 @@ async fn bad_or_oversized_configuration_is_rejected_before_database_or_network()
         json!({"profiles":{"bad":{"kind":"test","program":"/usr/bin/true","env":{"SENSITIVE":"private-unknown-value\0"}}}}).to_string(),
         json!({"budgets":{"max_total_tokens":0}}).to_string(),
         json!({"budgets":{"host_wait_ms":0}}).to_string(),
-        json!({"budgets":{"host_wait_ms":3600001}}).to_string(),
         json!({"budgets":{"host_call_timeout_ms":0}}).to_string(),
         json!({"profiles":{"bad":{"kind":"test","program":"/private/missing-config-profile"}}}).to_string(),
         json!({"profiles":{"bad":{"kind":"test","program":"/usr/bin/true","timeout_ms":0}}}).to_string(),
@@ -1247,6 +1270,8 @@ async fn bad_or_oversized_configuration_is_rejected_before_database_or_network()
         json!({"permissions":[{"capability":"test.run","arguments":{"profile":"missing"}}]}).to_string(),
         json!({"permissions":[{"capability":"fs.read","arguments":{"path":"ok","program":"private-unknown-value"}}]}).to_string(),
         json!({"permissions":[{"capability":"test.run","arguments":"private-unknown-value"}]}).to_string(),
+        // Non-JSON input is still rejected; the former fixed 1 MiB byte
+        // ceiling no longer applies to well-formed configuration.
         " ".repeat(1024 * 1024 + 1),
     ];
     for config in cases {

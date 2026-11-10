@@ -55,7 +55,7 @@ fn runtime(
         Arc::new(provider),
         Model::new("fixture", "values"),
         RuntimeConfig {
-            max_run_time: Duration::from_secs(10),
+            max_run_time: Some(Duration::from_secs(10)),
             permissions,
             ..Default::default()
         },

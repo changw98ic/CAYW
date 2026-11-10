@@ -103,15 +103,15 @@ fn open_runtime(
         Model::new("fixture", "local-agents"),
         RuntimeConfig {
             max_concurrent_runs: 8,
-            max_run_time: WATCHDOG,
+            max_run_time: Some(WATCHDOG),
             permissions,
             local_agents: Some(LocalAgents {
                 max_children: 8,
                 max_depth: 1,
-                shared_total_tokens: 100_000,
-                max_calls: 16,
+                shared_total_tokens: Some(100_000),
+                max_calls: Some(16),
                 max_output_bytes: 64 * 1024,
-                max_time: Duration::from_secs(10),
+                max_time: Some(Duration::from_secs(10)),
                 permissions: vec![ScopedPermission::exact(
                     "user.ask",
                     json!({"question":"Hold child at tool boundary","options":["release"]}),
@@ -174,7 +174,7 @@ async fn wait_child_question(runtime: &Runtime, session_id: &str) -> cayw_runtim
                 .next()
             {
                 assert_eq!(question.question, "Hold child at tool boundary");
-                assert!(!runtime.model_requests(session_id).unwrap().budget_unknown);
+                assert!(!runtime.model_requests(session_id).unwrap().usage_unknown);
                 return question;
             }
             tokio::task::yield_now().await;

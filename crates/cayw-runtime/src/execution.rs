@@ -4,10 +4,7 @@ use crate::{
     queue::{TaskLease, TaskTerminal},
 };
 use async_trait::async_trait;
-use cayw_agent::{
-    Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolArgumentLimit, ToolContext,
-    ToolResult,
-};
+use cayw_agent::{Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolContext, ToolResult};
 use cayw_ai::{CancellationToken, Message, ToolDefinition};
 use cayw_cells::{CellManager, CellTool};
 use cayw_codemode::{CapabilityError, CapabilityStop};
@@ -76,15 +73,29 @@ impl RunContext {
         if self.cancel.is_cancelled() || cancel.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if Instant::now() >= self.scope.deadline() {
+        if self
+            .scope
+            .deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             return Err(RuntimeError::Budget("time"));
         }
         self.scope.check()?;
-        if self.turns.load(Ordering::Acquire) > self.inner.config.max_turns {
+        if self
+            .inner
+            .config
+            .max_turns
+            .is_some_and(|max_turns| self.turns.load(Ordering::Acquire) > max_turns)
+        {
             return Err(RuntimeError::Budget("turn"));
         }
+        if let Some(error) = lock(&self.persistence_error).clone() {
+            return Err(RuntimeError::Worker(format!(
+                "durable execution recording failed: {error}"
+            )));
+        }
         if self.unknown.load(Ordering::Acquire) {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::Cancelled);
         }
         if self.failed.load(Ordering::Acquire) {
             return Err(RuntimeError::Worker(
@@ -126,6 +137,16 @@ impl RunContext {
         self.cancel.cancel();
         CapabilityError::unknown(format!("durable capability recording failed: {error}"))
     }
+    /// A pre-effect write or check keeps its ordinary error unless the durable
+    /// store itself is doubtful. Validation, limits and serialization cannot
+    /// claim that an external effect may have happened.
+    pub(crate) fn record_error(&self, error: RuntimeError) -> CapabilityError {
+        if durable_failure(&error) {
+            self.persistence_failed(error)
+        } else {
+            capability_error(error)
+        }
+    }
     /// Model accounting uncertainty cannot assert or clear tool side effects.
     pub(crate) fn model_recording_failed(&self) {
         let reason =
@@ -152,10 +173,34 @@ impl RunContext {
         self.inner
             .store
             .append_host_event(&self.lease, kind, data)
-            .map_err(|e| self.persistence_failed(e))?;
+            .map_err(|error| self.record_error(error.into()))?;
         self.inner.changed.notify_waiters();
         Ok(())
     }
+}
+/// True only when a write may have committed without a durable receipt. Every
+/// other error is a known refusal that must not freeze the session.
+pub(crate) fn durable_failure(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Journal(_)
+            | RuntimeError::Core(
+                cayw_core::CoreError::Database(_)
+                    | cayw_core::CoreError::StorePoisoned
+                    | cayw_core::CoreError::CorruptStore(_)
+            )
+    )
+}
+/// Core rejects these before any SQLite write commits, so the refusal is a
+/// known limit rather than an uncertain side effect.
+fn is_pre_write_refusal(error: &cayw_core::CoreError) -> bool {
+    matches!(
+        error,
+        cayw_core::CoreError::InvalidInput(message)
+            if message == "Metadata byte limit exceeded"
+                || message == "Metadata nesting limit exceeded"
+                || message == "Event byte limit exceeded"
+    )
 }
 pub(crate) fn capability_error(error: RuntimeError) -> CapabilityError {
     match error {
@@ -165,7 +210,6 @@ pub(crate) fn capability_error(error: RuntimeError) -> CapabilityError {
         RuntimeError::Budget(_) => {
             CapabilityError::stopped(CapabilityStop::Budget, error.to_string())
         }
-        RuntimeError::NeedsReconciliation => CapabilityError::unknown(error.to_string()),
         _ => CapabilityError::new(error.to_string()),
     }
 }
@@ -178,22 +222,9 @@ impl cayw_host::PermissionGate for Gate {
         cancel: CancellationToken,
     ) -> Result<(), CapabilityError> {
         self.scope.request.check(&self.scope.context)?;
-        self.check(name, args, cancel).await.map_err(|error| {
-            if matches!(
-                error,
-                RuntimeError::Journal(_)
-                    | RuntimeError::Json(_)
-                    | RuntimeError::Core(
-                        cayw_core::CoreError::Database(_)
-                            | cayw_core::CoreError::StorePoisoned
-                            | cayw_core::CoreError::CorruptStore(_)
-                    )
-            ) {
-                self.scope.context.persistence_failed(error)
-            } else {
-                capability_error(error)
-            }
-        })?;
+        self.check(name, args, cancel)
+            .await
+            .map_err(|error| self.scope.context.record_error(error))?;
         self.scope.request.check(&self.scope.context)
     }
 }
@@ -630,10 +661,7 @@ async fn launch_worker(
             }
             return Err(error);
         }
-        let unresolved = flags.unknown.load(Ordering::Acquire)
-            || outcome.as_ref().is_ok_and(|snapshot| {
-                snapshot.state == cayw_core::SessionState::NeedsReconciliation
-            });
+        let unresolved = flags.unknown.load(Ordering::Acquire);
         let terminal = if unresolved {
             TaskTerminal::OutcomeUnknown
         } else if worker_cancel.is_cancelled() {
@@ -751,7 +779,10 @@ async fn admit(
     task: &TaskLease,
     cancel: &CancellationToken,
 ) -> Result<(), RuntimeError> {
-    let deadline = tokio::time::Instant::now() + inner.config.max_queue_time;
+    let deadline = inner
+        .config
+        .max_queue_time
+        .map(|time| tokio::time::Instant::now() + time);
     loop {
         let notified = inner.changed.notified();
         if cancel.is_cancelled() {
@@ -768,7 +799,12 @@ async fn admit(
         }
         tokio::select! { biased;
             _ = cancel.cancelled() => return Err(RuntimeError::Cancelled),
-            _ = tokio::time::sleep_until(deadline) => return Err(RuntimeError::Budget("queue time")),
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => return Err(RuntimeError::Budget("queue time")),
             _ = notified => {},
             _ = tokio::time::sleep(Duration::from_millis(20)) => {},
         }
@@ -1000,14 +1036,7 @@ async fn execute_with_cells(
             context.clone(),
         )),
         context.selection.model.clone(),
-    )
-    // Core v3 rejects oversized metadata before it can commit an event. This is
-    // a Runtime persistence constraint, not an Agent product limit.
-    .with_tool_argument_limit(Some(ToolArgumentLimit::new(
-        cayw_core::MAX_METADATA_BYTES,
-        cayw_core::MAX_METADATA_DEPTH,
-        cayw_core::MAX_METADATA_NODES,
-    )));
+    );
     // FleetView intervention: steer/stop need the live Agent control.
     inner
         .fleet
@@ -1038,36 +1067,119 @@ async fn execute_with_cells(
     }))?;
     agent.set_execution_mode(cayw_agent::ExecutionMode::Sequential)?;
     agent.set_max_turns(inner.config.max_turns)?;
-    agent.set_stream_options(cayw_ai::StreamOptions {
-        max_tokens: Some(
-            context.scope.token_limit().min(
+    let max_tokens = context
+        .scope
+        .token_limit()
+        .map(|limit| {
+            limit.min(
                 context
                     .selection
                     .model
                     .max_output_tokens
                     .unwrap_or(u64::MAX),
-            ),
-        ),
+            )
+        })
+        .or(context.selection.model.max_output_tokens);
+    agent.set_stream_options(cayw_ai::StreamOptions {
+        max_tokens,
         ..Default::default()
     })?;
     let listener_context = context.clone();
+    let started_tools = Arc::new(Mutex::new(std::collections::BTreeSet::<String>::new()));
     agent.subscribe(move |event, agent_cancel| {
         let ctx = listener_context.clone();
+        let started_tools = started_tools.clone();
         async move {
             // Persist terminal bookkeeping before applying budgets/cancellation.
-            if let Err(error) = ctx.inner.store.append_agent_event(&ctx.lease, &event) {
-                ctx.persistence_failed(&error);
+            let mut persisted = ctx.inner.store.append_agent_event(&ctx.lease, &event);
+            if let Err(error) = &persisted
+                && matches!(event, AgentEvent::AgentEnd { .. })
+                && is_pre_write_refusal(error)
+            {
+                // AgentEnd's message list is informational: Core never compares
+                // it with persisted history, and every message was already
+                // persisted by its own terminal. Core can still reject the
+                // duplicate list when a model message, or the accumulated run,
+                // exceeds its metadata or event bound. Retrying without the
+                // list keeps the lifecycle terminal durable so the attempt can
+                // finish instead of remaining Running.
+                persisted = ctx.inner.store.append_agent_event(
+                    &ctx.lease,
+                    &AgentEvent::AgentEnd {
+                        messages: Vec::new(),
+                    },
+                );
+            }
+            if let Err(error) = persisted {
+                // A pre-execution event can be refused by Core's metadata or
+                // event bound (for example a model streamed a message or
+                // tool-call argument larger than Core accepts). Nothing touched
+                // SQLite, so that is a known failure, not an unknown side
+                // effect. Settling events for an already-started tool and
+                // genuine store failures still require reconciliation.
+                let settles = matches!(
+                    event,
+                    AgentEvent::ToolExecutionUpdate { .. }
+                        | AgentEvent::ToolExecutionEnd { .. }
+                        | AgentEvent::TurnEnd { .. }
+                        | AgentEvent::AgentEnd { .. }
+                );
+                let started_tool = match &event {
+                    AgentEvent::ToolExecutionUpdate { call, .. }
+                    | AgentEvent::ToolExecutionEnd { call, .. } => {
+                        lock(&started_tools).contains(&call.id)
+                    }
+                    _ => false,
+                };
+                // Core checks these bounds before it touches SQLite. A settling
+                // event can carry an oversized tool call whose start event was
+                // already refused; the tool never executed, so the refusal is
+                // still known rather than an uncertain effect.
+                let metadata_refusal = is_pre_write_refusal(&error);
+                let durable = matches!(
+                    &error,
+                    cayw_core::CoreError::Database(_)
+                        | cayw_core::CoreError::StorePoisoned
+                        | cayw_core::CoreError::CorruptStore(_)
+                );
+                if durable || started_tool || (settles && !metadata_refusal) {
+                    ctx.persistence_failed(&error);
+                } else {
+                    lock(&ctx.failed_reason).get_or_insert_with(|| error.to_string());
+                    ctx.failed.store(true, Ordering::Release);
+                    ctx.cancel.cancel();
+                }
                 agent_cancel.cancel();
                 return Err(error.to_string());
+            }
+            match &event {
+                AgentEvent::ToolExecutionStart { call } => {
+                    lock(&started_tools).insert(call.id.clone());
+                }
+                AgentEvent::ToolExecutionEnd { call, .. } => {
+                    lock(&started_tools).remove(&call.id);
+                }
+                _ => {}
             }
             ctx.inner.changed.notify_waiters();
             if matches!(event, AgentEvent::TurnStart) {
                 ctx.turns.fetch_add(1, Ordering::AcqRel);
             }
-            if serde_json::to_vec(&event).map_err(|e| e.to_string())?.len()
-                > ctx.inner.config.max_event_bytes
-                || ctx.scope.tokens().load(Ordering::Acquire) > ctx.scope.token_limit()
-                || ctx.turns.load(Ordering::Acquire) > ctx.inner.config.max_turns
+            if let Some(max_event_bytes) = ctx.inner.config.max_event_bytes
+                && serde_json::to_vec(&event).map_err(|e| e.to_string())?.len() > max_event_bytes
+            {
+                let reason = format!(
+                    "agent event exceeds the configured max_event_bytes ({max_event_bytes})"
+                );
+                lock(&ctx.failed_reason).get_or_insert_with(|| reason);
+                ctx.failed.store(true, Ordering::Release);
+                ctx.cancel.cancel();
+                agent_cancel.cancel();
+            } else if ctx
+                .inner
+                .config
+                .max_turns
+                .is_some_and(|max_turns| ctx.turns.load(Ordering::Acquire) > max_turns)
             {
                 ctx.cancel.cancel();
                 agent_cancel.cancel();
@@ -1128,7 +1240,7 @@ async fn execute_with_cells(
     let result = supervise_run(
         run,
         &context.cancel,
-        tokio::time::Instant::from_std(context.scope.deadline()),
+        context.scope.deadline().map(tokio::time::Instant::from_std),
         || async { context.check(&context.cancel) },
         || {
             context.cells_stopping.store(true, Ordering::Release);
@@ -1143,7 +1255,7 @@ async fn execute_with_cells(
 async fn supervise_run<F, C, CF, A>(
     run: F,
     cancel: &CancellationToken,
-    deadline: tokio::time::Instant,
+    deadline: Option<tokio::time::Instant>,
     mut check: C,
     mut abort: A,
 ) -> Result<(), RuntimeError>
@@ -1163,14 +1275,23 @@ where
         tokio::select! { biased;
             result = &mut run => {
                 return match result {
-                    Ok(()) if expired || tokio::time::Instant::now() >= deadline => {
+                    Ok(())
+                        if expired
+                            || deadline
+                                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline) =>
+                    {
                         Err(RuntimeError::Budget("time"))
                     }
                     other => other,
                 };
             }
             _ = cancel.cancelled() => { abort(); return run.await; },
-            _ = tokio::time::sleep_until(deadline) => {
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                 abort();
                 return match run.await {
                     Ok(()) => Err(RuntimeError::Budget("time")),
@@ -1219,6 +1340,44 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    fn sqlite(code: rusqlite::ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn durable_failure_only_marks_doubtful_writes() {
+        for error in [
+            RuntimeError::InvalidInput("bad name".into()),
+            RuntimeError::StaleApproval,
+            RuntimeError::Core(cayw_core::CoreError::StaleLease),
+            RuntimeError::Core(cayw_core::CoreError::CounterExhausted),
+            RuntimeError::Core(cayw_core::CoreError::InvalidInput("too large".into())),
+            RuntimeError::Json(serde_json::from_str::<Value>("{").unwrap_err()),
+            RuntimeError::Worker("known".into()),
+            RuntimeError::Busy,
+            RuntimeError::Budget("capability count"),
+            RuntimeError::Cancelled,
+        ] {
+            assert!(!durable_failure(&error), "{error:?}");
+        }
+        for error in [
+            RuntimeError::Journal(sqlite(rusqlite::ErrorCode::DatabaseBusy)),
+            RuntimeError::Core(cayw_core::CoreError::Database(sqlite(
+                rusqlite::ErrorCode::DatabaseBusy,
+            ))),
+            RuntimeError::Core(cayw_core::CoreError::StorePoisoned),
+            RuntimeError::Core(cayw_core::CoreError::CorruptStore("fixture".into())),
+        ] {
+            assert!(durable_failure(&error), "{error:?}");
+        }
+    }
+
     // Break caught: overdue checks run again before a response that becomes ready
     // during the next normal checking interval. Only virtual time is advanced.
     #[tokio::test(start_paused = true)]
@@ -1232,7 +1391,7 @@ mod tests {
         supervise_run(
             run,
             &CancellationToken::new(),
-            started + Duration::from_secs(10),
+            Some(started + Duration::from_secs(10)),
             || async {
                 checks.set(checks.get() + 1);
                 tokio::time::advance(Duration::from_millis(100)).await;
@@ -1261,7 +1420,7 @@ mod tests {
         supervise_run(
             run,
             &cancel,
-            tokio::time::Instant::now() + Duration::from_secs(10),
+            Some(tokio::time::Instant::now() + Duration::from_secs(10)),
             || async {
                 checks.set(checks.get() + 1);
                 tokio::time::advance(Duration::from_millis(100)).await;
@@ -1294,7 +1453,7 @@ mod tests {
                     Ok(())
                 },
                 &cancel,
-                tokio::time::Instant::now() + Duration::from_secs(10),
+                Some(tokio::time::Instant::now() + Duration::from_secs(10)),
                 || std::future::ready(Err(failure.take().unwrap())),
                 || stopped.cancel(),
             )
@@ -1316,7 +1475,7 @@ mod tests {
                 Ok(())
             },
             &cancel,
-            tokio::time::Instant::now() + Duration::from_secs(10),
+            Some(tokio::time::Instant::now() + Duration::from_secs(10)),
             || async { Err(RuntimeError::Cancelled) },
             || finished.cancel(),
         )

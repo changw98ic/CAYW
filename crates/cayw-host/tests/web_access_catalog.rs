@@ -119,6 +119,74 @@ async fn enabled_web_access_registers_web_tools() {
 }
 
 #[tokio::test]
+async fn invalid_web_limits_disable_web_tools_without_failing_host() {
+    let (_ws, host) = open(HostConfig {
+        web_access: Some(WebAccessOptions {
+            limits: cayw_web_access::Limits {
+                max_search_limit: 0,
+                ..Default::default()
+            },
+            search: cayw_web_access::SearchBackend::Fixture,
+        }),
+        ..Default::default()
+    });
+    let names: Vec<_> = host
+        .capabilities()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert!(!names.iter().any(|name| name.starts_with("web.")));
+    assert!(names.iter().any(|name| name == "fs.read"));
+    assert!(
+        host.disabled_services()
+            .iter()
+            .any(|service| service.name == "web_access" && !service.reason.is_empty())
+    );
+    let scoped = host
+        .scoped(Arc::new(Gate), Arc::new(Audit::default()))
+        .unwrap();
+    assert_eq!(scoped.disabled_services(), host.disabled_services());
+}
+
+#[tokio::test]
+async fn invalid_vision_limits_disable_vision_without_failing_host() {
+    let (_ws, host) = open(HostConfig {
+        vision: Some(cayw_vision::Limits {
+            input_bytes: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let names: Vec<_> = host
+        .capabilities()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert!(!names.iter().any(|name| name.starts_with("vision.")));
+    assert!(names.iter().any(|name| name == "fs.read"));
+    assert!(
+        host.disabled_services()
+            .iter()
+            .any(|service| service.name == "vision" && !service.reason.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn valid_vision_limits_keep_vision_tools() {
+    let (_ws, host) = open(HostConfig {
+        vision: Some(cayw_vision::Limits::default()),
+        ..Default::default()
+    });
+    let names: Vec<_> = host
+        .capabilities()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert!(names.iter().any(|name| name == "vision.crop"));
+    assert!(host.disabled_services().is_empty());
+}
+
+#[tokio::test]
 async fn fixture_web_search_via_host_call() {
     let config = HostConfig {
         web_access: Some(WebAccessOptions::fixture()),

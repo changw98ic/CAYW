@@ -16,7 +16,7 @@ async fn check(name: &str, args: Value, limits: Limits, prefix: &str) {
 #[tokio::test]
 async fn every_parser_rejects_deep_input_before_unbounded_recursion() {
     let depth = Limits {
-        max_depth: 4,
+        max_depth: Some(4),
         ..Limits::default()
     };
     for (format, text) in [
@@ -38,7 +38,10 @@ async fn every_parser_rejects_deep_input_before_unbounded_recursion() {
     check(
         "data.parse",
         json!({"format":"json","text":over}),
-        Limits::default(),
+        Limits {
+            max_depth: Some(32),
+            ..Limits::default()
+        },
         "depth_limit:",
     )
     .await;
@@ -47,7 +50,7 @@ async fn every_parser_rejects_deep_input_before_unbounded_recursion() {
 #[tokio::test]
 async fn parser_output_expansion_is_bounded_as_encoded_json() {
     let limits = Limits {
-        output_bytes: 80,
+        output_bytes: Some(80),
         ..Limits::default()
     };
     for (format, text) in [
@@ -87,7 +90,7 @@ async fn array_and_node_budgets_apply_to_all_value_formats() {
             "data.parse",
             json!({"format":format,"text":text}),
             Limits {
-                max_rows: 2,
+                max_rows: Some(2),
                 ..Limits::default()
             },
             "row_limit:",
@@ -105,7 +108,7 @@ async fn array_and_node_budgets_apply_to_all_value_formats() {
             "data.parse",
             json!({"format":format,"text":text}),
             Limits {
-                max_nodes: 4,
+                max_nodes: Some(4),
                 ..Limits::default()
             },
             "node_limit:",
@@ -303,7 +306,10 @@ async fn diff_separates_distant_hunks_and_retains_crlf_and_missing_newlines() {
     check(
         "text.diff",
         json!({"before":"x\n".repeat(10_000), "after":"y\n".repeat(10_000)}),
-        Limits::default(),
+        Limits {
+            max_diff_work: Some(1_000_000),
+            ..Limits::default()
+        },
         "diff_work_limit:",
     )
     .await;
@@ -319,7 +325,7 @@ async fn a_running_diff_yields_to_executor_cancellation() {
         json!({"before":"a\n".repeat(1_900),"after":"b\n".repeat(1_900)}),
         cancel.clone(),
         Limits {
-            max_diff_work: 16_000_000,
+            max_diff_work: Some(16_000_000),
             ..Limits::default()
         },
     );
@@ -338,7 +344,7 @@ async fn a_running_diff_yields_to_executor_cancellation() {
 async fn ordinary_toml_float_arrays_do_not_consume_nesting_budget() {
     let value = json!({"items":[1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0]});
     let limits = Limits {
-        max_depth: 4,
+        max_depth: Some(4),
         ..Limits::default()
     };
     let encoded = execute(
@@ -473,7 +479,10 @@ async fn deeply_nested_argument_values_fail_without_recursive_disposal() {
     check(
         "data.serialize",
         Value::Object(args),
-        Limits::default(),
+        Limits {
+            max_depth: Some(32),
+            ..Limits::default()
+        },
         "depth_limit:",
     )
     .await;
@@ -486,7 +495,7 @@ async fn shared_budgets_and_pre_cancel_cover_serialize_query_and_transform() {
             "data.serialize",
             json!({"format":"json","value":{"text":"x".repeat(200)}}),
             Limits {
-                output_bytes: 32,
+                output_bytes: Some(32),
                 ..Limits::default()
             },
             "output_limit:",
@@ -495,7 +504,7 @@ async fn shared_budgets_and_pre_cancel_cover_serialize_query_and_transform() {
             "data.query",
             json!({"value":[[[[[0]]]]],"pointer":""}),
             Limits {
-                max_depth: 4,
+                max_depth: Some(4),
                 ..Limits::default()
             },
             "depth_limit:",
@@ -504,7 +513,7 @@ async fn shared_budgets_and_pre_cancel_cover_serialize_query_and_transform() {
             "data.query",
             json!({"value":[1,2,3,4,5],"pointer":""}),
             Limits {
-                max_nodes: 4,
+                max_nodes: Some(4),
                 ..Limits::default()
             },
             "node_limit:",
@@ -513,7 +522,7 @@ async fn shared_budgets_and_pre_cancel_cover_serialize_query_and_transform() {
             "data.transform",
             json!({"value":[[[[[0]]]]],"operation":"select_rows","indices":[0]}),
             Limits {
-                max_depth: 4,
+                max_depth: Some(4),
                 ..Limits::default()
             },
             "depth_limit:",
@@ -522,7 +531,7 @@ async fn shared_budgets_and_pre_cancel_cover_serialize_query_and_transform() {
             "data.transform",
             json!({"value":{"a":1,"b":2,"c":3},"operation":"select_fields","fields":["a"]}),
             Limits {
-                max_nodes: 4,
+                max_nodes: Some(4),
                 ..Limits::default()
             },
             "node_limit:",
@@ -607,7 +616,7 @@ async fn identical_diff_still_validates_integer_context_and_row_limits() {
         "text.diff",
         json!({"before":"a\nb\nc\n", "after":"a\nb\nc\n"}),
         Limits {
-            max_rows: 2,
+            max_rows: Some(2),
             ..Limits::default()
         },
         "row_limit:",
@@ -619,15 +628,15 @@ async fn identical_diff_still_validates_integer_context_and_row_limits() {
 async fn invalid_limits_fail_without_work() {
     for limits in [
         Limits {
-            input_bytes: 0,
+            input_bytes: Some(0),
             ..Limits::default()
         },
         Limits {
-            max_depth: 65,
+            max_depth: Some(0),
             ..Limits::default()
         },
         Limits {
-            max_diff_work: usize::MAX,
+            max_diff_work: Some(0),
             ..Limits::default()
         },
     ] {
@@ -639,4 +648,25 @@ async fn invalid_limits_fail_without_work() {
         )
         .await;
     }
+}
+
+#[tokio::test]
+async fn configured_limits_have_no_artificial_ceiling() {
+    let limits = Limits {
+        input_bytes: Some(usize::MAX),
+        output_bytes: Some(usize::MAX),
+        max_depth: Some(65),
+        max_nodes: Some(1_000_001),
+        max_rows: Some(1_000_001),
+        max_diff_work: Some(usize::MAX),
+    };
+    let result = execute(
+        "data.parse",
+        json!({"format":"json","text":"{}"}),
+        CancellationToken::new(),
+        limits,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, json!({"value":{}}));
 }

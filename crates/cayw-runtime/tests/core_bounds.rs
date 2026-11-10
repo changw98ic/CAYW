@@ -1,5 +1,6 @@
-//! Runtime Core metadata bounds: oversized Host results stay known and
-//! oversized tool arguments never reach planning or execution.
+//! Runtime Core metadata behavior: results and arguments persist verbatim
+//! because the former artificial Core size ceilings are gone; only genuine
+//! tool failures are recorded as known errors.
 
 use async_trait::async_trait;
 use cayw_ai::{
@@ -20,6 +21,7 @@ use std::{
 };
 
 const PAYLOAD_BYTES: usize = 70 * 1024;
+const PAGE_BYTES: usize = 80 * 1024;
 
 struct LargeResultHost {
     calls: AtomicUsize,
@@ -92,6 +94,45 @@ impl Provider for HugeArgumentsProvider {
     }
 }
 
+/// A provider that streams a tool call whose argument exceeds the removed
+/// Core metadata bound for a single value (the 2 MiB ceiling is gone).
+struct OverMetadataArgumentsProvider;
+
+impl Provider for OverMetadataArgumentsProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        if last_user(&request).as_deref() == Some("follow up")
+            || request
+                .messages
+                .iter()
+                .any(|message| matches!(message, Message::ToolResult(_)))
+        {
+            return Box::pin(futures::stream::iter([AssistantEvent::Done {
+                message: final_message(&request),
+            }]));
+        }
+        let mut message = AssistantMessage::new(&request.model);
+        message.usage = Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = UsageStatus::Reported;
+        message.content.push(Content::ToolCall(ToolCall::new(
+            "over-metadata",
+            "execute_code",
+            json!({
+                "action":"exec",
+                "script":"x".repeat(2 * 1024 * 1024 + 200 * 1024),
+                "yield_time_ms":30_000,
+                "max_output_tokens":128*1024,
+            }),
+        )));
+        message.stop_reason = StopReason::ToolUse;
+        Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+    }
+}
+
 struct StreamingHugeProvider {
     calls: AtomicUsize,
 }
@@ -124,8 +165,8 @@ impl Provider for StreamingHugeProvider {
         )));
         partial.stop_reason = StopReason::ToolUse;
         // Providers accumulate tool-call arguments and republish the partial on
-        // every delta. Each MessageUpdate is durable, so the raw oversized
-        // partial must never be stored.
+        // every delta. Every MessageUpdate is durable, so a 70 KiB argument now
+        // persists verbatim instead of being rewritten into a summary.
         Box::pin(futures::stream::iter([
             AssistantEvent::ToolCallStart {
                 index: 0,
@@ -142,6 +183,23 @@ impl Provider for StreamingHugeProvider {
             },
             AssistantEvent::Done { message: partial },
         ]))
+    }
+}
+
+struct PageProvider;
+
+impl Provider for PageProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let message = if last_user(&request).as_deref() == Some("follow up") {
+            final_message(&request)
+        } else {
+            cayw_runtime::fixture::script_response(
+                &request,
+                "return string.rep('z', 80 * 1024)",
+                "page-80k",
+            )
+        };
+        Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
     }
 }
 
@@ -203,8 +261,15 @@ fn open(
                 ..Default::default()
             },
         }),
-        // Isolate the new durable bound from the older externalization path.
+        // Isolate Core persistence from the separate model-presentation
+        // externalization path so the durable terminal is what gets asserted.
         auto_externalize_threshold_bytes: 0,
+        // The CellLimits item budget must admit the same Host result that
+        // Core now persists so this test observes Core, not a Cells refusal.
+        cells: cayw_cells::CellLimits {
+            item_bytes: Some(120 * 1024),
+            ..Default::default()
+        },
         permissions: vec![ScopedPermission::exact(
             "search.query",
             json!({"query":"large"}),
@@ -235,6 +300,10 @@ fn open_frozen(root: &Path, content: bool) -> Runtime {
             },
         }),
         auto_externalize_threshold_bytes: 0,
+        cells: cayw_cells::CellLimits {
+            item_bytes: Some(120 * 1024),
+            ..Default::default()
+        },
         permissions: vec![ScopedPermission::exact(
             "fs.read",
             json!({"path":"big.txt"}),
@@ -269,6 +338,24 @@ fn host_result(rt: &Runtime, session: &str, name: &str) -> Value {
     }
 }
 
+fn has_receipt(result: &Value) -> bool {
+    result.get("core_result_bounded").is_some()
+        || result.get("result_omitted").is_some()
+        || result.get("externalized").is_some()
+}
+
+fn presented(rt: &Runtime, session: &str) -> String {
+    rt.get(session)
+        .unwrap()
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(result) => Some(cayw_ai::content_text(&result.content)),
+            _ => None,
+        })
+        .collect()
+}
+
 async fn assert_second_prompt(rt: &Runtime, session: &str, calls: &AtomicUsize, expected: usize) {
     let view = rt
         .prompt(session, "follow up", CancellationToken::new())
@@ -298,56 +385,18 @@ async fn oversized_result(content: bool) {
     assert_eq!(host.calls.load(Ordering::SeqCst), 1);
 
     let result = host_result(&rt, &session, "search.query");
+    assert_eq!(result, json!({"payload":"x".repeat(PAYLOAD_BYTES)}));
     assert!(
-        serde_json::to_vec(&result).unwrap().len() < cayw_core::MAX_METADATA_BYTES,
-        "bounded Core result must fit the durable metadata limit: {result}"
-    );
-    assert_eq!(result["core_result_bounded"], json!(true));
-    assert!(
-        result["original_sha256"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-    if content {
-        assert_eq!(result["externalized"], json!(true));
-        assert!(result["handle"].as_str().is_some_and(|h| !h.is_empty()));
-    } else {
-        assert_eq!(result["result_omitted"], json!(true));
-        assert!(
-            result["sha256"]
-                .as_str()
-                .is_some_and(|hash| hash.starts_with("sha256:"))
-        );
-    }
-    assert!(
-        result["bytes"].as_u64().unwrap() > cayw_core::MAX_METADATA_BYTES as u64,
-        "receipt/handle must describe the original oversized result: {result}"
+        !has_receipt(&result),
+        "the original result must persist: {result}"
     );
 
-    // Cells and Core must agree on the same bounded value. A second
-    // externalization would hand the model a different handle than the one
-    // durably recorded in the Core terminal.
-    let presented: String = rt
-        .get(&session)
-        .unwrap()
-        .messages
-        .iter()
-        .filter_map(|message| match message {
-            Message::ToolResult(result) => Some(cayw_ai::content_text(&result.content)),
-            _ => None,
-        })
-        .collect();
-    if content {
-        assert!(
-            presented.contains(result["handle"].as_str().unwrap()),
-            "the model must receive the same durable handle: {presented}"
-        );
-    } else {
-        assert!(
-            presented.contains("result_omitted"),
-            "the model must receive the omission receipt: {presented}"
-        );
-    }
+    let shown = presented(&rt, &session);
+    assert!(
+        shown.contains(&"x".repeat(1024)),
+        "the model must receive the original result, got {} bytes",
+        shown.len()
+    );
 
     assert_second_prompt(&rt, &session, &host.calls, 1).await;
 }
@@ -358,12 +407,12 @@ async fn oversized_host_result_without_content_store_is_known_and_continues() {
 }
 
 #[tokio::test]
-async fn oversized_host_result_with_content_store_is_externalized_and_continues() {
+async fn oversized_host_result_with_content_store_persists_verbatim_and_continues() {
     oversized_result(true).await;
 }
 
 #[tokio::test]
-async fn streamed_oversized_arguments_are_bounded_before_events_persist() {
+async fn streamed_oversized_arguments_persist_verbatim_without_an_artificial_ceiling() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let host = Arc::new(LargeResultHost {
@@ -384,6 +433,15 @@ async fn streamed_oversized_arguments_are_bounded_before_events_persist() {
         .unwrap();
     assert_eq!(view.state, SessionState::Idle, "{view:#?}");
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !rt.events(&session, 0, 1000).unwrap().iter().any(|event| {
+            matches!(
+                &event.event,
+                CoreEvent::CapabilityPlanned { .. } | CoreEvent::CapabilityStarted { .. }
+            )
+        }),
+        "oversized script arguments must not reach capability planning"
+    );
 
     let messages = rt.get(&session).unwrap().messages;
     let call = messages
@@ -396,23 +454,25 @@ async fn streamed_oversized_arguments_are_bounded_before_events_persist() {
             _ => None,
         })
         .expect("the streamed call keeps its identity");
-    assert_eq!(call.arguments["tool_arguments_omitted"], json!(true));
-    assert!(serde_json::to_vec(&call.arguments).unwrap().len() < cayw_core::MAX_METADATA_BYTES);
+    assert!(call.arguments.get("tool_arguments_omitted").is_none());
+    assert_eq!(
+        call.arguments["script"].as_str().unwrap().len(),
+        PAYLOAD_BYTES
+    );
     let result = messages
         .iter()
         .find_map(|message| match message {
             Message::ToolResult(result) if result.tool_call_id == "huge-stream" => Some(result),
             _ => None,
         })
-        .expect("the known failure is paired with the streamed call");
-    assert!(result.is_error);
+        .expect("the call keeps a paired result");
     assert!(!result.outcome_unknown);
 
     assert_second_prompt(&rt, &session, &host.calls, 0).await;
 }
 
 #[tokio::test]
-async fn oversized_tool_arguments_never_plan_or_dispatch() {
+async fn large_tool_arguments_persist_verbatim_without_capability_dispatch() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let host = Arc::new(LargeResultHost {
@@ -447,14 +507,12 @@ async fn oversized_tool_arguments_never_plan_or_dispatch() {
             _ => None,
         })
         .expect("the original call identity remains paired in history");
-    assert_eq!(call.arguments["tool_arguments_omitted"], json!(true));
-    assert!(
-        call.arguments["sha256"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
+    assert!(call.arguments.get("tool_arguments_omitted").is_none());
+    assert!(call.arguments.get("sha256").is_none());
+    assert_eq!(
+        call.arguments["script"].as_str().unwrap().len(),
+        PAYLOAD_BYTES
     );
-    assert!(call.arguments["bytes"].as_u64().unwrap() > cayw_core::MAX_METADATA_BYTES as u64);
-    assert!(serde_json::to_vec(&call.arguments).unwrap().len() < cayw_core::MAX_METADATA_BYTES);
 
     let result = messages
         .iter()
@@ -462,11 +520,140 @@ async fn oversized_tool_arguments_never_plan_or_dispatch() {
             Message::ToolResult(result) if result.tool_call_id == "huge" => Some(result),
             _ => None,
         })
-        .expect("the known failure is paired with the original call");
-    assert!(result.is_error);
+        .expect("the call keeps a paired result");
     assert!(!result.outcome_unknown);
-    assert!(cayw_ai::content_text(&result.content).contains("durable metadata limit"));
 
+    assert_second_prompt(&rt, &session, &host.calls, 0).await;
+}
+
+#[tokio::test]
+async fn execute_code_page_between_64k_and_128k_is_known_and_continues() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let host = Arc::new(LargeResultHost {
+        calls: AtomicUsize::new(0),
+    });
+    let rt = open(&root, false, host.clone(), Arc::new(PageProvider));
+    let session = rt.create(None).unwrap().id;
+    let view = rt
+        .prompt(&session, "first", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(view.state, SessionState::Idle, "{view:#?}");
+
+    let result = rt
+        .get(&session)
+        .unwrap()
+        .messages
+        .into_iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_call_id == "page-80k" => Some(result),
+            _ => None,
+        })
+        .expect("the execute_code terminal is paired");
+    assert!(
+        !result.is_error,
+        "the 80 KiB page must complete without error"
+    );
+    assert!(!result.outcome_unknown);
+    let page = result
+        .structured_content
+        .as_ref()
+        .expect("the CellPage is retained verbatim");
+    let outputs = page["outputs"].as_array().expect("CellPage outputs");
+    let output_bytes: usize = outputs
+        .iter()
+        .filter_map(|item| {
+            item["output"]
+                .get("text")
+                .or_else(|| item["output"].get("value"))
+                .and_then(Value::as_str)
+        })
+        .map(str::len)
+        .sum();
+    assert!(
+        output_bytes >= PAGE_BYTES,
+        "the 80 KiB page must be retained (got {output_bytes} bytes)"
+    );
+    assert_eq!(page["status"], json!("completed"));
+    assert_eq!(page["has_more"], json!(false));
+
+    assert_second_prompt(&rt, &session, &host.calls, 0).await;
+}
+
+#[tokio::test]
+async fn arguments_above_removed_core_metadata_ceiling_persist_without_a_refusal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let host = Arc::new(LargeResultHost {
+        calls: AtomicUsize::new(0),
+    });
+    let rt = open(
+        &root,
+        false,
+        host.clone(),
+        Arc::new(OverMetadataArgumentsProvider),
+    );
+    let session = rt.create(None).unwrap().id;
+    let view = rt
+        .prompt(&session, "first", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        view.state,
+        SessionState::Idle,
+        "a huge argument is persisted and fails as a known tool error"
+    );
+    assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    let messages = rt.get(&session).unwrap().messages;
+    let call = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Assistant(assistant) => assistant
+                .tool_calls()
+                .into_iter()
+                .find(|call| call.id == "over-metadata"),
+            _ => None,
+        })
+        .expect("the huge call persists verbatim");
+    assert!(call.arguments.get("tool_arguments_omitted").is_none());
+    assert_eq!(
+        call.arguments["script"].as_str().unwrap().len(),
+        2 * 1024 * 1024 + 200 * 1024,
+        "the removed Core metadata ceiling must not truncate the argument"
+    );
+    let result = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_call_id == "over-metadata" => Some(result),
+            _ => None,
+        })
+        .expect("the huge call keeps a paired result");
+    assert!(!result.outcome_unknown);
+    // The admitted call really executed: the returned CellPage completed even
+    // though the script was larger than the removed Core metadata ceiling.
+    let page = result
+        .structured_content
+        .as_ref()
+        .expect("execute_code returns a CellPage");
+    assert_eq!(page["status"], json!("completed"), "{page:#?}");
+    // The huge script never calls cayw.call, so it never plans a Core capability.
+    let records = rt.events(&session, 0, 1000).unwrap();
+    assert!(
+        !records.iter().any(|record| matches!(
+            &record.event,
+            CoreEvent::CapabilityPlanned { .. } | CoreEvent::CapabilityStarted { .. }
+        )),
+        "the huge script never calls cayw.call, so no Core capability is planned"
+    );
+    // The agent loop finished and left the session reusable.
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, Message::Assistant(assistant)
+            if cayw_ai::content_text(&assistant.content) == "follow up complete")),
+        "the agent must receive the admitted tool result and finish the attempt"
+    );
     assert_second_prompt(&rt, &session, &host.calls, 0).await;
 }
 
@@ -486,47 +673,18 @@ async fn frozen_oversized_read(content: bool) {
     assert_eq!(view.state, SessionState::Idle, "{view:#?}");
 
     let result = host_result(&rt, &session, "fs.read");
+    assert_eq!(result["bytes"], json!(PAYLOAD_BYTES));
+    assert_eq!(result["content"].as_str().unwrap().len(), PAYLOAD_BYTES);
     assert!(
-        serde_json::to_vec(&result).unwrap().len() < cayw_core::MAX_METADATA_BYTES,
-        "the Core terminal for an oversized frozen read must be bounded: {result}"
+        !has_receipt(&result),
+        "the frozen read must persist verbatim"
     );
-    assert_eq!(result["core_result_bounded"], json!(true));
-    assert!(
-        result["original_sha256"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-    if content {
-        assert_eq!(result["externalized"], json!(true));
-        assert!(result["handle"].as_str().is_some_and(|h| !h.is_empty()));
-    } else {
-        assert_eq!(result["result_omitted"], json!(true));
-    }
 
-    let presented: String = rt
-        .get(&session)
-        .unwrap()
-        .messages
-        .iter()
-        .filter_map(|message| match message {
-            Message::ToolResult(result) => Some(cayw_ai::content_text(&result.content)),
-            _ => None,
-        })
-        .collect();
-    if content {
-        assert!(
-            presented.contains(result["handle"].as_str().unwrap()),
-            "the model must receive the same durable handle: {presented}"
-        );
-    } else {
-        assert!(
-            presented.contains("result_omitted"),
-            "the model must receive the omission receipt: {presented}"
-        );
-    }
+    let shown = presented(&rt, &session);
+    assert!(shown.contains(&"y".repeat(1024)), "the model sees the read");
 
-    // Recovery re-reads the shared-read Evidence. It must accept the bounded
-    // terminal through the recorded original hash, not the handle's own hash.
+    // Recovery re-reads the shared-read Evidence and must re-hash the exact
+    // original value now retained by Core.
     let recovered = rt.recover(&session).unwrap();
     assert_eq!(recovered.state, SessionState::Idle);
     assert!(recovered.pending_approvals.is_empty());
@@ -539,11 +697,11 @@ async fn frozen_oversized_read(content: bool) {
 }
 
 #[tokio::test]
-async fn frozen_oversized_read_with_content_store_is_bounded_and_recovers() {
+async fn frozen_oversized_read_with_content_store_persists_and_recovers() {
     frozen_oversized_read(true).await;
 }
 
 #[tokio::test]
-async fn frozen_oversized_read_without_content_store_is_bounded_and_recovers() {
+async fn frozen_oversized_read_without_content_store_persists_and_recovers() {
     frozen_oversized_read(false).await;
 }

@@ -255,7 +255,7 @@ async fn errors_obey_serialized_output_budget_and_preserve_unknown_outcomes() {
     let bounded = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_output_bytes: 128,
+            max_output_bytes: Some(128),
             ..Limits::default()
         },
     )
@@ -272,7 +272,7 @@ async fn errors_obey_serialized_output_budget_and_preserve_unknown_outcomes() {
         let bounded = Workspace::open(
             temp.path().canonicalize().unwrap(),
             Limits {
-                max_output_bytes: limit,
+                max_output_bytes: Some(limit),
                 syntax_validator: std::sync::Arc::new(UnknownValidator),
                 ..Limits::default()
             },
@@ -577,9 +577,9 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
     let small = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_file_bytes: 2,
-            max_batch_bytes: 3,
-            max_batches: 1,
+            max_file_bytes: Some(2),
+            max_batch_bytes: Some(3),
+            max_batches: Some(1),
             ..Limits::default()
         },
     )
@@ -630,7 +630,7 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
         Workspace::open(
             temp.path().canonicalize().unwrap(),
             Limits {
-                max_output_bytes: 1,
+                max_output_bytes: Some(0),
                 ..Limits::default()
             },
         )
@@ -639,7 +639,7 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
     let tiny_output = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_output_bytes: 2,
+            max_output_bytes: Some(2),
             ..Limits::default()
         },
     )
@@ -658,7 +658,7 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
         Workspace::open(
             temp.path().canonicalize().unwrap(),
             Limits {
-                timeout: Duration::ZERO,
+                timeout: Some(Duration::ZERO),
                 ..Limits::default()
             }
         )
@@ -668,12 +668,82 @@ async fn limits_fail_before_user_changes_and_invalid_shapes_are_rejected() {
         Workspace::open(
             temp.path().canonicalize().unwrap(),
             Limits {
-                max_depth: 0,
+                max_depth: Some(0),
                 ..Limits::default()
             }
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn default_limits_allow_many_batches_and_large_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = workspace(&temp);
+    for index in 0..130 {
+        let name = format!("batch-{index}.json");
+        call(
+            &workspace,
+            "fs.prepare_change_batch",
+            json!({"operations":[write(&name, "null")]}),
+        )
+        .await
+        .unwrap();
+    }
+    let content = format!("\"{}\"", "x".repeat(1024 * 1024 + 1));
+    let prepared = call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[write("large.json", content.as_str())]}),
+    )
+    .await
+    .unwrap();
+    call(&workspace, "fs.submit_change_batch", submit(&prepared))
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(temp.path().join("large.json")).unwrap().len(),
+        content.len()
+    );
+}
+
+#[tokio::test]
+async fn discard_prepared_batches_reclaims_uncommitted_journals() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(
+        temp.path().canonicalize().unwrap(),
+        Limits {
+            max_batches: Some(1),
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[write("stale.json","null")]}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        call(
+            &workspace,
+            "fs.prepare_change_batch",
+            json!({"operations":[write("blocked.json","null")]})
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(workspace.discard_prepared_batches().unwrap(), 1);
+    assert_eq!(workspace.discard_prepared_batches().unwrap(), 0);
+    assert!(!temp.path().join("stale.json").exists());
+    call(
+        &workspace,
+        "fs.prepare_change_batch",
+        json!({"operations":[write("next.json","null")]}),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

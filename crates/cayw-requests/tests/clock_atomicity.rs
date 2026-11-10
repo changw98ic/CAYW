@@ -88,7 +88,7 @@ fn rejected_mutation_keeps_clock_highwater_atomic_with_real_host_admission() {
         std::fs::write(temp.path().join("ordinary.txt"), "real content\n").unwrap();
         let config = RequestConfig {
             repeated_valid_threshold: 1,
-            max_requests_per_task: 1,
+            max_requests_per_task: Some(1),
             sqlite_busy_timeout_ms: 0,
             ..RequestConfig::default()
         };

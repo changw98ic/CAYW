@@ -54,8 +54,8 @@ fn open(root: &Path, provider: Arc<HttpProvider>) -> Runtime {
         provider,
         model,
         RuntimeConfig {
-            max_run_time: RUN_TIME,
-            max_total_tokens: TOKEN_LIMIT,
+            max_run_time: Some(RUN_TIME),
+            max_total_tokens: Some(TOKEN_LIMIT),
             ..Default::default()
         },
     )
@@ -197,7 +197,8 @@ async fn deadline_case(stage: Stage) {
         assert_eq!(held.requests.len(), 1);
         assert!(held.requests[0].started_cursor.is_some());
         assert!(held.requests[0].terminal.is_none());
-        assert_eq!(held.reserved_tokens, TOKEN_LIMIT);
+        assert_eq!(held.reserved_tokens, held.requests[0].reservation_tokens);
+        assert!(held.requests[0].reservation_tokens > 0);
 
         let result = (&mut run).await;
         (held, result)
@@ -223,14 +224,22 @@ async fn deadline_case(stage: Stage) {
 
     let ledger = runtime.model_requests(&session).unwrap();
     assert_eq!(ledger.requests.len(), 1);
-    assert!(ledger.budget_unknown);
-    assert_eq!(ledger.reserved_tokens, TOKEN_LIMIT);
+    assert!(ledger.usage_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(
+        ledger.charged_unknown_tokens,
+        ledger.requests[0].reservation_tokens
+    );
     assert_eq!(ledger.settled_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, 0);
+    assert_eq!(
+        ledger.remaining_tokens,
+        Some(TOKEN_LIMIT - ledger.requests[0].reservation_tokens)
+    );
     let record = &ledger.requests[0];
     assert_eq!(record.identity, held.requests[0].identity);
     assert_eq!(record.identity.task_id, task.id);
-    assert_eq!(record.outstanding_reservation_tokens, TOKEN_LIMIT);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
     assert!(record.settled_tokens.is_none());
     // The model stream can be internally cancelled or dropped while the Task
     // retains its distinct time-budget failure. Neither outcome settles tokens.
@@ -278,9 +287,10 @@ async fn deadline_case(stage: Stage) {
         .await
         .unwrap();
     let after = reopened.model_requests(&session).unwrap();
-    assert_eq!(after.reserved_tokens, TOKEN_LIMIT);
+    assert_eq!(after.reserved_tokens, 0);
+    assert_eq!(after.charged_unknown_tokens, record.reservation_tokens);
     assert_eq!(after.settled_tokens, 0);
-    assert!(after.budget_unknown);
+    assert!(after.usage_unknown);
     assert_eq!(after.requests.len(), 2);
     assert_eq!(
         after

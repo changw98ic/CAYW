@@ -145,7 +145,7 @@ impl Provider for CountTextProvider {
 }
 
 #[tokio::test]
-async fn unknown_effect_in_new_input_must_be_blocked_before_model_request() {
+async fn unknown_effect_in_history_is_delivered_without_blocking_the_request() {
     let provider = Arc::new(CountTextProvider(AtomicUsize::new(0)));
     let agent = Agent::new(provider.clone(), Model::new("fixture", "test"));
     let message = Message::ToolResult(ToolResultMessage {
@@ -160,12 +160,24 @@ async fn unknown_effect_in_new_input_must_be_blocked_before_model_request() {
         timestamp: 0,
         duration_ms: None,
     });
-    let _ = agent.prompt(message).await;
+    let result = agent.prompt(message).await.unwrap();
+    assert_eq!(result.last_message.stop_reason, StopReason::Stop);
     assert_eq!(
         provider.0.load(Ordering::SeqCst),
-        0,
-        "new input bypassed unresolved-effects guard"
+        1,
+        "unknown outcome must not suppress the model request"
     );
+    let stored = agent
+        .snapshot()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(stored.content.is_empty());
+    assert!(stored.outcome_unknown);
 }
 
 #[tokio::test]
@@ -174,17 +186,16 @@ async fn unknown_effect_must_stop_current_run_before_another_request() {
     let agent = Agent::new(provider.clone(), Model::new("fixture", "test"));
     agent.set_tools(vec![Arc::new(UnknownEffect)]).unwrap();
     let result = agent.prompt(Message::user("start")).await.unwrap();
-    assert!(agent.snapshot().needs_reconciliation);
     assert_eq!(result.last_message.stop_reason, StopReason::Error);
     assert_eq!(
         provider.0.load(Ordering::SeqCst),
         1,
         "model received a second request after unknown tool effect"
     );
-    assert_eq!(
-        agent.reset().unwrap_err(),
-        AgentError::UnresolvedToolEffects
-    );
+    let retry = agent.prompt(Message::user("continue")).await.unwrap();
+    assert_eq!(retry.last_message.stop_reason, StopReason::Stop);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 2);
+    assert!(agent.reset().is_ok());
 }
 
 struct SequentialTwoToolProvider(AtomicUsize);
@@ -327,7 +338,6 @@ async fn natural_unknown_in_sequential_batch_stops_subsequent_tools_without_seco
     let result = agent.prompt(Message::user("start")).await.unwrap();
     assert_eq!(second_count.load(Ordering::SeqCst), 0);
     assert_eq!(provider.0.load(Ordering::SeqCst), 1);
-    assert!(agent.snapshot().needs_reconciliation);
     assert_eq!(result.last_message.stop_reason, StopReason::Error);
 
     let messages = agent.snapshot().messages;
@@ -363,10 +373,7 @@ async fn natural_unknown_in_sequential_batch_stops_subsequent_tools_without_seco
         .collect();
     assert_eq!(starts, ["first", "second"]);
     assert_eq!(ends, ["first", "second"]);
-    assert_eq!(
-        agent.reset().unwrap_err(),
-        AgentError::UnresolvedToolEffects
-    );
+    agent.reset().unwrap();
 }
 
 #[tokio::test]
@@ -385,7 +392,6 @@ async fn panic_in_sequential_batch_stops_subsequent_tools_without_second_model_r
     let result = agent.prompt(Message::user("start")).await.unwrap();
     assert_eq!(second_count.load(Ordering::SeqCst), 0);
     assert_eq!(provider.0.load(Ordering::SeqCst), 1);
-    assert!(agent.snapshot().needs_reconciliation);
     assert_eq!(result.last_message.stop_reason, StopReason::Error);
 
     let messages = agent.snapshot().messages;
@@ -402,10 +408,7 @@ async fn panic_in_sequential_batch_stops_subsequent_tools_without_second_model_r
     assert_eq!(tool_results[1].tool_call_id, "second");
     assert!(!tool_results[1].outcome_unknown);
     assert!(tool_results[1].is_error);
-    assert_eq!(
-        agent.reset().unwrap_err(),
-        AgentError::UnresolvedToolEffects
-    );
+    agent.reset().unwrap();
 }
 
 #[tokio::test]
@@ -430,7 +433,6 @@ async fn natural_unknown_in_parallel_batch_cleans_up_running_sibling_with_grace(
     let result = agent.prompt(Message::user("start")).await.unwrap();
     assert_eq!(cleaned_up.load(Ordering::SeqCst), 1);
     assert_eq!(provider.0.load(Ordering::SeqCst), 1);
-    assert!(agent.snapshot().needs_reconciliation);
     assert_eq!(result.last_message.stop_reason, StopReason::Error);
 
     let messages = agent.snapshot().messages;
@@ -446,10 +448,7 @@ async fn natural_unknown_in_parallel_batch_cleans_up_running_sibling_with_grace(
     assert!(tool_results[0].outcome_unknown);
     assert_eq!(tool_results[1].tool_call_id, "second");
     assert!(!tool_results[1].outcome_unknown);
-    assert_eq!(
-        agent.reset().unwrap_err(),
-        AgentError::UnresolvedToolEffects
-    );
+    agent.reset().unwrap();
 }
 
 #[tokio::test]
@@ -468,7 +467,6 @@ async fn natural_unknown_in_parallel_batch_leaves_unstarted_sibling_unexecuted()
     let result = agent.prompt(Message::user("start")).await.unwrap();
     assert_eq!(second_count.load(Ordering::SeqCst), 0);
     assert_eq!(provider.0.load(Ordering::SeqCst), 1);
-    assert!(agent.snapshot().needs_reconciliation);
     assert_eq!(result.last_message.stop_reason, StopReason::Error);
 
     let messages = agent.snapshot().messages;
@@ -485,8 +483,5 @@ async fn natural_unknown_in_parallel_batch_leaves_unstarted_sibling_unexecuted()
     assert_eq!(tool_results[1].tool_call_id, "second");
     assert!(!tool_results[1].outcome_unknown);
     assert!(tool_results[1].is_error);
-    assert_eq!(
-        agent.reset().unwrap_err(),
-        AgentError::UnresolvedToolEffects
-    );
+    agent.reset().unwrap();
 }

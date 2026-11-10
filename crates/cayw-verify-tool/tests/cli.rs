@@ -305,7 +305,8 @@ fn binary_records_real_host_results_failures_repairs_and_cancellation() {
         }
         assert_eq!(cancelled["semantic_passed"], true, "{cancelled}");
         let looped = case(&samples, "loop_budget", iteration);
-        assert_eq!(looped["error"]["kind"], "instruction_limit");
+        assert!(looped["error"].is_null());
+        assert_eq!(looped["report"]["return_value"]["sum"], 12_502_500);
         assert!(
             looped["report"]["instruction_checkpoints"]
                 .as_u64()

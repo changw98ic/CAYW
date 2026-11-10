@@ -361,7 +361,7 @@ async fn accepted_peer_cancel_preserves_original_unknown_instead_of_success_or_c
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(result.state, SessionState::NeedsReconciliation);
+    assert_eq!(result.state, SessionState::Idle);
     let task = rt.task(&admitted.id).unwrap();
     assert_eq!(task.state, TaskState::OutcomeUnknown);
     assert!(task.cancel_requested);
@@ -386,14 +386,11 @@ async fn accepted_peer_cancel_preserves_original_unknown_instead_of_success_or_c
             .count(),
         1
     );
-    assert!(matches!(
-        peer.enqueue(&id, "must not replay"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
-    assert_eq!(
-        peer.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
+    assert!(
+        peer.enqueue(&id, "follow-up must not replay").is_ok(),
+        "an unreconciled unknown outcome must not block enqueue"
     );
+    assert_eq!(peer.recover(&id).unwrap().state, SessionState::Idle);
     assert_eq!(rt.task(&task.id).unwrap(), task);
 }
 

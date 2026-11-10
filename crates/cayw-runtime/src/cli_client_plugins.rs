@@ -40,6 +40,9 @@ struct Inner {
     token: String,
     data_dir: PathBuf,
     cleanup_path: PathBuf,
+    /// The inherited cleanup record could not be read, parsed or checked. Its
+    /// processes are unknown, so it must never be overwritten or deleted here.
+    cleanup_poisoned: bool,
     webui_binary: PathBuf,
     tui_binary: PathBuf,
     state: Mutex<State>,
@@ -51,6 +54,12 @@ struct State {
     failed_web: BTreeMap<String, FailedWeb>,
     pending_tui: BTreeMap<String, PendingTui>,
     tui: BTreeMap<String, Tui>,
+    /// Live processes recorded by a previous Client generation. Their cleanup is
+    /// unconfirmed, so only a start of the matching plugin is blocked.
+    blocked: BTreeMap<String, CleanupProcess>,
+    /// Set when the cleanup record cannot be read, parsed or checked. Client UI
+    /// plugins are unavailable for this generation; the Client still starts.
+    cleanup_error: Option<String>,
     recent: VecDeque<Value>,
 }
 
@@ -160,16 +169,35 @@ impl ClientPlugins {
         tui_binary: PathBuf,
     ) -> Result<Self> {
         let cleanup_path = data_dir.join(CLEANUP_FILE);
-        reconcile_cleanup(&cleanup_path)?;
+        // A previous generation's unconfirmed cleanup never prevents this Client
+        // from starting. Live records are kept as blocked; a broken record only
+        // makes Client UI plugins unavailable until it is removed.
+        let state = match reconcile_cleanup(&cleanup_path) {
+            Ok(processes) => State {
+                blocked: processes
+                    .into_iter()
+                    .map(|process| (process.launch_id.clone(), process))
+                    .collect(),
+                ..State::default()
+            },
+            Err(error) => State {
+                cleanup_error: Some(format!(
+                    "Client plugin cleanup record is unavailable; Client UI plugins are disabled until it is repaired or removed: {error}"
+                )),
+                ..State::default()
+            },
+        };
+        let cleanup_poisoned = state.cleanup_error.is_some();
         Ok(Self {
             inner: Arc::new(Inner {
                 address,
                 token,
                 data_dir,
                 cleanup_path,
+                cleanup_poisoned,
                 webui_binary,
                 tui_binary,
-                state: Mutex::new(State::default()),
+                state: Mutex::new(state),
             }),
         })
     }
@@ -206,6 +234,11 @@ impl ClientPlugins {
     }
 
     fn persist_cleanup(&self, processes: &[CleanupProcess]) -> Result<()> {
+        if self.inner.cleanup_poisoned {
+            // The inherited record could not be read, so its processes are
+            // unknown. Keep it intact; the user repairs or removes it explicitly.
+            return Ok(());
+        }
         persist_cleanup(&self.inner.cleanup_path, processes)
     }
 
@@ -326,6 +359,9 @@ impl ClientPlugins {
         if cancel.is_cancelled() {
             return Err("Client plugin start was cancelled before launch".into());
         }
+        if let Some(error) = self.inner.state.lock().await.cleanup_error.clone() {
+            return Err(error.into());
+        }
         match request.plugin.as_str() {
             "webui" => {
                 if !self.inner.webui_binary.is_file() {
@@ -347,6 +383,13 @@ impl ClientPlugins {
                 }
                 let mut state = self.inner.state.lock().await;
                 reap(&mut state)?;
+                if let Some(blocked) = state
+                    .blocked
+                    .values()
+                    .find(|blocked| blocked.plugin == "tui")
+                {
+                    return Err(blocked_start_error(blocked).into());
+                }
                 self.persist_cleanup(&cleanup_snapshot(&state))?;
                 let launch_id = uuid::Uuid::new_v4().to_string();
                 state.pending_tui.insert(
@@ -421,6 +464,13 @@ impl ClientPlugins {
         let mut state = self.inner.state.lock().await;
         reap(&mut state)?;
         self.persist_cleanup(&cleanup_snapshot(&state))?;
+        if let Some(blocked) = state
+            .blocked
+            .values()
+            .find(|blocked| blocked.plugin == "webui")
+        {
+            return Err(blocked_start_error(blocked).into());
+        }
         if !state.failed_web.is_empty() {
             return Err(
                 "a previous WebUI cleanup is unconfirmed; stop or inspect it before starting another"
@@ -722,6 +772,26 @@ impl ClientPlugins {
             self.persist_cleanup(&cleanup_snapshot(&state))?;
             return Ok(json!({"stopped":true,"launch_id":request.launch_id}));
         }
+        if let Some(blocked) = state.blocked.get(&request.launch_id).cloned() {
+            if let Err(error) = stop_pid(&blocked.process).await {
+                return Err(format!(
+                    "previous Client plugin cleanup remains unconfirmed; Client ownership was retained: {error}"
+                )
+                .into());
+            }
+            state.blocked.remove(&request.launch_id);
+            record_terminal(
+                &mut state,
+                &blocked.plugin,
+                &request.launch_id,
+                &blocked.workspace_id,
+                blocked.process.pid,
+                "stopped",
+                None,
+            );
+            self.persist_cleanup(&cleanup_snapshot(&state))?;
+            return Ok(json!({"stopped":true,"launch_id":request.launch_id}));
+        }
         if let Some(tui) = state.tui.get(&request.launch_id) {
             let workspace_id = tui.workspace_id.clone();
             let identity = tui.identity.clone();
@@ -794,9 +864,25 @@ fn state_summary(state: &State) -> Value {
             "status":"running",
         })
     }));
+    entries.extend(state.blocked.values().map(|blocked| {
+        json!({
+            "plugin":blocked.plugin,
+            "role":"client",
+            "kind":if blocked.plugin == "tui" { "foreground" } else { "background" },
+            "launch_id":blocked.launch_id,
+            "workspace_id":blocked.workspace_id,
+            "pid":blocked.process.pid,
+            "status":"cleanup_unknown",
+            "last_error":format!(
+                "previous Client plugin cleanup is unconfirmed; stop that exact process with `client.plugins.stop {}`",
+                blocked.launch_id
+            ),
+        })
+    }));
     json!({
         "schema":"cayw.client-plugins.v1",
         "entries":entries,
+        "cleanup_error":state.cleanup_error,
         "recent":state.recent,
     })
 }
@@ -842,6 +928,15 @@ fn scoped_open_url(ready: &Value, workspace_id: &str) -> Result<Value> {
     Ok(json!(format!("{base}#workspace={workspace_id}")))
 }
 
+/// A previous Client generation's live UI plugin blocks only that plugin, not
+/// the Client or the other UI plugin. `client.plugins.stop` is the exit.
+fn blocked_start_error(blocked: &CleanupProcess) -> String {
+    format!(
+        "previous Client {} cleanup is unconfirmed (launch_id {}, PID {}); stop that exact process with `client.plugins.stop {}` before starting another",
+        blocked.plugin, blocked.launch_id, blocked.process.pid, blocked.launch_id
+    )
+}
+
 fn cleanup_snapshot(state: &State) -> Vec<CleanupProcess> {
     let mut processes = Vec::new();
     if let Some(webui) = &state.webui {
@@ -864,6 +959,9 @@ fn cleanup_snapshot(state: &State) -> Vec<CleanupProcess> {
         workspace_id: tui.workspace_id.clone(),
         process: tui.identity.clone(),
     }));
+    // Keep records inherited from a previous Client generation. Otherwise any
+    // later persist would silently drop an unconfirmed cleanup.
+    processes.extend(state.blocked.values().cloned());
     processes
 }
 
@@ -930,10 +1028,13 @@ pub(crate) fn inspect_cleanup(path: &Path) -> Result<Value> {
     }))
 }
 
-fn reconcile_cleanup(path: &Path) -> Result<()> {
+/// Returns the records whose exact process is still live. Exited records are
+/// dropped, and an all-exited ledger is removed. This never refuses startup;
+/// the caller records a parse or observation failure as unavailable.
+fn reconcile_cleanup(path: &Path) -> Result<Vec<CleanupProcess>> {
     let bytes = match read_private(path, 1024 * 1024) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
     let ledger: CleanupLedger = serde_json::from_slice(&bytes)?;
@@ -941,27 +1042,22 @@ fn reconcile_cleanup(path: &Path) -> Result<()> {
         return Err("Client plugin cleanup record has an unsupported schema".into());
     }
     let mut live = Vec::new();
-    for entry in &ledger.processes {
+    for entry in ledger.processes {
         validate_workspace_id(&entry.workspace_id)?;
         if !matches!(entry.plugin.as_str(), "webui" | "tui") || entry.launch_id.trim().is_empty() {
             return Err("Client plugin cleanup record is invalid".into());
         }
         if identity_matches_sync(&entry.process)? {
-            live.push(format!("{} PID {}", entry.plugin, entry.process.pid));
+            live.push(entry);
         }
     }
-    if !live.is_empty() {
-        return Err(format!(
-            "previous Client plugin cleanup is unconfirmed ({}); stop or inspect those exact processes, then retry",
-            live.join(", ")
-        )
-        .into());
+    if live.is_empty() {
+        std::fs::remove_file(path)?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
     }
-    std::fs::remove_file(path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
+    Ok(live)
 }
 
 fn record_terminal(
@@ -1074,6 +1170,31 @@ fn reap(state: &mut State) -> Result<()> {
                 cleanup.process.pid,
                 "cleanup_completed",
                 Some(error),
+            );
+        }
+    }
+
+    let blocked_exits = state
+        .blocked
+        .iter()
+        .map(|(launch_id, blocked)| {
+            Ok((launch_id.clone(), !identity_matches_sync(&blocked.process)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (launch_id, exited) in blocked_exits {
+        if exited {
+            let blocked = state
+                .blocked
+                .remove(&launch_id)
+                .expect("checked blocked record");
+            record_terminal(
+                state,
+                &blocked.plugin,
+                &launch_id,
+                &blocked.workspace_id,
+                blocked.process.pid,
+                "cleanup_completed",
+                None,
             );
         }
     }
@@ -1339,16 +1460,40 @@ mod tests {
                 & 0o777,
             0o600
         );
-        let refused = ClientPlugins::with_binaries(
+        // A previous Client generation's live process must not fail startup.
+        // It becomes a blocked cleanup record that only blocks its own plugin.
+        let next = ClientPlugins::with_binaries(
             "127.0.0.1:43211".parse().unwrap(),
             "other-synthetic-token-never-log".into(),
             temp.path().to_owned(),
-            webui,
+            webui.clone(),
             temp.path().join("missing-tui"),
         )
-        .err()
-        .expect("a new Client must not take over a live process");
-        assert!(refused.to_string().contains("cleanup is unconfirmed"));
+        .unwrap();
+        let summary = next.read_only_summary().await;
+        let blocked = summary["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["launch_id"] == launch_id)
+            .expect("stale record is reported");
+        assert_eq!(blocked["status"], "cleanup_unknown");
+        assert_eq!(blocked["pid"], cleanup_pid(&cleanup_bytes));
+        let refused = next
+            .call(
+                "client.plugins.start",
+                json!({"plugin":"webui","workspace_id":"local"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.message.contains(&launch_id), "{}", refused.message);
+        assert!(refused.message.contains("client.plugins.stop"));
+        // Any later persist keeps the inherited record.
+        next.call("client.plugins.list", json!({}), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(cleanup_path.exists());
         assert!(std::fs::read_dir(temp.path()).unwrap().all(|entry| {
             !entry
                 .unwrap()
@@ -1357,7 +1502,7 @@ mod tests {
                 .starts_with("launcher-")
         }));
 
-        let stopped = plugins
+        let stopped = next
             .call(
                 "client.plugins.stop",
                 json!({"launch_id":launch_id}),
@@ -1366,11 +1511,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stopped["stopped"], true);
+        assert!(!cleanup_path.exists());
+        // The exit releases the plugin; the Client can start it again.
+        let restarted = next
+            .call(
+                "client.plugins.start",
+                json!({"plugin":"webui","workspace_id":"local"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restarted["reused"], false);
+        next.shutdown().await.unwrap();
+
+        // The first supervisor still held the now-exited child; shutdown reaps it.
+        plugins.shutdown().await.unwrap();
         let summary = plugins.read_only_summary().await;
         assert_eq!(summary["entries"], json!([]));
-        assert_eq!(summary["recent"][0]["status"], "stopped");
         assert!(!cleanup_path.exists());
+    }
+
+    fn cleanup_pid(bytes: &[u8]) -> u64 {
+        serde_json::from_slice::<Value>(bytes).unwrap()["processes"][0]["process"]["pid"]
+            .as_u64()
+            .expect("cleanup record retains its PID")
+    }
+
+    #[tokio::test]
+    async fn corrupt_cleanup_record_disables_ui_plugins_without_blocking_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let webui = temp.path().join("cayw-webui");
+        webui_fixture(&webui);
+        let cleanup_path = temp.path().join(CLEANUP_FILE);
+        std::fs::write(&cleanup_path, b"{not json").unwrap();
+        let plugins = fixture_plugins(temp.path(), webui, temp.path().join("missing-tui"));
+        let summary = plugins.read_only_summary().await;
+        assert!(
+            summary["cleanup_error"]
+                .as_str()
+                .unwrap()
+                .contains("cleanup record is unavailable")
+        );
+        let error = plugins
+            .call(
+                "client.plugins.start",
+                json!({"plugin":"webui","workspace_id":"local"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("UI plugins are disabled"));
+        // Neither listing nor shutdown may silently drop the unreadable record.
+        plugins
+            .call("client.plugins.list", json!({}), CancellationToken::new())
+            .await
+            .unwrap();
         plugins.shutdown().await.unwrap();
+        assert_eq!(std::fs::read(&cleanup_path).unwrap(), b"{not json");
     }
 
     #[test]

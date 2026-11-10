@@ -399,7 +399,7 @@ fn lose_tool_observation(fixture: &Fixture, call: &ToolCall) {
         )
         .unwrap();
     let recovered = fixture.store.recover(&fixture.lease.session_id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(recovered.unresolved_calls.len(), 1);
     assert_eq!(recovered.unresolved_calls[0].call, *call);
     assert!(recovered.unresolved_capabilities.is_empty());
@@ -686,7 +686,7 @@ fn a_started_child_is_the_only_unknown_when_the_parent_response_is_lost() {
         .start_capability(&fixture.lease, &key, authorization(key.clone(), None, None))
         .unwrap();
     let recovered = fixture.store.recover(&fixture.lease.session_id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert!(recovered.unresolved_calls.is_empty());
     assert_eq!(recovered.unresolved_capabilities.len(), 1);
     assert_eq!(recovered.unresolved_capabilities[0].key, key);
@@ -942,12 +942,6 @@ fn capability_sequence_and_execution_boundary_are_durable() {
     assert!(
         fixture
             .store
-            .plan_capability(&fixture.lease, capability(key(1)))
-            .is_err()
-    );
-    assert!(
-        fixture
-            .store
             .request_approval(&fixture.lease, approval(key(0)))
             .is_err()
     );
@@ -958,6 +952,13 @@ fn capability_sequence_and_execution_boundary_are_durable() {
             .is_err()
     );
     assert_eq!(fixture.projection(), before);
+    assert!(
+        fixture
+            .store
+            .plan_capability(&fixture.lease, capability(key(1)))
+            .is_err(),
+        "a capability sequence must be contiguous from zero"
+    );
     let first = fixture.plan(0);
     assert!(
         fixture
@@ -1017,8 +1018,9 @@ fn capability_sequence_and_execution_boundary_are_durable() {
     assert!(
         fixture
             .store
-            .plan_capability(&fixture.lease, capability(key(3)))
-            .is_err()
+            .plan_capability(&fixture.lease, capability(key(0)))
+            .is_err(),
+        "a capability sequence must be contiguous from zero"
     );
     assert!(
         fixture
@@ -1389,7 +1391,7 @@ fn admitted_terminals_survive_agent_end_but_attempt_waits_for_the_vm() {
 }
 
 #[test]
-fn unknown_child_blocks_new_model_messages_but_preserves_other_terminals() {
+fn unknown_child_does_not_block_new_work_and_remains_an_audit_fact() {
     let fixture = Fixture::new(json!({"script":"return 1"}));
     fixture.begin("vm");
     fixture.parent_end();
@@ -1415,18 +1417,13 @@ fn unknown_child_blocks_new_model_messages_but_preserves_other_terminals() {
         .store
         .settle_capability(&fixture.lease, &sibling, completed())
         .unwrap();
-    assert!(matches!(
-        fixture
-            .store
-            .begin_execution(&fixture.lease, fixture.input("another")),
-        Err(CoreError::NeedsReconciliation)
-    ));
-    assert!(matches!(
-        fixture
-            .store
-            .plan_capability(&fixture.lease, capability(key(2))),
-        Err(CoreError::NeedsReconciliation)
-    ));
+    // A prior unknown child is an audit fact. It does not freeze planning inside
+    // the still-active execution.
+    let later = fixture.plan(2);
+    fixture
+        .store
+        .settle_capability(&fixture.lease, &later, not_executed())
+        .unwrap();
     let results = fixture
         .store
         .snapshot(&fixture.lease.session_id)
@@ -1455,34 +1452,20 @@ fn unknown_child_blocks_new_model_messages_but_preserves_other_terminals() {
         .store
         .append_agent_event(&fixture.lease, &AgentEvent::TurnStart)
         .unwrap();
-    let pending = AssistantMessage::new(&Model::new("fixture", "offline"));
-    let before = fixture.store.snapshot(&fixture.lease.session_id).unwrap();
-    assert!(matches!(
-        fixture.store.append_agent_event(
-            &fixture.lease,
-            &AgentEvent::MessageStart {
-                message: Message::Assistant(pending)
-            }
-        ),
-        Err(CoreError::NeedsReconciliation)
-    ));
-    assert_eq!(
-        fixture.store.snapshot(&fixture.lease.session_id).unwrap(),
-        before
-    );
-    let mut failure = AssistantMessage::new(&Model::new("fixture", "offline"));
-    failure.stop_reason = StopReason::Error;
+    // A normal assistant message is still accepted after an unknown sibling.
+    let mut next = AssistantMessage::new(&Model::new("fixture", "offline"));
+    next.stop_reason = StopReason::Stop;
     append_message(
         &fixture.store,
         &fixture.lease,
-        Message::Assistant(failure.clone()),
+        Message::Assistant(next.clone()),
     );
     fixture
         .store
         .append_agent_event(
             &fixture.lease,
             &AgentEvent::TurnEnd {
-                message: failure,
+                message: next,
                 tool_results: vec![],
             },
         )
@@ -1505,14 +1488,17 @@ fn unknown_child_blocks_new_model_messages_but_preserves_other_terminals() {
     let unknown = fixture.store.snapshot(&fixture.lease.session_id).unwrap();
     assert_eq!(unknown.unresolved_capabilities.len(), 1);
     assert!(unknown.unresolved_calls.is_empty());
-    assert!(matches!(
-        fixture.store.fork_session(&unknown.id, "copy", true),
-        Err(CoreError::NeedsReconciliation)
-    ));
-    assert!(matches!(
-        fixture.store.begin_attempt(&unknown.id, "new-worker"),
-        Err(CoreError::NeedsReconciliation)
-    ));
+    // The unknown child remains visible for reconciliation, but it neither blocks
+    // a confirmed fork nor a replacement attempt.
+    fixture
+        .store
+        .fork_session(&unknown.id, "copy", true)
+        .unwrap();
+    let next = fixture
+        .store
+        .begin_attempt(&unknown.id, "new-worker")
+        .unwrap();
+    assert!(next.fence > fixture.lease.fence);
 }
 
 #[test]
@@ -1725,7 +1711,7 @@ fn recovery_preserves_known_children_and_only_reconciles_started_effects() {
     let parent = before.messages.clone();
     let old_events = fixture.store.events(&before.id, 0, 100).unwrap();
     let recovered = fixture.store.recover(&before.id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(recovered.executions[0].state, ExecutionState::Interrupted);
     assert!(recovered.pending_approvals.is_empty());
     assert_eq!(recovered.unresolved_capabilities.len(), 1);
@@ -1773,10 +1759,12 @@ fn recovery_preserves_known_children_and_only_reconciles_started_effects() {
             && matches!(c.outcome, Some(CapabilityOutcome::NotExecuted { .. })))
     );
     assert!(capabilities.iter().all(|c| c.key != known));
-    assert!(matches!(
-        fixture.store.fork_session(&before.id, "blocked", true),
-        Err(CoreError::NeedsReconciliation)
-    ));
+    // A known parent history can fork even while a child outcome stays unknown;
+    // the unresolved child remains visible for later reconciliation.
+    fixture
+        .store
+        .fork_session(&before.id, "before-reconcile", true)
+        .unwrap();
     let reconciled = fixture
         .store
         .reconcile_capability(&before.id, reconciliation(&fixture, started.clone(), None))

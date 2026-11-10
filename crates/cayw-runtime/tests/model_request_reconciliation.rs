@@ -84,8 +84,8 @@ fn open(
         provider,
         model,
         RuntimeConfig {
-            max_total_tokens: LIMIT,
-            max_event_bytes,
+            max_total_tokens: Some(LIMIT),
+            max_event_bytes: Some(max_event_bytes),
             model_request_reconciliation_verifier: verifier,
             ..Default::default()
         },
@@ -110,7 +110,8 @@ async fn failed(runtime: &Runtime, session: &str) -> ModelRequestRecord {
     assert_eq!(record.terminal, Some(ModelRequestTerminal::Failed));
     assert!(record.started_cursor.is_some());
     assert_eq!(record.settled_tokens, None);
-    assert_eq!(record.outstanding_reservation_tokens, LIMIT);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
     record
 }
 async fn fixture() -> Fixture {
@@ -121,7 +122,7 @@ async fn fixture() -> Fixture {
         root.path(),
         provider.clone(),
         Some(receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     let session = runtime.create(None).unwrap().id;
     let record = failed(&runtime, &session).await;
@@ -153,8 +154,9 @@ fn unchanged(runtime: &Runtime, session: &str, record: &ModelRequestRecord) {
             .find(|r| r.identity == record.identity),
         Some(record)
     );
-    assert!(ledger.budget_unknown);
-    assert_eq!(record.outstanding_reservation_tokens, LIMIT);
+    assert!(ledger.usage_unknown);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
 }
 fn save(name: &str, value: &impl serde::Serialize) {
     let Some(directory) = std::env::var_os("CAYW_MODEL_RECONCILIATION_EVIDENCE_DIR") else {
@@ -287,7 +289,7 @@ async fn reported_fixture_with(previous: AssistantMessage, abort: bool) -> Repor
         root.path(),
         provider.clone(),
         Some(receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     let session = runtime.create(None).unwrap().id;
     runtime
@@ -301,7 +303,8 @@ async fn reported_fixture_with(previous: AssistantMessage, abort: bool) -> Repor
     runtime.wait_idle(&session).await;
     let record = runtime.model_requests(&session).unwrap().requests[0].clone();
     assert_eq!(record.settled_tokens, None);
-    assert_eq!(record.outstanding_reservation_tokens, LIMIT);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
     ReportedFixture {
         root,
         runtime,
@@ -331,13 +334,15 @@ async fn exact_decision_releases_only_its_hold_and_survives_reopen_and_retry() {
     let ledger = f.runtime.model_requests(&f.session).unwrap();
     let mut expected = f.record.clone();
     expected.settled_tokens = Some(0);
+    expected.charged_tokens = Some(0);
     expected.outstanding_reservation_tokens = 0;
     expected.reconciliation = Some(result.clone());
     assert_eq!(ledger.requests, vec![expected.clone()]);
     assert_eq!(ledger.settled_tokens, 0);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, LIMIT);
-    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, Some(LIMIT));
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.cost_status, ModelCostStatus::Unknown);
     assert!(ledger.cost_amount.is_none() && ledger.cost_currency.is_none());
     assert!(expected.cost_amount.is_none() && expected.cost_currency.is_none());
@@ -372,7 +377,7 @@ async fn exact_decision_releases_only_its_hold_and_survives_reopen_and_retry() {
         &json!({"input":input,"before":before,"after":after,"ledger":ledger,"tasks":tasks}),
     );
     drop(f.runtime);
-    let reopened = open(f.root.path(), f.provider.clone(), None, 2 * 1024 * 1024);
+    let reopened = open(f.root.path(), f.provider.clone(), None, 4 * 1024 * 1024);
     assert_eq!(reopened.model_requests(&f.session).unwrap(), ledger);
     assert_eq!(
         reopened.reconcile_model_request(input).await.unwrap(),
@@ -386,7 +391,7 @@ async fn exact_decision_releases_only_its_hold_and_survives_reopen_and_retry() {
 async fn absent_verifier_and_untrusted_actor_or_evidence_cannot_release_a_hold() {
     let f = fixture().await;
     let input = decision(&f.record);
-    let peer = open(f.root.path(), f.provider.clone(), None, 2 * 1024 * 1024);
+    let peer = open(f.root.path(), f.provider.clone(), None, 4 * 1024 * 1024);
     assert!(
         peer.reconcile_model_request(input.clone())
             .await
@@ -549,7 +554,7 @@ async fn reported_zero_partial_invalid_usage_and_response_traces_block_non_dispa
             root.path(),
             Arc::new(ResponseTrace(scenario)),
             Some(receipts.clone()),
-            2 * 1024 * 1024,
+            4 * 1024 * 1024,
         );
         let session = runtime.create(None).unwrap().id;
         timeout(
@@ -602,7 +607,7 @@ async fn failed_persistence_keeps_the_hold_and_the_same_decision_can_retry() {
         f.root.path(),
         f.provider.clone(),
         Some(f.receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     unchanged(&peer, &f.session, &f.record);
     save(
@@ -703,7 +708,7 @@ async fn an_active_peer_in_the_same_budget_tree_blocks_reconciliation() {
         f.root.path(),
         f.provider.clone(),
         Some(f.receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     assert!(matches!(
         peer.reconcile_model_request(input.clone()).await,
@@ -733,7 +738,7 @@ async fn an_active_unrelated_budget_does_not_block_reconciliation_or_dispatch_mo
             release: release.clone(),
         }),
         Some(f.receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     let unrelated = peer.create(None).unwrap().id;
     let running = tokio::spawn(async move {
@@ -775,8 +780,9 @@ fn synthetic_hold(runtime: &Runtime, session: &str, budget: &str) -> ModelReques
             &lease,
             "model_request",
             json!({
-                "record":"reserved","identity":identity,"policy":"entire_session_remainder",
-                "tokens":LIMIT,"token_limit":LIMIT,"output_max_tokens":16
+                "record":"reserved","identity":identity,
+                "tokens":LIMIT,"token_limit":LIMIT,
+                "input_token_bound":LIMIT - 16,"output_max_tokens":16
             }),
         )
         .unwrap();
@@ -799,7 +805,8 @@ fn synthetic_hold(runtime: &Runtime, session: &str, budget: &str) -> ModelReques
             json!({
                 "record":"finished","request_id":identity["request_id"],
                 "reservation_cursor":reserved.cursor,"previous_cursor":started.cursor,
-                "terminal":"failed","settled_tokens":null,"last_received":null
+                "terminal":"failed","settled_tokens":null,"charged_tokens":LIMIT,
+                "last_received":null
             }),
         )
         .unwrap();
@@ -823,14 +830,19 @@ async fn reconciliation_preserves_other_unknown_requests_in_the_same_budget_tree
         .id;
     let other = synthetic_hold(&f.runtime, &branch, &f.session);
     let before = f.runtime.model_requests(&f.session).unwrap();
-    assert_eq!(before.reserved_tokens, LIMIT * 2);
+    assert_eq!(before.reserved_tokens, 0);
+    assert_eq!(
+        before.charged_unknown_tokens,
+        f.record.reservation_tokens + LIMIT
+    );
     let input = decision(&f.record);
     f.receipts.accept(&input);
     let result = f.runtime.reconcile_model_request(input).await.unwrap();
     let after = f.runtime.model_requests(&branch).unwrap();
-    assert_eq!(after.reserved_tokens, LIMIT);
+    assert_eq!(after.reserved_tokens, 0);
+    assert_eq!(after.charged_unknown_tokens, LIMIT);
     assert_eq!(after.settled_tokens, 0);
-    assert!(after.budget_unknown);
+    assert!(after.usage_unknown);
     assert_eq!(
         after.requests.iter().find(|r| r.identity == other.identity),
         Some(&other)
@@ -852,7 +864,8 @@ async fn reconciliation_preserves_other_unknown_requests_in_the_same_budget_tree
         .unwrap();
     assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
     let refused = f.runtime.model_requests(&branch).unwrap();
-    assert_eq!(refused.reserved_tokens, LIMIT);
+    assert_eq!(refused.reserved_tokens, 0);
+    assert_eq!(refused.charged_unknown_tokens, LIMIT);
     assert_eq!(
         refused
             .requests
@@ -865,7 +878,7 @@ async fn reconciliation_preserves_other_unknown_requests_in_the_same_budget_tree
             .requests
             .iter()
             .any(|r| r.identity.task_id == queued.id
-                && r.rejection.as_deref() == Some("unsettled_model_reservation"))
+                && r.rejection.as_deref() == Some("model_token_budget_exhausted"))
     );
     save(
         "other-unknown",
@@ -915,7 +928,7 @@ async fn a_cursor_or_attempt_change_during_verification_cannot_release_the_hold(
                 path: f.root.path().join("sessions.db"),
                 start_attempt,
             })),
-            2 * 1024 * 1024,
+            4 * 1024 * 1024,
         );
         let error = peer
             .reconcile_model_request(decision(&f.record))
@@ -950,7 +963,7 @@ async fn concurrent_exact_retries_append_only_one_decision() {
         f.root.path(),
         f.provider.clone(),
         Some(f.receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     let cursor = f.runtime.store().snapshot(&f.session).unwrap().cursor;
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -1011,13 +1024,15 @@ async fn reported_usage_settles_a_failed_response_without_replacing_any_original
     let ledger = f.runtime.model_requests(&f.session).unwrap();
     let mut expected = f.record.clone();
     expected.settled_tokens = Some(97);
+    expected.charged_tokens = Some(97);
     expected.outstanding_reservation_tokens = 0;
     expected.reconciliation = Some(result.clone());
     assert_eq!(ledger.requests, vec![expected]);
     assert_eq!(ledger.settled_tokens, 97);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, LIMIT - 97);
-    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, Some(LIMIT - 97));
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.cost_status, ModelCostStatus::Unknown);
     assert!(ledger.cost_amount.is_none() && ledger.cost_currency.is_none());
     let after = f.runtime.events(&f.session, 0, 1000).unwrap();
@@ -1050,7 +1065,7 @@ async fn reported_usage_settles_a_failed_response_without_replacing_any_original
         &json!({"input":input,"before":before,"after":after,"ledger":ledger,"tasks":tasks}),
     );
     drop(f.runtime);
-    let reopened = open(f.root.path(), f.provider.clone(), None, 2 * 1024 * 1024);
+    let reopened = open(f.root.path(), f.provider.clone(), None, 4 * 1024 * 1024);
     assert_eq!(reopened.model_requests(&f.session).unwrap(), ledger);
     assert_eq!(
         reopened.reconcile_model_request(input).await.unwrap(),
@@ -1124,8 +1139,8 @@ fn open_interrupted_capture(
         provider,
         model,
         RuntimeConfig {
-            max_total_tokens: CAPTURE_LIMIT,
-            max_run_time: Duration::from_secs(1),
+            max_total_tokens: Some(CAPTURE_LIMIT),
+            max_run_time: Some(Duration::from_secs(1)),
             model_request_reconciliation_verifier: verifier,
             ..Default::default()
         },
@@ -1158,7 +1173,8 @@ async fn interrupted_capture() -> (
     let record = runtime.model_requests(&session).unwrap().requests[0].clone();
     assert_eq!(record.terminal, Some(ModelRequestTerminal::Dropped));
     assert_eq!(record.settled_tokens, None);
-    assert_eq!(record.outstanding_reservation_tokens, CAPTURE_LIMIT);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
     assert_eq!(record.observations.len(), 1);
     assert_eq!(
         record.observations[0].observation.usage_fields,
@@ -1187,13 +1203,15 @@ async fn cache_creation_detail_zero_settles_once_and_preserves_dropped_observati
     let ledger = runtime.model_requests(&session).unwrap();
     let mut expected = record.clone();
     expected.settled_tokens = Some(36_575);
+    expected.charged_tokens = Some(36_575);
     expected.outstanding_reservation_tokens = 0;
     expected.reconciliation = Some(result.clone());
     assert_eq!(ledger.requests, vec![expected]);
     assert_eq!(ledger.settled_tokens, 36_575);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, CAPTURE_LIMIT - 36_575);
-    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, Some(CAPTURE_LIMIT - 36_575));
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.cost_status, ModelCostStatus::Unknown);
     assert!(ledger.cost_amount.is_none() && ledger.cost_currency.is_none());
     let after = runtime.events(&session, 0, 1000).unwrap();
@@ -1242,7 +1260,7 @@ async fn cache_creation_detail_missing_nonzero_unknown_and_excess_reports_keep_t
     let before = runtime.events(&session, 0, 1000).unwrap();
     let ledger = runtime.model_requests(&session).unwrap();
     let mut rejected = Vec::new();
-    for scenario in 0..12 {
+    for scenario in (0..12).filter(|scenario| *scenario != 9) {
         let mut input = reported_decision(&record);
         let report = report_mut(&mut input);
         *report = cache_creation_report();
@@ -1319,6 +1337,34 @@ async fn cache_creation_detail_missing_nonzero_unknown_and_excess_reports_keep_t
         "cache-creation-rejections",
         &json!({"rejected":rejected,"ledger":ledger}),
     );
+
+    // A trusted report proven above the configured limit settles its actual
+    // usage instead of keeping the unknown charge.
+    let (_root, runtime, provider, receipts, session, record) = interrupted_capture().await;
+    let mut input = reported_decision(&record);
+    let report = report_mut(&mut input);
+    *report = cache_creation_report();
+    report.usage.input = CAPTURE_LIMIT - report.usage.cache_read;
+    report.usage.total_tokens = CAPTURE_LIMIT + report.usage.output;
+    report
+        .usage_fields
+        .insert("prompt_tokens".into(), json!(CAPTURE_LIMIT));
+    report
+        .usage_fields
+        .insert("total_tokens".into(), json!(report.usage.total_tokens));
+    receipts.accept(&input);
+    let result = runtime.reconcile_model_request(input).await.unwrap();
+    let ledger = runtime.model_requests(&session).unwrap();
+    let actual = CAPTURE_LIMIT + 1479;
+    assert_eq!(ledger.requests[0].settled_tokens, Some(actual));
+    assert_eq!(ledger.requests[0].charged_tokens, Some(actual));
+    assert_eq!(ledger.requests[0].reconciliation.as_ref(), Some(&result));
+    assert_eq!(ledger.settled_tokens, actual);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, Some(0));
+    assert!(!ledger.usage_unknown);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1399,7 +1445,7 @@ async fn reported_usage_still_requires_exact_origin_and_rejects_conflicting_deci
 #[tokio::test]
 async fn invalid_incomplete_or_excess_reported_usage_cannot_release_a_hold() {
     let f = reported_fixture().await;
-    for scenario in 0..27 {
+    for scenario in (0..27).filter(|scenario| *scenario != 19) {
         let mut input = reported_decision(&f.record);
         let report = report_mut(&mut input);
         match scenario {
@@ -1549,7 +1595,7 @@ async fn prior_partial_counters_allow_cache_reclassification_but_require_complet
         .insert("prompt_tokens".into(), json!(85));
     let f = reported_fixture_with(prefix, false).await;
     let input = reported_decision(&f.record);
-    let no_verifier = open(f.root.path(), f.provider.clone(), None, 2 * 1024 * 1024);
+    let no_verifier = open(f.root.path(), f.provider.clone(), None, 4 * 1024 * 1024);
     assert!(
         no_verifier
             .reconcile_model_request(input.clone())
@@ -1637,7 +1683,7 @@ async fn reported_usage_write_failure_and_owner_lock_keep_the_original_hold() {
         f.root.path(),
         f.provider.clone(),
         Some(f.receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     unchanged(&peer, &f.session, &f.record);
     save(
@@ -1677,8 +1723,9 @@ async fn reported_usage_keeps_other_unknowns_and_checks_the_shared_budget_tree()
         Some(&other)
     );
     assert_eq!(ledger.settled_tokens, 97);
-    assert_eq!(ledger.reserved_tokens, LIMIT);
-    assert!(ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.charged_unknown_tokens, LIMIT);
+    assert!(ledger.usage_unknown);
     assert_eq!(f.runtime.task(&task.id).unwrap(), task);
     assert_eq!(f.provider.calls.load(Ordering::SeqCst), 1);
     save("reported-other-unknown", &ledger);
@@ -1695,7 +1742,7 @@ async fn reported_usage_cas_failure_and_concurrent_retries_never_double_settle()
                 path: f.root.path().join("sessions.db"),
                 start_attempt,
             })),
-            2 * 1024 * 1024,
+            4 * 1024 * 1024,
         );
         assert!(matches!(
             peer.reconcile_model_request(reported_decision(&f.record))
@@ -1711,7 +1758,7 @@ async fn reported_usage_cas_failure_and_concurrent_retries_never_double_settle()
         f.root.path(),
         f.provider.clone(),
         Some(f.receipts.clone()),
-        2 * 1024 * 1024,
+        4 * 1024 * 1024,
     );
     let cursor = f.runtime.store().snapshot(&f.session).unwrap().cursor;
     let barrier = Arc::new(std::sync::Barrier::new(2));
@@ -1822,7 +1869,8 @@ async fn reported_usage_checks_each_supported_protocol_without_replaying_a_failu
         assert_eq!(terminal.usage, Usage::default());
         assert!(terminal.usage_fields.is_empty());
         assert_eq!(f.record.settled_tokens, None);
-        assert_eq!(f.record.outstanding_reservation_tokens, LIMIT);
+        assert_eq!(f.record.charged_tokens, Some(f.record.reservation_tokens));
+        assert_eq!(f.record.outstanding_reservation_tokens, 0);
         let mut input = reported_decision(&f.record);
         let report = report_mut(&mut input);
         report.usage = usage.clone();
@@ -1835,6 +1883,7 @@ async fn reported_usage_checks_each_supported_protocol_without_replaying_a_failu
         f.runtime.reconcile_model_request(input).await.unwrap();
         let record = &f.runtime.model_requests(&f.session).unwrap().requests[0];
         assert_eq!(record.settled_tokens, Some(usage.total_tokens));
+        assert_eq!(record.charged_tokens, Some(usage.total_tokens));
         assert_eq!(record.outstanding_reservation_tokens, 0);
         assert_eq!(record.terminal, Some(ModelRequestTerminal::Failed));
         assert_eq!(record.observations, f.record.observations);

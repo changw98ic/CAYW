@@ -136,14 +136,14 @@ fn every_catchup_page_boundary_hides_committed_and_abandoned_messages() {
 fn terminal_snapshots_never_publish_the_old_attempt_at_any_page_boundary() {
     let attempt = lease("ended", 1);
     for kind in ["attempt_recovered", "attempt_finished"] {
-        for state in ["idle", "needs_reconciliation"] {
+        for has_unknown in [false, true] {
             let records = [
                 start(1, &attempt),
                 update(2, &attempt, "ABANDONED"),
                 finish(3, &attempt, kind),
             ];
-            let mut value = snapshot(state, 3, Value::Null);
-            if state == "needs_reconciliation" {
+            let mut value = snapshot("idle", 3, Value::Null);
+            if has_unknown {
                 value["unresolved_calls"] =
                     json!([{"call":{"id":"unknown"},"state":"outcome_unknown"}]);
             }
@@ -153,7 +153,7 @@ fn terminal_snapshots_never_publish_the_old_attempt_at_any_page_boundary() {
                 assert_stream(&app, None, kind);
                 app.upsert_snapshot(value.clone(), false).unwrap();
                 assert_stream(&app, None, "terminal refresh");
-                assert_eq!(app.selected().unwrap().can_prompt(), state == "idle");
+                assert!(app.selected().unwrap().can_prompt());
             }
         }
     }
@@ -341,7 +341,7 @@ fn unknown_frozen_cancel_and_prompt_ownership_survive_catchup_and_reconnect() {
             task_id: "original-task".into(),
         }]
     );
-    let mut value = snapshot("needs_reconciliation", 2, attempt.clone());
+    let mut value = snapshot("awaiting_approval", 2, attempt.clone());
     value["frozen"] = json!(true);
     value["binding"] = json!({"plugin":"unavailable","frozen":true});
     value["pending_approvals"] = json!([{"id":"current-approval"}]);

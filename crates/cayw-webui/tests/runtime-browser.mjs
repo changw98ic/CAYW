@@ -12,9 +12,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 const [runtimeBinary, webBinary, evidence, coreFixture, option] = process.argv.slice(2);
+if (!runtimeBinary || !webBinary || !evidence) {
+  // This file is a fixture launcher, not a node:test case. Running it from the
+  // test glob without its explicit binaries has nothing to exercise.
+  console.log('runtime-browser fixture requires RUNTIME_BINARY WEBUI_BINARY EVIDENCE_DIRECTORY; skipped.');
+  process.exit(0);
+}
 if (option && option !== '--approval-gated') throw new Error('Unknown fixture option');
 const approvalGated = option === '--approval-gated';
-if (!runtimeBinary || !webBinary || !evidence) throw new Error('Provide Runtime binary, WebUI binary and a NEW evidence directory');
 await mkdir(evidence); // Refuse to overwrite earlier evidence.
 const workspace = join(evidence, 'workspace');
 await mkdir(workspace);

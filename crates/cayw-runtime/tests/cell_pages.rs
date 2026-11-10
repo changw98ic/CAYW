@@ -36,9 +36,9 @@ async fn offline_fixture_uses_advertised_limits_and_reads_every_output_page() {
         requests: Mutex::default(),
     });
     let mut config = RuntimeConfig::default();
-    config.cells.max_yield_time = std::time::Duration::from_millis(500);
-    config.cells.max_output_tokens = 16 * 1024;
-    config.cells.item_bytes = 12 * 1024;
+    config.cells.max_yield_time = Some(std::time::Duration::from_millis(500));
+    config.cells.max_output_tokens = Some(16 * 1024);
+    config.cells.item_bytes = Some(12 * 1024);
     let rt = Runtime::open(
         directory.path().join("session.db"),
         directory.path().join("workspace"),

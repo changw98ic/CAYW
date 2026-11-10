@@ -27,7 +27,7 @@ fn model() -> Model {
 }
 fn config() -> RuntimeConfig {
     RuntimeConfig {
-        max_total_tokens: 1000,
+        max_total_tokens: Some(1000),
         ..Default::default()
     }
 }
@@ -118,7 +118,7 @@ async fn reported_error_usage_settles_without_completing_or_replaying_the_failed
     let ledger = rt.model_requests(&id).unwrap();
     assert_eq!(ledger.settled_tokens, 8);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(
         ledger.requests[0].terminal,
         Some(ModelRequestTerminal::Failed)
@@ -142,7 +142,7 @@ async fn reported_error_usage_settles_without_completing_or_replaying_the_failed
     let after = reopened.model_requests(&id).unwrap();
     assert_eq!(after.settled_tokens, 16);
     assert_eq!(after.reserved_tokens, 0);
-    assert!(!after.budget_unknown);
+    assert!(!after.usage_unknown);
     assert_eq!(after.requests.len(), 2);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert_eq!(reopened.task(&failed.id).unwrap().state, TaskState::Failed);
@@ -156,7 +156,7 @@ async fn reported_error_usage_settles_without_completing_or_replaying_the_failed
 }
 
 #[tokio::test]
-async fn error_with_missing_partial_or_invalid_usage_retains_its_hold_after_reopen() {
+async fn error_with_missing_partial_or_invalid_usage_charges_once_after_reopen() {
     for (status, invalid_total) in [
         (UsageStatus::Unknown, false),
         (UsageStatus::Partial, false),
@@ -175,14 +175,26 @@ async fn error_with_missing_partial_or_invalid_usage_retains_its_hold_after_reop
         assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Failed);
         let ledger = rt.model_requests(&id).unwrap();
         assert_eq!(ledger.settled_tokens, 0);
-        assert_eq!(ledger.reserved_tokens, 1000);
-        assert!(ledger.budget_unknown);
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(
+            ledger.charged_unknown_tokens,
+            ledger.requests[0].reservation_tokens
+        );
+        assert_eq!(
+            ledger.requests[0].charged_tokens,
+            Some(ledger.requests[0].reservation_tokens)
+        );
+        assert!(ledger.usage_unknown);
         drop(rt);
         let reopened = open(root.path(), provider.clone());
         assert_eq!(reopened.model_requests(&id).unwrap(), ledger);
         prompt(&reopened, &id).await;
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(reopened.model_requests(&id).unwrap().reserved_tokens, 1000);
+        assert_eq!(reopened.model_requests(&id).unwrap().reserved_tokens, 0);
+        assert_eq!(
+            reopened.model_requests(&id).unwrap().charged_unknown_tokens,
+            ledger.charged_unknown_tokens
+        );
     }
 }
 
@@ -266,7 +278,7 @@ async fn unrelated_roots_do_not_share_request_record_capacity() {
         .model_requests(&unrelated)
         .expect("an unrelated root must remain readable");
     assert_eq!(other.requests.len(), 1);
-    assert_eq!(other.remaining_tokens, 1000);
+    assert_eq!(other.remaining_tokens, Some(1000));
     assert_eq!(rt.model_requests(&full).unwrap().requests.len(), 4096);
     prompt(&rt, &unrelated).await;
     assert_eq!(provider.0.load(Ordering::SeqCst), 1);
@@ -360,13 +372,18 @@ async fn committed_peer_cancel_prevents_late_reported_done_from_settling() {
     let ledger = owner.model_requests(&id).unwrap();
     assert_eq!(
         ledger.settled_tokens, 0,
-        "late Done must not release a cancelled reservation"
+        "late Done must not settle a cancelled request"
     );
-    assert_eq!(ledger.reserved_tokens, 1000);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(
+        ledger.charged_unknown_tokens,
+        ledger.requests[0].reservation_tokens
+    );
     assert_eq!(
         ledger.requests[0].terminal,
         Some(ModelRequestTerminal::Cancelled)
     );
+    assert!(ledger.usage_unknown);
     assert!(
         ledger.requests[0]
             .observations
@@ -436,9 +453,15 @@ async fn fork_branches_compete_for_one_hold_and_unknown_survives_new_fork_and_re
     let after = owner.fork(&branch, "after unknown", true).unwrap().id;
     let ledger = owner.model_requests(&after).unwrap();
     assert_eq!(ledger.budget_session_id, id);
-    assert_eq!(ledger.reserved_tokens, 1000);
+    assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.settled_tokens, 0);
-    assert!(ledger.budget_unknown);
+    assert!(ledger.usage_unknown);
+    let unknown = ledger
+        .requests
+        .iter()
+        .find(|record| record.terminal != Some(ModelRequestTerminal::Rejected))
+        .unwrap();
+    assert_eq!(ledger.charged_unknown_tokens, unknown.reservation_tokens);
     assert_eq!(owner.model_requests(&branch).unwrap(), ledger);
     assert_eq!(peer.model_requests(&id).unwrap(), ledger);
     drop(owner);
@@ -448,7 +471,11 @@ async fn fork_branches_compete_for_one_hold_and_unknown_survives_new_fork_and_re
     prompt(&reopened, &after).await;
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let final_ledger = reopened.model_requests(&id).unwrap();
-    assert_eq!(final_ledger.reserved_tokens, 1000);
+    assert_eq!(final_ledger.reserved_tokens, 0);
+    assert_eq!(
+        final_ledger.charged_unknown_tokens,
+        ledger.charged_unknown_tokens
+    );
     unknown_money(&final_ledger);
 }
 
@@ -471,9 +498,13 @@ async fn persistent_observed_and_finished_write_failures_keep_only_the_original_
     );
     assert_ne!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
     let ledger = rt.model_requests(&id).unwrap();
-    assert_eq!(ledger.reserved_tokens, 1000);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(
+        ledger.charged_unknown_tokens,
+        ledger.requests[0].reservation_tokens
+    );
     assert_eq!(ledger.settled_tokens, 0);
-    assert!(ledger.budget_unknown);
+    assert!(ledger.usage_unknown);
     assert!(ledger.requests[0].observations.is_empty());
     assert_eq!(
         ledger.requests[0].terminal, None,

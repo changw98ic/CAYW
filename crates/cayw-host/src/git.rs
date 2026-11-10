@@ -306,7 +306,7 @@ fn stage_paths<'a>(
             return Err(failure("staged paths must be unique"));
         }
         bytes = bytes.saturating_add(path.len());
-        if bytes > config.max_argument_bytes {
+        if config.max_argument_bytes.is_some_and(|limit| bytes > limit) {
             return Err(failure("staged paths exceed the argument byte limit"));
         }
         paths.push(path);
@@ -433,7 +433,7 @@ pub(crate) async fn execute(
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     match name {
         "git.status" | "git.diff" | "git.log" | "git.show" | "git.blame" => {
@@ -674,12 +674,12 @@ fn root_path(_: &Host) -> Result<PathBuf, CapabilityError> {
 async fn write_lock(
     host: &Host,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<(std::fs::File, cayw_workspace::Workspace), CapabilityError> {
     let (workspace, workspace_deadline) = host.open_workspace(cancel, deadline).await?;
-    let lock = filesystem::write_lock(&host.root, cancel, deadline).await?;
     host.ensure_workspace_settled(&workspace, cancel, workspace_deadline)
         .await?;
+    let lock = filesystem::write_lock(&host.root, cancel, deadline).await?;
     Ok((lock, workspace))
 }
 
@@ -720,7 +720,7 @@ async fn run(
     policy: &GitWritePolicy,
     args: Vec<String>,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<ProcessResult, CapabilityError> {
     check(cancel, deadline)?;
     let program = host
@@ -735,13 +735,15 @@ async fn run(
         env: write_environment(policy),
         timeout: host.config.process_timeout,
         max_output_bytes: host.config.max_process_output_bytes,
+        output_spill_dir: None,
         io: ProcessIo::Pipes,
     };
     check(cancel, deadline)?;
-    spec.timeout = spec
-        .timeout
-        .min(deadline.saturating_duration_since(Instant::now()));
-    if spec.timeout.is_zero() {
+    spec.timeout = crate::min_opt(
+        spec.timeout,
+        deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+    );
+    if spec.timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(failure("capability deadline reached before process launch"));
     }
     host.runner
@@ -808,7 +810,7 @@ async fn query_oid(
     mut args: Vec<String>,
     label: &str,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<String, CapabilityError> {
     args = {
         let mut base = write_base_args();
@@ -832,7 +834,7 @@ async fn head_oid(
     host: &Host,
     policy: &GitWritePolicy,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<String, CapabilityError> {
     query_oid(
         host,
@@ -849,7 +851,7 @@ async fn index_tree(
     host: &Host,
     policy: &GitWritePolicy,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<String, CapabilityError> {
     query_oid(
         host,
@@ -867,7 +869,7 @@ async fn branch_oid(
     policy: &GitWritePolicy,
     name: &str,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Option<String>, CapabilityError> {
     let mut args = write_base_args();
     args.extend([
@@ -894,7 +896,7 @@ async fn parent_oid(
     policy: &GitWritePolicy,
     commit: &str,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Option<String>, CapabilityError> {
     let mut args = write_base_args();
     args.extend([
@@ -932,7 +934,7 @@ async fn inspect_local_config(
     policy: &GitWritePolicy,
     repo: &Repo,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<(), CapabilityError> {
     let args = vec![
         "--no-pager".into(),
@@ -1082,7 +1084,7 @@ async fn stage(
     policy: &GitWritePolicy,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let paths = stage_paths(arguments, &host.config)?;
     let expected_head = object_id_value(arguments.get("expected_head"), "expected_head")?;
@@ -1156,7 +1158,7 @@ async fn commit(
     policy: &GitWritePolicy,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let message = arguments["message"]
         .as_str()
@@ -1279,7 +1281,7 @@ async fn branch(
     policy: &GitWritePolicy,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let action = arguments["action"].as_str().expect("validated action");
     let name = arguments["name"].as_str().expect("validated name");
@@ -1386,7 +1388,7 @@ async fn git_worktree_entries(
     host: &Host,
     policy: &GitWritePolicy,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Vec<(PathBuf, Option<String>, Option<String>)>, CapabilityError> {
     let mut args = write_base_args();
     args.extend(["worktree".into(), "list".into(), "--porcelain".into()]);
@@ -1499,7 +1501,7 @@ async fn worktree_has_changes(
     policy: &GitWritePolicy,
     name: &str,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<bool, CapabilityError> {
     // Ask Git whether removal without force would refuse before attempting any
     // write. This is a read through the verified linked-worktree control file:
@@ -1548,7 +1550,7 @@ async fn worktree(
     policy: &GitWritePolicy,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let action = arguments["action"].as_str().expect("validated action");
     let name = arguments["name"].as_str().expect("validated name");

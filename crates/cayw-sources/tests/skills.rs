@@ -143,7 +143,7 @@ fn read_request(name: &str, id: u64, max_result_bytes: usize) -> SourceRequest {
             target: name.into(),
         },
         operation: SourceOperation::ReadSkill { name: name.into() },
-        max_result_bytes,
+        max_result_bytes: Some(max_result_bytes),
     }
 }
 
@@ -360,7 +360,7 @@ fn rejects_unsafe_or_unbounded_inputs_at_load() {
     );
 
     let mut small = limits;
-    small.max_skill_bytes = 4;
+    small.max_skill_bytes = Some(4);
     let oversized = dir.path().join("oversized.md");
     std::fs::write(&oversized, "12345").unwrap();
     load_error(
@@ -486,7 +486,7 @@ async fn bounds_result_size_and_honors_cancel_and_close_without_unknown() {
     let big_path = dir.path().join("big.md");
     std::fs::write(&big_path, &big).unwrap();
     let large_limits = Limits {
-        max_skill_bytes: 512 * 1024,
+        max_skill_bytes: Some(512 * 1024),
         ..Default::default()
     };
     let skills = load_ok(vec![entry("big", "d", &big_path)], &large_limits);

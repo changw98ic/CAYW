@@ -77,7 +77,7 @@ impl Drop for PendingCall {
     }
 }
 struct Clock {
-    deadline: Instant,
+    deadline: Option<Instant>,
     paused: Option<Instant>,
 }
 struct Run {
@@ -91,8 +91,10 @@ struct Pause(Arc<Run>);
 impl Drop for Pause {
     fn drop(&mut self) {
         let mut clock = self.0.clock.lock().expect("VM clock poisoned");
-        if let Some(started) = clock.paused.take() {
-            clock.deadline += started.elapsed();
+        if let Some(started) = clock.paused.take()
+            && let Some(deadline) = &mut clock.deadline
+        {
+            *deadline += started.elapsed();
         }
     }
 }
@@ -120,7 +122,10 @@ impl Run {
         }
         let expired = {
             let clock = self.clock.lock().expect("VM clock poisoned");
-            clock.paused.is_none() && Instant::now() >= clock.deadline
+            clock.paused.is_none()
+                && clock
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline)
         };
         if expired {
             return Err(self.fail(Fault::new(
@@ -148,52 +153,46 @@ impl Run {
             .clone()
             .filter(|fault| fault.is_fatal())
     }
-    fn remaining(&self) -> usize {
-        self.limits.output_bytes.saturating_sub(
-            self.state
-                .lock()
-                .expect("execution state poisoned")
-                .report
-                .output_bytes,
-        )
+    fn remaining(&self) -> Option<usize> {
+        self.limits.output_bytes.map(|limit| {
+            limit.saturating_sub(
+                self.state
+                    .lock()
+                    .expect("execution state poisoned")
+                    .report
+                    .output_bytes,
+            )
+        })
     }
     fn charge(&self, value: &(impl Serialize + ?Sized)) -> Result<(), Fault> {
         let mut state = self.state.lock().expect("execution state poisoned");
         let remaining = self
             .limits
             .output_bytes
-            .saturating_sub(state.report.output_bytes);
+            .map(|limit| limit.saturating_sub(state.report.output_bytes));
         let size = json::size(value, remaining)?;
-        state.report.output_bytes += size;
+        state.report.output_bytes = state.report.output_bytes.saturating_add(size);
         Ok(())
     }
     fn interrupt(&self) -> Result<VmState, Fault> {
         self.check()?;
-        let exhausted = {
+        let checkpoints = {
             let mut state = self.state.lock().expect("execution state poisoned");
             state.report.instruction_checkpoints =
                 state.report.instruction_checkpoints.saturating_add(1);
-            state.report.instruction_checkpoints > self.limits.instruction_budget
+            state.report.instruction_checkpoints
         };
-        if exhausted {
-            return Err(self.fail(Fault::new(
-                ErrorKind::InstructionLimit,
-                "Luau interrupt checkpoint budget exhausted",
-            )));
-        }
-        // AsyncThread returns Pending after a hook yield, giving the executor a
-        // chance to run cancellation and timers even on a single worker thread.
-        let checkpoints = self
-            .state
-            .lock()
-            .expect("execution state poisoned")
-            .report
-            .instruction_checkpoints;
-        Ok(if checkpoints.is_multiple_of(256) {
-            VmState::Yield
-        } else {
-            VmState::Continue
-        })
+        // `instruction_budget` is the interrupt cadence: every Nth checkpoint
+        // yields so the executor can poll cancellation and timers. It never
+        // caps total execution. AsyncThread returns Pending after a yield,
+        // giving the executor a chance even on a single worker thread.
+        Ok(
+            if checkpoints.is_multiple_of(u64::from(self.limits.instruction_budget)) {
+                VmState::Yield
+            } else {
+                VmState::Continue
+            },
+        )
     }
     fn error(&self, fault: Fault) -> CodeModeError {
         let mut state = self.state.lock().expect("execution state poisoned");
@@ -208,9 +207,9 @@ impl Run {
         let remaining = self
             .limits
             .output_bytes
-            .saturating_sub(state.report.output_bytes);
+            .map(|limit| limit.saturating_sub(state.report.output_bytes));
         let (message, bytes) = json::fit_message(&fault.message, remaining);
-        state.report.output_bytes += bytes;
+        state.report.output_bytes = state.report.output_bytes.saturating_add(bytes);
         CodeModeError {
             kind: fault.kind,
             message,
@@ -455,7 +454,7 @@ pub(crate) async fn execute(
         }),
         limits: mode.limits.clone(),
         clock: Mutex::new(Clock {
-            deadline: Instant::now() + mode.limits.timeout,
+            deadline: mode.limits.timeout.map(|timeout| Instant::now() + timeout),
             paused: None,
         }),
         cancel: child,
@@ -597,12 +596,12 @@ fn record_host(
             let remaining = run
                 .limits
                 .output_bytes
-                .saturating_sub(state.report.output_bytes);
+                .map(|limit| limit.saturating_sub(state.report.output_bytes));
             let (message, bytes) = json::fit_message(
                 "Capability cleanup grace expired; reconcile its effects before retrying",
                 remaining,
             );
-            state.report.output_bytes += bytes;
+            state.report.output_bytes = state.report.output_bytes.saturating_add(bytes);
             state.report.calls[index].result_omitted = message.is_empty();
             state.report.calls[index].error = (!message.is_empty()).then_some(message);
             Err(Fault::new(
@@ -645,7 +644,7 @@ async fn call_host(
     let index = {
         let mut state = run.state.lock().expect("execution state poisoned");
         let index = state.report.calls.len();
-        if index >= run.limits.host_calls {
+        if run.limits.host_calls.is_some_and(|limit| index >= limit) {
             return Err(Fault::new(
                 ErrorKind::HostCallLimit,
                 "Host call budget exhausted",
@@ -682,11 +681,19 @@ async fn call_host(
     });
     run.clock.lock().expect("VM clock poisoned").paused = Some(Instant::now());
     let pause = Pause(run.clone());
-    let deadline = tokio::time::Instant::now() + run.limits.host_wait;
+    let deadline = run
+        .limits
+        .host_wait
+        .map(|wait| tokio::time::Instant::now() + wait);
     let result = tokio::select! {
         biased;
         _ = run.cancel.cancelled() => Err(run.fail(Fault::new(ErrorKind::Cancelled, "CodeMode execution cancelled"))),
-        _ = tokio::time::sleep_until(deadline) => Err(run.fail(Fault::new(ErrorKind::Timeout, "CodeMode Host wait limit reached"))),
+        _ = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => Err(run.fail(Fault::new(ErrorKind::Timeout, "CodeMode Host wait limit reached"))),
         result = std::future::poll_fn(|cx| {
             if let Err(fault) = run.check() {
                 return std::task::Poll::Ready(Err(fault));
@@ -770,11 +777,17 @@ async fn call_service(
     };
     let host_wait = matches!(operation, VmOperation::Store | VmOperation::Load);
     let deadline = if host_wait {
-        Some(tokio::time::Instant::now() + run.limits.host_wait)
+        run.limits
+            .host_wait
+            .map(|wait| tokio::time::Instant::now() + wait)
     } else if operation == VmOperation::Yield {
         None
     } else {
-        Some(run.clock.lock().expect("VM clock poisoned").deadline.into())
+        run.clock
+            .lock()
+            .expect("VM clock poisoned")
+            .deadline
+            .map(tokio::time::Instant::from)
     };
     let cancel = run.cancel.child_token();
     let service_cancel = cancel.clone();
@@ -974,8 +987,13 @@ async fn execute_vm(
     services: Option<Arc<dyn VmServices>>,
 ) -> Result<(), Fault> {
     run.check()?;
-    // The compiler is outside the VM allocator. Bound source before compiling it.
-    if script.len() > run.limits.memory_bytes / 4 {
+    // The compiler is outside the VM allocator. Bound source before compiling it
+    // only when a VM memory budget is configured.
+    if run
+        .limits
+        .memory_bytes
+        .is_some_and(|bytes| script.len() > bytes / 4)
+    {
         return Err(Fault::new(
             ErrorKind::MemoryLimit,
             "Script source exceeds one quarter of the VM memory budget",
@@ -986,8 +1004,9 @@ async fn execute_vm(
         LuaOptions::new(),
     )
     .map_err(Fault::from_lua)?;
-    lua.set_memory_limit(run.limits.memory_bytes)
-        .map_err(Fault::from_lua)?;
+    if let Some(bytes) = run.limits.memory_bytes {
+        lua.set_memory_limit(bytes).map_err(Fault::from_lua)?;
+    }
     let interrupt = run.clone();
     lua.set_interrupt(move |_| lua_result(&interrupt, interrupt.interrupt()));
 

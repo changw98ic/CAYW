@@ -7,13 +7,21 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::TryLockError,
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 const INTERNAL: &str = ".cayw-host-";
+/// An ordinary un-ranged read returns the file directly up to this size.
+const INLINE_READ_LIMIT: u64 = 8 * 1024 * 1024;
+/// Default preview size for an un-ranged read above `INLINE_READ_LIMIT`.
+const DEFAULT_PREVIEW_BYTES: usize = 256 * 1024;
+/// Default number of lines for a line-ranged read.
+const DEFAULT_READ_LINES: u64 = 2000;
+/// Upper bound on one streamed read window. Explicit host limits may lower it.
+const READ_WINDOW_BYTES: usize = 8 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 /// Actual objects owned by this Host or by Git. Other `.cayw-*` names are
@@ -101,16 +109,84 @@ fn regular(dir: &Dir, name: &str) -> Result<File, CapabilityError> {
     }
     Ok(file)
 }
+fn read_up_to(
+    file: &mut File,
+    limit: usize,
+    detect_extra: bool,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(Vec<u8>, bool), CapabilityError> {
+    let target = if detect_extra {
+        limit.saturating_add(1)
+    } else {
+        limit
+    };
+    let mut bytes = Vec::with_capacity(target.min(64 * 1024));
+    let mut chunk = [0; 8192];
+    while bytes.len() < target {
+        check(cancel, deadline)?;
+        let want = (target - bytes.len()).min(chunk.len());
+        let count = file.read(&mut chunk[..want]).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    let truncated = detect_extra && bytes.len() > limit;
+    if truncated {
+        bytes.truncate(limit);
+    }
+    Ok((bytes, truncated))
+}
+
+fn trim_incomplete_utf8(bytes: &mut Vec<u8>) -> Result<(), CapabilityError> {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => Ok(()),
+        Err(error) if error.error_len().is_none() => {
+            bytes.truncate(error.valid_up_to());
+            Ok(())
+        }
+        Err(_) => Err(failure("file is not UTF-8")),
+    }
+}
+
+fn text(bytes: &[u8]) -> Result<String, CapabilityError> {
+    String::from_utf8(bytes.to_vec()).map_err(|_| failure("file is not UTF-8"))
+}
+
+/// Trims an incomplete trailing character and, when possible, cuts the preview
+/// at the last complete line so the next line range starts cleanly.
+fn preview(mut bytes: Vec<u8>) -> Result<(String, usize), CapabilityError> {
+    trim_incomplete_utf8(&mut bytes)?;
+    if let Some(at) = bytes.iter().rposition(|byte| *byte == b'\n') {
+        bytes.truncate(at + 1);
+    }
+    let content = text(&bytes)?;
+    let consumed = content.len();
+    Ok((content, consumed))
+}
+
+fn line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.bytes().filter(|byte| *byte == b'\n').count() + usize::from(!text.ends_with('\n'))
+    }
+}
+
 fn read_bytes(
     dir: &Dir,
     name: &str,
-    limit: usize,
+    limit: Option<usize>,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, CapabilityError> {
     let mut file = regular(dir, name)?;
-    if file.metadata().map_err(io_error)?.len() > limit as u64 {
-        return Err(failure("file exceeds byte limit"));
+    if let Some(limit) = limit {
+        if file.metadata().map_err(io_error)?.len() > limit as u64 {
+            return Err(failure("file exceeds byte limit"));
+        }
+        return read_up_to(&mut file, limit, false, cancel, deadline).map(|(bytes, _)| bytes);
     }
     let mut bytes = vec![];
     let mut chunk = [0; 8192];
@@ -120,12 +196,90 @@ fn read_bytes(
         if count == 0 {
             break;
         }
-        if count > limit.saturating_sub(bytes.len()) {
-            return Err(failure("file exceeds byte limit"));
-        }
         bytes.extend_from_slice(&chunk[..count]);
     }
     Ok(bytes)
+}
+
+fn read_line_range(
+    dir: &Dir,
+    name: &str,
+    start_line: u64,
+    max_lines: u64,
+    byte_cap: usize,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(String, usize, u64, u64, bool), CapabilityError> {
+    let file = regular(dir, name)?;
+    let total_bytes = file.metadata().map_err(io_error)?.len();
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut offset = 0u64;
+    for _ in 1..start_line {
+        check(cancel, deadline)?;
+        line.clear();
+        let count = reader.read_until(b'\n', &mut line).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        offset += count as u64;
+    }
+    let mut collected = Vec::new();
+    let mut lines_returned = 0usize;
+    let mut truncated = false;
+    while (lines_returned as u64) < max_lines {
+        check(cancel, deadline)?;
+        line.clear();
+        let count = reader.read_until(b'\n', &mut line).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        if collected.len().saturating_add(count) > byte_cap {
+            if lines_returned == 0 {
+                return Err(failure("requested line exceeds the read window"));
+            }
+            truncated = true;
+            break;
+        }
+        collected.extend_from_slice(&line);
+        lines_returned += 1;
+    }
+    if !truncated && (lines_returned as u64) == max_lines {
+        truncated = !reader.fill_buf().map_err(io_error)?.is_empty();
+    }
+    trim_incomplete_utf8(&mut collected)?;
+    let content = text(&collected)?;
+    Ok((content, lines_returned, offset, total_bytes, truncated))
+}
+
+fn read_byte_range(
+    dir: &Dir,
+    name: &str,
+    offset: u64,
+    max_bytes: usize,
+    byte_cap: usize,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(String, u64, u64, bool), CapabilityError> {
+    let mut file = regular(dir, name)?;
+    let total_bytes = file.metadata().map_err(io_error)?.len();
+    let start = offset.min(total_bytes);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).map_err(io_error)?;
+    }
+    let window = max_bytes.min(byte_cap).max(1);
+    let (mut bytes, truncated) = read_up_to(&mut file, window, true, cancel, deadline)?;
+    if truncated {
+        trim_incomplete_utf8(&mut bytes)?;
+    }
+    let content = text(&bytes)?;
+    Ok((content, start, total_bytes, truncated))
+}
+
+fn read_window(host: &Host) -> usize {
+    host.config
+        .max_file_bytes
+        .map_or(READ_WINDOW_BYTES, |limit| READ_WINDOW_BYTES.min(limit))
 }
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -147,7 +301,7 @@ fn kind(metadata: &Metadata) -> &'static str {
 pub(crate) async fn write_lock(
     root: &Dir,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<std::fs::File, CapabilityError> {
     check(cancel, deadline)?;
     let mut options = OpenOptions::new();
@@ -173,7 +327,7 @@ pub(crate) async fn write_lock(
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => return Err(failure("cancelled while waiting for workspace write lock")),
-                    _ = tokio::time::sleep_until(deadline.into()) => return Err(failure("workspace write lock deadline reached")),
+                    _ = crate::sleep_deadline(deadline) => return Err(failure("workspace write lock deadline reached")),
                     _ = tokio::time::sleep(Duration::from_millis(5)) => {},
                 }
             }
@@ -273,7 +427,7 @@ fn commit(
     bytes: &[u8],
     permissions: Option<Permissions>,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let overwrite = permissions.is_some();
     let (mut temporary, mut file) = temporary(dir)?;
@@ -312,7 +466,7 @@ pub(crate) async fn execute(
     name: &str,
     args: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     check(cancel, deadline)?;
     let path = args["path"].as_str().expect("validated path");
@@ -320,10 +474,122 @@ pub(crate) async fn execute(
     match name {
         "fs.read" => {
             let (dir, name) = parent(&host.root, &components)?;
-            let bytes = read_bytes(&dir, name, host.config.max_file_bytes, cancel, deadline)?;
-            let sha256 = hash(&bytes);
-            let content = String::from_utf8(bytes).map_err(|_| failure("file is not UTF-8"))?;
-            Ok(json!({"path":path,"content":content,"bytes":content.len(),"sha256":sha256}))
+            let line_mode = args.get("start_line").is_some() || args.get("max_lines").is_some();
+            let byte_mode = args.get("offset_bytes").is_some() || args.get("max_bytes").is_some();
+            if line_mode && byte_mode {
+                return Err(failure(
+                    "line range and byte range arguments cannot be combined",
+                ));
+            }
+            if let Some(limit) = host.config.max_file_bytes
+                && !line_mode
+                && !byte_mode
+            {
+                let bytes = read_bytes(&dir, name, Some(limit), cancel, deadline)?;
+                let sha256 = hash(&bytes);
+                let content = text(&bytes)?;
+                return Ok(
+                    json!({"path":path,"content":content,"bytes":content.len(),"sha256":sha256}),
+                );
+            }
+            if byte_mode {
+                let offset = args
+                    .get("offset_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let max_bytes = args
+                    .get("max_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_PREVIEW_BYTES as u64)
+                    .min(usize::MAX as u64) as usize;
+                let (content, offset, total, truncated) = read_byte_range(
+                    &dir,
+                    name,
+                    offset,
+                    max_bytes,
+                    read_window(host),
+                    cancel,
+                    deadline,
+                )?;
+                let mut result = json!({
+                    "path":path,
+                    "content":content,
+                    "bytes":content.len(),
+                    "total_bytes":total,
+                    "offset_bytes":offset,
+                    "truncated":truncated,
+                });
+                if truncated {
+                    result["next_offset_bytes"] = json!(offset + content.len() as u64);
+                } else if offset == 0 {
+                    result["sha256"] = json!(hash(content.as_bytes()));
+                }
+                return Ok(result);
+            }
+            if line_mode {
+                let start_line = args.get("start_line").and_then(Value::as_u64).unwrap_or(1);
+                let max_lines = args
+                    .get("max_lines")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_READ_LINES);
+                let (content, lines_returned, offset, total, truncated) = read_line_range(
+                    &dir,
+                    name,
+                    start_line,
+                    max_lines,
+                    read_window(host),
+                    cancel,
+                    deadline,
+                )?;
+                let mut result = json!({
+                    "path":path,
+                    "content":content,
+                    "bytes":content.len(),
+                    "total_bytes":total,
+                    "start_line":start_line,
+                    "lines_returned":lines_returned,
+                    "offset_bytes":offset,
+                    "truncated":truncated,
+                });
+                if truncated {
+                    result["next_start_line"] = json!(start_line + lines_returned as u64);
+                    result["next_offset_bytes"] = json!(offset + content.len() as u64);
+                } else if start_line == 1 {
+                    result["sha256"] = json!(hash(content.as_bytes()));
+                }
+                return Ok(result);
+            }
+            let mut file = regular(&dir, name)?;
+            let total = file.metadata().map_err(io_error)?.len();
+            if total <= INLINE_READ_LIMIT {
+                let (bytes, _) = read_up_to(
+                    &mut file,
+                    INLINE_READ_LIMIT as usize,
+                    false,
+                    cancel,
+                    deadline,
+                )?;
+                let sha256 = hash(&bytes);
+                let content = text(&bytes)?;
+                return Ok(
+                    json!({"path":path,"content":content,"bytes":content.len(),"sha256":sha256}),
+                );
+            }
+            let (bytes, _) = read_up_to(&mut file, DEFAULT_PREVIEW_BYTES, false, cancel, deadline)?;
+            let (content, consumed) = preview(bytes)?;
+            let returned = line_count(&content);
+            Ok(json!({
+                "path":path,
+                "content":content,
+                "bytes":consumed,
+                "total_bytes":total,
+                "start_line":1,
+                "lines_returned":returned,
+                "next_start_line":1 + returned as u64,
+                "offset_bytes":0,
+                "next_offset_bytes":consumed,
+                "truncated":true,
+            }))
         }
         "fs.stat" => {
             let metadata = if components.is_empty() {
@@ -349,7 +615,11 @@ pub(crate) async fn execute(
                 if internal(&name) {
                     continue;
                 }
-                if entries.len() >= host.config.max_list_entries {
+                if host
+                    .config
+                    .max_list_entries
+                    .is_some_and(|limit| entries.len() >= limit)
+                {
                     return Err(failure("directory entry limit reached"));
                 }
                 let metadata = dir.symlink_metadata(&name).map_err(io_error)?;
@@ -406,7 +676,7 @@ pub(crate) async fn execute(
                         .checked_sub(old.len())
                         .and_then(|size| size.checked_add(new.len()))
                         .ok_or_else(|| failure("patch size overflow"))?;
-                    if size > host.config.max_file_bytes {
+                    if host.config.max_file_bytes.is_some_and(|limit| size > limit) {
                         return Err(failure("patched file exceeds byte limit"));
                     }
                     let mut patched = String::with_capacity(size);
@@ -424,6 +694,13 @@ pub(crate) async fn execute(
                 }
             }
             let content = args["content"].as_str().expect("validated content");
+            if host
+                .config
+                .max_file_bytes
+                .is_some_and(|limit| content.len() > limit)
+            {
+                return Err(failure("written file exceeds byte limit"));
+            }
             commit(
                 &dir,
                 filename,

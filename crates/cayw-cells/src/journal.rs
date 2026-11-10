@@ -132,19 +132,21 @@ impl SqliteJournal {
         if frozen(&tx, &record.identity.session_id)? {
             return Err(CellError::Frozen);
         }
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM cells_v1 WHERE session=?1 AND task=?2",
-            params![record.identity.session_id, record.identity.task_id],
-            |row| row.get(0),
-        )?;
-        if count >= limits.max_cells as i64 {
-            return Err(CellError::capacity(
-                CapacityKind::MaxCells,
-                Some(record.cell_id.clone()),
-                Some(record.status),
-                count as usize,
-                limits.max_cells,
-            ));
+        if let Some(max_cells) = limits.max_cells {
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM cells_v1 WHERE session=?1 AND task=?2",
+                params![record.identity.session_id, record.identity.task_id],
+                |row| row.get(0),
+            )?;
+            if count >= max_cells as i64 {
+                return Err(CellError::capacity(
+                    CapacityKind::MaxCells,
+                    Some(record.cell_id.clone()),
+                    Some(record.status),
+                    count as usize,
+                    max_cells,
+                ));
+            }
         }
         tx.execute(
             "INSERT INTO cells_v1(id,session,task,revision,body) VALUES(?1,?2,?3,?4,?5)",
@@ -170,7 +172,9 @@ impl SqliteJournal {
         if changed != 1 {
             return Err(CellError::Conflict);
         }
-        if record.status == CellStatus::OutcomeUnknown {
+        // A failed lifecycle hook is a backend repair obligation, not merely an
+        // uncertain effect. Ordinary outcome-unknown cells do not freeze a session.
+        if record.backend_error.is_some() {
             tx.execute(
                 "INSERT OR IGNORE INTO cells_frozen_v1(session) VALUES(?1)",
                 [&record.identity.session_id],
@@ -180,6 +184,8 @@ impl SqliteJournal {
         Ok(())
     }
     /// Reads persistent records without interpreting an open connection as a crash.
+    /// When no host byte/count cap is configured, every record for the
+    /// `(session, task)` scope is returned.
     pub fn records(
         &self,
         identity: &CellIdentity,
@@ -188,30 +194,7 @@ impl SqliteJournal {
         identity.validate()?;
         limits.validate()?;
         let connection = self.connection.lock().expect("journal lock poisoned");
-        let mut stmt = connection.prepare(
-            "SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY id LIMIT ?3",
-        )?;
-        let records = stmt
-            .query_map(
-                params![
-                    identity.session_id,
-                    identity.task_id,
-                    (limits.max_cells + 1) as i64
-                ],
-                |row| row.get::<_, String>(0),
-            )?
-            .map(|row| Ok(serde_json::from_str::<CellRecord>(&row?)?))
-            .collect::<Result<Vec<_>, CellError>>()?;
-        if records.len() > limits.max_cells {
-            return Err(CellError::capacity(
-                CapacityKind::MaxCells,
-                None,
-                None,
-                records.len(),
-                limits.max_cells,
-            ));
-        }
-        Ok(records)
+        load_records(&connection, identity, limits.max_cells)
     }
     /// Trusted explicit recovery. The caller asserts its former executor has
     /// stopped; a live task lock rejects recovery even with that assertion.
@@ -234,30 +217,7 @@ impl SqliteJournal {
         let _execution_lock = self.claim(identity)?;
         let mut connection = self.connection.lock().expect("journal lock poisoned");
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut records = {
-            let mut stmt = tx.prepare(
-                "SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY id LIMIT ?3",
-            )?;
-            stmt.query_map(
-                params![
-                    identity.session_id,
-                    identity.task_id,
-                    (limits.max_cells + 1) as i64
-                ],
-                |row| row.get::<_, String>(0),
-            )?
-            .map(|row| Ok(serde_json::from_str::<CellRecord>(&row?)?))
-            .collect::<Result<Vec<_>, CellError>>()?
-        };
-        if records.len() > limits.max_cells {
-            return Err(CellError::capacity(
-                CapacityKind::MaxCells,
-                None,
-                None,
-                records.len(),
-                limits.max_cells,
-            ));
-        }
+        let mut records = load_records(&tx, identity, limits.max_cells)?;
         for record in &mut records {
             if matches!(record.status, CellStatus::Running | CellStatus::Yielded)
                 || record.unresolved()
@@ -282,12 +242,6 @@ impl SqliteJournal {
                         record.cell_id
                     ],
                 )?;
-                if record.unresolved() {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO cells_frozen_v1(session) VALUES(?1)",
-                        [&identity.session_id],
-                    )?;
-                }
             }
         }
         tx.commit()?;
@@ -352,23 +306,28 @@ impl SqliteJournal {
             [session],
             |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize)),
         )?;
-        if old.is_none() && keys >= limits.store_keys {
+        if old.is_none()
+            && let Some(max_keys) = limits.store_keys
+            && keys >= max_keys
+        {
             return Err(CellError::capacity(
                 CapacityKind::StoreKeys,
                 None,
                 None,
                 keys,
-                limits.store_keys,
+                max_keys,
             ));
         }
         let next_bytes = bytes.saturating_sub(old_bytes).saturating_add(body.len());
-        if next_bytes > limits.store_bytes {
+        if let Some(max_bytes) = limits.store_bytes
+            && next_bytes > max_bytes
+        {
             return Err(CellError::capacity(
                 CapacityKind::StoreBytes,
                 None,
                 None,
                 next_bytes,
-                limits.store_bytes,
+                max_bytes,
             ));
         }
         let version = version
@@ -405,6 +364,52 @@ impl SqliteJournal {
         Ok(StoreSnapshot { version, value })
     }
 }
+/// Loads records for one exact `(session, task)` scope. A configured
+/// `max_cells` bounds the query and rejects overflow; `None` returns the full
+/// durable history without an artificial LIMIT.
+fn load_records(
+    connection: &Connection,
+    identity: &CellIdentity,
+    max_cells: Option<usize>,
+) -> Result<Vec<CellRecord>, CellError> {
+    let mut records = Vec::new();
+    if let Some(max_cells) = max_cells {
+        let mut statement = connection.prepare(
+            "SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![
+                identity.session_id,
+                identity.task_id,
+                (max_cells + 1) as i64
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        for row in rows {
+            records.push(serde_json::from_str::<CellRecord>(&row?)?);
+        }
+        if records.len() > max_cells {
+            return Err(CellError::capacity(
+                CapacityKind::MaxCells,
+                None,
+                None,
+                records.len(),
+                max_cells,
+            ));
+        }
+    } else {
+        let mut statement = connection
+            .prepare("SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY id")?;
+        let rows = statement.query_map(params![identity.session_id, identity.task_id], |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            records.push(serde_json::from_str::<CellRecord>(&row?)?);
+        }
+    }
+    Ok(records)
+}
+
 fn sql_u64(value: u64) -> Result<i64, CellError> {
     i64::try_from(value).map_err(|_| {
         CellError::capacity(

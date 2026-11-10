@@ -9,13 +9,13 @@ fn nested(depth: usize) -> Value {
 }
 
 #[test]
-fn generic_envelope_rejects_and_disposes_owned_json_request_and_response_leaves() {
+fn generic_envelope_accepts_owned_json_without_recursive_destruction() {
     const CHILD: &str = "CAYW_CORE_GENERIC_ENVELOPE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "generic_envelope_rejects_and_disposes_owned_json_request_and_response_leaves",
+                "generic_envelope_accepts_owned_json_without_recursive_destruction",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -34,7 +34,19 @@ fn generic_envelope_rejects_and_disposes_owned_json_request_and_response_leaves(
         .stack_size(256 * 1024)
         .spawn(|| {
             for id in ["", "valid", &"x".repeat(257)] {
-                assert!(ProtocolEnvelope::new(id, nested(25_000)).is_err());
+                let wrapped = Versioned {
+                    revision: 7,
+                    payload: Some(vec![Box::new(std::collections::BTreeMap::from([(
+                        "deep".to_owned(),
+                        nested(200),
+                    )]))]),
+                };
+                let envelope = ProtocolEnvelope::new(id, wrapped);
+                if id == "valid" {
+                    assert!(envelope.is_ok());
+                } else {
+                    assert!(envelope.is_err());
+                }
                 let request = CoreRequest::AppendHostEvent {
                     lease: cayw_core::AttemptLease {
                         session_id: "s".into(),
@@ -43,9 +55,9 @@ fn generic_envelope_rejects_and_disposes_owned_json_request_and_response_leaves(
                         fence: 1,
                     },
                     kind: "data".into(),
-                    data: nested(25_000),
+                    data: nested(200),
                 };
-                assert!(ProtocolEnvelope::new(id, request).is_err());
+                assert!(ProtocolEnvelope::new(id, request).is_ok() == (id == "valid"));
                 let event = EventRecord {
                     protocol_version: 3,
                     session_id: "s".into(),
@@ -54,7 +66,7 @@ fn generic_envelope_rejects_and_disposes_owned_json_request_and_response_leaves(
                     attempt: None,
                     event: CoreEvent::Host {
                         kind: "data".into(),
-                        data: nested(25_000),
+                        data: nested(200),
                     },
                 };
                 assert!(
@@ -64,16 +76,9 @@ fn generic_envelope_rejects_and_disposes_owned_json_request_and_response_leaves(
                             events: vec![event]
                         }
                     )
-                    .is_err()
+                    .is_ok()
+                        == (id == "valid")
                 );
-                let wrapped = Versioned {
-                    revision: 7,
-                    payload: Some(vec![Box::new(std::collections::BTreeMap::from([(
-                        "deep".to_owned(),
-                        nested(25_000),
-                    )]))]),
-                };
-                assert!(ProtocolEnvelope::new(id, wrapped).is_err());
             }
         })
         .unwrap()
@@ -148,36 +153,29 @@ fn custom_versioned_payload_and_scalar_payloads_round_trip() {
 }
 
 #[test]
-fn provider_usage_fields_obey_the_existing_json_leaf_limits() {
-    for value in [
-        nested(33),
-        Value::Array(vec![Value::Null; 4096]),
-        Value::String("x".repeat(65537)),
-    ] {
-        let mut message = cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "usage"));
-        message.usage_fields.insert("reported".into(), value);
-        assert!(
-            ProtocolEnvelope::new("usage", message).is_err(),
-            "raw usage fields must not bypass Core payload limits"
-        );
-    }
+fn provider_usage_fields_round_trip_large_and_deep_values() {
+    let mut message = cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "usage"));
+    message
+        .usage_fields
+        .insert("large".into(), Value::String("x".repeat(3 * 1024 * 1024)));
+    message.usage_fields.insert("deep".into(), nested(64));
+    let envelope = ProtocolEnvelope::new("usage", message.clone()).unwrap();
+    let wire = serde_json::to_string(&envelope).unwrap();
+    let decoded = ProtocolEnvelope::<cayw_ai::AssistantMessage>::decode(&wire).unwrap();
+    assert_eq!(decoded.payload.usage_fields, message.usage_fields);
 }
 
 #[test]
-fn provider_metadata_obeys_the_existing_json_leaf_limits() {
-    for value in [
-        nested(33),
-        Value::Array(vec![Value::Null; 4096]),
-        Value::String("x".repeat(65537)),
-    ] {
-        let mut message =
-            cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "metadata"));
-        message.provider_metadata.insert("replay".into(), value);
-        assert!(
-            ProtocolEnvelope::new("metadata", message).is_err(),
-            "provider_metadata must not bypass Core payload limits"
-        );
-    }
+fn provider_metadata_round_trips_large_and_deep_values() {
+    let mut message = cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "metadata"));
+    message
+        .provider_metadata
+        .insert("large".into(), Value::String("x".repeat(3 * 1024 * 1024)));
+    message.provider_metadata.insert("deep".into(), nested(64));
+    let envelope = ProtocolEnvelope::new("metadata", message.clone()).unwrap();
+    let wire = serde_json::to_string(&envelope).unwrap();
+    let decoded = ProtocolEnvelope::<cayw_ai::AssistantMessage>::decode(&wire).unwrap();
+    assert_eq!(decoded.payload.provider_metadata, message.provider_metadata);
 }
 
 #[test]
@@ -194,29 +192,28 @@ fn provider_metadata_preserves_valid_replay_data_across_roundtrip() {
 }
 
 #[test]
-fn decode_and_new_apply_the_same_json_leaf_limits() {
-    for data in [
-        nested(33),
-        Value::Array(vec![Value::Null; 4096]),
-        Value::String("x".repeat(65537)),
-    ] {
-        let wire = json!({"version": 3, "request_id": "limits", "payload": {"revision": 7, "payload": data.clone()}}).to_string();
-        assert!(ProtocolEnvelope::<Versioned<Value>>::decode(&wire).is_err());
-        assert!(
-            ProtocolEnvelope::new(
-                "limits",
-                Versioned {
-                    revision: 7,
-                    payload: data
-                }
-            )
-            .is_err()
-        );
-    }
+fn decode_rejects_only_serde_recursion_and_syntax_failures() {
     let wire = format!(
         "{{\"version\":3,\"request_id\":\"limits\",\"payload\":{}{}}}",
         "[".repeat(25000),
         "]".repeat(25000)
     );
     assert!(ProtocolEnvelope::<Value>::decode(&wire).is_err());
+
+    // In-process values are accepted; the JSON reader is the boundary that
+    // enforces serde_json's recursion limit.
+    let deep = nested(200);
+    let envelope = ProtocolEnvelope::new(
+        "limits",
+        Versioned {
+            revision: 7,
+            payload: deep.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(envelope.payload.payload, deep);
+    let wire =
+        json!({"version": 3, "request_id": "limits", "payload": {"revision": 7, "payload": deep}})
+            .to_string();
+    assert!(ProtocolEnvelope::<Versioned<Value>>::decode(&wire).is_err());
 }

@@ -26,7 +26,7 @@ fn batch() -> Value {
     json!({"type":"string","pattern":"^b-[0-9a-f-]{4,94}$"})
 }
 fn bound() -> Value {
-    json!({"type":"integer","minimum":1,"maximum":100000})
+    json!({"type":"integer","minimum":1})
 }
 fn language() -> Value {
     json!({"type":"string","minLength":1,"maxLength":64})
@@ -59,7 +59,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         definition(
             "fs.grep",
             "Search bounded complete UTF-8 regular files with a bounded Rust regex, or explicit literal=true. Reports source SHA-256, half-open byte ranges and inclusive 1-based lines. Binary and non-UTF8 files are explicitly skipped; scan bounds fail rather than imply completeness.",
-            json!({"path":path(),"pattern":{"type":"string","maxLength":16384},"literal":{"type":"boolean"},"multiline":{"type":"boolean"},"dot_matches_new_line":{"type":"boolean"},"case_insensitive":{"type":"boolean"},"respect_gitignore":{"type":"boolean"},"max_matches":bound(),"context_lines":{"type":"integer","minimum":0,"maximum":64}}),
+            json!({"path":path(),"pattern":{"type":"string"},"literal":{"type":"boolean"},"multiline":{"type":"boolean"},"dot_matches_new_line":{"type":"boolean"},"case_insensitive":{"type":"boolean"},"respect_gitignore":{"type":"boolean"},"max_matches":bound(),"context_lines":{"type":"integer","minimum":0,"maximum":64}}),
             &["path", "pattern"],
         ),
         definition(
@@ -101,12 +101,12 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
             "fs.tree",
             "Hash a bounded file tree; protected entries are omitted and links/special entries are rejected. Root is included in max_entries.",
             json!({"path":path(),"max_entries":bound()}),
-            &["path", "max_entries"],
+            &["path"],
         ),
         definition(
             "fs.prepare_change_batch",
             "Prepare exact regular-file writes, unique text patches and removals. Persist backups and syntax-validated candidate bytes without changing user paths.",
-            json!({"operations":{"type":"array","minItems":1,"maxItems":256,"items":{"oneOf":[write,patch,remove]}}}),
+            json!({"operations":{"type":"array","minItems":1,"items":{"oneOf":[write,patch,remove]}}}),
             &["operations"],
         ),
         definition(

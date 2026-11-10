@@ -204,10 +204,10 @@ async fn interleaved_cells_keep_original_parents_and_exact_approval_sequences() 
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         ..Default::default()
     };
-    config.codemode.timeout = Duration::from_secs(20);
+    config.codemode.timeout = Some(Duration::from_secs(20));
     let rt = Runtime::open(
         dir.path().join("session.db"),
         dir.path().join("workspace"),

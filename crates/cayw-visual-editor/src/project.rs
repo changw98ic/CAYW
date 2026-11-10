@@ -678,13 +678,13 @@ impl PermissionGate for PageGate {
 
 fn host_config(codeintel: Option<SymbolVersionBridge>) -> HostConfig {
     HostConfig {
-        max_argument_bytes: 32 * 1024 * 1024,
-        max_result_bytes: 32 * 1024 * 1024,
-        max_total_bytes: 128 * 1024 * 1024,
-        max_calls: 4096,
-        max_file_bytes: MAX_PAGE_BYTES,
-        max_list_entries: 1,
-        call_timeout: Duration::from_secs(60),
+        max_argument_bytes: Some(32 * 1024 * 1024),
+        max_result_bytes: Some(32 * 1024 * 1024),
+        max_total_bytes: Some(128 * 1024 * 1024),
+        max_calls: Some(4096),
+        max_file_bytes: Some(MAX_PAGE_BYTES),
+        max_list_entries: Some(1),
+        call_timeout: Some(Duration::from_secs(60)),
         data: None,
         workspace: None,
         codeintel,

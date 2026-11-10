@@ -11,7 +11,7 @@ use std::time::Instant;
 const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RESPONSE_FRAMES: usize = 8192;
+const MAX_RESPONSE_FRAMES: usize = 131_072;
 const DECODE_BATCH_BYTES: usize = 4096;
 
 #[derive(Clone)]

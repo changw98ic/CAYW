@@ -80,77 +80,84 @@ pub struct ExecutorStopped {
     pub evidence: String,
 }
 
+/// Optional artificial caps. `None` means the host did not configure that cap;
+/// the runtime then does not reject work merely for exceeding a default.
 #[derive(Clone, Debug)]
 pub struct CellLimits {
-    pub max_cells: usize,
+    pub max_cells: Option<usize>,
     pub max_running: usize,
-    pub script_bytes: usize,
-    pub output_bytes: usize,
-    pub output_items: usize,
-    pub item_bytes: usize,
-    pub media_bytes: usize,
-    pub max_output_tokens: usize,
-    pub max_yield_time: Duration,
-    pub store_bytes: usize,
-    pub store_keys: usize,
-    pub json_depth: usize,
+    pub script_bytes: Option<usize>,
+    pub output_bytes: Option<usize>,
+    pub output_items: Option<usize>,
+    pub item_bytes: Option<usize>,
+    pub media_bytes: Option<usize>,
+    pub max_output_tokens: Option<usize>,
+    pub max_yield_time: Option<Duration>,
+    pub store_bytes: Option<usize>,
+    pub store_keys: Option<usize>,
+    pub json_depth: Option<usize>,
     pub cache_entries: usize,
 }
 impl Default for CellLimits {
     fn default() -> Self {
         Self {
-            max_cells: 256,
-            max_running: 8,
-            script_bytes: 64 * 1024,
-            output_bytes: 1024 * 1024,
-            output_items: 256,
-            item_bytes: 64 * 1024,
-            media_bytes: 32 * 1024,
-            max_output_tokens: 128 * 1024,
-            max_yield_time: Duration::from_secs(30),
-            store_bytes: 1024 * 1024,
-            store_keys: 256,
-            json_depth: 32,
+            max_cells: None,
+            max_running: 64,
+            script_bytes: None,
+            output_bytes: None,
+            output_items: None,
+            item_bytes: None,
+            media_bytes: None,
+            max_output_tokens: None,
+            max_yield_time: None,
+            store_bytes: None,
+            store_keys: None,
+            json_depth: None,
             cache_entries: 128,
         }
     }
 }
 impl CellLimits {
+    pub(crate) const DEFAULT_PAGE_TOKENS: usize = 128 * 1024;
+
     pub(crate) fn validate(&self) -> Result<(), CellError> {
-        if self.max_cells == 0
-            || self.max_cells > 10_000
-            || self.max_running == 0
-            || self.max_running > self.max_cells
-            || self.script_bytes == 0
-            || self.output_bytes == 0
-            || self.output_items == 0
-            || self.output_items > 10_000
-            || self.output_bytes > 64 * 1024 * 1024
-            || self.store_bytes > 64 * 1024 * 1024
-            || self.script_bytes > 1024 * 1024
-            || self.media_bytes > 8 * 1024 * 1024
-            || self.store_keys > 10_000
-            || self.cache_entries > 4096
-            || self.item_bytes == 0
-            || self.media_bytes == 0
-            || self.store_bytes == 0
-            || self.store_keys == 0
-            || self.json_depth == 0
-            || self.json_depth > 64
-            || self.max_output_tokens < 1024
-            || self.max_output_tokens > 16 * 1024 * 1024
-            || self.item_bytes > self.max_output_tokens.saturating_sub(1024)
-            || self.max_yield_time.is_zero()
-            || self.max_yield_time > Duration::from_secs(300)
-        {
+        let invalid = self.max_running == 0
+            || self.cache_entries == 0
+            || self.max_cells == Some(0)
+            || self
+                .max_cells
+                .is_some_and(|max_cells| self.max_running > max_cells)
+            || self.script_bytes == Some(0)
+            || self.output_bytes == Some(0)
+            || self.output_items == Some(0)
+            || self.item_bytes == Some(0)
+            || self.media_bytes == Some(0)
+            || self.store_bytes == Some(0)
+            || self.store_keys == Some(0)
+            || self.json_depth == Some(0)
+            || self.max_output_tokens.is_some_and(|tokens| tokens < 1024)
+            || self.max_yield_time.is_some_and(|wait| wait.is_zero());
+        if invalid {
             return Err(CellError::Invalid("invalid cell limits".into()));
         }
         Ok(())
     }
+    /// The page budget used when the model omits `max_output_tokens`: the
+    /// canonical 128 KiB slice, reduced only by an explicitly configured cap.
+    pub(crate) fn default_page_tokens(&self) -> usize {
+        self.max_output_tokens
+            .map_or(Self::DEFAULT_PAGE_TOKENS, |max| {
+                max.min(Self::DEFAULT_PAGE_TOKENS)
+            })
+    }
     pub(crate) fn page_limits(&self, wait: Duration, tokens: usize) -> Result<(), CellError> {
-        if wait > self.max_yield_time || !(1024..=self.max_output_tokens).contains(&tokens) {
+        let wait_invalid = self.max_yield_time.is_some_and(|max| wait > max);
+        let tokens_invalid =
+            tokens < 1024 || self.max_output_tokens.is_some_and(|max| tokens > max);
+        if wait_invalid || tokens_invalid {
             return Err(CellError::Invalid(
-                "yield_time_ms or max_output_tokens exceeds limits (minimum budget 1024)".into(),
+                "yield_time_ms or max_output_tokens exceeds configured limits (minimum budget 1024)"
+                    .into(),
             ));
         }
         Ok(())
@@ -391,11 +398,13 @@ impl CellOutput {
         Ok(serde_json::to_vec(&value)?.len())
     }
 }
-fn media(data: &str, limit: usize) -> Result<(), CellError> {
+fn media(data: &str, limit: Option<usize>) -> Result<(), CellError> {
     if data.is_empty() {
         return Err(CellError::Invalid("empty media".into()));
     }
-    if data.len() > limit.saturating_add(2) / 3 * 4 {
+    if let Some(limit) = limit
+        && data.len() > limit.saturating_add(2) / 3 * 4
+    {
         return Err(CellError::capacity(
             CapacityKind::MediaBytes,
             None,
@@ -410,7 +419,9 @@ fn media(data: &str, limit: usize) -> Result<(), CellError> {
     if STANDARD.encode(&bytes) != data {
         return Err(CellError::Invalid("invalid base64 media".into()));
     }
-    if bytes.len() > limit {
+    if let Some(limit) = limit
+        && bytes.len() > limit
+    {
         return Err(CellError::capacity(
             CapacityKind::MediaBytes,
             None,
@@ -614,14 +625,18 @@ pub struct HostSettlementEvidence {
     pub settlement: HostSettlement,
 }
 
-pub(crate) fn validate_json(value: &Value, depth: usize, bytes: usize) -> Result<(), CellError> {
+pub(crate) fn validate_json(
+    value: &Value,
+    depth: Option<usize>,
+    bytes: Option<usize>,
+) -> Result<(), CellError> {
     validate_json_with(value, depth, bytes, None, None)
 }
 
 pub(crate) fn validate_json_with(
     value: &Value,
-    depth: usize,
-    bytes: usize,
+    depth: Option<usize>,
+    bytes: Option<usize>,
     cell_id: Option<&str>,
     status: Option<CellStatus>,
 ) -> Result<(), CellError> {
@@ -651,7 +666,9 @@ pub(crate) fn validate_json_with(
             Ok(())
         }
     }
-    if !visit(value, depth) {
+    if let Some(depth) = depth
+        && !visit(value, depth)
+    {
         return Err(CellError::capacity(
             CapacityKind::JsonDepth,
             cell_id.map(str::to_owned),
@@ -660,6 +677,9 @@ pub(crate) fn validate_json_with(
             depth,
         ));
     }
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
     let mut counter = Counter {
         size: 0,
         limit: bytes,

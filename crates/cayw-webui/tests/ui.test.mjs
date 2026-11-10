@@ -57,8 +57,8 @@ test('history and event previews are bounded and preserve recent entries', () =>
   assert.equal(messageText(populated.snapshot.messages.at(-1)), '299');
 });
 
-test('unknown side effects and unavailable workflow block prompts without clearing evidence', () => {
-  assert.match(sessionBlocked(snapshot({ unresolved_calls: [{ id: 'tool-1', outcome_unknown: true }] })), /核对/);
+test('interrupted tool effects never block prompts while an unavailable workflow stays frozen', () => {
+  assert.equal(sessionBlocked(snapshot({ unresolved_calls: [{ id: 'tool-1', outcome_unknown: true }] })), '');
   assert.match(sessionBlocked(snapshot({ state: 'frozen' })), /冻结/);
   assert.equal(sessionBlocked(snapshot()), '');
 });

@@ -1204,7 +1204,7 @@ async function main() {
   let ledgerAttempted = false;
   try {
     for (const framework of ['react', 'vue']) {
-      if (framework === 'vue' && results.react?.ledger?.model_requests?.budget_unknown) {
+      if (framework === 'vue' && results.react?.ledger?.model_requests?.usage_unknown) {
         summary.status = 'stopped_after_unknown_budget';
         break;
       }
@@ -1241,7 +1241,7 @@ async function main() {
       assert(browser.passed, `${framework} browser acceptance failed: ${browser.error || 'unknown'}`);
       results[framework] = {
         session: evidence.session, ledger, occupied_tokens: occupied,
-        token_usage: {settled, reserved, budget_unknown: Boolean(ledger.model_requests?.budget_unknown)},
+        token_usage: {settled, reserved, usage_unknown: Boolean(ledger.model_requests?.usage_unknown)},
         build_exit: build.exit_code, browser: {passed: browser.passed, checks: browser.checks, error: browser.error},
         changed_files: sources.changed, css_changed: sources.css_changed,
         shared_label_changed: sources.shared_label_changed,
@@ -1249,7 +1249,7 @@ async function main() {
         before_digest: digestMap(evidence.baseline), after_digest: digestMap(sources.after),
       };
       summary.frameworks[framework].generation = results[framework];
-      if (ledger.model_requests?.budget_unknown || Number(ledger.model_requests?.reserved_tokens || 0) > 0) {
+      if (ledger.model_requests?.usage_unknown || Number(ledger.model_requests?.reserved_tokens || 0) > 0) {
         summary.status = 'stopped_unknown_usage_preserved';
         throw Object.assign(new Error(`${framework} usage is unknown or still reserved; stopping without retry`), {budgetUnknown: true});
       }
@@ -1273,7 +1273,7 @@ async function main() {
         const model = ledger.model_requests || {};
         summary.error_ledger = {
           status: 'ok', settled_tokens: model.settled_tokens,
-          reserved_tokens: model.reserved_tokens, budget_unknown: model.budget_unknown,
+          reserved_tokens: model.reserved_tokens, usage_unknown: model.usage_unknown,
         };
         totalOccupied += Number(model.settled_tokens || 0) + Number(model.reserved_tokens || 0);
         summary.total_occupied_tokens = totalOccupied;

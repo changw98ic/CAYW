@@ -41,10 +41,6 @@ struct CallState {
     authorization: Option<Authorization>,
     started: bool,
     settled: bool,
-    /// The bounded value committed to Core when the original Host result was
-    /// too large for one durable record. Cells and the model reuse it instead
-    /// of externalizing a second copy under a different handle.
-    durable: Option<Value>,
 }
 pub(crate) struct Authorization {
     pub proof: CapabilityAuthorization,
@@ -136,10 +132,9 @@ impl CallScope {
                 .inner
                 .process_journal
                 .starting(&self.context.task.id, &self.context.lease)
-                .map_err(|error| self.context.persistence_failed(error))?;
+                .map_err(|error| self.context.record_error(error))?;
         }
-        let proof = serde_json::to_value(&authorization.proof)
-            .map_err(|error| self.context.persistence_failed(error))?;
+        let proof = serde_json::to_value(&authorization.proof).map_err(known)?;
         if let Some(evidence) = self.request.evidence() {
             self.context.host_event(
                 "task_request_admitted",
@@ -156,7 +151,7 @@ impl CallScope {
             .inner
             .store
             .start_capability(&self.context.lease, &self.key, proof)
-            .map_err(|error| self.context.persistence_failed(error))?;
+            .map_err(|error| self.context.record_error(error.into()))?;
         state.started = true;
         #[cfg(feature = "fault-injection")]
         cayw_ai::faults::hit("core.start.committed", self.fault_origin.clone());
@@ -180,16 +175,9 @@ impl CallScope {
             }
         } else {
             match result {
-                Ok(result) => {
-                    let durable = if crate::results::exceeds_core_metadata(result) {
-                        let durable = crate::results::durable_core_result(self, result.clone());
-                        state.durable = Some(durable.clone());
-                        durable
-                    } else {
-                        result.clone()
-                    };
-                    CapabilityOutcome::Completed { result: durable }
-                }
+                Ok(result) => CapabilityOutcome::Completed {
+                    result: result.clone(),
+                },
                 Err(error) if error.outcome_unknown => CapabilityOutcome::OutcomeUnknown {
                     error: bounded(&error.message),
                 },
@@ -227,17 +215,6 @@ impl CallScope {
         }
         Ok(())
     }
-    /// Returns the same bounded value this scope committed to Core so the Host
-    /// audit and Cells agree on one handle instead of storing two copies.
-    pub(crate) fn durable_result(&self, value: Value) -> Value {
-        if !crate::results::exceeds_core_metadata(&value) {
-            return value;
-        }
-        if let Some(durable) = lock(&self.state).durable.clone() {
-            return durable;
-        }
-        crate::results::durable_core_result(self, value)
-    }
     fn dropped(&self) -> Result<(), CapabilityError> {
         let started = lock(&self.state).started;
         let error = if started {
@@ -267,6 +244,16 @@ pub(crate) fn bounded(message: &str) -> String {
 fn known(error: impl std::fmt::Display) -> CapabilityError {
     CapabilityError::new(error.to_string())
 }
+/// A failed pre-effect cell write keeps its ordinary error. Only a doubtful
+/// durable write retains the unknown/Journal cell state.
+fn record_cell_error(context: &RunContext, error: RuntimeError) -> CellError {
+    let error = context.record_error(error);
+    if error.outcome_unknown {
+        CellError::Journal(error.message)
+    } else {
+        CellError::Invalid(error.message)
+    }
+}
 struct Pending(Arc<CallScope>);
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -290,17 +277,17 @@ impl cayw_host::AuditSink for CallScope {
         result: &Result<Value, CapabilityError>,
     ) -> Result<(), CapabilityError> {
         if id != self.audit_id() {
-            return Err(self
-                .context
-                .persistence_failed("capability terminal has a different audit identifier"));
+            return Err(CapabilityError::new(
+                "capability terminal has a different audit identifier",
+            ));
         }
         self.settle(result)
     }
     fn dropped(&self, id: &str) -> Result<(), CapabilityError> {
         if id != self.audit_id() {
-            return Err(self
-                .context
-                .persistence_failed("dropped capability has a different audit identifier"));
+            return Err(CapabilityError::new(
+                "dropped capability has a different audit identifier",
+            ));
         }
         self.dropped()
     }
@@ -459,15 +446,33 @@ impl CellBackend for Backend {
                     source_hash: execution.source_hash.clone(),
                 },
             )
-            .map_err(|error| {
-                CellError::Journal(self.context.persistence_failed(error).to_string())
-            })?;
-        self.context
+            .map_err(|error| record_cell_error(&self.context, error.into()))?;
+        if let Err(error) = self
+            .context
             .activity
             .cell_created(&self.context, &execution.cell_id)
-            .map_err(|error| {
-                CellError::Journal(self.context.persistence_failed(error).to_string())
-            })?;
+        {
+            // The execution row is already durable, so this is no longer a
+            // pre-effect refusal. Close it with a known terminal before the
+            // manager's finish_uncreated path records the same Cancelled cell;
+            // Backend::finished must not run for an execution it already
+            // settled here. If the terminal cannot be confirmed, report a
+            // journal failure so cells and Core both reconcile instead of
+            // leaving a live execution behind a known cell.
+            return match self.context.inner.store.finish_execution(
+                &self.context.lease,
+                &execution.cell_id,
+                ExecutionOutcome::Cancelled {
+                    reason: "the cell lost scheduler admission before its VM started".into(),
+                },
+            ) {
+                Ok(_) => Err(record_cell_error(&self.context, error)),
+                Err(settlement) => {
+                    let failure = self.context.record_error(settlement.into());
+                    Err(CellError::Journal(failure.message))
+                }
+            };
+        }
         self.context.inner.changed.notify_waiters();
         Ok(())
     }
@@ -516,7 +521,7 @@ impl CellBackend for Backend {
                     arguments: arguments.clone(),
                 },
             )
-            .map_err(|error| self.context.persistence_failed(error))?;
+            .map_err(|error| self.context.record_error(error.into()))?;
         #[cfg(feature = "fault-injection")]
         {
             let mut committed = fault_origin.clone();
@@ -636,14 +641,8 @@ impl CellBackend for Backend {
             error.message = bounded(&error.message);
             error
         });
-        // The original Host success must remain a known completion even when its
-        // value cannot fit into one Core metadata record. Reuse the exact
-        // bounded handle or receipt already committed by the Host audit; the
-        // original value stays the accounting basis inside `settle`.
-        let host_result = match host_result {
-            Ok(value) => Ok(scope.durable_result(value)),
-            Err(error) => Err(error),
-        };
+        // The Host result is settled exactly as produced; Core's metadata bound
+        // now matches the Host default, so an accepted result remains durable.
         scope.settle(&host_result)?;
         let presentation = match &host_result {
             Ok(value) => crate::results::maybe_externalize(&scope, value.clone()).await,
@@ -678,18 +677,22 @@ impl CellBackend for Backend {
             return Ok(());
         }
         self.verify(execution)?;
-        self.context
-            .host_event(
-                "trace_node",
-                json!({
-                    "execution_id":execution.cell_id,
-                    "parent_call_id":execution.parent_call_id,
-                    "source_hash":execution.source_hash,
-                    "task_id":self.context.task.id,
-                    "entry":entry,
-                }),
-            )
-            .map_err(|error| CellError::Journal(error.to_string()))
+        // A trace is optional observation. Its own validation or metadata
+        // refusal must not freeze the cell that produced it.
+        match self.context.host_event(
+            "trace_node",
+            json!({
+                "execution_id":execution.cell_id,
+                "parent_call_id":execution.parent_call_id,
+                "source_hash":execution.source_hash,
+                "task_id":self.context.task.id,
+                "entry":entry,
+            }),
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) if error.outcome_unknown => Err(CellError::Journal(error.message)),
+            Err(_) => Ok(()),
+        }
     }
     fn finished(
         &self,
@@ -750,12 +753,21 @@ impl CellBackend for Backend {
                 "terminal": terminal,
             }),
         );
-        self.context
+        if let Err(error) = self
+            .context
             .activity
             .cell_finished(&self.context, &execution.cell_id)
-            .map_err(|error| {
-                CellError::Journal(self.context.persistence_failed(error).to_string())
-            })?;
+        {
+            // The cell terminal above is already durable. Scheduler bookkeeping
+            // is a lifecycle obligation: retain the task slot for explicit
+            // recovery without relabelling this known result as unknown.
+            let _ = self
+                .context
+                .inner
+                .queue
+                .block(&self.context.task, &error.to_string());
+            return Ok(());
+        }
         if let Some(stop) = terminal
             .stop
             .filter(|stop| *stop != cayw_codemode::CapabilityStop::Exited)

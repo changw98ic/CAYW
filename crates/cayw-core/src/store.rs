@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, VecDeque},
-    io::Write,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -182,9 +181,7 @@ impl StoredSession {
             .collect()
     }
     fn state(&self) -> SessionState {
-        if self.has_unknown() {
-            SessionState::NeedsReconciliation
-        } else if self.approvals.iter().any(|a| a.decision.is_none()) {
+        if self.approvals.iter().any(|a| a.decision.is_none()) {
             SessionState::AwaitingApproval
         } else if self.attempt.is_some() {
             SessionState::Running
@@ -249,9 +246,9 @@ fn unresolved(call: &CallRecord) -> bool {
     call.state != CallState::Completed
 }
 fn nonempty(value: &str, field: &str) -> Result<(), CoreError> {
-    if value.trim().is_empty() || value.len() > MAX_METADATA_BYTES {
+    if value.trim().is_empty() {
         Err(CoreError::InvalidInput(format!(
-            "{field} must be nonempty and at most {MAX_METADATA_BYTES} bytes"
+            "{field} must not be empty"
         )))
     } else {
         Ok(())
@@ -263,73 +260,6 @@ fn identifier(value: &str, field: &str) -> Result<(), CoreError> {
         return Err(CoreError::InvalidInput(format!(
             "{field} is not a bounded identifier"
         )));
-    }
-    Ok(())
-}
-struct ByteCountWriter {
-    written: usize,
-    limit: usize,
-    exceeded: bool,
-}
-
-impl Write for ByteCountWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.written = self.written.saturating_add(buf.len());
-        if self.written > self.limit {
-            self.exceeded = true;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Metadata byte limit exceeded",
-            ));
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn bounded_value(value: &Value) -> Result<(), CoreError> {
-    let mut pending = vec![(value, 0)];
-    let mut nodes = 0;
-    while let Some((value, depth)) = pending.pop() {
-        nodes += 1;
-        let children = match value {
-            Value::Array(values) => values.len(),
-            Value::Object(values) => values.len(),
-            _ => 0,
-        };
-        if depth > MAX_METADATA_DEPTH || nodes + pending.len() + children > MAX_METADATA_NODES {
-            return Err(CoreError::InvalidInput(
-                "Metadata nesting or node limit exceeded".into(),
-            ));
-        }
-        match value {
-            Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
-            Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, depth + 1)))
-            }
-            _ => {}
-        }
-    }
-    let mut writer = ByteCountWriter {
-        written: 0,
-        limit: MAX_METADATA_BYTES,
-        exceeded: false,
-    };
-    if let Err(error) = serde_json::to_writer(&mut writer, value) {
-        if writer.exceeded {
-            return Err(CoreError::InvalidInput(
-                "Metadata byte limit exceeded".into(),
-            ));
-        }
-        return Err(error.into());
-    }
-    if writer.written > MAX_METADATA_BYTES {
-        return Err(CoreError::InvalidInput(
-            "Metadata byte limit exceeded".into(),
-        ));
     }
     Ok(())
 }
@@ -596,26 +526,30 @@ impl SessionStore {
         if original.attempt.is_some() {
             return Err(CoreError::Busy);
         }
-        if original
-            .calls
-            .iter()
-            .any(|c| unresolved(&c.record) || !c.batch_settled)
-            || original.executions.iter().any(execution_active)
-            || original.capabilities.iter().any(capability_unresolved)
-        {
-            return Err(CoreError::NeedsReconciliation);
-        }
         if original.approvals.iter().any(|a| a.decision.is_none()) {
             return Err(CoreError::PendingApproval);
         }
         validate_paired_history(&original.messages(), |result| {
-            if original.call(&result.tool_call_id)?.record.result.as_ref() != Some(result) {
+            let stored = original.call(&result.tool_call_id)?;
+            if stored.record.result.as_ref() != Some(result) {
                 return Err(invalid(
                     "Fork tool result differs from its original stored observation",
                 ));
             }
-            committed_tool_reconciliation(&transaction, &original.id, &result.tool_call_id)?;
-            Ok(())
+            match stored.record.state {
+                CallState::Completed => {
+                    committed_tool_reconciliation(
+                        &transaction,
+                        &original.id,
+                        &result.tool_call_id,
+                    )?;
+                    Ok(())
+                }
+                CallState::OutcomeUnknown if stored.batch_settled => Ok(()),
+                _ => Err(invalid(
+                    "Fork tool result is not a settled unknown observation or reconciled result",
+                )),
+            }
         })?;
         let mut session = StoredSession::new(Uuid::new_v4().to_string(), label.into());
         session.history = original.history.clone();
@@ -743,11 +677,19 @@ impl SessionStore {
             });
         }
         let mut records = vec![];
+        let mut total_bytes = 0usize;
+        let mut stopped_by_bytes = false;
         {
             let mut query = transaction.prepare("SELECT record FROM core_events WHERE session_id=?1 AND cursor>?2 ORDER BY cursor LIMIT ?3")?;
             let mut rows = query.query(params![session_id, after as i64, limit as i64])?;
             while let Some(row) = rows.next()? {
                 let json: String = row.get(0)?;
+                if !records.is_empty()
+                    && total_bytes.saturating_add(json.len()) > MAX_EVENT_PAGE_BYTES
+                {
+                    stopped_by_bytes = true;
+                    break;
+                }
                 let record = checked_input(serde_json::from_str::<EventRecord>(&json)?)?;
                 if record.protocol_version != PROTOCOL_VERSION
                     || record.session_id != session_id
@@ -757,10 +699,15 @@ impl SessionStore {
                         "The event log envelope or cursor is inconsistent".into(),
                     ));
                 }
+                total_bytes = total_bytes.saturating_add(json.len());
                 records.push(record);
             }
         }
-        if (records.len() as u64) < (session.cursor - after).min(limit as u64) {
+        // A byte-bounded page legitimately returns fewer than `limit` records.
+        // Its returned cursors were checked to be contiguous above. A page that
+        // was not cut short must still cover the entire requested cursor range.
+        if !stopped_by_bytes && (records.len() as u64) < (session.cursor - after).min(limit as u64)
+        {
             return Err(CoreError::CorruptStore(
                 "The event log has missing entries".into(),
             ));
@@ -817,6 +764,7 @@ impl SessionStore {
             None => (EVENTS_BY_TYPE, event_type),
         };
         let mut records = Vec::new();
+        let mut total_bytes = 0usize;
         {
             let mut query = transaction.prepare(sql)?;
             let mut rows = query.query(params![session_id, kind, after as i64, limit as i64])?;
@@ -824,6 +772,11 @@ impl SessionStore {
             while let Some(row) = rows.next()? {
                 let cursor: i64 = row.get(0)?;
                 let json: String = row.get(1)?;
+                if !records.is_empty()
+                    && total_bytes.saturating_add(json.len()) > MAX_EVENT_PAGE_BYTES
+                {
+                    break;
+                }
                 let record = checked_input(serde_json::from_str::<EventRecord>(&json)?)?;
                 if record.protocol_version != PROTOCOL_VERSION
                     || record.session_id != session_id
@@ -837,6 +790,7 @@ impl SessionStore {
                     ));
                 }
                 previous = record.cursor;
+                total_bytes = total_bytes.saturating_add(json.len());
                 records.push(record);
             }
         }
@@ -853,15 +807,6 @@ impl SessionStore {
         self.mutate(session_id, |session| {
             if session.attempt.is_some() {
                 return Err(CoreError::Busy);
-            }
-            if session
-                .calls
-                .iter()
-                .any(|c| unresolved(&c.record) || !c.batch_settled)
-                || session.executions.iter().any(execution_active)
-                || session.capabilities.iter().any(capability_unresolved)
-            {
-                return Err(CoreError::NeedsReconciliation);
             }
             if session.approvals.iter().any(|a| a.decision.is_none()) {
                 return Err(CoreError::PendingApproval);
@@ -1079,9 +1024,6 @@ impl SessionStore {
     ) -> Result<EventRecord, CoreError> {
         self.mutate(&lease.session_id, |session| {
             session.verify_lease(lease)?;
-            if session.has_unknown() {
-                return Err(CoreError::NeedsReconciliation);
-            }
             if session.lifecycle()?.ended {
                 return Err(invalid("The agent already ended"));
             }
@@ -1117,9 +1059,15 @@ impl SessionStore {
             if (lifecycle.started && !lifecycle.ended)
                 || lifecycle.turn_open
                 || lifecycle.open_message.is_some()
-                || session.calls.iter().any(|c| c.record.attempt_id == lease.attempt_id && !c.batch_settled)
+                || session
+                    .calls
+                    .iter()
+                    .any(|c| c.record.attempt_id == lease.attempt_id && !c.batch_settled)
                 || session.executions.iter().any(execution_active)
-                || session.capabilities.iter().any(|c| c.stage != CapabilityStage::Settled)
+                || session
+                    .capabilities
+                    .iter()
+                    .any(|c| c.stage != CapabilityStage::Settled)
             {
                 return Err(invalid(
                     "The attempt has no settled agent terminal or has active cells; recover it explicitly",
@@ -1140,10 +1088,11 @@ impl SessionStore {
 
     /// Explicitly invalidate a lost worker. Durable known terminals stay known;
     /// never-started calls receive paired nonexecution errors. Started calls with
-    /// no known terminal remain unknown until host reconciliation, never replayed.
-    /// The host must stop the old executor; fencing cannot undo external effects.
-    /// Pending approvals are denied with recovery as their actor. These decisions
-    /// and worker fencing commit together, so no orphan approval blocks recovery.
+    /// no known terminal receive paired unknown observations for internal audit and
+    /// never replay. The host must stop the old executor; fencing cannot undo
+    /// external effects. Pending approvals are denied with recovery as their actor.
+    /// These decisions and worker fencing commit together, so no orphan approval
+    /// blocks recovery.
     pub fn recover(&self, session_id: &str) -> Result<SessionSnapshot, CoreError> {
         let mut connection = self
             .connection
@@ -1168,6 +1117,10 @@ impl SessionStore {
         {
             return Ok(session.snapshot());
         }
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take(session_id);
         for index in 0..session.approvals.len() {
             let approval = &mut session.approvals[index];
             if approval.decision.is_some() {
@@ -1265,7 +1218,9 @@ impl SessionStore {
         for execution in &mut session.executions {
             if execution_active(execution) {
                 execution.state = ExecutionState::Interrupted;
-                execution.terminal = Some(ExecutionOutcome::Interrupted { reason: "Worker recovered; the VM is unavailable and must never be automatically replayed".into() });
+                execution.terminal = Some(ExecutionOutcome::Interrupted {
+                    reason: "Worker recovered; the VM is unavailable and must never be automatically replayed".into(),
+                });
                 recovered_executions.push(execution.clone());
             }
         }
@@ -1296,16 +1251,10 @@ impl SessionStore {
         nonempty(&input.reason, "reason")?;
         self.mutate(&lease.session_id, |session| {
             session.verify_lease(lease)?;
-            if session.has_unknown() {
-                return Err(CoreError::NeedsReconciliation);
-            }
             if session.lifecycle()?.ended {
                 return Err(invalid("The agent already ended"));
             }
             session.validate_approval_target(lease, &input)?;
-            if session.approvals.len() >= MAX_APPROVALS {
-                return Err(invalid("Approval count limit exceeded"));
-            }
             let approval = ApprovalRequest {
                 id: Uuid::new_v4().to_string(),
                 session_id: session.id.clone(),
@@ -1756,14 +1705,16 @@ fn committed_tool_reconciliation(
             .record
             .result
             .as_ref()
-            .ok_or(CoreError::NeedsReconciliation)?;
+            .ok_or_else(|| invalid("Tool has no recorded result"))?;
         if stored.record.state != CallState::Completed
             || !stored.batch_settled
             || !result.outcome_unknown
             || result.tool_call_id != call_id
             || result.tool_name != stored.record.call.name
         {
-            return Err(CoreError::NeedsReconciliation);
+            return Err(invalid(
+                "Tool is not an unknown outcome with a complete committed result",
+            ));
         }
         let decisions: Vec<_> = recorded_events(connection, &session, "reconciled")?
             .into_iter()
@@ -1798,7 +1749,7 @@ fn committed_tool_reconciliation(
                 }
             };
             if !known {
-                return Err(CoreError::NeedsReconciliation);
+                return Err(invalid("Reconciliation decision has no known outcome"));
             }
             return Ok(decision);
         }
@@ -1807,7 +1758,9 @@ fn committed_tool_reconciliation(
             .filter(|event| event.cursor <= cutoff)
             .collect();
         if forks.len() != 1 {
-            return Err(CoreError::NeedsReconciliation);
+            return Err(invalid(
+                "Unknown tool result has no committed reconciliation or fork origin",
+            ));
         }
         let CoreEvent::SessionForked {
             source_session_id,
@@ -1821,7 +1774,9 @@ fn committed_tool_reconciliation(
             .iter()
             .any(|message| matches!(message, Message::ToolResult(original) if original == result))
         {
-            return Err(CoreError::NeedsReconciliation);
+            return Err(invalid(
+                "Fork history does not contain its recorded unknown tool result",
+            ));
         }
         let source = load(connection, source_session_id)?;
         let source_call = source.call(call_id)?;
@@ -2005,12 +1960,6 @@ fn apply_agent_event(
                     "A message requires an open turn and no other open message",
                 ));
             }
-            if let Message::Assistant(assistant) = message
-                && session.has_unknown()
-                && !assistant.stop_reason.is_failure()
-            {
-                return Err(CoreError::NeedsReconciliation);
-            }
             if let Message::ToolResult(result) = message {
                 let call = session.call(&result.tool_call_id)?;
                 let expected = lifecycle
@@ -2188,9 +2137,6 @@ fn append_message(
             }
             if assistant.stop_reason == StopReason::Pending {
                 return Err(invalid("An assistant terminal may not be pending"));
-            }
-            if session.has_unknown() && !assistant.stop_reason.is_failure() {
-                return Err(CoreError::NeedsReconciliation);
             }
             let calls = if assistant.stop_reason.is_failure() {
                 vec![]

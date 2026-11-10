@@ -58,8 +58,8 @@ async fn complete_capture_preserves_stream_and_accounting() {
     let model = Model::new("local-capture", "opencode-go/deepseek-v4.1-flash");
     let provider = Arc::new(OpenAiProvider::new(format!("http://{address}/v1"), "").unwrap());
     let config = RuntimeConfig {
-        max_total_tokens: 1_000_000,
-        max_run_time: std::time::Duration::from_secs(1800),
+        max_total_tokens: Some(1_000_000),
+        max_run_time: Some(std::time::Duration::from_secs(1800)),
         ..Default::default()
     };
     let workspace = output.join("workspace");
@@ -125,7 +125,7 @@ async fn complete_capture_preserves_stream_and_accounting() {
     .unwrap();
     assert_eq!(task.state, TaskState::Completed);
     assert!(result.is_ok(), "{result:?}");
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.requests.len(), 1);
     assert_eq!(ledger.settled_tokens, 25_177);

@@ -25,7 +25,7 @@ impl Bridge {
             validate_json(
                 &serde_json::to_value(definition)?,
                 run.limits.json_depth,
-                usize::MAX,
+                None,
             )?;
         }
         // The canonical schemas add a fixed ToolDefinition/properties envelope.
@@ -37,8 +37,8 @@ impl Bridge {
         for definition in crate::values::definitions() {
             validate_json(
                 &serde_json::to_value(definition)?,
-                run.limits.json_depth.max(8),
-                usize::MAX,
+                run.limits.json_depth.map(|depth| depth.max(8)),
+                None,
             )?;
         }
         Ok(Self {
@@ -146,28 +146,40 @@ impl Bridge {
                 let value = serde_json::to_value(definition)?;
                 validate_json(
                     &value,
-                    self.run.limits.json_depth.max(8),
+                    self.run.limits.json_depth.map(|depth| depth.max(8)),
                     self.run.limits.item_bytes,
                 )?;
                 Ok(value)
             }
         }
     }
-    fn argument_limits(&self, name: &str) -> (usize, usize) {
+    fn argument_limits(&self, name: &str) -> (Option<usize>, Option<usize>) {
         if name == CELL_STORE {
             (
-                self.run.limits.json_depth.saturating_add(1),
-                self.run.limits.store_bytes.saturating_add(256),
+                self.run
+                    .limits
+                    .json_depth
+                    .map(|depth| depth.saturating_add(1)),
+                self.run
+                    .limits
+                    .store_bytes
+                    .map(|bytes| bytes.saturating_add(256)),
             )
         } else {
             (self.run.limits.json_depth, self.run.limits.item_bytes)
         }
     }
-    fn result_limits(&self, name: &str) -> (usize, usize) {
+    fn result_limits(&self, name: &str) -> (Option<usize>, Option<usize>) {
         if name == CELL_LOAD {
             (
-                self.run.limits.json_depth.saturating_add(1),
-                self.run.limits.store_bytes.saturating_add(64),
+                self.run
+                    .limits
+                    .json_depth
+                    .map(|depth| depth.saturating_add(1)),
+                self.run
+                    .limits
+                    .store_bytes
+                    .map(|bytes| bytes.saturating_add(64)),
             )
         } else {
             (self.run.limits.json_depth, self.run.limits.item_bytes)
@@ -252,7 +264,7 @@ impl Bridge {
             dependencies
                 .validate(&identity.permission_context, &self.run.limits)
                 .map_err(|error| {
-                    self.run.reads.freeze(&identity.session_id);
+                    self.run.reads.invalidate(&identity.session_id);
                     CapabilityError::unknown(error.to_string())
                 })?;
         }
@@ -284,7 +296,7 @@ impl Bridge {
                     call.error = Some(bounded_error(&error.message));
                     if error.outcome_unknown {
                         record.status = CellStatus::OutcomeUnknown;
-                        self.run.reads.freeze(&identity.session_id);
+                        self.run.reads.invalidate(&identity.session_id);
                     }
                 }
             }
@@ -341,7 +353,7 @@ struct Pending {
 impl Drop for Pending {
     fn drop(&mut self) {
         if !self.settled {
-            self.run.reads.freeze(&self.run.identity().session_id);
+            self.run.reads.invalidate(&self.run.identity().session_id);
             let _ = self.run.update(|record| {
                 let call = &mut record.calls[self.sequence as usize - 1];
                 call.status = IntentStatus::OutcomeUnknown;

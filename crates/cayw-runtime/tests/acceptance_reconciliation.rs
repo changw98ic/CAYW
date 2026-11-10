@@ -231,8 +231,8 @@ fn open_runtime(
             program: PathBuf::from("/bin/sh"),
             args: vec![profile_sh.to_string_lossy().to_string()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(90),
-            max_output_bytes: 8192,
+            timeout: Some(Duration::from_secs(90)),
+            max_output_bytes: Some(8192),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -243,15 +243,15 @@ fn open_runtime(
             "test.run",
             json!({"profile": "cancel_probe"}),
         )],
-        max_run_time: BUDGET,
-        max_queue_time: BUDGET,
+        max_run_time: Some(BUDGET),
+        max_queue_time: Some(BUDGET),
         reconciliation_verifier: verifier,
         ..RuntimeConfig::default()
     };
     config.host.profiles = profiles;
-    config.cells.max_yield_time = Duration::from_secs(30);
-    config.codemode.timeout = BUDGET;
-    config.host.call_timeout = BUDGET;
+    config.cells.max_yield_time = Some(Duration::from_secs(30));
+    config.codemode.timeout = Some(BUDGET);
+    config.host.call_timeout = Some(BUDGET);
 
     Runtime::open(
         root.join("session.db"),
@@ -278,7 +278,7 @@ impl TestServer {
         let address = listener.local_addr()?;
         let stop = CancellationToken::new();
         let mut config = ServerConfig::new(TOKEN);
-        config.request_timeout = BUDGET;
+        config.request_timeout = Some(BUDGET);
         let task = tokio::spawn(cayw_ipc::serve(
             listener,
             Arc::new(runtime),
@@ -289,7 +289,7 @@ impl TestServer {
             address,
             TOKEN,
             ClientConfig {
-                request_timeout: BUDGET,
+                request_timeout: Some(BUDGET),
                 ..ClientConfig::default()
             },
         )
@@ -424,11 +424,11 @@ async fn test_acceptance_cancellation_reconciliation_full_lifecycle() {
     let post_cancel_view = runtime.get(&sid).unwrap();
     assert_eq!(
         post_cancel_view.state,
-        SessionState::NeedsReconciliation,
-        "reopened session with OutcomeUnknown capability must remain in NeedsReconciliation"
+        SessionState::Idle,
+        "an unreconciled OutcomeUnknown stays an internal audit record and does not freeze the session"
     );
 
-    // Verify blind resume or blind enqueue is refused while in NeedsReconciliation
+    // A blind resume of the interrupted task is still refused; a new task is not.
     assert!(
         runtime
             .resume(&tid, CancellationToken::new())
@@ -436,13 +436,12 @@ async fn test_acceptance_cancellation_reconciliation_full_lifecycle() {
             .is_err(),
         "blind resume must be refused"
     );
-    assert!(
-        matches!(
-            runtime.enqueue(&sid, "blind attempt"),
-            Err(RuntimeError::NeedsReconciliation)
-        ),
-        "blind enqueue must fail with NeedsReconciliation"
-    );
+    let follow_up = runtime
+        .enqueue(&sid, "follow-up before reconciliation")
+        .expect("an unreconciled unknown outcome must not block enqueue");
+    runtime
+        .cancel(&runtime.task(&follow_up.id).unwrap().cancel_target())
+        .unwrap();
 
     // Locate the unresolved capability
     assert_eq!(post_cancel_view.unresolved_capabilities.len(), 1);
@@ -521,11 +520,8 @@ async fn test_acceptance_cancellation_reconciliation_full_lifecycle() {
         "mutated lease must be rejected"
     );
 
-    // Session remains in NeedsReconciliation
-    assert_eq!(
-        runtime.get(&sid).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    // The unknown outcome stays internal while the session remains usable.
+    assert_eq!(runtime.get(&sid).unwrap().state, SessionState::Idle);
 
     // 5. Submit valid reconciliation
     let valid_req = CapabilityReconciliation {
@@ -734,7 +730,7 @@ async fn test_acceptance_ipc_reconciliation_and_continuation_flow() {
         .request("session.get", json!({"session_id": sid}))
         .await
         .unwrap();
-    assert_eq!(view["state"], "needs_reconciliation");
+    assert_eq!(view["state"], "idle");
 
     let unres = view["unresolved_capabilities"].as_array().unwrap();
     assert_eq!(unres.len(), 1);

@@ -498,10 +498,10 @@ impl Settings {
 
 /// CLI consumes exactly the same authenticated management path as the WebUI.
 pub async fn run(mut args: impl Iterator<Item = String>, plugin: bool) -> Result<()> {
-    let action = args.next().ok_or("expected list / add / use / remove (plugins: list / install / update / enable / disable / remove)")?;
+    let action = args.next().ok_or("expected list / add / use / remove (plugins: list / install / update / enable / disable / remove / clear)")?;
     if action == "--help" {
         println!(
-            "cayw models list|add NAME --file MODEL.json|use NAME|remove NAME [--workspace DIR]\nFor an existing model profile, omitting api_key preserves its credential; api_key:null explicitly removes it. Changing the endpoint or adapter requires a supplied key or explicit null. New profiles without api_key use no authentication.\ncayw plugins list|install --file LOCAL.json|update NAME --file LOCAL.json|enable NAME --approve-process|disable NAME|remove NAME [--workspace DIR]\nLocal External workspace architecture descriptors only; no downloads. Install/update do not execute code. Enable requires explicit process approval."
+            "cayw models list|add NAME --file MODEL.json|use NAME|remove NAME [--workspace DIR]\nFor an existing model profile, omitting api_key preserves its credential; api_key:null explicitly removes it. Changing the endpoint or adapter requires a supplied key or explicit null. New profiles without api_key use no authentication.\ncayw plugins list|install --file LOCAL.json|update NAME --file LOCAL.json|enable NAME --approve-process|disable NAME|remove NAME|clear NAME [--workspace DIR]\nLocal External workspace architecture descriptors only; no downloads. Install/update do not execute code. Enable requires explicit process approval. Clear discards a cleanup block only after the recorded process is confirmed stopped; it leaves the enabled flag unchanged."
         );
         return Ok(());
     }

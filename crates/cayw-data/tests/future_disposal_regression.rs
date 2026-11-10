@@ -58,7 +58,10 @@ fn lifecycle_child() {
         "data.serialize",
         Value::Object(args),
         token.clone(),
-        Limits::default(),
+        Limits {
+            max_depth: Some(64),
+            ..Limits::default()
+        },
     ));
     if mode == "unpolled" {
         drop(future);

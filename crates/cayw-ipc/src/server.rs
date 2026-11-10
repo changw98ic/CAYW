@@ -168,25 +168,28 @@ fn queue_response(
     response: Response,
     config: &ServerConfig,
     written: Option<oneshot::Sender<()>>,
+    read_only: bool,
 ) -> bool {
-    let valid = match &response.payload {
-        wire::Payload::Result { result } => wire::validate_value(result, 1),
-        wire::Payload::Error { .. } => Ok(()),
-    };
-    let bytes = valid
-        .and_then(|_| wire::encode(&response, config.max_frame_bytes))
-        .or_else(|_| {
-            wire::encode(
-                &Response::new(
-                    response.id,
-                    Err(RpcError::new(
-                        "response_too_large_outcome_unknown",
-                        "response exceeded the JSON depth or frame limit; reconcile runtime state",
-                    )),
-                ),
-                config.max_frame_bytes,
+    let bytes = wire::encode(&response, config.max_frame_bytes).or_else(|_| {
+        // A pure read did not change runtime state, so its oversized
+        // response is a known transport failure rather than an unknown
+        // effect. Side-effecting calls keep the conservative code.
+        let error = if read_only {
+            RpcError::new(
+                "response_too_large",
+                "response exceeded the frame limit; the read did not change runtime state",
             )
-        });
+        } else {
+            RpcError::new(
+                "response_too_large_outcome_unknown",
+                "response exceeded the frame limit; reconcile runtime state",
+            )
+        };
+        wire::encode(
+            &Response::new(response.id, Err(error)),
+            config.max_frame_bytes,
+        )
+    });
     let Ok(bytes) = bytes else {
         return false;
     };
@@ -223,7 +226,7 @@ async fn write_responses(
     }
 }
 
-type CallResult = (String, Result<Value, RpcError>);
+type CallResult = (String, Result<Value, RpcError>, bool);
 
 /// Owned by the connection, never spawned. Drop cancels before dropping the inner future.
 struct OwnedCall {
@@ -262,11 +265,12 @@ fn call_handler(
     let request_timeout = if persistent_prompt(&request.method, &request.params) {
         config.prompt_timeout
     } else {
-        Some(config.request_timeout)
+        config.request_timeout
     };
     let deadline = request_timeout.map(|timeout| Instant::now() + timeout);
     let grace = config.cancellation_grace;
     let cancel = token.clone();
+    let read_only = handler.read_only(&request.method);
     let future = Box::pin(async move {
         let work = AssertUnwindSafe(handler.call(&request.method, request.params, token.clone()))
             .catch_unwind();
@@ -280,11 +284,11 @@ fn call_handler(
                     None => std::future::pending::<()>().await,
                 }
             } => RpcError::new("timeout_outcome_unknown", "request timed out; side effects may have happened"),
-            result = &mut work => return (request.id, result.unwrap_or_else(|_| Err(RpcError::new("handler_panic_outcome_unknown", "handler panicked; reconcile runtime state")))),
+            result = &mut work => return (request.id, result.unwrap_or_else(|_| Err(RpcError::new("handler_panic_outcome_unknown", "handler panicked; reconcile runtime state"))), read_only),
         };
         token.cancel();
         let _ = timeout(grace, &mut work).await;
-        (request.id, Err(interruption))
+        (request.id, Err(interruption), read_only)
     });
     OwnedCall { cancel, future }
 }
@@ -307,21 +311,23 @@ async fn dispatch<R: tokio::io::AsyncRead + Unpin>(
         tokio::select! {
             biased;
             _ = stop.cancelled() => break,
-            Some((id, result)) = calls.next(), if !calls.is_empty() => {
+            Some((id, result, read_only)) = calls.next(), if !calls.is_empty() => {
                 active.remove(&id);
-                if !queue_response(&tx, Response::new(id, result), config, None) { break; }
+                if !queue_response(&tx, Response::new(id, result), config, None, read_only) { break; }
             },
             frame = frames.next() => {
                 let bytes = match frame { Ok(Some(bytes)) => bytes, _ => break };
                 let request: Request = match wire::decode(&bytes, config.max_frame_bytes) { Ok(request) => request, Err(_) => break };
                 if !wire::valid_id(&request.id, config.max_id_bytes)
                     || seen.contains_key(&request.id)
-                    || seen.len() >= config.max_requests_per_connection
+                    || config
+                        .max_requests_per_connection
+                        .is_some_and(|limit| seen.len() >= limit)
                 { break; }
                 if request.version != PROTOCOL_VERSION {
                     for token in active.values() { token.cancel(); }
                     let (written, wait) = oneshot::channel();
-                    if queue_response(&tx, Response::new(request.id, Err(RpcError::new("unsupported_version", "unsupported IPC version; expected version 1"))), config, Some(written)) {
+                    if queue_response(&tx, Response::new(request.id, Err(RpcError::new("unsupported_version", "unsupported IPC version; expected version 1"))), config, Some(written), false) {
                         let _ = timeout(config.write_timeout, wait).await;
                     }
                     break;
@@ -332,11 +338,11 @@ async fn dispatch<R: tokio::io::AsyncRead + Unpin>(
                     let params: CancelParams = match serde_json::from_value(request.params) { Ok(params) => params, Err(_) => break };
                     if seen.get(&params.request_id) != Some(&true) { break; }
                     let cancelled = if let Some(token) = active.get(&params.request_id) { token.cancel(); true } else { false };
-                    if !queue_response(&tx, Response::new(request.id, Ok(json!({"cancelled":cancelled}))), config, None) { break; }
+                    if !queue_response(&tx, Response::new(request.id, Ok(json!({"cancelled":cancelled}))), config, None, false) { break; }
                 } else {
                     seen.insert(request.id.clone(), true);
                     if active.len() >= config.max_in_flight {
-                        if !queue_response(&tx, Response::new(request.id, Err(RpcError::new("busy", "connection handler limit reached; request was not dispatched"))), config, None) { break; }
+                        if !queue_response(&tx, Response::new(request.id, Err(RpcError::new("busy", "connection handler limit reached; request was not dispatched"))), config, None, false) { break; }
                         continue;
                     }
                     let token = stop.child_token();

@@ -53,13 +53,23 @@ impl WebAccessOptions {
         }
     }
 
+    /// Options with orderable soft limits normalized. Construction uses this
+    /// exact copy so the service and the recorded configuration agree.
+    pub fn normalized(&self) -> Self {
+        Self {
+            limits: self.limits.clone().normalized(),
+            search: self.search,
+        }
+    }
+
     /// Build a process-local [`WebAccess`] with optional [`ContentSink`] hook.
     pub fn build_with_sink(
         &self,
         sink: Option<Arc<dyn ContentSink>>,
     ) -> Result<WebAccess, WebAccessError> {
-        self.limits.validate()?;
-        let transport: Arc<dyn HttpTransport> = match self.search {
+        let options = self.normalized();
+        options.limits.validate()?;
+        let transport: Arc<dyn HttpTransport> = match options.search {
             SearchBackend::Fixture => Arc::new(FixtureTransport::new()),
             _ => Arc::new(ReqwestTransport::new()?),
         };
@@ -79,12 +89,7 @@ impl WebAccessOptions {
             Some(sink) => ContentStore::with_sink(sink),
             None => ContentStore::new(),
         };
-        Ok(WebAccess::new(
-            transport,
-            search,
-            store,
-            self.limits.clone(),
-        ))
+        Ok(WebAccess::new(transport, search, store, options.limits))
     }
 
     /// Build a process-local [`WebAccess`] with in-memory [`ContentStore`].

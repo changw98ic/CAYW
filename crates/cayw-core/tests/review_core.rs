@@ -1,6 +1,6 @@
 use cayw_agent::AgentEvent;
 use cayw_ai::{AssistantEvent, AssistantMessage, Message, Model, StopReason};
-use cayw_core::{CoreError, MAX_METADATA_BYTES, SessionStore};
+use cayw_core::SessionStore;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -30,7 +30,7 @@ fn nested(depth: usize) -> Value {
 }
 
 #[test]
-fn mc02_provider_metadata_leaf_limits_enforced_on_append_agent_event() {
+fn provider_metadata_values_are_stored_and_replayed_without_artificial_limits() {
     let db = Database::new();
     let store = db.open();
     let session = store.create_session("mc02 limits").unwrap();
@@ -41,178 +41,85 @@ fn mc02_provider_metadata_leaf_limits_enforced_on_append_agent_event() {
     store
         .append_agent_event(&lease, &AgentEvent::TurnStart)
         .unwrap();
+
+    // Only serde_json's own recursion limit rejects a value that cannot be read
+    // back; there is no separate Core depth or byte ceiling.
+    let mut msg_too_deep = AssistantMessage::new(&Model::new("test", "model"));
+    msg_too_deep
+        .provider_metadata
+        .insert("deep".into(), nested(130));
     let snapshot_before = store.snapshot(&session.id).unwrap();
-
-    // 1. Depth > 32
-    let mut msg_deep = AssistantMessage::new(&Model::new("test", "model"));
-    msg_deep.provider_metadata.insert("deep".into(), nested(33));
-    let event_deep = AgentEvent::MessageStart {
-        message: Message::Assistant(msg_deep),
-    };
-    assert!(matches!(
-        store.append_agent_event(&lease, &event_deep),
-        Err(CoreError::InvalidInput(_))
-    ));
+    assert!(
+        store
+            .append_agent_event(
+                &lease,
+                &AgentEvent::MessageStart {
+                    message: Message::Assistant(msg_too_deep),
+                },
+            )
+            .is_err()
+    );
     assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_before);
 
-    // 2. Nodes > 4096
-    let mut msg_nodes = AssistantMessage::new(&Model::new("test", "model"));
-    msg_nodes
-        .provider_metadata
-        .insert("nodes".into(), Value::Array(vec![Value::Null; 4096]));
-    let event_nodes = AgentEvent::MessageStart {
-        message: Message::Assistant(msg_nodes),
-    };
-    assert!(matches!(
-        store.append_agent_event(&lease, &event_nodes),
-        Err(CoreError::InvalidInput(_))
-    ));
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_before);
-
-    // 3. Bytes > 65536
-    let mut msg_bytes = AssistantMessage::new(&Model::new("test", "model"));
-    msg_bytes
-        .provider_metadata
-        .insert("bytes".into(), Value::String("x".repeat(65537)));
-    let event_bytes = AgentEvent::MessageStart {
-        message: Message::Assistant(msg_bytes),
-    };
-    assert!(matches!(
-        store.append_agent_event(&lease, &event_bytes),
-        Err(CoreError::InvalidInput(_))
-    ));
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_before);
-
-    // 4. Valid provider_metadata is stored, MessageUpdate rejection & round-trips intact
+    // Large and deep-but-readable metadata is persisted and round-trips.
     let mut msg_valid = AssistantMessage::new(&Model::new("test", "model"));
     msg_valid.stop_reason = StopReason::Stop;
-    msg_valid.provider_metadata.insert(
-        "replay_token".into(),
-        json!({"item_id": "item-12345", "signature": "sig-abc-67890"}),
-    );
-    let event_start = AgentEvent::MessageStart {
-        message: Message::Assistant(msg_valid.clone()),
-    };
-    store.append_agent_event(&lease, &event_start).unwrap();
-    let snapshot_after_start = store.snapshot(&session.id).unwrap();
-
-    // 4a. MessageUpdate carrying invalid provider_metadata (depth > 32) is rejected
-    let mut msg_update_deep = msg_valid.clone();
-    msg_update_deep
+    msg_valid
         .provider_metadata
-        .insert("deep_update".into(), nested(33));
-    let event_update_deep = AgentEvent::MessageUpdate {
-        message: msg_update_deep.clone(),
-        event: Box::new(AssistantEvent::TextDelta {
-            index: 0,
-            delta: "deep".into(),
-            partial: msg_update_deep,
-        }),
-    };
-    assert!(matches!(
-        store.append_agent_event(&lease, &event_update_deep),
-        Err(CoreError::InvalidInput(_))
-    ));
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_after_start);
-
-    // 4b. MessageUpdate carrying invalid provider_metadata (bytes > 64KiB) is rejected
-    let mut msg_update_bytes = msg_valid.clone();
-    msg_update_bytes
+        .insert("large".into(), Value::String("x".repeat(3 * 1024 * 1024)));
+    msg_valid
         .provider_metadata
-        .insert("bytes_update".into(), Value::String("y".repeat(65537)));
-    let event_update_bytes = AgentEvent::MessageUpdate {
-        message: msg_update_bytes.clone(),
-        event: Box::new(AssistantEvent::TextDelta {
-            index: 0,
-            delta: "bytes".into(),
-            partial: msg_update_bytes,
-        }),
-    };
-    assert!(matches!(
-        store.append_agent_event(&lease, &event_update_bytes),
-        Err(CoreError::InvalidInput(_))
-    ));
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_after_start);
-
-    // 4c. Valid MessageUpdate succeeds and preserves valid provider_metadata
-    let mut msg_update_valid = msg_valid.clone();
-    msg_update_valid.content = vec![cayw_ai::Content::text("streamed chunk")];
-    let event_update_valid = AgentEvent::MessageUpdate {
-        message: msg_update_valid.clone(),
-        event: Box::new(AssistantEvent::TextDelta {
-            index: 0,
-            delta: "streamed chunk".into(),
-            partial: msg_update_valid.clone(),
-        }),
-    };
-    let update_rec = store
-        .append_agent_event(&lease, &event_update_valid)
+        .insert("deep".into(), nested(64));
+    let message = Message::Assistant(msg_valid.clone());
+    store
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageStart {
+                message: message.clone(),
+            },
+        )
         .unwrap();
-    assert_eq!(update_rec.cursor, snapshot_after_start.cursor + 1);
-
-    let event_end = AgentEvent::MessageEnd {
-        message: Message::Assistant(msg_update_valid.clone()),
-    };
-    let end_rec = store.append_agent_event(&lease, &event_end).unwrap();
-    assert_eq!(end_rec.cursor, snapshot_after_start.cursor + 2);
+    store
+        .append_agent_event(&lease, &AgentEvent::MessageEnd { message })
+        .unwrap();
 
     let reopened = SessionStore::open(db.path()).unwrap();
     let snapshot = reopened.snapshot(&session.id).unwrap();
-    assert_eq!(snapshot.cursor, snapshot_before.cursor + 3);
-    let messages = snapshot.messages;
-    assert_eq!(messages.len(), 1);
-    match &messages[0] {
+    assert_eq!(snapshot.messages.len(), 1);
+    match &snapshot.messages[0] {
         Message::Assistant(saved) => {
             assert_eq!(saved.provider_metadata, msg_valid.provider_metadata);
-            assert_eq!(saved.content, msg_update_valid.content);
         }
         other => panic!("expected assistant message, got {other:?}"),
     }
 }
 
 #[test]
-fn mc04_byte_count_writer_boundary_and_escape_checks() {
+fn large_metadata_values_are_not_refused_by_artificial_byte_limits() {
     let db = Database::new();
     let store = db.open();
-    let session = store.create_session("mc04 boundary").unwrap();
+    let session = store.create_session("mc04 large").unwrap();
     let lease = store.begin_attempt(&session.id, "worker").unwrap();
 
-    // Exact boundary: "..." has 2 quotes + 65534 ascii chars = 65536 bytes == MAX_METADATA_BYTES
-    let exact_str = "x".repeat(MAX_METADATA_BYTES - 2);
-    let exact_event = store.append_host_event(&lease, "exact", Value::String(exact_str));
-    assert!(
-        exact_event.is_ok(),
-        "exact 64KiB metadata bytes must be accepted"
-    );
+    for (kind, value) in [
+        ("large", Value::String("x".repeat(5 * 1024 * 1024))),
+        ("escaped", Value::String("\"".repeat(2 * 1024 * 1024))),
+        ("deep", nested(64)),
+    ] {
+        store.append_host_event(&lease, kind, value).unwrap();
+    }
+    let snapshot = store.snapshot(&session.id).unwrap();
 
-    let snapshot_after_exact = store.snapshot(&session.id).unwrap();
-
-    // Exact + 1: "..." has 2 quotes + 65535 ascii chars = 65537 bytes > MAX_METADATA_BYTES
-    let overflow_str = "x".repeat(MAX_METADATA_BYTES - 1);
-    let overflow_event = store.append_host_event(&lease, "overflow", Value::String(overflow_str));
+    // A value beyond serde_json's typed-reader recursion limit is still a known
+    // refusal and must leave the committed state untouched.
     assert!(
-        matches!(overflow_event, Err(CoreError::InvalidInput(msg)) if msg.contains("Metadata byte limit exceeded")),
-        "64KiB + 1 byte must be rejected"
+        store
+            .append_host_event(&lease, "too-deep", nested(130))
+            .is_err()
     );
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_after_exact);
-
-    // Escaped string: length is 32768, but serialized as \" becomes 65536 + 2 quotes = 65538 bytes
-    let escaped_str = "\"".repeat(32768);
-    let escaped_event = store.append_host_event(&lease, "escaped", Value::String(escaped_str));
-    assert!(
-        matches!(escaped_event, Err(CoreError::InvalidInput(msg)) if msg.contains("Metadata byte limit exceeded")),
-        "string that expands on JSON escape beyond 64KiB must be rejected"
-    );
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_after_exact);
-
-    // Ultra-large string (e.g. 5MB) must be rejected without allocating 5MB full JSON buffer
-    let huge_str = "a".repeat(5 * 1024 * 1024);
-    let huge_event = store.append_host_event(&lease, "huge", Value::String(huge_str));
-    assert!(
-        matches!(huge_event, Err(CoreError::InvalidInput(msg)) if msg.contains("Metadata byte limit exceeded")),
-        "huge string must be rejected"
-    );
-    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot_after_exact);
+    assert_eq!(store.snapshot(&session.id).unwrap(), snapshot);
+    let reopened = SessionStore::open(db.path()).unwrap();
+    assert_eq!(reopened.snapshot(&session.id).unwrap(), snapshot);
 }
 
 #[test]

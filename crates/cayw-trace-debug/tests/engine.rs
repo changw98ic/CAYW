@@ -1004,7 +1004,7 @@ async fn replay_hides_discovery_instead_of_fabricating_a_catalog() {
 }
 
 #[tokio::test]
-async fn a_long_running_node_is_stopped_by_the_instruction_budget() {
+async fn a_long_running_node_is_stopped_by_the_replay_timeout() {
     let plan = plan(
         "a",
         vec![node("a", "while true do end", "")],
@@ -1020,7 +1020,7 @@ async fn a_long_running_node_is_stopped_by_the_instruction_budget() {
         evaluated
             .gaps
             .iter()
-            .any(|gap| gap.message.contains("InstructionLimit")),
+            .any(|gap| gap.message.contains("Timeout")),
         "{:?}",
         evaluated.gaps
     );

@@ -93,7 +93,7 @@ async fn import_prepare_registry_lands_in_runtime_bridge() {
             ),
             ScopedPermission::exact("mcp.prompts.list", json!({"server":"local"})),
         ],
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         ..Default::default()
     };
     let runtime = Runtime::open(

@@ -312,11 +312,13 @@ async fn ready_read_charges_each_original_runtime_response_bytes() {
     let mut config = RuntimeConfig::default();
     config.host.frozen_reads = true;
     config.permissions = vec![ScopedPermission::exact("fs.read", arguments.clone())];
-    config.max_capability_bytes = 3 * serde_json::to_vec(&arguments).unwrap().len()
-        + 2 * serde_json::to_vec(&json!({"ok":true,"value":value}))
-            .unwrap()
-            .len()
-        - 1;
+    config.max_capability_bytes = Some(
+        3 * serde_json::to_vec(&arguments).unwrap().len()
+            + 2 * serde_json::to_vec(&json!({"ok":true,"value":value}))
+                .unwrap()
+                .len()
+            - 1,
+    );
     let rt = Runtime::open(dir.path().join("session.db"),&root,
         Arc::new(Script("cayw.call('fs.read',{path='a.txt'}); cayw.call('fs.read',{path='a.txt'}); return cayw.call('fs.read',{path='a.txt'})")),
         Model::new("fixture","read-response-budget"),config).unwrap();
@@ -370,9 +372,9 @@ async fn warm_read_reuse_spends_each_original_host_and_runtime_call_budget() {
         config.host.frozen_reads = true;
         config.permissions = vec![ScopedPermission::exact("fs.read", json!({"path":"a.txt"}))];
         if host_limit {
-            config.host.max_calls = 2;
+            config.host.max_calls = Some(2);
         } else {
-            config.max_capability_calls = 2;
+            config.max_capability_calls = Some(2);
         }
         let rt = Runtime::open(dir.path().join("session.db"), &root, Arc::new(Script("cayw.call('fs.read',{path='a.txt'}); cayw.call('fs.read',{path='a.txt'}); return cayw.call('fs.read',{path='a.txt'})")), Model::new("fixture", "read-budget"), config).unwrap();
         let id = rt.create(None).unwrap().id;

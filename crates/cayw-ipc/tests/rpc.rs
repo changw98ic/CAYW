@@ -70,6 +70,7 @@ impl RpcHandler for Fixture {
                 std::future::pending().await
             }
             "large" => Ok(Value::String("x".repeat(4 * 1024 * 1024))),
+            "session.events" => Ok(Value::String("x".repeat(4 * 1024 * 1024))),
             "deep_result" => Ok(nested_arrays(64)),
             "error" => Err(RpcError::new("fixture_failure", "known failure")),
             "panic" => panic!("fixture panic"),
@@ -80,6 +81,9 @@ impl RpcHandler for Fixture {
                 Ok(params)
             }
         }
+    }
+    fn read_only(&self, method: &str) -> bool {
+        method == "session.events"
     }
 }
 
@@ -180,7 +184,7 @@ async fn signalled(semaphore: &Semaphore) {
 
 fn config() -> ServerConfig {
     ServerConfig {
-        request_timeout: Duration::from_secs(5),
+        request_timeout: Some(Duration::from_secs(5)),
         ..ServerConfig::new(TOKEN)
     }
 }
@@ -425,9 +429,34 @@ async fn duplicate_in_flight_id_cancels_original_instead_of_calling_twice() {
 }
 
 #[tokio::test]
+async fn default_request_budget_has_no_per_connection_ceiling() {
+    assert!(
+        ServerConfig::new(TOKEN)
+            .max_requests_per_connection
+            .is_none()
+    );
+    assert!(
+        ClientConfig::default()
+            .max_requests_per_connection
+            .is_none()
+    );
+    let server = Server::start(config()).await;
+    let mut raw = server.raw().await;
+    raw.hello().await;
+    for n in 0..1_000 {
+        let id = format!("request-{n}");
+        raw.send(request(&id, "echo", json!(n))).await;
+        assert_eq!(raw.receive().await.unwrap()["result"], n);
+    }
+    assert_eq!(server.handler.calls.load(Ordering::SeqCst), 1_000);
+    drop(raw);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn connection_lifetime_bounds_the_seen_id_set() {
     let server = Server::start(ServerConfig {
-        max_requests_per_connection: 3,
+        max_requests_per_connection: Some(3),
         ..config()
     })
     .await;
@@ -520,7 +549,7 @@ async fn client_timeout_reports_unknown_and_cancels_remote_work() {
         server.addr,
         TOKEN,
         ClientConfig {
-            request_timeout: Duration::from_millis(100),
+            request_timeout: Some(Duration::from_millis(100)),
             ..ClientConfig::default()
         },
     )
@@ -539,7 +568,7 @@ async fn client_timeout_reports_unknown_and_cancels_remote_work() {
 #[tokio::test]
 async fn server_timeout_and_oversized_response_report_unknown_outcome() {
     let server = Server::start(ServerConfig {
-        request_timeout: Duration::from_millis(100),
+        request_timeout: Some(Duration::from_millis(100)),
         max_frame_bytes: 512,
         ..config()
     })
@@ -552,6 +581,28 @@ async fn server_timeout_and_oversized_response_report_unknown_outcome() {
     let error = client.request("large", Value::Null).await.unwrap_err();
     assert_eq!(error.code, "response_too_large_outcome_unknown");
     assert!(error.outcome_unknown);
+    client.close().await;
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn oversized_read_response_is_a_known_transport_failure() {
+    let server = Server::start(ServerConfig {
+        max_frame_bytes: 512,
+        ..config()
+    })
+    .await;
+    let client = Client::connect(server.addr, TOKEN).await.unwrap();
+    let error = client
+        .request("session.events", Value::Null)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "response_too_large");
+    assert!(
+        !error.outcome_unknown,
+        "a failed read must not claim that an effect may have happened"
+    );
+    assert_eq!(client.request("echo", json!(7)).await.unwrap(), 7);
     client.close().await;
     server.stop().await;
 }
@@ -759,21 +810,31 @@ async fn local_validation_and_configuration_reject_invalid_limits_without_secret
         server.addr,
         TOKEN,
         ClientConfig {
-            request_timeout: Duration::ZERO,
+            request_timeout: Some(Duration::ZERO),
             ..ClientConfig::default()
         },
     )
     .await
     .unwrap_err();
     assert_eq!(error.code, "invalid_config");
-    let client = Client::connect(server.addr, TOKEN).await.unwrap();
+    let client = Client::connect_with_config(
+        server.addr,
+        TOKEN,
+        ClientConfig {
+            max_frame_bytes: 1024,
+            ..ClientConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     assert!(!format!("{client:?}").contains(TOKEN));
     let error = client.request("", Value::Null).await.unwrap_err();
     assert!(!error.outcome_unknown);
     let error = client
-        .request("echo", Value::String("x".repeat(2 * 1024 * 1024)))
+        .request("echo", Value::String("x".repeat(2048)))
         .await
         .unwrap_err();
+    assert_eq!(error.code, "request_too_large");
     assert!(!error.outcome_unknown);
     assert_eq!(server.handler.calls.load(Ordering::SeqCst), 0);
     client.close().await;
@@ -1061,7 +1122,7 @@ async fn client_write_timeout_closes_socket_without_replaying() {
         ClientConfig {
             max_frame_bytes: 64 * 1024 * 1024,
             write_timeout: Duration::from_millis(100),
-            request_timeout: Duration::from_secs(5),
+            request_timeout: Some(Duration::from_secs(5)),
             ..ClientConfig::default()
         },
     )
@@ -1107,7 +1168,7 @@ async fn missing_cancellation_acknowledgment_expires_even_after_original_respons
         addr,
         TOKEN,
         ClientConfig {
-            request_timeout: Duration::from_millis(250),
+            request_timeout: Some(Duration::from_millis(250)),
             ..ClientConfig::default()
         },
     )
@@ -1349,32 +1410,19 @@ fn nested_arrays(depth: usize) -> Value {
 }
 
 #[tokio::test]
-async fn json_depth_is_bounded_locally_and_on_the_socket_without_coercing_values() {
+async fn deep_json_values_round_trip_locally_and_on_the_socket_without_coercing_values() {
     let server = Server::start(config()).await;
     let client = Client::connect(server.addr, TOKEN).await.unwrap();
-    let allowed = nested_arrays(63); // The request/response object is container 64.
+    let deep_arrays = nested_arrays(100);
     assert_eq!(
-        client.request("echo", allowed.clone()).await.unwrap(),
-        allowed
+        client.request("echo", deep_arrays.clone()).await.unwrap(),
+        deep_arrays
     );
-    let result = client.request("echo", nested_arrays(64)).await;
-    assert!(result.is_err(), "too-deep local params were admitted");
-    assert!(!result.unwrap_err().outcome_unknown);
-    let allowed_objects = (0..63).fold(Value::Null, |value, _| json!({"child":value}));
+    let deep_objects = (0..100).fold(Value::Null, |value, _| json!({"child":value}));
     assert_eq!(
-        client
-            .request("echo", allowed_objects.clone())
-            .await
-            .unwrap(),
-        allowed_objects
+        client.request("echo", deep_objects.clone()).await.unwrap(),
+        deep_objects
     );
-    let deep_objects = (0..64).fold(Value::Null, |value, _| json!({"child":value}));
-    let error = client
-        .request("echo", deep_objects.clone())
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "invalid_params");
-    assert!(!error.outcome_unknown);
     let values = json!({"string":"12","number":12,"boolean":false,"null":null,
         "array":["false",true,-9,18446744073709551615u64],"float":1.25,
         "json_as_text":r#"{"x":1,"x":2}"#});
@@ -1382,21 +1430,13 @@ async fn json_depth_is_bounded_locally_and_on_the_socket_without_coercing_values
         client.request("echo", values.clone()).await.unwrap(),
         values
     );
+    // The same depth is accepted from a raw socket frame, not only from a
+    // locally constructed Value.
     let mut raw = server.raw().await;
     raw.hello().await;
-    raw.send(request("deep", "echo", nested_arrays(64))).await;
-    assert!(
-        raw.receive().await.is_none(),
-        "too-deep socket params were dispatched"
-    );
-    let mut raw = server.raw().await;
-    raw.hello().await;
-    raw.send(request("deep-object", "echo", deep_objects)).await;
-    assert!(
-        raw.receive().await.is_none(),
-        "too-deep socket object was dispatched"
-    );
-    assert_eq!(server.handler.calls.load(Ordering::SeqCst), 3);
+    raw.send(request("deep", "echo", nested_arrays(100))).await;
+    assert_eq!(raw.receive().await.unwrap()["result"], nested_arrays(100));
+    assert_eq!(server.handler.calls.load(Ordering::SeqCst), 4);
     client.close().await;
     server.stop().await;
 }
@@ -1551,26 +1591,24 @@ async fn hello_and_cancel_fields_do_not_coerce_non_string_values() {
 }
 
 #[tokio::test]
-async fn excessive_response_depth_is_unknown_and_releases_the_call() {
+async fn deep_results_are_accepted_and_unbounded_nesting_closes_the_connection() {
     let server = Server::start(config()).await;
     let client = Client::connect(server.addr, TOKEN).await.unwrap();
-    let error = client
-        .request("deep_result", Value::Null)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "response_too_large_outcome_unknown");
-    assert!(error.outcome_unknown);
+    let value = client.request("deep_result", Value::Null).await.unwrap();
+    assert_eq!(value, nested_arrays(64));
     assert_eq!(client.request("echo", json!(7)).await.unwrap(), 7);
     client.close().await;
     server.stop().await;
 
+    // serde_json's own recursion limit still rejects a response nested far
+    // beyond any protocol structure. The pending call is unknown.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         let mut raw = Raw::connect_peer(listener).await;
         fake_hello(&mut raw).await;
         let request = raw.receive().await.unwrap();
-        raw.send(json!({"version":1,"id":request["id"],"result":nested_arrays(64)}))
+        raw.send(json!({"version":1,"id":request["id"],"result":nested_arrays(200)}))
             .await;
         assert!(raw.receive().await.is_none());
     });

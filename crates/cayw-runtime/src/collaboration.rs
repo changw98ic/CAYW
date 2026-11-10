@@ -238,8 +238,13 @@ pub(crate) async fn invoke(
     // the durable question/plan fact stays in Core. The stop time is enforced
     // inside the service instead of by dropping the Host future, because a
     // dropped Host call conservatively records an unknown outcome.
-    let host_timeout = scope.context.inner.config.host.call_timeout;
-    let stop_at = Instant::now() + host_timeout.saturating_sub(host_timeout / 4);
+    let stop_at = scope
+        .context
+        .inner
+        .config
+        .host
+        .call_timeout
+        .map(|host_timeout| Instant::now() + host_timeout.saturating_sub(host_timeout / 4));
     let service = Service {
         scope,
         caller_cancel: cancel.clone(),
@@ -253,7 +258,7 @@ pub(crate) async fn invoke(
 struct Service<'a> {
     scope: &'a Arc<crate::cells::CallScope>,
     caller_cancel: CancellationToken,
-    stop_at: Instant,
+    stop_at: Option<Instant>,
     prepared: PreparedCollaboration,
 }
 #[async_trait]
@@ -291,7 +296,7 @@ async fn ask(
     input: &AskInput,
     caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
-    stop_at: Instant,
+    stop_at: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let context = &scope.context;
     context.check(host_cancel).map_err(known)?;
@@ -301,7 +306,7 @@ async fn ask(
         ));
     }
     scope.check_authority(host_cancel)?;
-    if Instant::now() >= stop_at {
+    if stop_at.is_some_and(|stop| Instant::now() >= stop) {
         return Err(CapabilityError::new(
             "user.ask reached its host deadline before the question was persisted",
         ));
@@ -380,7 +385,7 @@ async fn wait_for_answer(
     after: u64,
     caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
-    stop_at: Instant,
+    stop_at: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let context = &scope.context;
     let mut cursor = after;
@@ -390,7 +395,7 @@ async fn wait_for_answer(
                 "question {question_id} expired: the original capability was cancelled"
             )));
         }
-        if Instant::now() >= stop_at {
+        if stop_at.is_some_and(|stop| Instant::now() >= stop) {
             return Err(CapabilityError::new(format!(
                 "question {question_id} expired: the collaboration call reached its host deadline"
             )));
@@ -435,7 +440,14 @@ async fn wait_for_answer(
             _ = context.cancel.cancelled() => return Err(CapabilityError::new(format!(
                 "question {question_id} expired: the task was cancelled"
             ))),
-            _ = tokio::time::sleep(stop_at.saturating_duration_since(Instant::now())) => return Err(CapabilityError::new(format!(
+            _ = async {
+                match stop_at {
+                    Some(stop) => {
+                        tokio::time::sleep(stop.saturating_duration_since(Instant::now())).await
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            } => return Err(CapabilityError::new(format!(
                 "question {question_id} expired: the collaboration call reached its host deadline"
             ))),
             _ = context.inner.changed.notified() => {},
@@ -757,7 +769,7 @@ fn question_active(
     inner: &Inner,
     session: &str,
     attempt: Option<&AttemptLease>,
-    state: SessionState,
+    _state: SessionState,
     tasks: &[crate::TaskRecord],
     calls: &[CapabilityCallRecord],
     asked: &Asked,
@@ -765,7 +777,7 @@ fn question_active(
     let Some(lease) = attempt else {
         return Ok(false);
     };
-    if lease != &asked.lease || state == SessionState::NeedsReconciliation {
+    if lease != &asked.lease {
         return Ok(false);
     }
     // The answer is accepted only while the original capability call is still

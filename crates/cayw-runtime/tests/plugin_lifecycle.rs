@@ -124,7 +124,7 @@ async fn unloading_architecture_plugin_does_not_freeze_unbound_sessions() {
             "process.echo",
             json!({}),
             CancellationToken::new(),
-            Duration::from_secs(5),
+            Some(Duration::from_secs(5)),
         )
         .await
         .unwrap();
@@ -164,7 +164,7 @@ async fn process_exit_during_capability_preserves_unknown_without_freezing_sessi
         .prompt(&id, "actual process crash", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     assert!(!view.frozen);
     assert!(view.binding.is_none());
     assert!(rt.events(&id, 0, 1000).unwrap().iter().any(
@@ -348,7 +348,7 @@ mod strongflow {
         rt.unload_plugin("strongflow").await.unwrap();
         let recovered = rt.recover(&id).unwrap();
         assert!(recovered.frozen);
-        assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+        assert_eq!(recovered.state, SessionState::Idle);
         let reconciliation = Reconciliation {
             call_id: "lost".into(),
             expected,
@@ -449,10 +449,7 @@ mod strongflow {
         let _ = rt
             .prompt(&id, "failed workflow checkpoint", CancellationToken::new())
             .await;
-        assert_eq!(
-            rt.get(&id).unwrap().state,
-            SessionState::NeedsReconciliation
-        );
+        assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
         let events = rt.events(&id, 0, 1000).unwrap();
         assert_eq!(
             events
@@ -472,8 +469,10 @@ mod strongflow {
             terminal.outcome,
             Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
         ));
+        // The failed checkpoint write keeps the run's slot draining, so new
+        // work for the same session is refused until explicit recovery.
         assert!(
-            rt.enqueue(&id, "blocked after persistence failure")
+            rt.enqueue(&id, "a failed checkpoint blocks new work")
                 .is_err()
         );
     }

@@ -203,7 +203,7 @@ fn main() -> Result {
         "requests": output["model_requests"]["requests"].as_array().map_or(0, Vec::len),
         "settled_tokens": output["model_requests"]["settled_tokens"],
         "reserved_tokens": output["model_requests"]["reserved_tokens"],
-        "budget_unknown": output["model_requests"]["budget_unknown"],
+        "usage_unknown": output["model_requests"]["usage_unknown"],
         "snapshot": output["snapshot"]["snapshot_dir"],
         "original_sqlite_opened": output["snapshot"]["original_sqlite_opened"],
     });

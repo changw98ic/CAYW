@@ -47,9 +47,9 @@ async fn argument_preparation_cannot_dispatch_after_the_deadline() {
     let code = CodeMode::new(
         host.clone(),
         Limits {
-            timeout: Duration::from_millis(20),
-            memory_bytes: 64 * 1024 * 1024,
-            output_bytes: 16 * 1024 * 1024,
+            timeout: Some(Duration::from_millis(20)),
+            memory_bytes: Some(64 * 1024 * 1024),
+            output_bytes: Some(16 * 1024 * 1024),
             ..Limits::default()
         },
     )
@@ -73,8 +73,8 @@ async fn cancellation_during_argument_preparation_starts_no_effect() {
     let code = CodeMode::new(
         host.clone(),
         Limits {
-            memory_bytes: 64 * 1024 * 1024,
-            output_bytes: 16 * 1024 * 1024,
+            memory_bytes: Some(64 * 1024 * 1024),
+            output_bytes: Some(16 * 1024 * 1024),
             ..Limits::default()
         },
     )
@@ -165,11 +165,11 @@ fn unchecked_deep_host_values_do_not_abort_the_process() {
                 cancel: cancel.clone(),
             }),
             Limits {
-                output_bytes: if case == "tiny_budget" {
+                output_bytes: Some(if case == "tiny_budget" {
                     3
                 } else {
                     1024 * 1024
-                },
+                }),
                 ..Limits::default()
             },
         )
@@ -300,7 +300,7 @@ async fn unknown_names_have_bounded_accounted_errors_for_describe_and_call() {
             let code = CodeMode::new(
                 host.clone(),
                 Limits {
-                    output_bytes: limit,
+                    output_bytes: Some(limit),
                     ..Limits::default()
                 },
             )
@@ -360,8 +360,10 @@ async fn every_host_error_is_bounded_without_losing_settled_status_or_unknown() 
             let code = CodeMode::new(
                 Arc::new(ErrorHost),
                 Limits {
-                    output_bytes: limit,
-                    timeout: Duration::from_millis(30),
+                    output_bytes: Some(limit),
+                    timeout: Some(Duration::from_millis(30)),
+                    host_wait: Some(Duration::from_millis(30)),
+                    shutdown_grace: Duration::from_millis(50),
                     ..Limits::default()
                 },
             )
@@ -391,7 +393,7 @@ async fn an_error_after_the_last_payload_byte_keeps_audit_and_omits_its_message(
     let code = CodeMode::new(
         Arc::new(EffectHost::default()),
         Limits {
-            output_bytes: 6, // {} arguments and the true host result.
+            output_bytes: Some(6), // {} arguments and the true host result.
             ..Limits::default()
         },
     )

@@ -68,18 +68,20 @@ async (page) => {
     await capture('noop-cancel-settled');
     results.push({case:'delayed prompt receipt after terminal plus actual cancelled:false',pass:true,session:delayed.id,terminal});
 
-    const reconciliation=await control('session/reconciliation');
+    const interrupted=await control('session/reconciliation');
     await page.locator('#refresh-sessions').click();
-    const item=page.locator('#session-list button').filter({hasText:reconciliation.id.slice(0,20)});
-    await until(()=>item.count().then(Boolean),'reconciliation session missing');
+    const item=page.locator('#session-list button').filter({hasText:interrupted.id.slice(0,20)});
+    await until(()=>item.count().then(Boolean),'interrupted session missing');
     await item.click();
-    await until(async()=>(await page.locator('#session-state').innerText()).includes('待核对'),'durable unknown call missing');
+    await until(async()=>(await page.locator('#session-state').innerText()).includes('就绪'),'interrupted tool call did not leave the session ready');
+    check(await page.locator('#prompt').isEnabled(),'interrupted tool call locked the prompt');
+    check(!(await page.locator('#blocked-text').innerText()).includes('核对'),'interrupted tool call asked the user to reconcile side effects');
     const reconciled=await control('reconcile');
-    await until(async()=>(await status()).observed.delayedSnapshot?.cursor===reconciliation.cursor,'old snapshot was not injected');
-    await until(()=>page.locator('#prompt').isEnabled(),'old snapshot erased consumed Core reconciliation');
+    await until(async()=>(await status()).observed.delayedSnapshot?.cursor===interrupted.cursor,'old snapshot was not injected');
+    await until(()=>page.locator('#prompt').isEnabled(),'old snapshot locked the session');
     check((await page.locator('#event-count').innerText()).includes(`游标 ${reconciled.cursor}`),'reconciliation fact not consumed');
-    await capture('reconciliation-survives-old-snapshot');
-    results.push({case:'real Core reconciliation consumed before delayed unresolved projection',pass:true,session:reconciliation.id,oldCursor:reconciliation.cursor,terminal:reconciled.cursor});
+    await capture('interrupted-tool-session-stays-ready');
+    results.push({case:'real Core interrupted call remains usable before and after delayed unresolved projection',pass:true,session:interrupted.id,oldCursor:interrupted.cursor,terminal:reconciled.cursor});
     await save('results',{results,evidence});
     return {results,evidence};
   } catch(error) {

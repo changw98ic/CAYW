@@ -139,7 +139,7 @@ async fn gateway_http_to_ipc_default_ownership_lifecycle() {
         .expect("bind ipc listener");
     let ipc_addr = ipc_listener.local_addr().expect("ipc local addr");
     let mut ipc_config = ServerConfig::new(IPC_TOKEN);
-    ipc_config.request_timeout = Duration::from_secs(20);
+    ipc_config.request_timeout = Some(Duration::from_secs(20));
     let cancel = CancellationToken::new();
     let ipc_cancel = cancel.child_token();
     let ipc_handle = tokio::spawn(cayw_ipc::serve(

@@ -28,10 +28,11 @@ pub use cayw_device::{
     ProcessRunner, ProcessSpec, TerminationReason,
 };
 pub use process::runner;
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    io::{self, Write},
+    io,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -113,8 +114,12 @@ pub struct Profile {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
-    pub timeout: Duration,
-    pub max_output_bytes: usize,
+    /// `None` (the default) lets the process run until it exits or the caller
+    /// cancels. `Some` enforces an explicit lifetime bound.
+    pub timeout: Option<Duration>,
+    /// `None` (the default) never stops the process for output volume. Above
+    /// the Device inline threshold, output spills to a private file.
+    pub max_output_bytes: Option<usize>,
     pub allow_filter: bool,
     pub io: cayw_device::ProcessIo,
 }
@@ -496,26 +501,40 @@ impl cayw_vision::ImageSink for ContentVisionSink {
     }
 }
 
+/// One optional Host service that could not be constructed. The reason is safe
+/// to show to the user; it never contains credentials or file contents.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DisabledService {
+    pub name: &'static str,
+    pub reason: String,
+}
+
 #[derive(Clone)]
 pub struct HostConfig {
     /// Trusted opt-in to a cooperating, explicitly frozen fs.read view. Outside
     /// editors ignoring Host fences are not observed automatically.
     pub frozen_reads: bool,
-    pub max_argument_bytes: usize,
-    pub max_result_bytes: usize,
+    /// Optional explicit admission limits. `None` (the default) applies no
+    /// artificial bound for that dimension; the enclosing run deadline and
+    /// explicit caller limits still apply.
+    pub max_argument_bytes: Option<usize>,
+    pub max_result_bytes: Option<usize>,
     /// Combined serialized argument and result bytes across this host instance.
-    pub max_total_bytes: usize,
-    pub max_calls: usize,
-    /// Per-file bound for ordinary file reads and for each copied Git metadata
-    /// file. Git reads no longer copy object data or the worktree, so repository
-    /// size and ignored build data do not gate a read. Directory listings remain
-    /// bounded by `max_list_entries`.
-    pub max_file_bytes: usize,
-    /// Directory listing bound and copied Git metadata entry allowance.
-    pub max_list_entries: usize,
-    /// Includes permission waiting and execution. Durable audit writes are awaited
-    /// even after cancellation so a caller cannot mistake an uncommitted result.
-    pub call_timeout: Duration,
+    pub max_total_bytes: Option<usize>,
+    pub max_calls: Option<usize>,
+    /// Optional per-file bound for ordinary file reads and for each copied Git
+    /// metadata file. Git reads no longer copy object data or the worktree, so
+    /// repository size and ignored build data do not gate a read. Directory
+    /// listings are bounded only by an explicitly configured
+    /// `max_list_entries`.
+    pub max_file_bytes: Option<usize>,
+    /// Optional directory listing bound and copied Git metadata entry allowance.
+    pub max_list_entries: Option<usize>,
+    /// Includes permission waiting and execution. `None` (the default) waits
+    /// until cancellation or completion; the enclosing run deadline still stops
+    /// the call. Durable audit writes are awaited even after cancellation so a
+    /// caller cannot mistake an uncommitted result.
+    pub call_timeout: Option<Duration>,
     /// Absolute application-selected git executable; absent means no git catalog.
     /// Read commands use a sanitized private metadata directory and the held root
     /// in place. Worktree symlinks are not followed; a changed object-store
@@ -525,8 +544,12 @@ pub struct HostConfig {
     /// Opt-in for real-repository Git writes. Absent means no write capability.
     /// The identity is host-owned; capabilities are individually policy-gated.
     pub git_writes: Option<GitWritePolicy>,
-    pub process_timeout: Duration,
-    pub max_process_output_bytes: usize,
+    /// `None` (the default) lets process profiles and Git commands run until
+    /// they exit or the caller cancels.
+    pub process_timeout: Option<Duration>,
+    /// `None` (the default) never stops a process for output volume; larger
+    /// output spills to private files.
+    pub max_process_output_bytes: Option<usize>,
     pub profiles: BTreeMap<String, Profile>,
     /// Host-selected interactive profiles. None omits terminal handoffs.
     pub terminal_handoffs: Option<TerminalConfig>,
@@ -575,17 +598,17 @@ impl Default for HostConfig {
     fn default() -> Self {
         Self {
             frozen_reads: false,
-            max_argument_bytes: 2 * 1024 * 1024,
-            max_result_bytes: 2 * 1024 * 1024,
-            max_total_bytes: 16 * 1024 * 1024,
-            max_calls: 256,
-            max_file_bytes: 1024 * 1024,
-            max_list_entries: 4096,
-            call_timeout: Duration::from_secs(60),
+            max_argument_bytes: None,
+            max_result_bytes: None,
+            max_total_bytes: None,
+            max_calls: None,
+            max_file_bytes: None,
+            max_list_entries: None,
+            call_timeout: None,
             git_program: None,
             git_writes: None,
-            process_timeout: Duration::from_secs(30),
-            max_process_output_bytes: 256 * 1024,
+            process_timeout: None,
+            max_process_output_bytes: None,
             profiles: BTreeMap::new(),
             terminal_handoffs: None,
             data: Some(cayw_data::Limits::default()),
@@ -603,22 +626,22 @@ impl Default for HostConfig {
 }
 impl HostConfig {
     fn validate(&self) -> Result<(), CapabilityError> {
-        if self.max_argument_bytes == 0
-            || self.max_result_bytes < 2
-            || self.max_total_bytes < 2
-            || self.max_calls == 0
-            || self.max_file_bytes == 0
-            || self.max_list_entries == 0
-            || self.max_process_output_bytes == 0
-            || self.call_timeout.is_zero()
-            || self.process_timeout.is_zero()
-            || Instant::now().checked_add(self.call_timeout).is_none()
-            || Instant::now().checked_add(self.process_timeout).is_none()
-            || self.max_file_bytes > 64 * 1024 * 1024
-            || self.max_list_entries > 100_000
+        if self.max_argument_bytes == Some(0)
+            || self.max_result_bytes.is_some_and(|limit| limit < 2)
+            || self.max_total_bytes.is_some_and(|limit| limit < 2)
+            || self.max_calls == Some(0)
+            || self.max_file_bytes == Some(0)
+            || self.max_list_entries == Some(0)
+            || self.max_process_output_bytes == Some(0)
+            || self.call_timeout.is_some_and(|timeout| {
+                timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
+            })
+            || self.process_timeout.is_some_and(|timeout| {
+                timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
+            })
         {
             return Err(failure(
-                "host budgets must be positive, bounded, and have representable deadlines",
+                "host budgets must be positive and have representable deadlines",
             ));
         }
         if let Some(limits) = self.data {
@@ -627,21 +650,15 @@ impl HostConfig {
         if let Some(limits) = &self.workspace {
             limits.validate()?;
         }
-        if let Some(limits) = self.vision {
-            limits.validate()?;
-        }
         if let Some(program) = &self.git_program {
             process::validate_program(program)?;
         }
         git::validate_config(self)?;
         if let Some(config) = &self.terminal_handoffs {
             terminal::validate_config(config)?;
-            if config
-                .limits
-                .max_read_bytes
-                .saturating_mul(4)
-                .saturating_add(4096)
-                > self.max_result_bytes
+            if let (Some(read), Some(result)) =
+                (config.limits.max_read_bytes, self.max_result_bytes)
+                && read.saturating_mul(4).saturating_add(4096) > result
             {
                 return Err(failure("terminal read page exceeds host result budget"));
             }
@@ -660,9 +677,9 @@ impl HostConfig {
             if matches!(profile.io, cayw_device::ProcessIo::Pty { .. }) {
                 return Err(failure("terminal execution is only supported on macOS"));
             }
-            if profile.timeout.is_zero()
-                || Instant::now().checked_add(profile.timeout).is_none()
-                || profile.max_output_bytes == 0
+            if profile.timeout.is_some_and(|timeout| {
+                timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
+            }) || profile.max_output_bytes == Some(0)
                 || (profile.allow_filter && profile.kind != ProfileKind::Test)
                 || profile.args.len() > 256
                 || profile
@@ -732,6 +749,7 @@ pub struct Host {
     web_access: Option<Arc<cayw_web_access::WebAccess>>,
     vision: Option<Arc<cayw_vision::VisionService>>,
     external: Option<Arc<dyn ExternalHost>>,
+    disabled_services: Arc<Vec<DisabledService>>,
 }
 impl Host {
     /// Opens one directory capability. File operations never reopen an ambient
@@ -754,20 +772,65 @@ impl Host {
         gate: Arc<dyn PermissionGate>,
         audit: Arc<dyn AuditSink>,
     ) -> Result<Self, CapabilityError> {
-        Self::from_root(
+        let mut host = Self::from_root(
             self.root.try_clone().map_err(io_error)?,
             gate,
             audit,
             (*self.config).clone(),
-        )
+        )?;
+        // The parent already recorded why an optional service is absent. Carry
+        // that reason into the task scope instead of silently dropping it.
+        host.disabled_services = self.disabled_services.clone();
+        Ok(host)
     }
     fn from_root(
         root: Dir,
         gate: Arc<dyn PermissionGate>,
         audit: Arc<dyn AuditSink>,
-        config: HostConfig,
+        mut config: HostConfig,
     ) -> Result<Self, CapabilityError> {
         config.validate()?;
+        // An optional service that cannot be constructed only disables its own
+        // tool group. Record a visible reason and keep the Host usable.
+        let mut disabled_services = Vec::new();
+        let web_access = match config.web_access.take() {
+            Some(options) => {
+                let options = options.normalized();
+                match options.build_with_sink(config.web_access_sink.clone()) {
+                    Ok(service) => {
+                        config.web_access = Some(options);
+                        Some(Arc::new(service))
+                    }
+                    Err(error) => {
+                        disabled_services.push(DisabledService {
+                            name: "web_access",
+                            reason: cayw_web_access::host_error_message(&error),
+                        });
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let vision = match config.vision.take() {
+            Some(limits) => match cayw_vision::VisionService::from_env(limits) {
+                Ok(mut service) => {
+                    if let Some(sink) = &config.vision_sink {
+                        service = service.with_sink(Arc::clone(sink));
+                    }
+                    config.vision = Some(limits);
+                    Some(Arc::new(service))
+                }
+                Err(error) => {
+                    disabled_services.push(DisabledService {
+                        name: "vision",
+                        reason: error.to_string(),
+                    });
+                    None
+                }
+            },
+            None => None,
+        };
         let mut catalog = BTreeMap::new();
         for (definition, executor) in catalog::definitions(&config) {
             let validator = ArgumentValidator::new(&definition.parameters)
@@ -794,23 +857,6 @@ impl Host {
             .transpose()?
             .map(Arc::new);
         let external = config.external.clone();
-        let web_access = match &config.web_access {
-            Some(opts) => Some(Arc::new(
-                opts.build_with_sink(config.web_access_sink.clone())
-                    .map_err(|e| failure(cayw_web_access::host_error_message(&e)))?,
-            )),
-            None => None,
-        };
-        let vision = match config.vision {
-            Some(limits) => {
-                let mut svc = cayw_vision::VisionService::from_env(limits)?;
-                if let Some(sink) = &config.vision_sink {
-                    svc = svc.with_sink(Arc::clone(sink));
-                }
-                Some(Arc::new(svc))
-            }
-            None => None,
-        };
         Ok(Self {
             root: Arc::new(root),
             gate,
@@ -825,7 +871,12 @@ impl Host {
             web_access,
             vision,
             external,
+            disabled_services: Arc::new(disabled_services),
         })
+    }
+    /// Optional services that construction disabled, with a user-safe reason.
+    pub fn disabled_services(&self) -> &[DisabledService] {
+        &self.disabled_services
     }
     /// Shared F04 bridge handle (same instance as editor/Trace when they clone it).
     pub fn codeintel_bridge(&self) -> Option<SymbolVersionBridge> {
@@ -921,6 +972,7 @@ impl Host {
             web_access: self.web_access.clone(),
             vision: self.vision.clone(),
             external: self.external.clone(),
+            disabled_services: self.disabled_services.clone(),
         })
     }
 
@@ -1014,7 +1066,11 @@ impl Host {
             if !process::valid_name(&definition.name) {
                 return Err(failure("invalid service capability name"));
             }
-            if definition.description.len() > self.config.max_argument_bytes {
+            if self
+                .config
+                .max_argument_bytes
+                .is_some_and(|limit| definition.description.len() > limit)
+            {
                 return Err(failure("service description exceeds byte limit"));
             }
             json_size(&definition.parameters, self.config.max_argument_bytes)?;
@@ -1093,7 +1149,11 @@ impl Host {
     pub fn audit_failure(&self) -> Option<String> {
         lock(&self.safety.audit_failure).clone()
     }
-    fn check(&self, cancel: &CancellationToken, deadline: Instant) -> Result<(), CapabilityError> {
+    fn check(
+        &self,
+        cancel: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<(), CapabilityError> {
         if self.outcome_unknown() {
             let reason = self.audit_failure().map_or_else(
                 || "a previous capability requires reconciliation".into(),
@@ -1112,17 +1172,20 @@ impl Host {
     }
     fn admit(&self, bytes: usize) -> Result<ResponseBudget, CapabilityError> {
         let mut budget = lock(&self.budget);
-        let available = self
-            .config
-            .max_total_bytes
-            .saturating_sub(budget.bytes)
-            .saturating_sub(budget.reserved);
+        let available = self.config.max_total_bytes.map(|max_total| {
+            max_total
+                .saturating_sub(budget.bytes)
+                .saturating_sub(budget.reserved)
+        });
         // Reserve empty JSON messages for both the result sent to audit and a
         // possible settlement failure. Concurrent queued calls cannot consume it.
         if budget.exhausted
-            || budget.calls >= self.config.max_calls
-            || bytes > available.saturating_sub(4)
-            || available < 4
+            || self
+                .config
+                .max_calls
+                .is_some_and(|max_calls| budget.calls >= max_calls)
+            || available
+                .is_some_and(|available| bytes > available.saturating_sub(4) || available < 4)
         {
             return Err(CapabilityError::stopped(
                 CapabilityStop::Budget,
@@ -1150,7 +1213,7 @@ impl Host {
         name: &str,
         args: Value,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
         service: Option<&dyn ExternalHost>,
     ) -> Result<Value, CapabilityError> {
         match executor {
@@ -1158,9 +1221,9 @@ impl Host {
                 if matches!(name, "fs.write" | "fs.patch") {
                     let (workspace, workspace_deadline) =
                         self.open_workspace(cancel, deadline).await?;
-                    let _lock = filesystem::write_lock(&self.root, cancel, deadline).await?;
                     self.ensure_workspace_settled(&workspace, cancel, workspace_deadline)
                         .await?;
+                    let _lock = filesystem::write_lock(&self.root, cancel, deadline).await?;
                     filesystem::execute(self, name, &args, cancel, deadline).await
                 } else {
                     filesystem::execute(self, name, &args, cancel, deadline).await
@@ -1185,9 +1248,9 @@ impl Host {
             }
             Executor::Profile => {
                 let (workspace, workspace_deadline) = self.open_workspace(cancel, deadline).await?;
-                let _lock = filesystem::write_lock(&self.root, cancel, deadline).await?;
                 self.ensure_workspace_settled(&workspace, cancel, workspace_deadline)
                     .await?;
+                let _lock = filesystem::write_lock(&self.root, cancel, deadline).await?;
                 process::execute(self, name, &args, cancel, deadline).await
             }
             Executor::Data => {
@@ -1198,14 +1261,19 @@ impl Host {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "data capability cancelled")),
-                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "data capability deadline reached")),
+                    _ = sleep_deadline(deadline) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "data capability deadline reached")),
                     result = cayw_data::execute(name, args, cancel.clone(), limits) => result,
                 }
             }
             Executor::Workspace => {
                 let (workspace, workspace_deadline) = self.open_workspace(cancel, deadline).await?;
                 workspace
-                    .execute_until(name, &args, cancel.clone(), workspace_deadline)
+                    .execute_until(
+                        name,
+                        &args,
+                        cancel.clone(),
+                        deadline_instant(workspace_deadline),
+                    )
                     .await
             }
             Executor::CodeIntel => codeintel::execute(self, name, &args, cancel, deadline).await,
@@ -1217,7 +1285,7 @@ impl Host {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "web-access capability cancelled")),
-                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "web-access capability deadline reached")),
+                    _ = sleep_deadline(deadline) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "web-access capability deadline reached")),
                     result = access.call(name, args) => result.map_err(|error| {
                         let message = cayw_web_access::host_error_message(&error);
                         if error.outcome_unknown {
@@ -1237,7 +1305,7 @@ impl Host {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "vision capability cancelled")),
-                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "vision capability deadline reached")),
+                    _ = sleep_deadline(deadline) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "vision capability deadline reached")),
                     result = cayw_vision::execute(service, name, args, cancel.clone()) => result,
                 }
             }
@@ -1248,7 +1316,7 @@ impl Host {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(CapabilityError::unknown("external capability cancelled after admission")),
-                    _ = tokio::time::sleep_until(deadline.into()) => Err(CapabilityError::unknown("external capability timed out after admission")),
+                    _ = sleep_deadline(deadline) => Err(CapabilityError::unknown("external capability timed out after admission")),
                     result = external.call(name, args, cancel.clone()) => result,
                 }
             }
@@ -1258,24 +1326,28 @@ impl Host {
     pub(crate) async fn open_workspace(
         &self,
         cancel: &CancellationToken,
-        deadline: Instant,
-    ) -> Result<(cayw_workspace::Workspace, Instant), CapabilityError> {
+        deadline: Option<Instant>,
+    ) -> Result<(cayw_workspace::Workspace, Option<Instant>), CapabilityError> {
         check(cancel, deadline)?;
         let mut limits = self.config.workspace.clone().unwrap_or_default();
-        limits.max_file_bytes = limits.max_file_bytes.min(self.config.max_file_bytes);
-        limits.max_tree_entries = limits.max_tree_entries.min(self.config.max_list_entries);
-        let deadline = deadline.min(
-            Instant::now()
-                .checked_add(limits.timeout)
-                .ok_or_else(|| failure("invalid workspace deadline"))?,
-        );
+        limits.max_file_bytes = min_opt(limits.max_file_bytes, self.config.max_file_bytes);
+        limits.max_tree_entries = min_opt(limits.max_tree_entries, self.config.max_list_entries);
+        let deadline = match limits.timeout {
+            Some(timeout) => {
+                let local = Instant::now()
+                    .checked_add(timeout)
+                    .ok_or_else(|| failure("invalid workspace deadline"))?;
+                Some(deadline.map_or(local, |deadline| deadline.min(local)))
+            }
+            None => deadline,
+        };
         loop {
             check(cancel, deadline)?;
             match cayw_workspace::Workspace::open_dir_until(
                 self.root.try_clone().map_err(io_error)?,
                 limits.clone(),
                 cancel.clone(),
-                deadline,
+                deadline_instant(deadline),
             ) {
                 Ok(workspace) => return Ok((workspace, deadline)),
                 Err(error)
@@ -1288,7 +1360,7 @@ impl Host {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return Err(CapabilityError::stopped(CapabilityStop::Cancelled, "cancelled while opening workspace")),
-                        _ = tokio::time::sleep_until(deadline.into()) => return Err(CapabilityError::stopped(CapabilityStop::Timeout, "workspace opening deadline reached")),
+                        _ = sleep_deadline(deadline) => return Err(CapabilityError::stopped(CapabilityStop::Timeout, "workspace opening deadline reached")),
                         _ = tokio::time::sleep(Duration::from_millis(5)) => {},
                     }
                 }
@@ -1298,21 +1370,37 @@ impl Host {
     }
 
     /// Must be called while holding the same OS lock as the subsequent mutation.
-    /// A pending journal is a known refusal before this call has changed anything;
-    /// it does not clear any earlier unknown outcome on this host.
+    /// Prepared batches that never reached submission are inert and are
+    /// discarded here. A pending interrupted journal is a known refusal before
+    /// this call has changed anything; it does not clear any earlier unknown
+    /// outcome on this host.
     async fn ensure_workspace_settled(
         &self,
         workspace: &cayw_workspace::Workspace,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<(), CapabilityError> {
         check(cancel, deadline)?;
+        loop {
+            match workspace.discard_prepared_batches() {
+                Ok(_) => break,
+                Err(error) if !error.outcome_unknown && error.message == "workspace is busy" => {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(CapabilityError::stopped(CapabilityStop::Cancelled, "cancelled while settling prepared workspace batches")),
+                        _ = sleep_deadline(deadline) => return Err(CapabilityError::stopped(CapabilityStop::Timeout, "prepared workspace settlement deadline reached")),
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let status = workspace
             .execute_until(
                 "fs.batch_status",
                 &serde_json::json!({}),
                 cancel.clone(),
-                deadline,
+                deadline_instant(deadline),
             )
             .await?;
         let batches = status
@@ -1361,14 +1449,13 @@ impl Host {
         cancel: CancellationToken,
         service: Option<&dyn ExternalHost>,
     ) -> Result<Value, CapabilityError> {
-        let deadline = Instant::now()
-            .checked_add(self.config.call_timeout)
-            .ok_or_else(|| self.diagnostic(failure("invalid deadline")))?;
+        let deadline =
+            call_deadline(self.config.call_timeout).map_err(|error| self.diagnostic(error))?;
         // Ordinary calls retain ordered permission/audit admission. Frozen reads
         // never need this lane to settle or acknowledge their original ticket.
         let mut lane = Some(tokio::select! { biased;
             _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
-            _ = tokio::time::sleep_until(deadline.into()) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
+            _ = sleep_deadline(deadline) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
             guard = self.execution.lock() => guard,
         });
         let mut call = self
@@ -1438,7 +1525,7 @@ impl Host {
         arguments: Arguments,
         cancel: CancellationToken,
         service: bool,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<OwnedCall, CapabilityError> {
         let name = capability.definition.name.as_str();
         let child = cancel.child_token();
@@ -1446,17 +1533,16 @@ impl Host {
         let admission = (|| {
             self.check(&child, deadline)?;
             let argument_limit = match capability.executor {
-                Executor::Data => self.config.data.map(|limits| limits.input_bytes),
+                Executor::Data => self.config.data.and_then(|limits| limits.input_bytes),
                 Executor::Workspace => self
                     .config
                     .workspace
                     .as_ref()
-                    .map(|limits| limits.max_argument_bytes),
+                    .and_then(|limits| limits.max_argument_bytes),
                 Executor::Vision => self.config.vision.map(|limits| limits.input_bytes),
                 _ => None,
-            }
-            .unwrap_or(self.config.max_argument_bytes)
-            .min(self.config.max_argument_bytes);
+            };
+            let argument_limit = min_opt(argument_limit, self.config.max_argument_bytes);
             let size = json_size(&arguments.0, argument_limit)?;
             capability
                 .validator
@@ -1478,7 +1564,7 @@ impl Host {
         tokio::select! {
             biased;
             _ = child.cancelled() => return Err(response.error(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled before permission"))),
-            _ = tokio::time::sleep_until(deadline.into()) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability permission deadline reached"))),
+            _ = sleep_deadline(deadline) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability permission deadline reached"))),
             result = self.gate.authorize(name, &arguments.0, child.clone()) => {
                 if let Err(error) = result {
                     if error.outcome_unknown { self.safety.unknown.store(true, Ordering::Release); }
@@ -1528,9 +1614,8 @@ impl Host {
         cancel: CancellationToken,
     ) -> Result<FrozenReadTicket, CapabilityError> {
         let capability = self.catalog.get("fs.read").expect("filesystem catalog");
-        let deadline = Instant::now()
-            .checked_add(self.config.call_timeout)
-            .ok_or_else(|| self.diagnostic(failure("invalid deadline")))?;
+        let deadline =
+            call_deadline(self.config.call_timeout).map_err(|error| self.diagnostic(error))?;
         let mut call = self
             .admit_owned(capability, Arguments(arguments), cancel, false, deadline)
             .await?;
@@ -1552,7 +1637,7 @@ struct OwnedCall {
     arguments: Arguments,
     response: ResponseBudget,
     child: CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
     guard: CallGuard,
     _cancel_on_drop: CancelCall,
 }
@@ -1597,13 +1682,13 @@ struct ResponseBudget {
     reserved: usize,
 }
 impl ResponseBudget {
-    fn available(&self, budget: &Budget, keep: usize) -> usize {
-        self.host
-            .config
-            .max_total_bytes
-            .saturating_sub(budget.bytes)
-            .saturating_sub(budget.reserved.saturating_sub(self.reserved))
-            .saturating_sub(keep)
+    fn available(&self, budget: &Budget, keep: usize) -> Option<usize> {
+        self.host.config.max_total_bytes.map(|max_total| {
+            max_total
+                .saturating_sub(budget.bytes)
+                .saturating_sub(budget.reserved.saturating_sub(self.reserved))
+                .saturating_sub(keep)
+        })
     }
     fn release(&mut self, budget: &mut Budget, keep: usize) {
         budget.reserved -= self.reserved.saturating_sub(keep);
@@ -1619,7 +1704,7 @@ impl ResponseBudget {
         // An already exhausted caller has no encodable result allowance. Return
         // only the empty terminal control error, without another admission. All
         // encodable diagnostics below are charged at their full serialized size.
-        if available < 2 {
+        if available.is_some_and(|available| available < 2) {
             budget.exhausted = true;
             error.stop.get_or_insert(CapabilityStop::Budget);
             error.message.clear();
@@ -1628,11 +1713,11 @@ impl ResponseBudget {
         }
         let result_limit = self.host.config.max_result_bytes;
         error.message = fit_message(error.message, result_limit);
-        let limit = result_limit.min(available);
+        let limit = min_opt(result_limit, available);
         let size = serde_json::to_vec(&error.message)
             .expect("string JSON serialization")
             .len();
-        if size > available {
+        if available.is_some_and(|available| size > available) {
             budget.exhausted = true;
             error.stop.get_or_insert(CapabilityStop::Budget);
             error.message = fit_message(error.message, limit);
@@ -1656,11 +1741,10 @@ impl ResponseBudget {
         let charged = {
             let shared = self.host.budget.clone();
             let mut budget = lock(&shared);
-            let limit = self
-                .host
-                .config
-                .max_result_bytes
-                .min(self.available(&budget, 2));
+            let limit = min_opt(
+                self.host.config.max_result_bytes,
+                self.available(&budget, 2),
+            );
             match json_size(&value, limit) {
                 Ok(size) => {
                     budget.bytes += size;
@@ -1690,7 +1774,11 @@ impl Drop for ResponseBudget {
 }
 
 /// Fits the serialized JSON string, including quotes, escapes and UTF-8 bytes.
-fn fit_message(mut message: String, limit: usize) -> String {
+/// `None` leaves the message unchanged.
+fn fit_message(mut message: String, limit: Option<usize>) -> String {
+    let Some(limit) = limit else {
+        return message;
+    };
     let mut used = 2usize;
     let mut end = 0;
     for (at, character) in message.char_indices() {
@@ -1730,7 +1818,7 @@ impl Drop for Arguments {
 struct StartingGuard {
     safety: Arc<Safety>,
     cancel: CancellationToken,
-    max_error_bytes: usize,
+    max_error_bytes: Option<usize>,
     pending: bool,
 }
 impl Drop for StartingGuard {
@@ -1751,7 +1839,7 @@ struct CallGuard {
     audit: Arc<dyn AuditSink>,
     safety: Arc<Safety>,
     cancel: CancellationToken,
-    max_error_bytes: usize,
+    max_error_bytes: Option<usize>,
     settled: bool,
 }
 impl Drop for CallGuard {
@@ -1782,14 +1870,28 @@ pub(crate) fn failure(message: impl Into<String>) -> CapabilityError {
 pub(crate) fn io_error(error: io::Error) -> CapabilityError {
     failure(error.to_string())
 }
-pub(crate) fn check(cancel: &CancellationToken, deadline: Instant) -> Result<(), CapabilityError> {
+/// Internal executors take an optional absolute deadline. `None` means the
+/// wait ends only by cancellation or completion.
+pub(crate) fn call_deadline(timeout: Option<Duration>) -> Result<Option<Instant>, CapabilityError> {
+    timeout
+        .map(|timeout| {
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| failure("invalid deadline"))
+        })
+        .transpose()
+}
+pub(crate) fn check(
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(), CapabilityError> {
     if cancel.is_cancelled() {
         return Err(CapabilityError::stopped(
             CapabilityStop::Cancelled,
             "capability cancelled",
         ));
     }
-    if Instant::now() >= deadline {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         return Err(CapabilityError::stopped(
             CapabilityStop::Timeout,
             "capability deadline reached",
@@ -1797,69 +1899,74 @@ pub(crate) fn check(cancel: &CancellationToken, deadline: Instant) -> Result<(),
     }
     Ok(())
 }
-fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
-    // Bound recursion before serde or a schema validator can traverse arbitrary
-    // values. This also caps traversal work before exact serialized accounting.
-    fn shape(
-        value: &Value,
-        depth: usize,
-        used: &mut usize,
-        limit: usize,
-    ) -> Result<(), CapabilityError> {
-        if depth > 128 {
-            return Err(failure("JSON nesting limit exceeded"));
-        }
-        *used = used.saturating_add(1);
-        if *used > limit {
+/// Waits until the optional deadline; without one it never resolves on its own.
+pub(crate) async fn sleep_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending().await,
+    }
+}
+/// `cayw_workspace` still takes an absolute `Instant`. An absent host deadline
+/// becomes a far-future sentinel only at that boundary, never a product limit.
+pub(crate) fn deadline_instant(deadline: Option<Instant>) -> Instant {
+    deadline.unwrap_or_else(|| Instant::now() + UNBOUNDED_WAIT)
+}
+/// Combines optional bounds. `None` means unbounded; a `Some` value caps the
+/// other side, and two `Some` values keep the smaller one.
+pub(crate) fn min_opt<T: Ord>(left: Option<T>, right: Option<T>) -> Option<T> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+/// An unconfigured call timeout means the wait ends only by cancellation or
+/// completion, so the workspace-boundary sentinel is far beyond any real run
+/// rather than a product limit.
+const UNBOUNDED_WAIT: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
+
+fn json_size(value: &Value, limit: Option<usize>) -> Result<usize, CapabilityError> {
+    // Exact canonical JSON byte count, computed with an explicit stack so an
+    // arbitrarily deep value cannot overflow the call stack. Only an explicitly
+    // configured byte limit rejects the value.
+    fn string_size(value: &str) -> Result<usize, CapabilityError> {
+        serde_json::to_string(value)
+            .map(|value| value.len())
+            .map_err(|error| CapabilityError::stopped(CapabilityStop::Budget, error.to_string()))
+    }
+    fn add(used: &mut usize, bytes: usize, limit: Option<usize>) -> Result<(), CapabilityError> {
+        *used = used.checked_add(bytes).ok_or_else(|| {
+            CapabilityError::stopped(CapabilityStop::Budget, "JSON byte size overflow")
+        })?;
+        if limit.is_some_and(|limit| *used > limit) {
             return Err(CapabilityError::stopped(
                 CapabilityStop::Budget,
                 "JSON byte budget exceeded",
             ));
         }
-        match value {
-            Value::Array(values) => {
-                for value in values {
-                    shape(value, depth + 1, used, limit)?;
-                }
-            }
-            Value::Object(values) => {
-                for (key, value) in values {
-                    *used = used.saturating_add(key.len());
-                    shape(value, depth + 1, used, limit)?;
-                }
-            }
-            Value::String(text) => {
-                *used = used.saturating_add(text.len());
-                if *used > limit {
-                    return Err(CapabilityError::stopped(
-                        CapabilityStop::Budget,
-                        "JSON byte budget exceeded",
-                    ));
-                }
-            }
-            _ => {}
-        }
         Ok(())
     }
-    shape(value, 0, &mut 0, limit)?;
-    struct Counter {
-        used: usize,
-        limit: usize,
-    }
-    impl Write for Counter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.len() > self.limit.saturating_sub(self.used) {
-                return Err(io::Error::other("JSON byte budget exceeded"));
+    let mut used = 0usize;
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Null => add(&mut used, 4, limit)?,
+            Value::Bool(true) => add(&mut used, 4, limit)?,
+            Value::Bool(false) => add(&mut used, 5, limit)?,
+            Value::Number(number) => add(&mut used, number.to_string().len(), limit)?,
+            Value::String(value) => add(&mut used, string_size(value)?, limit)?,
+            Value::Array(values) => {
+                add(&mut used, 2 + values.len().saturating_sub(1), limit)?;
+                pending.extend(values);
             }
-            self.used += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
+            Value::Object(values) => {
+                add(&mut used, 2 + values.len().saturating_sub(1), limit)?;
+                for (key, value) in values {
+                    add(&mut used, string_size(key)? + 1, limit)?;
+                    pending.push(value);
+                }
+            }
         }
     }
-    let mut counter = Counter { used: 0, limit };
-    serde_json::to_writer(&mut counter, value)
-        .map_err(|error| CapabilityError::stopped(CapabilityStop::Budget, error.to_string()))?;
-    Ok(counter.used)
+    Ok(used)
 }

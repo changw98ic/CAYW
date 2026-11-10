@@ -9,7 +9,7 @@
 - 每次调用取得 plugin 代际快照；卸载取消旧代际中的请求，返回结果前再次检查代际。注册表不持锁等待 plugin 代码，不同 plugin 可以并行运行。同一个 External plugin 顺序处理协议请求。
 - plugin 返回的 JSON 仅是数据，不会变成权限或用户审批。宿主必须保持这条边界；恶意 Native Rust 代码和 External 进程本身都不能靠此库获得安全隔离。
 - macOS 本地产品的所有 plugin 进程都由设备上的唯一 Client 启动、停止和监管。WorkspaceArchitecture plugin 可以按工作区启用，但不能绕过 Client 直连工作区或创建工作区自己的进程生命周期。普通架构 plugin 不绑定普通 Session；StrongFlow 是保留专用 binding、冻结和显式 Fork 的例外。
-- 取消、超时、卸载、传输失败或 plugin 明确报告未知结果时，`PluginError::outcome_unknown()` 为真。终止等待或杀进程不能证明副作用已回滚，宿主必须核对再重试。`request_shutdown` 只关闭准入并发出取消，不能阻塞；宿主随后异步等待 `wait_shutdown`，确认该实例的调用、supervisor 和外部进程已经结束。原生 plugin 也必须主动响应取消，不能在异步函数中阻塞线程。
+- 已经运行的调用中，取消、超时、卸载、传输失败或 plugin 明确报告未知结果时，`PluginError::outcome_unknown()` 为真。终止等待或杀进程不能证明副作用已回滚，宿主必须核对再重试。启动和握手阶段按进程事实区分：进程从未启动，或终止并等待确认已退出时，库返回已知的 `PluginError::Unavailable` 启动失败，不标成未知，宿主可以直接显式重试。`request_shutdown` 只关闭准入并发出取消，不能阻塞；宿主随后异步等待 `wait_shutdown`，确认该实例的调用、supervisor 和外部进程已经结束。原生 plugin 也必须主动响应取消，不能在异步函数中阻塞线程。
 
 ## External 协议 v1
 
@@ -25,7 +25,7 @@
 {"type":"response","request_id":2,"result":{"status":"error","message":"known failure","outcome_unknown":false}}
 ```
 
-一个请求恰好对应一个响应。取消、超时、格式错误、错配、输出超限、未知副作用或卸载均使进程终结并拒绝继续调用；普通已知失败可以继续。丢弃正在等待的 Future 也传播取消。macOS 上新建独立进程组，正常和异常释放都向整个组发送 SIGKILL，随后回收直接子进程；主动脱离该进程组的后代不受此机制保证。`shutdown_timeout` 限制握手失败和卸载后的退出确认，默认是 10 秒。终止、等待或超时无法确认清理时返回未知结果，并保留原 PID、启动时间、命令和进程组。后续 `wait_shutdown` 重新观察这个原实例，不返回缓存的旧错误，也不启动新进程。PID 复用、任意说明文字或缺少身份都不能证明清理完成；只有原进程与进程组确认停止后，注册表才移除阻断。独立进程不是安全沙箱。
+一个请求恰好对应一个响应。取消、超时、格式错误、错配、输出超限、未知副作用或卸载均使进程终结并拒绝继续调用；普通已知失败可以继续。丢弃正在等待的 Future 也传播取消。macOS 上新建独立进程组，正常和异常释放都向整个组发送 SIGKILL，随后回收直接子进程；主动脱离该进程组的后代不受此机制保证。`shutdown_timeout` 限制握手失败和卸载后的退出确认，默认是 10 秒。终止、等待或超时无法确认清理时返回未知结果，并保留原 PID、启动时间、命令和进程组。握手失败经 SIGKILL 进程组并确认首领退出后，返回已知的启动失败（`Unavailable`），不再让调用方以为结果未知；macOS 在进程组只剩僵尸首领时 `killpg` 返回 `EPERM`，此时首领已经退出，按已确认退出处理。只有 terminate / wait 无法确认时才返回 `OutcomeUnknownProcess`。后续 `wait_shutdown` 重新观察这个原实例，不返回缓存的旧错误，也不启动新进程。PID 复用、任意说明文字或缺少身份都不能证明清理完成；只有原进程与进程组确认停止后，注册表才移除阻断。缺少进程身份或陈旧阻断的显式清除由上层 Runtime 提供，本库只提供原进程身份和确认结果。独立进程不是安全沙箱。
 
 `cayw-plugin-fixture` 是测试用真实 Rust 子进程，可模拟握手、往返、卡住、崩溃、错编号、超大输出、伪审批字段和 Unix 后代进程，不连接网络。
 

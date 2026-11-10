@@ -50,7 +50,7 @@ async fn model_plan_update_reaches_core_as_a_successful_capability() {
         .prompt(&id, "plan the work", CancellationToken::new())
         .await
         .unwrap();
-    assert_ne!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
 
     let records = rt.events(&id, 0, 1000).unwrap();

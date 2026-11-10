@@ -115,7 +115,7 @@ async fn acquire(
     host: &Host,
     exclusive: bool,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<std::fs::File, CapabilityError> {
     let file = open(&host.root, FENCE)?;
     loop {
@@ -130,7 +130,7 @@ async fn acquire(
             Err(TryLockError::Error(error)) => return Err(io_error(error)),
             Err(TryLockError::WouldBlock) => tokio::select! { biased;
                 _ = cancel.cancelled() => return Err(failure("cancelled while waiting for frozen view")),
-                _ = tokio::time::sleep_until(deadline.into()) => return Err(failure("frozen view deadline reached")),
+                _ = crate::sleep_deadline(deadline) => return Err(failure("frozen view deadline reached")),
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {},
             },
         }
@@ -468,7 +468,7 @@ impl Host {
     pub(crate) async fn read_lease(
         &self,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<ReadLease, CapabilityError> {
         if !self.config.frozen_reads {
             return Err(failure("frozen file views are not enabled by the host"));
@@ -514,7 +514,7 @@ impl Host {
         audit_id: &str,
         unconfined: bool,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Mutation, CapabilityError> {
         let file = acquire(self, true, cancel, deadline).await?;
         check_fault(self)?;
@@ -550,9 +550,7 @@ impl Host {
         &self,
         cancel: CancellationToken,
     ) -> Result<Option<PendingMutation>, CapabilityError> {
-        let deadline = Instant::now()
-            .checked_add(self.config.call_timeout)
-            .ok_or_else(|| failure("invalid deadline"))?;
+        let deadline = crate::call_deadline(self.config.call_timeout)?;
         let _file = acquire(self, false, &cancel, deadline).await?;
         pending(self, read_state(self)?.as_ref())
     }
@@ -560,9 +558,7 @@ impl Host {
         &self,
         cancel: CancellationToken,
     ) -> Result<Vec<ReadFenceFault>, CapabilityError> {
-        let deadline = Instant::now()
-            .checked_add(self.config.call_timeout)
-            .ok_or_else(|| failure("invalid deadline"))?;
+        let deadline = crate::call_deadline(self.config.call_timeout)?;
         let _file = acquire(self, false, &cancel, deadline).await?;
         read_faults(self)
     }
@@ -582,9 +578,7 @@ impl Host {
                 ));
             }
         }
-        let deadline = Instant::now()
-            .checked_add(self.config.call_timeout)
-            .ok_or_else(|| failure("invalid deadline"))?;
+        let deadline = crate::call_deadline(self.config.call_timeout)?;
         let _file = acquire(self, true, &cancel, deadline).await?;
         let state =
             read_state(self)?.ok_or_else(|| failure("original generation state is absent"))?;
@@ -643,9 +637,7 @@ impl Host {
                 ));
             }
         }
-        let deadline = Instant::now()
-            .checked_add(self.config.call_timeout)
-            .ok_or_else(|| failure("invalid deadline"))?;
+        let deadline = crate::call_deadline(self.config.call_timeout)?;
         let _file = acquire(self, true, &cancel, deadline).await?;
         let saved = read_state(self)?;
         if pending(self, saved.as_ref())?.as_ref() != Some(&evidence.pending) {
@@ -729,7 +721,7 @@ impl FrozenReadTicket {
     pub fn audit_id(&self) -> &str {
         &self.call.guard.id
     }
-    pub fn deadline(&self) -> Instant {
+    pub fn deadline(&self) -> Option<Instant> {
         self.call.deadline
     }
     pub fn check(&self) -> Result<(), CapabilityError> {
@@ -767,11 +759,31 @@ impl FrozenReadTicket {
             .get("content")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| failure("frozen value has no exact bytes"))?;
-        if content.len() > self.call.host.config.max_file_bytes
+        if self
+            .call
+            .host
+            .config
+            .max_file_bytes
+            .is_some_and(|limit| content.len() > limit)
             || value.0["bytes"].as_u64() != Some(content.len() as u64)
-            || value.0["sha256"].as_str()
-                != Some(format!("{:x}", Sha256::digest(content.as_bytes())).as_str())
-            || value.0.as_object().is_none_or(|o| o.len() != 4)
+        {
+            return Err(failure("frozen value byte evidence does not match"));
+        }
+        let complete = value.0.get("truncated").is_none()
+            && value.0.get("start_line").is_none()
+            && value.0.get("offset_bytes").is_none();
+        let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+        if complete {
+            if value.0["sha256"].as_str() != Some(digest.as_str())
+                || value.0.as_object().is_none_or(|o| o.len() != 4)
+            {
+                return Err(failure("frozen value byte evidence does not match"));
+            }
+        } else if value
+            .0
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|sha| sha != digest)
         {
             return Err(failure("frozen value byte evidence does not match"));
         }

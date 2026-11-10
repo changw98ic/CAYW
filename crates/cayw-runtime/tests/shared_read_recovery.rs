@@ -1,7 +1,7 @@
 use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
 use cayw_cells::{CellIdentity, IntentStatus, SqliteJournal};
 use cayw_core::{CapabilityOutcome, CoreEvent, SessionState};
-use cayw_runtime::{Runtime, RuntimeConfig, ScopedPermission};
+use cayw_runtime::{Runtime, RuntimeConfig, RuntimeError, ScopedPermission};
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -106,7 +106,13 @@ async fn failed_cells_terminal_recovers_exact_dependencies_and_known_core_bytes_
         faults[0].audit_id,
         format!("{}:{}", call.key.execution_id, call.key.sequence)
     );
-    assert!(rt.enqueue(&id, "must stay frozen").is_err());
+    let accepted = rt.enqueue(&id, "remains available while unreconciled");
+    // The session is not frozen; the unfinished original task still owns the
+    // single live queue entry for this session.
+    assert!(
+        matches!(accepted, Err(RuntimeError::Busy)),
+        "unexpected enqueue result: {accepted:?}"
+    );
     // This deliberate out-of-protocol edit is a recovery probe. No new read or
     // capture may be used to reconstruct the original result or dependencies.
     std::fs::write(root.join("a.txt"), "changed after capture").unwrap();
@@ -115,7 +121,7 @@ async fn failed_cells_terminal_recovers_exact_dependencies_and_known_core_bytes_
     drop(rt);
     let rt = open();
     let recovered = rt.recover(&id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert!(recovered.unresolved_capabilities.is_empty());
     assert_eq!(recovered.unresolved_calls.len(), 1);
     let original_parent = recovered.unresolved_calls[0].call.id.clone();
@@ -247,13 +253,13 @@ async fn failed_evidence_or_core_terminal_never_replays_or_guesses_the_capture()
         )
         .unwrap();
         let recovered = rt.recover(&id).unwrap();
-        assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+        assert_eq!(recovered.state, SessionState::Idle);
         assert_eq!(recovered.unresolved_capabilities.len(), 1);
         assert!(matches!(
             recovered.unresolved_capabilities[0].outcome,
             Some(CapabilityOutcome::OutcomeUnknown { .. })
         ));
-        assert!(rt.enqueue(&id, "must inspect original read").is_err());
+        assert!(rt.enqueue(&id, "must inspect original read").is_ok());
         let inspector =
             cayw_host::Host::new(&root, Arc::new(Deny), Arc::new(NoAudit), config().host).unwrap();
         assert_eq!(

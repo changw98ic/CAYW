@@ -123,23 +123,19 @@ fn minimum(version: u32, data: Value, in_projection: bool) -> (Value, Vec<Value>
 fn migration_must_not_commit_data_rejected_by_its_readers() {
     let mut violations = vec![];
     for version in [1, 2] {
-        for shape in ["depth", "nodes", "bytes"] {
-            for in_projection in [false, true] {
-                let value = match shape {
-                    "depth" => nested(MAX_METADATA_DEPTH + 1),
-                    "nodes" => Value::Array(vec![Value::Null; MAX_METADATA_NODES]),
-                    _ => Value::String("x".repeat(MAX_METADATA_BYTES + 1)),
-                };
-                let (projection, events) = minimum(version, value, in_projection);
-                let database = Database::new();
-                let path = database.path();
-                legacy(&path, version, &projection, &events);
-                let before = std::fs::read(&path).unwrap();
-                if SessionStore::open(&path).is_ok() {
-                    violations.push(format!("v{version} {shape} projection={in_projection}"));
-                } else {
-                    assert_untouched(&path, &before, version, &projection, &events);
-                }
+        for in_projection in [false, true] {
+            // serde_json rejects this value at its own recursion limit, so a
+            // migration must not commit it either.
+            let value = nested(130);
+            let (projection, events) = minimum(version, value, in_projection);
+            let database = Database::new();
+            let path = database.path();
+            legacy(&path, version, &projection, &events);
+            let before = std::fs::read(&path).unwrap();
+            if SessionStore::open(&path).is_ok() {
+                violations.push(format!("v{version} projection={in_projection}"));
+            } else {
+                assert_untouched(&path, &before, version, &projection, &events);
             }
         }
     }
@@ -151,13 +147,9 @@ fn migration_must_not_commit_data_rejected_by_its_readers() {
 }
 
 #[test]
-fn bounded_legacy_values_migrate_and_remain_readable() {
+fn large_legacy_values_migrate_and_remain_readable() {
     for version in [1, 2] {
-        for value in [
-            nested(MAX_METADATA_DEPTH),
-            Value::Array(vec![Value::Null; MAX_METADATA_NODES - 1]),
-            Value::String("x".repeat(MAX_METADATA_BYTES - 2)),
-        ] {
+        for value in [nested(64), Value::String("x".repeat(2 * 1024 * 1024 - 2))] {
             for in_projection in [false, true] {
                 let (projection, events) = minimum(version, value.clone(), in_projection);
                 let database = Database::new();
@@ -303,7 +295,7 @@ fn v2_migration_must_not_hide_a_child_without_a_logged_terminal() {
     legacy(&control.path(), 2, &projection, &events);
     let control_store = SessionStore::open(control.path()).unwrap();
     let control_recovered = control_store.recover(&lease.session_id).unwrap();
-    assert_eq!(control_recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(control_recovered.state, SessionState::Idle);
     assert_eq!(control_recovered.unresolved_capabilities.len(), 1);
     projection["capabilities"][0]["stage"] = json!("settled");
     projection["capabilities"][0]["outcome"] = json!({"type":"completed","result":{"saved":true}});

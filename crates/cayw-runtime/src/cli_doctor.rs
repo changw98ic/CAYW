@@ -78,7 +78,12 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
             "message":"没有待核对的 Client 插件清理记录",
             "details":details,
         })),
-        Err(error) => checks.push(failed("client_plugin_cleanup", error.to_string())),
+        Err(error) => checks.push(warning(
+            "client_plugin_cleanup",
+            format!(
+                "Client 插件清理记录无法读取或校验；UI 插件保持不可用，Client 仍可启动；请修复或删除该记录：{error}"
+            ),
+        )),
     }
 
     match legacy_client_state(&paths) {
@@ -108,6 +113,7 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
                         "health":health,
                     }));
                     checks.push(client_plugins_check(plugin_summary));
+                    checks.push(optional_services_check(health["disabled_services"].clone()));
                 }
                 Ok(Err(error)) => {
                     checks.push(failed("client", error.to_string()));
@@ -115,12 +121,20 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
                         "client_plugins",
                         "Client 不可连接，无法读取当前 UI 插件状态",
                     ));
+                    checks.push(warning(
+                        "optional_services",
+                        "Client 不可连接，无法读取可选服务状态",
+                    ));
                 }
                 Err(_) => {
                     checks.push(failed("client", "Client 健康检查超时"));
                     checks.push(warning(
                         "client_plugins",
                         "Client 健康检查超时，无法读取当前 UI 插件状态",
+                    ));
+                    checks.push(warning(
+                        "optional_services",
+                        "Client 健康检查超时，无法读取可选服务状态",
                     ));
                 }
             }
@@ -142,6 +156,10 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
                 "client_plugins",
                 "没有可连接的 Client，当前没有可读取的 UI 插件状态",
             ));
+            checks.push(warning(
+                "optional_services",
+                "没有可连接的 Client，当前没有可选服务状态",
+            ));
         }
         Err(error) => {
             checks.push(failed("client", error.to_string()));
@@ -149,14 +167,15 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
                 "client_plugins",
                 "Client 状态不可读取，无法读取当前 UI 插件状态",
             ));
+            checks.push(warning(
+                "optional_services",
+                "Client 状态不可读取，无法读取可选服务状态",
+            ));
         }
     }
 
     #[cfg(feature = "plugins")]
-    checks.push(
-        crate::cli_plugins::doctor(&paths)
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
-    );
+    checks.push(crate::cli_plugins::doctor(&paths));
     #[cfg(not(feature = "plugins"))]
     checks.push(warning("plugins", "当前二进制没有启用 plugins feature"));
 
@@ -185,6 +204,14 @@ fn client_plugins_check(summary: Value) -> Value {
         );
     }
     let entries = summary["entries"].as_array().expect("validated entries");
+    if let Some(error) = summary["cleanup_error"].as_str() {
+        return json!({
+            "name":"client_plugins",
+            "status":"warning",
+            "message":format!("Client UI 插件清理记录不可用；UI 插件保持不可用，Client 仍可启动；请修复或删除该记录：{error}"),
+            "summary":summary,
+        });
+    }
     let unknown = entries
         .iter()
         .filter(|entry| entry["status"] == "cleanup_unknown")
@@ -198,6 +225,33 @@ fn client_plugins_check(summary: Value) -> Value {
             "存在清理结果未知的 Client UI 插件；请核对对应进程"
         },
         "summary":summary,
+    })
+}
+
+fn optional_services_check(disabled: Value) -> Value {
+    let Some(entries) = disabled.as_array() else {
+        return warning(
+            "optional_services",
+            "Client 健康信息没有可选服务状态；doctor 无法判断是否降级",
+        );
+    };
+    if entries.is_empty() {
+        return ok("optional_services", "没有可选服务被禁用");
+    }
+    let details = entries
+        .iter()
+        .map(|entry| {
+            let name = entry["name"].as_str().unwrap_or("unknown");
+            let reason = entry["reason"].as_str().unwrap_or("未提供原因");
+            format!("{name}: {reason}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    json!({
+        "name":"optional_services",
+        "status":"warning",
+        "message":format!("可选服务已禁用：{details}"),
+        "disabled_services":disabled,
     })
 }
 
@@ -270,4 +324,27 @@ fn warning(name: &str, message: impl Into<String>) -> Value {
 
 fn failed(name: &str, message: impl Into<String>) -> Value {
     json!({"name":name,"status":"failed","message":message.into()})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::optional_services_check;
+    use serde_json::json;
+
+    #[test]
+    fn doctor_warns_when_optional_service_disabled() {
+        let check = optional_services_check(json!([
+            {"name":"web_access","reason":"invalid web-access limits: max_search_limit must be nonzero"}
+        ]));
+        assert_eq!(check["status"], "warning");
+        let message = check["message"].as_str().unwrap();
+        assert!(message.contains("web_access"), "{message}");
+        assert!(message.contains("max_search_limit"), "{message}");
+    }
+
+    #[test]
+    fn doctor_reports_ok_when_no_optional_service_is_disabled() {
+        let check = optional_services_check(json!([]));
+        assert_eq!(check["status"], "ok");
+    }
 }

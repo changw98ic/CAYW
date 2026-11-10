@@ -105,8 +105,8 @@ fn profile(
         program: program.into(),
         args: args.iter().map(|value| (*value).into()).collect(),
         env: BTreeMap::new(),
-        timeout,
-        max_output_bytes,
+        timeout: Some(timeout),
+        max_output_bytes: Some(max_output_bytes),
         allow_filter: false,
         io,
     }
@@ -115,12 +115,12 @@ fn profile(
 fn limits() -> TerminalLimits {
     TerminalLimits {
         max_sessions: 2,
-        max_sessions_total: 8,
-        max_input_bytes_per_write: 64,
-        max_input_bytes_per_session: 256,
-        max_output_bytes_per_session: 4096,
-        max_read_bytes: 64,
-        max_wait: Duration::from_secs(10),
+        max_sessions_total: Some(8),
+        max_input_bytes_per_write: Some(64),
+        max_input_bytes_per_session: Some(256),
+        max_output_bytes_per_session: Some(4096),
+        max_read_bytes: Some(64),
+        max_wait: Some(Duration::from_secs(10)),
     }
 }
 
@@ -372,7 +372,7 @@ async fn write_is_idempotent_and_read_pages_raw_utf8_bytes() {
         ),
     )]);
     let mut limits = limits();
-    limits.max_read_bytes = 1;
+    limits.max_read_bytes = Some(1);
     let (host, _gate, _audit) = host(&root.0, config(profiles, limits));
 
     let id = session_id(&exec(&host, "echo").await.unwrap());
@@ -436,10 +436,10 @@ async fn session_and_input_budgets_do_not_reset_after_wait_or_close() {
     )]);
     let mut limits = limits();
     limits.max_sessions = 1;
-    limits.max_sessions_total = 1;
-    limits.max_input_bytes_per_write = 4;
-    limits.max_input_bytes_per_session = 4;
-    limits.max_read_bytes = 16;
+    limits.max_sessions_total = Some(1);
+    limits.max_input_bytes_per_write = Some(4);
+    limits.max_input_bytes_per_session = Some(4);
+    limits.max_read_bytes = Some(16);
     let (host, _gate, _audit) = host(&root.0, config(profiles, limits));
 
     let id = session_id(&exec(&host, "head").await.unwrap());
@@ -580,8 +580,8 @@ async fn output_limit_retains_unknown_and_blocks_further_reads() {
         ),
     )]);
     let mut limits = limits();
-    limits.max_output_bytes_per_session = 8;
-    limits.max_read_bytes = 8;
+    limits.max_output_bytes_per_session = Some(8);
+    limits.max_read_bytes = Some(8);
     let (host, _gate, _audit) = host(&root.0, config(profiles, limits));
     let id = session_id(&exec(&host, "cat").await.unwrap());
     call(

@@ -52,6 +52,11 @@ pub trait RpcHandler: Send + Sync + 'static {
         params: Value,
         cancel: CancellationToken,
     ) -> Result<Value, RpcError>;
+    /// Whether this method only observes state. The transport uses it to label
+    /// an oversized response as a known failure instead of `outcome_unknown`.
+    fn read_only(&self, _method: &str) -> bool {
+        false
+    }
 }
 
 /// Per-server limits. Each active connection has its own request and response limits.
@@ -59,17 +64,20 @@ pub trait RpcHandler: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct ServerConfig {
     pub token: String,
-    /// Maximum JSON bytes per frame, excluding the terminating newline (256..=64 MiB).
+    /// Maximum JSON bytes per frame, excluding the terminating newline (256..=256 MiB).
     pub max_frame_bytes: usize,
     /// Simultaneously executing handler futures per connection; extra calls receive `busy`.
     pub max_in_flight: usize,
-    pub request_timeout: Duration,
+    /// `None` waits until the handler completes or the connection closes.
+    pub request_timeout: Option<Duration>,
     /// Persistent prompt methods have no server deadline by default. Their
     /// callers own the execution deadline; cancellation still settles them.
     pub prompt_timeout: Option<Duration>,
     pub max_connections: usize,
     /// All frame IDs, including hello, rejected calls and cancel frames, consume this budget.
-    pub max_requests_per_connection: usize,
+    /// `None` (the default) leaves no per-connection request count ceiling; a
+    /// configured value must be at least 2.
+    pub max_requests_per_connection: Option<usize>,
     /// UTF-8 byte length, not character count.
     pub max_id_bytes: usize,
     pub response_queue_capacity: usize,
@@ -85,12 +93,12 @@ impl ServerConfig {
     pub fn new(token: impl Into<String>) -> Self {
         Self {
             token: token.into(),
-            max_frame_bytes: 1024 * 1024,
+            max_frame_bytes: 64 * 1024 * 1024,
             max_in_flight: 64,
-            request_timeout: Duration::from_secs(30),
+            request_timeout: None,
             prompt_timeout: None,
             max_connections: 128,
-            max_requests_per_connection: 65_536,
+            max_requests_per_connection: None,
             max_id_bytes: 128,
             response_queue_capacity: 64,
             handshake_timeout: Duration::from_secs(5),
@@ -107,7 +115,6 @@ impl ServerConfig {
             self.response_queue_capacity,
         ];
         let durations = [
-            self.request_timeout,
             self.handshake_timeout,
             self.frame_timeout,
             self.write_timeout,
@@ -115,13 +122,18 @@ impl ServerConfig {
         ];
         if self.token.is_empty()
             || !valid_frame_limit(self.max_frame_bytes)
-            || self.max_requests_per_connection < 2
+            || self
+                .max_requests_per_connection
+                .is_some_and(|limit| limit < 2)
             || self.max_id_bytes == 0
             || self.max_id_bytes > self.max_frame_bytes / 2
             || counts
                 .iter()
                 .any(|&value| value == 0 || value > Semaphore::MAX_PERMITS)
             || durations.iter().any(|&value| !valid_duration(value))
+            || self
+                .request_timeout
+                .is_some_and(|value| !valid_duration(value))
             || self
                 .prompt_timeout
                 .is_some_and(|value| !valid_duration(value))
@@ -171,25 +183,26 @@ impl fmt::Debug for ServerConfig {
 pub struct ClientConfig {
     pub max_frame_bytes: usize,
     pub max_in_flight: usize,
-    pub max_requests_per_connection: usize,
+    pub max_requests_per_connection: Option<usize>,
     pub max_id_bytes: usize,
     pub write_queue_capacity: usize,
     /// Bounds TCP connection and the entire hello exchange together.
     pub connect_timeout: Duration,
-    pub request_timeout: Duration,
+    /// `None` waits until the server responds or the connection closes.
+    pub request_timeout: Option<Duration>,
     pub write_timeout: Duration,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            max_frame_bytes: 1024 * 1024,
+            max_frame_bytes: 64 * 1024 * 1024,
             max_in_flight: 64,
-            max_requests_per_connection: 65_536,
+            max_requests_per_connection: None,
             max_id_bytes: 128,
             write_queue_capacity: 64,
             connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: None,
             write_timeout: Duration::from_secs(5),
         }
     }
@@ -198,19 +211,20 @@ impl Default for ClientConfig {
 impl ClientConfig {
     pub(crate) fn validate(&self) -> Result<(), ClientError> {
         let counts = [self.max_in_flight, self.write_queue_capacity];
-        let durations = [
-            self.connect_timeout,
-            self.request_timeout,
-            self.write_timeout,
-        ];
+        let durations = [self.connect_timeout, self.write_timeout];
         if !valid_frame_limit(self.max_frame_bytes)
-            || self.max_requests_per_connection < 2
+            || self
+                .max_requests_per_connection
+                .is_some_and(|limit| limit < 2)
             || self.max_id_bytes == 0
             || self.max_id_bytes > self.max_frame_bytes / 2
             || counts
                 .iter()
                 .any(|&value| value == 0 || value > Semaphore::MAX_PERMITS)
             || durations.iter().any(|&value| !valid_duration(value))
+            || self
+                .request_timeout
+                .is_some_and(|value| !valid_duration(value))
         {
             return Err(ClientError::known(
                 "invalid_config",
@@ -222,7 +236,7 @@ impl ClientConfig {
 }
 
 fn valid_frame_limit(value: usize) -> bool {
-    (256..=64 * 1024 * 1024).contains(&value)
+    (256..=256 * 1024 * 1024).contains(&value)
 }
 fn valid_duration(value: Duration) -> bool {
     !value.is_zero() && std::time::Instant::now().checked_add(value).is_some()

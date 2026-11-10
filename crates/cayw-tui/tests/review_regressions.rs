@@ -2,7 +2,7 @@
 use cayw_agent::AgentEvent;
 use cayw_ai::{AssistantEvent, AssistantMessage, Content, Message, Model, StopReason};
 use cayw_tui::{
-    App, Command, Dialog,
+    App, Command,
     driver::Driver,
     transport::{Request, Update},
 };
@@ -37,11 +37,6 @@ fn attached(value: Value) -> App {
 
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Command> {
     app.handle_key(KeyEvent::new(code, modifiers))
-}
-
-fn known_budget(app: &mut App) -> Vec<Command> {
-    app.model_budget_status("s1", json!({"budget_unknown":false}))
-        .unwrap()
 }
 
 fn assistant(timestamp: u64, text: &str) -> Value {
@@ -82,10 +77,6 @@ fn known_queued_cancellation_releases_prompt_only_after_settled_snapshot() {
     app.input.insert("queued draft");
     assert!(matches!(
         key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
-        [Command::PreparePrompt { .. }]
-    ));
-    assert!(matches!(
-        known_budget(&mut app).as_slice(),
         [Command::Prompt { .. }]
     ));
     assert!(app.task_admitted("s1", "original-queued-task").is_empty());
@@ -126,20 +117,37 @@ fn known_queued_cancellation_releases_prompt_only_after_settled_snapshot() {
 }
 
 #[test]
-fn cancellation_with_unknown_or_missing_outcome_never_clears_uncertain_prompt() {
+fn cancelled_prompt_releases_lock_after_settled_snapshot_while_preserving_edits() {
     for error in [
-        "cancelled: task cancellation uncertain (outcome_unknown=true)",
-        "budget_continuation_cleanup_unknown: task may have been claimed (outcome_unknown=true)",
-        "cancelled: missing outcome",
-        "runtime_outcome_unknown: unresolved write (outcome_unknown=false)",
+        "cancelled: task cancelled (outcome_unknown=false)",
+        "cancelled: task cancelled during tool execution",
+    ] {
+        let mut app = attached(snapshot("idle", 3));
+        app.input.insert("submitted");
+        assert!(matches!(
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
+            [Command::Prompt { .. }]
+        ));
+        app.input.insert(" plus edit");
+        app.request_failed("s1", "session.prompt", error);
+        assert!(!app.selected().unwrap().can_prompt(), "{error}");
+        app.upsert_snapshot(snapshot("idle", 4), false).unwrap();
+        assert!(app.selected().unwrap().can_prompt(), "{error}");
+        assert_eq!(app.input.text(), "submitted plus edit");
+    }
+}
+
+#[test]
+fn untyped_transport_or_runtime_failure_never_clears_uncertain_prompt() {
+    for error in [
+        "connection_lost: task admission uncertain (outcome_unknown=true)",
         "recovery_required: unfinished bookkeeping (outcome_unknown=false)",
         "runtime_error: unexpected failure (outcome_unknown=false)",
     ] {
         let mut app = attached(snapshot("idle", 3));
         app.input.insert("submitted");
-        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(
-            known_budget(&mut app).as_slice(),
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
             [Command::Prompt { .. }]
         ));
         app.input.insert(" plus edit");
@@ -152,112 +160,22 @@ fn cancellation_with_unknown_or_missing_outcome_never_clears_uncertain_prompt() 
 }
 
 #[test]
-fn proven_unclaimed_budget_cleanup_releases_only_after_refresh() {
-    let mut app = attached(snapshot("idle", 3));
-    app.input.insert("budgeted draft");
-    assert!(matches!(
-        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
-        [Command::PreparePrompt { .. }]
-    ));
-    assert!(matches!(
-        known_budget(&mut app).as_slice(),
-        [Command::Prompt { .. }]
-    ));
-    assert!(app.task_admitted("s1", "budget-task").is_empty());
-    app.request_failed(
-        "s1",
-        "session.prompt_with_model_budget",
-        "budget_continuation_not_executed: grant rejected; task stayed queued and unclaimed until cancellation (outcome_unknown=false)",
-    );
-    assert_eq!(app.input.text(), "budgeted draft");
-    assert!(!app.selected().unwrap().can_prompt());
-    app.upsert_snapshot(snapshot("idle", 4), false).unwrap();
-    assert!(app.selected().unwrap().can_prompt());
-    assert_eq!(app.input.text(), "budgeted draft");
-}
-
-#[test]
-fn unknown_model_usage_requires_confirmation_before_task_admission() {
-    let mut app = attached(snapshot("idle", 3));
-    app.input.insert("budgeted draft");
-    assert!(matches!(
-        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
-        [Command::PreparePrompt { .. }]
-    ));
-    let expected = json!([{
-        "request_id":"unknown-request",
-        "session_id":"s1",
-        "task_id":"old-task"
-    }]);
-    let status = json!({
-        "budget_unknown":true,
-        "settled_tokens":12,
-        "reserved_tokens":1000,
-        "continuation":{
-            "expected":expected,
-            "unknown_request_count":1,
-            "additional_tokens":128,
-            "token_limit":1140
-        }
-    });
-    assert!(
-        app.model_budget_status("s1", status.clone())
-            .unwrap()
-            .is_empty()
-    );
-    assert!(matches!(
-        &app.dialog,
-        Some(Dialog::ModelBudget {
-            unknown_request_count: 1,
-            settled_tokens: 12,
-            reserved_tokens: 1000,
-            additional_tokens: 128,
-            token_limit: 1140,
-            ..
-        })
-    ));
-    assert!(key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE).is_empty());
-    assert!(app.dialog.is_none());
-    assert_eq!(app.input.text(), "budgeted draft");
-    assert!(app.selected().unwrap().can_prompt());
-
-    assert!(matches!(
-        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
-        [Command::PreparePrompt { .. }]
-    ));
-    app.model_budget_status("s1", status).unwrap();
-    assert_eq!(
-        key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE),
-        vec![Command::PromptWithModelBudget {
-            session_id: "s1".into(),
-            text: "budgeted draft".into(),
-            expected,
-            additional_tokens: 128,
-            token_limit: 1140,
-        }]
-    );
-    assert!(!app.selected().unwrap().can_prompt());
-}
-
-#[test]
-fn disconnecting_a_read_only_budget_check_keeps_the_draft_retryable() {
+fn disconnecting_after_send_keeps_the_draft_without_automatic_resend() {
     let mut app = attached(snapshot("idle", 3));
     app.input.insert("safe draft");
     assert!(matches!(
         key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
-        [Command::PreparePrompt { .. }]
+        [Command::Prompt { .. }]
     ));
+    // Sending may already have created a Task, so the draft stays but the
+    // session must never resend it before an authoritative refresh.
     app.set_disconnected("fixture disconnect");
     assert_eq!(app.input.text(), "safe draft");
-    assert!(app.dialog.is_none());
-
     app.set_connected();
     app.upsert_snapshot(snapshot("idle", 4), false).unwrap();
-    assert!(app.selected().unwrap().can_prompt());
-    assert!(matches!(
-        key(&mut app, KeyCode::Enter, KeyModifiers::NONE).as_slice(),
-        [Command::PreparePrompt { .. }]
-    ));
+    assert_eq!(app.input.text(), "safe draft");
+    assert!(!app.selected().unwrap().can_prompt());
+    assert!(key(&mut app, KeyCode::Enter, KeyModifiers::NONE).is_empty());
 }
 
 #[test]
@@ -324,8 +242,8 @@ fn snapshot_refresh_keeps_unread_cursor_and_recovered_stream() {
 }
 
 #[test]
-fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
-    for state in ["running", "needs_reconciliation"] {
+fn catchup_pages_preserve_snapshot_history_approvals_and_frozen_state() {
+    for state in ["running", "awaiting_approval"] {
         let completed = assistant(10, "already completed");
         let mut value = snapshot(state, 205);
         value["messages"] = json!([completed.clone()]);
@@ -343,7 +261,7 @@ fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
         decided["decision"] = json!({"decision":"approve","actor":"fixture-host","decided_at":101});
         value["pending_approvals"] = json!([approval.clone()]);
         value["unresolved_calls"] = json!([{"call":{"id":"current-call","name":"write","arguments":{}},
-            "attempt_id":"current","state":"outcome_unknown","execution_started":true,"result":null}]);
+            "attempt_id":"current","state":"started","execution_started":true,"result":null}]);
         let expected = value.clone();
         let mut app = attached(value);
         let records: Vec<Value> = (1..=205)
@@ -401,7 +319,6 @@ fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
             );
             assert_eq!(view.binding.as_ref(), Some(&expected["binding"]));
             assert!(view.frozen);
-            assert!(view.has_unknown());
             assert!(view.synced);
             assert!(!view.can_prompt());
             assert!(key(&mut app, KeyCode::Char('o'), KeyModifiers::ALT).is_empty());
@@ -415,8 +332,10 @@ fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
         // arrives, and a late update cannot reopen the recovered lease.
         let mut terminal = expected;
         terminal["cursor"] = json!(206);
-        terminal["state"] = json!("needs_reconciliation");
+        terminal["state"] = json!("idle");
         terminal["attempt"] = Value::Null;
+        terminal["pending_approvals"] = json!([]);
+        terminal["unresolved_calls"] = json!([]);
         app.upsert_snapshot(terminal, false).unwrap();
         assert!(app.selected().unwrap().streaming_text.is_none());
         app.apply_events("s1", json!([
@@ -425,8 +344,13 @@ fn catchup_pages_preserve_snapshot_history_approvals_frozen_and_unknown() {
             agent(207, "message_update", assistant(100, "late abandoned output"))
         ])).unwrap();
         assert!(app.selected().unwrap().streaming_text.is_none());
-        assert!(app.selected().unwrap().has_unknown());
         assert!(!app.selected().unwrap().can_prompt());
-        assert!(!app.selected().unwrap().can_fork());
+        let mut settled = snapshot("idle", 207);
+        settled["frozen"] = json!(true);
+        settled["binding"] =
+            json!({"plugin":"unavailable","frozen":true,"reason":"host unloaded plugin"});
+        app.upsert_snapshot(settled, false).unwrap();
+        assert!(!app.selected().unwrap().can_prompt());
+        assert!(app.selected().unwrap().can_fork());
     }
 }

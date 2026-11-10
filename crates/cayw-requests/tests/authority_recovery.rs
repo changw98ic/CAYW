@@ -81,8 +81,14 @@ fn catalog(root: &Path) -> OperationCatalog {
     .catalog()
     .unwrap()
 }
+fn config() -> RequestConfig {
+    RequestConfig {
+        max_state_bytes: Some(4 * 1024 * 1024 * 1024),
+        ..Default::default()
+    }
+}
 fn open(path: &Path) -> RequestStore {
-    RequestStore::open_with_clock(path, RequestConfig::default(), Arc::new(Clock1000)).unwrap()
+    RequestStore::open_with_clock(path, config(), Arc::new(Clock1000)).unwrap()
 }
 fn input() -> RequestInput {
     RequestInput {
@@ -121,12 +127,12 @@ fn fail_commit(path: &Path, store: &RequestStore) {
         .execute_batch("DROP TRIGGER fail_observation")
         .unwrap();
     assert!(matches!(
-        RequestStore::open(path, RequestConfig::default()),
+        RequestStore::open(path, config()),
         Err(RequestError::AuthorityStopped)
     ));
 }
 fn repair_request(path: &Path, repair_id: &str) -> AuthorityRepairRequest {
-    let inspection = RequestStore::inspect_authority(path, RequestConfig::default()).unwrap();
+    let inspection = RequestStore::inspect_authority(path, config()).unwrap();
     AuthorityRepairRequest::new(inspection, repair_id, actor(), "original Worker stopped; all Task locks and Cells ownership held; Device has no pending processes").unwrap()
 }
 fn quota(database: &rusqlite::Connection) -> (i64, i64) {
@@ -169,8 +175,7 @@ fn explicit_repair_preserves_original_history_and_fences_every_old_grant() {
     let original_events = events(&database);
     fail_commit(&path, &store);
     let request = repair_request(&path, "repair-original");
-    let repaired =
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
+    let repaired = RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
     assert_ne!(repaired.authority_id, repaired.previous_authority_id);
     let current = open(&path);
     assert!(matches!(
@@ -186,7 +191,7 @@ fn explicit_repair_preserves_original_history_and_fences_every_old_grant() {
     assert!(store.check_receipt(&receipt, &catalog).is_err());
     assert!(peer.check_receipt(&receipt, &catalog).is_err());
     assert!(
-        RequestStore::open(&path, RequestConfig::default()).is_ok(),
+        RequestStore::open(&path, config()).is_ok(),
         "old peer poisoned the new authority"
     );
     assert_eq!(
@@ -195,7 +200,7 @@ fn explicit_repair_preserves_original_history_and_fences_every_old_grant() {
     );
     let before_repeat = events(&database);
     assert_eq!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap(),
+        RequestStore::repair_authority(&path, config(), &request, stopped).unwrap(),
         repaired
     );
     assert_eq!(events(&database), before_repeat);
@@ -206,10 +211,7 @@ fn explicit_repair_preserves_original_history_and_fences_every_old_grant() {
         "changed identity",
     )
     .unwrap();
-    assert!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &old_identity, stopped)
-            .is_err()
-    );
+    assert!(RequestStore::repair_authority(&path, config(), &old_identity, stopped).is_err());
     let altered = AuthorityRepairRequest::new(
         request.inspection.clone(),
         "repair-original",
@@ -217,9 +219,7 @@ fn explicit_repair_preserves_original_history_and_fences_every_old_grant() {
         "different evidence must not match the old repair",
     )
     .unwrap();
-    assert!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &altered, stopped).is_err()
-    );
+    assert!(RequestStore::repair_authority(&path, config(), &altered, stopped).is_err());
     let next_task = TaskIdentity::new("original-session", "fresh-task", "fresh-attempt").unwrap();
     current
         .start_task(&next_task, TaskIntent::General, &catalog, &actor())
@@ -238,24 +238,19 @@ fn repair_requires_all_original_task_owners_and_the_same_storage() {
     let database = rusqlite::Connection::open(&path).unwrap();
     let before = events(&database);
     assert!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, |_| Ok(
-            StoppedTasks(vec![])
-        ))
-        .is_err()
+        RequestStore::repair_authority(&path, config(), &request, |_| Ok(StoppedTasks(vec![])))
+            .is_err()
     );
     assert_eq!(events(&database), before);
     let other = temp.path().join("other.sqlite");
     let (other_store, _, _) = granted(&other);
     fail_commit(&other, &other_store);
-    assert!(
-        RequestStore::repair_authority(&other, RequestConfig::default(), &request, stopped)
-            .is_err()
-    );
+    assert!(RequestStore::repair_authority(&other, config(), &request, stopped).is_err());
     assert!(matches!(
-        RequestStore::open(&path, RequestConfig::default()),
+        RequestStore::open(&path, config()),
         Err(RequestError::AuthorityStopped)
     ));
-    RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
+    RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
 }
 
 // Catches releasing admission after a real repair COMMIT failure, and catches
@@ -271,25 +266,23 @@ fn repair_commit_failure_blocks_admission_and_exact_retry_completes_once() {
     database.execute_batch("CREATE TRIGGER fail_repair_commit AFTER UPDATE OF authority_id ON request_meta BEGIN INSERT INTO broken_commit VALUES(2); END;").unwrap();
     let before = events(&database);
     assert!(matches!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped),
+        RequestStore::repair_authority(&path, config(), &request, stopped),
         Err(RequestError::Database(_))
     ));
     assert_eq!(events(&database), before);
     assert!(matches!(
-        RequestStore::open(&path, RequestConfig::default()),
+        RequestStore::open(&path, config()),
         Err(RequestError::AuthorityStopped)
     ));
     assert!(store.check_receipt(&receipt, &catalog).is_err());
     database
         .execute_batch("DROP TRIGGER fail_repair_commit")
         .unwrap();
-    RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
+    RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
     let current = open(&path);
     fail_commit_again(&path, &current);
-    assert!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).is_err()
-    );
-    assert!(RequestStore::open(&path, RequestConfig::default()).is_err());
+    assert!(RequestStore::repair_authority(&path, config(), &request, stopped).is_err());
+    assert!(RequestStore::open(&path, config()).is_err());
 }
 fn fail_commit_again(path: &Path, store: &RequestStore) {
     let database = rusqlite::Connection::open(path).unwrap();
@@ -314,7 +307,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
     // The table exists before the first administrative recovery opens it.
     database.execute_batch("CREATE TRIGGER fail_activation AFTER UPDATE OF authority_stopped ON request_meta WHEN NEW.authority_stopped=0 AND OLD.authority_stopped=1 BEGIN INSERT INTO broken_commit VALUES(2); END;").unwrap();
     assert!(matches!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped),
+        RequestStore::repair_authority(&path, config(), &request, stopped),
         Err(RequestError::Database(_))
     ));
     let prepared_events = events(&database);
@@ -326,13 +319,12 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
             row.get(0)
         })
         .unwrap();
-    assert!(RequestStore::open(&path, RequestConfig::default()).is_err());
+    assert!(RequestStore::open(&path, config()).is_err());
     assert_eq!(quota(&database), prepared_quota);
     database
         .execute_batch("DROP TRIGGER fail_activation")
         .unwrap();
-    let result =
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
+    let result = RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
     assert_eq!(events(&database), prepared_events);
     assert_ne!(result.authority_id, result.previous_authority_id);
     assert_eq!(quota(&database), original_quota);
@@ -342,7 +334,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         })
         .unwrap();
     assert_eq!(retained_record, prepared_record);
-    assert!(RequestStore::open(&path, RequestConfig::default()).is_ok());
+    assert!(RequestStore::open(&path, config()).is_ok());
     assert_eq!(quota(&database), original_quota);
 
     // Migrate an earlier successfully activated repair whose temporary
@@ -356,7 +348,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         )
         .unwrap();
     assert_eq!(quota(&database), prepared_quota);
-    let reopened = RequestStore::open(&path, RequestConfig::default()).unwrap();
+    let reopened = RequestStore::open(&path, config()).unwrap();
     assert_eq!(quota(&database), original_quota);
     let migrated_record: Vec<u8> = database
         .query_row("SELECT data FROM request_authority_repairs", [], |row| {
@@ -365,7 +357,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         .unwrap();
     assert_eq!(migrated_record, prepared_record);
     assert_eq!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap(),
+        RequestStore::repair_authority(&path, config(), &request, stopped).unwrap(),
         result
     );
     assert_eq!(quota(&database), original_quota);
@@ -379,7 +371,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         .unwrap();
     assert_eq!(quota(&database), (0, 0));
     drop(reopened);
-    assert!(RequestStore::open(&path, RequestConfig::default()).is_ok());
+    assert!(RequestStore::open(&path, config()).is_ok());
     assert_eq!(quota(&database), (0, 0));
 }
 
@@ -430,7 +422,7 @@ fn old_peer_process_cannot_stop_the_repaired_generation() {
     }
     fail_commit(&path, &store);
     let request = repair_request(&path, "peer-repair");
-    RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
+    RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
     let mut marker_path = path.as_os_str().to_os_string();
     marker_path.push(".authority");
     let marker_path = std::path::PathBuf::from(marker_path);
@@ -480,10 +472,10 @@ fn torn_marker_is_retained_for_trusted_inspection_after_reopen_is_refused() {
     marker.push(".authority");
     let marker = std::path::PathBuf::from(marker);
     std::fs::write(&marker, b"{interrupted authority record").unwrap();
-    assert!(RequestStore::open(&path, RequestConfig::default()).is_err());
+    assert!(RequestStore::open(&path, config()).is_err());
     let request = repair_request(&path, "repair-torn-marker");
     assert_eq!(request.inspection.marker, b"{interrupted authority record");
-    RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped).unwrap();
+    RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
     assert!(store.check_receipt(&receipt, &catalog).is_err());
     assert!(open(&path).check_receipt(&receipt, &catalog).is_err());
 }
@@ -499,13 +491,13 @@ fn repair_respects_the_original_persistent_storage_budget() {
     database
         .execute(
             "UPDATE request_meta SET reserved_bytes=?1 WHERE singleton=1",
-            [i64::try_from(RequestConfig::default().max_state_bytes).unwrap()],
+            [i64::try_from(config().max_state_bytes.unwrap()).unwrap()],
         )
         .unwrap();
     let request = repair_request(&path, "budget-repair");
     assert!(matches!(
-        RequestStore::repair_authority(&path, RequestConfig::default(), &request, stopped),
+        RequestStore::repair_authority(&path, config(), &request, stopped),
         Err(RequestError::Budget)
     ));
-    assert!(RequestStore::open(&path, RequestConfig::default()).is_err());
+    assert!(RequestStore::open(&path, config()).is_err());
 }

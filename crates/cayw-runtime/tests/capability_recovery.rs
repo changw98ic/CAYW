@@ -222,7 +222,7 @@ fn setup() -> tempfile::TempDir {
 }
 
 #[tokio::test]
-async fn real_host_unknown_terminal_pairs_in_core_and_blocks_models_after_reopen() {
+async fn real_host_unknown_terminal_pairs_in_core_and_allows_follow_up_after_reopen() {
     let dir = setup();
     let service = Arc::new(UnknownService(AtomicUsize::new(0)));
     let mut config = RuntimeConfig::default();
@@ -241,7 +241,7 @@ async fn real_host_unknown_terminal_pairs_in_core_and_blocks_models_after_reopen
         .prompt(&id, "unknown external effect", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(result.state, SessionState::NeedsReconciliation);
+    assert_eq!(result.state, SessionState::Idle);
     assert_eq!(service.0.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let events = rt.events(&id, 0, 1000).unwrap();
@@ -282,17 +282,16 @@ async fn real_host_unknown_terminal_pairs_in_core_and_blocks_models_after_reopen
     }));
     drop(rt);
     let rt = open(&dir, provider.clone(), config);
-    assert!(matches!(
-        rt.prompt(&id, "try again", CancellationToken::new()).await,
-        Err(RuntimeError::NeedsReconciliation)
-    ));
     rt.recover(&id).unwrap();
-    assert!(matches!(
-        rt.prompt(&id, "still blocked", CancellationToken::new())
-            .await,
-        Err(RuntimeError::NeedsReconciliation)
-    ));
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    // A follow-up prompt proceeds immediately; the unreconciled unknown keeps
+    // only its internal audit record and must not freeze the user session.
+    let follow_up = rt
+        .prompt(&id, "explicit next task", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(follow_up.state, SessionState::Idle);
+    assert_eq!(service.0.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     let reconciled = rt.reconcile_capability(&id, host_receipt(&dir, CapabilityReconciliation {
         expected: end.into(),
         key: end.key.clone(),
@@ -307,7 +306,7 @@ async fn real_host_unknown_terminal_pairs_in_core_and_blocks_models_after_reopen
     assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     rt.enqueue(&id, "explicit task after verified capability")
         .unwrap();
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -359,20 +358,26 @@ async fn cells_commit_failure_after_core_reconciliation_is_frozen_and_retryable(
         "{error}"
     );
     assert_eq!(rt.store().snapshot(&id).unwrap().state, SessionState::Idle);
-    assert!(matches!(
-        rt.enqueue(&id, "blocked during partial commit"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    assert!(
+        matches!(
+            rt.enqueue(&id, "retry during partial commit"),
+            Err(RuntimeError::RecoveryRequired { .. })
+        ),
+        "frozen Cells storage still blocks new work until the repair succeeds"
+    );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(service.0.load(Ordering::SeqCst), 1);
     db.execute_batch("DROP TRIGGER reject_cells_repair")
         .unwrap();
     drop(rt);
     let rt = open(&dir, provider.clone(), config);
-    assert!(matches!(
-        rt.enqueue(&id, "still blocked after reopen"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    assert!(
+        matches!(
+            rt.enqueue(&id, "reopen while partial commit remains"),
+            Err(RuntimeError::RecoveryRequired { .. })
+        ),
+        "reopening must not silently release frozen Cells storage"
+    );
     let recovered = rt.reconcile_capability(&id, input.clone()).unwrap();
     assert_eq!(recovered.state, SessionState::Idle);
     let events = rt.events(&id, 0, 1000).unwrap();
@@ -497,7 +502,7 @@ async fn known_failed_external_child_rejects_parent_not_executed_before_core_com
     db.execute_batch("DROP TRIGGER reject_known_failure_execution_finish;")
         .unwrap();
     let recovered = rt.recover(&id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(recovered.unresolved_calls.len(), 1);
     assert!(recovered.unresolved_capabilities.is_empty());
     let cells_before = stored_cell(&db, &id);
@@ -567,12 +572,13 @@ async fn known_failed_external_child_rejects_parent_not_executed_before_core_com
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(frozen_after, frozen_before);
-    assert_eq!(messages_after, messages_before);
     assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
+        frozen_after,
+        frozen_before + 1,
+        "a reclaimed contradiction must fence the original Cells scope for inspection"
     );
+    assert_eq!(messages_after, messages_before);
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -583,7 +589,7 @@ async fn known_failed_external_child_rejects_parent_not_executed_before_core_com
 }
 
 #[tokio::test]
-async fn partial_cells_reconciliation_blocks_fork_until_exact_retry_then_continues_once() {
+async fn partial_cells_reconciliation_allows_follow_up_before_exact_retry() {
     let dir = setup();
     let service = Arc::new(FileService {
         directory: dir.path().into(),
@@ -606,7 +612,7 @@ async fn partial_cells_reconciliation_blocks_fork_until_exact_retry_then_continu
         .prompt(&id, "persist one external effect", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(unknown.state, SessionState::NeedsReconciliation);
+    assert_eq!(unknown.state, SessionState::Idle);
     assert_eq!(unknown.unresolved_capabilities.len(), 1);
     assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
@@ -648,34 +654,26 @@ async fn partial_cells_reconciliation_blocks_fork_until_exact_retry_then_continu
     );
     let core_partial = rt.store().snapshot(&id).unwrap();
     assert_eq!(core_partial.state, SessionState::Idle);
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     assert_eq!(stored_cell(&db, &id), cells_before);
-    assert!(matches!(
-        rt.enqueue(&id, "explicit next task"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
-    let sessions_before = rt.store().list_sessions().unwrap();
-    let events_before = rt.events(&id, 0, 1000).unwrap();
-    let tasks_before = rt.tasks(&id).unwrap();
-    let fork = rt.fork(&id, "must wait for original Cells repair", true);
-    let sessions_after = rt.store().list_sessions().unwrap();
     assert!(
-        matches!(fork, Err(RuntimeError::NeedsReconciliation)),
-        "confirmed Fork must reject incomplete Cells repair: result={fork:?}, \
-         sessions_before={}, sessions_after={}",
-        sessions_before.len(),
-        sessions_after.len(),
+        matches!(
+            rt.enqueue(&id, "explicit next task"),
+            Err(RuntimeError::RecoveryRequired { .. })
+        ),
+        "an incomplete Cells repair must block new work until repaired"
     );
-    assert_eq!(
-        sessions_after, sessions_before,
-        "a rejected Fork must not create a new Core Session"
+    let events_before = rt.events(&id, 0, 1000).unwrap();
+    // Forking is still gated by the frozen Cells storage; the user session state
+    // itself stays Idle instead of a removed reconciliation state.
+    let early_fork = rt.fork(&id, "fork before original Cells repair", true);
+    assert!(
+        matches!(early_fork, Err(RuntimeError::RecoveryRequired { .. })),
+        "frozen Cells storage must block Fork until repaired: {early_fork:?}"
     );
+    let sessions_before = rt.store().list_sessions().unwrap();
     assert_eq!(rt.store().snapshot(&id).unwrap(), core_partial);
     assert_eq!(rt.events(&id, 0, 1000).unwrap(), events_before);
-    assert_eq!(rt.tasks(&id).unwrap(), tasks_before);
     assert_eq!(stored_cell(&db, &id), cells_before);
     assert_eq!(service.calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
@@ -683,10 +681,13 @@ async fn partial_cells_reconciliation_blocks_fork_until_exact_retry_then_continu
         .unwrap();
     drop(rt);
     let rt = open(&dir, provider.clone(), config);
-    assert!(matches!(
-        rt.enqueue(&id, "explicit next task"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    assert!(
+        matches!(
+            rt.enqueue(&id, "explicit next task"),
+            Err(RuntimeError::RecoveryRequired { .. })
+        ),
+        "reopening must not silently release frozen Cells storage"
+    );
     let repaired = rt.reconcile_capability(&id, input.clone()).unwrap();
     assert_eq!(repaired.state, SessionState::Idle);
     assert_eq!(repaired.messages, unknown.messages);
@@ -895,20 +896,27 @@ async fn backend_terminal_failure_repairs_from_core_without_replaying_the_file_w
         1,
         "failed Cells sync must retain its slot"
     );
-    assert!(rt.enqueue(&id, "must remain frozen").is_err());
+    assert!(
+        matches!(
+            rt.enqueue(&id, "queue despite unrepaired Cells write"),
+            Err(RuntimeError::RecoveryRequired { .. })
+        ),
+        "frozen Cells storage still blocks new work until the repair succeeds"
+    );
     db.execute_batch("DROP TRIGGER reject_recovery_cells")
         .unwrap();
     drop(rt);
     let rt = open(&dir, provider.clone(), config);
     let recovered = rt.recover(&id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(recovered.unresolved_calls.len(), 1);
     assert!(recovered.unresolved_capabilities.is_empty());
     assert_eq!(rt.health().unwrap().running, 0);
-    assert!(
-        rt.enqueue(&id, "parent reply still needs host evidence")
-            .is_err()
-    );
+    let queued = rt
+        .enqueue(&id, "parent reply still needs host evidence")
+        .expect("an unreconciled unknown must not block enqueue after reopen");
+    rt.cancel(&rt.task(&queued.id).unwrap().cancel_target())
+        .unwrap();
     let repaired: String = db
         .query_row("SELECT body FROM cells_v1 WHERE session=?1", [&id], |row| {
             row.get(0)
@@ -1082,11 +1090,7 @@ async fn settlement_persistence_failure_retains_written_file_and_unknown_parent(
         "written"
     );
     let snapshot = rt.get(&id).unwrap();
-    assert_eq!(
-        snapshot.state,
-        SessionState::NeedsReconciliation,
-        "{result:?}"
-    );
+    assert_eq!(snapshot.state, SessionState::Running, "{result:?}");
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     assert!(
         snapshot
@@ -1098,12 +1102,23 @@ async fn settlement_persistence_failure_retains_written_file_and_unknown_parent(
         .unwrap();
     drop(rt);
     let rt = open(&dir, provider.clone(), config);
-    assert!(matches!(
-        rt.prompt(&id, "do not replay", CancellationToken::new())
-            .await,
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    let blocked = rt
+        .prompt(&id, "explicit next task", CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(blocked, RuntimeError::RecoveryRequired { .. }),
+        "frozen Cells storage must block a follow-up until an explicit repair: {blocked:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("workspace/committed.txt")).unwrap(),
+        "written",
+        "the blocked follow-up must not replay the original file write"
+    );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let recovered = rt.recover(&id).unwrap();
+    assert_eq!(recovered.state, SessionState::Idle);
+    assert_eq!(recovered.unresolved_capabilities.len(), 1);
 }
 
 #[tokio::test]
@@ -1332,9 +1347,6 @@ async fn start_persistence_failure_stops_before_effect_and_conservatively_requir
         .prompt(&id, "fail durable start", CancellationToken::new())
         .await;
     assert!(!dir.path().join("workspace/absent.txt").exists());
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }

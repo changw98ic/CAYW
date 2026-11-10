@@ -109,40 +109,48 @@ impl CapabilityError {
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// Total Lua allocator bytes, including the sandbox and standard libraries.
-    pub memory_bytes: usize,
-    /// Luau interrupt checkpoints (function entries and loop back edges), not VM opcodes.
-    pub instruction_budget: u64,
+    /// `None` (the default) does not cap Luau memory.
+    pub memory_bytes: Option<usize>,
+    /// Luau interrupt cadence in checkpoints (function entries and loop back
+    /// edges), not VM opcodes. Every checkpoint polls cancellation; every
+    /// `instruction_budget` checkpoints yields to the async executor. It is a
+    /// cadence, not a cap on total execution. Must be positive.
+    pub instruction_budget: u32,
     /// Active time for VM setup, compilation, argument preparation and execution.
     /// Yielding, awaited Host calls and cell Store/Load waits preserve the
-    /// remaining calculation time.
-    pub timeout: Duration,
+    /// remaining calculation time. `None` (the default) only stops on cancellation.
+    pub timeout: Option<Duration>,
     /// Maximum time for one awaited Host call or cell Store/Load wait, including
-    /// permission waits. Cancellation and the enclosing Host/task deadlines
+    /// permission waits. `None` (the default) waits until cancellation or the
+    /// enclosing run deadline. Cancellation and the enclosing Host/task deadlines
     /// still apply. A started call may additionally use `shutdown_grace` to
     /// settle its original result.
-    pub host_wait: Duration,
+    pub host_wait: Option<Duration>,
     /// Additional time to poll the same started Host or cell service future
     /// after cancellation or timeout. No new call is dispatched during this
     /// interval. Must be positive and leave room for the agent's one-second
     /// settlement margin in an Instant.
     pub shutdown_grace: Duration,
-    pub host_calls: usize,
+    /// Maximum number of Host capability calls per execution. `None` (the
+    /// default) allows unlimited calls.
+    pub host_calls: Option<usize>,
     /// Shared JSON payload budget: arguments, host results/errors, emits, return value
     /// and retained diagnostics. Original host errors are charged before truncation.
     /// Audit metadata is separately bounded by `host_calls`; omitted results keep status.
-    pub output_bytes: usize,
+    /// `None` (the default) does not cap or omit payloads.
+    pub output_bytes: Option<usize>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            memory_bytes: 16 * 1024 * 1024,
+            memory_bytes: None,
             instruction_budget: 100_000,
-            timeout: Duration::from_secs(5),
-            host_wait: Duration::from_secs(60),
+            timeout: None,
+            host_wait: None,
             shutdown_grace: Duration::from_secs(2),
-            host_calls: 64,
-            output_bytes: 1024 * 1024,
+            host_calls: None,
+            output_bytes: None,
         }
     }
 }
@@ -225,7 +233,7 @@ pub struct CodeModeError {
 }
 
 impl CodeModeError {
-    fn empty(kind: ErrorKind, message: impl Into<String>, limit: usize) -> Self {
+    fn empty(kind: ErrorKind, message: impl Into<String>, limit: Option<usize>) -> Self {
         let message = message.into();
         let (message, output_bytes) = json::fit_message(&message, limit);
         Self {
@@ -254,16 +262,21 @@ impl CodeMode {
     /// Captures an advertised catalog; its schemas cannot load external references.
     /// Catalog membership never grants permission to execute a capability.
     pub fn new(host: Arc<dyn CapabilityHost>, limits: Limits) -> Result<Self, CodeModeError> {
-        if limits.memory_bytes == 0
+        let host_wait_invalid = limits.host_wait.is_some_and(|host_wait| {
+            host_wait.is_zero()
+                || host_wait > Duration::from_secs(3600)
+                || Instant::now().checked_add(host_wait).is_none()
+        });
+        let timeout_invalid = limits.timeout.is_some_and(|timeout| {
+            timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
+        });
+        if limits.memory_bytes == Some(0)
             || limits.instruction_budget == 0
-            || limits.timeout.is_zero()
-            || limits.host_wait.is_zero()
-            || limits.host_wait > Duration::from_secs(3600)
+            || timeout_invalid
+            || host_wait_invalid
             || limits.shutdown_grace.is_zero()
-            || limits.host_calls == 0
-            || limits.output_bytes == 0
-            || Instant::now().checked_add(limits.timeout).is_none()
-            || Instant::now().checked_add(limits.host_wait).is_none()
+            || limits.host_calls == Some(0)
+            || limits.output_bytes == Some(0)
             || limits
                 .shutdown_grace
                 .checked_add(Duration::from_secs(1))
@@ -272,7 +285,7 @@ impl CodeMode {
         {
             return Err(CodeModeError::empty(
                 ErrorKind::InvalidLimits,
-                "Every limit must be non-zero; Host wait is at most one hour; deadlines and shutdown grace plus the agent margin must fit an Instant",
+                "Every configured limit must be non-zero; a configured Host wait is at most one hour; deadlines and shutdown grace plus the agent margin must fit an Instant",
                 limits.output_bytes,
             ));
         }
@@ -314,7 +327,11 @@ impl CodeMode {
     /// Embedders use this before placing that body inside a generated function,
     /// so unmatched delimiters cannot escape the generated function boundary.
     pub fn validate_source(&self, source: &str) -> Result<(), CodeModeError> {
-        if source.len() > self.limits.memory_bytes / 4 {
+        if self
+            .limits
+            .memory_bytes
+            .is_some_and(|bytes| source.len() > bytes / 4)
+        {
             return Err(CodeModeError::empty(
                 ErrorKind::MemoryLimit,
                 "Script source exceeds one quarter of the VM memory budget",

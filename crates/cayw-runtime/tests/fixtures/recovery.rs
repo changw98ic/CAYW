@@ -272,13 +272,13 @@ impl ExternalHost for EffectService {
 
 fn base_config() -> RuntimeConfig {
     let mut config = RuntimeConfig {
-        max_run_time: RUN_BUDGET,
-        max_queue_time: RUN_BUDGET,
+        max_run_time: Some(RUN_BUDGET),
+        max_queue_time: Some(RUN_BUDGET),
         ..RuntimeConfig::default()
     };
-    config.cells.max_yield_time = Duration::from_secs(300);
-    config.codemode.timeout = RUN_BUDGET;
-    config.host.call_timeout = RUN_BUDGET;
+    config.cells.max_yield_time = Some(Duration::from_secs(300));
+    config.codemode.timeout = Some(RUN_BUDGET);
+    config.host.call_timeout = Some(RUN_BUDGET);
     config
 }
 
@@ -321,8 +321,8 @@ pub fn process_config(root: &Path, program: &Path) -> RuntimeConfig {
             program: program.to_owned(),
             args: vec!["leaf".into(), root.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: ProcessIo::Pipes,
         },
@@ -404,7 +404,7 @@ async fn run(mode: &str, root: &Path, checkpoint: &str) -> Result<()> {
             )?;
             let stop = CancellationToken::new();
             let mut config = ServerConfig::new(TOKEN);
-            config.request_timeout = RUN_BUDGET;
+            config.request_timeout = Some(RUN_BUDGET);
             config.frame_timeout = RUN_BUDGET;
             let server = tokio::spawn(cayw_ipc::serve(
                 listener,
@@ -416,7 +416,7 @@ async fn run(mode: &str, root: &Path, checkpoint: &str) -> Result<()> {
                 address,
                 TOKEN,
                 ClientConfig {
-                    request_timeout: RUN_BUDGET,
+                    request_timeout: Some(RUN_BUDGET),
                     ..ClientConfig::default()
                 },
             )

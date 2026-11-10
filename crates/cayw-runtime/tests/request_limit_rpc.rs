@@ -64,7 +64,7 @@ async fn decision_after_adjustment(initial: u64, adjusted: u64, requested: u64, 
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(20),
+        max_run_time: Some(Duration::from_secs(20)),
         permissions: vec![ScopedPermission::exact(
             "fs.write",
             json!({"path":"result.txt","content":"approved"}),

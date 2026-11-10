@@ -256,7 +256,7 @@ fn request_input(operation: &str, arguments: Value) -> RequestInput {
 }
 fn settings(project: &Project) -> RuntimeConfig {
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(45),
+        max_run_time: Some(Duration::from_secs(45)),
         ..Default::default()
     };
     for name in [PROFILE, OTHER_PROFILE] {
@@ -270,8 +270,8 @@ fn settings(project: &Project) -> RuntimeConfig {
                     project.profile_root(name).to_string_lossy().into_owned(),
                 ],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(4096),
                 allow_filter: true,
                 io: ProcessIo::Pipes,
             },

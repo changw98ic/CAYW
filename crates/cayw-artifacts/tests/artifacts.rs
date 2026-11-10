@@ -313,7 +313,7 @@ fn transactional_snapshot_recovery_preserves_store_on_action_failure() {
 }
 
 #[test]
-fn host_dispatch_unknown_records_outcome_unknown_and_blocks_session() {
+fn host_dispatch_unknown_records_outcome_unknown_without_blocking_session() {
     struct UnknownDispatch;
     impl HostActionDispatch for UnknownDispatch {
         fn follow_up_task(
@@ -368,11 +368,12 @@ fn host_dispatch_unknown_records_outcome_unknown_and_blocks_session() {
     );
     assert!(ws.actions.has_outcome_unknown("sess-1"));
 
-    // 2. Subsequent action on the same session is blocked with NeedsReconciliation
-    let blocked = ws
+    // 2. A later action on the same session is still accepted and recorded; the
+    // unknown outcome remains an audit fact, not a session-wide freeze.
+    let later = ws
         .actions
         .dispatch(ActionRequest {
-            action_id: "act-blocked-2".into(),
+            action_id: "act-later-2".into(),
             artifact_id: "card-a".into(),
             session_id: "sess-1".into(),
             kind: ActionKind::Button,
@@ -382,13 +383,14 @@ fn host_dispatch_unknown_records_outcome_unknown_and_blocks_session() {
             expected_content_version: Some(1),
             requested_at_ms: 20,
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(blocked, ArtifactError::NeedsReconciliation(_)));
+    assert_eq!(later.record.status, ActionStatus::Applied);
+    assert!(ws.actions.has_outcome_unknown("sess-1"));
 }
 
 #[test]
-fn host_dispatch_unknown_cancel_preserves_needs_reconciliation() {
+fn unknown_cancel_error_is_a_known_cancellation_failure() {
     struct CancelUnknownDispatch;
     impl HostActionDispatch for CancelUnknownDispatch {
         fn follow_up_task(
@@ -436,15 +438,20 @@ fn host_dispatch_unknown_cancel_preserves_needs_reconciliation() {
         .unwrap();
     assert_eq!(outcome.record.status, ActionStatus::Applied);
 
-    // Cancel returning unknown must return NeedsReconciliation rather than Invalid
+    // A cancel bridge error is a known failure to signal the flight, not a new
+    // reconciliation requirement.
     let cancel_err = ws.actions.cancel("act-cancel-me").unwrap_err();
     assert!(
-        matches!(cancel_err, ArtifactError::NeedsReconciliation(msg) if msg.contains("cancel_action: cancel failed with unknown outcome"))
+        matches!(cancel_err, ArtifactError::Invalid(msg) if msg.contains("cancel_action: cancel failed with unknown outcome"))
+    );
+    assert_eq!(
+        ws.actions.get_action("act-cancel-me").unwrap().status,
+        ActionStatus::Applied
     );
 }
 
 #[test]
-fn outcome_unknown_blocks_subsequent_actions() {
+fn outcome_unknown_is_an_audit_fact_not_a_session_gate() {
     struct UnknownDispatch;
     impl HostActionDispatch for UnknownDispatch {
         fn follow_up_task(
@@ -486,8 +493,9 @@ fn outcome_unknown_blocks_subsequent_actions() {
     assert_eq!(outcome.record.status, ActionStatus::OutcomeUnknown);
     assert!(ws.actions.has_outcome_unknown("sess-1"));
 
-    // Subsequent action on sess-1 must be blocked with NeedsReconciliation
-    let err = ws
+    // A later action on sess-1 must still be accepted. The unknown outcome stays
+    // visible for audit and reconciliation, but does not block the session.
+    let later = ws
         .actions
         .dispatch(ActionRequest {
             action_id: "act-subsequent".into(),
@@ -500,12 +508,10 @@ fn outcome_unknown_blocks_subsequent_actions() {
             expected_content_version: Some(1),
             requested_at_ms: 2,
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert!(
-        matches!(err, ArtifactError::NeedsReconciliation(_)),
-        "subsequent actions must require reconciliation, got {err:?}"
-    );
+    assert_eq!(later.record.status, ActionStatus::Applied);
+    assert!(ws.actions.has_outcome_unknown("sess-1"));
 }
 
 #[test]

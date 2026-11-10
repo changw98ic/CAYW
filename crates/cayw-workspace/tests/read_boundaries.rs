@@ -117,15 +117,15 @@ async fn reads_stop_at_file_depth_ignore_bytes_and_output_limits() {
     fs::write(temp.path().join("a/b/c"), "x".repeat(100)).unwrap();
     for limits in [
         Limits {
-            max_depth: 1,
+            max_depth: Some(1),
             ..Limits::default()
         },
         Limits {
-            max_file_bytes: 4,
+            max_file_bytes: Some(4),
             ..Limits::default()
         },
         Limits {
-            max_output_bytes: 80,
+            max_output_bytes: Some(80),
             ..Limits::default()
         },
     ] {
@@ -237,7 +237,7 @@ async fn outline_has_depth_bound_and_correct_shebang_and_unicode_spans() {
     let ws = open(
         &temp,
         Limits {
-            max_depth: 1,
+            max_depth: Some(1),
             ..Limits::default()
         },
     );

@@ -124,7 +124,7 @@ fn open(root: &Path, base: &str, max_turns: usize) -> Runtime {
     open_with_budget(
         root,
         base,
-        max_turns,
+        Some(max_turns),
         RuntimeConfig::default().max_total_tokens,
     )
 }
@@ -141,7 +141,12 @@ impl Provider for CountedProvider {
     }
 }
 
-fn open_with_budget(root: &Path, base: &str, max_turns: usize, tokens: u64) -> Runtime {
+fn open_with_budget(
+    root: &Path,
+    base: &str,
+    max_turns: Option<usize>,
+    tokens: Option<u64>,
+) -> Runtime {
     open_with_provider(
         root,
         Arc::new(AnthropicProvider::new(base, "synthetic-recovery-key").unwrap()),
@@ -153,8 +158,8 @@ fn open_with_budget(root: &Path, base: &str, max_turns: usize, tokens: u64) -> R
 fn open_with_provider(
     root: &Path,
     provider: Arc<dyn Provider>,
-    max_turns: usize,
-    tokens: u64,
+    max_turns: Option<usize>,
+    tokens: Option<u64>,
 ) -> Runtime {
     let mut config = RuntimeConfig {
         max_turns,
@@ -238,7 +243,7 @@ async fn invalid_arguments_return_to_model_before_one_real_write_and_survive_reo
         assert_eq!(records.iter().filter(|row| matches!(&row.event, CoreEvent::CapabilitySettled{call} if call.name=="fs.write")).count(), 1);
         let ledger = runtime.model_requests(&session.id).unwrap();
         save("recovery-first-round.json", &json!({"view":view,"events":records,"ledger":ledger,"tasks":runtime.tasks(&session.id).unwrap()}));
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
         assert_eq!(ledger.requests.len(), 3);
         assert_eq!(ledger.settled_tokens, 45);
         assert_eq!(ledger.reserved_tokens, 0);
@@ -306,7 +311,7 @@ async fn truncated_arguments(reported: bool, evidence: &str) {
         adapter: AnthropicProvider::new(&base, "synthetic-recovery-key").unwrap(),
         calls: AtomicUsize::new(0),
     });
-    let runtime = open_with_provider(root.path(), provider.clone(), 6, 1000);
+    let runtime = open_with_provider(root.path(), provider.clone(), Some(6), Some(1000));
     let session = runtime.create(None).unwrap();
     let view = runtime
         .prompt(&session.id, "Do the fixture.", CancellationToken::new())
@@ -362,7 +367,7 @@ async fn truncated_arguments(reported: bool, evidence: &str) {
         assert_eq!(first.outstanding_reservation_tokens, 0);
         assert_eq!(ledger.settled_tokens, 15);
         assert_eq!(ledger.reserved_tokens, 0);
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
     } else {
         assert_eq!(observation.usage_status, UsageStatus::Partial);
         assert_eq!(observation.usage.output, 0);
@@ -375,13 +380,19 @@ async fn truncated_arguments(reported: bool, evidence: &str) {
                 .all(|entry| entry.observation.usage_status != UsageStatus::Reported)
         );
         assert_eq!(first.settled_tokens, None);
-        assert_eq!(first.outstanding_reservation_tokens, ledger.token_limit);
+        assert_eq!(first.charged_tokens, Some(first.reservation_tokens));
+        assert_eq!(first.outstanding_reservation_tokens, 0);
         assert_eq!(ledger.settled_tokens, 0);
-        assert_eq!(ledger.reserved_tokens, ledger.token_limit);
-        assert!(ledger.budget_unknown);
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(ledger.charged_unknown_tokens, first.reservation_tokens);
+        assert_eq!(
+            ledger.remaining_tokens,
+            Some(1000 - first.reservation_tokens)
+        );
+        assert!(ledger.usage_unknown);
     }
     drop(runtime);
-    let reopened = open_with_provider(root.path(), provider.clone(), 6, 1000);
+    let reopened = open_with_provider(root.path(), provider.clone(), Some(6), Some(1000));
     let reopened_view = reopened.get(&session.id).unwrap();
     let reopened_ledger = reopened.model_requests(&session.id).unwrap();
     save(
@@ -454,13 +465,13 @@ async fn truncated_arguments(reported: bool, evidence: &str) {
         assert_eq!(next_request.outstanding_reservation_tokens, 0);
         assert_eq!(after.settled_tokens, 30);
         assert_eq!(after.reserved_tokens, 0);
-        assert!(!after.budget_unknown);
+        assert!(!after.usage_unknown);
     } else {
         assert_eq!(reopened.task(&next.id).unwrap().state, TaskState::Failed);
         assert_eq!(
             provider.calls.load(Ordering::SeqCst),
             1,
-            "the held reservation must reject before the next Provider request"
+            "the charged unknown usage must refuse the next Provider request"
         );
         assert_eq!(requests.len(), 1);
         assert_eq!(after.requests.len(), 2);
@@ -469,14 +480,19 @@ async fn truncated_arguments(reported: bool, evidence: &str) {
         assert!(rejected.started_cursor.is_none());
         assert_eq!(
             rejected.rejection.as_deref(),
-            Some("unsettled_model_reservation")
+            Some("model_token_budget_exhausted")
         );
         assert_eq!(rejected.settled_tokens, None);
         assert_eq!(rejected.outstanding_reservation_tokens, 0);
         assert!(rejected.observations.is_empty());
         assert_eq!(after.settled_tokens, 0);
-        assert_eq!(after.reserved_tokens, ledger.token_limit);
-        assert!(after.budget_unknown);
+        assert_eq!(after.reserved_tokens, 0);
+        assert_eq!(
+            after.charged_unknown_tokens,
+            first.charged_tokens.unwrap_or(0)
+        );
+        assert_eq!(after.remaining_tokens, Some(0));
+        assert!(after.usage_unknown);
     }
 }
 
@@ -488,7 +504,7 @@ async fn invalid_arguments_without_message_stop_settle_reported_usage_after_reop
 }
 
 #[tokio::test]
-async fn invalid_arguments_before_message_delta_keep_partial_usage_reserved_after_reopen() {
+async fn invalid_arguments_before_message_delta_charge_partial_usage_once_after_reopen() {
     timeout(WATCHDOG, truncated_arguments(false, "partial-incomplete"))
         .await
         .expect("partial truncated argument response stalled");
@@ -511,7 +527,7 @@ async fn argument_correction_cannot_exceed_the_existing_token_budget() {
             .await;
             listener
         });
-        let runtime = open_with_budget(root.path(), &base, 6, 15);
+        let runtime = open_with_budget(root.path(), &base, Some(6), Some(15));
         let session = runtime.create(None).unwrap();
         let view = runtime
             .prompt(&session.id, "Do the fixture.", CancellationToken::new())
@@ -525,8 +541,8 @@ async fn argument_correction_cannot_exceed_the_existing_token_budget() {
         let ledger = runtime.model_requests(&session.id).unwrap();
         assert_eq!(ledger.settled_tokens, 15);
         assert_eq!(ledger.reserved_tokens, 0);
-        assert_eq!(ledger.remaining_tokens, 0);
-        assert!(!ledger.budget_unknown);
+        assert_eq!(ledger.remaining_tokens, Some(0));
+        assert!(!ledger.usage_unknown);
         assert_eq!(
             ledger
                 .requests
@@ -579,7 +595,7 @@ async fn repeated_invalid_arguments_stop_at_the_existing_turn_limit_without_exec
         let ledger = runtime.model_requests(&session.id).unwrap();
         save("turn-limit.json", &json!({"view":view,"ledger":ledger,"tasks":runtime.tasks(&session.id).unwrap()}));
         assert_eq!(ledger.requests.len(), 2);
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
         server.await.unwrap();
     }).await.expect("invalid argument turn limit stalled");
 }

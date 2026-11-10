@@ -157,10 +157,12 @@ fn confirmed_fork_retains_reconciled_unknown_history_and_its_original_decision()
     store.mark_tool_started(&lease, &call.id).unwrap();
     store.recover(&id).unwrap();
     let unknown = store.snapshot(&id).unwrap();
-    assert!(matches!(
-        store.fork_session(&id, "unresolved", true),
-        Err(CoreError::NeedsReconciliation)
-    ));
+    let unresolved_fork = store
+        .fork_session(&id, "unresolved", true)
+        .expect("idle session with paired unknown audit record can fork");
+    assert_eq!(unresolved_fork.state, SessionState::Idle);
+    assert_eq!(unresolved_fork.unresolved_calls, unknown.unresolved_calls);
+    assert_eq!(unresolved_fork.messages, unknown.messages);
     let reconciliation = cayw_core::Reconciliation {
         call_id: call.id,
         expected: store.tool_reconciliation_origin(&id, "fork-call").unwrap(),
@@ -248,7 +250,7 @@ fn confirmed_fork_retains_reconciled_unknown_history_and_its_original_decision()
 }
 
 #[test]
-fn active_and_unknown_sessions_cannot_fork_and_recovery_resolves_pending_approvals() {
+fn active_sessions_cannot_fork_while_recovered_unknown_sessions_fork_with_audit_intact() {
     let database = Database::new();
     let store = database.open();
     let (id, lease, _assistant, call) = planned(&store);
@@ -294,11 +296,11 @@ fn active_and_unknown_sessions_cannot_fork_and_recovery_resolves_pending_approva
     store.mark_tool_started(&lease, "fork-call").unwrap();
     store.recover(&unknown).unwrap();
     let before = store.snapshot(&unknown).unwrap();
-    assert!(matches!(
-        store.fork_session(&unknown, "copy", true),
-        Err(CoreError::NeedsReconciliation)
-    ));
+    let unknown_fork = store.fork_session(&unknown, "copy", true).unwrap();
+    assert_eq!(unknown_fork.state, SessionState::Idle);
+    assert_eq!(unknown_fork.unresolved_calls, before.unresolved_calls);
+    assert_eq!(unknown_fork.messages, before.messages);
     assert_eq!(store.snapshot(&unknown).unwrap(), before);
     assert!(store.fork_session(&id, " ", true).is_err());
-    assert_eq!(store.list_sessions().unwrap().len(), 3);
+    assert_eq!(store.list_sessions().unwrap().len(), 4);
 }

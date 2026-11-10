@@ -153,7 +153,7 @@ async fn diff_hunks_enforces_line_and_output_bounds_and_pre_cancel() {
     let line_limited = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_tree_entries: 4,
+            max_tree_entries: Some(4),
             ..Limits::default()
         },
     )
@@ -170,7 +170,7 @@ async fn diff_hunks_enforces_line_and_output_bounds_and_pre_cancel() {
     let output_limited = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_output_bytes: 24,
+            max_output_bytes: Some(24),
             ..Limits::default()
         },
     )

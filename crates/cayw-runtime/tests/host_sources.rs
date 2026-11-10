@@ -230,7 +230,7 @@ impl Fixture {
         let config = RuntimeConfig {
             bridge: Some(consumer),
             permissions: permissions.clone(),
-            max_run_time: Duration::from_secs(30),
+            max_run_time: Some(Duration::from_secs(30)),
             ..Default::default()
         };
         write_json(
@@ -238,15 +238,15 @@ impl Fixture {
             "runtime-config.json",
             &json!({
                 "permissions": config.permissions, "bindings": pins,
-                "max_run_time_ms": config.max_run_time.as_millis(), "max_turns": config.max_turns,
+                "max_run_time_ms": config.max_run_time.map(|time| time.as_millis()), "max_turns": config.max_turns,
                 "max_total_tokens": config.max_total_tokens, "max_capability_calls": config.max_capability_calls,
                 "max_capability_bytes": config.max_capability_bytes, "max_history_bytes": config.max_history_bytes,
                 "max_event_bytes": config.max_event_bytes,
                 "host": {"max_calls": config.host.max_calls, "max_argument_bytes": config.host.max_argument_bytes,
                     "max_result_bytes": config.host.max_result_bytes, "max_total_bytes": config.host.max_total_bytes,
-                    "call_timeout_ms": config.host.call_timeout.as_millis()},
+                    "call_timeout_ms": config.host.call_timeout.map(|time| time.as_millis())},
                 "codemode": {"host_calls": config.codemode.host_calls, "output_bytes": config.codemode.output_bytes,
-                    "timeout_ms": config.codemode.timeout.as_millis()}, "requests": config.request_limits,
+                    "timeout_ms": config.codemode.timeout.map(|time| time.as_millis())}, "requests": config.request_limits,
             }),
         );
         let runtime = Runtime::open(

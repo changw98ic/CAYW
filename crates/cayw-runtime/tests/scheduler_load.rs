@@ -281,7 +281,7 @@ async fn continuous_high_arrivals_bounded_for_low_and_limits_visible() {
             max_concurrent_runs: CONCURRENCY,
             max_queued_runs: CAPACITY,
             fairness_after_dispatches: FAIRNESS,
-            max_run_time: Duration::from_secs(30),
+            max_run_time: Some(Duration::from_secs(30)),
             ..Default::default()
         },
     )
@@ -702,7 +702,7 @@ async fn waiting_approval_releases_slot_and_real_file_load_completes() {
             max_concurrent_runs: CONCURRENCY,
             max_queued_runs: CAPACITY,
             fairness_after_dispatches: FAIRNESS,
-            max_run_time: Duration::from_secs(20),
+            max_run_time: Some(Duration::from_secs(20)),
             ..Default::default()
         },
     )
@@ -932,7 +932,7 @@ async fn cancelling_one_queued_task_leaves_other_ready_work_runnable() {
             max_concurrent_runs: 1,
             max_queued_runs: 3,
             fairness_after_dispatches: 2,
-            max_run_time: Duration::from_secs(20),
+            max_run_time: Some(Duration::from_secs(20)),
             ..Default::default()
         },
     )

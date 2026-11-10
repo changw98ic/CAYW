@@ -111,8 +111,8 @@ fn harness() -> Harness {
         RuntimeConfig {
             max_concurrent_runs: 1,
             max_queued_runs: 4,
-            max_queue_time: Duration::from_secs(10),
-            max_run_time: Duration::from_secs(30),
+            max_queue_time: Some(Duration::from_secs(10)),
+            max_run_time: Some(Duration::from_secs(30)),
             ..Default::default()
         },
     )
@@ -374,9 +374,9 @@ async fn park_storage_failure_at_approval_wait_fails_closed() {
         "a scheduler bookkeeping failure must not label a tool outcome unknown"
     );
     assert_eq!(h.rt.get(&h.session).unwrap().state, SessionState::Idle);
-    // Observed contract: the failed park is retained as a conservative
-    // lifecycle obligation. It is not an effect unknown (started is empty), and
-    // the task keeps its slot until an explicit recovery.
+    // The failed park is retained as a known lifecycle obligation. It is not an
+    // effect unknown (started is empty), and the task keeps its slot until an
+    // explicit recovery.
     assert_eq!(task.state, TaskState::Draining);
     assert!(
         task.holds_slot,
@@ -386,11 +386,11 @@ async fn park_storage_failure_at_approval_wait_fails_closed() {
         matches!(
             result,
             Err(cayw_runtime::RuntimeError::RecoveryRequired {
-                outcome_unknown: true,
+                outcome_unknown: false,
                 ..
             })
         ),
-        "the conservative lifecycle obligation is reported: {result:?}"
+        "the lifecycle obligation is known, not an uncertain effect: {result:?}"
     );
     // Recovery clears the obligation and the slot without replaying anything.
     db.execute_batch("DROP TRIGGER fail_wait_park;").unwrap();
@@ -490,30 +490,33 @@ async fn park_storage_failure_after_a_cell_finishes_keeps_the_slot() {
         "no capability may cross its execution boundary"
     );
     assert!(!h.workspace.join("a.txt").exists());
-    // Current contract: B really completed and its terminal is durable, but the
-    // failed park retains a lifecycle obligation and re-labels B's successful
-    // tool result as an unknown outcome.
+    // B really completed and its terminal stays durable. The failed park retains
+    // a known lifecycle obligation; it must not re-label B's successful tool
+    // result as an unknown outcome.
     assert_eq!(b_execution.state, cayw_core::ExecutionState::Completed);
     assert_eq!(task.state, TaskState::Draining);
     assert!(
         task.holds_slot,
         "the failed park must keep the slot: {task:?}"
     );
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
     assert_eq!(
-        unknown_tool_results(&h.rt, &h.session),
-        vec!["wait-b".to_string()],
-        "the completed cell's tool result is currently re-labelled unknown"
+        view.state,
+        SessionState::Idle,
+        "a scheduler bookkeeping failure must not freeze the session"
+    );
+    assert!(
+        unknown_tool_results(&h.rt, &h.session).is_empty(),
+        "the completed cell's tool result stays known"
     );
     assert!(
         matches!(
             result,
             Err(cayw_runtime::RuntimeError::RecoveryRequired {
-                outcome_unknown: true,
+                outcome_unknown: false,
                 ..
             })
         ),
-        "the conservative lifecycle obligation is reported: {result:?}"
+        "the lifecycle obligation is known, not an uncertain effect: {result:?}"
     );
     db.execute_batch("DROP TRIGGER fail_finished_park;")
         .unwrap();
@@ -527,9 +530,8 @@ async fn park_storage_failure_after_a_cell_finishes_keeps_the_slot() {
         h.rt.health().unwrap().running,
         started_events(&h.rt, &h.session)
     );
-    // Recovery releases the slot, but the session keeps the reconciliation
-    // requirement created by the unknown tool result.
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    // Recovery releases the slot without inventing an unknown effect.
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(task.state, TaskState::Interrupted);
     assert!(!task.holds_slot);
     assert_eq!(h.rt.health().unwrap().running, 0);
@@ -640,4 +642,71 @@ async fn one_live_cell_keeps_the_only_slot_while_another_awaits_approval() {
         1,
         "sequential execution must never overlap provider streams"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 5. The scheduler loses the task slot after begin_execution commits but before
+//    cell_created observes it. The cell is a known refusal, yet Core already
+//    holds an execution row; that row must be settled before the refusal is
+//    reported, or the next attempt sees a live execution.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn slot_loss_after_execution_commit_settles_core_before_the_known_refusal() {
+    let mut h = harness();
+    // The trigger simulates the scheduler parking the task in the window after
+    // Core committed ExecutionStarted and before cell_created re-reads the row.
+    let db = rusqlite::Connection::open(&h.db).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER drop_slot_after_execution_start AFTER INSERT ON core_events
+         WHEN json_extract(NEW.record,'$.event.type')='execution_started'
+         BEGIN UPDATE runtime_tasks SET holds_slot=0 WHERE state='running'; END;",
+    )
+    .unwrap();
+    drop(db);
+
+    let mut worker = spawn_prompt(&h.rt, &h.session);
+    let round = next_round(&mut h.rounds).await;
+    tool(round, "exec-a", exec("return 1"));
+    let view = tokio::time::timeout(Duration::from_secs(15), &mut worker)
+        .await
+        .expect("the refused cell must not wedge the worker")
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.state, SessionState::Idle, "{view:#?}");
+    let Some(cayw_ai::Message::ToolResult(result)) = view
+        .messages
+        .iter()
+        .find(|message| matches!(message, cayw_ai::Message::ToolResult(_)))
+    else {
+        panic!("the model must receive the cell admission refusal: {view:#?}");
+    };
+    assert!(result.is_error, "{result:?}");
+    assert!(
+        !result.outcome_unknown,
+        "the VM never started, so the refusal is known: {result:?}"
+    );
+    assert_eq!(view.executions.len(), 1, "{view:#?}");
+    assert_eq!(
+        view.executions[0].state,
+        cayw_core::ExecutionState::Cancelled,
+        "the refused cell must not leave a live Core execution: {view:#?}"
+    );
+    assert!(
+        matches!(
+            view.executions[0].terminal,
+            Some(cayw_core::ExecutionOutcome::Cancelled { .. })
+        ),
+        "{view:#?}"
+    );
+
+    // A second attempt must be admitted at the Core boundary.
+    let worker = spawn_prompt(&h.rt, &h.session);
+    let round = next_round(&mut h.rounds).await;
+    final_text(round, "second turn complete");
+    let second = tokio::time::timeout(Duration::from_secs(15), worker)
+        .await
+        .expect("the next attempt must not stay blocked")
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.state, SessionState::Idle, "{second:#?}");
 }

@@ -54,7 +54,7 @@ fn runtime(
         Arc::new(Scripts { scripts }),
         Model::new("fixture", "shared-read-invalidation"),
         RuntimeConfig {
-            max_run_time: Duration::from_secs(10),
+            max_run_time: Some(Duration::from_secs(10)),
             permissions,
             host: cayw_host::HostConfig {
                 frozen_reads: true,
@@ -139,7 +139,7 @@ async fn real_runtime_read_write_read_captures_the_new_bytes() {
         }),
         Model::new("fixture", "shared-read-invalidation"),
         RuntimeConfig {
-            max_run_time: Duration::from_secs(10),
+            max_run_time: Some(Duration::from_secs(10)),
             permissions: vec![
                 ScopedPermission::exact("fs.read", json!({"path":"a.txt"})),
                 ScopedPermission::exact(

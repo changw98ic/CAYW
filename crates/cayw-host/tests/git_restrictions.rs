@@ -192,8 +192,8 @@ async fn allowed_filter_accepts_underscore_unicode_spaces_and_parentheses_as_one
         program: "/bin/echo".into(),
         args: vec!["filter:".into()],
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(4096),
         allow_filter: true,
         io: cayw_host::ProcessIo::Pipes,
     };

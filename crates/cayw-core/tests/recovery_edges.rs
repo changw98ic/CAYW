@@ -176,7 +176,7 @@ fn recovery_rolls_back_all_approval_decisions_when_its_terminal_cannot_be_record
 }
 
 #[test]
-fn explicit_unknown_blocks_new_calls_but_allows_existing_calls_to_settle() {
+fn explicit_unknown_is_audited_without_freezing_the_running_attempt() {
     let (_database, store, id, lease, call) = fixture();
     store
         .append_agent_event(
@@ -201,10 +201,7 @@ fn explicit_unknown_blocks_new_calls_but_allows_existing_calls_to_settle() {
             },
         )
         .unwrap();
-    assert_eq!(
-        store.snapshot(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(store.snapshot(&id).unwrap().state, SessionState::Running);
     assert!(store.mark_tool_started(&lease, &call.id).is_err());
     let reconciliation = Reconciliation {
         expected: store.tool_reconciliation_origin(&id, &call.id).unwrap(),

@@ -28,9 +28,14 @@ pub struct TaskInput {
 
 impl TaskInput {
     /// Validate trusted host input before it is written to the durable queue.
-    /// `max_prompt_bytes` counts text plus each image's MIME type and encoded
-    /// data, matching the bytes retained in the task row.
-    pub fn validate(&self, model: &Model, max_prompt_bytes: usize) -> Result<(), QueueError> {
+    /// When `max_prompt_bytes` is `Some(limit)`, it counts text plus each
+    /// image's MIME type and encoded data, matching the bytes retained in the
+    /// task row. `None` imposes no byte cap.
+    pub fn validate(
+        &self,
+        model: &Model,
+        max_prompt_bytes: Option<usize>,
+    ) -> Result<(), QueueError> {
         if self.text.trim().is_empty() && self.images.is_empty() {
             return Err(QueueError::InvalidInput(
                 "prompt must contain text or at least one image".into(),
@@ -42,7 +47,7 @@ impl TaskInput {
             ));
         }
         let mut bytes = self.text.len();
-        if bytes > max_prompt_bytes {
+        if max_prompt_bytes.is_some_and(|limit| bytes > limit) {
             return Err(QueueError::InvalidInput(
                 "prompt exceeds the byte budget".into(),
             ));
@@ -52,7 +57,7 @@ impl TaskInput {
                 .checked_add(image.mime_type.len())
                 .and_then(|total| total.checked_add(image.data.len()))
                 .ok_or_else(|| QueueError::InvalidInput("prompt size overflow".into()))?;
-            if bytes > max_prompt_bytes {
+            if max_prompt_bytes.is_some_and(|limit| bytes > limit) {
                 return Err(QueueError::InvalidInput(
                     "prompt exceeds the byte budget".into(),
                 ));

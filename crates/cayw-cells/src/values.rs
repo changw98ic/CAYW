@@ -124,8 +124,10 @@ impl CellValueExecutor {
             // fixed envelope separately so a value accepted at json_depth can
             // still reach the journal.
             CellValueOperation::Store => (
-                self.limits.json_depth.saturating_add(1),
-                self.limits.store_bytes.saturating_add(256),
+                self.limits.json_depth.map(|depth| depth.saturating_add(1)),
+                self.limits
+                    .store_bytes
+                    .map(|bytes| bytes.saturating_add(256)),
             ),
             CellValueOperation::Load => (self.limits.json_depth, self.limits.item_bytes),
         };
@@ -156,7 +158,7 @@ impl CellValueExecutor {
             .cloned()
             .ok_or_else(|| CapabilityError::new("cells.store value required"))?;
         // A failed commit can still have written the value. Report that case as
-        // unknown so Bridge freezes the session instead of replaying the write.
+        // unknown so Bridge invalidates cached reads instead of replaying the write.
         self.journal
             .store(session, key, expected_version, value, &self.limits)
             .map(|snapshot| json!({"version":snapshot.version}))
@@ -180,7 +182,7 @@ impl CellValueExecutor {
 /// Explicit authorization for independent Cells backends. Implementations
 /// receive the immutable cell origin and the exact value operation/arguments.
 /// Returning `CapabilityError::unknown` means the authorization result itself
-/// is uncertain; Bridge then freezes the session.
+/// is uncertain; Bridge then invalidates cached reads before the cell stops.
 #[async_trait]
 pub trait CellValueAuthorizer: Send + Sync {
     async fn authorize(
@@ -321,8 +323,8 @@ fn validate_snapshot(
     let value = serde_json::to_value(snapshot).map_err(|error| capability_error(error.into()))?;
     if let Err(error) = validate_json(
         &value,
-        limits.json_depth.saturating_add(1),
-        limits.store_bytes.saturating_add(64),
+        limits.json_depth.map(|depth| depth.saturating_add(1)),
+        limits.store_bytes.map(|bytes| bytes.saturating_add(64)),
     ) {
         discard_json(value);
         return Err(capability_error(error));

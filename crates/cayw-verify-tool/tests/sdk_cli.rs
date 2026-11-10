@@ -116,7 +116,7 @@ fn full_sdk_ipc_suite_records_real_faults_and_original_call_identity() {
     for name in [
         "original_attempt_running",
         "effect_after_original_durable_start",
-        "unknown_blocks_new_work",
+        "unknown_keeps_session_idle_without_replaying",
         "durable_effect_not_repeated",
         "unknown_survives_another_reopen",
         "no_provider_replay_across_recovery",

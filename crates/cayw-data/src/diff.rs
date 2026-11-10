@@ -34,21 +34,32 @@ pub(crate) fn diff(args: &Value, budget: &Budget<'_>) -> Result<Value> {
     let width = new.len() + 1;
     let cells = (old.len() + 1)
         .checked_mul(width)
-        .filter(|&n| n <= budget.limits.max_diff_work)
-        .ok_or_else(|| error("diff_work_limit", "diff matrix exceeds max_diff_work"))?;
-    let mut remaining = budget.limits.max_diff_work - cells;
+        .ok_or_else(|| error("diff_work_limit", "diff matrix size overflow"))?;
+    if budget
+        .limits
+        .max_diff_work
+        .is_some_and(|max_diff_work| cells > max_diff_work)
+    {
+        return Err(error(
+            "diff_work_limit",
+            "diff matrix exceeds max_diff_work",
+        ));
+    }
+    let mut remaining = budget.limits.max_diff_work.map(|max| max - cells);
     let mut table = vec![0_u32; cells];
     for i in (0..old.len()).rev() {
         budget.checkpoint()?;
         for j in (0..new.len()).rev() {
             // Charge byte comparisons as well as matrix size, even for repeated long lines.
             let cost = old[i].len().min(new[j].len()) + 1;
-            remaining = remaining.checked_sub(cost).ok_or_else(|| {
-                error(
-                    "diff_work_limit",
-                    "diff byte comparisons exceed max_diff_work",
-                )
-            })?;
+            if let Some(available) = remaining.as_mut() {
+                *available = available.checked_sub(cost).ok_or_else(|| {
+                    error(
+                        "diff_work_limit",
+                        "diff byte comparisons exceed max_diff_work",
+                    )
+                })?;
+            }
             table[i * width + j] = if old[i] == new[j] {
                 table[(i + 1) * width + j + 1] + 1
             } else {
@@ -140,7 +151,11 @@ fn lines<'a>(text: &'a str, budget: &Budget<'_>) -> Result<Vec<&'a str>> {
     for line in text.split_inclusive('\n') {
         budget.checkpoint()?;
         budget.rows(lines.len() + 1)?;
-        if lines.len() >= budget.limits.max_nodes {
+        if budget
+            .limits
+            .max_nodes
+            .is_some_and(|max_nodes| lines.len() >= max_nodes)
+        {
             return Err(error("node_limit", "diff lines exceed max_nodes"));
         }
         lines.push(line);

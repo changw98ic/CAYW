@@ -595,9 +595,18 @@ impl RequestStore {
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
-            if u64::from(next.max_tasks) < read_unsigned(&active)?
-                || next.max_events < read_unsigned(&reserved_events)?
-                || next.max_state_bytes < read_unsigned(&reserved_bytes)?
+            let active = read_unsigned(&active)?;
+            let reserved_events = read_unsigned(&reserved_events)?;
+            let reserved_bytes = read_unsigned(&reserved_bytes)?;
+            if next
+                .max_tasks
+                .is_some_and(|limit| u64::from(limit) < active)
+                || next
+                    .max_events
+                    .is_some_and(|limit| limit < reserved_events)
+                || next
+                    .max_state_bytes
+                    .is_some_and(|limit| limit < reserved_bytes)
             {
                 return Err(RequestError::InvalidInput(
                     "configuration limits cannot be lowered below current active usage".into(),
@@ -832,7 +841,7 @@ impl RequestStore {
                 [],
                 |r| r.get(0),
             )?;
-            if count >= config.max_tasks {
+            if config.max_tasks.is_some_and(|limit| count >= limit) {
                 return Err(RequestError::Budget);
             }
             reserve(tx, config, TASK_EVENT_RESERVE, TASK_RESERVE)?;
@@ -881,7 +890,12 @@ impl RequestStore {
         self.transaction(|tx, now, config| {
             let mut task = active_task(tx, current)?;
             if task.attempts.iter().any(|a| a == next_attempt_id) { return Err(RequestError::Stale); }
-            if task.attempts.len() >= config.max_attempts_per_task as usize { return Err(RequestError::Budget); }
+            if config
+                .max_attempts_per_task
+                .is_some_and(|limit| task.attempts.len() >= limit as usize)
+            {
+                return Err(RequestError::Budget);
+            }
             reserve(tx, config, ATTEMPT_EVENT_RESERVE, TASK_BYTES as u64 + 16 * 1024)?;
             terminalize_all(tx, &task, now, RequestState::Superseded, DecisionKind::Superseded, actor, reason)?;
             task.identity.attempt_id = next_attempt_id.into();
@@ -1024,7 +1038,10 @@ impl RequestStore {
             let mut task = active_task(tx, identity)?;
             check_catalog(&task, catalog)?;
             expire_task(tx, &task, now)?;
-            if task.request_count >= config.max_requests_per_task {
+            if config
+                .max_requests_per_task
+                .is_some_and(|limit| task.request_count >= limit)
+            {
                 return Err(RequestError::Budget);
             }
             let mut reasons = Vec::new();
@@ -1420,7 +1437,10 @@ impl RequestStore {
                 let payload: Vec<u8> = row.get(6)?;
                 let event = RequestEvent { sequence: read_unsigned(&row.get::<_, i64>(0)?)?, at_ms: read_unsigned(&row.get::<_, i64>(1)?)?, task_id: row.get(2)?, request_id: row.get(3)?, kind: row.get(4)?, actor: row.get(5)?, payload: serde_json::from_slice(&payload)? };
                 let size = bounded_json(&event, TASK_BYTES + RECORD_BYTES)?.len().checked_add(usize::from(!events.is_empty())).ok_or(RequestError::Budget)?;
-                if size > config.max_result_bytes.saturating_sub(bytes) {
+                if config
+                    .max_result_bytes
+                    .is_some_and(|limit| size > limit.saturating_sub(bytes))
+                {
                     if events.is_empty() { return Err(RequestError::Budget); }
                     break;
                 }
@@ -1746,14 +1766,18 @@ fn reserve(tx: &Transaction<'_>, config: &RequestConfig, events: u64, bytes: u64
     )?;
     let old_events = read_unsigned(&old_events)?;
     let old_bytes = read_unsigned(&old_bytes)?;
-    let next_events = old_events
-        .checked_add(events)
-        .filter(|n| *n <= config.max_events)
-        .ok_or(RequestError::Budget)?;
-    let next_bytes = old_bytes
-        .checked_add(bytes)
-        .filter(|n| *n <= config.max_state_bytes)
-        .ok_or(RequestError::Budget)?;
+    let next_events = old_events.checked_add(events);
+    let next_events = match config.max_events {
+        Some(limit) => next_events.filter(|n| *n <= limit),
+        None => next_events,
+    }
+    .ok_or(RequestError::Budget)?;
+    let next_bytes = old_bytes.checked_add(bytes);
+    let next_bytes = match config.max_state_bytes {
+        Some(limit) => next_bytes.filter(|n| *n <= limit),
+        None => next_bytes,
+    }
+    .ok_or(RequestError::Budget)?;
     tx.execute(
         "UPDATE request_meta SET reserved_events=?1,reserved_bytes=?2 WHERE singleton=1",
         params![sql_integer(next_events)?, sql_integer(next_bytes)?],

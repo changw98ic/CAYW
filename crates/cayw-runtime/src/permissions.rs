@@ -85,7 +85,7 @@ pub(crate) fn decide(
         inner: inner.clone(),
     }
     .get(session)?;
-    if view.frozen || view.state == cayw_core::SessionState::NeedsReconciliation {
+    if view.frozen {
         return Err(RuntimeError::StaleApproval);
     }
     let lease = view.attempt.ok_or(RuntimeError::StaleApproval)?;

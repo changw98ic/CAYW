@@ -423,8 +423,8 @@ async fn scheduler_ipc_enforces_capacity_fairness_approval_and_session_boundarie
             max_concurrent_runs: 1,
             max_queued_runs: 3,
             fairness_after_dispatches: 2,
-            max_queue_time: Duration::from_secs(20),
-            max_run_time: Duration::from_secs(40),
+            max_queue_time: Some(Duration::from_secs(20)),
+            max_run_time: Some(Duration::from_secs(40)),
             permissions: vec![ScopedPermission::exact(
                 "fs.write",
                 json!({"path": WORKSPACE_FILE, "content": "approved"}),
@@ -1000,7 +1000,7 @@ async fn cell_values_remain_bound_to_their_original_session_over_ipc() {
             max_concurrent_runs: 1,
             max_queued_runs: 3,
             fairness_after_dispatches: 2,
-            max_run_time: Duration::from_secs(20),
+            max_run_time: Some(Duration::from_secs(20)),
             permissions: vec![
                 ScopedPermission::exact(
                     "cells.store",
@@ -1169,7 +1169,7 @@ async fn scheduler_pagination_sdk_and_authenticated_ipc_share_terminal_cursor_se
             max_concurrent_runs: 1,
             max_queued_runs: 4,
             fairness_after_dispatches: 2,
-            max_run_time: Duration::from_secs(20),
+            max_run_time: Some(Duration::from_secs(20)),
             ..Default::default()
         },
     )
@@ -1472,7 +1472,7 @@ fn headless_scheduler_json_maps_to_runtime_config_and_rejects_invalid_values() {
     assert_eq!(config.max_concurrent_runs, 2);
     assert_eq!(config.max_queued_runs, 5);
     assert_eq!(config.fairness_after_dispatches, 3);
-    assert_eq!(config.max_queue_time, Duration::from_millis(1500));
+    assert_eq!(config.max_queue_time, Some(Duration::from_millis(1500)));
 
     for (name, json) in [
         (

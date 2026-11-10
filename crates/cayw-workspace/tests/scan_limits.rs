@@ -12,7 +12,7 @@ async fn explicit_subroots_charge_ancestor_entries_before_reading_files() {
     let ws = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_tree_entries: 2,
+            max_tree_entries: Some(2),
             ..Limits::default()
         },
     )

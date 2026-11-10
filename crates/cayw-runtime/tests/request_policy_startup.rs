@@ -35,7 +35,7 @@ fn setup() -> tempfile::TempDir {
 }
 fn limits(max_tasks: u32) -> RequestConfig {
     RequestConfig {
-        max_tasks,
+        max_tasks: Some(max_tasks),
         ..Default::default()
     }
 }

@@ -1049,10 +1049,27 @@ async fn complete_response_stops_before_late_garbage_and_releases_socket() {
 #[tokio::test]
 async fn response_fragment_limit_stops_empty_argument_flood() {
     let mut wire = vec![created(), call_added(0, "fc-flood", "call-flood")];
-    for _ in 0..4097 {
+    for _ in 0..65_537 {
         wire.push(argument_delta(0, "fc-flood", ""));
     }
-    let (events, _) = run("fragment-limit", wire).await;
+    let (base, _, task) = server(
+        "fragment-limit",
+        "200 OK",
+        "text/event-stream",
+        sse(&wire),
+        8192,
+    )
+    .await;
+    let events: Vec<_> = tokio::time::timeout(
+        WATCHDOG,
+        ResponsesProvider::new(base, KEY)
+            .unwrap()
+            .stream(request(), CancellationToken::new())
+            .collect(),
+    )
+    .await
+    .unwrap();
+    save("fragment-limit", "events.json", &events);
     assert_error(&events);
     assert!(
         terminal(&events)
@@ -1061,6 +1078,7 @@ async fn response_fragment_limit_stops_empty_argument_flood() {
             .unwrap()
             .contains("limit")
     );
+    task.await.unwrap();
 }
 
 fn result(call_id: &str) -> Message {
@@ -1297,6 +1315,61 @@ async fn replay_rejects_missing_or_contradictory_original_output_before_http() {
     }
 }
 
+#[tokio::test]
+async fn unknown_tool_outcome_replays_with_interruption_note() {
+    use cayw_ai::INTERRUPTED_TOOL_OUTCOME_NOTE;
+    let (events, _) = run("unknown-note-first", calls_wire()).await;
+    let assistant = terminal(&events).clone();
+    let mut follow = request();
+    let mut first = result("call-first");
+    if let Message::ToolResult(result) = &mut first {
+        result.content = vec![];
+        result.structured_content = None;
+        result.outcome_unknown = true;
+    }
+    let mut second = result("call-second");
+    if let Message::ToolResult(result) = &mut second {
+        result.content = vec![Content::text("cancelled")];
+        result.structured_content = None;
+        result.outcome_unknown = true;
+    }
+    follow
+        .messages
+        .extend([Message::Assistant(assistant), first, second]);
+    let (base, received, task) = server(
+        "unknown-note-second",
+        "200 OK",
+        "text/event-stream",
+        sse(&text_wire()),
+        5,
+    )
+    .await;
+    let events: Vec<_> = tokio::time::timeout(
+        WATCHDOG,
+        ResponsesProvider::new(base, KEY)
+            .unwrap()
+            .stream(follow, CancellationToken::new())
+            .collect(),
+    )
+    .await
+    .unwrap();
+    save("unknown-note-second", "events.json", &events);
+    assert!(
+        matches!(events.last(), Some(AssistantEvent::Done { .. })),
+        "{events:?}"
+    );
+    let received = received.await.unwrap();
+    task.await.unwrap();
+    let items = received["body"]["input"].as_array().unwrap();
+    assert_eq!(
+        items[3]["output"],
+        json!([{"type":"input_text","text":INTERRUPTED_TOOL_OUTCOME_NOTE}])
+    );
+    assert_eq!(
+        items[4]["output"],
+        json!([{"type":"input_text","text":format!("cancelled\n{INTERRUPTED_TOOL_OUTCOME_NOTE}")}])
+    );
+}
 #[tokio::test]
 async fn raw_calls_and_paired_outputs_round_trip_through_second_native_request() {
     let (events, _) = run("roundtrip-first", calls_wire()).await;

@@ -425,7 +425,7 @@ impl PluginRegistry {
         method: &str,
         arguments: Value,
         cancel: CancellationToken,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Value, PluginError> {
         let entry = self
             .state
@@ -449,7 +449,7 @@ impl PluginRegistry {
         method: &str,
         arguments: Value,
         cancel: CancellationToken,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Value, PluginError> {
         let entry = {
             let state = self.state.lock().expect("plugin registry poisoned");
@@ -477,7 +477,7 @@ impl PluginRegistry {
         method: &str,
         arguments: Value,
         cancel: CancellationToken,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Value, PluginError> {
         let validator = entry
             .validators
@@ -489,7 +489,7 @@ impl PluginRegistry {
         validator
             .validate(&arguments)
             .map_err(|error| PluginError::InvalidArguments(error.to_string()))?;
-        if timeout.is_zero() {
+        if timeout == Some(Duration::ZERO) {
             return Err(PluginError::Timeout);
         }
         let call_cancel = entry.cancel.child_token();
@@ -498,7 +498,12 @@ impl PluginRegistry {
             biased;
             _ = entry.cancel.cancelled() => Err(PluginError::Unloaded),
             _ = cancel.cancelled() => Err(PluginError::Cancelled),
-            _ = tokio::time::sleep(timeout) => Err(PluginError::Timeout),
+            _ = async {
+                match timeout {
+                    Some(timeout) => tokio::time::sleep(timeout).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err(PluginError::Timeout),
             result = entry.plugin.call(method, arguments, call_cancel) => result,
         };
         let state = self.state.lock().expect("plugin registry poisoned");

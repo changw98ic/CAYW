@@ -34,22 +34,27 @@ pub(crate) fn execute(
                 return Err(failure("unsupported outline language; expected rust"));
             }
             let parts = filesystem::components(&args.path, false)?;
-            if parts.len() > workspace.limits.max_depth {
+            if workspace
+                .limits
+                .max_depth
+                .is_some_and(|max| parts.len() > max)
+            {
                 return Err(failure("outline path depth limit exceeded"));
             }
             let (dir, name) = filesystem::parent(&workspace.root, &parts)?;
             let bytes = filesystem::read(
                 &dir,
                 name,
-                workspace
-                    .limits
-                    .max_file_bytes
-                    .min(workspace.limits.max_batch_bytes),
+                crate::min_limit(
+                    workspace.limits.max_file_bytes,
+                    workspace.limits.max_batch_bytes,
+                ),
                 context,
             )?;
             let text =
                 std::str::from_utf8(&bytes).map_err(|_| failure("Rust source must be UTF-8"))?;
-            syntax_shape(text, workspace.limits.max_depth.min(64), context)?;
+            let shape_depth = workspace.limits.max_depth.map_or(64, |max| max.min(64));
+            syntax_shape(text, shape_depth, context)?;
             context.check()?;
             let parsed =
                 syn::parse_file(text).map_err(|error| failure(format!("Rust syntax: {error}")))?;
@@ -76,7 +81,12 @@ pub(crate) fn execute(
         }
         "code.diff_hunks" => {
             let args: DiffArgs = parse(arguments)?;
-            if args.diff.len() > workspace.limits.max_batch_bytes || args.diff.contains('\0') {
+            if workspace
+                .limits
+                .max_batch_bytes
+                .is_some_and(|limit| args.diff.len() > limit)
+                || args.diff.contains('\0')
+            {
                 return Err(failure("diff input byte limit exceeded or binary input"));
             }
             let max = bound(args.max_hunks, 1000, workspace.limits.max_tree_entries)?;
@@ -195,8 +205,8 @@ struct Outline<'a> {
     symbols: Vec<Value>,
     max: usize,
     total: usize,
-    ceiling: usize,
-    depth: usize,
+    ceiling: Option<usize>,
+    depth: Option<usize>,
     context: &'a Context,
     output: OutputBudget,
 }
@@ -209,7 +219,7 @@ impl Outline<'_> {
         parent: Option<usize>,
     ) -> Result<usize, CapabilityError> {
         self.context.check()?;
-        if self.total >= self.ceiling {
+        if self.ceiling.is_some_and(|ceiling| self.total >= ceiling) {
             return Err(failure("outline declaration limit exceeded"));
         }
         let range = span.byte_range();
@@ -236,7 +246,7 @@ impl Outline<'_> {
         parent: Option<usize>,
         depth: usize,
     ) -> Result<(), CapabilityError> {
-        if depth > self.depth {
+        if self.depth.is_some_and(|max| depth > max) {
             return Err(failure("outline nesting limit exceeded"));
         }
         for item in items {
@@ -412,7 +422,11 @@ fn diff(
     let mut at = 0;
     for raw in text.split_inclusive('\n') {
         context.check()?;
-        if lines.len() >= workspace.limits.max_tree_entries {
+        if workspace
+            .limits
+            .max_tree_entries
+            .is_some_and(|limit| lines.len() >= limit)
+        {
             return Err(failure("diff input line limit exceeded"));
         }
         let line = raw
@@ -530,7 +544,11 @@ fn diff(
             last_new = new_begin + new.count;
             hunk_count += 1;
             section_hunks += 1;
-            if hunk_count > workspace.limits.max_tree_entries {
+            if workspace
+                .limits
+                .max_tree_entries
+                .is_some_and(|limit| hunk_count > limit)
+            {
                 return Err(failure("diff hunk limit exceeded"));
             }
             let header_at = at;

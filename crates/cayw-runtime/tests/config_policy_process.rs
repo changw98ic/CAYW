@@ -82,7 +82,12 @@ async fn stopped_policy_can_change_after_the_original_process_releases_ownership
     .await
     .expect("fixture did not publish its held policy");
     let requests = cayw_requests::RequestConfig {
-        max_tasks: cayw_requests::RequestConfig::default().max_tasks + 1,
+        max_tasks: Some(
+            cayw_requests::RequestConfig::default()
+                .max_tasks
+                .unwrap_or(0)
+                + 1,
+        ),
         ..Default::default()
     };
     let actor = cayw_requests::HostActor::new("process-policy-fixture").unwrap();

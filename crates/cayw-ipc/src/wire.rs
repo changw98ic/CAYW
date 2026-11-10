@@ -13,18 +13,17 @@ use tokio::{
 pub(crate) const HELLO_ID: &str = "h";
 pub(crate) const CANCEL_METHOD: &str = "rpc.cancel";
 pub(crate) const MAX_METHOD_BYTES: usize = 256;
-// Counts all object/array containers, including the outer protocol object.
-pub(crate) const MAX_JSON_DEPTH: usize = 64;
 
 /// Validate the complete JSON before any Value can discard a duplicate key.
 /// The first pass retains only keys in currently open objects, not a second tree.
 /// Typed decoding still rejects unknown fields, missing fields and wrong types.
+/// Nesting is bounded by `serde_json`'s own recursion limit.
 pub(crate) fn decode<T: de::DeserializeOwned>(bytes: &[u8], max: usize) -> io::Result<T> {
     if bytes.len() > max {
         return Err(invalid_json());
     }
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    StrictJson { depth: 0 }
+    StrictJson
         .deserialize(&mut deserializer)
         .map_err(|_| invalid_json())?;
     deserializer.end().map_err(|_| invalid_json())?;
@@ -36,20 +35,7 @@ fn invalid_json() -> io::Error {
 }
 
 #[derive(Clone, Copy)]
-struct StrictJson {
-    depth: usize,
-}
-
-impl StrictJson {
-    fn child<E: de::Error>(self) -> Result<Self, E> {
-        if self.depth >= MAX_JSON_DEPTH {
-            return Err(E::custom("IPC JSON nesting limit exceeded"));
-        }
-        Ok(Self {
-            depth: self.depth + 1,
-        })
-    }
-}
+struct StrictJson;
 
 impl<'de> DeserializeSeed<'de> for StrictJson {
     type Value = ();
@@ -63,7 +49,7 @@ impl<'de> de::Visitor<'de> for StrictJson {
     type Value = ();
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("bounded JSON without duplicate object keys")
+        f.write_str("JSON without duplicate object keys")
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<(), E> {
@@ -89,48 +75,21 @@ impl<'de> de::Visitor<'de> for StrictJson {
     }
 
     fn visit_seq<M: de::SeqAccess<'de>>(self, mut sequence: M) -> Result<(), M::Error> {
-        let child = self.child()?;
-        while sequence.next_element_seed(child)?.is_some() {}
+        while sequence.next_element_seed(Self)?.is_some() {}
         Ok(())
     }
 
     fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<(), M::Error> {
-        let child = self.child()?;
         let mut keys = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
             // Keys are compared after JSON escape decoding; x and \\u0078 collide.
             if !keys.insert(key) {
                 return Err(de::Error::custom("duplicate IPC JSON object key"));
             }
-            map.next_value_seed(child)?;
+            map.next_value_seed(Self)?;
         }
         Ok(())
     }
-}
-
-/// Values created by callers have no repeated keys, but can exceed decoder depth.
-/// Bound local params/results before recursively serializing them onto the wire.
-pub(crate) fn validate_value(value: &Value, depth: usize) -> io::Result<()> {
-    match value {
-        Value::Array(array) => {
-            if depth >= MAX_JSON_DEPTH {
-                return Err(invalid_json());
-            }
-            for value in array {
-                validate_value(value, depth + 1)?;
-            }
-        }
-        Value::Object(object) => {
-            if depth >= MAX_JSON_DEPTH {
-                return Err(invalid_json());
-            }
-            for value in object.values() {
-                validate_value(value, depth + 1)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -165,7 +124,7 @@ pub(crate) struct HelloResult {
     pub version: u32,
     pub max_frame_bytes: usize,
     pub max_in_flight: usize,
-    pub max_requests_per_connection: usize,
+    pub max_requests_per_connection: Option<usize>,
     pub max_id_bytes: usize,
 }
 

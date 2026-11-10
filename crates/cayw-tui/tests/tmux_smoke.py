@@ -134,7 +134,7 @@ try:
     assert all(record["usage_status"] == "reported" and record["usage"]["input"] == 2
                and record["usage"]["output"] == 2 and record["usage"]["total_tokens"] == 4 for record in done)
     overview = report["completed_context_overview"]
-    assert overview["budget_unknown"] is False and overview["ledger_reserved_tokens"] == 0
+    assert overview["usage_unknown"] is False and overview["ledger_reserved_tokens"] == 0
     assert overview["request_count"] == len(finished) and overview["ledger_settled_tokens"] == 4 * len(finished)
     assert overview["cost"]["status"] == "unknown"
     keys("M-4")

@@ -197,8 +197,8 @@ fn workspace() -> tempfile::TempDir {
 fn settings(temp: &tempfile::TempDir) -> RuntimeConfig {
     let root = temp.path().join("workspace");
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(60),
-        max_turns: 64,
+        max_run_time: Some(Duration::from_secs(60)),
+        max_turns: Some(64),
         permissions: vec![
             ScopedPermission::exact("test.run", json!({"profile":"project"})),
             ScopedPermission::exact("fs.read", json!({"path":"ordinary.txt"})),
@@ -223,8 +223,8 @@ fn settings(temp: &tempfile::TempDir) -> RuntimeConfig {
             program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
             args: vec!["leaf".into(), root.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(10),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(10)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: ProcessIo::Pipes,
         },
@@ -1001,7 +1001,7 @@ async fn other_task_and_session_cannot_use_original_request_and_reopen_cannot_in
 async fn repeated_requests_and_ordinary_reads_share_the_original_capability_count() {
     let temp = workspace();
     let mut config = settings(&temp);
-    config.max_capability_calls = 3;
+    config.max_capability_calls = Some(3);
     let pause = Arc::new(Semaphore::new(0));
     let script = format!(
         "local first = {}\n{}",

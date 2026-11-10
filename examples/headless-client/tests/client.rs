@@ -46,7 +46,7 @@ fn serve_test_runtime(
     cancel: cayw_ai::CancellationToken,
 ) -> JoinHandle<std::io::Result<()>> {
     let mut config = cayw_ipc::ServerConfig::new(token);
-    config.request_timeout = timeout;
+    config.request_timeout = Some(timeout);
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap();
     let handler = Arc::new(TestServerHandler {
         runtime,

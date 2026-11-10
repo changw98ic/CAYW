@@ -10,8 +10,8 @@ pub(crate) type Result<T> = std::result::Result<T, String>;
 
 // Byte limits alone cannot bound work or the number of full-message snapshots.
 // Count content fragments (including empty ones) and calls over the whole reply.
-const MAX_FRAGMENTS: usize = 4096;
-const MAX_TOOL_CALLS: usize = 128;
+const MAX_FRAGMENTS: usize = 65_536;
+const MAX_TOOL_CALLS: usize = 1024;
 
 #[derive(Default)]
 pub(crate) struct ResponseLimits {
@@ -93,14 +93,9 @@ pub(crate) fn prepare_request(request: &ModelRequest, format: Format) -> Result<
     {
         return Err("Temperature is outside the provider's supported range".into());
     }
-    // Reconcile unknown outcomes even when another malformed message occurs earlier.
-    if request
-        .messages
-        .iter()
-        .any(|message| matches!(message, Message::ToolResult(result) if result.outcome_unknown))
-    {
-        return Err("Tool outcome is unknown; reconcile effects before another request".into());
-    }
+    // A paired result whose outcome is unknown stays replayable. Its identity
+    // is audited in history, and the serialized text carries an interruption
+    // note so the model inspects current state before acting again.
     let mut pending = BTreeMap::<String, PendingCall>::new();
     let mut seen = BTreeSet::new();
     let mut definitions = BTreeMap::<String, ToolDefinition>::new();
@@ -207,8 +202,8 @@ pub(crate) fn prepare_request(request: &ModelRequest, format: Format) -> Result<
                 }
                 let output = validate_and_build_tool_output(result, format)?;
                 tool_outputs.insert(idx, output);
-                // Invalid arguments require a paired failure result. Unknown
-                // outcomes were rejected before walking the history.
+                // Invalid arguments require a paired failure result. An unknown
+                // outcome is a recorded audit fact, not a replay blocker.
                 if call.invalid_arguments && !result.is_error {
                     return Err(
                         "Invalid tool arguments require a matching error tool result".into(),
@@ -388,6 +383,7 @@ pub(crate) fn validate_and_build_tool_output(
             if let Some(structured) = &result.structured_content {
                 output.push(json!({"type":"text","text":structured.to_string()}));
             }
+            append_interruption_note(&mut output, "text", result.outcome_unknown);
         }
         Format::Responses => {
             for part in &result.content {
@@ -398,10 +394,25 @@ pub(crate) fn validate_and_build_tool_output(
             if let Some(structured) = &result.structured_content {
                 output.push(json!({"type":"input_text","text":structured.to_string()}));
             }
+            append_interruption_note(&mut output, "input_text", result.outcome_unknown);
         }
         Format::Gemini => {}
     }
     Ok(output)
+}
+
+// The note is added to the serialized copy only; the recorded tool result
+// keeps its exact text and structured fields.
+fn append_interruption_note(output: &mut Vec<Value>, kind: &str, outcome_unknown: bool) {
+    if !outcome_unknown {
+        return;
+    }
+    if let Some(Value::Object(last)) = output.last_mut() {
+        let text = last.get("text").and_then(Value::as_str).unwrap_or_default();
+        last["text"] = cayw_ai::interrupted_tool_text(text, true).into();
+    } else {
+        output.push(json!({"type":kind,"text":cayw_ai::INTERRUPTED_TOOL_OUTCOME_NOTE}));
+    }
 }
 
 pub(crate) fn append_turn(turns: &mut Vec<Value>, role: &str, field: &str, parts: Vec<Value>) {

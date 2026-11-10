@@ -4,7 +4,7 @@ use cayw_ai::{
 };
 use cayw_cells::{CellPage, CellStatus, IntentStatus, SqliteJournal};
 use cayw_core::{CapabilityOutcome, CoreEvent};
-use cayw_runtime::{ApprovalChoice, Runtime, RuntimeConfig};
+use cayw_runtime::{ApprovalChoice, Runtime, RuntimeConfig, RuntimeError};
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -540,13 +540,10 @@ async fn original_cells_failure_recovers_exact_dependencies_without_reread_or_pa
     drop(rt);
     let rt = open_script(&dir, provider.clone(), config);
     let recovered = rt.recover(&id).unwrap();
-    assert_eq!(
-        recovered.state,
-        cayw_core::SessionState::NeedsReconciliation
-    );
+    assert_eq!(recovered.state, cayw_core::SessionState::Idle);
     assert_eq!(recovered.unresolved_calls.len(), 1);
     assert!(recovered.unresolved_capabilities.is_empty());
-    assert!(rt.enqueue(&id, "parent still requires evidence").is_err());
+    assert!(rt.enqueue(&id, "parent still requires evidence").is_ok());
     let body: String = db
         .query_row(
             "SELECT body FROM cells_v1 WHERE id=?1",
@@ -614,13 +611,25 @@ async fn original_read_canonical_write_failures_keep_unknown_parent_and_never_re
             .await;
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         let view = rt.get(&id).unwrap();
-        assert_eq!(
-            view.state,
-            cayw_core::SessionState::NeedsReconciliation,
-            "{stage}"
-        );
+        let expected_state = if stage == "terminal" {
+            cayw_core::SessionState::Running
+        } else {
+            cayw_core::SessionState::Idle
+        };
+        assert_eq!(view.state, expected_state, "{stage}");
         assert_eq!(view.unresolved_calls.len(), 1, "{stage}");
-        assert!(rt.enqueue(&id, "must inspect original parent").is_err());
+        let accepted = rt.enqueue(&id, "must inspect original parent");
+        match (stage, &accepted) {
+            (
+                "terminal",
+                Err(RuntimeError::RecoveryRequired {
+                    outcome_unknown: true,
+                    ..
+                }),
+            ) => {}
+            (_, Err(RuntimeError::Busy)) => {}
+            _ => panic!("{stage}: unexpected enqueue result: {accepted:?}"),
+        }
         let events = rt.events(&id, 0, 1000).unwrap();
         assert!(!events.iter().any(|event| matches!(&event.event,CoreEvent::CapabilitySettled{call} if call.name=="fs.read"&&matches!(call.outcome,Some(CapabilityOutcome::Completed{..})))), "{stage}");
         let captures = events.iter().filter(|event| matches!(&event.event,CoreEvent::Host{kind,..} if kind=="runtime_shared_read")).count();
@@ -631,13 +640,9 @@ async fn original_read_canonical_write_failures_keep_unknown_parent_and_never_re
         drop(rt);
         let rt = open_script(&dir, provider.clone(), config);
         let recovered = rt.recover(&id).unwrap();
-        assert_eq!(
-            recovered.state,
-            cayw_core::SessionState::NeedsReconciliation,
-            "{stage}"
-        );
+        assert_eq!(recovered.state, cayw_core::SessionState::Idle, "{stage}");
         assert_eq!(recovered.unresolved_calls.len(), 1, "{stage}");
-        assert!(rt.enqueue(&id, "do not replay").is_err());
+        assert!(rt.enqueue(&id, "do not replay").is_ok());
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert!(!file.exists());
     }
@@ -653,7 +658,7 @@ async fn warm_read_spends_each_original_runtime_call_budget() {
         calls: AtomicUsize::new(0),
     });
     let mut config = RuntimeConfig {
-        max_capability_calls: 1,
+        max_capability_calls: Some(1),
         ..Default::default()
     };
     config.host.frozen_reads = true;

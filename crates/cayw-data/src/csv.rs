@@ -120,7 +120,11 @@ fn strict_syntax(text: &str, budget: &Budget<'_>) -> Result<()> {
             (State::Closed, b'"') => State::Quoted,
             (State::Closed, _) => return Err(error("syntax", "content after CSV closing quote")),
         };
-        if cells > budget.limits.max_nodes {
+        if budget
+            .limits
+            .max_nodes
+            .is_some_and(|max_nodes| cells > max_nodes)
+        {
             return Err(error("node_limit", "CSV cell count exceeds max_nodes"));
         }
     }

@@ -192,7 +192,7 @@ fn search_script() -> String {
 fn config(registry: &Registry, allowed: Option<Value>) -> RuntimeConfig {
     let mut config = RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         ..Default::default()
     };
     if let Some(arguments) = allowed {
@@ -218,15 +218,15 @@ fn open(
             "model": {"provider":"fixture","id":"host-source-search"}, "real_model": false,
             "permissions": config.permissions,
             "bindings": config.bridge.as_ref().map(|bridge| bridge.binding_snapshot()),
-            "runtime": {"max_run_time_ms":config.max_run_time.as_millis(), "max_turns":config.max_turns,
+            "runtime": {"max_run_time_ms":config.max_run_time.map(|time| time.as_millis()), "max_turns":config.max_turns,
                 "max_total_tokens":config.max_total_tokens, "max_capability_calls":config.max_capability_calls,
                 "max_capability_bytes":config.max_capability_bytes, "max_history_bytes":config.max_history_bytes,
                 "max_event_bytes":config.max_event_bytes},
             "host": {"max_calls":config.host.max_calls, "max_argument_bytes":config.host.max_argument_bytes,
                 "max_result_bytes":config.host.max_result_bytes, "max_total_bytes":config.host.max_total_bytes,
-                "call_timeout_ms":config.host.call_timeout.as_millis()},
+                "call_timeout_ms":config.host.call_timeout.map(|time| time.as_millis())},
             "codemode": {"host_calls":config.codemode.host_calls, "output_bytes":config.codemode.output_bytes,
-                "timeout_ms":config.codemode.timeout.as_millis()}, "requests":config.request_limits
+                "timeout_ms":config.codemode.timeout.map(|time| time.as_millis())}, "requests":config.request_limits
         }),
     );
     Runtime::open(
@@ -813,7 +813,7 @@ async fn disconnect_keeps_plain_chat_and_missing_search_is_explicit() {
     let missing_workspace = missing_workspace.canonicalize().unwrap();
     let missing_provider = Arc::new(ScriptProvider::new(vec![search_script()]));
     let missing_settings = RuntimeConfig::default();
-    let missing_max_run_time_ms = missing_settings.max_run_time.as_millis();
+    let missing_max_run_time_ms = missing_settings.max_run_time.map(|time| time.as_millis());
     let missing_rt = open(
         &missing_case,
         &missing_workspace,

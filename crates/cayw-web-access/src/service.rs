@@ -35,9 +35,16 @@ impl Default for Limits {
 }
 
 impl Limits {
+    /// Bring orderable soft limits into range. A default above the maximum is
+    /// lowered to the maximum instead of failing construction.
+    pub fn normalized(mut self) -> Self {
+        self.default_search_limit = self.default_search_limit.min(self.max_search_limit);
+        self
+    }
+
     /// Reject host configuration that would otherwise make `clamp` panic or
     /// every request fail. This is a known configuration error, not a request
-    /// failure.
+    /// failure. Order-only values are handled by [`Self::normalized`].
     pub fn validate(&self) -> Result<(), WebAccessError> {
         if self.max_body_bytes == 0 {
             return Err(configuration_error("max_body_bytes must be nonzero"));
@@ -50,11 +57,6 @@ impl Limits {
         }
         if self.default_search_limit == 0 {
             return Err(configuration_error("default_search_limit must be nonzero"));
-        }
-        if self.default_search_limit > self.max_search_limit {
-            return Err(configuration_error(
-                "default_search_limit must not exceed max_search_limit",
-            ));
         }
         Ok(())
     }

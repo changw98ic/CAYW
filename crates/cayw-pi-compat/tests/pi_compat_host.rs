@@ -248,6 +248,26 @@ async fn missing_sample_executable_is_unavailable_not_silent() {
 }
 
 #[tokio::test]
+async fn cancelled_install_is_known_and_not_recorded_incompatible() {
+    let host = PiCompatHost::new(true);
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_cayw-pi-sample-ext"));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let err = host
+        .install_sample_extension(&exe, cancel)
+        .await
+        .expect_err("cancelled install must fail");
+    assert!(matches!(err, PiCompatError::Cancelled), "got {err:?}");
+    assert!(!err.outcome_unknown());
+    let matrix = host.matrix_snapshot();
+    let row = matrix.lookup(
+        &PiSampleExtension::package_id(),
+        &SurfaceId::new(SurfaceFamily::Lifecycle, "install"),
+    );
+    assert_ne!(row.level, CompatibilityLevel::Incompatible);
+}
+
+#[tokio::test]
 async fn incompatible_interaction_surface_is_recorded_not_silent() {
     let host = PiCompatHost::new(true);
     let package = PiFixturePlugin::package_id();

@@ -72,7 +72,7 @@ cayw models remove unused --workspace /你的项目
 
 公开模型视图、启动输出、doctor 和 Settings RPC 只显示 `authentication: plain_file` 或 `none`，不返回密钥。切换只影响后续开始的 Task Attempt。运行中的 Attempt 保留原 Provider、模型和输出上限。
 
-如果先前模型请求已经发出，但 Runtime 没有收到完整用量，原 token 预留和未知费用继续保留。TUI 和 WebUI 会在发送下一条消息前显示精确的未知请求数量、原预留、一次性新增额度和累计上限。用户确认前不会创建 Task。确认后才按 `task.enqueue`、`model.budget.continue`、`task.resume` 的顺序执行；拒绝会保留草稿。授权失败时只取消刚创建且尚未派发的 Task，不能把额度转给另一个任务。
+如果先前模型请求已经发出，但 Runtime 没有收到完整用量，该请求按有界预留只扣记一次并立即释放占用，记录保留用量未知标志，不把未知写成零。未配置 token 上限时，这笔扣记不阻塞后续请求；配置了上限时，只要已用量仍小于上限，发送下一条消息仍可直接获准。TUI 和 WebUI 都使用普通发送路径，按 `task.enqueue`、`task.resume` 的顺序执行，不预览、不申请也不续期模型预算。配置的上限用完时，下一次请求返回 `budget_exceeded`，界面显示一句明确的预算耗尽说明，保留草稿且不自动重发。
 
 本地 `config.json.model` 不是长期配置源。发现旧字段时，Client 把它单向迁移到当前工作区的 `models.json`，然后删除旧字段。已有选中方案优先，损坏的旧字段不会覆盖它。
 

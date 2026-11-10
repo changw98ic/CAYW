@@ -413,7 +413,7 @@ fn v2_migration_preserves_independent_effects_without_guessing_wait_bindings() {
     );
     assert!(db.execute("DELETE FROM core_events", []).is_err());
     let recovered = store.recover("v2-session").unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(recovered.unresolved_calls.len(), 1);
     assert_eq!(recovered.unresolved_calls[0].call.id, "wait");
     assert_eq!(recovered.unresolved_capabilities.len(), 1);

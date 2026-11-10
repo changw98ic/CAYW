@@ -6,13 +6,13 @@ use crate::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// Expose every owned JSON leaf so protocol input can be bounded before it is
-/// cloned, serialized or rejected. Implementations must return the same complete
+/// Expose every owned JSON leaf so generic envelopes can reach their payload
+/// without a second decoding pass. Implementations must return the same complete
 /// set of leaves from both methods, without recursing inside a `Value`. Forward
 /// through finite Rust wrappers to their fields; do not omit hidden JSON fields.
-/// This lets rejection drain deep caller-owned JSON without recursive destruction.
-/// The contract bounds JSON leaves, not arbitrary recursive Rust wrapper types.
-/// Adding an envelope does not grant any host authority to its payload.
+/// The JSON reader enforces syntax and serde's recursion limit; Core adds no
+/// separate depth or byte ceiling. Adding an envelope does not grant any host
+/// authority to its payload.
 pub trait ProtocolPayload {
     fn json_values(&self) -> Vec<&serde_json::Value>;
     fn json_values_mut(&mut self) -> Vec<&mut serde_json::Value>;

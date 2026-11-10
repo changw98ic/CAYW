@@ -146,7 +146,7 @@ async fn tool_and_follow_up(provider: Arc<dyn Provider>, model: &Model) -> TestR
     let value = format!("CAYW_PROBE_{}_{}", timestamp_ms(), std::process::id());
     let executions = Arc::new(AtomicUsize::new(0));
     let agent = Agent::new(provider, model.clone());
-    agent.set_max_turns(3)?;
+    agent.set_max_turns(Some(3))?;
     agent.set_stream_options(StreamOptions {
         max_tokens: Some(2048),
         thinking_level: ThinkingLevel::Low,
@@ -226,7 +226,7 @@ async fn tool_and_follow_up(provider: Arc<dyn Provider>, model: &Model) -> TestR
         "tool call/result identity mismatch",
     )?;
     check(
-        !results[0].is_error && !results[0].outcome_unknown && !snapshot.needs_reconciliation,
+        !results[0].is_error && !results[0].outcome_unknown,
         "tool outcome was not confirmed",
     )?;
     println!(
@@ -263,7 +263,7 @@ async fn tool_and_follow_up(provider: Arc<dyn Provider>, model: &Model) -> TestR
 
 async fn cancel_stream(provider: Arc<dyn Provider>, model: &Model) -> TestResult {
     let agent = Agent::new(provider, model.clone());
-    agent.set_max_turns(1)?;
+    agent.set_max_turns(Some(1))?;
     agent.set_stream_options(StreamOptions {
         max_tokens: Some(1024),
         thinking_level: ThinkingLevel::Low,
@@ -298,9 +298,7 @@ async fn cancel_stream(provider: Arc<dyn Provider>, model: &Model) -> TestResult
     )?;
     let snapshot = agent.snapshot();
     check(
-        snapshot.streaming_message.is_none()
-            && snapshot.pending_tool_calls.is_empty()
-            && !snapshot.needs_reconciliation,
+        snapshot.streaming_message.is_none() && snapshot.pending_tool_calls.is_empty(),
         "cancel left unsettled agent state",
     )?;
     println!(

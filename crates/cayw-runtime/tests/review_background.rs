@@ -50,8 +50,8 @@ impl Provider for Script {
 
 fn base_config(max_retained_finished: usize) -> RuntimeConfig {
     let mut config = RuntimeConfig::default();
-    config.codemode.timeout = Duration::from_secs(20);
-    config.max_run_time = Duration::from_secs(30);
+    config.codemode.timeout = Some(Duration::from_secs(20));
+    config.max_run_time = Some(Duration::from_secs(30));
     config.background = Some(BackgroundConfig {
         max_retained_finished,
         ..Default::default()
@@ -64,8 +64,8 @@ fn base_config(max_retained_finished: usize) -> RuntimeConfig {
                 program: "/bin/sh".into(),
                 args: vec!["-c".into(), "printf 'line1\\nline2\\nline3\\n'".into()],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(5),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(5)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: cayw_host::ProcessIo::Pipes,
             },
@@ -77,8 +77,8 @@ fn base_config(max_retained_finished: usize) -> RuntimeConfig {
                 program: "/bin/sh".into(),
                 args: vec!["-c".into(), "exec /bin/sleep 30".into()],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(60),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(60)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: cayw_host::ProcessIo::Pipes,
             },

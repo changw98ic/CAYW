@@ -41,7 +41,7 @@ fn runtime(temp: &tempfile::TempDir, provider: Arc<dyn Provider>) -> Runtime {
         provider,
         Model::new("fixture", "run-inspector"),
         RuntimeConfig {
-            max_run_time: Duration::from_secs(10),
+            max_run_time: Some(Duration::from_secs(10)),
             permissions: vec![
                 ScopedPermission::exact(
                     "fs.write",

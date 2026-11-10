@@ -236,10 +236,16 @@ impl Default for Limits {
     }
 }
 impl Limits {
+    /// Raise an orderable soft limit into range. A total quota below one
+    /// content's maximum is raised to that maximum instead of failing.
+    pub fn normalized(mut self) -> Self {
+        self.max_total_bytes = self.max_total_bytes.max(self.max_content_bytes);
+        self
+    }
+
     pub fn validate(self) -> Result<()> {
         if self.max_content_bytes == 0
             || self.max_content_bytes > 1024 * 1024 * 1024
-            || self.max_total_bytes < self.max_content_bytes
             || self.max_records == 0
             || self.max_records > 10000
             || self.max_security_entries == 0

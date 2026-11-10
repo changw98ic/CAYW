@@ -178,7 +178,7 @@ fn success(f: &Fixture) -> DispatchOutcome {
 }
 fn assert_unknown(f: &Fixture) {
     let view = f.runtime.recover(&f.id).unwrap();
-    assert_eq!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert_eq!(view.state, cayw_core::SessionState::Idle);
     assert_eq!(view.unresolved_capabilities.len(), 1);
     assert_eq!(
         view.unresolved_capabilities[0].external_provenance,
@@ -334,14 +334,7 @@ fn explicit_core_known_or_unknown_terminal_is_never_replaced_by_source_success()
             )
             .unwrap();
         let view = f.runtime.recover(&f.id).unwrap();
-        assert_eq!(
-            view.state,
-            if unknown {
-                cayw_core::SessionState::NeedsReconciliation
-            } else {
-                cayw_core::SessionState::Idle
-            }
-        );
+        assert_eq!(view.state, cayw_core::SessionState::Idle);
         assert!(
             !f.runtime
                 .events(&f.id, 0, 1000)

@@ -447,7 +447,7 @@ async fn limits_reject_input_output_depth_nodes_rows_and_diff_work() {
             "data.parse",
             json!({"format":"json","text":"{}"}),
             Limits {
-                input_bytes: 8,
+                input_bytes: Some(8),
                 ..Limits::default()
             },
             "input_limit:",
@@ -456,7 +456,7 @@ async fn limits_reject_input_output_depth_nodes_rows_and_diff_work() {
             "codec.encode",
             json!({"encoding":"hex","input":{"kind":"utf8","value":"12345"}}),
             Limits {
-                output_bytes: 8,
+                output_bytes: Some(8),
                 ..Limits::default()
             },
             "output_limit:",
@@ -465,7 +465,7 @@ async fn limits_reject_input_output_depth_nodes_rows_and_diff_work() {
             "data.parse",
             json!({"format":"json","text":"[[[[[0]]]]]"}),
             Limits {
-                max_depth: 4,
+                max_depth: Some(4),
                 ..Limits::default()
             },
             "depth_limit:",
@@ -474,7 +474,7 @@ async fn limits_reject_input_output_depth_nodes_rows_and_diff_work() {
             "data.parse",
             json!({"format":"json","text":"[0,1,2,3,4,5]"}),
             Limits {
-                max_nodes: 5,
+                max_nodes: Some(5),
                 ..Limits::default()
             },
             "node_limit:",
@@ -483,7 +483,7 @@ async fn limits_reject_input_output_depth_nodes_rows_and_diff_work() {
             "data.parse",
             json!({"format":"csv","text":"a\n1\n2\n3\n"}),
             Limits {
-                max_rows: 2,
+                max_rows: Some(2),
                 ..Limits::default()
             },
             "row_limit:",
@@ -492,7 +492,7 @@ async fn limits_reject_input_output_depth_nodes_rows_and_diff_work() {
             "text.diff",
             json!({"before":"a\nb\nc\n","after":"x\ny\nz\n"}),
             Limits {
-                max_diff_work: 4,
+                max_diff_work: Some(4),
                 ..Limits::default()
             },
             "diff_work_limit:",

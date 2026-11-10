@@ -1,6 +1,6 @@
 use cayw_ai::{
-    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Message, Model,
-    ModelRequest, Provider, StopReason,
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Message, Model,
+    ModelRequest, Provider, StopReason, ToolCall, Usage, UsageStatus,
 };
 use cayw_core::SessionState;
 use cayw_runtime::{
@@ -9,7 +9,10 @@ use cayw_runtime::{
 use futures::stream;
 use serde_json::json;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -44,6 +47,35 @@ impl Provider for HangingProvider {
         Box::pin(stream::pending())
     }
 }
+struct TurnProvider {
+    calls: AtomicUsize,
+    tool_calls: usize,
+}
+impl Provider for TurnProvider {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut message = AssistantMessage::new(&request.model);
+        if turn < self.tool_calls {
+            message.content.push(Content::ToolCall(ToolCall::new(
+                format!("turn-{turn}"),
+                "execute_code",
+                json!({"action":"exec","script":"return nil","yield_time_ms":30000,"max_output_tokens":131072}),
+            )));
+            message.stop_reason = StopReason::ToolUse;
+        } else {
+            message.content.push(Content::text("finished"));
+            message.stop_reason = StopReason::Stop;
+        }
+        message.usage = Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = UsageStatus::Reported;
+        Box::pin(stream::iter(vec![AssistantEvent::Done { message }]))
+    }
+}
 struct FailedProvider;
 impl Provider for FailedProvider {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
@@ -54,7 +86,7 @@ impl Provider for FailedProvider {
 }
 fn config() -> RuntimeConfig {
     RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         ..Default::default()
     }
 }
@@ -336,12 +368,93 @@ async fn approval_cancellation_and_revocation_are_durable() {
     assert_eq!(rt.health().unwrap().running, 0);
 }
 
+#[test]
+fn default_configuration_has_no_budgets() {
+    let config = RuntimeConfig::default();
+    assert_eq!(config.max_total_tokens, None);
+    assert_eq!(config.max_turns, None);
+    assert_eq!(config.max_run_time, None);
+    assert_eq!(config.max_queue_time, None);
+    assert_eq!(config.max_capability_calls, None);
+    assert_eq!(config.max_capability_bytes, None);
+    assert_eq!(config.codemode.host_wait, None);
+    assert_eq!(config.host.call_timeout, None);
+}
+
 #[tokio::test]
-async fn token_budget_blocks_tool_execution_before_side_effect() {
+async fn absent_budgets_do_not_stop_a_run_and_configured_turns_still_do() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("workspace")).unwrap();
+    let rt = runtime(
+        &temp,
+        Arc::new(TurnProvider {
+            calls: AtomicUsize::new(0),
+            tool_calls: 70,
+        }),
+        RuntimeConfig::default(),
+    );
+    let id = rt.create(None).unwrap().id;
+    let view = rt
+        .prompt(
+            &id,
+            "run past the old hidden turn default",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            view.messages.last(),
+            Some(Message::Assistant(last))
+                if last.content.iter().any(|part| matches!(part, Content::Text { text } if text == "finished"))
+        ),
+        "default configuration must not stop the run: {view:?}"
+    );
+    assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
+
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("workspace")).unwrap();
+    let rt = runtime(
+        &temp,
+        Arc::new(TurnProvider {
+            calls: AtomicUsize::new(0),
+            tool_calls: 70,
+        }),
+        RuntimeConfig {
+            max_turns: Some(3),
+            ..Default::default()
+        },
+    );
+    let id = rt.create(None).unwrap().id;
+    let view = rt
+        .prompt(
+            &id,
+            "stop at the configured turn limit",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            view.messages.last(),
+            Some(Message::Assistant(last))
+                if last
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|error| error.contains("max_turns"))
+        ),
+        "configured turn limit must still stop the run: {view:?}"
+    );
+    assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Cancelled);
+    assert_eq!(rt.health().unwrap().running, 0);
+}
+
+#[tokio::test]
+async fn configured_token_limit_stops_the_next_request_after_admitted_unknown_usage() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::create_dir(temp.path().join("workspace")).unwrap();
     let mut settings = config();
-    settings.max_total_tokens = 3;
+    settings.max_total_tokens = Some(3);
     settings.permissions.push(ScopedPermission::exact(
         "fs.write",
         json!({"path":"limit.txt","content":"no"}),
@@ -361,7 +474,22 @@ async fn token_budget_blocks_tool_execution_before_side_effect() {
     assert!(
         matches!(answer.messages.last(), Some(Message::Assistant(last)) if last.stop_reason.is_failure())
     );
-    assert!(!temp.path().join("workspace/limit.txt").exists());
+    // Admission only requires used < limit, so the first request is dispatched
+    // and its tool may execute. The reported usage then settles above the limit
+    // and refuses the next model request.
+    assert!(temp.path().join("workspace/limit.txt").exists());
+    let ledger = rt.model_requests(&id).unwrap();
+    assert!(!ledger.usage_unknown);
+    assert_eq!(ledger.settled_tokens, 8);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, Some(0));
+    assert!(
+        ledger
+            .requests
+            .iter()
+            .any(|record| record.rejection.as_deref() == Some("model_token_budget_exhausted"))
+    );
     assert_eq!(rt.health().unwrap().running, 0);
 }
 

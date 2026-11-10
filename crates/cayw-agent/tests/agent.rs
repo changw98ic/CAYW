@@ -483,7 +483,7 @@ async fn per_run_turn_budget_stops_unbounded_continuation() {
     }
     let provider = Scripted::from(vec![response("one"), response("two")]);
     let agent = Agent::new(provider.clone(), model());
-    agent.set_max_turns(2).unwrap();
+    agent.set_max_turns(Some(2)).unwrap();
     agent.set_hooks(Arc::new(KeepGoing)).unwrap();
     let result = agent.prompt(Message::user("start")).await.unwrap();
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
@@ -498,27 +498,54 @@ async fn per_run_turn_budget_stops_unbounded_continuation() {
 }
 
 #[tokio::test]
-async fn host_must_reconcile_unknown_results_before_continuing() {
-    let agent = Agent::new(Scripted::from(vec![]), model());
+async fn unknown_tool_outcome_does_not_lock_out_the_next_prompt() {
+    let provider = Scripted::from(vec![response("continued")]);
+    let agent = Agent::new(provider.clone(), model());
+    let mut assistant = AssistantMessage::new(&model());
+    assistant.content = vec![Content::ToolCall(ToolCall::new(
+        "unknown",
+        "write",
+        json!({}),
+    ))];
+    assistant.stop_reason = StopReason::ToolUse;
     agent
-        .replace_messages(vec![Message::ToolResult(ToolResultMessage {
-            tool_call_id: "unknown".into(),
-            tool_name: "write".into(),
-            content: vec![],
-            details: None,
-            structured_content: None,
-            usage: None,
-            is_error: true,
-            outcome_unknown: true,
-            timestamp: 0,
-            duration_ms: None,
-        })])
+        .replace_messages(vec![
+            Message::user("write"),
+            Message::Assistant(assistant),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "unknown".into(),
+                tool_name: "write".into(),
+                content: vec![],
+                details: None,
+                structured_content: None,
+                usage: None,
+                is_error: true,
+                outcome_unknown: true,
+                timestamp: 0,
+                duration_ms: None,
+            }),
+        ])
         .unwrap();
-    assert!(agent.snapshot().needs_reconciliation);
-    assert_eq!(
-        agent.prompt(Message::user("retry")).await.unwrap_err(),
-        AgentError::UnresolvedToolEffects
+    let result = agent.prompt(Message::user("retry")).await.unwrap();
+    assert_eq!(result.last_message.stop_reason, StopReason::Stop);
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages.iter().any(
+            |message| matches!(message, Message::ToolResult(result) if result.outcome_unknown)
+        )
     );
+    let stored = agent
+        .snapshot()
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_call_id == "unknown" => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(stored.content.is_empty());
+    assert!(stored.outcome_unknown);
 }
 
 struct Echo {

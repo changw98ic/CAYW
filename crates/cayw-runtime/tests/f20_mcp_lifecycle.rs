@@ -144,7 +144,7 @@ async fn managed_mcp_lifecycle_and_result_reopen() {
                 json!({"server":"local","tool":"add","arguments":{"a":10,"b":20}}),
             ),
         ],
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         ..Default::default()
     };
 

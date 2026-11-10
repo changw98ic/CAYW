@@ -48,6 +48,37 @@ const RESULT_LABEL_BYTES: usize = 256;
 const RESULT_ERROR_BYTES: usize = 256;
 const CLEANUP_CAP: Duration = Duration::from_secs(60);
 
+/// Waits until an optional absolute deadline. `None` never resolves on time, so
+/// cancellation and completion remain the only ways out.
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Applies an optional bound to one wait. `None` waits for the future itself.
+async fn bounded_wait<F: std::future::Future>(
+    bound: Option<Duration>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    match bound {
+        Some(bound) => tokio::time::timeout(bound, future).await,
+        None => Ok(future.await),
+    }
+}
+
+/// The earlier of two optional deadlines, or the present one.
+fn earliest(
+    first: Option<tokio::time::Instant>,
+    second: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.min(second)),
+        (first, second) => first.or(second),
+    }
+}
+
 /// Trusted host opt-in for local sub-agents. `None` removes `agent.run` from the
 /// catalog entirely; this is the only way to enable it.
 #[derive(Clone, Debug)]
@@ -57,13 +88,15 @@ pub struct LocalAgents {
     /// 1 permits one child level. A child at this depth cannot start another.
     pub max_depth: usize,
     /// Cumulative provider tokens for the whole tree. Children never reset it.
-    pub shared_total_tokens: u64,
-    /// Total `agent.run` calls in one root tree.
-    pub max_calls: usize,
+    /// `None` means no shared token limit.
+    pub shared_total_tokens: Option<u64>,
+    /// Total `agent.run` calls in one root tree. `None` means no call limit.
+    pub max_calls: Option<usize>,
     /// Serialized byte bound for one result returned to the parent's Luau cell.
     pub max_output_bytes: usize,
     /// One child's wall time, additionally capped by the parent's remaining time.
-    pub max_time: Duration,
+    /// `None` means no per-child time limit.
+    pub max_time: Option<Duration>,
     /// The child's complete permission set. Parent grants and approvals are never
     /// consulted for the child, and model arguments cannot extend this list.
     pub permissions: Vec<ScopedPermission>,
@@ -74,10 +107,10 @@ impl Default for LocalAgents {
         Self {
             max_children: 4,
             max_depth: 1,
-            shared_total_tokens: 32_768,
-            max_calls: 16,
+            shared_total_tokens: None,
+            max_calls: None,
             max_output_bytes: 256 * 1024,
-            max_time: Duration::from_secs(30),
+            max_time: None,
             permissions: vec![],
         }
     }
@@ -87,24 +120,18 @@ pub(crate) fn validate(config: Option<&LocalAgents>) -> Result<(), RuntimeError>
     let Some(config) = config else {
         return Ok(());
     };
+    let budgets_invalid = config.shared_total_tokens == Some(0)
+        || config.max_calls == Some(0)
+        || config.max_time.is_some_and(|time| {
+            time.is_zero() || std::time::Instant::now().checked_add(time).is_none()
+        });
     if config.max_children == 0
-        || config.max_children > 1024
         || config.max_depth == 0
-        || config.max_depth > 32
-        || config.shared_total_tokens == 0
-        || config.max_calls == 0
-        || config.max_calls > 100_000
-        || config.max_output_bytes < 1024
-        || config.max_output_bytes > 16 * 1024 * 1024
-        || config.max_time < Duration::from_millis(100)
-        || config.max_time > Duration::from_secs(3600)
-        || std::time::Instant::now()
-            .checked_add(config.max_time)
-            .is_none()
+        || config.max_output_bytes == 0
+        || budgets_invalid
     {
         return Err(RuntimeError::InvalidInput(
-            "local agent limits must be positive, bounded and leave a representable deadline"
-                .into(),
+            "local agent limits must be positive and leave a representable deadline".into(),
         ));
     }
     Ok(())
@@ -119,7 +146,7 @@ fn definition() -> ToolDefinition {
             "additionalProperties": false,
             "required": ["prompt"],
             "properties": {
-                "prompt": {"type": "string", "minLength": 1, "maxLength": 256 * 1024},
+                "prompt": {"type": "string", "minLength": 1},
                 "label": {"type": "string", "minLength": 1, "maxLength": 1024},
                 "mode": {"type": "string", "enum": ["foreground", "background"]}
             }
@@ -204,7 +231,7 @@ pub(crate) fn is_capability(name: &str) -> bool {
 /// child map is per run: a child's drain must not join its parent's siblings.
 pub(crate) struct RunScope {
     tokens: Arc<AtomicU64>,
-    token_limit: u64,
+    token_limit: Option<u64>,
     calls: Arc<AtomicUsize>,
     bytes: Arc<AtomicUsize>,
     agent_runs: Arc<AtomicUsize>,
@@ -213,24 +240,27 @@ pub(crate) struct RunScope {
     depth: usize,
     permissions: Vec<ScopedPermission>,
     config: Option<LocalAgents>,
-    deadline: std::time::Instant,
-    max_capability_calls: usize,
-    max_capability_bytes: usize,
+    deadline: Option<std::time::Instant>,
+    max_capability_calls: Option<usize>,
+    max_capability_bytes: Option<usize>,
 }
 
 impl RunScope {
     pub(crate) fn root(inner: &Inner) -> Self {
         let config = inner.config.local_agents.clone();
-        let token_limit = config
-            .as_ref()
-            .map_or(inner.config.max_total_tokens, |config| {
-                config
-                    .shared_total_tokens
-                    .min(inner.config.max_total_tokens)
-            });
-        let deadline = std::time::Instant::now()
-            .checked_add(inner.config.max_run_time)
-            .unwrap_or_else(|| std::time::Instant::now() + Duration::from_secs(24 * 3600));
+        let token_limit = [
+            config
+                .as_ref()
+                .and_then(|config| config.shared_total_tokens),
+            inner.config.max_total_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let deadline = inner
+            .config
+            .max_run_time
+            .and_then(|time| std::time::Instant::now().checked_add(time));
         Self {
             tokens: Arc::new(AtomicU64::new(0)),
             token_limit,
@@ -283,32 +313,41 @@ impl RunScope {
         &self.tokens
     }
 
-    pub(crate) fn token_limit(&self) -> u64 {
+    pub(crate) fn token_limit(&self) -> Option<u64> {
         self.token_limit
     }
 
     /// Absolute deadline for the whole root tree. A child never receives a fresh
-    /// parent time budget.
-    pub(crate) fn deadline(&self) -> std::time::Instant {
+    /// parent time budget. `None` means the run has no configured deadline.
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
         self.deadline
     }
 
-    pub(crate) fn remaining_time(&self) -> Duration {
+    pub(crate) fn remaining_time(&self) -> Option<Duration> {
         self.deadline
-            .saturating_duration_since(std::time::Instant::now())
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
     }
 
     fn cleanup_bound(&self) -> Duration {
         self.config
             .as_ref()
-            .map_or(CLEANUP_CAP, |config| config.max_time.min(CLEANUP_CAP))
+            .and_then(|config| config.max_time)
+            .map_or(CLEANUP_CAP, |time| time.min(CLEANUP_CAP))
     }
 
     /// Shared capability-call admission for the whole tree.
     pub(crate) fn admit_call(&self, arguments: &Value) -> Result<(), RuntimeError> {
-        let count = self.calls.fetch_add(1, Ordering::AcqRel);
-        if count >= self.max_capability_calls {
-            return Err(RuntimeError::Budget("capability count"));
+        match self.max_capability_calls {
+            Some(limit) => {
+                self.calls
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        (count < limit).then_some(count + 1)
+                    })
+                    .map_err(|_| RuntimeError::Budget("capability count"))?;
+            }
+            None => {
+                self.calls.fetch_add(1, Ordering::AcqRel);
+            }
         }
         self.charge_bytes(arguments)
     }
@@ -316,35 +355,55 @@ impl RunScope {
     /// Shared capability payload accounting for the whole tree.
     pub(crate) fn charge_bytes(&self, value: &impl Serialize) -> Result<(), RuntimeError> {
         let size = serde_json::to_vec(value)?.len();
-        let previous = self.bytes.fetch_add(size, Ordering::AcqRel);
-        if previous.saturating_add(size) > self.max_capability_bytes {
-            return Err(RuntimeError::Budget("capability byte"));
+        match self.max_capability_bytes {
+            Some(limit) => {
+                self.bytes
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                        used.checked_add(size).filter(|total| *total <= limit)
+                    })
+                    .map_err(|_| RuntimeError::Budget("capability byte"))?;
+            }
+            None => {
+                self.bytes.fetch_add(size, Ordering::AcqRel);
+            }
         }
         Ok(())
     }
 
-    /// Shared budget check used by both parent and child RunContexts.
+    /// Shared budget check used by both parent and child RunContexts. Token
+    /// spending is enforced at model-request admission, not by this mid-run
+    /// check.
     pub(crate) fn check(&self) -> Result<(), RuntimeError> {
-        if self.tokens.load(Ordering::Acquire) > self.token_limit {
-            return Err(RuntimeError::Budget("token"));
-        }
-        if self.calls.load(Ordering::Acquire) > self.max_capability_calls {
+        if self
+            .max_capability_calls
+            .is_some_and(|limit| self.calls.load(Ordering::Acquire) > limit)
+        {
             return Err(RuntimeError::Budget("capability count"));
         }
-        if self.bytes.load(Ordering::Acquire) > self.max_capability_bytes {
+        if self
+            .max_capability_bytes
+            .is_some_and(|limit| self.bytes.load(Ordering::Acquire) > limit)
+        {
             return Err(RuntimeError::Budget("capability byte"));
         }
         Ok(())
     }
 
     /// Counts one `agent.run` request in this tree. Rejection is immediate.
-    pub(crate) fn begin_agent_run(&self, max_calls: usize) -> Result<(), RuntimeError> {
-        self.agent_runs
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < max_calls).then_some(count + 1)
-            })
-            .map(|_| ())
-            .map_err(|_| RuntimeError::InvalidInput("local agent call limit reached".into()))
+    pub(crate) fn begin_agent_run(&self, max_calls: Option<usize>) -> Result<(), RuntimeError> {
+        match max_calls {
+            Some(limit) => self
+                .agent_runs
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    (count < limit).then_some(count + 1)
+                })
+                .map(|_| ())
+                .map_err(|_| RuntimeError::InvalidInput("local agent call limit reached".into())),
+            None => {
+                self.agent_runs.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
+        }
     }
 
     fn reserve_child(&self, max_children: usize) -> Result<ChildPermit, RuntimeError> {
@@ -566,7 +625,11 @@ impl ChildService {
             cancel.child_token()
         };
         context.check(&parent_cancel).map_err(known)?;
-        if context.scope.remaining_time().is_zero() {
+        if context
+            .scope
+            .remaining_time()
+            .is_some_and(|remaining| remaining.is_zero())
+        {
             return Err(known("parent run time budget is exhausted"));
         }
         let child_scope = Arc::new(context.scope.child(&self.config).map_err(known)?);
@@ -590,7 +653,7 @@ impl ChildService {
                 .inner
                 .store
                 .create_session(label.clone())
-                .map_err(|error| context.persistence_failed(error))?;
+                .map_err(|error| context.record_error(error.into()))?;
             let lease = context
                 .inner
                 .queue
@@ -621,7 +684,7 @@ impl ChildService {
             identity.clone(),
         ) {
             abort_started_child(&context.inner, &lease, "parent identity record failed");
-            return Err(context.persistence_failed(error));
+            return Err(context.record_error(error.into()));
         }
         context.inner.changed.notify_waiters();
         if let Err(error) = context.inner.store.append_control_event(
@@ -633,7 +696,7 @@ impl ChildService {
             identity,
         ) {
             abort_started_child(&context.inner, &lease, "child identity record failed");
-            return Err(context.persistence_failed(error));
+            return Err(context.record_error(error.into()));
         }
         context.inner.changed.notify_waiters();
 
@@ -740,9 +803,12 @@ impl ChildService {
         );
 
         let mut receiver = receiver;
-        let parent_deadline = tokio::time::Instant::from_std(context.scope.deadline());
-        let own_deadline = tokio::time::Instant::now() + self.config.max_time;
-        let deadline = parent_deadline.min(own_deadline);
+        let parent_deadline = context.scope.deadline().map(tokio::time::Instant::from_std);
+        let own_deadline = self
+            .config
+            .max_time
+            .and_then(|time| tokio::time::Instant::now().checked_add(time));
+        let deadline = earliest(parent_deadline, own_deadline);
         let mut timed_out = false;
         enum Stop {
             Outcome(ChildOutcome),
@@ -763,7 +829,7 @@ impl ChildService {
                     child_cancel.cancel();
                     break Stop::Cleanup;
                 }
-                _ = tokio::time::sleep_until(deadline) => {
+                _ = sleep_until(deadline) => {
                     timed_out = true;
                     child_cancel.cancel();
                     break Stop::Cleanup;
@@ -784,7 +850,7 @@ impl ChildService {
                     &session_id,
                     &label,
                     depth,
-                    self.config.max_time,
+                    context.scope.cleanup_bound(),
                     &mut receiver,
                 )
                 .await
@@ -814,7 +880,8 @@ impl ChildService {
                 JoinState::Joined => JoinAttempt::Joined,
                 JoinState::Failed(reason) => JoinAttempt::Failed(reason.clone()),
                 JoinState::Pending => {
-                    match tokio::time::timeout(self.config.max_time, &mut handle.join).await {
+                    let bound = self.config.max_time.unwrap_or(CLEANUP_CAP);
+                    match bounded_wait(Some(bound), &mut handle.join).await {
                         Ok(Ok(())) => {
                             handle.join_state = JoinState::Joined;
                             JoinAttempt::Joined
@@ -870,7 +937,7 @@ impl ChildService {
             // The joined worker and its live slot stay owned by the scope; a
             // later drain sees `Joined` and retries this evidence write.
             drop(joined);
-            return Err(context.persistence_failed(error));
+            return Err(context.record_error(error.into()));
         }
         joined.confirmed = true;
         drop(joined);
@@ -908,7 +975,12 @@ impl ExternalHost for ChildService {
                 let args: RunArgs = serde_json::from_value(arguments)
                     .map_err(|error| known(format!("agent.run arguments are invalid: {error}")))?;
                 if args.prompt.trim().is_empty()
-                    || args.prompt.len() > self.context.inner.config.max_prompt_bytes
+                    || self
+                        .context
+                        .inner
+                        .config
+                        .max_prompt_bytes
+                        .is_some_and(|max| args.prompt.len() > max)
                 {
                     return Err(known(
                         "agent.run prompt is empty or exceeds the prompt byte budget",
@@ -1101,13 +1173,13 @@ async fn finish_detached(
     session_id: String,
     label: String,
     depth: usize,
-    max_time: Duration,
+    max_time: Option<Duration>,
     mut join: tokio::task::JoinHandle<()>,
     receiver: &mut watch::Receiver<Option<ChildOutcome>>,
 ) {
-    let parent_deadline = tokio::time::Instant::from_std(context.scope.deadline());
-    let own_deadline = tokio::time::Instant::now() + max_time;
-    let deadline = parent_deadline.min(own_deadline);
+    let parent_deadline = context.scope.deadline().map(tokio::time::Instant::from_std);
+    let own_deadline = max_time.and_then(|time| tokio::time::Instant::now().checked_add(time));
+    let deadline = earliest(parent_deadline, own_deadline);
     // Register always inserts the token before this finisher is spawned; a
     // missing handle is a programming error, not a never-cancelled default.
     let fleet_cancel = context
@@ -1122,7 +1194,7 @@ async fn finish_detached(
         tokio::select! {
             biased;
             _ = fleet_cancel.cancelled() => break,
-            _ = tokio::time::sleep_until(deadline) => {
+            _ = sleep_until(deadline) => {
                 fleet_cancel.cancel();
                 break;
             }
@@ -1139,13 +1211,18 @@ async fn finish_detached(
         &session_id,
         &label,
         depth,
-        max_time,
+        max_time.map_or(CLEANUP_CAP, |time| time.min(CLEANUP_CAP)),
         receiver,
     )
     .await;
     // Soft join for the detached runner: keep ownership in the fleet registry,
     // but surface join failure/timeout as Unknown instead of discarding silently.
-    let join_ok = match tokio::time::timeout(max_time, &mut join).await {
+    let join_ok = match bounded_wait(
+        Some(max_time.map_or(CLEANUP_CAP, |time| time.min(CLEANUP_CAP))),
+        &mut join,
+    )
+    .await
+    {
         Ok(Ok(())) => true,
         Ok(Err(_join_err)) => {
             context.unknown.store(true, Ordering::Release);
@@ -1447,7 +1524,7 @@ impl RunScope {
     fn fixture() -> Self {
         Self {
             tokens: Arc::new(AtomicU64::new(0)),
-            token_limit: 1024,
+            token_limit: Some(1024),
             calls: Arc::new(AtomicUsize::new(0)),
             bytes: Arc::new(AtomicUsize::new(0)),
             agent_runs: Arc::new(AtomicUsize::new(0)),
@@ -1456,9 +1533,9 @@ impl RunScope {
             depth: 0,
             permissions: vec![],
             config: Some(LocalAgents::default()),
-            deadline: std::time::Instant::now() + Duration::from_secs(60),
-            max_capability_calls: 1024,
-            max_capability_bytes: 1024,
+            deadline: Some(std::time::Instant::now() + Duration::from_secs(60)),
+            max_capability_calls: Some(1024),
+            max_capability_bytes: Some(1024),
         }
     }
 }

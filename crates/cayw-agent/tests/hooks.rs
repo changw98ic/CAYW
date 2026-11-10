@@ -252,11 +252,11 @@ impl AgentTool for WaitingTool {
     }
 }
 #[tokio::test]
-async fn cancelled_or_dropped_running_tool_requires_reconciliation() {
+async fn cancelled_or_dropped_running_tool_recovers_on_the_next_prompt() {
     for dropped in [false, true] {
         let entered = Arc::new(Notify::new());
         let token = Arc::new(Mutex::new(None));
-        let provider = Script::new(vec![call()]);
+        let provider = Script::new(vec![call(), text("done")]);
         let agent = Agent::new(provider.clone(), model());
         agent
             .set_tools(vec![Arc::new(WaitingTool {
@@ -270,6 +270,17 @@ async fn cancelled_or_dropped_running_tool_requires_reconciliation() {
         if dropped {
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
+            let interrupted = agent
+                .snapshot()
+                .messages
+                .iter()
+                .find_map(|message| match message {
+                    Message::ToolResult(result) => Some(result.clone()),
+                    _ => None,
+                })
+                .expect("dropped run must record a paired result");
+            assert_eq!(interrupted.tool_call_id, "one");
+            assert!(interrupted.is_error && interrupted.outcome_unknown);
         } else {
             agent.control().abort();
             let result = task.await.unwrap().unwrap();
@@ -280,12 +291,9 @@ async fn cancelled_or_dropped_running_tool_requires_reconciliation() {
         }
         assert!(token.lock().unwrap().as_ref().unwrap().is_cancelled());
         assert!(!agent.snapshot().is_running);
-        assert!(agent.snapshot().needs_reconciliation);
-        assert_eq!(
-            agent.continue_run().await.unwrap_err(),
-            AgentError::UnresolvedToolEffects
-        );
-        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        let result = agent.prompt(Message::user("retry")).await.unwrap();
+        assert_eq!(result.last_message.stop_reason, StopReason::Stop);
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
     }
 }
 

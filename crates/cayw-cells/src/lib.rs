@@ -19,7 +19,8 @@
 //! the guarded CodeMode dispatcher. Live output is durably validated before Lua
 //! continues. Ordinary known errors can be handled in Luau. Explicit stops remain
 //! typed in durable records and pages; normal exit ends the cell, while unknown
-//! effects keep the session frozen until reconciliation.
+//! effects stop that cell and invalidate cached reads without freezing later
+//! tasks in the same session.
 //!
 //! The original [`CellBackend::call`] independently admits every invocation,
 //! including shared hits/followers. Audio remains typed

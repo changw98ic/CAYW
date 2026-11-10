@@ -14,7 +14,7 @@ CAYW 网页搜索 / URL 获取 / HTML·PDF 正文提取（F10）。
 - HTML 正文：`html5gum`
 - [`ContentStore`] 支持宿主注入持久内容接口；Runtime 的网页正文使用正式结果引用，可通过 `result.get` 跨任务与重开读取，并保留 URL、状态与引用来源
 - 独立 Rust 使用者未注入内容接口时可使用进程内存放；一旦注入，写入或读取失败直接返回，不退回内存成功结果
-- 构建服务时先校验搜索和正文上限。`default_search_limit`、`max_search_limit`、正文和提取上限必须为正，默认搜索上限不能超过最大值；非法宿主配置返回已知配置错误，不进入请求路径或触发 panic。单次请求的 `limit: 0` 继续按 1 处理
+- 构建服务时先归一顺序上限：`default_search_limit` 大于 `max_search_limit` 时自动下调到最大值。`default_search_limit`、`max_search_limit`、正文和提取上限仍必须为正；真正非法的宿主配置返回已知配置错误，不进入请求路径或触发 panic。Host 构造失败时只禁用 web 工具并记录原因，不阻止 Host 启动。单次请求的 `limit: 0` 继续按 1 处理
 
 ## 明确不支持 / 弱支持
 

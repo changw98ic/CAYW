@@ -20,8 +20,8 @@ impl Provider for Script {
 
 fn base_config() -> RuntimeConfig {
     let mut config = RuntimeConfig::default();
-    config.codemode.timeout = Duration::from_secs(20);
-    config.max_run_time = Duration::from_secs(30);
+    config.codemode.timeout = Some(Duration::from_secs(20));
+    config.max_run_time = Some(Duration::from_secs(30));
     config.background = Some(BackgroundConfig::default());
     config.host.profiles = BTreeMap::from([(
         "bg-fixture".into(),
@@ -30,8 +30,8 @@ fn base_config() -> RuntimeConfig {
             program: "/bin/echo".into(),
             args: vec!["bg-hello-f13".into()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(5),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(5)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -349,8 +349,8 @@ async fn descendant_cancellation_terminates_process_group_and_reaps() {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "/bin/sleep 60 & wait".into()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -517,8 +517,8 @@ async fn concurrent_runtime_instances_do_not_falsely_orphan_active_tasks() {
             program: "/bin/sleep".into(),
             args: vec!["10".into()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(20),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(20)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -600,8 +600,8 @@ async fn descendant_process_identities_terminate_and_reap() {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "/bin/sleep 30 & wait".into()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },

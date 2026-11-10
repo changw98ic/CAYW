@@ -175,8 +175,8 @@ fn manager(
         ReadCoordinator::new(vec![], limits.clone()).unwrap(),
         limits,
         Limits {
-            timeout: Duration::from_secs(30),
-            host_calls: 256,
+            timeout: Some(Duration::from_secs(30)),
+            host_calls: Some(256),
             ..Limits::default()
         },
     )

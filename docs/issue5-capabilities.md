@@ -46,21 +46,22 @@
 
 ### 0.4 预算
 
-Host 级（`cayw_host::HostConfig`，默认值以源码为准）：`max_argument_bytes`、`max_result_bytes`、`max_total_bytes`（本 Host 实例累计序列化参数+结果字节）、`max_calls`（本 Host 实例累计调用数）、`max_file_bytes`、`max_list_entries`、`call_timeout`（含等待权限与执行，审计写入在取消后仍会等待）。
+Host 级（`cayw_host::HostConfig`，默认值以源码为准）：`max_argument_bytes`、`max_result_bytes`、`max_total_bytes`（本 Host 实例累计序列化参数+结果字节）、`max_calls`（本 Host 实例累计调用数）、`max_file_bytes`、`max_list_entries`、`call_timeout`（可选，含等待权限与执行；省略时不设单次 Host 调用上限，取消和任务期限仍生效；审计写入在取消后仍会等待）。
 
-Runtime 级（`cayw_runtime::RuntimeConfig`）：`max_capability_calls`（默认 128）、`max_capability_bytes`（默认 8 MiB）、`max_turns`、`max_run_time`、`max_total_tokens`、`max_prompt_bytes`、`max_history_bytes`。
+Runtime 级（`cayw_runtime::RuntimeConfig`）：`max_capability_calls`、`max_capability_bytes`、`max_turns`、`max_run_time`、`max_queue_time`、`max_total_tokens` 都是可选预算，默认不设置，省略即不限制；只有显式配置的预算才参与校验和执行。`max_prompt_bytes`、`max_history_bytes` 仍有固定上限。
 
 能力本地预算：
 
 | 域 | 关键默认值 |
 | --- | --- |
+| Core（`cayw_core`） | 单个 JSON 值 `MAX_METADATA_BYTES` 2 MiB、`MAX_METADATA_DEPTH` 64；事件页 `MAX_EVENT_PAGE_BYTES` 4 MiB + 64 KiB（按字节截断后 cursor 仍连续，不是缺页）；不再设节点数上限 |
 | Cells（`CellLimits`） | `script_bytes` 64 KiB、`output_bytes` 1 MiB、`output_items` 256、`item_bytes` 64 KiB、`media_bytes` 32 KiB、`max_output_tokens` 128 KiB、`max_yield_time` 30 s、`store_bytes` 1 MiB、`store_keys` 256、`json_depth` 32、`max_cells` 256、`max_running` 8、`cache_entries` 128 |
-| VM（`cayw_codemode::Limits`） | `memory_bytes` 16 MiB、`instruction_budget` 100000 检查点、计算 `timeout` 5 s、单次 `host_wait` 60 s（最多 1 h）、`shutdown_grace` 2 s、`host_calls` 64、共享 JSON `output_bytes` 1 MiB；Host 等待与受控 store/load 暂停计算时钟，各自受 `host_wait` 限制；显式 yield 暂停到 wait 续跑 |
+| VM（`cayw_codemode::Limits`） | `memory_bytes` 16 MiB、`instruction_budget` 100000 检查点、计算 `timeout` 5 s、单次 `host_wait` 默认不限制（配置时最多 1 h）、`shutdown_grace` 2 s、`host_calls` 64、共享 JSON `output_bytes` 1 MiB；Host 等待与受控 store/load 暂停计算时钟，各自只在配置了 `host_wait` 时受限；显式 yield 暂停到 wait 续跑 |
 | Workspace（`Limits`） | `max_file_bytes` 1 MiB、`max_batch_bytes` 16 MiB、`max_batch_operations` 64（schema 上限 256）、`max_batches` 128、`max_tree_entries` 4096、`max_depth` 32、`max_argument_bytes` 8 MiB、`max_output_bytes` 8 MiB、`max_archive_bytes` 16 MiB、`max_archive_entries` 4096、`max_archive_expanded_bytes` 16 MiB、`max_compression_ratio` 100、`timeout` 30 s |
 | Data（`Limits`） | `input_bytes` 1 MiB、`output_bytes` 1 MiB、`max_depth` 32、`max_nodes` 100000、`max_rows` 10000、`max_diff_work` 1000000 |
 | Terminal（`TerminalLimits`） | `max_sessions` 4、`max_sessions_total` 64、`max_input_bytes_per_write` 64 KiB、`max_input_bytes_per_session` 1 MiB、`max_output_bytes_per_session` 1 MiB、`max_read_bytes` 64 KiB、`max_wait` 30 s |
 | Git | 提交消息 ≤ 64 KiB、stage 路径 1..256 且唯一、`git.log` limit 1..100、对象 ID 必须 40 或 64 位十六进制 |
-| LocalAgents | `max_children` 4、`max_depth` 1、`shared_total_tokens` 32768、`max_calls` 16、`max_output_bytes` 256 KiB、`max_time` 30 s |
+| LocalAgents | `max_children` 4、`max_depth` 1、`max_output_bytes` 256 KiB；`shared_total_tokens`、`max_calls`、`max_time` 默认不限制，配置时必须为正 |
 
 超预算必须分两段判断，不能一律写成普通 `Err`：
 
@@ -211,7 +212,7 @@ Issue 5 要求独立检查文件/Git/进程前后状态、持久事件、调用�
 | --- | --- | --- | --- | --- |
 | 共享登记与合并 | 只有 `fs.read` 走 `shared_read::call`；先 `admit_frozen_read` 独立校验/计费/授权，再取共享代际租约 | 每个原始调用各自计费；共享 Host 调用与响应字节预算 | ✅ E-CSR `bridge_acknowledges_each_original_backend_only_after_its_terminal_and_dependencies_commit`、`publication_waits_for_original_acknowledgment_and_cancelled_waiter_leaves_leader`、`noncoalescing_policy_uses_uncached_capture_without_replacing_original_leader`、`full_cache_uses_original_uncached_capture_and_never_replaces_a_live_owner` | 无独立 IPC 方法；模型侧 `cayw.call('fs.read', ...)` |
 | 结果复用（warm hit） | 同一 `ReadStamp` 下第二个原始 cell 复用已发布字节，但仍各自付费、各自保留依赖快照 | 每个原始调用都花自己的 Runtime/Host 调用预算 | ✅ E-RT `shared_read::two_original_cells_pay_two_grants_and_keep_exact_dependencies_for_one_capture`、`shared_read_authority::warm_read_reuse_spends_each_original_host_and_runtime_call_budget`、`ready_read_charges_each_original_runtime_response_bytes`；E-CSR 的拒绝发布对照保留 | 同左 |
-| 依赖版本快照 | 快照含 `workspace`、`incarnation`、`generation`、`semantics`；随候选值一起持久化 | 证据超 `MAX_METADATA_BYTES` 为持久化失败 | ✅ E-CSR `oversized_and_deep_capture_never_reaches_waiters_or_a_ready_entry` | `session.events` 读 `runtime_shared_read` 宿主事件 |
+| 依赖版本快照 | 快照含 `workspace`、`incarnation`、`generation`、`semantics`；随候选值一起持久化 | 证据超 `MAX_METADATA_BYTES` 为效果前的已知拒绝（无副作用），不置 unknown | ✅ E-CSR `oversized_and_deep_capture_never_reaches_waiters_or_a_ready_entry` | `session.events` 读 `runtime_shared_read` 宿主事件 |
 | 写入后失效 | 另一个 Runtime 的相同写入改变 generation，旧命中不再交付 | 旧值不交付；重新真实捕获 | ✅ E-INV `real_runtime_read_write_read_captures_the_new_bytes`（E-RV 同项） | 同左 |
 | 撤销后失效 | `Runtime::revoke` 取消任务并使该 Session 共享读缓存失效，下一次读不是旧值 | 撤销后旧租约不再放行 | ✅ E-INV `runtime_revoke_cancels_the_task_and_the_next_read_is_not_stale`（E-RV 同项） | SDK `Runtime::revoke`；IPC `approval.revoke` |
 | 中断执行对账 | 原始读 unknown 时保留 unknown 父记录，不重放、不猜测；核对 Cells/Core 终态后修复 | unknown latch；恢复需显式证据 | ✅ E-CSR `cancelled_leader_capture_wakes_waiters_without_promotion`、`dropped_capture_wakes_waiters_without_detached_capture`、`dropped_candidate_wakes_followers_and_rejects_future_hits_without_recapture`、`known_candidate_rejection_releases_only_original_publication`、`cancelled_ready_hit_and_invalidated_generation_never_deliver_old_value` | SDK `Runtime::recover` / `reconcile_capability`；IPC `session.recover` / `capability.reconcile` |

@@ -215,7 +215,7 @@ fn setup() -> tempfile::TempDir {
 fn config(registry: &Registry) -> RuntimeConfig {
     RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         ..Default::default()
     }
 }
@@ -423,7 +423,7 @@ async fn all_scopes_share_host_call_budget() {
     let temp = setup();
     let (registry, state) = registry(Behavior::Reply);
     let mut settings = config(&registry);
-    settings.host.max_calls = 1;
+    settings.host.max_calls = Some(1);
     allow(&mut settings, "mcp.discover", json!({}));
     allow(&mut settings, "mcp.call", call_args(1));
     let rt = open(
@@ -537,17 +537,14 @@ async fn cancellation_preserves_unknown_dispatch_across_reopen_and_original_regi
     rt.cancel(&rt.task(&admitted.id).unwrap().cancel_target())
         .unwrap();
     let _ = worker.await.unwrap();
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     let records = dispatches(&rt, &id);
     assert!(matches!(
         records.last().unwrap().outcome,
         Some(DispatchOutcome::Unknown { .. })
     ));
     assert!(registry.snapshot("local").unwrap().outcome_unknown);
-    assert!(rt.enqueue(&id, "retry").is_err());
+    assert!(rt.enqueue(&id, "retry").is_ok());
     let call = rt.get(&id).unwrap().unresolved_capabilities[0].clone();
     let pins = call.external_provenance.clone();
     // The original source future has joined. Its fixture performs no effect
@@ -574,11 +571,11 @@ async fn cancellation_preserves_unknown_dispatch_across_reopen_and_original_regi
     settings.reconciliation_verifier = Some(Arc::new(ConfirmedSourceReceipt(receipt.clone())));
     drop(rt);
     let reopened = open(&temp, settings, provider("return 1"));
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+    assert!(
+        matches!(reopened.enqueue(&id, "retry"), Err(RuntimeError::Busy)),
+        "the retry accepted before the reopen still owns the session's one live task"
     );
-    assert!(reopened.enqueue(&id, "retry").is_err());
     let mut bad = pins.clone().unwrap();
     bad["sources"]["local"]["source"]["origin"] = json!("altered origin");
     let wrong = CapabilityReconciliation {
@@ -732,7 +729,7 @@ async fn unverifiable_bridge_child_cannot_hide_the_unknown_parent_after_a_record
     );
     assert_eq!(state.calls.lock().unwrap().len(), 1);
     let snapshot = rt.get(&id).unwrap();
-    assert_eq!(snapshot.state, SessionState::NeedsReconciliation);
+    assert_eq!(snapshot.state, SessionState::Running);
     assert_eq!(snapshot.unresolved_capabilities.len(), 1);
     let child = &snapshot.unresolved_capabilities[0];
     assert_eq!(child.stage, CapabilityStage::Started);
@@ -960,7 +957,7 @@ async fn known_source_success_does_not_replace_explicit_core_unknown_from_host_r
     let temp = setup();
     let (registry, state) = registry(Behavior::Reply);
     let mut settings = config(&registry);
-    settings.host.max_result_bytes = 32;
+    settings.host.max_result_bytes = Some(32);
     allow(&mut settings, "mcp.call", call_args(1));
     let rt = open(
         &temp,
@@ -972,7 +969,7 @@ async fn known_source_success_does_not_replace_explicit_core_unknown_from_host_r
         .prompt(&id, "small Host result", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     assert!(matches!(
         dispatches(&rt, &id).last().unwrap().outcome,
         Some(DispatchOutcome::Succeeded { .. })
@@ -981,16 +978,10 @@ async fn known_source_success_does_not_replace_explicit_core_unknown_from_host_r
         view.unresolved_capabilities[0].outcome,
         Some(CapabilityOutcome::OutcomeUnknown { .. })
     ));
-    assert_eq!(
-        rt.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.recover(&id).unwrap().state, SessionState::Idle);
     drop(rt);
     let reopened = open(&temp, settings, provider("return 1"));
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
     assert_eq!(state.calls.lock().unwrap().len(), 1);
 }
 
@@ -1026,17 +1017,11 @@ async fn failed_source_terminal_write_retains_preparation_and_unknown_without_re
     assert!(registry.snapshot("local").unwrap().outcome_unknown);
     db.execute_batch("DROP TRIGGER fail_bridge_settlement;")
         .unwrap();
-    assert_eq!(
-        rt.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.recover(&id).unwrap().state, SessionState::Idle);
     drop(rt);
     let reopened = open(&temp, settings, provider("return 1"));
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(reopened.enqueue(&id, "retry").is_err());
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+    assert!(reopened.enqueue(&id, "retry").is_ok());
     assert_eq!(state.calls.lock().unwrap().len(), 1);
 }
 
@@ -1091,16 +1076,14 @@ async fn recovery_retries_exact_known_source_terminal_after_reconciliation_commi
         Some(DispatchOutcome::Failed { .. })
     ));
     db.execute_batch("DROP TRIGGER fail_core_terminal_retry; CREATE TRIGGER fail_reconcile_retry BEFORE INSERT ON core_events WHEN json_extract(NEW.record,'$.event.type')='capability_reconciled' BEGIN SELECT RAISE(ABORT,'injected reconciliation commit failure'); END;").unwrap();
+    let recovery = rt.recover(&id).unwrap_err();
     assert!(
-        rt.recover(&id)
-            .unwrap_err()
+        recovery
             .to_string()
-            .contains("injected reconciliation commit failure")
+            .contains("injected reconciliation commit failure"),
+        "{recovery:?}"
     );
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     assert_eq!(state.calls.lock().unwrap().len(), 1);
     db.execute_batch("DROP TRIGGER fail_reconcile_retry;")
         .unwrap();
@@ -1135,10 +1118,7 @@ async fn revocation_cancels_original_source_and_keeps_unknown_after_reopen() {
         .unwrap();
     registry.revoke("local").unwrap();
     let _ = worker.await.unwrap();
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     assert!(matches!(
         dispatches(&rt, &id).last().unwrap().outcome,
         Some(DispatchOutcome::Unknown { .. })
@@ -1147,10 +1127,7 @@ async fn revocation_cancels_original_source_and_keeps_unknown_after_reopen() {
     assert_eq!(state.disconnected.load(Ordering::Acquire), 1);
     drop(rt);
     let reopened = open(&temp, settings, provider("return 1"));
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
     assert_eq!(state.calls.lock().unwrap().len(), 1);
 }
 
@@ -1195,7 +1172,7 @@ async fn parallel_sessions_keep_full_task_attempt_worker_origins_on_one_registry
 }
 
 #[test]
-fn oversized_pinned_binding_catalog_is_rejected_before_opening_or_dispatching() {
+fn large_pinned_binding_catalog_opens_without_an_artificial_metadata_ceiling() {
     let temp = setup();
     let registry = Registry::new(Limits::default(), Arc::new(Policy)).unwrap();
     let state = Arc::new(SourceState::default());
@@ -1216,17 +1193,16 @@ fn oversized_pinned_binding_catalog_is_rejected_before_opening_or_dispatching() 
             )
             .unwrap();
     }
-    let error = Runtime::open(
+    let rt = Runtime::open(
         temp.path().join("large.db"),
         temp.path().join("workspace"),
         provider("return 1"),
         Model::new("fixture", "large-pins"),
         config(&registry),
     )
-    .err()
-    .unwrap();
-    assert!(error.to_string().contains("metadata budget"), "{error}");
-    assert!(!temp.path().join("large.db").exists());
+    .expect("no fixed bridge binding metadata ceiling");
+    assert_eq!(rt.list().unwrap().len(), 0);
+    assert!(temp.path().join("large.db").exists());
     assert!(state.calls.lock().unwrap().is_empty());
 }
 
@@ -1335,11 +1311,8 @@ async fn original_dispatch_journal_cannot_write_after_its_full_lease_is_fenced()
     assert!(registry.journal_failure().is_some());
     drop(rt);
     let reopened = open(&temp, settings, provider("return 1"));
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(reopened.enqueue(&id, "retry old task").is_err());
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+    assert!(reopened.enqueue(&id, "retry old task").is_ok());
 }
 
 #[tokio::test]
@@ -1349,7 +1322,7 @@ async fn source_failure_and_source_result_bounds_keep_their_known_or_unknown_out
         let (registry, state) = registry_with(
             behavior,
             Limits {
-                max_result_bytes: 4096,
+                max_result_bytes: Some(4096),
                 ..Default::default()
             },
         );
@@ -1367,14 +1340,7 @@ async fn source_failure_and_source_result_bounds_keep_their_known_or_unknown_out
             .prompt(&id, "source result bound", CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(
-            result.state,
-            if unknown {
-                SessionState::NeedsReconciliation
-            } else {
-                SessionState::Idle
-            }
-        );
+        assert_eq!(result.state, SessionState::Idle);
         let entries = dispatches(&rt, &id);
         assert_eq!(entries.len(), 2);
         assert_eq!(

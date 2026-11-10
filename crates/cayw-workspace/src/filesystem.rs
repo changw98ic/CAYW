@@ -151,12 +151,42 @@ pub(crate) async fn write_lock(
             Ok(()) => return Ok(file),
             Err(TryLockError::Error(error)) => return Err(io_error(error)),
             Err(TryLockError::WouldBlock) => {
+                let deadline = context.deadline;
                 tokio::select! {
                     biased;
                     _ = context.cancel.cancelled() => return Err(failure("cancelled waiting for workspace lock")),
-                    _ = tokio::time::sleep_until(context.deadline.into()) => return Err(failure("workspace lock deadline reached")),
+                    _ = async move {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                            None => std::future::pending().await,
+                        }
+                    } => return Err(failure("workspace lock deadline reached")),
                     _ = tokio::time::sleep(Duration::from_millis(5)) => {},
                 }
+            }
+        }
+    }
+}
+
+/// Synchronous variant used by recovery helpers that are not async. Without a
+/// configured timeout one immediate attempt is made; a busy workspace returns a
+/// known error so the host can retry later.
+pub(crate) fn try_write_lock(
+    root: &Dir,
+    context: &Context,
+) -> Result<std::fs::File, CapabilityError> {
+    context.check()?;
+    let file = lock_file(root)?;
+    loop {
+        context.check()?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::Error(error)) => return Err(io_error(error)),
+            Err(TryLockError::WouldBlock) if context.deadline.is_none() => {
+                return Err(failure("workspace is busy"));
+            }
+            Err(TryLockError::WouldBlock) => {
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
     }
@@ -173,18 +203,20 @@ pub(crate) fn regular(dir: &Dir, name: &str) -> Result<File, CapabilityError> {
 pub(crate) fn read(
     dir: &Dir,
     name: &str,
-    limit: usize,
+    limit: Option<usize>,
     context: &Context,
 ) -> Result<Vec<u8>, CapabilityError> {
     let mut file = regular(dir, name)?;
-    if file.metadata().map_err(io_error)?.len() > limit as u64 {
+    if let Some(limit) = limit
+        && file.metadata().map_err(io_error)?.len() > limit as u64
+    {
         return Err(failure("file byte limit exceeded"));
     }
     read_bounded(&mut file, limit, context)
 }
 pub(crate) fn read_bounded(
     reader: &mut impl Read,
-    limit: usize,
+    limit: Option<usize>,
     context: &Context,
 ) -> Result<Vec<u8>, CapabilityError> {
     let mut bytes = vec![];
@@ -195,7 +227,7 @@ pub(crate) fn read_bounded(
         if count == 0 {
             return Ok(bytes);
         }
-        if count > limit.saturating_sub(bytes.len()) {
+        if limit.is_some_and(|limit| count > limit.saturating_sub(bytes.len())) {
             return Err(failure("read byte limit exceeded"));
         }
         bytes.extend_from_slice(&chunk[..count]);
@@ -286,7 +318,8 @@ pub(crate) struct Node {
 #[serde(deny_unknown_fields)]
 struct TreeArgs {
     path: String,
-    max_entries: usize,
+    #[serde(default)]
+    max_entries: Option<usize>,
 }
 struct TreeScan<'a> {
     workspace: &'a Workspace,
@@ -324,7 +357,13 @@ impl TreeScan<'_> {
         names.sort();
         for name in names {
             self.context.check()?;
-            if depth > self.workspace.limits.max_depth || self.entries.len() >= self.max {
+            if self
+                .workspace
+                .limits
+                .max_depth
+                .is_some_and(|max| depth > max)
+                || self.entries.len() >= self.max
+            {
                 return Err(failure("tree depth or entry limit exceeded"));
             }
             let full = if path == "." {
@@ -338,11 +377,12 @@ impl TreeScan<'_> {
                 let bytes = read(
                     dir,
                     &name,
-                    self.workspace.limits.max_file_bytes.min(
+                    crate::min_limit(
+                        self.workspace.limits.max_file_bytes,
                         self.workspace
                             .limits
                             .max_batch_bytes
-                            .saturating_sub(self.bytes),
+                            .map(|limit| limit.saturating_sub(self.bytes)),
                     ),
                     self.context,
                 )?;
@@ -378,7 +418,12 @@ fn scan(
     deleting: bool,
     context: &Context,
 ) -> Result<(Vec<Node>, String), CapabilityError> {
-    if max == 0 || max > workspace.limits.max_tree_entries {
+    if max == 0
+        || workspace
+            .limits
+            .max_tree_entries
+            .is_some_and(|ceiling| max > ceiling)
+    {
         return Err(failure("invalid tree entry bound"));
     }
     let parts = components(path, !deleting)?;
@@ -410,7 +455,8 @@ pub(crate) fn tree(
     context: &Context,
 ) -> Result<Value, CapabilityError> {
     let args: TreeArgs = parse(args)?;
-    let (entries, root_sha256) = scan(workspace, &args.path, args.max_entries, false, context)?;
+    let max = crate::search::bound(args.max_entries, 1000, workspace.limits.max_tree_entries)?;
+    let (entries, root_sha256) = scan(workspace, &args.path, max, false, context)?;
     Ok(
         json!({"path":args.path,"root_sha256":root_sha256,"entries":entries,"protected_entries_omitted":true}),
     )

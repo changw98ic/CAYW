@@ -7,8 +7,9 @@ use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Bounds the one pending write and unread stdout. Both limits must be positive
-/// and representable as Rust allocation sizes. The spec's timeout/output budget
-/// apply to the whole process lifetime, including idle and prefetched output.
+/// and representable as Rust allocation sizes. The spec's optional timeout and
+/// output budget apply to the whole process lifetime, including idle and
+/// prefetched output; without them the process runs until exit or cancellation.
 /// In pipe mode, stderr is drained and charged without retaining or exposing its
 /// contents; stderr read errors fail the shared outcome. PTY mode merges stderr
 /// into the raw output stream, including terminal echo and line-ending conversion.
@@ -305,8 +306,8 @@ impl ProcessControl {
 }
 
 impl ProcessRunner {
-    /// Starts one managed interactive process with an explicit lifetime timeout
-    /// and raw stdout+stderr lifetime budget from spec. The original supervisor
+    /// Starts one managed interactive process with the spec's optional lifetime
+    /// timeout and raw stdout+stderr lifetime budget. The original supervisor
     /// retains the child, group, pipes or PTY, opened cwd, and transferred permit.
     pub async fn start_interactive_in_directory_with_permit(
         &self,

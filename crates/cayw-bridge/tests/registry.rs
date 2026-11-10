@@ -94,7 +94,7 @@ impl SourceHandle for Handle {
         let value = match request.operation {
             SourceOperation::InvokeTool { arguments, .. } => {
                 if self.state.oversize.load(Ordering::Relaxed) {
-                    json!({"text":"x".repeat(request.max_result_bytes+1)})
+                    json!({"text":"x".repeat(request.max_result_bytes.map_or(0, |limit| limit + 1))})
                 } else {
                     arguments
                 }
@@ -434,7 +434,10 @@ async fn reconnect_while_response_is_pending_cannot_accept_old_result() {
 #[tokio::test]
 async fn mismatched_ids_and_result_budgets_keep_executed_effects_unknown() {
     for mismatch in [true, false] {
-        let registry = registry(Limits::default());
+        let registry = registry(Limits {
+            max_result_bytes: Some(1024),
+            ..Limits::default()
+        });
         let state = Arc::new(State::default());
         state.mismatch.store(mismatch, Ordering::Relaxed);
         state.oversize.store(!mismatch, Ordering::Relaxed);
@@ -457,7 +460,7 @@ async fn mismatched_ids_and_result_budgets_keep_executed_effects_unknown() {
 #[tokio::test]
 async fn source_budgets_apply_to_metadata_operations_and_never_reset_on_reconnect() {
     let registry = registry(Limits {
-        max_source_operations: 3,
+        max_source_operations: Some(3),
         ..Limits::default()
     });
     let state = Arc::new(State::default());
@@ -515,7 +518,7 @@ async fn cancelled_before_admission_and_timeouts_do_not_replay() {
         // Barrier below waits for admission; once entered the handler blocks on
         // release so tens of ms is enough for the unknown-outcome deadline.
         // Do not widen this as a flake shield — the entered select is the fix.
-        operation_timeout: Duration::from_millis(50),
+        operation_timeout: Some(Duration::from_millis(50)),
         ..Limits::default()
     });
     let state = Arc::new(State::default());
@@ -559,4 +562,62 @@ async fn cancelled_before_admission_and_timeouts_do_not_replay() {
             .unwrap()
             .is_cancelled()
     );
+}
+
+#[test]
+fn default_limits_are_unbounded_and_keep_64_in_flight() {
+    let limits = Limits::default();
+    assert_eq!(limits.max_in_flight, 64);
+    assert!(limits.max_sources.is_none());
+    assert!(limits.max_tools_per_source.is_none());
+    assert!(limits.max_skills_per_source.is_none());
+    assert!(limits.max_resources_per_source.is_none());
+    assert!(limits.max_prompts_per_source.is_none());
+    assert!(limits.max_metadata_bytes.is_none());
+    assert!(limits.max_all_metadata_bytes.is_none());
+    assert!(limits.max_argument_bytes.is_none());
+    assert!(limits.max_result_bytes.is_none());
+    assert!(limits.max_skill_bytes.is_none());
+    assert!(limits.max_resource_bytes.is_none());
+    assert!(limits.max_source_operations.is_none());
+    assert!(limits.max_source_bytes.is_none());
+    assert!(limits.operation_timeout.is_none());
+    Registry::new(limits, Arc::new(Policy)).unwrap();
+}
+
+#[test]
+fn registry_validates_only_configured_limits_and_has_no_artificial_ceiling() {
+    assert!(
+        Registry::new(
+            Limits {
+                max_in_flight: 0,
+                ..Limits::default()
+            },
+            Arc::new(Policy)
+        )
+        .is_err()
+    );
+    assert!(
+        Registry::new(
+            Limits {
+                max_metadata_bytes: Some(0),
+                ..Limits::default()
+            },
+            Arc::new(Policy)
+        )
+        .is_err()
+    );
+    Registry::new(
+        Limits {
+            max_sources: Some(usize::MAX),
+            max_tools_per_source: Some(usize::MAX),
+            max_metadata_bytes: Some(usize::MAX),
+            max_result_bytes: Some(usize::MAX),
+            max_source_bytes: Some(usize::MAX),
+            operation_timeout: Some(Duration::from_secs(3600)),
+            ..Limits::default()
+        },
+        Arc::new(Policy),
+    )
+    .unwrap();
 }

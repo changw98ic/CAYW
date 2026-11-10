@@ -87,8 +87,8 @@ fn printenv_profile(kind: ProfileKind, tag: &str) -> Profile {
         program: PathBuf::from(PRINTENV),
         args: vec![TAG.into()],
         env: BTreeMap::from([(TAG.into(), tag.into())]),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: ProcessIo::Pipes,
     }
@@ -101,8 +101,8 @@ fn leaf_profile(kind: ProfileKind, root: &Path) -> Profile {
         program: PathBuf::from(FIXTURE),
         args: vec!["leaf".into(), root.to_string_lossy().into_owned()],
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(20),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(20)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: ProcessIo::Pipes,
     }
@@ -626,8 +626,8 @@ async fn a_nonzero_profile_exit_is_a_confirmed_result_not_an_unknown_effect() {
                 program: PathBuf::from(FALSE),
                 args: vec![],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: ProcessIo::Pipes,
             },
@@ -722,7 +722,7 @@ async fn cancelling_a_running_profile_settles_unknown_and_reaps_the_process() {
     );
 
     let view = rt.get(&id).unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::OutcomeUnknown);
     assert_eq!(view.executions.len(), 1);
     let execution = &view.executions[0];

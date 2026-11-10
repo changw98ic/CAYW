@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createView, applySnapshot, consumeEvents, sessionBlocked, sessionRunning, messageText, beginWrite, finishWrite, terminalReadCursor, consumeTerminalRead } from '../assets/app.js';
+import { createView, applySnapshot, consumeEvents, sessionBlocked, sessionRunning, messageText, messagePresentation, beginWrite, finishWrite, terminalReadCursor, consumeTerminalRead, canFork, stateLabel } from '../assets/app.js';
 
 const snapshot = (extra = {}) => ({ id: 's1', label: '测试', messages: [], cursor: 10, state: 'idle', pending_approvals: [], unresolved_calls: [], ...extra });
 const initial = (extra = {}) => applySnapshot(createView('s1'), snapshot(extra), true);
@@ -15,12 +15,12 @@ test('snapshot refresh does not skip events that have not been consumed', () => 
   assert.equal(view.liveText, '回答');
 });
 
-test('a delayed snapshot cannot replace newer session history or blocking state', () => {
+test('a delayed snapshot cannot replace newer session history or state', () => {
   let view = initial();
-  view = applySnapshot(view, snapshot({ cursor: 18, state: 'needs_reconciliation', messages: [{ role: 'assistant', content: '真实终态' }] }));
+  view = applySnapshot(view, snapshot({ cursor: 18, state: 'idle', messages: [{ role: 'assistant', content: '真实终态' }] }));
   view = applySnapshot(view, snapshot({ cursor: 12, state: 'running', messages: [] }));
   assert.equal(view.snapshot.cursor, 18);
-  assert.equal(view.snapshot.state, 'needs_reconciliation');
+  assert.equal(view.snapshot.state, 'idle');
   assert.equal(messageText(view.snapshot.messages[0]), '真实终态');
 });
 
@@ -52,18 +52,37 @@ test('render history and streamed content stay bounded while the cursor consumes
   assert.equal(view.cursor, 910);
 });
 
-test('unknown effects remain blocked and frozen sessions explain the confirmed fork route', () => {
-  assert.match(sessionBlocked(snapshot({ unresolved_calls: [{ id: 'c1' }] })), /核对/);
-  assert.match(sessionBlocked(snapshot({ needs_reconciliation: true })), /核对/);
-  assert.match(sessionBlocked(snapshot({ state: 'needs_reconciliation' })), /核对/);
+test('interrupted tool effects leave a ready session usable while a frozen workflow still explains the fork route', () => {
+  const interrupted = snapshot({ unresolved_calls: [{ call: { id: 'c1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] });
+  assert.equal(sessionBlocked(interrupted), '');
+  assert.equal(stateLabel(interrupted), '就绪');
+  assert.equal(sessionBlocked(snapshot({ needs_reconciliation: true })), '');
+  assert.equal(sessionBlocked(snapshot({ state: 'idle', unresolved_calls: [{ id: 'c1' }] })), '');
   assert.match(sessionBlocked(snapshot({ state: 'frozen', workflow_unavailable: true })), /确认后 Fork/);
+});
+
+test('interrupted calls never prevent forking a frozen StrongFlow session', () => {
+  const view = initial({ state: 'idle', binding: { plugin: 'strongflow', frozen: true }, unresolved_calls: [{ call: { id: 'c1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] });
+  assert.equal(stateLabel(view.snapshot, view), '强流程冻结');
+  assert.match(sessionBlocked(view.snapshot, view), /冻结/);
+  assert.equal(canFork(view), true);
+  assert.equal(canFork({ ...view, activeAttempt: { lease, after: 10, terminal: null } }), false, 'an active attempt still needs its durable terminal');
+});
+
+test('interrupted tool results are presented as interrupted without host reconciliation', () => {
+  const presentation = messagePresentation({ role: 'toolResult', tool_name: 'execute_code', content: [], is_error: true, outcome_unknown: true, structured_content: { status: 'outcome_unknown', outputs: [{ output: { type: 'json', value: { content: 'unconfirmed' } } }] } });
+  assert.equal(presentation.status, 'interrupted');
+  assert.equal(presentation.title, '已中断');
+  assert.equal(presentation.text, '本次工具执行已中断。');
+  assert.deepEqual(presentation.values, []);
+  assert.doesNotMatch(presentation.raw, /宿主|核对|待核对/);
 });
 
 test('unfinished known calls keep approval available while their durable attempt is active', () => {
   const awaiting = snapshot({ state:'awaiting_approval', attempt:{attempt_id:'a1'}, unresolved_calls:[{state:'started',execution_started:true,result:null}], pending_approvals:[{id:'approval-1'}] });
   assert.equal(sessionBlocked(awaiting), '');
   assert.equal(sessionRunning(awaiting), true);
-  assert.match(sessionBlocked({...awaiting, unresolved_calls:[{state:'outcome_unknown'}]}), /核对/);
+  assert.equal(sessionBlocked({...awaiting, unresolved_calls:[{state:'outcome_unknown'}]}), '');
 });
 
 test('an active durable attempt blocks sending even before its first running projection', () => {
@@ -88,8 +107,9 @@ test('wrapped durable agent updates drive live text and their terminal clears it
   assert.equal(view.liveText, '');
 });
 
-test('tool errors and unknown outcomes are visible even when the content is empty', () => {
-  assert.match(messageText({ role: 'toolResult', content: [], is_error: true, outcome_unknown: true }), /待核对/);
+test('tool errors and interrupted outcomes are visible even when the content is empty', () => {
+  assert.match(messageText({ role: 'toolResult', content: [], is_error: true, outcome_unknown: true }), /中断/);
+  assert.doesNotMatch(messageText({ role: 'toolResult', content: [], is_error: true, outcome_unknown: true }), /宿主|核对/);
   assert.match(messageText({ role: 'toolResult', content: [], is_error: true }), /失败/);
 });
 
@@ -100,15 +120,17 @@ test('model content remains literal text', () => {
 const lease = { session_id:'s1', attempt_id:'a1', worker_id:'w1', fence:1 };
 const fact = (cursor, event) => ({ protocol_version:3, session_id:'s1', cursor, timestamp:1, attempt:lease, event });
 
-test('same-cursor idle cannot erase a durable reconciliation warning before its fact is consumed', () => {
-  let view = initial({ state:'needs_reconciliation', cursor:12, unresolved_calls:[{ call:{id:'c1'}, state:'outcome_unknown' }] });
+test('an interrupted call in an idle snapshot never locks the next prompt', () => {
+  let view = initial({ state:'idle', cursor:12, unresolved_calls:[{ call:{id:'c1'}, state:'outcome_unknown' }] });
+  assert.equal(sessionBlocked(view.snapshot, view), '');
+  assert.equal(stateLabel(view.snapshot, view), '就绪');
   view = applySnapshot(view, snapshot({cursor:12}));
-  assert.match(sessionBlocked(view.snapshot, view), /核对/);
-  view = applySnapshot(view, snapshot({cursor:13}));
-  assert.match(sessionBlocked(view.snapshot, view), /核对/);
-  view = consumeEvents(view, [fact(13, {type:'reconciled', reconciliation:{call_id:'c1'}})]);
+  assert.equal(sessionBlocked(view.snapshot, view), '');
   view = applySnapshot(view, snapshot({cursor:13}));
   assert.equal(sessionBlocked(view.snapshot, view), '');
+  view = consumeEvents(view, [fact(13, {type:'reconciled', reconciliation:{call_id:'c1'}})]);
+  view = applySnapshot(view, snapshot({cursor:13}));
+  assert.equal(sessionBlocked(view.snapshot, view), '', 'a host reconciliation record is audit data, not a lock');
 });
 
 test('a known prompt receipt cannot unlock against a read issued before consuming its completion', () => {
@@ -272,18 +294,13 @@ test('a malformed early cancel receipt cannot borrow a successful prompt complet
   assert.match(sessionBlocked(view.snapshot, view), /结束结果/);
 });
 
-test('delayed snapshots cannot recreate a completed attempt or undo reconciled calls', () => {
+test('delayed snapshots cannot recreate a completed attempt or freeze interrupted calls', () => {
   const call = id => ({call:{id}, state:'outcome_unknown', result:{outcome_unknown:true}});
-  let view = initial({cursor:12, state:'needs_reconciliation', unresolved_calls:[call('c1'), call('c2')]});
-  view = consumeEvents(view, [fact(13, {type:'reconciled', reconciliation:{call_id:'c1'}})]);
-  view = applySnapshot(view, snapshot({cursor:12, state:'needs_reconciliation', unresolved_calls:[call('c1'), call('c2')]}));
-  view = applySnapshot(view, snapshot({cursor:13, state:'needs_reconciliation', unresolved_calls:[call('c2')]}));
-  view = consumeEvents(view, [fact(14, {type:'reconciled', reconciliation:{call_id:'unrelated'}})]);
+  let view = initial({cursor:12, unresolved_calls:[call('c1'), call('c2')]});
+  assert.equal(sessionBlocked(view.snapshot, view), '');
+  view = applySnapshot(view, snapshot({cursor:12, unresolved_calls:[call('c1'), call('c2')]}));
+  assert.equal(sessionBlocked(view.snapshot, view), '');
   view = applySnapshot(view, snapshot({cursor:14}));
-  assert.match(sessionBlocked(view.snapshot, view), /核对/, 'c2 still lacks its own reconciliation');
-  view = consumeEvents(view, [fact(15, {type:'reconciled', reconciliation:{call_id:'c2'}})]);
-  view = applySnapshot(view, snapshot({cursor:14, state:'needs_reconciliation', unresolved_calls:[call('c2')]}));
-  view = applySnapshot(view, snapshot({cursor:15}));
   assert.equal(sessionBlocked(view.snapshot, view), '');
   view = consumeEvents(view, [fact(16, {type:'attempt_started', lease}), fact(17, {type:'attempt_finished', lease})]);
   view = applySnapshot(view, snapshot({cursor:16, state:'running', attempt:lease}));
@@ -339,9 +356,10 @@ test('unknown prompt and cancel receipts do not schedule historical guesses', ()
   }
 });
 
-test('a reconciliation rejection with no known call cannot be cleared by an unrelated call', () => {
+test('a legacy reconciliation rejection no longer locks the session', () => {
   let view = finishWrite(beginWrite(initial(), 1, 'session.prompt'), 1, {code:'needs_reconciliation', outcome_unknown:false});
   view = consumeEvents(view, [fact(11, {type:'reconciled', reconciliation:{call_id:'not-this-call'}})]);
   view = applySnapshot(view, snapshot({cursor:11}));
-  assert.match(sessionBlocked(view.snapshot, view), /核对/);
+  assert.equal(sessionBlocked(view.snapshot, view), '');
+  assert.equal(stateLabel(view.snapshot, view), '就绪');
 });

@@ -7,13 +7,11 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const SCHEMA_VERSION: u32 = 3;
 pub const MAX_EVENT_PAGE: usize = 1_000;
+/// Soft pagination budget: a page stops before it would exceed this many
+/// serialized bytes, but always returns at least one record. This only batches
+/// reads; it never refuses a stored event.
+pub const MAX_EVENT_PAGE_BYTES: usize = 4 * 1024 * 1024 + 64 * 1024;
 pub const MAX_IDENTIFIER_BYTES: usize = 256;
-pub const MAX_METADATA_BYTES: usize = 65_536;
-pub const MAX_METADATA_DEPTH: usize = 32;
-pub const MAX_METADATA_NODES: usize = 4_096;
-pub const MAX_EXECUTIONS: usize = 4_096;
-pub const MAX_CAPABILITY_CALLS: usize = 65_536;
-pub const MAX_APPROVALS: usize = 16_384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,7 +19,6 @@ pub enum SessionState {
     Idle,
     Running,
     AwaitingApproval,
-    NeedsReconciliation,
 }
 
 /// Every execution write checks the entire lease in its write transaction.

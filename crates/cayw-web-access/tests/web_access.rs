@@ -384,11 +384,6 @@ fn invalid_search_limits_are_configuration_errors_not_panics() {
             ..Limits::default()
         },
         Limits {
-            default_search_limit: 21,
-            max_search_limit: 20,
-            ..Limits::default()
-        },
-        Limits {
             max_body_bytes: 0,
             ..Limits::default()
         },
@@ -411,6 +406,21 @@ fn invalid_search_limits_are_configuration_errors_not_panics() {
             "unexpected message: {error}"
         );
     }
+}
+
+#[test]
+fn default_search_limit_above_max_is_clamped() {
+    let options = WebAccessOptions {
+        limits: Limits {
+            default_search_limit: 21,
+            max_search_limit: 20,
+            ..Limits::default()
+        },
+        search: SearchBackend::Fixture,
+    };
+    let access = options.build().expect("an orderable limit must not fail");
+    assert_eq!(access.limits().default_search_limit, 20);
+    assert_eq!(access.limits().max_search_limit, 20);
 }
 
 #[tokio::test]

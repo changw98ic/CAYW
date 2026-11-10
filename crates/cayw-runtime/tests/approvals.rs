@@ -572,7 +572,7 @@ async fn revoking_live_grant_cancels_dispatch_and_retains_unknown_effect() {
         .unwrap();
     rt.revoke(&id, &grant.id, "host-user").unwrap();
     let result = task.await.unwrap().unwrap();
-    assert_eq!(result.state, cayw_core::SessionState::NeedsReconciliation);
+    assert_eq!(result.state, cayw_core::SessionState::Idle);
     assert!(rt.grants(&id).unwrap().iter().all(|g| g.state == "revoked"));
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::OutcomeUnknown);
     assert!(

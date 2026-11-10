@@ -47,8 +47,8 @@ fn profile(program: &str, args: &[&str]) -> Profile {
         program: program.into(),
         args: args.iter().map(|value| (*value).into()).collect(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: ProcessIo::Pipes,
     }
@@ -56,12 +56,12 @@ fn profile(program: &str, args: &[&str]) -> Profile {
 fn limits() -> TerminalLimits {
     TerminalLimits {
         max_sessions: 2,
-        max_sessions_total: 8,
-        max_input_bytes_per_write: 64,
-        max_input_bytes_per_session: 256,
-        max_output_bytes_per_session: 4096,
-        max_read_bytes: 64,
-        max_wait: Duration::from_secs(10),
+        max_sessions_total: Some(8),
+        max_input_bytes_per_write: Some(64),
+        max_input_bytes_per_session: Some(256),
+        max_output_bytes_per_session: Some(4096),
+        max_read_bytes: Some(64),
+        max_wait: Some(Duration::from_secs(10)),
     }
 }
 fn terminal(profiles: BTreeMap<String, Profile>, limits: TerminalLimits) -> TerminalConfig {
@@ -148,7 +148,7 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .profiles
             .get_mut("terminal")
             .unwrap()
-            .timeout = Duration::from_secs(11);
+            .timeout = Some(Duration::from_secs(11));
     });
     changed(&root, "terminal profile output budget", |config| {
         config
@@ -158,7 +158,7 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .profiles
             .get_mut("terminal")
             .unwrap()
-            .max_output_bytes = 8192;
+            .max_output_bytes = Some(8192);
     });
     // Terminal PTY profiles are macOS-only; Linux rejects them in Host::new
     // (pinned by `pty_terminal_profiles_are_rejected_off_macos`).
@@ -198,7 +198,7 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .as_mut()
             .unwrap()
             .limits
-            .max_sessions_total = 9;
+            .max_sessions_total = Some(9);
     });
     changed(&root, "terminal input write limits", |config| {
         config
@@ -206,7 +206,7 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .as_mut()
             .unwrap()
             .limits
-            .max_input_bytes_per_write = 32;
+            .max_input_bytes_per_write = Some(32);
     });
     changed(&root, "terminal per-session input limits", |config| {
         config
@@ -214,7 +214,7 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .as_mut()
             .unwrap()
             .limits
-            .max_input_bytes_per_session = 512;
+            .max_input_bytes_per_session = Some(512);
     });
     changed(&root, "terminal output limits", |config| {
         config
@@ -222,7 +222,7 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .as_mut()
             .unwrap()
             .limits
-            .max_output_bytes_per_session = 8192;
+            .max_output_bytes_per_session = Some(8192);
     });
     changed(&root, "terminal read limits", |config| {
         config
@@ -230,10 +230,10 @@ fn host_identity_rotates_for_every_execution_relevant_configuration() {
             .as_mut()
             .unwrap()
             .limits
-            .max_read_bytes = 32;
+            .max_read_bytes = Some(32);
     });
     changed(&root, "terminal wait limits", |config| {
-        config.terminal_handoffs.as_mut().unwrap().limits.max_wait = Duration::from_secs(11);
+        config.terminal_handoffs.as_mut().unwrap().limits.max_wait = Some(Duration::from_secs(11));
     });
     changed(&root, "terminal availability", |config| {
         config.terminal_handoffs = None;

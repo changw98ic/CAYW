@@ -1,21 +1,8 @@
 use super::*;
 
 impl StoredSession {
-    pub(super) fn has_unknown(&self) -> bool {
-        self.calls
-            .iter()
-            .any(|c| c.record.state == CallState::OutcomeUnknown)
-            || self
-                .capabilities
-                .iter()
-                .any(|c| matches!(c.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. })))
-    }
-
     pub(super) fn admit_work(&self, lease: &AttemptLease) -> Result<(), CoreError> {
         self.verify_lease(lease)?;
-        if self.has_unknown() {
-            return Err(CoreError::NeedsReconciliation);
-        }
         if !self.lifecycle()?.started || self.lifecycle()?.ended {
             return Err(invalid("New execution work requires a live agent"));
         }
@@ -147,9 +134,6 @@ impl StoredSession {
 
 fn validate_key(key: &CapabilityCallKey) -> Result<(), CoreError> {
     identifier(&key.execution_id, "execution_id")?;
-    if key.sequence > MAX_CAPABILITY_CALLS as u64 {
-        return Err(CoreError::CounterExhausted);
-    }
     Ok(())
 }
 
@@ -177,9 +161,6 @@ impl SessionStore {
         identifier(&input.source_hash, "source_hash")?;
         self.mutate(&lease.session_id, |session| {
             session.admit_work(lease)?;
-            if session.executions.len() >= MAX_EXECUTIONS {
-                return Err(invalid("Execution count limit exceeded"));
-            }
             if session
                 .executions
                 .iter()
@@ -275,9 +256,6 @@ impl SessionStore {
         identifier(&input.name, "capability name")?;
         self.mutate(&lease.session_id, |session| {
             session.admit_work(lease)?;
-            if session.capabilities.len() >= MAX_CAPABILITY_CALLS {
-                return Err(invalid("Capability count limit exceeded"));
-            }
             let execution = session.verify_execution(lease, &input.key.execution_id)?;
             let next = session
                 .capabilities
@@ -492,7 +470,9 @@ impl SessionStore {
                         && matches!(c.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. }))
                 })
             {
-                return Err(CoreError::NeedsReconciliation);
+                return Err(invalid(
+                    "Execution cannot finish completed while a capability outcome is unknown",
+                ));
             }
             let execution = session
                 .executions

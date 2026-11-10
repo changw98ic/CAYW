@@ -142,11 +142,11 @@ fn main() {
                 let mut config = cayw_runtime::RuntimeConfig {
                     max_concurrent_runs: 1,
                     max_queued_runs: 1,
-                    max_run_time: Duration::from_secs(90),
+                    max_run_time: Some(Duration::from_secs(90)),
                     ..Default::default()
                 };
-                config.codemode.timeout = Duration::from_secs(60);
-                config.host.call_timeout = Duration::from_secs(60);
+                config.codemode.timeout = Some(Duration::from_secs(60));
+                config.host.call_timeout = Some(Duration::from_secs(60));
                 config.host.profiles.insert(
                     "tree".into(),
                     cayw_host::Profile {
@@ -154,8 +154,8 @@ fn main() {
                         program: std::env::current_exe().unwrap(),
                         args: vec!["tree".into(), root.to_string_lossy().into_owned()],
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(60),
-                        max_output_bytes: 4096,
+                        timeout: Some(Duration::from_secs(60)),
+                        max_output_bytes: Some(4096),
                         allow_filter: false,
                         io: cayw_host::ProcessIo::Pipes,
                     },
@@ -201,11 +201,11 @@ fn main() {
                 let mut config = cayw_runtime::RuntimeConfig {
                     max_concurrent_runs: 1,
                     max_queued_runs: 1,
-                    max_run_time: Duration::from_secs(90),
+                    max_run_time: Some(Duration::from_secs(90)),
                     ..Default::default()
                 };
-                config.codemode.timeout = Duration::from_secs(60);
-                config.host.call_timeout = Duration::from_secs(60);
+                config.codemode.timeout = Some(Duration::from_secs(60));
+                config.host.call_timeout = Some(Duration::from_secs(60));
                 config.host.profiles.insert(
                     "chain".into(),
                     cayw_host::Profile {
@@ -217,8 +217,8 @@ fn main() {
                             "0".into(),
                         ],
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(60),
-                        max_output_bytes: 4096,
+                        timeout: Some(Duration::from_secs(60)),
+                        max_output_bytes: Some(4096),
                         allow_filter: false,
                         io: if pty {
                             cayw_host::ProcessIo::Pty {

@@ -51,7 +51,7 @@ impl TestFixture {
         let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ipc_addr = ipc_listener.local_addr().unwrap();
         let mut ipc_config = ServerConfig::new(IPC_TOKEN);
-        ipc_config.request_timeout = Duration::from_secs(20);
+        ipc_config.request_timeout = Some(Duration::from_secs(20));
         let ipc_stop = stop.child_token();
         tokio::spawn(cayw_ipc::serve(
             ipc_listener,

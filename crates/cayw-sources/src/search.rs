@@ -27,9 +27,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const MAX_QUERY_BYTES: usize = 8192;
 const MAX_PATH_BYTES: usize = 4096;
-const MAX_MATCHES: u64 = 1000;
 const DEFAULT_MATCHES: u64 = 100;
 const CONTEXT_LINES: usize = 2;
 
@@ -176,13 +174,10 @@ impl SourceHandle for WorkspaceSearch {
             failure("invalid search arguments")
         })?;
         if args.query.is_empty()
-            || args.query.len() > MAX_QUERY_BYTES
             || args.path.as_ref().is_some_and(|path| {
                 path.is_empty() || path.len() > MAX_PATH_BYTES || path.contains('\0')
             })
-            || args
-                .limit
-                .is_some_and(|limit| limit == 0 || limit > MAX_MATCHES)
+            || args.limit.is_some_and(|limit| limit == 0)
         {
             self.stats.reject();
             return Err(failure("invalid search bounds"));
@@ -253,14 +248,16 @@ impl SourceHandle for WorkspaceSearch {
         // The registry later wraps this value as {request, source, value}. Check
         // that exact envelope here so an over-budget read-only search remains a
         // known failure instead of becoming an unknown effect after dispatch.
-        let envelope = json!({"request": &key, "source": &key.source, "value": &value});
-        let envelope_bytes = serde_json::to_vec(&envelope)
-            .map_err(|_| failure("workspace search result could not be serialized"))?;
-        if envelope_bytes.len() > max_result_bytes {
-            self.stats.reject();
-            return Err(failure(
-                "workspace search result exceeds the source result budget",
-            ));
+        if let Some(max_result_bytes) = max_result_bytes {
+            let envelope = json!({"request": &key, "source": &key.source, "value": &value});
+            let envelope_bytes = serde_json::to_vec(&envelope)
+                .map_err(|_| failure("workspace search result could not be serialized"))?;
+            if envelope_bytes.len() > max_result_bytes {
+                self.stats.reject();
+                return Err(failure(
+                    "workspace search result exceeds the source result budget",
+                ));
+            }
         }
 
         Ok(SourceReply { key, value })

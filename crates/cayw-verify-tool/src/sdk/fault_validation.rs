@@ -413,18 +413,16 @@ fn restart(
         || capabilities.len() != 1
         || executions.len() != 1
         || before.executions.len() != 1
-        || after.state != cayw_core::SessionState::NeedsReconciliation
+        || after.state != cayw_core::SessionState::Idle
         || after.unresolved_capabilities != *capabilities
         || after.executions != *executions
         || serde_json::from_slice::<Value>(&marker)? != super::provider::effect_result()
         || serde_json::from_slice::<Value>(&readiness)?
             != json!({"effect_sha256":sha256(&marker),"process_id":receipt.process_id})
         || decode::<SessionView>(report, "second_reopen_still_unknown")? != after
-        || observed(report, "prompt_frozen_unknown")?["result"]
-            .get("Err")
-            .is_none()
+        || observed(report, "fork_after_unknown_recovery")?["fork_ok"] != json!(true)
     {
-        return Err("unknown effect did not remain frozen across recovery and reopen".into());
+        return Err("unknown effect audit record did not survive recovery and reopen".into());
     }
     let start = starts[0];
     let settled = &capabilities[0];

@@ -218,7 +218,7 @@ async fn result_limits_are_deterministic_and_distinct_from_scan_failures() {
     let bounded = self::workspace(
         &bounded_temp,
         Limits {
-            max_tree_entries: 1,
+            max_tree_entries: Some(1),
             ..Limits::default()
         },
     );
@@ -237,7 +237,7 @@ async fn scan_bytes_regex_complexity_and_output_are_bounded() {
     let workspace = workspace(
         &temp,
         Limits {
-            max_batch_bytes: 10,
+            max_batch_bytes: Some(10),
             ..Limits::default()
         },
     );
@@ -264,7 +264,7 @@ async fn scan_bytes_regex_complexity_and_output_are_bounded() {
     let small = self::workspace(
         &small_temp,
         Limits {
-            max_output_bytes: 200,
+            max_output_bytes: Some(200),
             ..Limits::default()
         },
     );

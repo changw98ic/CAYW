@@ -101,7 +101,13 @@ fn store_rejects_unchecked_values_without_process_abort() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("cells.db");
             let journal = SqliteJournal::open(&path).unwrap();
-            let mut limits = CellLimits::default();
+            // These cases deliberately exercise explicit host caps.
+            let mut limits = CellLimits {
+                json_depth: Some(64),
+                item_bytes: Some(64 * 1024),
+                store_bytes: Some(1024 * 1024),
+                ..CellLimits::default()
+            };
             let baseline = journal
                 .store("s", "value", 0, json!("original"), &limits)
                 .unwrap();
@@ -112,15 +118,18 @@ fn store_rejects_unchecked_values_without_process_abort() {
                 _ => "value".into(),
             };
             if case == "deep-invalid-limits" {
-                limits.json_depth = usize::MAX;
+                limits.json_depth = Some(0);
             }
             if case == "deep-byte-limit" {
-                limits.store_bytes = 1;
+                limits.store_bytes = Some(1);
             }
             let shallow = case.starts_with("shallow");
             let mut value = nested(if shallow { 10 } else { DEEP }, case == "deep-object");
             if case == "deep-unvisited-sibling" {
-                value = Value::Array(vec![json!("x".repeat(limits.store_bytes + 1)), value]);
+                value = Value::Array(vec![
+                    json!("x".repeat(limits.store_bytes.unwrap() + 1)),
+                    value,
+                ]);
             }
             let result = journal.store("s", &key, 1, value, &limits);
             if case == "shallow" {
@@ -220,7 +229,11 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
             runtime.block_on(async {
                 let dir = tempfile::tempdir().unwrap();
                 let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
-                let limits = CellLimits::default();
+                let limits = CellLimits {
+                    json_depth: Some(64),
+                    item_bytes: Some(64 * 1024),
+                    ..CellLimits::default()
+                };
                 let identity = CellIdentity {
                     session_id: "s".into(),
                     task_id: "t".into(),
@@ -252,7 +265,7 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
                 let original = cells.record(&page.cell_id).unwrap();
                 assert_eq!(original.status, CellStatus::OutcomeUnknown);
                 assert_eq!(original.calls[0].status, IntentStatus::OutcomeUnknown);
-                assert!(journal.is_frozen("s").unwrap());
+                assert!(!journal.is_frozen("s").unwrap());
                 let shallow = case.starts_with("shallow");
                 let mut evidence = ReconciliationEvidence {
                     source_hash: original.source_hash.clone(),
@@ -276,7 +289,7 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
                     resolution: Resolution::Succeeded,
                 };
                 if case == "oversized-arguments-deep-result" {
-                    evidence.expected_arguments = json!("x".repeat(limits.item_bytes + 1));
+                    evidence.expected_arguments = json!("x".repeat(limits.item_bytes.unwrap() + 1));
                 }
                 if case == "empty-reference" {
                     evidence.evidence.clear();
@@ -323,7 +336,7 @@ fn reconcile_rejects_unchecked_values_without_process_abort() {
                         serde_json::to_value(cells.record(&page.cell_id).unwrap()).unwrap(),
                         serde_json::to_value(&original).unwrap()
                     );
-                    assert!(journal.is_frozen("s").unwrap());
+                    assert!(!journal.is_frozen("s").unwrap());
                     let persisted = journal.records(&identity, &limits).unwrap();
                     assert_eq!(
                         serde_json::to_value(&persisted[0]).unwrap(),

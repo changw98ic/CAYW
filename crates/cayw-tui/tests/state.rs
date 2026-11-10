@@ -35,6 +35,15 @@ fn unicode_editing_never_splits_a_character_and_preserves_multiline_paste() {
 }
 
 #[test]
+fn editor_insert_preserves_drafts_larger_than_256_kib() {
+    let mut editor = Editor::default();
+    let large = "长".repeat(120_000);
+    assert!(large.len() > 256 * 1024);
+    editor.insert(&large);
+    assert_eq!(editor.text().len(), large.len());
+}
+
+#[test]
 fn terminal_controls_are_removed_but_unicode_and_newlines_survive() {
     assert_eq!(
         sanitize("你好\x1b[31mRED\x1b[0m\x1b]52;c;secret\x07\r\n\t🙂\x08\u{9b}2J"),
@@ -69,17 +78,11 @@ fn new_prompt_is_dispatched_once_and_cancel_does_not_claim_a_terminal_state() {
     app.input.insert("你好");
     let send = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(
-        matches!(&send[..], [Command::PreparePrompt { session_id, text }] if session_id == "s1" && text == "你好")
+        matches!(&send[..], [Command::Prompt { session_id, text }] if session_id == "s1" && text == "你好")
     );
     assert!(
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .is_empty()
-    );
-    let send = app
-        .model_budget_status("s1", json!({"budget_unknown":false}))
-        .unwrap();
-    assert!(
-        matches!(&send[..], [Command::Prompt { session_id, text }] if session_id == "s1" && text == "你好")
     );
     let cancel = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert!(
@@ -100,24 +103,36 @@ fn new_prompt_is_dispatched_once_and_cancel_does_not_claim_a_terminal_state() {
 }
 
 #[test]
-fn unknown_effects_block_both_send_and_fork_without_clearance_button() {
-    let mut value = snapshot("needs_reconciliation", 4);
-    value["unresolved_calls"] = json!([{"id": "call1"}]);
-    let view = SessionView::from_snapshot(value).unwrap();
-    assert!(!view.can_prompt());
+fn interrupted_history_does_not_block_send_or_fork_and_needs_reconciliation_state_is_rejected() {
+    assert!(SessionView::from_snapshot(snapshot("needs_reconciliation", 4)).is_err());
+    let mut value = snapshot("idle", 4);
+    value["messages"] = json!([{
+        "role": "toolResult",
+        "tool_call_id": "call1",
+        "tool_name": "execute_code",
+        "content": [{"type": "text", "text": "Execution interrupted."}],
+        "is_error": true,
+        "outcome_unknown": true,
+        "timestamp": 1
+    }]);
+    let view = SessionView::from_snapshot(value.clone()).unwrap();
+    assert!(view.can_prompt());
     assert!(!view.can_fork());
+
+    let mut frozen = value.clone();
+    frozen["frozen"] = json!(true);
+    let frozen_view = SessionView::from_snapshot(frozen).unwrap();
+    assert!(!frozen_view.can_prompt());
+    assert!(frozen_view.can_fork());
+
     let mut app = app("idle");
-    app.upsert_snapshot(snapshot("needs_reconciliation", 4), true)
-        .unwrap();
+    app.upsert_snapshot(value, true).unwrap();
     app.input.insert("do it again");
-    assert!(
+    assert!(matches!(
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .is_empty()
-    );
-    assert!(
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
-            .is_empty()
-    );
+            .as_slice(),
+        [Command::Prompt { .. }]
+    ));
 }
 
 #[test]
@@ -229,7 +244,7 @@ fn malformed_event_page_is_atomic_and_other_session_cannot_advance_cursor() {
 }
 
 #[test]
-fn core_event_wrappers_project_history_approvals_and_unknown_terminal_results() {
+fn core_event_wrappers_project_history_approvals_and_interrupted_terminal_results() {
     let mut app = app("idle");
     app.apply_events("s1", json!([
         {"cursor":1, "event":{"type":"attempt_started", "lease":{}}},
@@ -246,8 +261,11 @@ fn core_event_wrappers_project_history_approvals_and_unknown_terminal_results() 
     let session = app.selected().unwrap();
     assert!(session.approvals.is_empty());
     assert_eq!(session.messages.len(), 2);
-    assert_eq!(session.state, "needs_reconciliation");
+    assert_eq!(session.state, "idle");
+    assert!(!session.synced);
     assert!(!session.can_prompt());
+    app.upsert_snapshot(snapshot("idle", 6), false).unwrap();
+    assert!(app.selected().unwrap().can_prompt());
 }
 
 #[test]
@@ -337,19 +355,19 @@ fn owned_prompt_stays_pending_until_its_response_even_after_terminal_events() {
 }
 
 #[test]
-fn recovery_unknown_ids_block_prompt_until_authoritative_snapshot() {
+fn recovery_event_waits_for_authoritative_snapshot_and_then_unblocks_prompt() {
     let mut app = app("running");
     app.apply_events("s1", json!([{"cursor":1,"event":{"type":"attempt_recovered","lease":null,"unknown_call_ids":["c1"],"not_executed_call_ids":[]}}])).unwrap();
     let session = app.selected().unwrap();
-    assert_eq!(session.state, "needs_reconciliation");
     assert!(!session.synced);
     assert!(!session.can_prompt());
     app.upsert_snapshot(snapshot("idle", 2), false).unwrap();
+    assert_eq!(app.selected().unwrap().state, "idle");
     assert!(app.selected().unwrap().can_prompt());
 }
 
 #[test]
-fn reconciled_event_and_same_cursor_authoritative_snapshot_clears_unknown_and_unblocks_prompt() {
+fn reconciled_event_and_same_cursor_authoritative_snapshot_unblocks_prompt() {
     let mut app = app("running");
     app.apply_events(
         "s1",
@@ -362,19 +380,10 @@ fn reconciled_event_and_same_cursor_authoritative_snapshot_clears_unknown_and_un
 
     let session = app.selected().unwrap();
     assert_eq!(session.cursor, 2);
-    assert_eq!(session.state, "needs_reconciliation");
     assert!(!session.synced);
     assert!(!session.can_prompt());
-    assert!(session.has_unknown());
-    assert!(
-        session
-            .unresolved_calls
-            .iter()
-            .any(|c| c["call"]["id"] == "c1")
-    );
 
-    // Authoritative snapshot arrives with snapshot_cursor == old.cursor (2 == 2)
-    // and empty unresolved_calls after Core reconciliation.
+    // Authoritative snapshot arrives with snapshot_cursor == old.cursor (2 == 2).
     app.upsert_snapshot(snapshot("idle", 2), false).unwrap();
 
     let session = app.selected().unwrap();
@@ -383,7 +392,6 @@ fn reconciled_event_and_same_cursor_authoritative_snapshot_clears_unknown_and_un
     assert_eq!(session.state, "idle");
     assert!(session.synced);
     assert!(session.unresolved_calls.is_empty());
-    assert!(!session.has_unknown());
     assert!(session.can_prompt());
 }
 
@@ -509,7 +517,7 @@ fn rpc_commands_encode_shared_contract_for_create_prompt_approval_and_confirmed_
 }
 
 #[test]
-fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_unknown_outputs() {
+fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_interrupted_outputs() {
     let mut app = app("idle");
     app.apply_events(
         "s1",
@@ -519,7 +527,7 @@ fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_unknown_out
         ]),
     )
     .unwrap();
-    let mut snap = snapshot("needs_reconciliation", 2);
+    let mut snap = snapshot("idle", 2);
     snap["messages"] = json!([
         {
             "role": "toolResult",
@@ -536,15 +544,12 @@ fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_unknown_out
             }
         }
     ]);
-    snap["unresolved_calls"] =
-        json!([{"call": {"id": "call-unknown", "name": "fs.write"}, "state": "outcome_unknown"}]);
     app.upsert_snapshot(snap, false).unwrap();
     let session = app.selected().unwrap();
     assert_eq!(session.logs.len(), 2);
-    assert_eq!(session.files.len(), 1);
-    assert_eq!(session.files[0].status, "outcome_unknown");
-    assert!(!session.files[0].preview.contains("unverified content"));
+    assert!(session.files.is_empty());
     assert!(session.diffs.is_empty());
+    assert!(session.can_prompt());
 
     app.focus = Focus::History;
     assert!(
@@ -560,13 +565,13 @@ fn inspector_tabs_preserve_logs_across_snapshots_and_hide_unverified_unknown_out
 }
 
 #[test]
-fn apply_list_validates_page_atomically_and_preserves_cursor_draft_unknown_and_attempt() {
+fn apply_list_validates_page_atomically_and_preserves_cursor_draft_and_attempt() {
     let mut app = app("running");
     let attempt = json!({"session_id":"s1","attempt_id":"a1","worker_id":"worker","fence":1});
     let records = json!([
         {"cursor": 1, "attempt": attempt, "event": {"type": "attempt_started", "lease": attempt}},
         {"cursor": 2, "attempt": attempt, "event": {"type": "agent", "event": {"type": "message_update", "message": {"content": [{"type": "text", "text": "streaming text"}]}}}},
-        {"cursor": 3, "attempt": attempt, "event": {"type": "agent", "event": {"type": "tool_execution_end", "call": {"id": "call-unknown", "name": "fs.write"}, "result": {"outcome_unknown": true, "content": "error"}}}}
+        {"cursor": 3, "attempt": attempt, "event": {"type": "agent", "event": {"type": "tool_execution_end", "call": {"id": "call-interrupted", "name": "fs.write"}, "result": {"outcome_unknown": true, "content": "interrupted"}}}}
     ]);
     app.apply_events("s1", records).unwrap();
     assert_eq!(app.selected().unwrap().cursor, 3);
@@ -574,8 +579,7 @@ fn apply_list_validates_page_atomically_and_preserves_cursor_draft_unknown_and_a
         app.selected().unwrap().streaming_text.as_deref(),
         Some("streaming text")
     );
-    assert!(app.selected().unwrap().has_unknown());
-    assert_eq!(app.selected().unwrap().state, "needs_reconciliation");
+    assert_eq!(app.selected().unwrap().state, "running");
 
     // Enter a draft in the composer
     app.focus = Focus::Composer;
@@ -586,7 +590,6 @@ fn apply_list_validates_page_atomically_and_preserves_cursor_draft_unknown_and_a
     assert!(app.apply_list(dup_list).is_err());
     assert_eq!(app.selected().unwrap().cursor, 3);
     assert_eq!(app.input.text(), "draft prompt");
-    assert!(app.selected().unwrap().has_unknown());
 
     // 2. apply_list with invalid state fails atomically
     let mut bad_item = snapshot("idle", 0);
@@ -611,14 +614,7 @@ fn apply_list_validates_page_atomically_and_preserves_cursor_draft_unknown_and_a
     let s1 = app.sessions.iter().find(|s| s.id == "s1").unwrap();
     // Preserves cursor
     assert_eq!(s1.cursor, 3);
-    // Preserves unknown state and unresolved calls
-    assert!(s1.has_unknown());
-    assert_eq!(s1.state, "needs_reconciliation");
-    assert!(
-        s1.unresolved_calls
-            .iter()
-            .any(|c| c["call"]["id"] == "call-unknown")
-    );
+    assert_eq!(s1.state, "running");
     // Preserves active attempt and streaming text
     assert_eq!(s1.streaming_text.as_deref(), Some("streaming text"));
     // Preserves draft
@@ -626,16 +622,14 @@ fn apply_list_validates_page_atomically_and_preserves_cursor_draft_unknown_and_a
 }
 
 #[test]
-fn apply_list_with_higher_cursor_authoritative_unknown_atomically_updates_and_locks_session() {
+fn apply_list_with_higher_cursor_authoritative_snapshot_atomically_updates_sessions() {
     let mut app = app("idle");
     assert_eq!(app.selected().unwrap().cursor, 0);
     assert_eq!(app.selected().unwrap().state, "idle");
     assert!(app.selected().unwrap().can_prompt());
 
     // 1. apply_list with an invalid item fails atomically without updating s1
-    let mut bad_s1 = snapshot("needs_reconciliation", 2);
-    bad_s1["unresolved_calls"] =
-        json!([{"call": {"id": "c-auth", "name": "fs.write"}, "state": "outcome_unknown"}]);
+    let bad_s1 = snapshot("idle", 2);
     let mut bad_s2 = snapshot("idle", 0);
     bad_s2["id"] = json!("s2");
     bad_s2["state"] = json!("invalid_state");
@@ -647,14 +641,20 @@ fn apply_list_with_higher_cursor_authoritative_unknown_atomically_updates_and_lo
     assert_eq!(s1.snapshot_cursor, 0);
     assert_eq!(s1.state, "idle");
     assert!(s1.unresolved_calls.is_empty());
-    assert!(!s1.has_unknown());
     assert!(s1.can_prompt());
 
     // 2. Valid apply_list where s1 snapshot has snapshot_cursor 2 >= old.cursor (0)
-    // and contains a genuine authoritative outcome_unknown call
-    let mut valid_s1 = snapshot("needs_reconciliation", 2);
-    valid_s1["unresolved_calls"] =
-        json!([{"call": {"id": "c-auth", "name": "fs.write"}, "state": "outcome_unknown"}]);
+    // and contains settled interrupted history while remaining ready for input
+    let mut valid_s1 = snapshot("idle", 2);
+    valid_s1["messages"] = json!([{
+        "role": "toolResult",
+        "tool_call_id": "c-auth",
+        "tool_name": "execute_code",
+        "content": [],
+        "is_error": true,
+        "outcome_unknown": true,
+        "timestamp": 1
+    }]);
     let mut valid_s2 = snapshot("idle", 1);
     valid_s2["id"] = json!("s2");
     valid_s2["label"] = json!("session two");
@@ -665,12 +665,9 @@ fn apply_list_with_higher_cursor_authoritative_unknown_atomically_updates_and_lo
 
     let s1 = app.sessions.iter().find(|s| s.id == "s1").unwrap();
     assert_eq!(s1.snapshot_cursor, 2);
-    assert_eq!(s1.state, "needs_reconciliation");
-    assert!(s1.has_unknown());
-    assert_eq!(s1.unresolved_calls.len(), 1);
-    assert_eq!(s1.unresolved_calls[0]["call"]["id"], "c-auth");
-    assert_eq!(s1.unresolved_calls[0]["state"], "outcome_unknown");
-    assert!(!s1.can_prompt());
+    assert_eq!(s1.state, "idle");
+    assert_eq!(s1.messages.len(), 1);
+    assert!(s1.can_prompt());
 
     let s2 = app.sessions.iter().find(|s| s.id == "s2").unwrap();
     assert_eq!(s2.snapshot_cursor, 1);

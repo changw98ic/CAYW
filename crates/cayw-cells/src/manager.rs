@@ -49,22 +49,11 @@ impl CellManager {
         identity.validate()?;
         limits.validate()?;
         let host_catalog = backend.capabilities();
-        let host_capability_count = host_catalog
-            .iter()
-            .filter(|definition| CellValueOperation::from_name(&definition.name).is_none())
-            .count();
         let catalog = crate::values::with_definitions(host_catalog);
         // Validate the exact VM catalog, including canonical value definitions,
         // before claiming ownership.
         CodeMode::new(Arc::new(BackendCatalog(catalog.clone())), vm_limits.clone())
             .map_err(|e| CellError::Invalid(e.to_string()))?;
-        // The two canonical value capabilities are internal trusted helpers and
-        // do not consume the host's 256-capability budget.
-        if host_capability_count > 256 || vm_limits.host_calls > 4096 {
-            return Err(CellError::Invalid(
-                "catalog or host call budget too large".into(),
-            ));
-        }
         if catalog.iter().any(|d| d.name.starts_with("__cells_")) {
             return Err(CellError::Invalid(
                 "host capability uses reserved __cells_ prefix".into(),
@@ -100,8 +89,10 @@ impl CellManager {
                 )
             })
             .collect();
-        if needs_recovery || journal.is_frozen(&identity.session_id)? {
-            reads.freeze(&identity.session_id);
+        if needs_recovery {
+            // A lost VM invalidates cached reads, but its outcome-unknown
+            // records do not freeze later tasks in the same session.
+            reads.invalidate(&identity.session_id);
         }
         Ok(Arc::new(Self {
             identity,
@@ -167,7 +158,10 @@ impl CellManager {
             ));
         }
         if request.script.is_empty()
-            || request.script.len() > self.limits.script_bytes
+            || self
+                .limits
+                .script_bytes
+                .is_some_and(|max| request.script.len() > max)
             || cancel.is_cancelled()
         {
             return Err(CellError::Invalid(
@@ -233,7 +227,12 @@ impl CellManager {
                 .expect("manager lock poisoned")
                 .insert(run.id(), run.clone());
             if let Err(error) = self.backend.created(&run.execution) {
-                run.hook_failed(&error);
+                match &error {
+                    CellError::Journal(_) | CellError::Frozen => run.hook_failed(&error),
+                    // A refused creation never reached the backend's execution
+                    // terminal, so it is a known stop, not an unknown outcome.
+                    _ => run.finish_uncreated(&error),
+                }
                 run.live.store(false, Ordering::Release);
                 return Err(error);
             }
@@ -354,7 +353,18 @@ impl CellManager {
             armed: true,
         };
         let mut changed = run.changed.subscribe();
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(request.yield_time_ms);
+        // An unconfigured max_yield_time accepts any representable millisecond
+        // value. If the deadline itself is not representable, wait until an
+        // event or cancellation instead of panicking on overflow.
+        let deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_millis(request.yield_time_ms));
+        let deadline_elapsed = async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(deadline_elapsed);
         loop {
             let ready = {
                 let record = run.record.lock().expect("cell lock poisoned");
@@ -387,7 +397,7 @@ impl CellManager {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => { run.stop(); break; },
-                _ = tokio::time::sleep_until(deadline) => break,
+                _ = &mut deadline_elapsed => break,
                 result = changed.changed() => if result.is_err() { break; },
             }
         }
@@ -407,7 +417,7 @@ impl CellManager {
                 cell_id: id.into(),
                 cursor: 0,
                 yield_time_ms: 0,
-                max_output_tokens: self.limits.max_output_tokens,
+                max_output_tokens: self.limits.default_page_tokens(),
                 continue_execution: false,
             },
             CancellationToken::new(),
@@ -479,13 +489,13 @@ impl CellManager {
         // them. Drain both on rejection, including an unvisited deep sibling.
         if let Err(error) = validate_json(
             &evidence.expected_arguments,
-            self.limits.json_depth.saturating_sub(1),
+            self.limits.json_depth.map(|depth| depth.saturating_sub(1)),
             self.limits.item_bytes,
         )
         .and_then(|()| {
             validate_json(
                 &evidence.observed_result,
-                self.limits.json_depth.saturating_sub(1),
+                self.limits.json_depth.map(|depth| depth.saturating_sub(1)),
                 self.limits.item_bytes,
             )
         }) {
@@ -698,7 +708,7 @@ impl Run {
         record.revision += 1;
         if let Err(error) = self.journal.persist(&record, previous) {
             self.durability_failed.store(true, Ordering::Release);
-            self.reads.freeze(&record.identity.session_id);
+            self.reads.invalidate(&record.identity.session_id);
             self.cancel.cancel();
             return Err(error);
         }
@@ -711,22 +721,26 @@ impl Run {
         let bytes = output.validate(&self.limits)?;
         let mut entry = None;
         self.update(|record| {
-            if record.outputs.len() >= self.limits.output_items {
+            if let Some(max_items) = self.limits.output_items
+                && record.outputs.len() >= max_items
+            {
                 return Err(CellError::capacity(
                     CapacityKind::OutputItems,
                     Some(record.cell_id.clone()),
                     Some(record.status),
                     record.outputs.len(),
-                    self.limits.output_items,
+                    max_items,
                 ));
             }
-            if record.output_bytes.saturating_add(bytes) > self.limits.output_bytes {
+            if let Some(max_bytes) = self.limits.output_bytes
+                && record.output_bytes.saturating_add(bytes) > max_bytes
+            {
                 return Err(CellError::capacity(
                     CapacityKind::OutputBytes,
                     Some(record.cell_id.clone()),
                     Some(record.status),
                     record.output_bytes.saturating_add(bytes),
-                    self.limits.output_bytes,
+                    max_bytes,
                 ));
             }
             let committed = OutputEntry {
@@ -845,7 +859,7 @@ impl Run {
     }
     fn hook_failed(&self, error: &CellError) {
         self.durability_failed.store(true, Ordering::Release);
-        self.reads.freeze(&self.execution.identity.session_id);
+        self.reads.invalidate(&self.execution.identity.session_id);
         self.cancel.cancel();
         let _ = self.update(|record| {
             record.status = CellStatus::OutcomeUnknown;
@@ -855,6 +869,14 @@ impl Run {
         });
     }
     fn finish(&self, error: Option<String>, completed: bool) {
+        self.finish_inner(error, completed, true);
+    }
+    /// The backend refused the cell before it began. Record the known refusal
+    /// without asking the backend to finish an execution it never created.
+    fn finish_uncreated(&self, error: &CellError) {
+        self.finish_inner(Some(bounded_error(&error.to_string())), false, false);
+    }
+    fn finish_inner(&self, error: Option<String>, completed: bool, notify_backend: bool) {
         if self.finished.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -874,7 +896,7 @@ impl Run {
                 record.stop.get_or_insert(CapabilityStop::Cancelled);
             }
             if unknown {
-                self.reads.freeze(&record.identity.session_id);
+                self.reads.invalidate(&record.identity.session_id);
             }
             record.status = if unknown {
                 CellStatus::OutcomeUnknown
@@ -898,7 +920,7 @@ impl Run {
             let mut record = self.record.lock().expect("cell lock poisoned");
             record.status = CellStatus::OutcomeUnknown;
             record.error = Some("Durable journal unavailable; execution stopped".into());
-        } else {
+        } else if notify_backend {
             let terminal = {
                 let record = self.record.lock().expect("cell lock poisoned");
                 CellTerminal {

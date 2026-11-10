@@ -284,15 +284,15 @@ async fn held_root_search_is_not_redirected_after_rename() {
 async fn search_limits_invalid_patterns_and_cancellation_are_known_failures() {
     for limits in [
         Limits {
-            max_tree_entries: 1,
+            max_tree_entries: Some(1),
             ..Limits::default()
         },
         Limits {
-            max_file_bytes: 4,
+            max_file_bytes: Some(4),
             ..Limits::default()
         },
         Limits {
-            max_batch_bytes: 6,
+            max_batch_bytes: Some(6),
             ..Limits::default()
         },
     ] {

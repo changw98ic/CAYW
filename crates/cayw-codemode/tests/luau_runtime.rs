@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cayw_agent::{Agent, AgentError, AgentTool, ExecutionMode};
+use cayw_agent::{Agent, AgentTool, ExecutionMode};
 use cayw_ai::{
     ArgumentValidator, AssistantEvent, AssistantMessage, AssistantStream, CancellationToken,
     Content, Message, Model, ModelRequest, Provider, StopReason, ToolCall, ToolDefinition,
@@ -203,7 +203,7 @@ async fn json_rejects_cycles_sparse_tables_mixed_keys_and_unsupported_values() {
         "return string.char(255)",
         "return setmetatable({}, {__index = function() return true end})",
         "return cayw.array({field = true})",
-        "local t = {}; for i=1,70 do t = {t} end; return t",
+        "local t = {}; for i=1,130 do t = {t} end; return t",
         "return 1, 2",
     ] {
         let error = code
@@ -346,7 +346,7 @@ async fn known_and_unknown_host_errors_keep_prior_success_and_stop_further_calls
 #[tokio::test]
 async fn host_call_limit_prevents_the_next_effect_and_preserves_completed_calls() {
     let (host, code) = mode(Limits {
-        host_calls: 2,
+        host_calls: Some(2),
         ..Limits::default()
     });
     let error = code
@@ -371,7 +371,7 @@ async fn host_call_limit_prevents_the_next_effect_and_preserves_completed_calls(
 #[tokio::test]
 async fn output_limit_stops_emits_without_discarding_successful_audit() {
     let (_, code) = mode(Limits {
-        output_bytes: 64,
+        output_bytes: Some(64),
         ..Limits::default()
     });
     let error = code
@@ -390,7 +390,7 @@ async fn output_limit_stops_emits_without_discarding_successful_audit() {
 #[tokio::test]
 async fn over_budget_host_results_keep_success_status_with_omitted_payload() {
     let (_, code) = mode(Limits {
-        output_bytes: 64,
+        output_bytes: Some(64),
         ..Limits::default()
     });
     let error = code
@@ -407,7 +407,7 @@ async fn over_budget_host_results_keep_success_status_with_omitted_payload() {
 #[tokio::test]
 async fn host_error_payloads_share_the_budget_without_losing_unknown_status() {
     let (_, code) = mode(Limits {
-        output_bytes: 64,
+        output_bytes: Some(64),
         ..Limits::default()
     });
     for (name, status, unknown) in [
@@ -448,7 +448,7 @@ async fn lossy_host_integer_is_rejected_after_recording_host_success() {
 #[tokio::test]
 async fn json_budget_counts_escaped_utf8_and_repeated_shared_values() {
     let (_, code) = mode(Limits {
-        output_bytes: 13,
+        output_bytes: Some(13),
         ..Limits::default()
     });
     let report = code
@@ -469,7 +469,7 @@ async fn json_budget_counts_escaped_utf8_and_repeated_shared_values() {
 #[tokio::test]
 async fn json_conversion_stops_at_the_budget_before_expanding_more_shared_values() {
     let (_, code) = mode(Limits {
-        output_bytes: 128,
+        output_bytes: Some(128),
         ..Limits::default()
     });
     let error = code
@@ -491,7 +491,7 @@ async fn json_conversion_stops_at_the_budget_before_expanding_more_shared_values
 #[tokio::test]
 async fn vm_allocation_and_source_are_bounded() {
     let (_, code) = mode(Limits {
-        memory_bytes: 256 * 1024,
+        memory_bytes: Some(256 * 1024),
         ..Limits::default()
     });
     let error = code
@@ -510,25 +510,29 @@ async fn vm_allocation_and_source_are_bounded() {
 }
 
 #[tokio::test]
-async fn infinite_cpu_loop_is_stopped_by_instruction_checkpoints() {
+async fn instruction_checkpoints_are_a_cadence_not_an_execution_cap() {
     let (_, code) = mode(Limits {
         instruction_budget: 32,
         ..Limits::default()
     });
-    let error = code
-        .execute("while true do end", CancellationToken::new())
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind, ErrorKind::InstructionLimit);
-    assert_eq!(error.report.instruction_checkpoints, 33);
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        trigger.cancel();
+    });
+    let error = code.execute("while true do end", cancel).await.unwrap_err();
+    canceller.await.unwrap();
+    assert_eq!(error.kind, ErrorKind::Cancelled);
+    assert!(error.report.instruction_checkpoints > 32);
     assert!(!error.report.outcome_unknown);
 }
 
 #[tokio::test]
 async fn cpu_loop_and_pending_host_call_use_their_own_deadlines() {
     let (_, code) = mode(Limits {
-        instruction_budget: u64::MAX,
-        timeout: Duration::from_millis(40),
+        instruction_budget: u32::MAX,
+        timeout: Some(Duration::from_millis(40)),
         ..Limits::default()
     });
     let error = code
@@ -540,9 +544,9 @@ async fn cpu_loop_and_pending_host_call_use_their_own_deadlines() {
     // Separate budget so Luau setup under loaded CI cannot expire before hang's
     // first poll; wait for started before asserting unknown settlement.
     let (host, code) = mode(Limits {
-        instruction_budget: u64::MAX,
-        timeout: Duration::from_secs(1),
-        host_wait: Duration::from_secs(1),
+        instruction_budget: u32::MAX,
+        timeout: Some(Duration::from_secs(1)),
+        host_wait: Some(Duration::from_secs(1)),
         shutdown_grace: Duration::from_millis(100),
         ..Limits::default()
     });
@@ -564,8 +568,8 @@ async fn cpu_loop_and_pending_host_call_use_their_own_deadlines() {
 #[tokio::test(flavor = "current_thread")]
 async fn pure_cpu_execution_yields_so_same_thread_cancellation_can_run() {
     let (_, code) = mode(Limits {
-        instruction_budget: u64::MAX,
-        timeout: Duration::from_secs(2),
+        instruction_budget: 256,
+        timeout: Some(Duration::from_secs(2)),
         ..Limits::default()
     });
     let cancel = CancellationToken::new();
@@ -763,7 +767,7 @@ async fn nested_pcall_and_coroutines_cannot_swallow_unknown_or_dispatch_more_cal
 #[tokio::test]
 async fn pcall_cannot_swallow_cancellation_before_the_next_dispatch() {
     let (host, code) = mode(Limits {
-        timeout: Duration::from_secs(1),
+        timeout: Some(Duration::from_secs(1)),
         shutdown_grace: Duration::from_millis(100),
         ..Limits::default()
     });
@@ -800,7 +804,7 @@ async fn pcall_cannot_swallow_cancellation_before_the_next_dispatch() {
 #[tokio::test]
 async fn pcall_cannot_swallow_the_host_call_budget() {
     let (host, code) = mode(Limits {
-        host_calls: 1,
+        host_calls: Some(1),
         ..Limits::default()
     });
     let error = code
@@ -859,7 +863,7 @@ async fn memory_exhaustion_inside_handlers_cannot_be_swallowed() {
         "pcall(function() xpcall(function() error('known failure') end, function() return string.rep('x',8*1024*1024) end) end); cayw.call('echo',{value='after memory stop'})",
     ] {
         let (host, code) = mode(Limits {
-            memory_bytes: 2 * 1024 * 1024,
+            memory_bytes: Some(2 * 1024 * 1024),
             ..Limits::default()
         });
         let error = code
@@ -880,7 +884,7 @@ async fn memory_exhaustion_inside_coroutines_cannot_be_swallowed() {
         "pcall(coroutine.wrap(function() return string.rep('x',8*1024*1024) end)); cayw.call('echo',{value='after memory stop'})",
     ] {
         let (host, code) = mode(Limits {
-            memory_bytes: 2 * 1024 * 1024,
+            memory_bytes: Some(2 * 1024 * 1024),
             ..Limits::default()
         });
         let error = code
@@ -1135,7 +1139,6 @@ async fn agent_runs_one_code_tool_with_multiple_host_calls_and_a_structured_repo
     assert_eq!(content["report"]["calls"].as_array().unwrap().len(), 3);
     assert_eq!(host.received.lock().unwrap().len(), 3);
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
-    assert!(!agent.snapshot().needs_reconciliation);
 }
 
 #[tokio::test]
@@ -1154,7 +1157,6 @@ async fn agent_stops_after_known_host_stops_without_another_model_turn() {
         assert!(!tool.outcome_unknown);
         assert_eq!(provider.requests.lock().unwrap().len(), 1, "{name}");
         assert_eq!(host.received.lock().unwrap().len(), 1);
-        assert!(!agent.snapshot().needs_reconciliation);
     }
 }
 
@@ -1163,7 +1165,7 @@ async fn agent_stops_after_unknown_even_when_its_error_payload_exceeds_the_budge
     let (agent, _, provider) = agent_fixture(
         "cayw.call('echo', {value=true}); cayw.call('unknown_large', {})",
         Limits {
-            output_bytes: 64,
+            output_bytes: Some(64),
             ..Limits::default()
         },
     );
@@ -1171,19 +1173,12 @@ async fn agent_stops_after_unknown_even_when_its_error_payload_exceeds_the_budge
     let tool = code_result(&result.messages);
     assert!(tool.is_error);
     assert!(tool.outcome_unknown);
-    assert!(agent.snapshot().needs_reconciliation);
+    assert_eq!(result.last_message.stop_reason, StopReason::Error);
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     let content = tool.structured_content.as_ref().unwrap();
     assert_eq!(content["error"]["kind"], "output_limit");
     assert_eq!(content["report"]["calls"][0]["status"], "succeeded");
     assert_eq!(content["report"]["calls"][1]["status"], "outcome_unknown");
-    assert_eq!(
-        agent
-            .prompt(Message::user("do not retry blindly"))
-            .await
-            .unwrap_err(),
-        AgentError::UnresolvedToolEffects
-    );
 }
 
 #[tokio::test]
@@ -1194,8 +1189,8 @@ async fn agent_keeps_unknown_when_host_wait_times_out_for_a_started_host_call() 
             // The VM timeout only bounds computation and must cover Luau setup
             // under loaded macOS CI. The started Host wait is bounded separately
             // by host_wait, which expires while hang remains pending.
-            timeout: Duration::from_secs(1),
-            host_wait: Duration::from_millis(300),
+            timeout: Some(Duration::from_secs(1)),
+            host_wait: Some(Duration::from_millis(300)),
             shutdown_grace: Duration::from_millis(100),
             ..Limits::default()
         },
@@ -1217,7 +1212,6 @@ async fn agent_keeps_unknown_when_host_wait_times_out_for_a_started_host_call() 
     let tool = code_result(&result.messages);
     assert!(tool.is_error);
     assert!(tool.outcome_unknown);
-    assert!(agent.snapshot().needs_reconciliation);
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     assert!(host.tokens.lock().unwrap()[0].is_cancelled());
     assert_eq!(
@@ -1230,7 +1224,7 @@ async fn agent_keeps_unknown_when_host_wait_times_out_for_a_started_host_call() 
 fn invalid_limits_and_catalogs_fail_before_any_execution() {
     for limits in [
         Limits {
-            memory_bytes: 0,
+            memory_bytes: Some(0),
             ..Limits::default()
         },
         Limits {
@@ -1238,19 +1232,19 @@ fn invalid_limits_and_catalogs_fail_before_any_execution() {
             ..Limits::default()
         },
         Limits {
-            timeout: Duration::ZERO,
+            timeout: Some(Duration::ZERO),
             ..Limits::default()
         },
         Limits {
-            timeout: Duration::MAX,
+            timeout: Some(Duration::MAX),
             ..Limits::default()
         },
         Limits {
-            host_calls: 0,
+            host_calls: Some(0),
             ..Limits::default()
         },
         Limits {
-            output_bytes: 0,
+            output_bytes: Some(0),
             ..Limits::default()
         },
     ] {

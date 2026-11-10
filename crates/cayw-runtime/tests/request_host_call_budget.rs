@@ -64,14 +64,14 @@ async fn project_request_and_execution_share_the_existing_host_call_budget() {
     let settings = RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
-        max_run_time: Duration::from_secs(45),
+        max_run_time: Some(Duration::from_secs(45)),
         codemode: cayw_codemode::Limits {
-            timeout: Duration::from_secs(30),
+            timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         },
         host: cayw_host::HostConfig {
-            call_timeout: Duration::from_secs(30),
-            process_timeout: Duration::from_secs(20),
+            call_timeout: Some(Duration::from_secs(30)),
+            process_timeout: Some(Duration::from_secs(20)),
             profiles: BTreeMap::from([(
                 "project-test".into(),
                 Profile {
@@ -79,13 +79,13 @@ async fn project_request_and_execution_share_the_existing_host_call_budget() {
                     program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
                     args: vec!["project".into(), "complete".into()],
                     env: BTreeMap::from([("CAYW_REQUEST_PROJECT".into(), "exact-project".into())]),
-                    timeout: Duration::from_secs(20),
-                    max_output_bytes: 16 * 1024,
+                    timeout: Some(Duration::from_secs(20)),
+                    max_output_bytes: Some(16 * 1024),
                     allow_filter: false,
                     io: ProcessIo::Pipes,
                 },
             )]),
-            max_calls: 2,
+            max_calls: Some(2),
             ..Default::default()
         },
         permissions: vec![ScopedPermission::exact(

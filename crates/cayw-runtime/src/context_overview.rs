@@ -14,8 +14,8 @@ use cayw_core::{CoreEvent, SessionStore};
 /// Map one durable ledger into a session-scoped overview input.
 ///
 /// Request rows are filtered to `session_id`. Budget fields (`token_limit`,
-/// reserved/remaining, cost, `budget_unknown`) stay the lineage authority from
-/// [`ModelRequestLedger`] — this adapter does not invent a second budget.
+/// reserved/charged/remaining, cost, `usage_unknown`) stay the lineage authority
+/// from [`ModelRequestLedger`] — this adapter does not invent a second budget.
 pub fn session_ledger_snapshot_from_model_requests(
     ledger: &ModelRequestLedger,
     session_id: &str,
@@ -36,8 +36,9 @@ pub fn session_ledger_snapshot_from_model_requests(
         token_limit: ledger.token_limit,
         settled_tokens: ledger.settled_tokens,
         reserved_tokens: ledger.reserved_tokens,
+        charged_unknown_tokens: ledger.charged_unknown_tokens,
         remaining_tokens: ledger.remaining_tokens,
-        budget_unknown: ledger.budget_unknown,
+        usage_unknown: ledger.usage_unknown,
         cost_status: map_cost_status(ledger.cost_status),
         cost_amount: ledger.cost_amount.clone(),
         cost_currency: ledger.cost_currency.clone(),
@@ -90,8 +91,6 @@ fn map_terminal(terminal: ModelRequestTerminal) -> RequestTerminal {
         ModelRequestTerminal::Dropped => RequestTerminal::Dropped,
         ModelRequestTerminal::MissingTerminal => RequestTerminal::MissingTerminal,
         ModelRequestTerminal::RecordingFailed => RequestTerminal::RecordingFailed,
-        ModelRequestTerminal::InvalidUsage => RequestTerminal::InvalidUsage,
-        ModelRequestTerminal::BudgetExceeded => RequestTerminal::BudgetExceeded,
         ModelRequestTerminal::Rejected => RequestTerminal::Rejected,
     }
 }
@@ -125,7 +124,7 @@ fn immediate_parent(store: &SessionStore, session: &str) -> Result<Option<String
                     .as_str()
                     .ok_or_else(|| {
                         RuntimeError::Worker(
-                            "model request ledger is inconsistent; keep its reservations and inspect the original Core events"
+                            "model request ledger is inconsistent; keep its accounting and inspect the original Core events"
                                 .into(),
                         )
                     })?
@@ -137,7 +136,7 @@ fn immediate_parent(store: &SessionStore, session: &str) -> Result<Option<String
             && parent.replace(found).is_some()
         {
             return Err(RuntimeError::Worker(
-                "model request ledger is inconsistent; keep its reservations and inspect the original Core events"
+                "model request ledger is inconsistent; keep its accounting and inspect the original Core events"
                     .into(),
             ));
         }

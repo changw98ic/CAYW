@@ -16,7 +16,6 @@ use std::{
 
 const READ: &str = "content.read";
 const PUT: &str = "content.put";
-const MAX_TEXT_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +26,13 @@ pub struct ContentConfig {
     pub limits: Limits,
 }
 impl ContentConfig {
+    /// Normalize orderable soft limits. The durable binding, validation and
+    /// store all use the same normalized values.
+    pub fn normalized(mut self) -> Self {
+        self.limits = self.limits.normalized();
+        self
+    }
+
     pub fn validate(&self) -> Result<(), RuntimeError> {
         Id::new(&self.device_id)?;
         self.limits.validate()?;
@@ -320,6 +326,8 @@ pub(crate) fn open(
     workspace: &Path,
     config: Option<&ContentConfig>,
 ) -> Result<Option<Arc<ContentStore>>, RuntimeError> {
+    let normalized = config.map(|config| config.clone().normalized());
+    let config = normalized.as_ref();
     if let Some(config) = config {
         config.validate()?;
         if config.directory.starts_with(workspace) || workspace.starts_with(&config.directory) {
@@ -344,7 +352,8 @@ pub(crate) fn check_binding(
     config: Option<&ContentConfig>,
     store: Option<&ContentStore>,
 ) -> Result<(), RuntimeError> {
-    let expected = parse_binding(Some(&encode_identity(config, store)?))?;
+    let normalized = config.map(|config| config.clone().normalized());
+    let expected = parse_binding(Some(&encode_identity(normalized.as_ref(), store)?))?;
     if read_binding(database)? != expected {
         return Err(binding_error());
     }
@@ -404,7 +413,7 @@ pub(crate) fn definitions(config: Option<&ContentConfig>) -> Vec<ToolDefinition>
             name:PUT.into(),
             description:"Create or update authoritative local UTF-8 text. Creation requires expected_version=0 and no expected_revision. Updates require the exact version and lowercase revision returned by content.read. A conflict never overwrites newer content. Unknown writes must be inspected and reconciled, never replayed automatically.".into(),
             parameters:json!({"type":"object","additionalProperties":false,"required":["name","text","expected_version"],"properties":{
-                "name":name,"scope":scope,"text":{"type":"string","maxLength":config.limits.max_content_bytes.min(MAX_TEXT_BYTES)},
+                "name":name,"scope":scope,"text":{"type":"string","maxLength":config.limits.max_content_bytes},
                 "expected_version":{"type":"integer","minimum":0},
                 "expected_revision":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"}
             }}),
@@ -573,7 +582,7 @@ impl cayw_host::ExternalHost for Service<'_> {
             PUT => {
                 let input: PutInput = serde_json::from_value(arguments).map_err(known)?;
                 let expected = input.expected()?;
-                if input.text.len() as u64 > store.limits().max_content_bytes.min(MAX_TEXT_BYTES) {
+                if input.text.len() as u64 > store.limits().max_content_bytes {
                     return Err(known("content text exceeds its UTF-8 byte budget"));
                 }
                 (input.name, input.scope, Some((expected, input.text)))

@@ -163,26 +163,32 @@ async fn syntax_error_is_reported_without_host_calls() {
 }
 
 #[tokio::test]
-async fn vm_interrupt_stops_an_infinite_cpu_loop() {
+async fn cancellation_stops_an_infinite_cpu_loop_without_an_instruction_cap() {
     let limits = Limits {
         instruction_budget: 100,
-        timeout: Duration::from_secs(2),
         ..Limits::default()
     };
     let code = mode(Arc::new(Host::default()), limits);
-    let error = code
-        .execute("while true do end", CancellationToken::new())
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind, ErrorKind::InstructionLimit);
-    assert!(error.report.instruction_checkpoints > 0);
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let canceller = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        trigger.cancel();
+    });
+    let error = code.execute("while true do end", cancel).await.unwrap_err();
+    canceller.await.unwrap();
+    assert_eq!(error.kind, ErrorKind::Cancelled);
+    assert!(
+        error.report.instruction_checkpoints > 100,
+        "checkpoints are a cadence, not a cap"
+    );
 }
 
 #[tokio::test]
 async fn wall_time_interrupts_cpu_work_even_without_an_async_yield() {
     let limits = Limits {
-        instruction_budget: u64::MAX,
-        timeout: Duration::from_millis(20),
+        instruction_budget: u32::MAX,
+        timeout: Some(Duration::from_millis(20)),
         ..Limits::default()
     };
     let error = mode(Arc::new(Host::default()), limits)
@@ -195,7 +201,7 @@ async fn wall_time_interrupts_cpu_work_even_without_an_async_yield() {
 #[tokio::test]
 async fn allocation_is_limited_by_the_vm_allocator() {
     let limits = Limits {
-        memory_bytes: 512 * 1024,
+        memory_bytes: Some(512 * 1024),
         ..Limits::default()
     };
     let error = mode(Arc::new(Host::default()), limits)
@@ -244,7 +250,7 @@ async fn a_pre_cancelled_script_cannot_dispatch_a_capability() {
 async fn host_call_budget_prevents_the_next_effect() {
     let host = Arc::new(Host::default());
     let limits = Limits {
-        host_calls: 1,
+        host_calls: Some(1),
         ..Limits::default()
     };
     let error = mode(host.clone(), limits)
@@ -264,7 +270,7 @@ async fn host_call_budget_prevents_the_next_effect() {
 async fn output_limit_keeps_prior_success_and_emitted_values() {
     let host = Arc::new(Host::default());
     let limits = Limits {
-        output_bytes: 128,
+        output_bytes: Some(128),
         ..Limits::default()
     };
     let error = mode(host.clone(), limits)
@@ -285,7 +291,7 @@ async fn output_limit_keeps_prior_success_and_emitted_values() {
 #[tokio::test]
 async fn large_host_result_does_not_erase_a_completed_effect() {
     let limits = Limits {
-        output_bytes: 256,
+        output_bytes: Some(256),
         ..Limits::default()
     };
     let error = mode(Arc::new(Host::default()), limits)
@@ -431,11 +437,54 @@ async fn sandbox_has_no_ambient_execution_and_each_run_has_fresh_globals() {
     assert_eq!(error.kind, ErrorKind::Script);
 }
 
+#[tokio::test]
+async fn default_limits_allow_more_than_64_calls_and_payloads_over_one_mebibyte() {
+    let host = Arc::new(Host::default());
+    let code = mode(host.clone(), Limits::default());
+    let report = code
+        .execute(
+            r#"
+        local payload = string.rep('x', 64 * 1024)
+        local total = 0
+        for _ = 1, 100 do
+            local returned = cayw.call('echo', {value = payload})
+            total = total + #returned.value
+        end
+        return total
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(host.effects.load(Ordering::SeqCst), 0);
+    assert_eq!(report.calls.len(), 100);
+    assert_eq!(report.return_value, json!(100 * 64 * 1024));
+    assert!(report.output_bytes > 1024 * 1024);
+    assert!(!report.outcome_unknown);
+}
+
+#[tokio::test]
+async fn default_limits_still_honor_cancellation_during_a_host_call() {
+    let host = Arc::new(Host::default());
+    let code = mode(host.clone(), Limits::default());
+    let cancel = CancellationToken::new();
+    let (result, ()) = tokio::join!(
+        code.execute("cayw.call('wait', {})", cancel.clone()),
+        async {
+            host.started.notified().await;
+            cancel.cancel();
+        }
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Cancelled);
+    assert!(error.report.outcome_unknown);
+}
+
 #[test]
 fn every_limit_must_be_non_zero() {
     for limits in [
         Limits {
-            memory_bytes: 0,
+            memory_bytes: Some(0),
             ..Limits::default()
         },
         Limits {
@@ -443,15 +492,15 @@ fn every_limit_must_be_non_zero() {
             ..Limits::default()
         },
         Limits {
-            timeout: Duration::ZERO,
+            timeout: Some(Duration::ZERO),
             ..Limits::default()
         },
         Limits {
-            host_calls: 0,
+            host_calls: Some(0),
             ..Limits::default()
         },
         Limits {
-            output_bytes: 0,
+            output_bytes: Some(0),
             ..Limits::default()
         },
     ] {

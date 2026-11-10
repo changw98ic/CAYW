@@ -256,8 +256,6 @@ pub enum ArtifactError {
     },
     #[error("action already recorded: {0}")]
     DuplicateAction(String),
-    #[error("session requires reconciliation: {0}")]
-    NeedsReconciliation(String),
     #[error("artifact io: {0}")]
     Io(String),
 }

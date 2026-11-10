@@ -712,13 +712,13 @@ impl PermissionGate for FrameworkGate {
 /// full read or save; JSON escaping keeps the worst case well below this cap.
 fn host_config(codeintel: Option<SymbolVersionBridge>) -> HostConfig {
     HostConfig {
-        max_argument_bytes: 32 * 1024 * 1024,
-        max_result_bytes: 32 * 1024 * 1024,
-        max_total_bytes: 128 * 1024 * 1024,
-        max_calls: 4096,
-        max_file_bytes: MAX_FILE_BYTES,
-        max_list_entries: 1,
-        call_timeout: Duration::from_secs(60),
+        max_argument_bytes: Some(32 * 1024 * 1024),
+        max_result_bytes: Some(32 * 1024 * 1024),
+        max_total_bytes: Some(128 * 1024 * 1024),
+        max_calls: Some(4096),
+        max_file_bytes: Some(MAX_FILE_BYTES),
+        max_list_entries: Some(1),
+        call_timeout: Some(Duration::from_secs(60)),
         data: None,
         workspace: None,
         codeintel,
@@ -1755,8 +1755,8 @@ mod tests {
         let state = tempfile::tempdir().expect("state");
         let audit = Arc::new(DurableAudit::open(state.path()).expect("audit"));
         let mut config = host_config(None);
-        config.max_calls = 2;
-        config.max_total_bytes = 4096;
+        config.max_calls = Some(2);
+        config.max_total_bytes = Some(4096);
         let paths = || ["a.tsx".to_owned()].into_iter();
         let gate = Arc::new(FrameworkGate {
             paths: paths().collect(),

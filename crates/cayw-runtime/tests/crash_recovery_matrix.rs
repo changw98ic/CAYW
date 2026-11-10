@@ -695,18 +695,18 @@ fn validate_recovery(before: &Snapshot, after: &Snapshot) {
             }
         }
     }
+    assert_eq!(after.session.state, SessionState::Idle);
+    let frozen_rows = &after.databases["core_cells_runtime"]["cells_frozen_v1"]["rows"];
+    assert!(
+        !frozen_rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[0] == after.session.id),
+        "recovered Cells session remained frozen"
+    );
     if has_unknown {
-        assert_eq!(after.session.state, SessionState::NeedsReconciliation);
         assert!(!after.session.unresolved_capabilities.is_empty());
-        let frozen_rows = &after.databases["core_cells_runtime"]["cells_frozen_v1"]["rows"];
-        assert!(
-            frozen_rows
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row[0] == after.session.id),
-            "unknown Cells session is not frozen"
-        );
     }
 }
 
@@ -839,12 +839,6 @@ async fn run_window(mode: &str, root: &Path, point: &str) -> Result<()> {
         .resume(&identity.task_id, CancellationToken::new())
         .await;
     assert!(replay.is_err(), "original nonqueued task was replayed");
-    if after.session.state == SessionState::NeedsReconciliation {
-        assert!(matches!(
-            reopened.enqueue(&identity.session_id, "must stay frozen"),
-            Err(RuntimeError::NeedsReconciliation)
-        ));
-    }
     let after_refusal = snapshot(&reopened, root, &identity)?;
     fixture::write_json(&root.join("replay-refusal-originals.json"), &after_refusal)?;
     assert_same(
@@ -861,23 +855,21 @@ async fn run_window(mode: &str, root: &Path, point: &str) -> Result<()> {
         &reopened_again,
         "second open changed recovered facts",
     );
-    if after.session.state == SessionState::NeedsReconciliation {
+    if !after.session.unresolved_capabilities.is_empty() {
         again.recover(&identity.session_id)?;
         let still_unknown = snapshot(&again, root, &identity)?;
         fixture::write_json(&root.join("recover-again-originals.json"), &still_unknown)?;
         assert_no_replay(&after, &still_unknown);
-        assert_eq!(
-            still_unknown.session.state,
-            SessionState::NeedsReconciliation
-        );
+        assert_eq!(still_unknown.session.state, SessionState::Idle);
         assert_eq!(
             still_unknown.session.unresolved_capabilities,
             after.session.unresolved_capabilities
         );
-        assert!(matches!(
-            again.enqueue(&identity.session_id, "unknown remains frozen"),
-            Err(RuntimeError::NeedsReconciliation)
-        ));
+        assert!(
+            again
+                .enqueue(&identity.session_id, "follow-up after recovery")
+                .is_ok()
+        );
     }
     eprintln!(
         "CRASH_WINDOW_VERIFIED mode={mode} point={point} originals={}",

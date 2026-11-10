@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "strongflow.ready",
                 json!({"workflow_id":"demo"}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await?
     );

@@ -101,13 +101,21 @@ fn preflight(text: &str, budget: &Budget<'_>) -> Result<()> {
                 }
             }
         }
-        if containers.len() + path > budget.limits.max_depth {
+        if budget
+            .limits
+            .max_depth
+            .is_some_and(|max_depth| containers.len() + path > max_depth)
+        {
             return Err(error(
                 "depth_limit",
                 "TOML lexical nesting or dotted path exceeds max_depth",
             ));
         }
-        if tokens > budget.limits.max_nodes {
+        if budget
+            .limits
+            .max_nodes
+            .is_some_and(|max_nodes| tokens > max_nodes)
+        {
             return Err(error("node_limit", "TOML token count exceeds max_nodes"));
         }
         i += 1;

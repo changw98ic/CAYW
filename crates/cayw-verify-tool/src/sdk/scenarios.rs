@@ -149,34 +149,35 @@ pub fn config(effect: bool, root: &Path) -> RuntimeConfig {
     };
     let mut config = RuntimeConfig {
         permissions,
-        max_run_time: DEADLINE,
-        max_queue_time: DEADLINE,
+        max_run_time: Some(DEADLINE),
+        max_queue_time: Some(DEADLINE),
         ..RuntimeConfig::default()
     };
     if effect {
         config.host.external = Some(Arc::new(EffectFixture(root.join("effect.json"))));
-        config.codemode.timeout = DEADLINE;
+        config.codemode.timeout = Some(DEADLINE);
     }
     config
 }
 fn configuration_json(effect: bool) -> Value {
     let c = config(effect, Path::new("<sample-root>"));
     let ns = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+    let opt_ns = |d: Option<std::time::Duration>| d.map(ns);
     // The Host defaults are shared with the existing Luau measurement config.
     json!({"runtime":{"max_concurrent_runs":c.max_concurrent_runs,"max_queued_runs":c.max_queued_runs,
         "max_prompt_bytes":c.max_prompt_bytes,"max_history_bytes":c.max_history_bytes,"max_event_bytes":c.max_event_bytes,
-        "max_total_tokens":c.max_total_tokens,"max_turns":c.max_turns,"max_run_time_ns":ns(c.max_run_time),"max_queue_time_ns":ns(c.max_queue_time),
+        "max_total_tokens":c.max_total_tokens,"max_turns":c.max_turns,"max_run_time_ns":opt_ns(c.max_run_time),"max_queue_time_ns":opt_ns(c.max_queue_time),
         "max_capability_calls":c.max_capability_calls,"max_capability_bytes":c.max_capability_bytes,"grant_lifetime_ns":ns(c.grant_lifetime),
         "codemode":{"memory_bytes":c.codemode.memory_bytes,"instruction_budget":c.codemode.instruction_budget,
-            "timeout_ns":ns(c.codemode.timeout),"shutdown_grace_ns":ns(c.codemode.shutdown_grace),"host_calls":c.codemode.host_calls,"output_bytes":c.codemode.output_bytes},
+            "timeout_ns":opt_ns(c.codemode.timeout),"shutdown_grace_ns":ns(c.codemode.shutdown_grace),"host_calls":c.codemode.host_calls,"output_bytes":c.codemode.output_bytes},
         "cells":{"max_cells":c.cells.max_cells,"max_running":c.cells.max_running,"script_bytes":c.cells.script_bytes,
             "output_bytes":c.cells.output_bytes,"output_items":c.cells.output_items,"item_bytes":c.cells.item_bytes,
-            "media_bytes":c.cells.media_bytes,"max_output_tokens":c.cells.max_output_tokens,"max_yield_time_ns":ns(c.cells.max_yield_time),
+            "media_bytes":c.cells.media_bytes,"max_output_tokens":c.cells.max_output_tokens,"max_yield_time_ns":opt_ns(c.cells.max_yield_time),
             "store_bytes":c.cells.store_bytes,"store_keys":c.cells.store_keys,"json_depth":c.cells.json_depth,"cache_entries":c.cells.cache_entries},
         "requests":c.request_limits,"request_policy":null,"optional_features":[]},
         "host":{"max_argument_bytes":c.host.max_argument_bytes,"max_result_bytes":c.host.max_result_bytes,
             "max_total_bytes":c.host.max_total_bytes,"max_calls":c.host.max_calls,"max_file_bytes":c.host.max_file_bytes,
-            "max_list_entries":c.host.max_list_entries,"call_timeout_ns":ns(c.host.call_timeout),"process_timeout_ns":ns(c.host.process_timeout),
+            "max_list_entries":c.host.max_list_entries,"call_timeout_ns":opt_ns(c.host.call_timeout),"process_timeout_ns":opt_ns(c.host.process_timeout),
             "max_process_output_bytes":c.host.max_process_output_bytes,"git_program":null,"profiles":{},
             "data":c.host.data.map(|limits|json!({"input_bytes":limits.input_bytes,"output_bytes":limits.output_bytes,
                 "max_depth":limits.max_depth,"max_nodes":limits.max_nodes,"max_rows":limits.max_rows,"max_diff_work":limits.max_diff_work})),
@@ -184,7 +185,7 @@ fn configuration_json(effect: bool) -> Value {
                 "max_batch_bytes":w.max_batch_bytes,"max_batch_operations":w.max_batch_operations,"max_batches":w.max_batches,
                 "max_tree_entries":w.max_tree_entries,"max_depth":w.max_depth,"max_argument_bytes":w.max_argument_bytes,"max_output_bytes":w.max_output_bytes,
                 "max_archive_bytes":w.max_archive_bytes,"max_archive_entries":w.max_archive_entries,"max_archive_expanded_bytes":w.max_archive_expanded_bytes,
-                "max_compression_ratio":w.max_compression_ratio,"timeout_ns":ns(w.timeout),"syntax_validator":"cayw_workspace::JsonTomlValidator"})),
+                "max_compression_ratio":w.max_compression_ratio,"timeout_ns":opt_ns(w.timeout),"syntax_validator":"cayw_workspace::JsonTomlValidator"})),
             "external":if effect {Some("search.query fixture performs one durable local marker then waits")} else {None}},
         "ipc":ipc_config_json(),"executor":"tokio current_thread","deadline_ns":ns(DEADLINE)})
 }
@@ -197,15 +198,16 @@ fn ipc_config_json() -> Value {
     let c = ipc_config();
     let client = cayw_ipc::ClientConfig::default();
     let ns = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+    let opt_ns = |d: Option<std::time::Duration>| d.map(ns);
     json!({"transport":"loopback TCP ephemeral port","auth":"fixed public offline fixture token, not a credential",
-        "server":{"max_frame_bytes":c.max_frame_bytes,"max_in_flight":c.max_in_flight,"request_timeout_ns":ns(c.request_timeout),
+        "server":{"max_frame_bytes":c.max_frame_bytes,"max_in_flight":c.max_in_flight,"request_timeout_ns":opt_ns(c.request_timeout),
             "max_connections":c.max_connections,"max_requests_per_connection":c.max_requests_per_connection,"max_id_bytes":c.max_id_bytes,
             "response_queue_capacity":c.response_queue_capacity,"handshake_timeout_ns":ns(c.handshake_timeout),"frame_timeout_ns":ns(c.frame_timeout),
             "write_timeout_ns":ns(c.write_timeout),"cancellation_grace_ns":ns(c.cancellation_grace)},
         "client":{"max_frame_bytes":client.max_frame_bytes,"max_in_flight":client.max_in_flight,
             "max_requests_per_connection":client.max_requests_per_connection,"max_id_bytes":client.max_id_bytes,
             "write_queue_capacity":client.write_queue_capacity,"connect_timeout_ns":ns(client.connect_timeout),
-            "request_timeout_ns":ns(client.request_timeout),"write_timeout_ns":ns(client.write_timeout)}})
+            "request_timeout_ns":opt_ns(client.request_timeout),"write_timeout_ns":ns(client.write_timeout)}})
 }
 pub fn open(root: &Path, provider: Arc<FixedProvider>, effect: bool) -> Result<Runtime> {
     Ok(Runtime::open(

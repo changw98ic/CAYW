@@ -116,17 +116,6 @@ impl ActionProtocol {
             return Err(ArtifactError::DuplicateAction(req.action_id));
         }
 
-        if guard
-            .actions
-            .values()
-            .any(|r| r.session_id == req.session_id && r.status == ActionStatus::OutcomeUnknown)
-        {
-            return Err(ArtifactError::NeedsReconciliation(format!(
-                "session {} has an artifact action with outcome_unknown and requires reconciliation",
-                req.session_id
-            )));
-        }
-
         if artifact.session_id != req.session_id {
             let record = rejected_record(
                 &req,
@@ -294,8 +283,8 @@ impl ActionProtocol {
             return Ok(ActionOutcome { record: snapshot });
         }
         if snapshot.status == ActionStatus::OutcomeUnknown {
-            return Err(ArtifactError::NeedsReconciliation(format!(
-                "action {action_id} has outcome_unknown and cannot be cancelled without reconciliation"
+            return Err(ArtifactError::Invalid(format!(
+                "action {action_id} already ended with an unconfirmed outcome and is not an active cancellable flight"
             )));
         }
         if matches!(snapshot.status, ActionStatus::Rejected) {
@@ -313,13 +302,10 @@ impl ActionProtocol {
             )));
         }
 
-        let signalled = self.dispatch.cancel_action(action_id).map_err(|reason| {
-            if reason.outcome_unknown {
-                ArtifactError::NeedsReconciliation(format!("cancel_action: {reason}"))
-            } else {
-                ArtifactError::Invalid(format!("cancel_action: {reason}"))
-            }
-        })?;
+        let signalled = self
+            .dispatch
+            .cancel_action(action_id)
+            .map_err(|reason| ArtifactError::Invalid(format!("cancel_action: {reason}")))?;
 
         let mut guard = self.inner.lock().expect("action lock");
         let existing = guard
@@ -327,8 +313,8 @@ impl ActionProtocol {
             .get_mut(action_id)
             .ok_or_else(|| ArtifactError::NotFound(action_id.to_owned()))?;
         if existing.status == ActionStatus::OutcomeUnknown {
-            return Err(ArtifactError::NeedsReconciliation(format!(
-                "action {action_id} has outcome_unknown and cannot be cancelled without reconciliation"
+            return Err(ArtifactError::Invalid(format!(
+                "action {action_id} already ended with an unconfirmed outcome and is not an active cancellable flight"
             )));
         }
         if existing.status == ActionStatus::Cancelled {

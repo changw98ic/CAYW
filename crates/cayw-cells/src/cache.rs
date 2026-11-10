@@ -239,7 +239,10 @@ impl ReadCoordinator {
         };
         let result = source.capture(cancel.clone()).await;
         if result.as_ref().is_err_and(|e| e.outcome_unknown) {
-            self.freeze(&identity.session_id);
+            // An interrupted side effect makes every earlier cached read stale.
+            // Invalidate the generation so later callers must capture afresh;
+            // do not block unrelated tasks in the session.
+            self.invalidate(&identity.session_id);
         }
         let value = result?;
         if let Err(error) = validate_json(&value, self.limits.json_depth, self.limits.item_bytes) {
@@ -380,7 +383,9 @@ impl ReadCandidate {
 impl Drop for ReadCandidate {
     fn drop(&mut self) {
         if !self.acknowledged {
-            self.coordinator.freeze(&self.session);
+            // An abandoned publication must not serve its captured bytes again.
+            // A new generation forces a fresh capture without freezing the session.
+            self.coordinator.invalidate(&self.session);
         }
         if let Some(value) = self.value.take() {
             discard_json(value);

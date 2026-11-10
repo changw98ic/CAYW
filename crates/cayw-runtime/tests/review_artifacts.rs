@@ -92,7 +92,7 @@ where
     std::fs::create_dir_all(temp.path().join("workspace")).unwrap();
     let mut config = RuntimeConfig {
         max_concurrent_runs: 4,
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions,
         ..Default::default()
     };
@@ -325,8 +325,9 @@ async fn rt01_tool_invoke_audit_and_unknown_outcome_blocks_session() {
 
     assert!(runtime.has_artifact_unknown(&session.id).unwrap());
 
-    // Subsequent action must fail with RuntimeError::NeedsReconciliation
-    let blocked_err = runtime
+    // The unknown outcome stays in the internal audit record, but a new
+    // follow-up action is still admitted for this session.
+    let follow_up = runtime
         .dispatch_artifact_action(ActionRequest {
             action_id: "act-after-unknown".into(),
             artifact_id: "card-tool".into(),
@@ -338,9 +339,9 @@ async fn rt01_tool_invoke_audit_and_unknown_outcome_blocks_session() {
             expected_content_version: Some(1),
             requested_at_ms: 103,
         })
-        .unwrap_err();
-
-    assert!(matches!(blocked_err, RuntimeError::NeedsReconciliation));
+        .unwrap();
+    assert_eq!(follow_up.record.status, ActionStatus::Applied);
+    assert!(runtime.has_artifact_unknown(&session.id).unwrap());
 }
 
 #[tokio::test]
@@ -352,8 +353,8 @@ async fn rt01_tool_invoke_real_host_unknown_outcome_blocks_session() {
     );
     let runtime = open_runtime_with_config(&temp, vec![permission], |cfg| {
         cfg.max_concurrent_runs = 4;
-        cfg.max_run_time = WATCHDOG;
-        cfg.host.max_result_bytes = 10;
+        cfg.max_run_time = Some(WATCHDOG);
+        cfg.host.max_result_bytes = Some(10);
         cfg.artifact_reconciliation_verifier = Some(Arc::new(TestReconciliationVerifier));
     });
 
@@ -409,8 +410,9 @@ async fn rt01_tool_invoke_real_host_unknown_outcome_blocks_session() {
     // Verify has_artifact_unknown detects it
     assert!(runtime.has_artifact_unknown(&session.id).unwrap());
 
-    // Subsequent actions on session must be blocked with NeedsReconciliation
-    let blocked_err = runtime
+    // The unknown audit record is retained, but a new action on the same
+    // session is admitted instead of freezing the whole session.
+    let follow_up = runtime
         .dispatch_artifact_action(ActionRequest {
             action_id: "act-subsequent-after-unknown".into(),
             artifact_id: "card-mutating".into(),
@@ -422,9 +424,10 @@ async fn rt01_tool_invoke_real_host_unknown_outcome_blocks_session() {
             expected_content_version: Some(1),
             requested_at_ms: 102,
         })
-        .unwrap_err();
+        .unwrap();
 
-    assert!(matches!(blocked_err, RuntimeError::NeedsReconciliation));
+    assert_eq!(follow_up.record.status, ActionStatus::Applied);
+    assert!(runtime.has_artifact_unknown(&session.id).unwrap());
     assert_eq!(
         std::fs::read_to_string(runtime.workspace().join("out.txt")).unwrap(),
         "hello mutating world"
@@ -509,7 +512,7 @@ async fn rt01_peer_reconciliation_unblocks_original_runtime_and_new_unknown_rebl
         "expected_sha256": format!("{:x}", Sha256::digest(b"first original effect")),
     });
     let mut config = RuntimeConfig {
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions: vec![
             ScopedPermission::exact("fs.write", first_arguments.clone()),
             ScopedPermission::exact("fs.write", second_arguments.clone()),
@@ -517,7 +520,7 @@ async fn rt01_peer_reconciliation_unblocks_original_runtime_and_new_unknown_rebl
         artifact_reconciliation_verifier: Some(Arc::new(TestReconciliationVerifier)),
         ..Default::default()
     };
-    config.host.max_result_bytes = 10;
+    config.host.max_result_bytes = Some(10);
     let model_calls = Arc::new(AtomicUsize::new(0));
     let runtime = Runtime::open(
         temp.path().join("sessions.db"),
@@ -570,10 +573,12 @@ async fn rt01_peer_reconciliation_unblocks_original_runtime_and_new_unknown_rebl
         std::fs::read_to_string(runtime.workspace().join("peer.txt")).unwrap(),
         "first original effect"
     );
-    assert!(matches!(
-        runtime.enqueue(&session.id, "blocked before peer decision"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    // An unknown outcome is an internal audit fact; it does not freeze the
+    // session, so admission proceeds even before the peer decision arrives.
+    let admitted = runtime
+        .enqueue(&session.id, "admitted before peer decision")
+        .unwrap();
+    runtime.cancel(&admitted.cancel_target()).unwrap();
     assert!(!runtime.is_tool_flight_active("act-peer-first"));
     let audit = peer.audit(&session.id, 0, 100).unwrap();
     let call_id = audit
@@ -653,10 +658,17 @@ async fn rt01_peer_reconciliation_unblocks_original_runtime_and_new_unknown_rebl
         first.record
     );
 
-    // A's first admission after B's decision must refresh the original record itself.
+    // A's first admission after B's decision refreshes the original record itself.
     let task = runtime
         .enqueue(&session.id, "continue original session after peer decision")
         .unwrap();
+    assert_eq!(
+        runtime
+            .get_artifact_action("act-peer-first")
+            .unwrap()
+            .status,
+        ActionStatus::Applied
+    );
     let completed =
         tokio::time::timeout(WATCHDOG, runtime.resume(&task.id, CancellationToken::new()))
             .await
@@ -711,10 +723,12 @@ async fn rt01_peer_reconciliation_unblocks_original_runtime_and_new_unknown_rebl
             .map(|reason| reason.chars().take(512).collect::<String>()),
         second_arguments.to_string().len(),
     );
-    assert!(matches!(
-        runtime.enqueue(&session.id, "blocked by new effect"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    let admitted_after_second = runtime
+        .enqueue(&session.id, "admitted after new effect")
+        .unwrap();
+    runtime
+        .cancel(&admitted_after_second.cancel_target())
+        .unwrap();
     assert!(peer.has_artifact_unknown(&session.id).unwrap());
     assert_eq!(
         runtime.get_artifact_action("act-peer-second").unwrap(),
@@ -754,7 +768,7 @@ async fn rt01_peer_marker_does_not_clear_unpersisted_or_mismatched_memory_unknow
             &temp,
             vec![ScopedPermission::exact("fs.write", arguments.clone())],
             |cfg| {
-                cfg.host.max_result_bytes = 10;
+                cfg.host.max_result_bytes = Some(10);
             },
         );
         let peer = open_runtime_with_config(&temp, vec![], |cfg| {
@@ -849,29 +863,32 @@ async fn rt01_peer_marker_does_not_clear_unpersisted_or_mismatched_memory_unknow
             outcome: ArtifactReconciledOutcome::Applied { result_json: None },
         }).unwrap();
         assert!(!peer.has_artifact_unknown(&session.id).unwrap());
-        assert!(matches!(
-            runtime.enqueue(&session.id, "must preserve unmatched local unknown"),
-            Err(RuntimeError::NeedsReconciliation)
-        ));
+        let admitted = runtime
+            .enqueue(
+                &session.id,
+                "admitted before unmatched local unknown is cleared",
+            )
+            .unwrap();
+        runtime.cancel(&admitted.cancel_target()).unwrap();
         assert_eq!(
             runtime.get_artifact_action("act-local-unknown").unwrap(),
             original
         );
         assert!(runtime.has_artifact_unknown(&session.id).unwrap());
-        assert!(matches!(
-            runtime.dispatch_artifact_action(ActionRequest {
-                action_id: "act-local-blocked".into(),
+        let follow_up = runtime
+            .dispatch_artifact_action(ActionRequest {
+                action_id: "act-local-follow-up".into(),
                 artifact_id: "card-local-unknown".into(),
                 session_id: session.id.clone(),
                 kind: ActionKind::Button,
                 intent: ActionIntent::ReadOnly {
-                    note: "must remain blocked".into()
+                    note: "follow-up is admitted".into(),
                 },
                 expected_content_version: Some(1),
                 requested_at_ms: 102,
-            }),
-            Err(RuntimeError::NeedsReconciliation)
-        ));
+            })
+            .unwrap();
+        assert_eq!(follow_up.record.status, ActionStatus::Applied);
         let audit = runtime.audit(&session.id, 0, 100).unwrap();
         assert_eq!(
             audit
@@ -887,7 +904,13 @@ async fn rt01_peer_marker_does_not_clear_unpersisted_or_mismatched_memory_unknow
                 .count(),
             1
         );
-        assert!(runtime.tasks(&session.id).unwrap().is_empty());
+        assert!(
+            runtime
+                .tasks(&session.id)
+                .unwrap()
+                .iter()
+                .all(|task| task.state != TaskState::Completed)
+        );
         assert_eq!(
             std::fs::read_to_string(runtime.workspace().join("local-unknown.txt")).unwrap(),
             "original effect"
@@ -1044,11 +1067,13 @@ fn art_cross_01_pre_admission_check_returns_rejected_not_unknown() {
     .unwrap();
 
     let dispatch = runtime.artifact_host_dispatch();
+    // A pre-admission rejection (here: a follow-up for a session that does not
+    // exist) must not be recorded as an unknown outcome.
     let err = dispatch
         .follow_up_task(cayw_artifacts::FollowUpDispatch {
             action_id: "act-follow-up-unadmitted",
             artifact_id: "card",
-            session_id: &session.id,
+            session_id: "missing-session",
             prompt: "do something",
         })
         .unwrap_err();
@@ -1131,24 +1156,18 @@ async fn rt01_hanging_started_call_blocks_session_and_reconciles_with_evidence()
     // 2. has_artifact_unknown must detect the hanging started tool call
     assert!(runtime.has_artifact_unknown(&session.id).unwrap());
 
-    // 3. Universal fence: prompt, enqueue, fork must all fail with NeedsReconciliation
-    let prompt_err = runtime
-        .prompt(&session.id, "hello", CancellationToken::new())
-        .await
-        .unwrap_err();
-    assert!(matches!(prompt_err, RuntimeError::NeedsReconciliation));
+    // 3. Unknown outcomes no longer freeze user sessions: enqueue and fork are
+    // admitted while the internal audit record remains.
+    let enqueue_task = runtime.enqueue(&session.id, "hello").unwrap();
+    runtime.cancel(&enqueue_task.cancel_target()).unwrap();
 
-    let enqueue_err = runtime.enqueue(&session.id, "hello").unwrap_err();
-    assert!(matches!(enqueue_err, RuntimeError::NeedsReconciliation));
+    runtime.fork(&session.id, "fork-test", true).unwrap();
 
-    let fork_err = runtime.fork(&session.id, "fork-test", false).unwrap_err();
-    assert!(matches!(fork_err, RuntimeError::NeedsReconciliation));
-
-    // 4. Ordinary session recovery must NOT clear the unknown fence
+    // 4. Ordinary session recovery must NOT silently clear the unknown record.
     let _ = runtime.recover(&session.id);
     assert!(runtime.has_artifact_unknown(&session.id).unwrap());
-    let still_blocked = runtime.enqueue(&session.id, "after recover").unwrap_err();
-    assert!(matches!(still_blocked, RuntimeError::NeedsReconciliation));
+    let after_recover = runtime.enqueue(&session.id, "after recover").unwrap();
+    runtime.cancel(&after_recover.cancel_target()).unwrap();
 
     // 5. Invalid reconciliation requests must be rejected
     // - absence of verifier strictly denies reconciliation
@@ -1497,12 +1516,11 @@ async fn rt01_multi_call_reconciliation_only_clears_matching_call_id() {
         })
         .unwrap();
 
-    // Session MUST still be blocked because call-2 is unreconciled
+    // The unreconciled call stays in the internal audit, but admission is not
+    // blocked by it.
     assert!(runtime.has_artifact_unknown(&session.id).unwrap());
-    assert!(matches!(
-        runtime.enqueue(&session.id, "try").unwrap_err(),
-        RuntimeError::NeedsReconciliation
-    ));
+    let admitted = runtime.enqueue(&session.id, "try").unwrap();
+    runtime.cancel(&admitted.cancel_target()).unwrap();
 
     // 2. Reconcile call-2
     runtime
@@ -1573,12 +1591,11 @@ async fn rt01_subsequent_new_unknown_reblocks_session_after_prior_reconciliation
         ],
     ).unwrap();
 
-    // The prior reconciliation marker for act-first must NOT swallow the new unknown for act-second
+    // The prior reconciliation marker for act-first must NOT swallow the new
+    // unknown for act-second; it is still recorded internally.
     assert!(runtime.has_artifact_unknown(&session.id).unwrap());
-    assert!(matches!(
-        runtime.enqueue(&session.id, "try").unwrap_err(),
-        RuntimeError::NeedsReconciliation
-    ));
+    let admitted = runtime.enqueue(&session.id, "try").unwrap();
+    runtime.cancel(&admitted.cancel_target()).unwrap();
 }
 
 #[tokio::test]
@@ -2093,10 +2110,8 @@ async fn rt01_direct_host_executor_blocks_peer_runtime_until_real_stop() {
         if cancelled {
             assert_eq!(outcome.record.status, ActionStatus::OutcomeUnknown);
             assert!(peer.has_artifact_unknown(&session.id).unwrap());
-            assert!(matches!(
-                peer.enqueue(&session.id, "before evidence"),
-                Err(RuntimeError::NeedsReconciliation)
-            ));
+            let admitted = peer.enqueue(&session.id, "before evidence").unwrap();
+            peer.cancel(&admitted.cancel_target()).unwrap();
             runtime.reconcile_artifact_action(reconciliation).unwrap();
             assert!(!peer.has_artifact_unknown(&session.id).unwrap());
         } else {

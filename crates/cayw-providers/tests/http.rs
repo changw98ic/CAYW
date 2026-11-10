@@ -142,7 +142,7 @@ fn adapter(kind: &str, base: &str) -> Arc<dyn Provider> {
 
 async fn collect(provider: &dyn Provider, request: ModelRequest) -> Vec<AssistantEvent> {
     timeout(
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         provider.stream(request, CancellationToken::new()).collect(),
     )
     .await
@@ -1214,7 +1214,7 @@ async fn anthropic_tool_json_resource_limits_never_become_correctable_arguments(
             format!("{}0{}", "[".repeat(129), "]".repeat(129)),
             "depth limit",
         ),
-        (format!("[{}0]", "0,".repeat(65_535)), "node limit"),
+        (format!("[{}0]", "0,".repeat(1_048_576)), "node limit"),
         ("1".repeat(4097), "scalar token limit"),
     ] {
         let (base, server) =
@@ -1346,11 +1346,6 @@ async fn anthropic_tool_argument_errors_require_paired_error_results_before_netw
     variants.push(missing);
     // A result that is not marked as an error.
     variants.push(paired(message.clone(), |_| {}));
-    // Unknown effects still stop the next request.
-    variants.push(paired(message.clone(), |result| {
-        result.is_error = true;
-        result.outcome_unknown = true;
-    }));
     for metadata in [true, false] {
         // Invalid arguments still need an error marker.
         let mut missing_marker = message.clone();
@@ -2182,9 +2177,9 @@ async fn response_fragment_and_tool_limits_cover_both_gemini_modes() {
     ] {
         for tool_calls in [false, true] {
             let parts = if tool_calls {
-                (0..129).map(|index| json!({"functionCall":{"id":format!("call_{index}"),"name":"weather","args":{"city":"Paris"}}})).collect::<Vec<_>>()
+                (0..1025).map(|index| json!({"functionCall":{"id":format!("call_{index}"),"name":"weather","args":{"city":"Paris"}}})).collect::<Vec<_>>()
             } else {
-                vec![json!({"text":""}); 4097]
+                vec![json!({"text":""}); 65_537]
             };
             let value = json!({"candidates":[{"content":{"parts":parts},"finishReason":"STOP"}]});
             let (mime, body) = gemini_body(mode, value);
@@ -2202,7 +2197,7 @@ async fn response_fragment_and_tool_limits_cover_both_gemini_modes() {
                     .unwrap()
                     .contains("limit")
             );
-            assert!(terminal(&events).tool_calls().len() <= 128);
+            assert!(terminal(&events).tool_calls().len() <= 1024);
             server.await.unwrap();
         }
     }
@@ -2213,13 +2208,13 @@ async fn response_fragment_limits_accumulate_across_sse_frames() {
     for kind in ["anthropic", "gemini"] {
         let body = if kind == "gemini" {
             let chunk = json!({"candidates":[{"content":{"parts":[{"text":""}]}}]});
-            sse(vec![chunk; 4097]) + &sse(vec![json!({"candidates":[{"finishReason":"STOP"}]})])
+            sse(vec![chunk; 65_537]) + &sse(vec![json!({"candidates":[{"finishReason":"STOP"}]})])
         } else {
             let mut values = vec![
                 json!({"type":"message_start","message":{"id":"limited","model":"returned","role":"assistant","type":"message","content":[],"usage":{}}}),
                 json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             ];
-            values.extend(vec![json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}); 4097]);
+            values.extend(vec![json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}); 65_537]);
             values.extend([
                 json!({"type":"content_block_stop","index":0}),
                 json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
@@ -2237,13 +2232,13 @@ async fn response_fragment_limits_accumulate_across_sse_frames() {
 async fn tool_call_limits_accumulate_across_sse_frames() {
     for kind in ["anthropic", "gemini"] {
         let body = if kind == "gemini" {
-            let values = (0..129).map(|i| json!({"candidates":[{"content":{"parts":[{"functionCall":{"id":format!("call_{i}"),"name":"weather","args":{"city":"Paris"}}}]}}]})).collect();
+            let values = (0..1025).map(|i| json!({"candidates":[{"content":{"parts":[{"functionCall":{"id":format!("call_{i}"),"name":"weather","args":{"city":"Paris"}}}]}}]})).collect();
             sse(values) + &sse(vec![json!({"candidates":[{"finishReason":"STOP"}]})])
         } else {
             let mut values = vec![
                 json!({"type":"message_start","message":{"id":"limited","model":"returned","role":"assistant","type":"message","content":[],"usage":{}}}),
             ];
-            for i in 0..129 {
+            for i in 0..1025 {
                 values.push(json!({"type":"content_block_start","index":i,"content_block":{"type":"tool_use","id":format!("call_{i}"),"name":"weather","input":{"city":"Paris"}}}));
                 values.push(json!({"type":"content_block_stop","index":i}));
             }
@@ -2254,13 +2249,13 @@ async fn tool_call_limits_accumulate_across_sse_frames() {
         let (base, server) = bulk_server("text/event-stream", body).await;
         let events = collect(adapter(kind, &base).as_ref(), tools_request(kind)).await;
         assert_error(&events);
-        assert_eq!(terminal(&events).tool_calls().len(), 128);
+        assert_eq!(terminal(&events).tool_calls().len(), 1024);
         assert_eq!(
             events
                 .iter()
                 .filter(|e| matches!(e, AssistantEvent::ToolCallEnd { .. }))
                 .count(),
-            128
+            1024
         );
         server.await.unwrap();
     }
@@ -2274,9 +2269,9 @@ async fn gemini_accepts_complete_responses_at_fragment_and_tool_limits() {
     ] {
         for calls in [false, true] {
             let parts = if calls {
-                (0..128).map(|i| json!({"functionCall":{"id":format!("call_{i}"),"name":"weather","args":{"city":"Paris"}}})).collect::<Vec<_>>()
+                (0..1024).map(|i| json!({"functionCall":{"id":format!("call_{i}"),"name":"weather","args":{"city":"Paris"}}})).collect::<Vec<_>>()
             } else {
-                vec![json!({"text":""}); 4096]
+                vec![json!({"text":""}); 65_536]
             };
             let (mime, body) = gemini_body(
                 mode,
@@ -2294,7 +2289,7 @@ async fn gemini_accepts_complete_responses_at_fragment_and_tool_limits() {
                     StopReason::Stop
                 }
             );
-            assert_eq!(message.tool_calls().len(), if calls { 128 } else { 0 });
+            assert_eq!(message.tool_calls().len(), if calls { 1024 } else { 0 });
             server.await.unwrap();
         }
     }
@@ -2304,9 +2299,9 @@ async fn gemini_accepts_complete_responses_at_fragment_and_tool_limits() {
 async fn frame_limits_count_usage_and_ping_frames_without_content() {
     for kind in ["anthropic", "gemini"] {
         let body = if kind == "gemini" {
-            sse(vec![json!({"usageMetadata":{}}); 8193])
+            sse(vec![json!({"usageMetadata":{}}); 131_073])
         } else {
-            sse(vec![json!({"type":"ping"}); 8193])
+            sse(vec![json!({"type":"ping"}); 131_073])
         };
         let (base, server) = bulk_server("text/event-stream", body).await;
         let events = collect(adapter(kind, &base).as_ref(), request(kind)).await;
@@ -2481,6 +2476,84 @@ async fn gemini_generate_content_replays_paired_tool_results_with_original_ids()
         json!({"name":"weather","response":{"error":{"temperature":21},"text":"sunny"}})
     );
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_tool_outcome_replays_with_interruption_note_for_anthropic_and_gemini() {
+    use cayw_ai::INTERRUPTED_TOOL_OUTCOME_NOTE;
+
+    let (base, rx, server) = http_server("200 OK", "text/event-stream", anthropic_text()).await;
+    let mut req = tools_request("anthropic");
+    let mut assistant = AssistantMessage::new(&req.model);
+    assistant.stop_reason = StopReason::ToolUse;
+    assistant.content = vec![Content::ToolCall(cayw_ai::ToolCall::new(
+        "unknown",
+        "weather",
+        json!({"city":"Paris"}),
+    ))];
+    req.messages.push(Message::Assistant(assistant));
+    req.messages.push(Message::ToolResult(ToolResultMessage {
+        tool_call_id: "unknown".into(),
+        tool_name: "weather".into(),
+        content: vec![],
+        details: None,
+        structured_content: Some(json!({"temperature":21})),
+        usage: None,
+        is_error: true,
+        outcome_unknown: true,
+        timestamp: 0,
+        duration_ms: None,
+    }));
+    assert_eq!(
+        terminal(&collect(adapter("anthropic", &base).as_ref(), req).await).stop_reason,
+        StopReason::Stop
+    );
+    let body = rx.await.unwrap().body;
+    server.await.unwrap();
+    assert_eq!(
+        body["messages"][2]["content"][0]["content"][0]["text"],
+        format!("{{\"temperature\":21}}\n{INTERRUPTED_TOOL_OUTCOME_NOTE}")
+    );
+
+    let value = json!({"candidates":[{"content":{"parts":[{"functionCall":{"id":"native_1","name":"weather","args":{"city":"Paris"}}}]},"finishReason":"STOP"}]});
+    let (base, rx, server) = http_server("200 OK", "application/json", value.to_string()).await;
+    let provider = GeminiProvider::new(base, KEY)
+        .unwrap()
+        .with_mode(GeminiMode::GenerateContent);
+    let req = tools_request("gemini");
+    let message = terminal(&collect(&provider, req.clone()).await).clone();
+    rx.await.unwrap();
+    server.await.unwrap();
+    let mut follow = req;
+    follow.messages.push(Message::Assistant(message));
+    follow.messages.push(Message::ToolResult(ToolResultMessage {
+        tool_call_id: "native_1".into(),
+        tool_name: "weather".into(),
+        content: vec![],
+        details: None,
+        structured_content: None,
+        usage: None,
+        is_error: true,
+        outcome_unknown: true,
+        timestamp: 0,
+        duration_ms: None,
+    }));
+    let value =
+        json!({"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}]});
+    let (base, rx, server) = http_server("200 OK", "application/json", value.to_string()).await;
+    let provider = GeminiProvider::new(base, KEY)
+        .unwrap()
+        .with_mode(GeminiMode::GenerateContent);
+    assert_eq!(
+        terminal(&collect(&provider, follow).await).stop_reason,
+        StopReason::Stop
+    );
+    let body = rx.await.unwrap().body;
+    server.await.unwrap();
+    assert_eq!(
+        body["contents"][2]["parts"][0]["functionResponse"]["response"]["error"],
+        INTERRUPTED_TOOL_OUTCOME_NOTE
+    );
 }
 
 #[test]

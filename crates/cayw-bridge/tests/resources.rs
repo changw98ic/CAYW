@@ -208,7 +208,7 @@ async fn resource_manifest_is_explicit_validated_and_pinned_into_the_source_dige
         reject(
             too_many,
             Limits {
-                max_resources_per_source: 1,
+                max_resources_per_source: Some(1),
                 ..Limits::default()
             }
         )
@@ -480,7 +480,7 @@ async fn resource_read_validates_uri_mime_exactly_one_content_and_payload_bound(
     }
     let registry = make_registry(
         Limits {
-            max_resource_bytes: 4,
+            max_resource_bytes: Some(4),
             ..Limits::default()
         },
         Arc::new(support::Policy::default()),

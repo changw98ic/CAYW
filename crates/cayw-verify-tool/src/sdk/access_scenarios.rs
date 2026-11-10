@@ -225,7 +225,7 @@ pub(super) async fn execute(
     ));
     let mut configuration = config(false, &context.root);
     configuration.permissions.clear();
-    configuration.codemode.timeout = DEADLINE;
+    configuration.codemode.timeout = Some(DEADLINE);
     let runtime = Runtime::open(
         context.root.join("session.sqlite"),
         context.root.join("workspace"),

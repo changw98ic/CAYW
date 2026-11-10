@@ -702,13 +702,14 @@ fn assert_terminal(
     assert_eq!(received.stop_reason, StopReason::Stop);
     assert_eq!(received.usage_status, cayw_ai::UsageStatus::Unknown);
     assert_eq!(model_request.settled_tokens, None);
-    assert_eq!(
-        model_request.outstanding_reservation_tokens,
-        ledger.token_limit
-    );
+    assert_eq!(model_request.charged_tokens, None);
+    assert_eq!(model_request.outstanding_reservation_tokens, 0);
+    assert_eq!(ledger.token_limit, None);
     assert_eq!(ledger.settled_tokens, 0);
-    assert_eq!(ledger.reserved_tokens, ledger.token_limit);
-    assert!(ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, None);
+    assert!(ledger.usage_unknown);
     assert_eq!(ledger.cost_status, cayw_runtime::ModelCostStatus::Unknown);
     assert!(ledger.cost_amount.is_none() && ledger.cost_currency.is_none());
     let request_state: RequestState =

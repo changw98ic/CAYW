@@ -908,14 +908,14 @@ def check_ledger(payload, entries):
         used.add(response_id)
         settled_sum += settled
     need(used == set(by_response), 'ledger did not account for every relay request')
-    need(ledger.get('budget_unknown') is False, 'ledger budget_unknown is not false')
+    need(ledger.get('usage_unknown') is False, 'ledger usage_unknown is not false')
     need(ledger.get('reserved_tokens') == 0, 'ledger still reserves tokens after completion')
     need(ledger.get('settled_tokens') == settled_sum, 'ledger settled_tokens differs from requests')
     need(settled_sum == sum(entry['usage_total'] for entry in entries),
          'ledger settled tokens differ from relay usage sum')
     return {'requests': len(requests), 'settled_tokens': settled_sum,
             'reserved_tokens': ledger.get('reserved_tokens'),
-            'budget_unknown': ledger.get('budget_unknown'), 'observations': observations,
+            'usage_unknown': ledger.get('usage_unknown'), 'observations': observations,
             'relay_response_ids': sorted(used),
             'cost_status': ledger.get('cost_status'), 'cost_amount': ledger.get('cost_amount'),
             'cost_currency': ledger.get('cost_currency')}

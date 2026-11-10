@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use cayw_ipc::{RpcError, RpcHandler, ServerConfig};
 use cayw_webui::{
-    AccountSettings, DeviceRouter, GatewayLimits, IpcEndpoint, LanAccount, MAX_REQUEST_BYTES,
-    OwnershipStore, WebAccess, WorkspaceAccountSettings, serve_configured,
+    AccountSettings, DeviceRouter, GatewayLimits, IpcEndpoint, LanAccount, OwnershipStore,
+    WebAccess, WorkspaceAccountSettings, serve_configured,
     serve_with_account_settings_for_workspace, serve_with_limits, serve_with_ownership,
 };
 use reqwest::{Client as HttpClient, StatusCode};
@@ -85,8 +85,8 @@ impl RpcHandler for RuntimeFixture {
                 Ok(json!({"cancelled":true}))
             }
             "session.get" if params["session_id"] == "error" => Err(RpcError::new(
-                "needs_reconciliation",
-                "tool outcome must be checked",
+                "fixture_rejection",
+                "fixture rejected the request",
             )),
             "session.get" if params["session_id"] == "secrets" => Err(RpcError::new(
                 "fixture_error",
@@ -102,7 +102,7 @@ impl RpcHandler for RuntimeFixture {
                 json!({"id":"s1","status":"ok","token_usage":42,"tool_output":{"ok":true,"id":"call-1"}}),
             ),
             "session.get" if params["session_id"] == "unknown" => Err(RpcError::new(
-                "tool_outcome_unknown",
+                "fixture_outcome_unknown",
                 "inspect durable tool record",
             )),
             "session.create" | "session.fork"
@@ -157,7 +157,7 @@ impl Fixture {
         let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ipc_addr = ipc_listener.local_addr().unwrap();
         let mut ipc_config = ServerConfig::new(IPC_TOKEN);
-        ipc_config.request_timeout = Duration::from_secs(20);
+        ipc_config.request_timeout = Some(Duration::from_secs(20));
         let ipc_stop = stop.child_token();
         let ipc_cancel = runtime.ipc_cancel.clone();
         let watcher_stop = ipc_stop.clone();
@@ -214,7 +214,7 @@ impl Fixture {
         let ipc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ipc_addr = ipc_listener.local_addr().unwrap();
         let mut ipc_config = ServerConfig::new(IPC_TOKEN);
-        ipc_config.request_timeout = Duration::from_secs(20);
+        ipc_config.request_timeout = Some(Duration::from_secs(20));
         let ipc_stop = stop.child_token();
         let ipc_cancel = runtime.ipc_cancel.clone();
         let watcher_stop = ipc_stop.clone();
@@ -553,7 +553,11 @@ async fn bearer_host_origin_and_fetch_site_are_checked_before_forwarding() {
 
 #[tokio::test]
 async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
-    let fixture = Fixture::start(GatewayLimits::default()).await;
+    let fixture = Fixture::start(GatewayLimits {
+        max_request_bytes: 1024,
+        ..Default::default()
+    })
+    .await;
     for method in [
         "tool.execute",
         "session.reconcile",
@@ -616,10 +620,7 @@ async fn methods_json_and_large_requests_fail_with_one_error_envelope() {
     .await;
     envelope(
         fixture
-            .rpc(
-                "session.prompt",
-                json!({"text":"x".repeat(MAX_REQUEST_BYTES)}),
-            )
+            .rpc("session.prompt", json!({"text":"x".repeat(1024)}))
             .send()
             .await
             .unwrap(),
@@ -652,8 +653,8 @@ async fn forwarding_preserves_structured_runtime_errors() {
         StatusCode::BAD_GATEWAY,
     )
     .await;
-    assert_eq!(result["error"]["code"], "needs_reconciliation");
-    assert_eq!(result["error"]["message"], "tool outcome must be checked");
+    assert_eq!(result["error"]["code"], "fixture_rejection");
+    assert_eq!(result["error"]["message"], "fixture rejected the request");
     assert_eq!(result["error"]["outcome_unknown"], false);
     let unknown = envelope(
         fixture
@@ -664,7 +665,7 @@ async fn forwarding_preserves_structured_runtime_errors() {
         StatusCode::BAD_GATEWAY,
     )
     .await;
-    assert_eq!(unknown["error"]["code"], "tool_outcome_unknown");
+    assert_eq!(unknown["error"]["code"], "fixture_outcome_unknown");
     assert_eq!(unknown["error"]["outcome_unknown"], true);
     let result = envelope(
         fixture
@@ -1683,7 +1684,7 @@ async fn serve_marker_ipc(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let mut config = ServerConfig::new(token);
-    config.request_timeout = Duration::from_secs(20);
+    config.request_timeout = Some(Duration::from_secs(20));
     let task = tokio::spawn(cayw_ipc::serve(
         listener,
         Arc::new(MarkerRuntime { marker }),

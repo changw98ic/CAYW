@@ -259,10 +259,10 @@ fn local(permissions: Vec<ScopedPermission>) -> LocalAgents {
     LocalAgents {
         max_children: 4,
         max_depth: 1,
-        shared_total_tokens: 100_000,
-        max_calls: 8,
+        shared_total_tokens: Some(100_000),
+        max_calls: Some(8),
         max_output_bytes: 64 * 1024,
-        max_time: Duration::from_secs(10),
+        max_time: Some(Duration::from_secs(10)),
         permissions,
     }
 }
@@ -270,7 +270,7 @@ fn local(permissions: Vec<ScopedPermission>) -> LocalAgents {
 fn config(local_agents: Option<LocalAgents>, permissions: Vec<ScopedPermission>) -> RuntimeConfig {
     RuntimeConfig {
         max_concurrent_runs: 4,
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions,
         local_agents,
         ..Default::default()
@@ -278,12 +278,26 @@ fn config(local_agents: Option<LocalAgents>, permissions: Vec<ScopedPermission>)
 }
 
 fn runtime(temp: &tempfile::TempDir, provider: Arc<Fixture>, config: RuntimeConfig) -> Runtime {
+    runtime_with_model(
+        temp,
+        provider,
+        config,
+        Model::new("fixture", "local-agents"),
+    )
+}
+
+fn runtime_with_model(
+    temp: &tempfile::TempDir,
+    provider: Arc<Fixture>,
+    config: RuntimeConfig,
+    model: Model,
+) -> Runtime {
     std::fs::create_dir(temp.path().join("workspace")).unwrap();
     Runtime::open(
         temp.path().join("sessions.db"),
         temp.path().join("workspace"),
         provider,
-        Model::new("fixture", "local-agents"),
+        model,
         config,
     )
     .unwrap()
@@ -627,7 +641,7 @@ async fn unconfirmed_child_cleanup_keeps_the_handle_slot_and_never_claims_finish
     let mut agents = local(vec![]);
     // The child provider blocks synchronously and cannot observe cancellation,
     // so the parent's join and terminal both stay unconfirmed until release.
-    agents.max_time = Duration::from_secs(1);
+    agents.max_time = Some(Duration::from_secs(1));
     let runtime = runtime(
         &temp,
         provider,
@@ -713,7 +727,7 @@ async fn shared_token_budget_is_consumed_by_the_child_not_reset() {
     // 8 tokens per model reply. Parent script reply 8, child script 8 and child
     // final 8 put the tree at 24; the parent's own 16 stays inside the limit.
     let mut agents = local(vec![]);
-    agents.shared_total_tokens = 24;
+    agents.shared_total_tokens = Some(24);
     let settings = config(
         Some(agents),
         vec![ScopedPermission::exact(
@@ -977,10 +991,10 @@ async fn child_subagent_succeeds_and_shares_settled_budget_when_usage_reported()
     // Verify shared accounting ledger: complete usage was recorded, reservation settled,
     // and parent and child shared the persistent budget without exceeding limits.
     let ledger = runtime.model_requests(&parent.id).unwrap();
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.settled_tokens, 32);
-    assert_eq!(ledger.remaining_tokens, 100_000 - 32);
+    assert_eq!(ledger.remaining_tokens, Some(100_000 - 32));
     assert_eq!(ledger.requests.len(), 4);
     for req in &ledger.requests {
         assert_eq!(req.terminal, Some(ModelRequestTerminal::Completed));
@@ -990,7 +1004,7 @@ async fn child_subagent_succeeds_and_shares_settled_budget_when_usage_reported()
 }
 
 #[tokio::test]
-async fn child_subagent_is_blocked_by_unsettled_model_reservation_when_parent_usage_missing() {
+async fn child_subagent_proceeds_after_parent_unknown_is_charged() {
     let temp = tempfile::tempdir().unwrap();
     let provider = Arc::new(Fixture::default());
     let settings = config(
@@ -1000,60 +1014,64 @@ async fn child_subagent_is_blocked_by_unsettled_model_reservation_when_parent_us
             json!({"prompt":"child work","label":"Child"}),
         )],
     );
-    let runtime = runtime(&temp, provider.clone(), settings);
+    let runtime = runtime_with_model(&temp, provider.clone(), settings, {
+        let mut model = Model::new("fixture", "local-agents");
+        // A bounded output keeps the unknown-usage charge below the shared
+        // tree limit, so the child can still be admitted.
+        model.max_output_tokens = Some(128);
+        model
+    });
     let parent = runtime.create(Some("parent".into())).unwrap();
     let _result = run_prompt(&runtime, &parent.id, "spawn child missing usage").await;
 
-    // The child model request should have failed or returned error because
-    // the parent reservation was unsettled.
+    // The child proceeds because the parent's unknown usage was charged once
+    // from its bounded reservation and released.
     let child = child_session(&runtime, &parent.id).await;
     let child_tasks = runtime.tasks(&child).unwrap();
     assert_eq!(child_tasks.len(), 1);
-    assert_ne!(child_tasks[0].state, TaskState::Completed);
+    assert_eq!(child_tasks[0].state, TaskState::Completed);
 
-    // Verify that the child's model prompt "child work" was never dispatched to the provider.
     let requests = provider.requests.lock().unwrap();
     let child_model_dispatched = requests
         .iter()
         .any(|req| req.messages.iter().any(|msg| msg.text() == "child work"));
     assert!(
-        !child_model_dispatched,
-        "child model request must be blocked before dispatch to the provider"
+        child_model_dispatched,
+        "the child model request runs after the parent's unknown was charged"
     );
     drop(requests);
 
-    // Verify the persistent shared ledger:
-    // Missing usage preserves unknown reservation; unknown tokens are NOT treated as 0;
-    // rejection reason is explicitly unsettled_model_reservation.
     let ledger = runtime.model_requests(&parent.id).unwrap();
-    assert!(
-        ledger.budget_unknown,
-        "ledger must strictly retain budget_unknown=true"
-    );
-    assert!(
-        ledger.reserved_tokens > 0,
-        "unknown reservation tokens must be preserved, never zeroed"
-    );
-    assert_eq!(
-        ledger.settled_tokens, 0,
-        "unreported usage cannot settle tokens"
-    );
-
-    // The child session recorded an explicit rejection with unsettled_model_reservation.
-    let child_rejections: Vec<_> = ledger
+    assert!(ledger.usage_unknown);
+    assert_eq!(ledger.reserved_tokens, 0, "the hold was released");
+    let parent_request = ledger
         .requests
         .iter()
-        .filter(|req| req.identity.lease.session_id == child)
-        .collect();
-    assert!(
-        !child_rejections.is_empty(),
-        "child must have an accounting record in the shared ledger"
-    );
+        .find(|req| req.identity.lease.session_id == parent.id)
+        .expect("parent request");
+    assert_eq!(parent_request.settled_tokens, None, "usage stays unknown");
+    let charged = parent_request
+        .charged_tokens
+        .expect("unknown usage charged once");
+    assert!(charged > 0);
+    let charged_unknown: u64 = ledger
+        .requests
+        .iter()
+        .filter(|req| req.identity.lease.session_id == parent.id && req.settled_tokens.is_none())
+        .filter_map(|req| req.charged_tokens)
+        .sum();
+    assert_eq!(ledger.charged_unknown_tokens, charged_unknown);
+    let child_request = ledger
+        .requests
+        .iter()
+        .find(|req| req.identity.lease.session_id == child)
+        .expect("child request");
     assert_eq!(
-        child_rejections[0].rejection.as_deref(),
-        Some("unsettled_model_reservation"),
-        "child request rejection reason must be unsettled_model_reservation"
+        child_request.terminal,
+        Some(ModelRequestTerminal::Completed)
     );
+    assert_eq!(child_request.settled_tokens, Some(8));
+    assert_eq!(child_request.rejection, None);
 }
 
 #[tokio::test]
@@ -1142,10 +1160,10 @@ async fn child_subagent_waits_for_concurrent_parent_turn_and_succeeds_under_synt
 
     // Verify shared budget ledger: both parent and child succeeded and settled
     let ledger = runtime.model_requests(&parent.id).unwrap();
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.settled_tokens, 24); // parent: 8, child: 16 (turn 1 + turn 2)
-    assert_eq!(ledger.remaining_tokens, 100_000 - 24);
+    assert_eq!(ledger.remaining_tokens, Some(100_000 - 24));
     for req in &ledger.requests {
         assert_eq!(req.terminal, Some(ModelRequestTerminal::Completed));
         assert!(req.settled_tokens.is_some());
@@ -1250,12 +1268,12 @@ async fn child_subagent_waiting_for_parent_turn_is_cancelled_cleanly() {
 
     // Verify shared budget ledger:
     // Child never created an unsettled reservation; parent settled its tokens;
-    // budget_unknown is false.
+    // usage_unknown is false.
     let ledger = runtime.model_requests(&parent.id).unwrap();
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.settled_tokens, 8);
-    assert_eq!(ledger.remaining_tokens, 100_000 - 8);
+    assert_eq!(ledger.remaining_tokens, Some(100_000 - 8));
     assert_eq!(ledger.requests.len(), 1);
     assert_eq!(
         ledger.requests[0].terminal,
@@ -1426,7 +1444,7 @@ async fn child_subagent_waits_for_parent_turn_via_exec_yield_zero_tool_call() {
 
     // 12. Verify shared budget ledger: zero reserved tokens, requests completely settled
     let ledger = reopened.model_requests(&parent.id).unwrap();
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.reserved_tokens, 0);
     assert!(ledger.settled_tokens > 0);
     for req in &ledger.requests {
@@ -1436,7 +1454,7 @@ async fn child_subagent_waits_for_parent_turn_via_exec_yield_zero_tool_call() {
     }
 
     let child_ledger = reopened.model_requests(&child).unwrap();
-    assert!(!child_ledger.budget_unknown);
+    assert!(!child_ledger.usage_unknown);
     assert_eq!(child_ledger.reserved_tokens, 0);
     assert_eq!(child_ledger.settled_tokens, ledger.settled_tokens);
 }

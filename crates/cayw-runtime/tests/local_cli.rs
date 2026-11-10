@@ -475,10 +475,11 @@ async fn doctor_is_read_only_before_and_after_initialization() {
     );
 }
 
-// Break caught: the Client publishes discovery and readiness before the Client
-// plugin supervisor has accepted its persistent cleanup state.
+// Break caught: a corrupt Client plugin cleanup record must degrade only the
+// Client UI plugin feature. The Client still publishes readiness, doctor warns,
+// and the unreadable record is never dropped silently.
 #[tokio::test]
-async fn serve_never_reports_readiness_when_client_plugin_initialization_fails() {
+async fn serve_keeps_starting_with_a_corrupt_client_plugin_cleanup_record() {
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
     let home = tempfile::tempdir().unwrap();
@@ -491,36 +492,78 @@ async fn serve_never_reports_readiness_when_client_plugin_initialization_fails()
     );
 
     let cleanup_file = root.path().join("client-plugin-cleanup.json");
-    std::fs::write(
-        &cleanup_file,
-        serde_json::to_vec_pretty(&json!({
-            "schema":"unsupported-client-plugin-cleanup-schema",
-            "processes":[]
-        }))
-        .unwrap(),
-    )
+    let corrupt = serde_json::to_vec_pretty(&json!({
+        "schema":"unsupported-client-plugin-cleanup-schema",
+        "processes":[]
+    }))
     .unwrap();
+    std::fs::write(&cleanup_file, &corrupt).unwrap();
     std::fs::set_permissions(&cleanup_file, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let output = run(serve(
-        home.path(),
-        workspace.path(),
-        root.path(),
-        &["--offline"],
-    ))
-    .await;
-    assert!(!output.status.success());
+    let mut server = serve(home.path(), workspace.path(), root.path(), &["--offline"])
+        .spawn()
+        .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    let health = client.request("client.health", json!({})).await.unwrap();
     assert!(
-        output.stdout.is_empty(),
-        "failed initialization must not publish readiness: {}",
-        String::from_utf8_lossy(&output.stdout)
+        health["client_plugins"]["cleanup_error"]
+            .as_str()
+            .unwrap()
+            .contains("cleanup record is unavailable"),
+        "{health}"
     );
+    let error = client
+        .request(
+            "client.plugins.start",
+            json!({"plugin":"webui","workspace_id":"local"}),
+        )
+        .await
+        .unwrap_err();
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unsupported schema"),
-        "stderr: {}",
+        error.message.contains("UI plugins are disabled"),
+        "{error:?}"
+    );
+    client.close().await;
+    assert_eq!(std::fs::read(&cleanup_file).unwrap(), corrupt);
+
+    let mut doctor = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    doctor.arg("doctor");
+    let output = run(doctor).await;
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!root.path().join("client.json").exists());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let cleanup = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "client_plugin_cleanup")
+        .unwrap();
+    assert_eq!(cleanup["status"], "warning");
+    assert!(
+        cleanup["message"]
+            .as_str()
+            .unwrap()
+            .contains("UI 插件保持不可用")
+    );
+    assert_eq!(std::fs::read(&cleanup_file).unwrap(), corrupt);
+
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }
 
 // Break caught: a bare serve still demands --db/--token-env, silently falls back
@@ -1182,7 +1225,10 @@ async fn client_owns_global_plugin_inventory_and_workspace_activations() {
         .await
         .unwrap_err();
     assert_eq!(role_error.code, "settings_error");
-    assert!(role_error.message.contains("Client plugins"));
+    assert!(
+        role_error.message.contains("Client plugins"),
+        "{role_error:?}"
+    );
     assert!(!root.path().join("plugins.json").exists());
 
     let installed = client
@@ -1405,6 +1451,138 @@ async fn client_owns_global_plugin_inventory_and_workspace_activations() {
         .await
         .unwrap_err();
     assert_eq!(bind_error.code, "settings_error");
+
+    client.close().await;
+    let pid = server.id().unwrap();
+    std::process::Command::new("/bin/kill")
+        .arg("-INT")
+        .arg(pid.to_string())
+        .status()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[cfg(feature = "plugins")]
+#[tokio::test]
+async fn client_start_continues_with_identity_less_plugin_cleanup_block() {
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    assert!(
+        init(home.path(), workspace.path(), root.path())
+            .await
+            .status
+            .success()
+    );
+    let canonical = workspace.path().canonicalize().unwrap();
+    let key = workspace_key(workspace.path());
+    let state_dir = root.path().join("workspaces").join(&key);
+
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_cayw-runtime-plugin-fixture"));
+    let inventory = json!({
+        "schema":"cayw.plugin-inventory.v1",
+        "entries":{"fixture":{
+            "descriptor":{
+                "executable":executable,
+                "argv":["echo"],
+                "manifest":{
+                    "name":"fixture",
+                    "version":"1.0.0",
+                    "protocol_version":1,
+                    "role":"workspace_architecture",
+                    "kind":"external",
+                    "capabilities":[],
+                    "permissions":{}
+                }
+            },
+            "executable_sha256":"0".repeat(64)
+        }}
+    });
+    let write_private = |path: &Path, value: &Value| {
+        std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    write_private(&root.path().join("plugins.json"), &inventory);
+    write_private(
+        &state_dir.join("architecture-plugins.json"),
+        &json!({
+            "schema":"cayw.workspace-architecture-plugins.v2",
+            "entries":{"fixture":{"enabled":true,"last_error":null}}
+        }),
+    );
+    write_private(
+        &root.path().join("workspace-plugin-cleanup.json"),
+        &json!({
+            "schema":"cayw.workspace-plugin-cleanup.v2",
+            "entries":{key.clone():{
+                "workspace":canonical,
+                "plugins":{"fixture":{
+                    "message":"prior cleanup is unconfirmed",
+                    "instance":null,
+                    "process":null
+                }}
+            }}
+        }),
+    );
+
+    // The Client must publish readiness even though one plugin is blocked.
+    let mut server = serve(home.path(), workspace.path(), root.path(), &["--offline"])
+        .spawn()
+        .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    let listed = client
+        .request("settings.plugins.list", json!({}))
+        .await
+        .unwrap();
+    let entry = &listed["entries"][0];
+    assert_eq!(entry["name"], "fixture");
+    assert_eq!(entry["cleanup_blocked"], true);
+    assert_eq!(entry["cleanup_clearable"], true);
+    assert_eq!(entry["available"], false);
+    assert_eq!(entry["last_error"]["outcome_unknown"], true);
+    assert!(
+        entry["last_error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cayw plugins clear fixture")
+    );
+    // The rest of the Client is usable.
+    assert!(
+        client
+            .request("client.workspaces.list", json!({}))
+            .await
+            .unwrap()["workspaces"]
+            .is_array()
+    );
+
+    let mut clear = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    clear.arg("plugins").arg("clear").arg("fixture");
+    let output = run(clear).await;
+    assert!(
+        output.status.success(),
+        "plugins clear failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed = client
+        .request("settings.plugins.list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["entries"][0]["cleanup_blocked"], false);
+    assert_eq!(listed["entries"][0]["last_error"]["outcome_unknown"], false);
+    let activation: Value = serde_json::from_slice(
+        &std::fs::read(state_dir.join("architecture-plugins.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(activation["entries"]["fixture"]["enabled"], true);
+    assert!(activation["entries"]["fixture"]["last_error"].is_null());
 
     client.close().await;
     let pid = server.id().unwrap();

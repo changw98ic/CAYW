@@ -49,7 +49,8 @@ async fn timeout_drops_an_uncooperative_host_future_and_reports_unknown() {
     let code = CodeMode::new(
         fixture.clone(),
         Limits {
-            timeout: Duration::from_millis(30),
+            timeout: Some(Duration::from_millis(30)),
+            host_wait: Some(Duration::from_millis(30)),
             ..Limits::default()
         },
     )
@@ -86,7 +87,7 @@ async fn an_abort_cannot_be_caught_with_pcall() {
     let code = CodeMode::new(
         host(),
         Limits {
-            instruction_budget: 200,
+            timeout: Some(Duration::from_millis(50)),
             ..Limits::default()
         },
     )
@@ -105,7 +106,7 @@ async fn an_abort_cannot_be_caught_with_pcall() {
         )
         .await
         .unwrap_err();
-    assert_eq!(error.kind, ErrorKind::InstructionLimit);
+    assert_eq!(error.kind, ErrorKind::Timeout);
 }
 
 #[tokio::test]
@@ -113,7 +114,7 @@ async fn a_huge_return_value_is_part_of_the_output_budget() {
     let code = CodeMode::new(
         host(),
         Limits {
-            output_bytes: 128,
+            output_bytes: Some(128),
             ..Limits::default()
         },
     )
@@ -132,7 +133,7 @@ async fn huge_arguments_are_refused_before_dispatch() {
     let code = CodeMode::new(
         fixture.clone(),
         Limits {
-            output_bytes: 128,
+            output_bytes: Some(128),
             ..Limits::default()
         },
     )

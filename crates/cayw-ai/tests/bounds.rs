@@ -168,7 +168,7 @@ async fn response_and_frame_counts_accumulate_even_without_content() {
             "response exceeds the 64 MiB limit",
         )
         .await;
-        let body = frame(json!({}), Value::Null).repeat(8193) + &stop("stop");
+        let body = frame(json!({}), Value::Null).repeat(131_073) + &stop("stop");
         limited(kind, "frame-count", body, "frame limit").await;
     }
 }
@@ -189,9 +189,9 @@ async fn individual_sse_events_remain_bounded() {
 #[tokio::test(flavor = "current_thread")]
 async fn fragments_and_tool_calls_have_cumulative_and_single_frame_limits() {
     for kind in ["openai", "magpie"] {
-        let body = frame(json!({"content":""}), Value::Null).repeat(4097) + &stop("stop");
+        let body = frame(json!({"content":""}), Value::Null).repeat(65_537) + &stop("stop");
         limited(kind, "empty-fragments", body, "content fragment limit").await;
-        let calls = (0..129).map(|index| json!({"index":index,"id":format!("c{index}"),"type":"function","function":{"name":"sum","arguments":"{}"}})).collect::<Vec<_>>();
+        let calls = (0..1025).map(|index| json!({"index":index,"id":format!("c{index}"),"type":"function","function":{"name":"sum","arguments":"{}"}})).collect::<Vec<_>>();
         let body = frame(json!({"tool_calls":calls}), Value::Null) + &stop("tool_calls");
         let (message, events) = limited(kind, "single-frame-calls", body, "tool call limit").await;
         assert!(message.content.is_empty());
@@ -199,17 +199,19 @@ async fn fragments_and_tool_calls_have_cumulative_and_single_frame_limits() {
             events, 0,
             "oversized frame generated snapshots before rejection"
         );
-        let calls = (0..129).map(|index| frame(json!({"tool_calls":[{"index":index,"id":format!("c{index}"),"function":{"name":"sum","arguments":"{}"}}]}), Value::Null)).collect::<String>();
+        let calls = (0..1025).map(|index| frame(json!({"tool_calls":[{"index":index,"id":format!("c{index}"),"function":{"name":"sum","arguments":"{}"}}]}), Value::Null)).collect::<String>();
+        // At this many calls the per-run snapshot-work budget stops the
+        // stream first; the single-frame case above covers the exact call cap.
         let (message, _) = limited(
             kind,
             "cumulative-calls",
             calls + &stop("tool_calls"),
-            "tool call limit",
+            "limit",
         )
         .await;
-        assert_eq!(message.tool_calls().len(), 128);
+        assert!(message.tool_calls().len() < 1024);
         let body = frame(
-            json!({"tool_calls":vec![json!({"index":1}); 4097]}),
+            json!({"tool_calls":vec![json!({"index":1}); 65_537]}),
             Value::Null,
         ) + &stop("stop");
         let (message, events) =
@@ -245,7 +247,7 @@ async fn retained_content_and_full_message_snapshot_work_are_bounded() {
 #[tokio::test(flavor = "current_thread")]
 async fn same_thread_cancel_interrupts_one_ready_frame_before_the_remaining_tool_events() {
     for kind in ["openai", "magpie"] {
-        let calls = (0..128).map(|index| json!({"index":index,"id":format!("c{index}"),"function":{"name":"sum","arguments":"{}"}})).collect::<Vec<_>>();
+        let calls = (0..1024).map(|index| json!({"index":index,"id":format!("c{index}"),"function":{"name":"sum","arguments":"{}"}})).collect::<Vec<_>>();
         let body = frame(json!({"tool_calls":calls}), json!("tool_calls")) + "data: [DONE]\n\n";
         let (provider, server) = fixture(body, usize::MAX).await;
         let cancel = CancellationToken::new();
@@ -352,7 +354,7 @@ async fn same_thread_cancel_interrupts_ready_frames_that_emit_no_content_events(
 async fn network_json_tree_limits_reject_unused_structure_before_normalizing_content() {
     for kind in ["openai", "magpie"] {
         for (metadata, reason) in [
-            (format!("[{}null]", "null,".repeat(65_536)), "node limit"),
+            (format!("[{}null]", "null,".repeat(1_048_576)), "node limit"),
             (
                 format!("{}null{}", "[".repeat(129), "]".repeat(129)),
                 "depth limit",

@@ -61,7 +61,7 @@ fn setup() -> tempfile::TempDir {
 }
 fn config() -> RuntimeConfig {
     RuntimeConfig {
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         ..Default::default()
     }
 }
@@ -149,12 +149,7 @@ async fn run_script_outcome(
 fn assert_reconciliation_prompt(outcome: &Result<SessionView, RuntimeError>) {
     if let Err(error) = outcome {
         assert!(
-            matches!(
-                error,
-                RuntimeError::Worker(_)
-                    | RuntimeError::Cancelled
-                    | RuntimeError::NeedsReconciliation
-            ),
+            matches!(error, RuntimeError::Worker(_) | RuntimeError::Cancelled),
             "unexpected reconciliation surface: {error}"
         );
     }
@@ -412,7 +407,7 @@ async fn invalid_arguments_escape_and_tree_bound_fail_before_effect() {
 
     let mut cfg = config();
     let mut limits = cfg.host.workspace.expect("workspace catalog");
-    limits.max_tree_entries = 2;
+    limits.max_tree_entries = Some(2);
     cfg.host.workspace = Some(limits);
     allow(&mut cfg, "fs.tree", json!({"path":".","max_entries":10}));
     let (rt, id, view) = run_script(
@@ -424,14 +419,14 @@ async fn invalid_arguments_escape_and_tree_bound_fail_before_effect() {
     assert_idle(&view);
     let calls = settled(&rt, &id);
     assert_eq!(calls.len(), 1);
-    assert!(known_failure(&calls[0]).contains("tree entry bound"));
+    assert!(known_failure(&calls[0]).contains("invalid read result or entry bound"));
 }
 
 #[tokio::test]
 async fn write_byte_limit_and_host_call_budget_are_known_failures() {
     let temp = setup();
     let mut cfg = config();
-    cfg.host.max_file_bytes = 8;
+    cfg.host.max_file_bytes = Some(8);
     allow(
         &mut cfg,
         "fs.write",
@@ -452,7 +447,7 @@ async fn write_byte_limit_and_host_call_budget_are_known_failures() {
 
     let temp = setup();
     let mut cfg = config();
-    cfg.host.max_calls = 1;
+    cfg.host.max_calls = Some(1);
     allow(
         &mut cfg,
         "fs.write",
@@ -559,7 +554,7 @@ async fn interrupted_change_batch_recovers_through_a_fresh_runtime() {
     .await;
     assert_reconciliation_prompt(&prompt);
     let view = submit_rt.get(&submit_id).unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation, "{view:?}");
+    assert_eq!(view.state, SessionState::Idle, "{view:?}");
     assert_eq!(view.unresolved_capabilities.len(), 1, "{view:?}");
     let original = view.unresolved_capabilities[0].clone();
     let calls = settled(&submit_rt, &submit_id);
@@ -587,11 +582,7 @@ async fn interrupted_change_batch_recovers_through_a_fresh_runtime() {
         run_script_outcome(&temp, fence, BLOCKED_WRITE_SCRIPT).await;
     assert_reconciliation_prompt(&fence_prompt);
     let fence_view = fence.get(&fence_id).unwrap();
-    assert_eq!(
-        fence_view.state,
-        SessionState::NeedsReconciliation,
-        "{fence_view:?}"
-    );
+    assert_eq!(fence_view.state, SessionState::Idle, "{fence_view:?}");
     let calls = settled(&fence, &fence_id);
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(matches!(
@@ -638,11 +629,7 @@ async fn interrupted_change_batch_recovers_through_a_fresh_runtime() {
     settings.reconciliation_verifier = Some(Arc::new(InspectedBatchReceipt(receipt.clone())));
     let reconcile_rt = open(&temp, settings, "return nil".into());
     let recovered = reconcile_rt.recover(&submit_id).unwrap();
-    assert_eq!(
-        recovered.state,
-        SessionState::NeedsReconciliation,
-        "{recovered:?}"
-    );
+    assert_eq!(recovered.state, SessionState::Idle, "{recovered:?}");
     let mut forged = receipt.clone();
     forged.expected.task_id = "replacement-task".into();
     assert!(
@@ -720,7 +707,7 @@ async fn third_party_change_blocks_batch_recovery_through_host() {
     .await;
     assert_reconciliation_prompt(&prompt);
     let view = rt.get(&id).unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation, "{view:?}");
+    assert_eq!(view.state, SessionState::Idle, "{view:?}");
     let original = view.unresolved_capabilities[0].clone();
     let calls = settled(&rt, &id);
     assert_eq!(calls.len(), 1, "{calls:?}");
@@ -793,7 +780,7 @@ async fn third_party_change_blocks_batch_recovery_through_host() {
     let (rt, id, prompt) = run_script_outcome(&temp, cfg, script).await;
     assert_reconciliation_prompt(&prompt);
     let view = rt.get(&id).unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation, "{view:?}");
+    assert_eq!(view.state, SessionState::Idle, "{view:?}");
     let calls = settled(&rt, &id);
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(matches!(
@@ -966,7 +953,7 @@ async fn search_permission_denial_and_call_budget_are_enforced() {
     let temp = setup();
     write(&temp.path().join("workspace"), "src/a.txt", b"alpha\n");
     let mut cfg = config();
-    cfg.host.max_calls = 1;
+    cfg.host.max_calls = Some(1);
     allow(&mut cfg, "fs.grep", json!({"path":"src","pattern":"alpha"}));
     allow(
         &mut cfg,
@@ -1184,7 +1171,7 @@ async fn data_syntax_and_depth_failures_are_known() {
     let temp = setup();
     let mut cfg = config();
     let mut limits = cfg.host.data.expect("data catalog");
-    limits.max_depth = 4;
+    limits.max_depth = Some(4);
     cfg.host.data = Some(limits);
     let text = "{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":1}}}}}}";
     allow(&mut cfg, "data.parse", json!({"format":"json","text":text}));
@@ -1221,7 +1208,7 @@ async fn data_permission_denial_and_call_budget_are_enforced() {
 
     let temp = setup();
     let mut cfg = config();
-    cfg.host.max_calls = 1;
+    cfg.host.max_calls = Some(1);
     allow(&mut cfg, "data.parse", json!({"format":"json","text":"1"}));
     allow(&mut cfg, "data.parse", json!({"format":"json","text":"2"}));
     let (rt, id, view) = run_budget_script(

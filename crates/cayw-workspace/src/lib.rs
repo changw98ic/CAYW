@@ -49,74 +49,74 @@ impl SyntaxValidator for JsonTomlValidator {
     }
 }
 
+/// Optional resource limits. `None` means this workspace imposes no artificial
+/// bound for that dimension; hosts that need a budget must set `Some(..)`.
 #[derive(Clone)]
 pub struct Limits {
-    pub max_file_bytes: usize,
-    pub max_batch_bytes: usize,
-    pub max_batch_operations: usize,
+    pub max_file_bytes: Option<usize>,
+    pub max_batch_bytes: Option<usize>,
+    pub max_batch_operations: Option<usize>,
     /// Completed journals are retained as evidence; this is also a storage bound.
-    pub max_batches: usize,
-    pub max_tree_entries: usize,
-    pub max_depth: usize,
-    pub max_argument_bytes: usize,
-    pub max_output_bytes: usize,
-    pub max_archive_bytes: usize,
-    pub max_archive_entries: usize,
-    pub max_archive_expanded_bytes: usize,
-    pub max_compression_ratio: u64,
-    pub timeout: Duration,
+    pub max_batches: Option<usize>,
+    pub max_tree_entries: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub max_argument_bytes: Option<usize>,
+    pub max_output_bytes: Option<usize>,
+    pub max_archive_bytes: Option<usize>,
+    pub max_archive_entries: Option<usize>,
+    pub max_archive_expanded_bytes: Option<usize>,
+    pub max_compression_ratio: Option<u64>,
+    pub timeout: Option<Duration>,
     pub syntax_validator: Arc<dyn SyntaxValidator>,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_file_bytes: 1024 * 1024,
-            max_batch_bytes: 16 * 1024 * 1024,
-            max_batch_operations: 64,
-            max_batches: 128,
-            max_tree_entries: 4096,
-            max_depth: 32,
-            max_argument_bytes: 8 * 1024 * 1024,
-            max_output_bytes: 8 * 1024 * 1024,
-            max_archive_bytes: 16 * 1024 * 1024,
-            max_archive_entries: 4096,
-            max_archive_expanded_bytes: 16 * 1024 * 1024,
-            max_compression_ratio: 100,
-            timeout: Duration::from_secs(30),
+            max_file_bytes: None,
+            max_batch_bytes: None,
+            max_batch_operations: None,
+            max_batches: None,
+            max_tree_entries: None,
+            max_depth: None,
+            max_argument_bytes: None,
+            max_output_bytes: None,
+            max_archive_bytes: None,
+            max_archive_entries: None,
+            max_archive_expanded_bytes: None,
+            max_compression_ratio: None,
+            timeout: None,
             syntax_validator: Arc::new(JsonTomlValidator),
         }
     }
 }
 impl Limits {
-    /// Checks configuration without opening or modifying the workspace.
+    /// Checks configuration without opening or modifying the workspace. Only an
+    /// explicitly configured limit is validated: every `Some` value must be
+    /// positive. No artificial upper ceiling is applied.
     pub fn validate(&self) -> Result<(), CapabilityError> {
-        for (value, ceiling) in [
-            (self.max_file_bytes, 16 * 1024 * 1024),
-            (self.max_batch_bytes, 64 * 1024 * 1024),
-            (self.max_batch_operations, 256),
-            (self.max_batches, 1024),
-            (self.max_tree_entries, 100_000),
-            (self.max_depth, 128),
-            (self.max_argument_bytes, 64 * 1024 * 1024),
-            (self.max_output_bytes, 64 * 1024 * 1024),
-            (self.max_archive_bytes, 64 * 1024 * 1024),
-            (self.max_archive_entries, 100_000),
-            (self.max_archive_expanded_bytes, 64 * 1024 * 1024),
-        ] {
-            if value == 0 || value > ceiling {
-                return Err(failure(
-                    "workspace limits must be positive and within hard ceilings",
-                ));
-            }
+        let sizes = [
+            self.max_file_bytes,
+            self.max_batch_bytes,
+            self.max_batch_operations,
+            self.max_batches,
+            self.max_tree_entries,
+            self.max_depth,
+            self.max_argument_bytes,
+            self.max_output_bytes,
+            self.max_archive_bytes,
+            self.max_archive_entries,
+            self.max_archive_expanded_bytes,
+        ];
+        if sizes.into_iter().flatten().any(|value| value == 0) {
+            return Err(failure("workspace limits must be positive"));
         }
-        if self.max_output_bytes < 2
-            || self.max_compression_ratio == 0
-            || self.max_compression_ratio > 10_000
-            || self.timeout.is_zero()
-            || self.timeout > Duration::from_secs(300)
-            || Instant::now().checked_add(self.timeout).is_none()
+        if self.max_compression_ratio == Some(0) {
+            return Err(failure("workspace compression ratio must be positive"));
+        }
+        if let Some(timeout) = self.timeout
+            && (timeout.is_zero() || Instant::now().checked_add(timeout).is_none())
         {
-            return Err(failure("invalid workspace output limit, ratio or timeout"));
+            return Err(failure("invalid workspace timeout"));
         }
         Ok(())
     }
@@ -158,7 +158,7 @@ impl Workspace {
     /// Reopening checks journals and pending path evidence without replaying work.
     pub fn open(root: impl AsRef<Path>, limits: Limits) -> Result<Self, CapabilityError> {
         limits.validate()?;
-        let context = Context::new(CancellationToken::new(), limits.timeout)?;
+        let context = Context::new(CancellationToken::new(), limits.timeout);
         context.check()?;
         Self::open_dir_inner(filesystem::open_root(root.as_ref())?, limits, &context)
     }
@@ -166,7 +166,7 @@ impl Workspace {
     /// Uses an application-selected directory handle without resolving its path
     /// again. The root stays the same directory if its name is moved or replaced.
     pub fn open_dir(root: Dir, limits: Limits) -> Result<Self, CapabilityError> {
-        let context = Context::new(CancellationToken::new(), limits.timeout)?;
+        let context = Context::new(CancellationToken::new(), limits.timeout);
         Self::open_dir_inner(root, limits, &context)
     }
 
@@ -178,7 +178,7 @@ impl Workspace {
         cancel: CancellationToken,
         deadline: Instant,
     ) -> Result<Self, CapabilityError> {
-        let context = Context::until(cancel, deadline, limits.timeout)?;
+        let context = Context::until(cancel, deadline, limits.timeout);
         Self::open_dir_inner(root, limits, &context)
     }
 
@@ -230,10 +230,8 @@ impl Workspace {
         arguments: &Value,
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
-        let deadline = Instant::now()
-            .checked_add(self.limits.timeout)
-            .ok_or_else(|| failure("invalid deadline"))?;
-        self.execute_until(name, arguments, cancel, deadline).await
+        let context = Context::new(cancel, self.limits.timeout);
+        self.execute_with_context(name, arguments, &context).await
     }
 
     /// Executes within the same absolute allowance used by open_dir_until.
@@ -246,8 +244,17 @@ impl Workspace {
         cancel: CancellationToken,
         deadline: Instant,
     ) -> Result<Value, CapabilityError> {
-        let context = Context::until(cancel, deadline, self.limits.timeout)?;
-        self.execute_inner(name, arguments, &context)
+        let context = Context::until(cancel, deadline, self.limits.timeout);
+        self.execute_with_context(name, arguments, &context).await
+    }
+
+    async fn execute_with_context(
+        &self,
+        name: &str,
+        arguments: &Value,
+        context: &Context,
+    ) -> Result<Value, CapabilityError> {
+        self.execute_inner(name, arguments, context)
             .await
             .map_err(|mut error| {
                 error.message = fit_error(error.message, self.limits.max_output_bytes);
@@ -314,6 +321,20 @@ impl Workspace {
         *self.fault.lock().unwrap_or_else(|error| error.into_inner()) = Some((point, action));
     }
 
+    /// Settles prepared batches that were persisted but never submitted. A crash
+    /// between prepare and submit leaves only inert journal evidence; marking
+    /// those journals aborted lets a host recover automatically instead of
+    /// accumulating stale records. Interrupted commits that may have changed user
+    /// paths are never discarded here; they still require explicit recovery.
+    /// Removes journals that were prepared but never submitted. Such batches
+    /// never changed user paths, so their backup and candidate blobs are
+    /// discarded and the batch storage/limit slot is reclaimed. Interrupted
+    /// `Intent`/`Committing` batches are left for explicit recovery.
+    pub fn discard_prepared_batches(&self) -> Result<usize, CapabilityError> {
+        let context = Context::new(CancellationToken::new(), self.limits.timeout);
+        self.discard_prepared_batches_inner(&context)
+    }
+
     pub(crate) fn fault(
         &self,
         stage: &str,
@@ -361,42 +382,55 @@ pub fn definitions() -> Vec<ToolDefinition> {
 
 pub(crate) struct Context {
     cancel: CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 impl Context {
-    fn new(cancel: CancellationToken, timeout: Duration) -> Result<Self, CapabilityError> {
-        Ok(Self {
+    fn new(cancel: CancellationToken, timeout: Option<Duration>) -> Self {
+        Self {
             cancel,
-            deadline: Instant::now()
-                .checked_add(timeout)
-                .ok_or_else(|| failure("invalid deadline"))?,
-        })
+            deadline: timeout.and_then(|timeout| Instant::now().checked_add(timeout)),
+        }
     }
-    fn until(
-        cancel: CancellationToken,
-        deadline: Instant,
-        timeout: Duration,
-    ) -> Result<Self, CapabilityError> {
-        let local = Instant::now()
-            .checked_add(timeout)
-            .ok_or_else(|| failure("invalid deadline"))?;
-        Ok(Self {
+    fn until(cancel: CancellationToken, deadline: Instant, timeout: Option<Duration>) -> Self {
+        let deadline = match timeout {
+            Some(timeout) => Instant::now()
+                .checked_add(timeout)
+                .map_or(deadline, |local| deadline.min(local)),
+            None => deadline,
+        };
+        Self {
             cancel,
-            deadline: deadline.min(local),
-        })
+            deadline: Some(deadline),
+        }
     }
     pub(crate) fn check(&self) -> Result<(), CapabilityError> {
         if self.cancel.is_cancelled() {
             return Err(failure("workspace operation cancelled"));
         }
-        if Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             return Err(failure("workspace operation deadline reached"));
         }
         Ok(())
     }
 }
 
-fn fit_error(mut message: String, limit: usize) -> String {
+/// Combines optional bounds. `None` means unbounded; a `Some` value caps the
+/// other side, and two `Some` values keep the smaller one.
+pub(crate) fn min_limit(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn fit_error(mut message: String, limit: Option<usize>) -> String {
+    let Some(limit) = limit else {
+        return message;
+    };
     let mut used = 2usize;
     let mut end = 0;
     for (at, character) in message.char_indices() {
@@ -428,13 +462,13 @@ fn check_argument_shape(
     value: &Value,
     depth: usize,
     used: &mut usize,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<(), CapabilityError> {
     if depth > 128 {
         return Err(failure("argument nesting limit exceeded"));
     }
     *used = used.saturating_add(1);
-    if *used > limit {
+    if limit.is_some_and(|limit| *used > limit) {
         return Err(failure("argument byte limit exceeded"));
     }
     match value {
@@ -456,7 +490,7 @@ fn check_argument_shape(
         }
         Value::String(text) => {
             *used = used.saturating_add(text.len());
-            if *used > limit {
+            if limit.is_some_and(|limit| *used > limit) {
                 return Err(failure("argument byte limit exceeded"));
             }
         }
@@ -469,17 +503,20 @@ pub(crate) fn parse<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, 
     serde_json::from_value(value.clone())
         .map_err(|error| failure(format!("invalid arguments: {error}")))
 }
-pub(crate) fn json_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
+pub(crate) fn json_size(value: &Value, limit: Option<usize>) -> Result<usize, CapabilityError> {
     struct Counter {
         used: usize,
-        limit: usize,
+        limit: Option<usize>,
     }
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.len() > self.limit.saturating_sub(self.used) {
+            if self
+                .limit
+                .is_some_and(|limit| bytes.len() > limit.saturating_sub(self.used))
+            {
                 return Err(io::Error::other("JSON byte budget exceeded"));
             }
-            self.used += bytes.len();
+            self.used = self.used.saturating_add(bytes.len());
             Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> {

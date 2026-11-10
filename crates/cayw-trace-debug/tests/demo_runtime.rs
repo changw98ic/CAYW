@@ -209,7 +209,7 @@ async fn demo_runs_real_host_graph_and_switches_branches() -> TestResult {
         "the IPC server accepted an unauthenticated client"
     );
     let config = ClientConfig {
-        request_timeout: Duration::from_secs(120),
+        request_timeout: Some(Duration::from_secs(120)),
         ..Default::default()
     };
     let client = Client::connect_with_config(address, TOKEN, config).await?;

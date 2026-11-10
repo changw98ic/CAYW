@@ -195,7 +195,7 @@ async fn unknown_sequential_tool_stops_execution_and_settles_remaining_declared_
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
     let snapshot = store.snapshot(&id).unwrap();
-    assert_eq!(snapshot.state, SessionState::NeedsReconciliation);
+    assert_eq!(snapshot.state, SessionState::Idle);
     assert!(snapshot.attempt.is_none());
     assert_eq!(snapshot.unresolved_calls.len(), 1);
     let results = snapshot

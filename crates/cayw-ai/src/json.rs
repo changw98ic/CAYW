@@ -32,12 +32,12 @@ impl From<ParseError> for String {
 }
 
 type Result<T> = std::result::Result<T, ParseError>;
-const MAX_JSON_NODES: usize = 65_536;
+const MAX_JSON_NODES: usize = 1_048_576;
 const MAX_JSON_DEPTH: usize = 128;
 const SCAN_BATCH: usize = 4096;
 
 /// Parse one JSON value without silently replacing duplicate object fields.
-/// Supports at most 65,536 values and 128 nested containers. Errors contain no
+/// Supports at most 1,048,576 values and 128 nested containers. Errors contain no
 /// input data. Cancellation returns `Request cancelled`.
 pub async fn parse_response(input: &str, cancel: &CancellationToken) -> Result<Value> {
     check_cancel(cancel)?;
@@ -487,7 +487,7 @@ mod tests {
     async fn json_nodes_depth_and_scalar_tokens_are_bounded_before_tree_expansion() {
         for (input, expected) in [
             (
-                format!("[{}null]", "null,".repeat(65_536)),
+                format!("[{}null]", "null,".repeat(1_048_576)),
                 ParseError::NodeLimit,
             ),
             (

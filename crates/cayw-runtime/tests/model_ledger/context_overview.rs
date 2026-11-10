@@ -84,7 +84,7 @@ async fn runtime_session_context_overview_reads_live_model_request_ledger() {
     assert_eq!(overview.ledger_settled_tokens, ledger.settled_tokens);
     assert_eq!(overview.ledger_reserved_tokens, ledger.reserved_tokens);
     assert_eq!(overview.ledger_remaining_tokens, ledger.remaining_tokens);
-    assert_eq!(overview.budget_unknown, ledger.budget_unknown);
+    assert_eq!(overview.usage_unknown, ledger.usage_unknown);
     assert_eq!(overview.cost.status, CostStatus::Unknown);
     assert!(overview.cost.amount.is_none());
     assert!(overview.cost.currency.is_none());

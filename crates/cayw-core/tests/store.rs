@@ -646,7 +646,7 @@ fn interrupted_batch_preserves_durable_results_and_reconciles_only_missing_termi
     drop(store);
     let store = database.open();
     let recovered = store.recover(&id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert!(recovered.attempt.is_none());
     assert_eq!(recovered.unresolved_calls.len(), 1);
     assert_eq!(recovered.unresolved_calls[0].call.id, b.id);
@@ -658,15 +658,9 @@ fn interrupted_batch_preserves_durable_results_and_reconciles_only_missing_termi
     assert_eq!(tool_results(&store, &id)[0], durable_result);
     assert!(tool_results(&store, &id)[2].is_error);
     assert!(!tool_results(&store, &id)[2].outcome_unknown);
-    assert!(matches!(
-        store.begin_attempt(&id, "replacement"),
-        Err(CoreError::NeedsReconciliation)
-    ));
-    store.recover(&id).unwrap();
-    assert_eq!(
-        store.snapshot(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    let replacement = store.begin_attempt(&id, "replacement").unwrap();
+    let recovered = store.recover(&replacement.session_id).unwrap();
+    assert_eq!(recovered.state, SessionState::Idle);
     let input = Reconciliation {
         expected: store.tool_reconciliation_origin(&id, &b.id).unwrap(),
         call_id: b.id.clone(),
@@ -795,14 +789,11 @@ fn unknown_outcome_cannot_be_cleared_by_finishing_or_reopening() {
     store.finish_attempt(&lease).unwrap();
     drop(store);
     let store = database.open();
-    assert_eq!(
-        store.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(matches!(
-        store.begin_attempt(&id, "next"),
-        Err(CoreError::NeedsReconciliation)
-    ));
+    let recovered = store.recover(&id).unwrap();
+    assert_eq!(recovered.state, SessionState::Idle);
+    assert_eq!(recovered.unresolved_calls.len(), 1);
+    let next = store.begin_attempt(&id, "next").unwrap();
+    store.recover(&next.session_id).unwrap();
     assert!(
         store
             .reconcile(
@@ -949,4 +940,95 @@ fn duplicate_messages_and_unpaired_results_leave_no_partial_log_entries() {
             .is_err()
     );
     assert_eq!(store.snapshot(&id).unwrap(), before);
+}
+
+fn begin_cell(store: &SessionStore, lease: &cayw_core::AttemptLease, id: &str) {
+    let parent = ToolCall::new(id, "execute_code", json!({"script":"return 1"}));
+    message(
+        store,
+        lease,
+        Message::Assistant(assistant(vec![parent.clone()])),
+    );
+    store
+        .append_agent_event(
+            lease,
+            &AgentEvent::ToolExecutionStart {
+                call: parent.clone(),
+            },
+        )
+        .unwrap();
+    store.mark_tool_started(lease, &parent.id).unwrap();
+    store
+        .begin_execution(
+            lease,
+            ExecutionInput {
+                execution_id: "cell".into(),
+                parent_call_id: parent.id.clone(),
+                task_id: "task".into(),
+                source_hash: "hash".into(),
+            },
+        )
+        .unwrap();
+    end_call(store, lease, &parent, "cell is still running");
+}
+
+#[test]
+fn plan_rejects_serde_invalid_input_without_an_event() {
+    let database = Database::new();
+    let store = database.open();
+    let id = store.create_session("plan bounds").unwrap().id;
+    let lease = store.begin_attempt(&id, "worker").unwrap();
+    start(&store, &lease);
+    begin_cell(&store, &lease, "code-bounds");
+    let before = store.snapshot(&id).unwrap();
+    let deep = (0..200).fold(serde_json::Value::Null, |value, _| {
+        serde_json::Value::Array(vec![value])
+    });
+    let input = CapabilityInput {
+        key: CapabilityCallKey {
+            execution_id: "cell".into(),
+            sequence: 0,
+        },
+        name: "fs.write".into(),
+        arguments: deep,
+    };
+    assert!(store.plan_capability(&lease, input).is_err());
+    let after = store.snapshot(&id).unwrap();
+    assert_eq!(after.cursor, before.cursor);
+    assert!(after.unresolved_capabilities.is_empty());
+    assert!(
+        !store
+            .events(&id, before.cursor, 100)
+            .unwrap()
+            .iter()
+            .any(|record| matches!(record.event, CoreEvent::CapabilityPlanned { .. }))
+    );
+}
+
+#[test]
+fn plan_requires_contiguous_sequences_from_zero() {
+    let database = Database::new();
+    let store = database.open();
+    let id = store.create_session("plan sequence").unwrap().id;
+    let lease = store.begin_attempt(&id, "worker").unwrap();
+    start(&store, &lease);
+    begin_cell(&store, &lease, "code-sequence");
+    let plan = |sequence: u64| CapabilityInput {
+        key: CapabilityCallKey {
+            execution_id: "cell".into(),
+            sequence,
+        },
+        name: "fs.write".into(),
+        arguments: json!({"path":"a.txt"}),
+    };
+    store.plan_capability(&lease, plan(0)).unwrap();
+    assert!(matches!(
+        store.plan_capability(&lease, plan(2)),
+        Err(CoreError::InvalidEvent(_))
+    ));
+    store.plan_capability(&lease, plan(1)).unwrap();
+    assert!(matches!(
+        store.plan_capability(&lease, plan(0)),
+        Err(CoreError::InvalidEvent(_))
+    ));
 }

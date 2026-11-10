@@ -23,27 +23,6 @@ pub enum QueueMode {
     OneAtATime,
 }
 
-/// Optional, host-supplied bound for tool-call arguments.
-///
-/// `None` (the default) applies no argument limit. A host that persists Agent
-/// events into a stricter store supplies its own limit explicitly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ToolArgumentLimit {
-    pub bytes: usize,
-    pub depth: usize,
-    pub nodes: usize,
-}
-
-impl ToolArgumentLimit {
-    pub const fn new(bytes: usize, depth: usize, nodes: usize) -> Self {
-        Self {
-            bytes,
-            depth,
-            nodes,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct AgentContext {
     pub model: Model,
@@ -60,8 +39,6 @@ pub struct AgentSnapshot {
     pub streaming_message: Option<AssistantMessage>,
     pub pending_tool_calls: BTreeSet<String>,
     pub error_message: Option<String>,
-    /// A cancelled/dropped tool may have produced effects that the host must inspect.
-    pub needs_reconciliation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,8 +57,6 @@ pub enum AgentError {
     NeedsInput,
     #[error("A prompt must contain at least one message")]
     EmptyPrompt,
-    #[error("Tool effects are unresolved; supply reconciled history before continuing")]
-    UnresolvedToolEffects,
     #[error("Invalid configuration: {0}")]
     InvalidConfiguration(String),
     #[error("Event listener failed: {0}")]

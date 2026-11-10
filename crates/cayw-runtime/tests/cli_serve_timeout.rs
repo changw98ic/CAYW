@@ -9,7 +9,7 @@ use tokio::{
 const TOKEN: &str = "cli-serve-timeout-test-token-123456";
 
 #[tokio::test]
-async fn default_serve_advertises_360s_timeout_and_accepts_requests() {
+async fn default_serve_advertises_no_derived_timeout_and_accepts_requests() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
 
@@ -46,8 +46,8 @@ async fn default_serve_advertises_360s_timeout_and_accepts_requests() {
         .unwrap();
     let health = client.request("runtime.health", json!({})).await.unwrap();
 
-    // Default max_run_time is 300s, so request_timeout = 300s + 60s = 360s = 360_000 ms.
-    assert_eq!(health["request_timeout_ms"], 360_000);
+    // No configured max_run_time derives no IPC request timeout: health reports null.
+    assert!(health["request_timeout_ms"].is_null());
 
     // Ensure ordinary RPC methods work through CliRpcHandler
     let session = client

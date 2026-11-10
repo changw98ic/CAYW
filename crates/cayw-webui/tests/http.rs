@@ -62,6 +62,10 @@ async fn startup_rejects_budgets_that_could_starve_control_requests() {
             ..Default::default()
         },
         GatewayLimits {
+            max_request_bytes: 1,
+            ..Default::default()
+        },
+        GatewayLimits {
             queue_timeout: std::time::Duration::ZERO,
             ..Default::default()
         },

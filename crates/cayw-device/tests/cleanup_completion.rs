@@ -38,8 +38,9 @@ fn spec(root: &Path, program: PathBuf) -> DirectoryProcessSpec {
         args: vec![],
         cwd: fs::File::open(root).unwrap(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 1024,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(1024),
+        output_spill_dir: None,
         io: cayw_device::ProcessIo::Pipes,
     }
 }
@@ -132,7 +133,7 @@ async fn every_early_return_waits_for_cleanup_and_drain_retains_its_failure() {
         let cancel = CancellationToken::new();
         match case {
             "cancelled" => cancel.cancel(),
-            "validation" => command.timeout = Duration::ZERO,
+            "validation" => command.timeout = Some(Duration::ZERO),
             "closed" => runner.close(),
             _ => {}
         }
@@ -215,7 +216,7 @@ async fn successful_cleanup_and_plain_resource_drop_stay_pending_until_destructo
             finished: finished.clone(),
         };
         let mut command = spec(&root.0, program);
-        command.timeout = Duration::ZERO;
+        command.timeout = Some(Duration::ZERO);
         let cloned = runner.clone();
         let call = if fallible {
             let resource = runner.own_cleanup(resource);

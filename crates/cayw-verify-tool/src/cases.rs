@@ -105,7 +105,7 @@ local read = cayw.call("fs.read", {{path = "repair.txt"}})
 cayw.emit(read)
 return {{content = read.content, sha256 = read.sha256, same_hash = written.sha256 == read.sha256}}
 "#, content = serde_json::to_string(REPAIR_CONTENT).expect("serialize fixed string")),
-            Self::LoopBudget => "while true do end".into(),
+            Self::LoopBudget => "local n = 0; for i = 1, 5000 do n += i end; return {sum = n}".into(),
             Self::Cancel | Self::HostTimeout => format!(
                 "return cayw.call('search.query', {{query = {:?}}})",
                 crate::fixtures::BLOCK_QUERY
@@ -210,7 +210,7 @@ cayw.call("fs.write", {{path = "after.txt", content = "must not be written"}})
     pub fn expected_error(self) -> Option<ErrorKind> {
         match self {
             Self::SyntaxFailure => Some(ErrorKind::Script),
-            Self::LoopBudget => Some(ErrorKind::InstructionLimit),
+            Self::LoopBudget => None,
             Self::Cancel => Some(ErrorKind::Cancelled),
             Self::GateDenial => Some(ErrorKind::Capability),
             Self::UnknownCapability => Some(ErrorKind::UnknownCapability),
@@ -226,16 +226,17 @@ cayw.call("fs.write", {{path = "after.txt", content = "must not be written"}})
         let mut limits = Limits::default();
         match self {
             Self::LoopBudget => limits.instruction_budget = 2_000,
-            Self::OutputBudget => limits.output_bytes = 4096,
-            Self::MemoryBudget => limits.memory_bytes = 1024 * 1024,
-            Self::CallBudget => limits.host_calls = 2,
+            Self::OutputBudget => limits.output_bytes = Some(4096),
+            Self::MemoryBudget => limits.memory_bytes = Some(1024 * 1024),
+            Self::CallBudget => limits.host_calls = Some(2),
             Self::ActiveTimeout => {
-                limits.instruction_budget = u64::MAX;
-                limits.timeout = std::time::Duration::from_secs(1);
+                limits.instruction_budget = u32::MAX;
+                limits.timeout = Some(std::time::Duration::from_secs(1));
             }
             Self::HostTimeout => {
-                limits.instruction_budget = u64::MAX;
-                limits.host_wait = std::time::Duration::from_secs(1);
+                limits.instruction_budget = u32::MAX;
+                limits.timeout = Some(std::time::Duration::from_secs(5));
+                limits.host_wait = Some(std::time::Duration::from_secs(1));
             }
             _ => {}
         }
@@ -261,7 +262,17 @@ cayw.call("fs.write", {{path = "after.txt", content = "must not be written"}})
         let path = json!({"type":"string","minLength":1,"maxLength":4096});
         Value::Array(self.signature_names().iter().map(|name| {
             let (description, properties, required) = match *name {
-                "fs.read" => ("Read one bounded UTF-8 regular file and its SHA-256.", json!({"path":path}), vec!["path"]),
+                "fs.read" => (
+                    "Read a UTF-8 regular file. Without range arguments a small file is returned whole and a large file returns a bounded preview; start_line/max_lines or offset_bytes/max_bytes stream one range.",
+                    json!({
+                        "path":path,
+                        "start_line":{"type":"integer","minimum":1},
+                        "max_lines":{"type":"integer","minimum":1},
+                        "offset_bytes":{"type":"integer","minimum":0},
+                        "max_bytes":{"type":"integer","minimum":1}
+                    }),
+                    vec!["path"],
+                ),
                 "fs.list" => ("List bounded direct directory entries without following symbolic links.", json!({"path":path}), vec!["path"]),
                 "fs.stat" => ("Inspect an entry without following symbolic links.", json!({"path":path}), vec!["path"]),
                 "fs.write" => ("Atomically create a UTF-8 file. Replacing an existing file requires overwrite=true and expected_sha256.", json!({

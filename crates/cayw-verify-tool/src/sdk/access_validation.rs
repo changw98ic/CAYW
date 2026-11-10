@@ -305,6 +305,7 @@ impl Snapshot {
                     "max_concurrent_runs",
                     "provider",
                     "model",
+                    "disabled_services",
                 ],
             ) && health["status"] == "ok"
                 && health["protocol_version"] == cayw_core::PROTOCOL_VERSION

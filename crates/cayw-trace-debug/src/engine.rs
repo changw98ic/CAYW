@@ -887,13 +887,13 @@ struct RunFailure {
 
 fn replay_limits(calls: usize) -> Limits {
     Limits {
-        memory_bytes: 16 * 1024 * 1024,
+        memory_bytes: Some(16 * 1024 * 1024),
         instruction_budget: 100_000,
-        timeout: Duration::from_secs(5),
-        host_wait: Duration::from_secs(5),
+        timeout: Some(Duration::from_secs(5)),
+        host_wait: Some(Duration::from_secs(5)),
         shutdown_grace: Duration::from_secs(2),
-        host_calls: calls.saturating_add(1).max(1),
-        output_bytes: 1024 * 1024,
+        host_calls: Some(calls.saturating_add(1).max(1)),
+        output_bytes: Some(1024 * 1024),
     }
 }
 

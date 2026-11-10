@@ -23,7 +23,7 @@ fn request(arguments: Value, max_result_bytes: usize) -> SourceRequest {
             target: "search.query".into(),
         },
         operation: SourceOperation::Search { arguments },
-        max_result_bytes,
+        max_result_bytes: Some(max_result_bytes),
     }
 }
 
@@ -142,7 +142,6 @@ async fn invalid_operations_arguments_and_pre_cancel_do_not_scan() {
     for arguments in [
         json!({"query":""}),
         json!({"query":"marker","limit":0}),
-        json!({"query":"marker","limit":1001}),
         json!({"query":"marker","limit":"1"}),
         json!({"query":"marker","role":"system"}),
         json!({"query":"marker","path":""}),

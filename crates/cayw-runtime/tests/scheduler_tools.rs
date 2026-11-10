@@ -25,8 +25,8 @@ use cayw_host::{
     HostConfig, ProcessIdentity, ProcessIo, Profile, ProfileKind, TerminalConfig, TerminalLimits,
 };
 use cayw_runtime::{
-    ApprovalChoice, AuditRecord, ModelCostStatus, ModelRequestTerminal, ModelReservationPolicy,
-    Runtime, RuntimeConfig, RuntimeError, ScopedPermission, SessionView, TaskRecord, TaskState,
+    ApprovalChoice, AuditRecord, ModelCostStatus, ModelRequestTerminal, Runtime, RuntimeConfig,
+    RuntimeError, ScopedPermission, SessionView, TaskRecord, TaskState,
 };
 use serde_json::{Value, json};
 use std::{
@@ -268,8 +268,8 @@ fn config(project: &Project) -> RuntimeConfig {
             "--nocapture".into(),
         ],
         env: environment,
-        timeout: Duration::from_secs(150),
-        max_output_bytes: 64 * 1024,
+        timeout: Some(Duration::from_secs(150)),
+        max_output_bytes: Some(64 * 1024),
         allow_filter: false,
         io: ProcessIo::Pipes,
     };
@@ -277,28 +277,29 @@ fn config(project: &Project) -> RuntimeConfig {
         max_concurrent_runs: 2,
         max_queued_runs: 3,
         fairness_after_dispatches: 2,
-        max_run_time: Duration::from_secs(180),
-        max_queue_time: Duration::from_secs(120),
-        max_capability_calls: 8,
+        max_run_time: Some(Duration::from_secs(180)),
+        max_queue_time: Some(Duration::from_secs(120)),
+        max_total_tokens: Some(128_000),
+        max_capability_calls: Some(8),
         codemode: cayw_codemode::Limits {
-            timeout: Duration::from_secs(120),
+            timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         },
         host: HostConfig {
-            call_timeout: Duration::from_secs(90),
-            process_timeout: Duration::from_secs(60),
-            max_calls: 8,
-            max_process_output_bytes: 64 * 1024,
+            call_timeout: Some(Duration::from_secs(90)),
+            process_timeout: Some(Duration::from_secs(60)),
+            max_calls: Some(8),
+            max_process_output_bytes: Some(64 * 1024),
             terminal_handoffs: Some(TerminalConfig {
                 profiles: BTreeMap::from([(PROFILE_A.to_string(), profile)]),
                 limits: TerminalLimits {
                     max_sessions: 2,
-                    max_sessions_total: 8,
-                    max_input_bytes_per_write: 64,
-                    max_input_bytes_per_session: 256,
-                    max_output_bytes_per_session: 64 * 1024,
-                    max_read_bytes: 64 * 1024,
-                    max_wait: Duration::from_secs(120),
+                    max_sessions_total: Some(8),
+                    max_input_bytes_per_write: Some(64),
+                    max_input_bytes_per_session: Some(256),
+                    max_output_bytes_per_session: Some(64 * 1024),
+                    max_read_bytes: Some(64 * 1024),
+                    max_wait: Some(Duration::from_secs(120)),
                 },
             }),
             ..Default::default()
@@ -329,8 +330,8 @@ fn dual_profile(project: &Project, role: &str) -> Profile {
             ),
             (CHILD_ROLE.to_string(), role.to_string()),
         ]),
-        timeout: Duration::from_secs(150),
-        max_output_bytes: 64 * 1024,
+        timeout: Some(Duration::from_secs(150)),
+        max_output_bytes: Some(64 * 1024),
         allow_filter: false,
         io: ProcessIo::Pipes,
     }
@@ -345,18 +346,19 @@ fn dual_config(project: &Project) -> RuntimeConfig {
         max_concurrent_runs: 2,
         max_queued_runs: 3,
         fairness_after_dispatches: 2,
-        max_run_time: Duration::from_secs(180),
-        max_queue_time: Duration::from_secs(120),
-        max_capability_calls: 8,
+        max_run_time: Some(Duration::from_secs(180)),
+        max_queue_time: Some(Duration::from_secs(120)),
+        max_total_tokens: Some(128_000),
+        max_capability_calls: Some(8),
         codemode: cayw_codemode::Limits {
-            timeout: Duration::from_secs(120),
+            timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         },
         host: HostConfig {
-            call_timeout: Duration::from_secs(90),
-            process_timeout: Duration::from_secs(60),
-            max_calls: 8,
-            max_process_output_bytes: 64 * 1024,
+            call_timeout: Some(Duration::from_secs(90)),
+            process_timeout: Some(Duration::from_secs(60)),
+            max_calls: Some(8),
+            max_process_output_bytes: Some(64 * 1024),
             terminal_handoffs: Some(TerminalConfig {
                 profiles: BTreeMap::from([
                     (PROFILE_A.to_string(), dual_profile(project, PROFILE_A)),
@@ -365,12 +367,12 @@ fn dual_config(project: &Project) -> RuntimeConfig {
                 ]),
                 limits: TerminalLimits {
                     max_sessions: 2,
-                    max_sessions_total: 8,
-                    max_input_bytes_per_write: 64,
-                    max_input_bytes_per_session: 256,
-                    max_output_bytes_per_session: 64 * 1024,
-                    max_read_bytes: 64 * 1024,
-                    max_wait: Duration::from_secs(120),
+                    max_sessions_total: Some(8),
+                    max_input_bytes_per_write: Some(64),
+                    max_input_bytes_per_session: Some(256),
+                    max_output_bytes_per_session: Some(64 * 1024),
+                    max_read_bytes: Some(64 * 1024),
+                    max_wait: Some(Duration::from_secs(120)),
                 },
             }),
             ..Default::default()
@@ -574,17 +576,14 @@ fn authorization_scope(
 fn assert_model_ledger(rt: &Runtime, session: &str, task: &TaskRecord, requests: usize) {
     let ledger = rt.model_requests(session).unwrap();
     assert_eq!(ledger.budget_session_id, session);
-    assert_eq!(
-        ledger.policy,
-        ModelReservationPolicy::EntireSessionRemainder
-    );
-    assert_eq!(ledger.token_limit, 128_000);
+    assert_eq!(ledger.token_limit, Some(128_000));
     assert_eq!(ledger.requests.len(), requests);
     assert_eq!(ledger.settled_tokens, 8 * requests as u64);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, 128_000 - 8 * requests as u64);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, Some(128_000 - 8 * requests as u64));
     assert!(
-        !ledger.budget_unknown,
+        !ledger.usage_unknown,
         "every completed model request must release its original reservation"
     );
     assert!(!ledger.overflowed);
@@ -598,12 +597,9 @@ fn assert_model_ledger(rt: &Runtime, session: &str, task: &TaskRecord, requests:
         assert_eq!(record.identity.turn, index as u64 + 1);
         assert_eq!(record.identity.provider, "fixture");
         assert_eq!(record.identity.model, "scheduler-tools");
-        assert_eq!(
-            record.policy,
-            ModelReservationPolicy::EntireSessionRemainder
-        );
         assert_eq!(record.terminal, Some(ModelRequestTerminal::Completed));
         assert_eq!(record.settled_tokens, Some(8));
+        assert_eq!(record.charged_tokens, Some(8));
         assert_eq!(record.outstanding_reservation_tokens, 0);
         assert_eq!(record.cost_status, ModelCostStatus::Unknown);
         assert!(record.cost_amount.is_none());

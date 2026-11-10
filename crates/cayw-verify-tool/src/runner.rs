@@ -114,8 +114,8 @@ pub fn limits_json(limits: &Limits) -> Value {
     json!({
         "memory_bytes":limits.memory_bytes,
         "instruction_checkpoint_budget":limits.instruction_budget,
-        "timeout_ns":u64::try_from(limits.timeout.as_nanos()).unwrap_or(u64::MAX),
-        "host_wait_ns":u64::try_from(limits.host_wait.as_nanos()).unwrap_or(u64::MAX),
+        "timeout_ns":limits.timeout.map(|timeout| u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)),
+        "host_wait_ns":limits.host_wait.map(|wait| u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX)),
         "shutdown_grace_ns":u64::try_from(limits.shutdown_grace.as_nanos()).unwrap_or(u64::MAX),
         "host_calls":limits.host_calls,
         "output_bytes":limits.output_bytes,
@@ -132,8 +132,8 @@ pub fn config_json(case: Case) -> Value {
             "max_calls":host.max_calls,
             "max_file_bytes":host.max_file_bytes,
             "max_list_entries":host.max_list_entries,
-            "call_timeout_ns":u64::try_from(host.call_timeout.as_nanos()).unwrap_or(u64::MAX),
-            "process_timeout_ns":u64::try_from(host.process_timeout.as_nanos()).unwrap_or(u64::MAX),
+            "call_timeout_ns":host.call_timeout.map(|timeout| u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)),
+            "process_timeout_ns":host.process_timeout.map(|timeout| u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)),
             "max_process_output_bytes":host.max_process_output_bytes,
             "data":host.data.map(|limits| json!({
                 "input_bytes":limits.input_bytes,"output_bytes":limits.output_bytes,
@@ -148,7 +148,7 @@ pub fn config_json(case: Case) -> Value {
                 "max_archive_bytes":limits.max_archive_bytes,"max_archive_entries":limits.max_archive_entries,
                 "max_archive_expanded_bytes":limits.max_archive_expanded_bytes,
                 "max_compression_ratio":limits.max_compression_ratio,
-                "timeout_ns":u64::try_from(limits.timeout.as_nanos()).unwrap_or(u64::MAX),
+                "timeout_ns":limits.timeout.map(|timeout| u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX)),
                 // This function records the unmodified HostConfig::default() used
                 // below; it does not introspect an arbitrary SyntaxValidator trait.
                 "syntax_validator":"cayw_workspace::JsonTomlValidator",
@@ -490,7 +490,9 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
     );
     sample.check(
         "payload_stays_within_limit",
-        sample.report.output_bytes <= case.limits().output_bytes,
+        case.limits()
+            .output_bytes
+            .is_none_or(|limit| sample.report.output_bytes <= limit),
         "Recorded shared JSON payload bytes do not exceed the configured hard limit.",
     );
     sample.check(
@@ -636,8 +638,9 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
         Case::SyntaxFailure => sample.check("syntax_has_no_effects", sample.audit_events.is_empty()
             && sample.permission_decisions.is_empty(), "Compilation failed before any Host call or permission request."),
         Case::LoopBudget => sample.check("checkpoint_budget_exhausted",
-            sample.report.instruction_checkpoints > case.limits().instruction_budget,
-            format!("observed checkpoints {}; budget {}",sample.report.instruction_checkpoints,case.limits().instruction_budget)),
+            sample.report.instruction_checkpoints > u64::from(case.limits().instruction_budget)
+                && sample.report.return_value == json!({"sum": 12502500}),
+            format!("observed checkpoints {}; cadence {}",sample.report.instruction_checkpoints,case.limits().instruction_budget)),
         Case::GateDenial => sample.check("real_gate_denial", sample.permission_decisions.len() == 1
             && sample.permission_decisions[0].decision == "fixture_denial"
             && sample.audit_events.is_empty()
@@ -682,10 +685,10 @@ fn validate(sample: &mut Sample, case: Case, kind: Option<ErrorKind>) {
                     && sample.report.output_bytes > 0,
                     "The small emit remains; the next 8192-byte string exceeds the 4096-byte shared JSON budget.");
             } else if case == Case::MemoryBudget {
-                sample.check("allocator_limit_during_execution", sample.input["script"].as_str().is_some_and(|script| script.len() < case.limits().memory_bytes / 4),
+                sample.check("allocator_limit_during_execution", sample.input["script"].as_str().is_some_and(|script| case.limits().memory_bytes.is_some_and(|mem| script.len() < mem / 4)),
                     "A real Host write preceded the 8 MiB allocation against a 1 MiB VM allocator cap; this is not a pre-compilation source-size rejection. Per-script allocation peak is not measured.");
             } else {
-                sample.check("third_call_not_dispatched", sample.report.calls.len() == case.limits().host_calls,
+                sample.check("third_call_not_dispatched", Some(sample.report.calls.len()) == case.limits().host_calls,
                     "Exactly two calls settled; the advertised and permitted third operation did not reach Host or its permission gate.");
             }
         }
@@ -1239,13 +1242,13 @@ mod tests {
     #[test]
     fn configuration_records_host_wait_separately_from_active_timeout() {
         let host = Case::HostTimeout.limits();
-        assert_eq!(host.host_wait, std::time::Duration::from_secs(1));
-        assert_eq!(host.timeout, std::time::Duration::from_secs(5));
+        assert_eq!(host.host_wait, Some(std::time::Duration::from_secs(1)));
+        assert_eq!(host.timeout, Some(std::time::Duration::from_secs(5)));
         let recorded = config_json(Case::HostTimeout)["codemode"].clone();
         assert_eq!(recorded["host_wait_ns"], json!(1_000_000_000_u64));
         assert_eq!(recorded["timeout_ns"], json!(5_000_000_000_u64));
         let active = config_json(Case::ActiveTimeout)["codemode"].clone();
-        assert_eq!(active["host_wait_ns"], json!(60_000_000_000_u64));
+        assert!(active["host_wait_ns"].is_null());
         assert_eq!(active["timeout_ns"], json!(1_000_000_000_u64));
     }
 
@@ -1255,17 +1258,17 @@ mod tests {
         assert_eq!(
             config["host"]["data"],
             json!({
-                "input_bytes":1048576,"output_bytes":1048576,"max_depth":32,
-                "max_nodes":100000,"max_rows":10000,"max_diff_work":1000000,
+                "input_bytes":null,"output_bytes":null,"max_depth":null,
+                "max_nodes":null,"max_rows":null,"max_diff_work":null,
             })
         );
         assert_eq!(
             config["host"]["workspace"],
             json!({
-                "max_file_bytes":1048576,"max_batch_bytes":16777216,"max_batch_operations":64,
-                "max_batches":128,"max_tree_entries":4096,"max_depth":32,"max_argument_bytes":8388608,
-                "max_output_bytes":8388608,"max_archive_bytes":16777216,"max_archive_entries":4096,
-                "max_archive_expanded_bytes":16777216,"max_compression_ratio":100,"timeout_ns":30000000000_u64,
+                "max_file_bytes":null,"max_batch_bytes":null,"max_batch_operations":null,
+                "max_batches":null,"max_tree_entries":null,"max_depth":null,"max_argument_bytes":null,
+                "max_output_bytes":null,"max_archive_bytes":null,"max_archive_entries":null,
+                "max_archive_expanded_bytes":null,"max_compression_ratio":null,"timeout_ns":null,
                 "syntax_validator":"cayw_workspace::JsonTomlValidator",
             })
         );

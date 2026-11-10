@@ -185,7 +185,6 @@ async fn cooperative_tool_cleanup_finishes_before_result_and_idle() {
                 assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
                 let unknown = matches!(reply, Reply::Unknown | Reply::Panic);
                 assert_eq!(results[0].outcome_unknown, unknown);
-                assert_eq!(agent.snapshot().needs_reconciliation, unknown);
                 assert!(!agent.snapshot().is_running);
                 if matches!(reply, Reply::Success) {
                     assert!(!results[0].is_error);
@@ -226,7 +225,8 @@ async fn permanently_pending_tool_is_polled_for_cleanup_then_returns_unknown() {
         assert!(results[0].is_error && results[0].outcome_unknown);
         assert!(!results[1].outcome_unknown);
         assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
-        assert!(agent.snapshot().needs_reconciliation);
+        assert!(!agent.snapshot().is_running);
+        assert!(agent.reset().is_ok());
     })
     .await
     .expect("uncooperative tool must not wait forever");
@@ -253,7 +253,6 @@ async fn cancellation_before_tool_first_poll_starts_zero_effects() {
     assert_eq!(run.last_message.stop_reason, StopReason::Aborted);
     assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
     assert!(results(&run).iter().all(|result| !result.outcome_unknown));
-    assert!(!agent.snapshot().needs_reconciliation);
 }
 
 #[tokio::test]
@@ -277,7 +276,6 @@ async fn cancellation_race_preserves_a_ready_committed_tool_result() {
             Some(json!({"committed":true}))
         );
         assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
-        assert!(!agent.snapshot().needs_reconciliation);
     })
     .await
     .unwrap();
@@ -305,8 +303,23 @@ async fn dropping_agent_during_cleanup_fences_unsettled_effects_without_detachin
         assert!(tool.dropped.load(Ordering::SeqCst));
         assert!(!tool.settled.load(Ordering::SeqCst));
         assert!(!agent.snapshot().is_running);
-        assert!(agent.snapshot().needs_reconciliation);
-        assert_eq!(agent.reset(), Err(AgentError::UnresolvedToolEffects));
+        let interrupted = agent
+            .snapshot()
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) => Some(result.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(interrupted.len(), 2, "dropped run must pair every call");
+        assert!(interrupted.iter().all(|result| {
+            result.is_error
+                && result.outcome_unknown
+                && content_text(&result.content)
+                    == "Tool execution was interrupted before completion."
+        }));
+        assert!(agent.reset().is_ok());
         tool.release.notify_one();
         tokio::task::yield_now().await;
         assert!(!tool.settled.load(Ordering::SeqCst));

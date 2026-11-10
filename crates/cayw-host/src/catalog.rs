@@ -28,11 +28,21 @@ fn hash() -> Value {
 }
 
 pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)> {
+    let patch_old = match config.max_file_bytes {
+        Some(limit) => string(limit),
+        None => json!({"type":"string", "minLength":1}),
+    };
     let mut definitions = vec![
         definition(
             "fs.read",
-            "Read one bounded UTF-8 regular file and its SHA-256.",
-            json!({"path":path()}),
+            "Read a UTF-8 regular file. Without range arguments a small file is returned whole and a large file returns a bounded preview; start_line/max_lines or offset_bytes/max_bytes stream one range.",
+            json!({
+                "path":path(),
+                "start_line":{"type":"integer","minimum":1},
+                "max_lines":{"type":"integer","minimum":1},
+                "offset_bytes":{"type":"integer","minimum":0},
+                "max_bytes":{"type":"integer","minimum":1}
+            }),
             &["path"],
         ),
         definition(
@@ -59,7 +69,7 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             "fs.patch",
             "Atomically replace one unique exact text match after checking expected_sha256.",
             json!({
-                "path":path(), "old":string(config.max_file_bytes), "new":{"type":"string"}, "expected_sha256":hash()
+                "path":path(), "old":patch_old, "new":{"type":"string"}, "expected_sha256":hash()
             }),
             &["path", "old", "new", "expected_sha256"],
         ),
@@ -213,7 +223,9 @@ pub(crate) fn validate_arguments(
         )?;
     }
     if name == "fs.write" {
-        if args["content"].as_str().expect("schema validated").len() > config.max_file_bytes {
+        if let Some(limit) = config.max_file_bytes
+            && args["content"].as_str().expect("schema validated").len() > limit
+        {
             return Err(failure("file content exceeds byte limit"));
         }
         if args.get("expected_sha256").is_some()
@@ -228,8 +240,10 @@ pub(crate) fn validate_arguments(
         }
     }
     if name == "fs.patch"
-        && (args["old"].as_str().expect("schema validated").len() > config.max_file_bytes
-            || args["new"].as_str().expect("schema validated").len() > config.max_file_bytes)
+        && config.max_file_bytes.is_some_and(|limit| {
+            args["old"].as_str().expect("schema validated").len() > limit
+                || args["new"].as_str().expect("schema validated").len() > limit
+        })
     {
         return Err(failure("patch text exceeds file byte limit"));
     }

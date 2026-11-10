@@ -9,7 +9,7 @@ use crate::child::ManagedChild;
 use crate::measurement::{elapsed_ns, sha256};
 use cayw_ai::CancellationToken;
 use cayw_core::{CapabilityOutcome, CoreEvent, SessionState};
-use cayw_runtime::{RuntimeError, SessionView, TaskState};
+use cayw_runtime::{SessionView, TaskState};
 use serde_json::{Value, json};
 use std::{env, ffi::OsString, fs, path::Path, process::Command, sync::Arc, time::Instant};
 
@@ -383,30 +383,24 @@ pub async fn restart(
     );
     if effect {
         check_unknown(&recovered, &original_calls, report);
-        let denied = tokio::time::timeout(
-            DEADLINE,
-            runtime.prompt(id, provider::PROMPT, CancellationToken::new()),
-        )
-        .await?;
+        let forked = runtime.fork(id, "after-unknown", true);
         report.observe(
-            "prompt_frozen_unknown",
-            json!({"result":denied.as_ref().map_err(ToString::to_string)}),
+            "fork_after_unknown_recovery",
+            json!({"fork_ok":forked.is_ok()}),
         )?;
         report.check(
-            "unknown_blocks_new_work",
-            matches!(denied, Err(RuntimeError::NeedsReconciliation))
-                && runtime.tasks(id)?.len() == 1
-                && provider.calls() == 0,
-            "Unknown capability outcome freezes admission before any new task or Provider stream",
+            "unknown_keeps_session_idle_without_replaying",
+            forked.is_ok() && runtime.tasks(id)?.len() == 1 && provider.calls() == 0,
+            "Unknown capability outcome is retained internally while the session returns to Idle without replaying",
         );
         report.check("durable_effect_not_repeated",fs::read(&point)?==marker_bytes,
-            "The exact one marker survives kill, reopen, recover and refused replay; fixture uses create_new for any second invocation");
+            "The exact one marker survives kill, reopen and recover; fixture uses create_new for any second invocation");
         drop(runtime);
         let again = scenarios::open(&context.root, provider.clone(), true)?;
         let view = again.get(id)?;
         report.observe("second_reopen_still_unknown", &view)?;
         report.check("unknown_survives_another_reopen",view==recovered && provider.calls()==0,
-            "Reopen cannot clear unknown outcomes; no host reconciliation is fabricated by this fixture");
+            "Reopen preserves the internal unknown audit record; no host reconciliation is fabricated by this fixture");
     } else {
         report.task_check("before_dispatch_recovery_is_known",scenarios::clean(&recovered) && recovered.executions.is_empty()
             && !context.root.join("workspace/result.txt").exists(),"No capability started, so explicit recovery reaches known idle without executing the queued script");
@@ -451,12 +445,12 @@ fn check_unknown(
     report: &mut ScenarioReport,
 ) {
     let unknown = &view.unresolved_capabilities;
-    report.task_check("recovered_effect_is_unknown_and_frozen",view.state==SessionState::NeedsReconciliation
+    report.task_check("recovered_effect_is_unknown_and_idle",view.state==SessionState::Idle
         && view.attempt.is_none() && unknown.len()==1 && original.len()==1
         && unknown[0].key==original[0].key && unknown[0].lease==original[0].lease
         && unknown[0].task_id==original[0].task_id && unknown[0].source_hash==original[0].source_hash
         && unknown[0].parent_call_id==original[0].parent_call_id && unknown[0].arguments==original[0].arguments
         && unknown[0].authorization==original[0].authorization
         && matches!(unknown[0].outcome,Some(CapabilityOutcome::OutcomeUnknown{..})),
-        "Recovered unknown retains the original capability, complete lease, task, source, parent and authorization; session remains unavailable for execution");
+        "Recovered unknown retains the original capability, complete lease, task, source, parent and authorization while returning session to Idle");
 }

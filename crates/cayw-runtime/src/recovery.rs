@@ -307,8 +307,16 @@ impl Facts {
     fn clean(&self) -> bool {
         self.snapshot.state == SessionState::Idle
             && self.snapshot.attempt.is_none()
-            && self.snapshot.unresolved_calls.is_empty()
-            && self.snapshot.unresolved_capabilities.is_empty()
+            && self
+                .snapshot
+                .unresolved_calls
+                .iter()
+                .all(|call| call.state != cayw_core::CallState::Started)
+            && self
+                .snapshot
+                .unresolved_capabilities
+                .iter()
+                .all(|call| call.stage == cayw_core::CapabilityStage::Settled)
             && self.snapshot.pending_approvals.is_empty()
             && self.snapshot.executions.iter().all(|execution| {
                 !matches!(
@@ -825,24 +833,28 @@ pub(crate) fn call_terminal(
 ) -> Result<Option<HostCallTerminal>, RuntimeError> {
     let terminal = match outcome {
         Some(CapabilityOutcome::Completed { result }) => {
-            let mut pending = vec![(result, 1usize)];
             let mut fits = true;
-            while let Some((value, depth)) = pending.pop() {
-                if depth > limits.json_depth {
-                    fits = false;
-                    break;
-                }
-                match value {
-                    serde_json::Value::Array(items) => {
-                        pending.extend(items.iter().map(|item| (item, depth + 1)))
+            if let Some(max_depth) = limits.json_depth {
+                let mut pending = vec![(result, 1usize)];
+                while let Some((value, depth)) = pending.pop() {
+                    if depth > max_depth {
+                        fits = false;
+                        break;
                     }
-                    serde_json::Value::Object(items) => {
-                        pending.extend(items.values().map(|item| (item, depth + 1)))
+                    match value {
+                        serde_json::Value::Array(items) => {
+                            pending.extend(items.iter().map(|item| (item, depth + 1)))
+                        }
+                        serde_json::Value::Object(items) => {
+                            pending.extend(items.values().map(|item| (item, depth + 1)))
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
-            fits &= serde_json::to_vec(result)?.len() <= limits.item_bytes;
+            if let Some(item_bytes) = limits.item_bytes {
+                fits &= serde_json::to_vec(result)?.len() <= item_bytes;
+            }
             HostCallTerminal::Succeeded {
                 result: if fits {
                     HostResult::Value(result.clone())
@@ -927,25 +939,10 @@ fn hash_valid(value: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
-/// Shared-read Evidence binds the original raw result hash. When the Host
-/// result exceeds the Core metadata limit, the terminal stores a bounded
-/// receipt or handle that carries that original hash; comparing the handle's
-/// own hash would reject a valid read.
+/// Shared-read Evidence binds the original raw result hash, and the terminal
+/// now stores that original value verbatim.
 fn shared_read_result_matches(result: &serde_json::Value, expected: &str) -> bool {
     HostResult::value_hash(result) == expected
-        || bounded_original_hash(result).is_some_and(|hash| hash == expected)
-}
-fn bounded_original_hash(result: &serde_json::Value) -> Option<&str> {
-    let object = result.as_object()?;
-    if object.get("core_result_bounded").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
-    }
-    let externalized = object.get("externalized").and_then(|v| v.as_bool()) == Some(true);
-    let omitted = object.get("result_omitted").and_then(|v| v.as_bool()) == Some(true);
-    if !externalized && !omitted {
-        return None;
-    }
-    object.get("original_sha256")?.as_str()
 }
 fn corrupt(message: &str) -> RuntimeError {
     CoreError::CorruptStore(message.into()).into()

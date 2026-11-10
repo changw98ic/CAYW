@@ -680,8 +680,8 @@ fn schemas_and_exact_host_policy_are_bound_and_tools_cannot_self_grant() {
 #[test]
 fn budgets_preserve_space_for_revoke_task_end_and_immutable_events() {
     let config = RequestConfig {
-        max_requests_per_task: 2,
-        max_events: 15,
+        max_requests_per_task: Some(2),
+        max_events: Some(15),
         ..RequestConfig::default()
     };
     let fixture = Fixture::with_config(config);
@@ -790,7 +790,7 @@ fn event_failure_rolls_back_projection_and_oversized_input_never_persists() {
 #[test]
 fn rejected_request_preserves_observed_expiry_across_clock_rollback() {
     let fixture = Fixture::with_config(RequestConfig {
-        max_requests_per_task: 2,
+        max_requests_per_task: Some(2),
         ..RequestConfig::default()
     });
     let store = fixture.open();
@@ -935,8 +935,8 @@ fn host_config(
             "--nocapture".into(),
         ],
         env: BTreeMap::from([("CAYW_REQUEST_PROFILE_CHILD".into(), "1".into())]),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 8192,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(8192),
         allow_filter: false,
         io: cayw_host::ProcessIo::Pipes,
     };

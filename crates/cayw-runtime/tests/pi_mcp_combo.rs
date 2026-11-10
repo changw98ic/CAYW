@@ -180,7 +180,7 @@ async fn unified_bridge_combines_real_mcp_and_pi_compat_extension() {
                 }),
             ),
         ],
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         ..Default::default()
     };
 

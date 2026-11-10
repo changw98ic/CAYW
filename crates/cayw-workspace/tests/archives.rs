@@ -341,8 +341,14 @@ async fn archive_bombs_counts_depth_total_output_and_cancellation_are_bounded() 
         zip(&[("bomb", &vec![b'A'; 200_000])], true),
     )
     .unwrap();
-    let workspace =
-        Workspace::open(temp.path().canonicalize().unwrap(), Limits::default()).unwrap();
+    let workspace = Workspace::open(
+        temp.path().canonicalize().unwrap(),
+        Limits {
+            max_archive_expanded_bytes: Some(100_000),
+            ..Limits::default()
+        },
+    )
+    .unwrap();
     assert!(
         run(
             &workspace,
@@ -368,7 +374,7 @@ async fn archive_bombs_counts_depth_total_output_and_cancellation_are_bounded() 
     let limited = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_archive_entries: 1,
+            max_archive_entries: Some(1),
             ..Limits::default()
         },
     )
@@ -386,7 +392,7 @@ async fn archive_bombs_counts_depth_total_output_and_cancellation_are_bounded() 
     let limited = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_depth: 2,
+            max_depth: Some(2),
             ..Limits::default()
         },
     )
@@ -403,7 +409,7 @@ async fn archive_bombs_counts_depth_total_output_and_cancellation_are_bounded() 
     let limited = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_archive_expanded_bytes: 6,
+            max_archive_expanded_bytes: Some(6),
             ..Limits::default()
         },
     )
@@ -420,7 +426,7 @@ async fn archive_bombs_counts_depth_total_output_and_cancellation_are_bounded() 
     let limited = Workspace::open(
         temp.path().canonicalize().unwrap(),
         Limits {
-            max_output_bytes: 10,
+            max_output_bytes: Some(10),
             ..Limits::default()
         },
     )

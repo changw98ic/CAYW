@@ -159,11 +159,21 @@ pub(crate) async fn observe(
                     store.connection_error(&session, None)?;
                     limit = 32;
                 }
-                Err(error) if error.code == "response_too_large_outcome_unknown" && limit > 1 => {
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "response_too_large" | "response_too_large_outcome_unknown"
+                    ) && limit > 1 =>
+                {
                     // This read produced no event. Ask for fewer events at the same cursor.
                     limit /= 2;
                 }
-                Err(error) if error.code == "response_too_large_outcome_unknown" => {
+                Err(error)
+                    if matches!(
+                        error.code.as_str(),
+                        "response_too_large" | "response_too_large_outcome_unknown"
+                    ) =>
+                {
                     store.connection_error(
                         &session,
                         Some(format!(

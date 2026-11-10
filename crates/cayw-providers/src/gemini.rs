@@ -45,7 +45,10 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 common::append_turn(&mut contents, "model", "parts", parts);
             }
             Message::ToolResult(result) => {
-                let text = cayw_ai::content_text(&result.content);
+                let text = cayw_ai::interrupted_tool_text(
+                    &cayw_ai::content_text(&result.content),
+                    result.outcome_unknown,
+                );
                 let output = result
                     .structured_content
                     .clone()
@@ -55,7 +58,9 @@ pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
                 } else {
                     json!({"output":output})
                 };
-                if result.structured_content.is_some() && !text.is_empty() {
+                if result.structured_content.is_some()
+                    && (!text.is_empty() || result.outcome_unknown)
+                {
                     response["text"] = text.into();
                 }
                 outputs.insert(

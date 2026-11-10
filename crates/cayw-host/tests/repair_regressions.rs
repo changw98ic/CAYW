@@ -254,7 +254,7 @@ async fn opening_journals_cannot_restart_the_host_deadline() {
     let host = host(
         root.path(),
         HostConfig {
-            call_timeout: Duration::from_secs(1),
+            call_timeout: Some(Duration::from_secs(1)),
             workspace: Some(cayw_workspace::Limits {
                 syntax_validator: validator.clone(),
                 ..Default::default()
@@ -329,8 +329,8 @@ async fn replacement_diagnostic_consumes_remaining_bytes_and_blocks_another_admi
     let host = host(
         root.path(),
         HostConfig {
-            max_result_bytes: 64,
-            max_total_bytes: 64,
+            max_result_bytes: Some(64),
+            max_total_bytes: Some(64),
             ..Default::default()
         },
         gate.clone(),
@@ -360,7 +360,7 @@ async fn scopes_keep_independent_permissions_audits_and_one_cumulative_budget() 
     let parent = host(
         root.path(),
         HostConfig {
-            max_calls: 3,
+            max_calls: Some(3),
             ..Default::default()
         },
         parent_gate.clone(),
@@ -566,9 +566,9 @@ async fn host_wait_stops_keep_their_type_before_execution() {
                     audit.clone(),
                     HostConfig {
                         call_timeout: if cancelled {
-                            Duration::from_secs(5)
+                            Some(Duration::from_secs(5))
                         } else {
-                            Duration::from_millis(100)
+                            Some(Duration::from_millis(100))
                         },
                         ..Default::default()
                     },
@@ -625,8 +625,8 @@ async fn host_byte_budget_stops_leave_ordinary_errors_recoverable() {
     let host = host(
         root.path(),
         HostConfig {
-            max_argument_bytes: 128,
-            max_result_bytes: 128,
+            max_argument_bytes: Some(128),
+            max_result_bytes: Some(128),
             ..Default::default()
         },
         Arc::new(Gate::default()),
@@ -694,8 +694,8 @@ async fn diagnostics_from_gate_start_execution_and_settlement_are_json_bounded()
         let host = host(
             root.path(),
             HostConfig {
-                max_result_bytes: 16,
-                max_total_bytes: 128,
+                max_result_bytes: Some(16),
+                max_total_bytes: Some(128),
                 external: Some(Arc::new(ErrorExternal)),
                 ..Default::default()
             },
@@ -731,8 +731,8 @@ async fn settlement_failure_uses_reserved_bytes_and_keeps_bounded_audit_pairs() 
     let host = host(
         root.path(),
         HostConfig {
-            max_result_bytes: 16,
-            max_total_bytes: 24,
+            max_result_bytes: Some(16),
+            max_total_bytes: Some(24),
             external: Some(Arc::new(ErrorExternal)),
             ..Default::default()
         },
@@ -769,11 +769,11 @@ fn budgets_must_encode_an_empty_json_diagnostic() {
     let root = Root::new();
     for config in [
         HostConfig {
-            max_result_bytes: 1,
+            max_result_bytes: Some(1),
             ..Default::default()
         },
         HostConfig {
-            max_total_bytes: 1,
+            max_total_bytes: Some(1),
             ..Default::default()
         },
     ] {
@@ -796,7 +796,7 @@ async fn scopes_share_remaining_serialized_bytes_without_resetting_them() {
     let parent = host(
         root.path(),
         HostConfig {
-            max_total_bytes: 43,
+            max_total_bytes: Some(43),
             ..Default::default()
         },
         gate.clone(),
@@ -890,8 +890,8 @@ async fn gate_and_start_failures_charge_the_cumulative_budget() {
         let host = host(
             root.path(),
             HostConfig {
-                max_result_bytes: 16,
-                max_total_bytes: 20,
+                max_result_bytes: Some(16),
+                max_total_bytes: Some(20),
                 ..Default::default()
             },
             gate.clone(),
@@ -928,8 +928,8 @@ async fn exec_permission_denied_is_a_known_failure_and_leaves_host_usable() {
                     program,
                     args: vec![],
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(10),
-                    max_output_bytes: 1024,
+                    timeout: Some(Duration::from_secs(10)),
+                    max_output_bytes: Some(1024),
                     allow_filter: false,
                     io: cayw_device::ProcessIo::Pipes,
                 },
@@ -996,8 +996,8 @@ async fn replaced_root_keeps_profiles_and_git_in_the_opened_directory() {
                         "--nocapture".into(),
                     ],
                     env: BTreeMap::from([("CAYW_HOST_REPAIR_PROCESS".into(), "1".into())]),
-                    timeout: Duration::from_secs(5),
-                    max_output_bytes: 4096,
+                    timeout: Some(Duration::from_secs(5)),
+                    max_output_bytes: Some(4096),
                     allow_filter: false,
                     io: cayw_device::ProcessIo::Pipes,
                 },
@@ -1049,8 +1049,8 @@ async fn host_scopes_drain_dropped_processes_and_keep_other_tasks_independent() 
                     "--nocapture".into(),
                 ],
                 env: BTreeMap::from([("CAYW_HOST_REPAIR_WAIT".into(), "1".into())]),
-                timeout: Duration::from_secs(30),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(30)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: cayw_device::ProcessIo::Pipes,
             },
@@ -1256,8 +1256,8 @@ async fn git_snapshot_accepts_links_without_following_and_still_bounds_metadata_
                 root.path().join(".git/objects/linked"),
             )
             .unwrap(),
-            "byte-budget" => config.max_file_bytes = 1,
-            "entry-budget" => config.max_list_entries = 1,
+            "byte-budget" => config.max_file_bytes = Some(1),
+            "entry-budget" => config.max_list_entries = Some(1),
             _ => unreachable!(),
         }
         let host = host(

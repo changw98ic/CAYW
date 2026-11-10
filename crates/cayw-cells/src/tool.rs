@@ -26,14 +26,18 @@ impl CellTool {
 enum Action {
     Exec {
         script: String,
+        #[serde(default)]
         yield_time_ms: u64,
-        max_output_tokens: usize,
+        #[serde(default)]
+        max_output_tokens: Option<usize>,
     },
     Wait {
         cell_id: String,
         cursor: u64,
+        #[serde(default)]
         yield_time_ms: u64,
-        max_output_tokens: usize,
+        #[serde(default)]
+        max_output_tokens: Option<usize>,
         #[serde(default = "continue_default")]
         continue_execution: bool,
     },
@@ -44,12 +48,26 @@ fn continue_default() -> bool {
 #[async_trait]
 impl AgentTool for CellTool {
     fn definition(&self) -> ToolDefinition {
+        let limits = self.manager.limits();
+        let mut script = json!({"type":"string"});
+        if let Some(max) = limits.script_bytes {
+            script["maxLength"] = json!(max);
+        }
+        let mut yield_time_ms = json!({"type":"integer","minimum":0,"default":0});
+        if let Some(max) = limits.max_yield_time {
+            yield_time_ms["maximum"] = json!(u64::try_from(max.as_millis()).unwrap_or(u64::MAX));
+        }
+        let mut max_output_tokens =
+            json!({"type":"integer","minimum":1024,"default":limits.default_page_tokens()});
+        if let Some(max) = limits.max_output_tokens {
+            max_output_tokens["maximum"] = json!(max);
+        }
         ToolDefinition {
             name: "execute_code".into(),
-            description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.".into(),
+            description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\",\"yield_time_ms\":0,\"max_output_tokens\":1024}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms and max_output_tokens are optional: omitted values use 0 ms and a 131072-byte page. yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay.".into(),
             parameters: json!({"type":"object","oneOf":[
-                {"type":"object","properties":{"action":{"const":"exec"},"script":{"type":"string","maxLength":self.manager.limits().script_bytes},"yield_time_ms":{"type":"integer","minimum":0,"maximum":self.manager.limits().max_yield_time.as_millis() as u64},"max_output_tokens":{"type":"integer","minimum":1024,"maximum":self.manager.limits().max_output_tokens}},"required":["action","script","yield_time_ms","max_output_tokens"],"additionalProperties":false},
-                {"type":"object","properties":{"action":{"const":"wait"},"cell_id":{"type":"string","minLength":1,"maxLength":128},"cursor":{"type":"integer","minimum":0},"yield_time_ms":{"type":"integer","minimum":0,"maximum":self.manager.limits().max_yield_time.as_millis() as u64},"max_output_tokens":{"type":"integer","minimum":1024,"maximum":self.manager.limits().max_output_tokens},"continue_execution":{"type":"boolean"}},"required":["action","cell_id","cursor","yield_time_ms","max_output_tokens"],"additionalProperties":false}
+                {"type":"object","properties":{"action":{"const":"exec"},"script":script,"yield_time_ms":yield_time_ms,"max_output_tokens":max_output_tokens},"required":["action","script"],"additionalProperties":false},
+                {"type":"object","properties":{"action":{"const":"wait"},"cell_id":{"type":"string","minLength":1,"maxLength":128},"cursor":{"type":"integer","minimum":0},"yield_time_ms":yield_time_ms,"max_output_tokens":max_output_tokens,"continue_execution":{"type":"boolean"}},"required":["action","cell_id","cursor"],"additionalProperties":false}
             ]}),
         }
     }
@@ -95,7 +113,8 @@ impl AgentTool for CellTool {
                         ExecRequest {
                             script,
                             yield_time_ms,
-                            max_output_tokens,
+                            max_output_tokens: max_output_tokens
+                                .unwrap_or_else(|| self.manager.limits().default_page_tokens()),
                         },
                         &context.call_id,
                         context.cancel,
@@ -115,7 +134,8 @@ impl AgentTool for CellTool {
                             cell_id,
                             cursor,
                             yield_time_ms,
-                            max_output_tokens,
+                            max_output_tokens: max_output_tokens
+                                .unwrap_or_else(|| self.manager.limits().default_page_tokens()),
                             continue_execution,
                         },
                         context.cancel,

@@ -211,10 +211,7 @@ async fn run(
                     let admissions = admissions.clone();
                     let workspace_id = workspace_id.clone();
                     jobs.spawn(async move {
-                        let result = if matches!(
-                            request.method,
-                            "session.prompt" | "session.prompt_with_model_budget"
-                        ) {
+                        let result = if request.method == "session.prompt" {
                             prompt_task(
                                 &connection,
                                 workspace_id.as_deref(),
@@ -240,9 +237,9 @@ async fn run(
                 connecting = true;
                 let secret = token.clone();
                 jobs.spawn(async move {
-                    // Prompts may last as long as the host's run budget; short RPCs
-                    // retain their separate timeout below. The UI remains responsive.
-                    let config = ClientConfig { request_timeout: Duration::from_secs(3600), ..ClientConfig::default() };
+                    // Prompts run until completion, cancellation or disconnect; there
+                    // is no client-side deadline when the host has no run budget.
+                    let config = ClientConfig { request_timeout: None, ..ClientConfig::default() };
                     let result = match timeout(CONNECT_TIMEOUT, Client::connect_with_config(address, secret.clone(), config)).await {
                         Ok(result) => result.map_err(|error| redact(&error.to_string(), &secret)),
                         Err(_) => Err("IPC connection timed out".into()),
@@ -410,45 +407,6 @@ async fn prompt_task(
             disconnected: true,
         });
     }
-    if params["confirm"] == true {
-        let continuation = json!({
-            "session_id": session_id.clone(),
-            "task_id": task_id.clone(),
-            "expected": params["expected"],
-            "additional_tokens": params["additional_tokens"],
-            "token_limit": params["token_limit"],
-            "confirm": true,
-        });
-        if let Err(error) =
-            routed_request(client, workspace_id, "model.budget.continue", continuation).await
-        {
-            let original = failure(error);
-            let cleanup = cancel_unstarted_task(client, workspace_id, &session_id, &task_id).await;
-            return match cleanup {
-                Ok(result) if result["cancelled"] == true => Err(Failure {
-                    message: format!(
-                        "budget_continuation_not_executed: {}; continuation task remained queued and unclaimed until cancellation (outcome_unknown=false)",
-                        original.message
-                    ),
-                    disconnected: false,
-                }),
-                Ok(_) => Err(Failure {
-                    message: format!(
-                        "budget_continuation_cleanup_unknown: {}; the continuation task cancellation was not confirmed (outcome_unknown=true)",
-                        original.message
-                    ),
-                    disconnected: true,
-                }),
-                Err(cleanup) => Err(Failure {
-                    message: format!(
-                        "budget_continuation_cleanup_unknown: {}; continuation task cancellation failed: {} (outcome_unknown=true)",
-                        original.message, cleanup.message
-                    ),
-                    disconnected: true,
-                }),
-            };
-        }
-    }
     routed_request(
         client,
         workspace_id,
@@ -457,38 +415,6 @@ async fn prompt_task(
     )
     .await
     .map_err(failure)
-}
-
-async fn cancel_unstarted_task(
-    client: &Client,
-    workspace_id: Option<&str>,
-    session_id: &str,
-    task_id: &str,
-) -> Reply {
-    let task = routed_request(client, workspace_id, "task.get", json!({"task_id":task_id}))
-        .await
-        .map_err(failure)?;
-    let pristine = task["id"].as_str() == Some(task_id)
-        && task["session_id"].as_str() == Some(session_id)
-        && task["state"].as_str() == Some("queued")
-        && task.get("worker_id").is_some_and(Value::is_null)
-        && task.get("attempt_id").is_some_and(Value::is_null)
-        && task["dispatches"].as_u64() == Some(0)
-        && task["holds_slot"].as_bool() == Some(false)
-        && task["cancel_requested"].as_bool() == Some(false)
-        && task["fence"].as_u64().is_some();
-    if !pristine {
-        return Err(Failure {
-            message: "Task is no longer proven queued and unclaimed; its execution outcome must be inspected"
-                .into(),
-            disconnected: false,
-        });
-    }
-    let target = json!({"session_id":task["session_id"],"task_id":task["id"],
-        "worker_id":task["worker_id"],"attempt_id":task["attempt_id"],"fence":task["fence"]});
-    routed_request(client, workspace_id, "session.cancel", target)
-        .await
-        .map_err(failure)
 }
 
 async fn cancel_original_task(
@@ -522,25 +448,6 @@ async fn request_value(
     method: &str,
     params: Value,
 ) -> Reply {
-    if method == "model.budget.prepare_prompt" {
-        return match timeout(
-            REQUEST_TIMEOUT,
-            routed_request(
-                client,
-                workspace_id,
-                "model.budget.status",
-                json!({"session_id":params["session_id"]}),
-            ),
-        )
-        .await
-        {
-            Ok(result) => result.map_err(failure),
-            Err(_) => Err(Failure {
-                message: "model.budget.status timed out; no task was created".into(),
-                disconnected: true,
-            }),
-        };
-    }
     if method == "session.prompt" {
         return routed_request(client, workspace_id, method, params)
             .await

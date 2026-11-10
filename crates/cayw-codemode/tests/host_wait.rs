@@ -48,8 +48,8 @@ impl CapabilityHost for WaitingHost {
 }
 fn limits() -> Limits {
     Limits {
-        timeout: Duration::from_secs(1),
-        instruction_budget: u64::MAX,
+        timeout: Some(Duration::from_secs(1)),
+        instruction_budget: u32::MAX,
         ..Limits::default()
     }
 }
@@ -63,6 +63,45 @@ async fn release_after_calculation_budget(host: &WaitingHost) {
     // millisecond scheduling assertion. No timing upper bound is asserted.
     tokio::time::sleep(Duration::from_secs(2)).await;
     host.release.add_permits(1);
+}
+
+#[tokio::test]
+async fn absent_host_wait_keeps_waiting_for_the_slow_host_reply() {
+    assert_eq!(Limits::default().host_wait, None);
+    let host = WaitingHost::new();
+    let mode = CodeMode::new(
+        host.clone(),
+        Limits {
+            timeout: Some(Duration::from_secs(120)),
+            instruction_budget: u32::MAX,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let execution = tokio::spawn(async move {
+        mode.execute("return cayw.call('reply',{})", CancellationToken::new())
+            .await
+    });
+    host.entered
+        .acquire()
+        .await
+        .expect("the actual Host call must start")
+        .forget();
+    // The Host stays provably inside its call while the harness waits longer
+    // than a short implicit wait would allow. Only the reply releases it.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !execution.is_finished(),
+        "an absent Host wait must not stop the started call"
+    );
+    host.release.add_permits(1);
+    let report = execution
+        .await
+        .unwrap()
+        .expect("the delayed reply must be accepted");
+    assert_eq!(report.return_value, json!({"answer":"accepted"}));
+    assert_eq!(report.calls.len(), 1);
+    assert_eq!(report.calls[0].status, CallStatus::Succeeded);
 }
 
 #[tokio::test]

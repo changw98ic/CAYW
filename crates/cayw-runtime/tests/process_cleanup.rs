@@ -28,11 +28,11 @@ fn settings(root: &Path) -> RuntimeConfig {
     let mut config = RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
-        max_run_time: Duration::from_secs(90),
+        max_run_time: Some(Duration::from_secs(90)),
         ..Default::default()
     };
-    config.codemode.timeout = Duration::from_secs(60);
-    config.host.call_timeout = Duration::from_secs(60);
+    config.codemode.timeout = Some(Duration::from_secs(60));
+    config.host.call_timeout = Some(Duration::from_secs(60));
     config.host.profiles.insert(
         "tree".into(),
         Profile {
@@ -40,8 +40,8 @@ fn settings(root: &Path) -> RuntimeConfig {
             program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
             args: vec!["tree".into(), root.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -974,7 +974,7 @@ async fn provider_panic_preserves_unknown_effects_and_drains_the_original_proces
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     assert!(view.messages.iter().any(|message| matches!(message,
         cayw_ai::Message::Assistant(answer)
         if answer.error_message.as_deref() == Some("Provider stream panicked"))));
@@ -998,12 +998,9 @@ async fn provider_panic_preserves_unknown_effects_and_drains_the_original_proces
     assert!(stopped.cursor < terminal.cursor);
     assert_eq!(stopped.task_id.as_ref(), Some(&task.id));
     assert_eq!(stopped.data["state"], "drained");
-    assert!(
-        rt.enqueue(&id, "do not replay provider panic effects")
-            .is_err()
-    );
+    assert!(rt.enqueue(&id, "follow-up enqueue is not blocked").is_ok());
     let recovered = rt.recover(&id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(rt.task(&task.id).unwrap().state, TaskState::OutcomeUnknown);
 }
 
@@ -1351,7 +1348,7 @@ async fn killed_host_requires_observed_process_cleanup_before_recovery_releases_
         "cleanup evidence alone does not release the task"
     );
     let recovered = rt.recover(&id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert!(!recovered.unresolved_capabilities.is_empty());
     assert_eq!(rt.health().unwrap().running, 0);
     assert_eq!(rt.task(&task.id).unwrap().state, TaskState::Interrupted);
@@ -1361,7 +1358,7 @@ async fn killed_host_requires_observed_process_cleanup_before_recovery_releases_
             .iter()
             .any(|event| matches!(event.event, CoreEvent::AttemptRecovered { .. }))
     );
-    assert!(rt.enqueue(&id, "do not replay process effects").is_err());
+    assert!(rt.enqueue(&id, "follow-up enqueue is not blocked").is_ok());
     assert_eq!(
         rt.audit(&id, 0, 1000)
             .unwrap()
@@ -1393,11 +1390,11 @@ fn chain_settings(
     let mut config = RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
-        max_run_time: Duration::from_secs(90),
+        max_run_time: Some(Duration::from_secs(90)),
         ..Default::default()
     };
-    config.codemode.timeout = Duration::from_secs(60);
-    config.host.call_timeout = Duration::from_secs(60);
+    config.codemode.timeout = Some(Duration::from_secs(60));
+    config.host.call_timeout = Some(Duration::from_secs(60));
     let mut args = vec![
         "chain".into(),
         root.to_string_lossy().into_owned(),
@@ -1413,8 +1410,8 @@ fn chain_settings(
             program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
             args,
             env: BTreeMap::new(),
-            timeout: profile_timeout,
-            max_output_bytes,
+            timeout: Some(profile_timeout),
+            max_output_bytes: Some(max_output_bytes),
             allow_filter: false,
             io,
         },
@@ -1923,7 +1920,7 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
                 view.state,
                 match trigger {
                     ChainTrigger::Normal => SessionState::Idle,
-                    _ => SessionState::NeedsReconciliation,
+                    _ => SessionState::Idle,
                 },
                 "{label}: unexpected terminal"
             );
@@ -1998,7 +1995,8 @@ async fn chain_matrix_records_and_cleans_every_generation_per_trigger_point() {
 ///
 /// The propagation is measured end to end rather than read off a comment: the
 /// injected cause reaches the caller, the original call settles as
-/// `OutcomeUnknown`, and the session requires reconciliation. The Host classifies
+/// `OutcomeUnknown`, and the unconfirmed process slot keeps the original attempt
+/// live without offering the same effects for replay. The Host classifies
 /// every post-launch supervisor or I/O failure this way, so the unknown marking
 /// does not depend on `record_process_identity` calling `context.persistence_failed`
 /// itself — it is a backstop, not a substitute, and this test fixes which one
@@ -2037,8 +2035,8 @@ async fn a_failed_observation_record_marks_the_original_run_unknown() {
     let view = result.unwrap_or_else(|_| rt.get(&id).unwrap());
     assert_eq!(
         view.state,
-        SessionState::NeedsReconciliation,
-        "a failed identity record must leave the original run requiring reconciliation"
+        SessionState::Running,
+        "an unconfirmed process slot keeps its original attempt live"
     );
     let call = view
         .unresolved_capabilities
@@ -2192,7 +2190,7 @@ async fn runtime_deadline_stops_the_real_chain_before_resource_release() {
         4096,
         false,
     ));
-    config.max_run_time = Duration::from_secs(10);
+    config.max_run_time = Some(Duration::from_secs(10));
     let rt = Runtime::open(
         dir.path().join("session.db"),
         dir.path().join("workspace"),
@@ -2233,11 +2231,11 @@ async fn runtime_deadline_stops_the_real_chain_before_resource_release() {
     assert!(rows.iter().all(|row| row.state == "stopped"));
     assert_resources(&rt, &task, false);
     assert_eq!(rt.task(&task.id).unwrap().state, TaskState::OutcomeUnknown);
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
+    assert!(
+        rt.enqueue(&id, "follow-up after a released deadline slot")
+            .is_ok()
     );
-    assert!(rt.enqueue(&id, "do not replay deadline effects").is_err());
     let audit = rt.audit(&id, 0, 1000).unwrap();
     let stopped = audit
         .iter()
@@ -2392,7 +2390,7 @@ async fn provider_panic_stops_and_records_every_generation_in_both_io_modes() {
             .expect("the cell must reach a terminal")
             .unwrap();
         if let Ok(view) = &outcome {
-            assert_eq!(view.state, SessionState::NeedsReconciliation, "{label}");
+            assert_eq!(view.state, SessionState::Idle, "{label}");
             assert!(
                 view.messages.iter().any(|message| matches!(message,
                     cayw_ai::Message::Assistant(answer)
@@ -2446,8 +2444,9 @@ async fn provider_panic_stops_and_records_every_generation_in_both_io_modes() {
             "{label}: unexpected terminal"
         );
         assert!(
-            rt.enqueue(&id, "do not replay provider panic effects")
-                .is_err()
+            rt.enqueue(&id, "follow-up after a released panic slot")
+                .is_ok(),
+            "{label}: a confirmed cleanup releases capacity for new work"
         );
         eprintln!(
             "CHAIN_PANIC {}",
@@ -2692,7 +2691,7 @@ async fn a_killed_host_keeps_the_chain_draining_until_every_identity_is_verified
             "{label}: cleanup evidence alone does not release the task"
         );
         let recovered = rt.recover(&id).unwrap();
-        assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+        assert_eq!(recovered.state, SessionState::Idle);
         assert!(!recovered.unresolved_capabilities.is_empty());
         assert_eq!(rt.health().unwrap().running, 0);
         assert_eq!(rt.task(&task.id).unwrap().state, TaskState::Interrupted);
@@ -2711,7 +2710,7 @@ async fn a_killed_host_keeps_the_chain_draining_until_every_identity_is_verified
         assert_eq!(stopped[0].data["state"], "host_verified");
         assert_eq!(stopped[0].data["actor"], "fixture-host");
         assert_eq!(stopped[0].task_id.as_ref(), Some(&task.id));
-        assert!(rt.enqueue(&id, "do not replay process effects").is_err());
+        assert!(rt.enqueue(&id, "follow-up enqueue is not blocked").is_ok());
         eprintln!(
             "CHAIN_HOST_KILL {}",
             json!({
@@ -3910,7 +3909,7 @@ async fn a_success_submitted_after_the_cancel_through_the_original_sink_is_refus
             .any(|outcome| outcome.contains("Completed")),
         "the new task must never be handed the old successful result: {other_outcomes:?}"
     );
-    assert_eq!(other_view.state, SessionState::NeedsReconciliation);
+    assert_eq!(other_view.state, SessionState::Idle);
     // The cancelled session is still exactly as it was.
     assert_eq!(rt.task(&task.id).unwrap(), terminal_before);
     let cells_end = cell_bodies(dir.path());

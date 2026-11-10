@@ -246,7 +246,7 @@ async fn unload_exact_never_removes_a_replacement_or_foreign_instance() {
                 "fixture.echo",
                 json!({"n":2}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await
             .unwrap(),
@@ -279,7 +279,7 @@ async fn registry_denies_missing_grants_and_permissions_before_invocation() {
                     "fixture.echo",
                     json!({}),
                     CancellationToken::new(),
-                    Duration::from_secs(1)
+                    Some(Duration::from_secs(1))
                 )
                 .await,
             Err(PluginError::Denied(_))
@@ -305,7 +305,7 @@ async fn registry_denies_missing_grants_and_permissions_before_invocation() {
                 "fixture.echo",
                 json!({"n":2}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await
             .unwrap(),
@@ -328,7 +328,7 @@ async fn registry_strictly_validates_arguments_and_never_converts_response_into_
                     "fixture.echo",
                     arguments,
                     CancellationToken::new(),
-                    Duration::from_secs(1)
+                    Some(Duration::from_secs(1))
                 )
                 .await,
             Err(PluginError::InvalidArguments(_))
@@ -341,7 +341,7 @@ async fn registry_strictly_validates_arguments_and_never_converts_response_into_
                 "other",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await,
         Err(PluginError::Denied(_))
@@ -399,7 +399,7 @@ async fn queued_name_call_selects_the_replacement_at_first_poll() {
         "fixture.echo",
         json!({"n": 7}),
         CancellationToken::new(),
-        Duration::from_secs(1),
+        Some(Duration::from_secs(1)),
     );
     registry.unload("fixture").unwrap();
     let replacement = Arc::new(Native::new("fixture", "fixture.echo", false));
@@ -424,7 +424,7 @@ async fn queued_exact_call_rejects_an_identical_replacement_before_execution() {
         "fixture.echo",
         json!({"n": 7}),
         CancellationToken::new(),
-        Duration::from_secs(1),
+        Some(Duration::from_secs(1)),
     );
     registry.unload("fixture").unwrap();
     let replacement = Arc::new(Native::new("fixture", "fixture.echo", false));
@@ -455,7 +455,7 @@ async fn queued_exact_call_rejects_a_changed_manifest_without_refreshing_the_pin
         "fixture.echo",
         json!({}),
         CancellationToken::new(),
-        Duration::from_secs(1),
+        Some(Duration::from_secs(1)),
     );
     registry.unload("fixture").unwrap();
     let mut replacement = Native::new("fixture", "fixture.echo", false);
@@ -479,7 +479,7 @@ async fn queued_exact_call_rejects_a_changed_manifest_without_refreshing_the_pin
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await,
         Err(PluginError::Unavailable(_))
@@ -492,7 +492,7 @@ async fn queued_exact_call_rejects_a_changed_manifest_without_refreshing_the_pin
                 "fixture.echo",
                 json!({"n": 8}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await
             .unwrap(),
@@ -521,7 +521,7 @@ async fn exact_call_rejects_a_foreign_registry_with_matching_generation_and_mani
         "fixture.echo",
         json!({}),
         CancellationToken::new(),
-        Duration::from_secs(1),
+        Some(Duration::from_secs(1)),
     );
 
     let error = queued.await.unwrap_err();
@@ -567,7 +567,7 @@ async fn exact_call_compares_the_full_manifest_even_with_matching_registry_and_g
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await
             .unwrap_err();
@@ -589,7 +589,7 @@ async fn queued_exact_call_to_an_unloaded_plugin_never_starts() {
         "fixture.echo",
         json!({}),
         CancellationToken::new(),
-        Duration::from_secs(1),
+        Some(Duration::from_secs(1)),
     );
     registry.unload("fixture").unwrap();
 
@@ -619,7 +619,7 @@ async fn exact_call_enforces_grants_permissions_and_schema_before_invocation() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await
             .unwrap_err();
@@ -647,7 +647,7 @@ async fn exact_call_enforces_grants_permissions_and_schema_before_invocation() {
                 "fixture.echo",
                 arguments,
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await
             .unwrap_err();
@@ -661,7 +661,7 @@ async fn exact_call_enforces_grants_permissions_and_schema_before_invocation() {
                 "other",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await,
         Err(PluginError::Denied(_))
@@ -674,7 +674,7 @@ async fn exact_call_enforces_grants_permissions_and_schema_before_invocation() {
                 "fixture.echo",
                 json!({"n": 9}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await
             .unwrap(),
@@ -695,7 +695,7 @@ async fn exact_call_keeps_running_effects_unknown_when_unloaded_and_replaced() {
         "fixture.echo",
         json!({}),
         CancellationToken::new(),
-        Duration::from_secs(5),
+        Some(Duration::from_secs(5)),
     );
     tokio::pin!(call);
     assert!(futures::poll!(call.as_mut()).is_pending());
@@ -721,7 +721,7 @@ async fn exact_call_keeps_running_effects_unknown_when_unloaded_and_replaced() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1),
+                Some(Duration::from_secs(1)),
             )
             .await,
         Err(PluginError::Unavailable(_))
@@ -739,9 +739,9 @@ async fn exact_call_cancel_timeout_and_drop_preserve_the_cancellation_contract()
             .unwrap();
         let cancel = CancellationToken::new();
         let timeout = if stop == "timeout" {
-            Duration::from_millis(20)
+            Some(Duration::from_millis(20))
         } else {
-            Duration::from_secs(5)
+            Some(Duration::from_secs(5))
         };
         let mut call = Box::pin(registry.call_exact(
             &expected,
@@ -839,7 +839,7 @@ async fn reentrant_exact_call_checks_the_captured_entry_at_settlement_without_de
                     "fixture.echo",
                     json!({}),
                     CancellationToken::new(),
-                    Duration::from_secs(2),
+                    Some(Duration::from_secs(2)),
                 )
                 .await
                 .unwrap_err();
@@ -861,7 +861,7 @@ async fn reentrant_exact_call_checks_the_captured_entry_at_settlement_without_de
                         "fixture.echo",
                         json!({"n": 10}),
                         CancellationToken::new(),
-                        Duration::from_secs(1),
+                        Some(Duration::from_secs(1)),
                     )
                     .await
                     .unwrap(),
@@ -895,7 +895,7 @@ async fn unload_cancels_running_native_and_rejects_old_generation() {
                     "fixture.echo",
                     json!({}),
                     CancellationToken::new(),
-                    Duration::from_secs(10),
+                    Some(Duration::from_secs(10)),
                 )
                 .await
         })
@@ -920,7 +920,7 @@ async fn unload_cancels_running_native_and_rejects_old_generation() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await
             .unwrap(),
@@ -934,7 +934,7 @@ async fn unload_cancels_running_native_and_rejects_old_generation() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await,
         Err(PluginError::NotFound(_))
@@ -960,7 +960,7 @@ async fn cancelled_and_dropped_native_calls_propagate_token() {
                         "fixture.echo",
                         json!({}),
                         cancel,
-                        Duration::from_secs(5),
+                        Some(Duration::from_secs(5)),
                     )
                     .await
             })
@@ -1001,7 +1001,7 @@ async fn independent_plugins_run_without_global_await_lock() {
                     "wait",
                     json!({}),
                     CancellationToken::new(),
-                    Duration::from_secs(10),
+                    Some(Duration::from_secs(10)),
                 )
                 .await
         })
@@ -1014,7 +1014,7 @@ async fn independent_plugins_run_without_global_await_lock() {
             "echo",
             json!({}),
             CancellationToken::new(),
-            Duration::from_secs(1),
+            Some(Duration::from_secs(1)),
         ),
     )
     .await

@@ -321,7 +321,7 @@ async fn oversized_outgoing_tool_request_frame_rejected_without_unknown_outcome_
             name: "add".into(),
             arguments: json!({"a": 10, "b": 20, "extra": big_string}),
         },
-        max_result_bytes: 4096,
+        max_result_bytes: Some(4096),
     };
     let err = handle
         .request(oversized_req, CancellationToken::new())
@@ -341,7 +341,7 @@ async fn oversized_outgoing_tool_request_frame_rejected_without_unknown_outcome_
             name: "add".into(),
             arguments: json!({"a": 10, "b": 20}),
         },
-        max_result_bytes: 4096,
+        max_result_bytes: Some(4096),
     };
     let reply = handle
         .request(normal_req, CancellationToken::new())

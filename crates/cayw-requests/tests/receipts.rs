@@ -173,8 +173,8 @@ fn a_process_io_change_invalidates_the_original_permission_receipt() {
                 program: "/usr/bin/true".into(),
                 args: vec![],
                 env: Default::default(),
-                timeout: std::time::Duration::from_secs(10),
-                max_output_bytes: 1024,
+                timeout: Some(std::time::Duration::from_secs(10)),
+                max_output_bytes: Some(1024),
                 allow_filter: false,
                 io,
             },
@@ -751,7 +751,7 @@ async fn per_call_host_scopes_share_the_original_call_budget() {
     let fixture = Fixture::new();
     let audit = Arc::new(Audit::default());
     let mut config = fixture.config(Arc::new(Allow), audit.clone());
-    config.host.max_calls = 1;
+    config.host.max_calls = Some(1);
     let catalog = config.catalog().unwrap();
     let current = fixture
         .store
@@ -859,7 +859,7 @@ async fn denied_protected_calls_still_use_the_shared_host_admission_budget() {
     let fixture = Fixture::new();
     let audit = Arc::new(Audit::default());
     let mut config = fixture.config(Arc::new(Allow), audit.clone());
-    config.host.max_calls = 1;
+    config.host.max_calls = Some(1);
     let catalog = config.catalog().unwrap();
     let current = fixture
         .store

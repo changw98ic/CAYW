@@ -556,6 +556,7 @@ impl ProcessRunner {
                 env: spec.env,
                 timeout: spec.timeout,
                 max_output_bytes: spec.max_output_bytes,
+                output_spill_dir: spec.output_spill_dir,
                 io: spec.io,
             })
         }
@@ -568,12 +569,14 @@ impl ProcessRunner {
         if !spec.program.is_absolute() {
             return Err(DeviceError::InvalidSpec("program must be absolute"));
         }
-        if spec.timeout.is_zero() || Instant::now().checked_add(spec.timeout).is_none() {
+        if let Some(timeout) = spec.timeout
+            && (timeout.is_zero() || Instant::now().checked_add(timeout).is_none())
+        {
             return Err(DeviceError::InvalidSpec(
                 "timeout must be positive and representable",
             ));
         }
-        if spec.max_output_bytes == 0 {
+        if spec.max_output_bytes == Some(0) {
             return Err(DeviceError::InvalidSpec(
                 "max_output_bytes must be positive",
             ));
@@ -641,6 +644,7 @@ impl ProcessRunner {
                 env: spec.env,
                 timeout: spec.timeout,
                 max_output_bytes: spec.max_output_bytes,
+                output_spill_dir: spec.output_spill_dir,
                 io: spec.io,
             },
             resources: None,
@@ -844,8 +848,9 @@ mod cleanup_ownership {
                 args: vec!["60".into()],
                 cwd: std::env::temp_dir(),
                 env: Default::default(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 1024,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(1024),
+                output_spill_dir: None,
                 io: crate::ProcessIo::Pipes,
             })
             .unwrap();
@@ -899,8 +904,9 @@ mod cleanup_ownership {
                 args: vec![],
                 cwd: std::env::temp_dir(),
                 env: Default::default(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 1024,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(1024),
+                output_spill_dir: None,
                 io: crate::ProcessIo::Pipes,
             })
             .unwrap();
@@ -1035,8 +1041,9 @@ mod cleanup_ownership {
                 args: vec![],
                 cwd: std::env::temp_dir(),
                 env: Default::default(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 10,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(10),
+                output_spill_dir: None,
                 io: crate::ProcessIo::Pipes,
             })
             .unwrap();
@@ -1174,8 +1181,9 @@ mod directory_races {
                     args: vec!["marker".into()],
                     cwd: original.clone(),
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(10),
-                    max_output_bytes: 1024,
+                    timeout: Some(Duration::from_secs(10)),
+                    max_output_bytes: Some(1024),
+                    output_spill_dir: None,
                     io: crate::ProcessIo::Pipes,
                 })
                 .unwrap();
@@ -1209,9 +1217,12 @@ impl Drop for CancelOnDrop {
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use crate::TerminationReason;
-    use std::io::{self, Read};
+    use crate::{HEAD_BYTES, INLINE_OUTPUT_BYTES, SpilledOutput, TAIL_BYTES, TerminationReason};
+    use sha2::{Digest, Sha256};
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
     use std::os::fd::{AsRawFd, RawFd};
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, ExitStatus, Stdio};
     use std::time::Duration;
@@ -1234,13 +1245,13 @@ mod unix {
     fn lock_launch(
         cancellation: &CancellationToken,
         abandoned: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<std::sync::MutexGuard<'static, ()>, DeviceError> {
         loop {
             if cancellation.is_cancelled() || abandoned.is_cancelled() {
                 return Err(DeviceError::Cancelled);
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(DeviceError::not_started(
                     "launch deadline reached",
                     io::Error::from_raw_os_error(libc::ETIMEDOUT),
@@ -1259,7 +1270,7 @@ mod unix {
             if cancellation.is_cancelled() || abandoned.is_cancelled() {
                 return Err(DeviceError::Cancelled);
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 return Err(DeviceError::not_started(
                     "launch deadline reached",
                     io::Error::from_raw_os_error(libc::ETIMEDOUT),
@@ -2059,8 +2070,9 @@ mod unix {
                 args: vec!["overflow".into()],
                 cwd: std::env::temp_dir(),
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 1,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(1),
+                output_spill_dir: None,
                 io: crate::ProcessIo::Pipes,
             };
             let runner = ProcessRunner::new([spec.program.clone()]).unwrap();
@@ -2102,8 +2114,9 @@ mod unix {
                     args: vec!["overflow".into()],
                     cwd: std::env::temp_dir(),
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(10),
-                    max_output_bytes: 1,
+                    timeout: Some(Duration::from_secs(10)),
+                    max_output_bytes: Some(1),
+                    output_spill_dir: None,
                     io: crate::ProcessIo::Pipes,
                 },
                 CancellationToken::new(),
@@ -2205,8 +2218,9 @@ mod unix {
                             args: vec!["60".into()],
                             cwd: std::env::temp_dir(),
                             env: BTreeMap::new(),
-                            timeout: Duration::from_secs(10),
-                            max_output_bytes: 1024,
+                            timeout: Some(Duration::from_secs(10)),
+                            max_output_bytes: Some(1024),
+                            output_spill_dir: None,
                             io,
                         },
                         CancellationToken::new(),
@@ -2262,8 +2276,9 @@ mod unix {
                         args: vec!["60".into()],
                         cwd: std::env::temp_dir(),
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(10),
-                        max_output_bytes: 1024,
+                        timeout: Some(Duration::from_secs(10)),
+                        max_output_bytes: Some(1024),
+                        output_spill_dir: None,
                         io: crate::ProcessIo::Pipes,
                     },
                     CancellationToken::new(),
@@ -2315,8 +2330,9 @@ mod unix {
                         args: vec![],
                         cwd: std::env::temp_dir(),
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(10),
-                        max_output_bytes: 1024,
+                        timeout: Some(Duration::from_secs(10)),
+                        max_output_bytes: Some(1024),
+                        output_spill_dir: None,
                         io: crate::ProcessIo::Pipes,
                     })
                     .unwrap();
@@ -2372,8 +2388,9 @@ mod unix {
                     args: vec!["60".into()],
                     cwd: std::env::temp_dir(),
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(10),
-                    max_output_bytes: 1024,
+                    timeout: Some(Duration::from_secs(10)),
+                    max_output_bytes: Some(1024),
+                    output_spill_dir: None,
                     io: crate::ProcessIo::Pipes,
                 },
                 CancellationToken::new(),
@@ -2420,8 +2437,9 @@ mod unix {
                             args: vec![],
                             cwd: fs::File::open(std::env::temp_dir()).unwrap(),
                             env: BTreeMap::new(),
-                            timeout: Duration::from_secs(10),
-                            max_output_bytes: 10,
+                            timeout: Some(Duration::from_secs(10)),
+                            max_output_bytes: Some(10),
+                            output_spill_dir: None,
                             io: crate::ProcessIo::Pipes,
                         },
                         InteractiveLimits {
@@ -2471,8 +2489,9 @@ mod unix {
                         args: vec![],
                         cwd: std::env::temp_dir(),
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(30),
-                        max_output_bytes: 1024,
+                        timeout: Some(Duration::from_secs(30)),
+                        max_output_bytes: Some(1024),
+                        output_spill_dir: None,
                         io,
                     },
                     cancel.clone(),
@@ -2594,8 +2613,9 @@ mod unix {
                     args: vec!["abc".into()],
                     cwd: std::env::temp_dir(),
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(30),
-                    max_output_bytes: 3,
+                    timeout: Some(Duration::from_secs(30)),
+                    max_output_bytes: Some(3),
+                    output_spill_dir: None,
                     io,
                 };
                 let (first_pause, mut first_control) = LaunchControl::pair();
@@ -2679,8 +2699,9 @@ mod unix {
                     args: vec![],
                     cwd: std::env::temp_dir(),
                     env: BTreeMap::new(),
-                    timeout,
-                    max_output_bytes: 10,
+                    timeout: Some(timeout),
+                    max_output_bytes: Some(10),
+                    output_spill_dir: None,
                     io: crate::ProcessIo::Pipes,
                 };
                 let (pause, mut control) = LaunchControl::pair();
@@ -2810,8 +2831,9 @@ mod unix {
                     args: vec!["60".into()],
                     cwd: fs::File::open(std::env::temp_dir()).unwrap(),
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(10),
-                    max_output_bytes: 10,
+                    timeout: Some(Duration::from_secs(10)),
+                    max_output_bytes: Some(10),
+                    output_spill_dir: None,
                     io: crate::ProcessIo::Pipes,
                 },
                 InteractiveLimits {
@@ -2873,8 +2895,9 @@ mod unix {
                         args: vec!["overflow".into()],
                         cwd: fs::File::open(std::env::temp_dir()).unwrap(),
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(10),
-                        max_output_bytes: 1,
+                        timeout: Some(Duration::from_secs(10)),
+                        max_output_bytes: Some(1),
+                        output_spill_dir: None,
                         io: crate::ProcessIo::Pipes,
                     },
                     InteractiveLimits {
@@ -2901,8 +2924,9 @@ mod unix {
                         args: vec!["ok".into()],
                         cwd: std::env::temp_dir(),
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(10),
-                        max_output_bytes: 10,
+                        timeout: Some(Duration::from_secs(10)),
+                        max_output_bytes: Some(10),
+                        output_spill_dir: None,
                         io: crate::ProcessIo::Pipes,
                     },
                     CancellationToken::new(),
@@ -2963,8 +2987,9 @@ mod unix {
                         args: vec!["ok".into()],
                         cwd: fs::File::open(std::env::temp_dir()).unwrap(),
                         env: BTreeMap::new(),
-                        timeout: Duration::from_secs(10),
-                        max_output_bytes: 10,
+                        timeout: Some(Duration::from_secs(10)),
+                        max_output_bytes: Some(10),
+                        output_spill_dir: None,
                         io: crate::ProcessIo::Pipes,
                     },
                     InteractiveLimits {
@@ -3013,8 +3038,9 @@ mod unix {
                 args: vec!["overflow".into()],
                 cwd: std::env::temp_dir(),
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 1,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(1),
+                output_spill_dir: None,
                 io: crate::ProcessIo::Pipes,
             };
             let mut run =
@@ -3107,7 +3133,7 @@ mod unix {
             let mut stdout = Pipe::new(out_reader, PipeSink::Collected).unwrap();
             let mut stderr = Pipe::new(err_reader, PipeSink::Collected).unwrap();
             let mut budget = OutputBudget {
-                remaining: 3,
+                remaining: Some(3),
                 read: 0,
             };
             let out_overflow = stdout.drain(&mut budget).unwrap();
@@ -3115,7 +3141,7 @@ mod unix {
             assert!(out_overflow && err_overflow);
             assert_eq!(stdout.bytes, b"std");
             assert!(stderr.bytes.is_empty());
-            assert_eq!(budget.remaining, 0);
+            assert_eq!(budget.remaining, Some(0));
             assert_eq!(budget.read, 38);
             assert!(stdout.reader.is_none() && stderr.reader.is_none());
         }
@@ -3143,7 +3169,7 @@ mod unix {
                 let mut pipe =
                     Pipe::new(FailingReader(fs::File::open("/dev/null").unwrap()), sink).unwrap();
                 let mut budget = OutputBudget {
-                    remaining: 10,
+                    remaining: Some(10),
                     read: 0,
                 };
                 assert_eq!(
@@ -3154,7 +3180,7 @@ mod unix {
             let mut pipe =
                 Pipe::new(fs::File::open("/dev/zero").unwrap(), PipeSink::Discard).unwrap();
             let mut budget = OutputBudget {
-                remaining: 10,
+                remaining: Some(10),
                 read: usize::MAX,
             };
             assert!(pipe.drain(&mut budget).is_err());
@@ -3171,7 +3197,7 @@ mod unix {
             let mut pipe = Pipe::new(consumer, PipeSink::Stdout(shared.clone())).unwrap();
             producer.write_all(b"abcdef").unwrap();
             let mut budget = OutputBudget {
-                remaining: 10,
+                remaining: Some(10),
                 read: 0,
             };
             assert!(!pipe.drain(&mut budget).unwrap());
@@ -3361,8 +3387,9 @@ mod unix {
                 args: vec!["overflow".into()],
                 cwd: std::env::temp_dir(),
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 1,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(1),
+                output_spill_dir: None,
                 io: crate::ProcessIo::Pipes,
             };
             let run = runner.run_with_permit(spec, CancellationToken::new(), permit);
@@ -3485,13 +3512,16 @@ mod unix {
     }
 
     struct OutputBudget {
-        remaining: usize,
+        /// `Some` enforces the exact combined stdout+stderr lifetime limit.
+        /// `None` never terminates the process for output volume.
+        remaining: Option<usize>,
         read: usize,
     }
 
     enum PipeSink {
         Collected,
         Stdout(Arc<InteractiveShared>),
+        Spill(Box<SpillBuffer>),
         Discard,
     }
 
@@ -3502,6 +3532,12 @@ mod unix {
         cleaning: bool,
         discarded: bool,
         terminal_eof: bool,
+    }
+
+    struct FinishedOutput {
+        bytes: Vec<u8>,
+        spilled: Option<SpilledOutput>,
+        incomplete: bool,
     }
 
     impl<T: Read + AsRawFd> Pipe<T> {
@@ -3568,8 +3604,10 @@ mod unix {
                             .read
                             .checked_add(count)
                             .ok_or_else(|| io::Error::other("raw output byte count exhausted"))?;
-                        let keep = count.min(budget.remaining);
-                        match &self.sink {
+                        let keep = budget
+                            .remaining
+                            .map_or(count, |remaining| count.min(remaining));
+                        match &mut self.sink {
                             PipeSink::Collected => {
                                 self.bytes
                                     .try_reserve_exact(keep)
@@ -3579,12 +3617,16 @@ mod unix {
                             PipeSink::Stdout(shared) => {
                                 self.discarded |= !shared.push_stdout(&buffer[..keep])?
                             }
+                            PipeSink::Spill(spill) => spill.push(&buffer[..keep]),
                             PipeSink::Discard => {}
                         }
-                        budget.remaining = budget
-                            .remaining
-                            .checked_sub(keep)
-                            .ok_or_else(|| io::Error::other("output budget underflow"))?;
+                        if let Some(remaining) = budget.remaining {
+                            budget.remaining = Some(
+                                remaining
+                                    .checked_sub(keep)
+                                    .ok_or_else(|| io::Error::other("output budget underflow"))?,
+                            );
+                        }
                         overflow |= keep != count;
                     }
                     Err(error) if self.terminal_eof && error.raw_os_error() == Some(libc::EIO) => {
@@ -3602,6 +3644,254 @@ mod unix {
             }
             Ok(overflow)
         }
+
+        fn finish(self) -> FinishedOutput {
+            let Pipe { bytes, sink, .. } = self;
+            match sink {
+                PipeSink::Collected => FinishedOutput {
+                    bytes,
+                    spilled: None,
+                    incomplete: false,
+                },
+                PipeSink::Spill(spill) => (*spill).finish(),
+                PipeSink::Stdout(_) | PipeSink::Discard => FinishedOutput {
+                    bytes,
+                    spilled: None,
+                    incomplete: false,
+                },
+            }
+        }
+    }
+
+    /// Bounded spill writer for one stream. Up to [`INLINE_OUTPUT_BYTES`] stays
+    /// in memory without touching the filesystem. Beyond that, the whole stream
+    /// is written sequentially to a private file while only the first
+    /// [`HEAD_BYTES`] and the rolling last [`TAIL_BYTES`] remain in memory.
+    struct SpillBuffer {
+        directory: PathBuf,
+        stream: &'static str,
+        buffer: Vec<u8>,
+        head: Vec<u8>,
+        tail: VecDeque<u8>,
+        file: Option<fs::File>,
+        hasher: Option<Sha256>,
+        path: Option<PathBuf>,
+        total: u64,
+        spilled: bool,
+        failed: bool,
+    }
+
+    impl SpillBuffer {
+        fn new(directory: PathBuf, stream: &'static str) -> Self {
+            Self {
+                directory,
+                stream,
+                buffer: Vec::new(),
+                head: Vec::new(),
+                tail: VecDeque::new(),
+                file: None,
+                hasher: None,
+                path: None,
+                total: 0,
+                spilled: false,
+                failed: false,
+            }
+        }
+
+        fn push(&mut self, bytes: &[u8]) {
+            self.total = self.total.saturating_add(bytes.len() as u64);
+            if self.spilled {
+                self.absorb(bytes);
+                self.write(bytes);
+                return;
+            }
+            if self.failed {
+                self.absorb(bytes);
+                return;
+            }
+            if self.buffer.len().saturating_add(bytes.len()) <= INLINE_OUTPUT_BYTES {
+                if self.buffer.try_reserve(bytes.len()).is_ok() {
+                    self.buffer.extend_from_slice(bytes);
+                } else {
+                    // Allocation failure must not panic or keep growing. Fall
+                    // back to the bounded head/tail representation.
+                    self.failed = true;
+                    self.spilled = true;
+                    let buffered = std::mem::take(&mut self.buffer);
+                    self.absorb(&buffered);
+                    self.absorb(bytes);
+                }
+                return;
+            }
+            self.spilled = true;
+            let buffered = std::mem::take(&mut self.buffer);
+            self.start_file();
+            self.absorb(&buffered);
+            self.absorb(bytes);
+            self.write(&buffered);
+            self.write(bytes);
+        }
+
+        fn start_file(&mut self) {
+            for _ in 0..8 {
+                let path = unique_spill_path(&self.directory, self.stream);
+                let opened = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path);
+                match opened {
+                    Ok(file) => {
+                        self.file = Some(file);
+                        self.hasher = Some(Sha256::new());
+                        self.path = Some(path);
+                        return;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(_) => break,
+                }
+            }
+            // A spill failure keeps bounded head/tail data and marks the run's
+            // output incomplete; it never fails or kills the child.
+            self.fail();
+        }
+
+        fn fail(&mut self) {
+            self.failed = true;
+            self.file = None;
+            self.hasher = None;
+            if let Some(path) = self.path.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            if self.failed {
+                return;
+            }
+            let write_failed = match (self.file.as_mut(), self.hasher.as_mut()) {
+                (Some(file), Some(hasher)) => match file.write_all(bytes) {
+                    Ok(()) => {
+                        hasher.update(bytes);
+                        false
+                    }
+                    Err(_) => true,
+                },
+                _ => false,
+            };
+            if write_failed {
+                self.fail();
+            }
+        }
+
+        fn absorb(&mut self, bytes: &[u8]) {
+            if self.head.len() < HEAD_BYTES {
+                let take = (HEAD_BYTES - self.head.len()).min(bytes.len());
+                if self.head.try_reserve(take).is_ok() {
+                    self.head.extend_from_slice(&bytes[..take]);
+                }
+            }
+            if bytes.len() >= TAIL_BYTES {
+                self.tail.clear();
+                if self.tail.try_reserve(TAIL_BYTES).is_ok() {
+                    self.tail
+                        .extend(bytes[bytes.len() - TAIL_BYTES..].iter().copied());
+                }
+            } else {
+                let overflow = self
+                    .tail
+                    .len()
+                    .saturating_add(bytes.len())
+                    .saturating_sub(TAIL_BYTES);
+                if overflow > 0 {
+                    self.tail.drain(..overflow);
+                }
+                if self.tail.try_reserve(bytes.len()).is_ok() {
+                    self.tail.extend(bytes.iter().copied());
+                }
+            }
+        }
+
+        fn finish(mut self) -> FinishedOutput {
+            if !self.spilled {
+                return FinishedOutput {
+                    bytes: self.buffer,
+                    spilled: None,
+                    incomplete: self.failed,
+                };
+            }
+            if !self.failed {
+                let flushed = self.file.as_mut().is_none_or(|file| file.flush().is_ok());
+                if !flushed {
+                    self.fail();
+                }
+            }
+            let tail: Vec<u8> = self.tail.into_iter().collect();
+            let omitted = self
+                .total
+                .saturating_sub(self.head.len().saturating_add(tail.len()) as u64);
+            if self.failed {
+                let mut bytes = Vec::with_capacity(self.head.len() + tail.len() + 96);
+                bytes.extend_from_slice(&self.head);
+                bytes.extend_from_slice(
+                    format!("\n... [omitted {omitted} bytes; output spill failed] ...\n")
+                        .as_bytes(),
+                );
+                bytes.extend_from_slice(&tail);
+                return FinishedOutput {
+                    bytes,
+                    spilled: None,
+                    incomplete: true,
+                };
+            }
+            let sha256 = hex(&self.hasher.take().expect("spill hasher").finalize());
+            let path = self.path.take().expect("spill path");
+            let mut bytes = Vec::with_capacity(self.head.len() + tail.len() + 128);
+            bytes.extend_from_slice(&self.head);
+            bytes.extend_from_slice(
+                format!(
+                    "\n... [omitted {omitted} bytes; full output saved to {}] ...\n",
+                    path.display()
+                )
+                .as_bytes(),
+            );
+            bytes.extend_from_slice(&tail);
+            FinishedOutput {
+                bytes,
+                spilled: Some(SpilledOutput {
+                    path,
+                    total_bytes: self.total,
+                    sha256,
+                    head: self.head,
+                    tail,
+                }),
+                incomplete: false,
+            }
+        }
+    }
+
+    fn unique_spill_path(directory: &std::path::Path, stream: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0u128, |elapsed| elapsed.as_nanos());
+        directory.join(format!(
+            "cayw-proc-{:x}-{nanos:x}-{sequence:x}-{stream}.log",
+            std::process::id()
+        ))
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            out.push(DIGITS[usize::from(byte >> 4)] as char);
+            out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+        }
+        out
     }
 
     fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
@@ -3768,7 +4058,7 @@ mod unix {
         mut socket: std::os::unix::net::UnixStream,
         cancellation: CancellationToken,
         abandoned: CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> io::Result<LaunchDecision> {
         let decision = decide_launch(&mut socket, &cancellation, &abandoned, deadline);
         if !matches!(decision, Ok(LaunchDecision::Allowed)) {
@@ -3783,7 +4073,7 @@ mod unix {
         socket: &mut std::os::unix::net::UnixStream,
         cancellation: &CancellationToken,
         abandoned: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> io::Result<LaunchDecision> {
         loop {
             if cancellation.is_cancelled() || abandoned.is_cancelled() {
@@ -3792,7 +4082,7 @@ mod unix {
                 socket.shutdown(std::net::Shutdown::Both)?;
                 return Ok(LaunchDecision::Cancelled);
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 socket.shutdown(std::net::Shutdown::Both)?;
                 return Ok(LaunchDecision::TimedOut);
             }
@@ -3818,7 +4108,7 @@ mod unix {
                             socket.shutdown(std::net::Shutdown::Both)?;
                             return Ok(LaunchDecision::Cancelled);
                         }
-                        if Instant::now() >= deadline {
+                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                             socket.shutdown(std::net::Shutdown::Both)?;
                             return Ok(LaunchDecision::TimedOut);
                         }
@@ -3900,14 +4190,20 @@ mod unix {
             env,
             timeout,
             max_output_bytes,
+            output_spill_dir,
             io,
         } = spec;
         if cancellation.is_cancelled() || abandoned.is_cancelled() {
             return Err(DeviceError::Cancelled);
         }
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(DeviceError::InvalidSpec("timeout is not representable"))?;
+        let deadline = match timeout {
+            Some(timeout) => Some(
+                Instant::now()
+                    .checked_add(timeout)
+                    .ok_or(DeviceError::InvalidSpec("timeout is not representable"))?,
+            ),
+            None => None,
+        };
         let image = ExecImage::new(&program, &args, &env)?;
         #[cfg(target_os = "macos")]
         let launch_lock = lock_launch(&cancellation, &abandoned, deadline)?;
@@ -4102,11 +4398,22 @@ mod unix {
         }
         #[cfg(all(test, target_os = "macos"))]
         tests::panic_after_spawn(group.child.id());
-        let out_sink = interactive.as_ref().map_or(PipeSink::Collected, |shared| {
-            PipeSink::Stdout(shared.clone())
-        });
+        let spill_dir = output_spill_dir.unwrap_or_else(std::env::temp_dir);
+        let unlimited = max_output_bytes.is_none();
+        let out_sink = interactive.as_ref().map_or_else(
+            || {
+                if unlimited {
+                    PipeSink::Spill(Box::new(SpillBuffer::new(spill_dir.clone(), "stdout")))
+                } else {
+                    PipeSink::Collected
+                }
+            },
+            |shared| PipeSink::Stdout(shared.clone()),
+        );
         let err_sink = if interactive.is_some() {
             PipeSink::Discard
+        } else if unlimited {
+            PipeSink::Spill(Box::new(SpillBuffer::new(spill_dir, "stderr")))
         } else {
             PipeSink::Collected
         };
@@ -4165,7 +4472,7 @@ mod unix {
             if cancellation.is_cancelled() || abandoned.is_cancelled() {
                 break TerminationReason::Cancelled;
             }
-            if Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break TerminationReason::TimedOut;
             }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -4240,15 +4547,24 @@ mod unix {
         group
             .record_stopped()
             .map_err(|error| DeviceError::io("record process cleanup", error))?;
+        let stdout_reader_closed = stdout.reader.is_none();
+        let stderr_reader_closed = stderr.reader.is_none();
+        let stdout_discarded = stdout.discarded;
+        let stdout_output = stdout.finish();
+        let stderr_output = stderr.finish();
         Ok(ProcessResult {
             status,
             termination,
             output_complete: termination == TerminationReason::Exited
-                && stdout.reader.is_none()
-                && stderr.reader.is_none()
-                && !stdout.discarded,
-            stdout: stdout.bytes,
-            stderr: stderr.bytes,
+                && stdout_reader_closed
+                && stderr_reader_closed
+                && !stdout_discarded
+                && !stdout_output.incomplete
+                && !stderr_output.incomplete,
+            stdout: stdout_output.bytes,
+            stderr: stderr_output.bytes,
+            spilled_stdout: stdout_output.spilled,
+            spilled_stderr: stderr_output.spilled,
         })
     }
 }

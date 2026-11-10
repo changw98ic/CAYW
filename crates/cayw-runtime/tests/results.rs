@@ -243,8 +243,8 @@ async fn filter_read_original_reopen_and_release() {
         program: script_path,
         args: vec![],
         env: std::collections::BTreeMap::new(),
-        timeout: std::time::Duration::from_secs(10),
-        max_output_bytes: 64 * 1024,
+        timeout: Some(std::time::Duration::from_secs(10)),
+        max_output_bytes: Some(64 * 1024),
         allow_filter: false,
         io: cayw_host::ProcessIo::Pipes,
     };

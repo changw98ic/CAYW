@@ -392,17 +392,16 @@ async fn content_put_busy_retry_cancelled_preserves_unknown_and_blocks_continuat
         events
     );
 
-    // 3. Verify Host and Cells terminal state pairing: session strictly enters NeedsReconciliation
+    // 3. Verify Host and Cells terminal state pairing: the unknown outcome is
+    // kept as an internal audit fact and does not freeze the user session.
     let view = rt.get(&session).unwrap();
     assert_eq!(
         view.state,
-        SessionState::NeedsReconciliation,
-        "session must enter NeedsReconciliation when mutating capability is cancelled after admission"
+        SessionState::Idle,
+        "an internal outcome_unknown must not freeze the user session"
     );
-    assert!(matches!(
-        rt.enqueue(&session, "must remain blocked"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    let admitted = rt.enqueue(&session, "follow-up after unknown").unwrap();
+    rt.cancel(&admitted.cancel_target()).unwrap();
 }
 
 #[cfg(feature = "plugins")]

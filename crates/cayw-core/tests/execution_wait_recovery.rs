@@ -263,7 +263,7 @@ fn registered_wait_does_not_settle_an_actual_unknown_child() {
         recovered.unresolved_capabilities[0].outcome,
         Some(CapabilityOutcome::OutcomeUnknown { .. })
     ));
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(store.recover(&lease.session_id).unwrap(), recovered);
 }
 

@@ -201,8 +201,8 @@ async fn store_wait_is_paused_and_bounded_by_host_wait_not_vm_timeout() {
         counters: counters.clone(),
     });
     let mode = mode(Limits {
-        timeout: Duration::from_millis(300),
-        host_wait: Duration::from_secs(3),
+        timeout: Some(Duration::from_millis(300)),
+        host_wait: Some(Duration::from_secs(3)),
         shutdown_grace: Duration::from_secs(1),
         ..Default::default()
     });
@@ -227,8 +227,8 @@ async fn explicit_yield_pauses_the_clock_and_is_not_bounded_by_host_wait() {
         counters: counters.clone(),
     });
     let mode = mode(Limits {
-        timeout: Duration::from_millis(300),
-        host_wait: Duration::from_millis(50),
+        timeout: Some(Duration::from_millis(300)),
+        host_wait: Some(Duration::from_millis(50)),
         shutdown_grace: Duration::from_secs(1),
         ..Default::default()
     });
@@ -252,8 +252,8 @@ async fn host_wait_expiry_marks_unsettled_store_unknown() {
         counters: counters.clone(),
     });
     let mode = mode(Limits {
-        timeout: Duration::from_secs(2),
-        host_wait: Duration::from_millis(150),
+        timeout: Some(Duration::from_secs(2)),
+        host_wait: Some(Duration::from_millis(150)),
         shutdown_grace: Duration::from_millis(100),
         ..Default::default()
     });

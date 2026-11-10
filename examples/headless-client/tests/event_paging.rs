@@ -11,7 +11,7 @@ const WATCHDOG: Duration = Duration::from_secs(20);
 
 struct TestServerHandler {
     runtime: Arc<Runtime>,
-    request_timeout_ms: u64,
+    request_timeout_ms: Option<u64>,
 }
 
 #[async_trait::async_trait]
@@ -29,6 +29,9 @@ impl cayw_ipc::RpcHandler for TestServerHandler {
             map.insert("request_timeout_ms".into(), json!(self.request_timeout_ms));
         }
         Ok(response)
+    }
+    fn read_only(&self, method: &str) -> bool {
+        self.runtime.read_only(method)
     }
 }
 
@@ -134,7 +137,9 @@ impl Fixture {
         let stop = CancellationToken::new();
         let mut config = ServerConfig::new(TOKEN);
         config.max_frame_bytes = max_frame_bytes;
-        let request_timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap();
+        let request_timeout_ms = config
+            .request_timeout
+            .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(0));
         let handler = Arc::new(TestServerHandler {
             runtime: Arc::new(self.runtime.clone()),
             request_timeout_ms,
@@ -222,7 +227,8 @@ async fn prompt_reads_large_history_before_reporting_original_unknown() {
         )
         .await
         .unwrap_err();
-    assert_eq!(error.code, "response_too_large_outcome_unknown");
+    assert_eq!(error.code, "response_too_large");
+    assert!(!error.outcome_unknown, "{error:?}");
     client.close().await;
     let output = server
         .command(
@@ -315,7 +321,8 @@ async fn single_oversized_event_fails_without_advancing_cursor_or_enqueuing() {
     assert!(!output.status.success());
     let errors = rows(&output.stderr);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["code"], "response_too_large_outcome_unknown");
+    assert_eq!(errors[0]["code"], "response_too_large");
+    assert_eq!(errors[0]["outcome_unknown"], false);
     assert!(emitted_events(&output).is_empty());
     assert_eq!(std::fs::read(&cursor).unwrap(), saved);
     assert!(fixture.runtime.tasks(&fixture.id).unwrap().is_empty());

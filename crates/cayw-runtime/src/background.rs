@@ -75,15 +75,9 @@ impl Default for BackgroundConfig {
 
 impl BackgroundConfig {
     pub fn validate(&self) -> Result<(), RuntimeError> {
-        if self.max_tasks == 0
-            || self.max_tasks > 1024
-            || self.max_log_bytes < 4096
-            || self.max_log_bytes > 64 * 1024 * 1024
-            || self.max_retained_finished == 0
-            || self.max_retained_finished > 10_000
-        {
+        if self.max_tasks == 0 || self.max_log_bytes == 0 || self.max_retained_finished == 0 {
             return Err(RuntimeError::InvalidInput(
-                "background task limits must be positive and bounded".into(),
+                "background task limits must be positive".into(),
             ));
         }
         Ok(())
@@ -1257,13 +1251,6 @@ impl BackgroundRegistry {
     }
 }
 
-pub(crate) fn validate(config: Option<&BackgroundConfig>) -> Result<(), RuntimeError> {
-    if let Some(config) = config {
-        config.validate()?;
-    }
-    Ok(())
-}
-
 pub(crate) fn definitions(
     config: Option<&BackgroundConfig>,
     profiles: &BTreeMap<String, Profile>,
@@ -1665,19 +1652,22 @@ async fn drive_child(
     });
     let runner = registry.runner.observed(observer);
 
-    let timeout = if profile.timeout.is_zero() {
-        Duration::from_secs(3600)
-    } else {
-        profile.timeout
-    };
+    let timeout = profile.timeout.filter(|t| !t.is_zero());
     let spec = cayw_host::ProcessSpec {
         program: canonical_program,
         args: profile.args.clone(),
         cwd: workspace,
         env: profile.env.clone(),
         timeout,
-        max_output_bytes: registry.config.max_log_bytes.min(profile.max_output_bytes),
+        max_output_bytes: Some(
+            profile
+                .max_output_bytes
+                .map_or(registry.config.max_log_bytes, |limit| {
+                    registry.config.max_log_bytes.min(limit)
+                }),
+        ),
         io: profile.io,
+        output_spill_dir: log_path.parent().map(Path::to_path_buf),
     };
 
     let cancel_poll = cancel.clone();
@@ -1726,13 +1716,7 @@ async fn drive_child(
             if let Err(error) = registry.record_cleanup(&id, "device_confirmed") {
                 return ChildOutcome::Unknown(format!("Device cleanup record failed: {error}"));
             }
-            if let Err(error) = write_logs(
-                &registry,
-                &id,
-                &log_path,
-                &proc_res.stdout,
-                &proc_res.stderr,
-            ) {
+            if let Err(error) = write_logs(&registry, &id, &log_path, &proc_res) {
                 return ChildOutcome::Unknown(format!("background log is not durable: {error}"));
             }
             match proc_res.termination {
@@ -1773,8 +1757,7 @@ fn write_logs(
     registry: &Arc<BackgroundRegistry>,
     id: &str,
     log_path: &Path,
-    stdout: &[u8],
-    stderr: &[u8],
+    proc_res: &cayw_host::ProcessResult,
 ) -> Result<(), RuntimeError> {
     let io_error = |error: std::io::Error| RuntimeError::Workspace(error.to_string());
     let mut file = OpenOptions::new()
@@ -1782,11 +1765,27 @@ fn write_logs(
         .truncate(true)
         .open(log_path)
         .map_err(io_error)?;
-    file.write_all(stdout).map_err(io_error)?;
-    file.write_all(stderr).map_err(io_error)?;
+    let mut total_bytes = 0u64;
+    if let Some(spilled) = &proc_res.spilled_stdout {
+        let mut src = File::open(&spilled.path).map_err(io_error)?;
+        total_bytes += std::io::copy(&mut src, &mut file).map_err(io_error)?;
+        let _ = fs::remove_file(&spilled.path);
+    } else {
+        file.write_all(&proc_res.stdout).map_err(io_error)?;
+        total_bytes += proc_res.stdout.len() as u64;
+    }
+    if let Some(spilled) = &proc_res.spilled_stderr {
+        let mut src = File::open(&spilled.path).map_err(io_error)?;
+        total_bytes += std::io::copy(&mut src, &mut file).map_err(io_error)?;
+        let _ = fs::remove_file(&spilled.path);
+    } else {
+        file.write_all(&proc_res.stderr).map_err(io_error)?;
+        total_bytes += proc_res.stderr.len() as u64;
+    }
     file.flush().map_err(io_error)?;
     file.sync_all().map_err(io_error)?;
-    let total_bytes = (stdout.len() + stderr.len()) as i64;
+    let total_bytes = i64::try_from(total_bytes)
+        .map_err(|_| RuntimeError::Workspace("background log exceeds i64".into()))?;
     let mut connection = lock(&registry.connection);
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let updated = tx.execute(
@@ -2257,8 +2256,8 @@ mod tests {
             program: "/bin/sh".into(),
             args: std::iter::once("-c".into()).chain(args).collect(),
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(10),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(10)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         }

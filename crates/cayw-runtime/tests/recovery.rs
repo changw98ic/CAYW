@@ -136,20 +136,35 @@ async fn interrupted_execution_is_fenced_and_never_replayed_without_evidence() {
         Err(RuntimeError::Busy)
     ));
     let recovered = reopened.recover(&session.id).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert!(
         reopened
             .store()
             .append_agent_event(&lease, &AgentEvent::AgentEnd { messages: vec![] })
             .is_err()
     );
-    assert!(matches!(
-        reopened
-            .prompt(&session.id, "retry", CancellationToken::new())
-            .await,
-        Err(RuntimeError::NeedsReconciliation)
-    ));
-    assert!(reopened.fork(&session.id, "unsafe fork", true).is_err());
+    // The unknown tool call stays in the internal audit record, while the user
+    // session returns to Idle and accepts follow-up admission and confirmed
+    // forks without replaying the interrupted attempt.
+    let admitted = reopened
+        .enqueue(&session.id, "follow-up admission")
+        .unwrap();
+    reopened.cancel(&admitted.cancel_target()).unwrap();
+    let pre_reconcile_fork = reopened
+        .fork(&session.id, "fork before reconcile", true)
+        .unwrap();
+    assert_eq!(pre_reconcile_fork.state, SessionState::Idle);
+    assert_eq!(pre_reconcile_fork.unresolved_calls.len(), 1);
+    let pre_completed = reopened
+        .prompt(
+            &pre_reconcile_fork.id,
+            "continue on fork before reconcile",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("follow-up prompt must succeed with paired interrupted tool result");
+    assert_eq!(pre_completed.state, SessionState::Idle);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
     assert!(!directory.path().join("workspace/lost.txt").exists());
     let receipt = Reconciliation { call_id: "lost-call".into(), expected, actor: "test-user".into(), evidence: "This synthetic fixture never dispatched a Host call; verified the workspace has no lost.txt".into(), outcome: ReconciledOutcome::NotExecuted { reason: "The test stopped before the host call".into() } };
     // The fixture never invokes Host. Preserve that exact observed decision as
@@ -172,11 +187,11 @@ async fn interrupted_execution_is_fenced_and_never_replayed_without_evidence() {
     let source_events = reopened.events(&session.id, 0, 1000).unwrap();
     let fork_events = reopened.events(&fork.id, 0, 1000).unwrap();
     let fork_prefix = fork.messages.clone();
-    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
     let completed = reopened.prompt(&fork.id, "explicit new fork task", CancellationToken::new())
         .await.expect("a confirmed fork with the original committed decision must accept an explicit new prompt");
     assert_eq!(completed.state, SessionState::Idle);
-    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 2);
     assert!(completed.messages.iter().any(|message| matches!(message,
         Message::Assistant(assistant) if assistant.stop_reason == StopReason::Stop
             && assistant.content.iter().any(|part| matches!(part, Content::Text { text, .. } if text == "explicit fork task completed")))));

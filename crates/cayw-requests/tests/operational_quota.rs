@@ -169,9 +169,9 @@ fn first_general_valid_request_is_evaluable_below_repeat_threshold() {
 #[test]
 fn finished_zero_request_tasks_release_task_and_state_reservations() {
     let fixture = Fixture::with_config(RequestConfig {
-        max_tasks: 64,
+        max_tasks: Some(64),
         // One start reserves about 1.6 MiB; two simultaneous starts do not fit.
-        max_state_bytes: 2 * 1024 * 1024,
+        max_state_bytes: Some(2 * 1024 * 1024),
         ..RequestConfig::default()
     });
     let store = fixture.open();
@@ -218,7 +218,7 @@ fn trusted_adjustment_is_durable_and_stale_handles_fail_closed() {
     let stale = fixture.open();
     fixture.start(&store, "task-a");
     let reduced = RequestConfig {
-        max_tasks: 64,
+        max_tasks: Some(64),
         ..fixture.config.clone()
     };
     store
@@ -249,7 +249,7 @@ fn trusted_adjustment_is_durable_and_stale_handles_fail_closed() {
     // The supported restart path adopts persisted limits and applies the new
     // trusted value with another immutable history row.
     let next = RequestConfig {
-        max_tasks: 32,
+        max_tasks: Some(32),
         ..reduced.clone()
     };
     let store = RequestStore::open_with_trusted_adjustment(
@@ -279,14 +279,14 @@ fn trusted_adjustment_is_durable_and_stale_handles_fail_closed() {
 #[test]
 fn adjustment_rejects_limits_below_active_usage() {
     let fixture = Fixture::with_config(RequestConfig {
-        max_tasks: 2,
+        max_tasks: Some(2),
         ..RequestConfig::default()
     });
     let store = fixture.open();
     fixture.start(&store, "task-a");
     fixture.start(&store, "task-b");
     let lowered = RequestConfig {
-        max_tasks: 1,
+        max_tasks: Some(1),
         ..fixture.config.clone()
     };
     assert!(matches!(
@@ -313,7 +313,7 @@ fn trusted_open_creates_or_adjusts_an_existing_store() {
     assert!(store.config_history().unwrap().is_empty());
     drop(store);
     let next = RequestConfig {
-        max_tasks: 16,
+        max_tasks: Some(16),
         ..fixture.config.clone()
     };
     let store = RequestStore::open_with_trusted_adjustment(
@@ -333,7 +333,7 @@ fn trusted_open_creates_or_adjusts_an_existing_store() {
 #[test]
 fn reopen_rebuilds_operational_counters_without_deleting_audit() {
     let fixture = Fixture::with_config(RequestConfig {
-        max_tasks: 1,
+        max_tasks: Some(1),
         ..RequestConfig::default()
     });
     let store = fixture.open();
@@ -385,8 +385,8 @@ fn reopen_rebuilds_operational_counters_without_deleting_audit() {
 #[test]
 fn max_tasks_bounds_active_tasks_and_releases_on_end() {
     let fixture = Fixture::with_config(RequestConfig {
-        max_tasks: 1,
-        max_state_bytes: 16 * 1024 * 1024,
+        max_tasks: Some(1),
+        max_state_bytes: Some(16 * 1024 * 1024),
         ..RequestConfig::default()
     });
     let store = fixture.open();

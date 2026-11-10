@@ -182,7 +182,7 @@ async fn known_candidate_rejection_releases_only_original_publication() {
 }
 
 #[tokio::test]
-async fn dropped_candidate_wakes_followers_and_rejects_future_hits_without_recapture() {
+async fn dropped_candidate_wakes_followers_and_forces_a_fresh_capture() {
     let reads = coordinator(CellLimits::default());
     let captures = Arc::new(AtomicUsize::new(0));
     let mut source = Source(captures.clone());
@@ -211,20 +211,22 @@ async fn dropped_candidate_wakes_followers_and_rejects_future_hits_without_recap
     assert!(futures::poll!(&mut follower).is_pending());
     drop(candidate);
     assert!(follower.await.is_err());
-    assert!(
-        reads
-            .read(
-                origin("later", 1),
-                "read",
-                &json!({}),
-                stamp(),
-                &mut source,
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(captures.load(Ordering::SeqCst), 1);
+    // The abandoned publication is invalidated, so the next caller must capture
+    // afresh instead of receiving the unacknowledged bytes.
+    let later = reads
+        .read(
+            origin("later", 1),
+            "read",
+            &json!({}),
+            stamp(),
+            &mut source,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(later.role, ReadRole::Leader);
+    later.acknowledge();
+    assert_eq!(captures.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -495,7 +497,13 @@ async fn oversized_and_deep_capture_never_reaches_waiters_or_a_ready_entry() {
         }
     }
     for deep in [false, true] {
-        let reads = coordinator(CellLimits::default());
+        // These cases depend on explicit host caps; unconfigured limits are
+        // unlimited by default.
+        let reads = coordinator(CellLimits {
+            json_depth: Some(32),
+            item_bytes: Some(64 * 1024),
+            ..CellLimits::default()
+        });
         let calls = Arc::new(AtomicUsize::new(0));
         let mut source = Invalid {
             calls: calls.clone(),
@@ -727,21 +735,23 @@ async fn rejected_original_cells_commit_abandons_completion_and_never_publishes(
     assert_eq!(backend.captures.load(Ordering::SeqCst), 1);
     assert_eq!(backend.acknowledged.load(Ordering::SeqCst), 0);
     assert_eq!(backend.abandoned.load(Ordering::SeqCst), 1);
-    assert!(backend.journal.is_frozen("session").unwrap());
-    assert!(
-        backend
-            .reads
-            .read(
-                origin("later", 1),
-                "read",
-                &json!({}),
-                stamp(),
-                &mut Source(backend.captures.clone()),
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(backend.captures.load(Ordering::SeqCst), 1);
+    assert!(!backend.journal.is_frozen("session").unwrap());
+    // The rejected commit invalidated cached reads, so a later read cannot
+    // reuse the original capture. It starts a fresh capture and publishes.
+    let later = backend
+        .reads
+        .read(
+            origin("later", 1),
+            "read",
+            &json!({}),
+            stamp(),
+            &mut Source(backend.captures.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(later.role, ReadRole::Leader);
+    later.acknowledge();
+    assert_eq!(backend.captures.load(Ordering::SeqCst), 2);
     cells.close().await;
 }

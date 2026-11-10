@@ -210,7 +210,7 @@ async fn cancelled_question_keeps_its_fact_and_rejects_late_answer() {
         .unwrap();
     let _ = task.await.unwrap();
     let view = rt.get(&id).unwrap();
-    assert_ne!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert!(!view.frozen);
     // The known wait failure does not erase the original question fact.
     assert_eq!(
         host_events(&rt, &id, "collaboration_question_asked").len(),
@@ -286,7 +286,7 @@ async fn permission_expiry_stops_the_original_wait_as_known_failure() {
         .expect("expired permission must stop the wait")
         .unwrap()
         .unwrap();
-    assert_ne!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert!(!view.frozen);
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
     assert_eq!(
         host_events(&rt, &id, "collaboration_question_asked").len(),
@@ -366,7 +366,7 @@ return cayw.call('plan.update',{expected_version=0,steps={{id='conflict',text='M
     );
     let id = rt.create(None).unwrap().id;
     let first = start(&rt, &id).await.unwrap().unwrap();
-    assert_ne!(first.state, cayw_core::SessionState::NeedsReconciliation);
+    assert!(!first.frozen);
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
     let plan = rt.plan(&id).unwrap().expect("one accepted plan");
     assert_eq!(plan.version, 1);
@@ -396,7 +396,7 @@ async fn plan_update_allows_parallel_in_progress_steps_with_the_same_version_cas
     let (_dir, rt) = setup(script, vec![ScopedPermission::exact("plan.update", scope)]);
     let id = rt.create(None).unwrap().id;
     let view = start(&rt, &id).await.unwrap().unwrap();
-    assert_ne!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert!(!view.frozen);
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
     let plan = rt.plan(&id).unwrap().expect("one accepted plan");
     assert_eq!(plan.version, 1);
@@ -428,7 +428,7 @@ async fn invalid_plan_arguments_never_write_a_plan_event() {
     let (_dir, rt) = setup(SCRIPT, vec![ScopedPermission::exact("plan.update", scope)]);
     let id = rt.create(None).unwrap().id;
     let view = start(&rt, &id).await.unwrap().unwrap();
-    assert_ne!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert!(!view.frozen);
     assert!(rt.plan(&id).unwrap().is_none());
     assert!(host_events(&rt, &id, "collaboration_plan_updated").is_empty());
     // The invalid call is a known, non-executed failure.

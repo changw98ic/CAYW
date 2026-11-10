@@ -73,7 +73,7 @@ async fn caught_known_error_can_continue_through_real_host_with_user_globals_and
         return cayw.call('fs.write', {path='result.txt', content='42'})
     "#;
     let config = RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         permissions: vec![
             ScopedPermission::exact("fs.read", json!({"path":"missing.txt"})),
             ScopedPermission::exact("fs.write", json!({"path":"result.txt","content":"42"})),
@@ -131,7 +131,7 @@ async fn caught_host_call_budget_cannot_complete_the_runtime_task() {
         return 'must not complete after the Host call budget was exhausted'
     "#;
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         permissions: vec![
             ScopedPermission::exact("fs.read", json!({"path":"source.txt"})),
             ScopedPermission::exact(
@@ -141,7 +141,7 @@ async fn caught_host_call_budget_cannot_complete_the_runtime_task() {
         ],
         ..Default::default()
     };
-    config.host.max_calls = 1;
+    config.host.max_calls = Some(1);
     let runtime = open(&temp, script, config);
     let session = runtime.create(None).unwrap();
     let _ = runtime
@@ -176,14 +176,14 @@ async fn caught_cell_output_budget_stops_the_runtime_task() {
         cayw.call('fs.write', {path='blocked.txt', content='must not exist'})
     "#;
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         permissions: vec![ScopedPermission::exact(
             "fs.write",
             json!({"path":"blocked.txt","content":"must not exist"}),
         )],
         ..Default::default()
     };
-    config.cells.output_items = 1;
+    config.cells.output_items = Some(1);
     let runtime = open(&temp, script, config);
     let session = runtime.create(None).unwrap();
     let _ = runtime
@@ -234,7 +234,7 @@ async fn nested_protected_coroutine_cannot_hide_unknown_or_allow_another_effect(
         return 'must not complete after an unknown effect'
     "#;
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         permissions: vec![
             ScopedPermission::exact("search.query", json!({"query":"synthetic unknown"})),
             ScopedPermission::exact(
@@ -257,7 +257,7 @@ async fn nested_protected_coroutine_cannot_hide_unknown_or_allow_another_effect(
         .await;
     let view = runtime.get(&session.id).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     assert_eq!(view.unresolved_capabilities.len(), 1);
     assert_eq!(view.unresolved_capabilities[0].name, "search.query");
     assert!(matches!(
@@ -269,10 +269,13 @@ async fn nested_protected_coroutine_cannot_hide_unknown_or_allow_another_effect(
         runtime.tasks(&session.id).unwrap()[0].state,
         TaskState::OutcomeUnknown
     );
-    assert!(matches!(
-        runtime.enqueue(&session.id, "must remain stopped"),
-        Err(cayw_runtime::RuntimeError::NeedsReconciliation)
-    ));
+    // The unknown outcome stays in the internal audit record, but the session
+    // itself is not frozen: a follow-up prompt/enqueue proceeds immediately.
+    assert!(
+        runtime
+            .enqueue(&session.id, "follow-up proceeds after unknown")
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -289,8 +292,8 @@ async fn caught_runtime_call_budget_cannot_complete_or_write_another_effect() {
         return 'must not complete after the budget was exhausted'
     "#;
     let config = RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
-        max_capability_calls: 1,
+        max_run_time: Some(Duration::from_secs(10)),
+        max_capability_calls: Some(1),
         permissions: vec![
             ScopedPermission::exact("fs.read", json!({"path":"source.txt"})),
             ScopedPermission::exact(

@@ -156,7 +156,7 @@ async fn external_scope_only_replaces_its_service_gate_and_audit_and_shares_call
         &root,
         HostConfig {
             external: Some(Arc::new(Service("parent"))),
-            max_calls: 4,
+            max_calls: Some(4),
             ..Default::default()
         },
     );
@@ -256,7 +256,7 @@ async fn external_scope_retains_spent_serialized_bytes() {
         &root,
         HostConfig {
             external: Some(Arc::new(Service("parent"))),
-            max_total_bytes: 43,
+            max_total_bytes: Some(43),
             ..Default::default()
         },
     );
@@ -387,7 +387,7 @@ async fn injected_service_uses_original_budget_gate_audit_and_stays_out_of_catal
         gate.clone(),
         audit.clone(),
         HostConfig {
-            max_calls: 2,
+            max_calls: Some(2),
             ..Default::default()
         },
     )
@@ -570,7 +570,7 @@ async fn injected_service_uses_bytes_already_spent_by_base_calls() {
         gate.clone(),
         Arc::new(Audit::default()),
         HostConfig {
-            max_total_bytes: 43,
+            max_total_bytes: Some(43),
             ..Default::default()
         },
     )
@@ -603,8 +603,8 @@ async fn injected_service_unretainable_response_is_unknown_and_charges_shared_by
         gate.clone(),
         audit.clone(),
         HostConfig {
-            max_result_bytes: 16,
-            max_total_bytes: 32,
+            max_result_bytes: Some(16),
+            max_total_bytes: Some(32),
             ..Default::default()
         },
     )
@@ -753,7 +753,7 @@ async fn delegated_service_unretainable_response_keeps_its_known_nested_effect_a
         Arc::new(Gate::default()),
         audit.clone(),
         HostConfig {
-            max_result_bytes: 512,
+            max_result_bytes: Some(512),
             ..Default::default()
         },
     )
@@ -983,7 +983,7 @@ async fn injected_service_deadline_uses_original_timeout_and_cancels_child() {
         Arc::new(Gate::default()),
         audit.clone(),
         HostConfig {
-            call_timeout: Duration::from_millis(500),
+            call_timeout: Some(Duration::from_millis(500)),
             ..Default::default()
         },
     )
@@ -1050,8 +1050,8 @@ async fn parent_drain_joins_the_process_started_by_an_external_scope() {
                     program: env!("CARGO_BIN_EXE_cayw-host-test-process").into(),
                     args: vec!["wait".into()],
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(20),
-                    max_output_bytes: 4096,
+                    timeout: Some(Duration::from_secs(20)),
+                    max_output_bytes: Some(4096),
                     allow_filter: false,
                     io: cayw_device::ProcessIo::Pipes,
                 },
@@ -1116,8 +1116,8 @@ async fn external_scope_keeps_the_pinned_root_and_original_process_runner() {
                     program: env!("CARGO_BIN_EXE_cayw-host-test-process").into(),
                     args: vec!["effect".into()],
                     env: BTreeMap::new(),
-                    timeout: Duration::from_secs(10),
-                    max_output_bytes: 4096,
+                    timeout: Some(Duration::from_secs(10)),
+                    max_output_bytes: Some(4096),
                     allow_filter: false,
                     io: cayw_device::ProcessIo::Pipes,
                 },

@@ -720,36 +720,29 @@ fn v2_approval_facts_replay_without_allowing_projection_or_receipt_changes() {
 }
 
 #[test]
-fn migration_validates_value_limits_in_events_and_projections_and_retains_original_guards() {
+fn migration_validates_typed_reader_recursion_and_retains_original_guards() {
     for version in [1, 2] {
         for placement in ["event", "projection"] {
-            for shape in ["depth", "nodes", "bytes"] {
-                let db = Database::new();
-                let path = db.path("limits");
-                let value = match shape {
-                    "depth" => {
-                        (0..MAX_METADATA_DEPTH + 1).fold(Value::Null, |v, _| Value::Array(vec![v]))
-                    }
-                    "nodes" => Value::Array(vec![Value::Null; MAX_METADATA_NODES]),
-                    _ => Value::String("x".repeat(MAX_METADATA_BYTES + 1)),
-                };
-                let mut projection = json!({"id":"legacy","label":"legacy","cursor":2,"fence":0,"attempt":null,"lifecycle":null,"history":[],"calls":[],"approvals":[]});
-                if version == 2 {
-                    projection["executions"] = json!([]);
-                    projection["capabilities"] = json!([]);
-                }
-                let mut events = vec![
-                    json!({"protocol_version":version,"session_id":"legacy","cursor":1,"timestamp":1,"attempt":null,"event":{"type":"session_created","label":"legacy"}}),
-                    json!({"protocol_version":version,"session_id":"legacy","cursor":2,"timestamp":2,"attempt":null,"event":{"type":"host","kind":"data","data":null}}),
-                ];
-                if placement == "event" {
-                    events[1]["event"]["data"] = value;
-                } else {
-                    projection["history"] = json!([{"type":"message","message":{"role":"custom","kind":"data","data":value}}]);
-                }
-                legacy(&path, version, &projection, &events);
-                assert_rejected_unchanged(&path, version);
+            let db = Database::new();
+            let path = db.path("limits");
+            // serde_json rejects this nesting at its own recursion limit.
+            let value = (0..130).fold(Value::Null, |v, _| Value::Array(vec![v]));
+            let mut projection = json!({"id":"legacy","label":"legacy","cursor":2,"fence":0,"attempt":null,"lifecycle":null,"history":[],"calls":[],"approvals":[]});
+            if version == 2 {
+                projection["executions"] = json!([]);
+                projection["capabilities"] = json!([]);
             }
+            let mut events = vec![
+                json!({"protocol_version":version,"session_id":"legacy","cursor":1,"timestamp":1,"attempt":null,"event":{"type":"session_created","label":"legacy"}}),
+                json!({"protocol_version":version,"session_id":"legacy","cursor":2,"timestamp":2,"attempt":null,"event":{"type":"host","kind":"data","data":null}}),
+            ];
+            if placement == "event" {
+                events[1]["event"]["data"] = value;
+            } else {
+                projection["history"] = json!([{"type":"message","message":{"role":"custom","kind":"data","data":value}}]);
+            }
+            legacy(&path, version, &projection, &events);
+            assert_rejected_unchanged(&path, version);
         }
     }
 }

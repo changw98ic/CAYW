@@ -168,6 +168,30 @@ fn main() {
             io::stdout().write_all(&vec![b'o'; 128 * 1024]).unwrap();
             stderr.join().unwrap();
         }
+        // Deterministic multi-megabyte stdout: byte i is (i % 256).
+        Some("large-stdout") => {
+            const TOTAL: usize = 3 * 1024 * 1024;
+            let chunk: Vec<u8> = (0..8192).map(|index| (index % 256) as u8).collect();
+            let mut written = 0usize;
+            while written < TOTAL {
+                let count = (TOTAL - written).min(chunk.len());
+                io::stdout().write_all(&chunk[..count]).unwrap();
+                written += count;
+            }
+            io::stdout().flush().unwrap();
+        }
+        // Deterministic multi-megabyte stderr: byte i is (255 - i % 256).
+        Some("large-stderr") => {
+            const TOTAL: usize = 3 * 1024 * 1024;
+            let chunk: Vec<u8> = (0..8192).map(|index| (255 - index % 256) as u8).collect();
+            let mut written = 0usize;
+            while written < TOTAL {
+                let count = (TOTAL - written).min(chunk.len());
+                io::stderr().write_all(&chunk[..count]).unwrap();
+                written += count;
+            }
+            io::stderr().flush().unwrap();
+        }
         Some("flood") => {
             let stderr = thread::spawn(|| {
                 loop {

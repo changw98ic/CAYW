@@ -195,7 +195,7 @@ async fn binary_input_arrays_use_the_same_node_budget_as_json_data() {
                 args,
                 CancellationToken::new(),
                 Limits {
-                    max_nodes,
+                    max_nodes: Some(max_nodes),
                     ..Limits::default()
                 },
             )
@@ -227,7 +227,7 @@ async fn decoded_byte_arrays_count_the_root_and_each_byte() {
                 json!({"encoding":encoding,"text":text,"output":"bytes"}),
                 CancellationToken::new(),
                 Limits {
-                    max_nodes,
+                    max_nodes: Some(max_nodes),
                     ..Limits::default()
                 },
             )
@@ -248,7 +248,7 @@ async fn binary_arrays_obey_depth_and_row_limits() {
     for (limits, value, hex, expected_error) in [
         (
             Limits {
-                max_depth: 1,
+                max_depth: Some(1),
                 ..Limits::default()
             },
             json!([]),
@@ -257,7 +257,7 @@ async fn binary_arrays_obey_depth_and_row_limits() {
         ),
         (
             Limits {
-                max_depth: 1,
+                max_depth: Some(1),
                 ..Limits::default()
             },
             json!([0]),
@@ -266,7 +266,7 @@ async fn binary_arrays_obey_depth_and_row_limits() {
         ),
         (
             Limits {
-                max_depth: 2,
+                max_depth: Some(2),
                 ..Limits::default()
             },
             json!([0]),
@@ -275,7 +275,7 @@ async fn binary_arrays_obey_depth_and_row_limits() {
         ),
         (
             Limits {
-                max_rows: 1,
+                max_rows: Some(1),
                 ..Limits::default()
             },
             json!([0, 1]),
@@ -303,8 +303,8 @@ async fn binary_arrays_obey_depth_and_row_limits() {
 #[tokio::test]
 async fn encoding_strings_remain_scalar_data_and_byte_work_remains_bounded() {
     let limits = Limits {
-        max_nodes: 1,
-        max_depth: 1,
+        max_nodes: Some(1),
+        max_depth: Some(1),
         ..Limits::default()
     };
     for input in [
@@ -349,7 +349,7 @@ async fn encoding_strings_remain_scalar_data_and_byte_work_remains_bounded() {
             "codec.encode",
             json!({"encoding":"hex","input":{"kind":"utf8","value":"abc"}}),
             Limits {
-                input_bytes: 32,
+                input_bytes: Some(32),
                 ..limits
             },
             "input_limit:",
@@ -358,7 +358,7 @@ async fn encoding_strings_remain_scalar_data_and_byte_work_remains_bounded() {
             "hash.digest",
             json!({"algorithm":"sha256","input":{"kind":"base64","value":"YWJj"}}),
             Limits {
-                input_bytes: 32,
+                input_bytes: Some(32),
                 ..limits
             },
             "input_limit:",
@@ -367,9 +367,9 @@ async fn encoding_strings_remain_scalar_data_and_byte_work_remains_bounded() {
             "codec.encode",
             json!({"encoding":"hex","input":{"kind":"bytes","value":[0]}}),
             Limits {
-                max_nodes: 2,
-                max_depth: 2,
-                output_bytes: 12,
+                max_nodes: Some(2),
+                max_depth: Some(2),
+                output_bytes: Some(12),
                 ..limits
             },
             "output_limit:",
@@ -378,9 +378,9 @@ async fn encoding_strings_remain_scalar_data_and_byte_work_remains_bounded() {
             "codec.decode",
             json!({"encoding":"hex","text":"00","output":"bytes"}),
             Limits {
-                max_nodes: 2,
-                max_depth: 2,
-                output_bytes: 12,
+                max_nodes: Some(2),
+                max_depth: Some(2),
+                output_bytes: Some(12),
                 ..limits
             },
             "output_limit:",
@@ -389,7 +389,7 @@ async fn encoding_strings_remain_scalar_data_and_byte_work_remains_bounded() {
             "codec.decode",
             json!({"encoding":"base64","text":"YWJj","output":"utf8"}),
             Limits {
-                output_bytes: 13,
+                output_bytes: Some(13),
                 ..limits
             },
             "output_limit:",

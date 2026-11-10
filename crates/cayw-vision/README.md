@@ -25,6 +25,8 @@ CAYW 视觉工具路由（F11，SLICE N）。
 
 `cayw-host` 在 `HostConfig.vision = Some(Limits)` 时把上述工具编入目录，默认不提供；Runtime 通过 `host.capabilities()` 可见。图像参数为 RGBA8，且必须提供 `rgba_base64` 或 `handle` 恰好其一。
 
+`Limits` 非法时，Host 只禁用 vision 工具，并通过 `disabled_services()` 记录原因，不阻止 Host 启动，也不影响其他能力。单独使用 `VisionService` 的调用方仍收到已知配置错误。
+
 Runtime 把裁切图像写入同一 Device 内容库，返回正式 `ResultHandleView`，保留尺寸、MIME 和像素摘要。后续图像输入可按引用读取，Base64 只解码一次。注入内容接口后，存放失败直接返回，不退回进程内引用。独立 Rust 使用者可选择自己的存放接口。
 
 ## 快速使用

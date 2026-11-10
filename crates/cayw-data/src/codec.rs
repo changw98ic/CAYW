@@ -61,7 +61,7 @@ pub(crate) fn encode(args: &Value, budget: &mut Budget<'_>) -> Result<Value> {
                 .div_ceil(3)
                 .checked_mul(4)
                 .ok_or_else(|| error("output_limit", "Base64 size overflow"))?;
-            if size > budget.limits.output_bytes {
+            if budget.limits.output_bytes.is_some_and(|limit| size > limit) {
                 return Err(error("output_limit", "Base64 result exceeds output_bytes"));
             }
             let mut sink = Sink::new(budget.limits.output_bytes, budget.cancel);
@@ -151,7 +151,11 @@ fn digit(byte: u8) -> Option<u8> {
 }
 
 fn hex(bytes: &[u8], budget: &Budget<'_>) -> Result<String> {
-    if bytes.len() > budget.limits.output_bytes / 2 {
+    if budget
+        .limits
+        .output_bytes
+        .is_some_and(|limit| bytes.len() > limit / 2)
+    {
         return Err(error("output_limit", "hex result exceeds output_bytes"));
     }
     const DIGITS: &[u8] = b"0123456789abcdef";

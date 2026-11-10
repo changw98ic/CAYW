@@ -20,8 +20,6 @@ pub enum CoreError {
     Busy,
     #[error("The attempt lease is no longer current")]
     StaleLease,
-    #[error("Tool effects require host reconciliation")]
-    NeedsReconciliation,
     #[error("An approval is pending; it does not authorize execution")]
     PendingApproval,
     #[error("The host denied this operation")]

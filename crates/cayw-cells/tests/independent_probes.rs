@@ -141,7 +141,7 @@ fn manager(
         reads,
         limits,
         Limits {
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
             ..Limits::default()
         },
     )
@@ -167,7 +167,7 @@ fn shared_manager(
         reads,
         limits,
         Limits {
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
             ..Limits::default()
         },
     )
@@ -313,7 +313,7 @@ async fn requirement_store_value_accepted_at_depth_limit_can_be_loaded() {
     cells.close().await;
     drop(cells);
     let limits = CellLimits {
-        json_depth: 4,
+        json_depth: Some(4),
         ..CellLimits::default()
     };
     let cells = manager(
@@ -546,7 +546,7 @@ async fn requirement_raw_emit_respects_output_limit_before_next_real_operation()
     cells.close().await;
     drop(cells);
     let limits = CellLimits {
-        output_items: 2,
+        output_items: Some(2),
         ..CellLimits::default()
     };
     let cells = manager(
@@ -704,7 +704,9 @@ fn independent_crash_effect_is_durable_unknown_without_replay() {
             &CellLimits::default(),
         )
         .unwrap();
-    assert!(journal.is_frozen("crash").unwrap());
+    // The crash is recorded as an unknown effect for the original cell; it
+    // does not freeze the session against a new, explicitly started attempt.
+    assert!(!journal.is_frozen("crash").unwrap());
     let limits = CellLimits::default();
     let host = Arc::new(CrashEffectHost {
         effect_path: dir.path().join("effect.txt"),
@@ -742,12 +744,14 @@ fn independent_crash_effect_is_durable_unknown_without_replay() {
         assert_eq!(page.status, CellStatus::OutcomeUnknown);
         assert!(!page.vm_alive);
         assert_eq!(host.calls.load(Ordering::SeqCst), 0);
-        assert!(matches!(
+        assert_eq!(
             cells
-                .exec_fixture(request("text('must not run')"), CancellationToken::new())
-                .await,
-            Err(CellError::Frozen)
-        ));
+                .exec_fixture(request("text('new task runs')"), CancellationToken::new())
+                .await
+                .unwrap()
+                .status,
+            CellStatus::Completed
+        );
         let record = cells.record(&cell_id).unwrap();
         let evidence = ReconciliationEvidence {
             source_hash: record.source_hash,
@@ -777,9 +781,9 @@ async fn public_output_page_fits_byte_budget_and_preserves_unread_items() {
     cells.close().await;
     drop(cells);
     let limits = CellLimits {
-        output_items: 2,
-        output_bytes: 4096,
-        item_bytes: 2048,
+        output_items: Some(2),
+        output_bytes: Some(4096),
+        item_bytes: Some(2048),
         ..CellLimits::default()
     };
     let cells = manager(

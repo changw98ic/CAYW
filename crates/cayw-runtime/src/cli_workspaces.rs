@@ -20,41 +20,6 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-#[derive(Debug)]
-pub(crate) struct WorkspaceOpenError {
-    message: String,
-    code: &'static str,
-}
-
-impl WorkspaceOpenError {
-    #[cfg(feature = "plugins")]
-    fn from_error(error: Box<dyn Error>) -> Self {
-        let code = if let Some(error) = error.downcast_ref::<cayw_runtime::RuntimeError>() {
-            error.code()
-        } else if cli_settings::error_outcome_unknown(error.as_ref()) {
-            "workspace_outcome_unknown"
-        } else {
-            "settings_error"
-        };
-        Self {
-            message: error.to_string(),
-            code,
-        }
-    }
-
-    pub(crate) fn code(&self) -> &'static str {
-        self.code
-    }
-}
-
-impl std::fmt::Display for WorkspaceOpenError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl Error for WorkspaceOpenError {}
-
 struct ClientBridgePolicy;
 #[async_trait]
 impl RegistryPolicy for ClientBridgePolicy {
@@ -71,11 +36,35 @@ impl RegistryPolicy for ClientBridgePolicy {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct OptionalServicesReport {
     pub mcp_installed: usize,
     pub mcp_skipped: usize,
     pub pi_installed: usize,
+    pub mcp_error: Option<String>,
+    pub pi_error: Option<String>,
+    pub cleanup_error: Option<String>,
+}
+
+impl OptionalServicesReport {
+    /// Disabled optional sources with user-facing reasons. Sources that were
+    /// not configured never appear here.
+    pub fn disabled_services(&self) -> Vec<cayw_runtime::DisabledService> {
+        let mut disabled = Vec::new();
+        for (name, reason) in [
+            ("mcp", &self.mcp_error),
+            ("pi_compat", &self.pi_error),
+            ("optional_service_cleanup", &self.cleanup_error),
+        ] {
+            if let Some(reason) = reason {
+                disabled.push(cayw_runtime::DisabledService {
+                    name: name.into(),
+                    reason: reason.clone(),
+                });
+            }
+        }
+        disabled
+    }
 }
 
 #[derive(Default)]
@@ -133,20 +122,6 @@ pub(crate) async fn cleanup_failed_setup<T>(
     }
 }
 
-#[cfg(feature = "plugins")]
-async fn cleanup_failed_setup_error<T>(
-    resources: WorkspaceResources,
-    primary: WorkspaceOpenError,
-) -> Result<T> {
-    match resources.shutdown().await {
-        Ok(()) => Err(Box::new(primary)),
-        Err(cleanup) => Err(Box::new(WorkspaceOpenError {
-            message: format!("{primary}; optional service cleanup also failed: {cleanup}"),
-            code: "workspace_outcome_unknown",
-        })),
-    }
-}
-
 pub(crate) async fn prepare_optional_services(
     workspace: &Path,
     mcp_servers_file: Option<&Path>,
@@ -162,98 +137,131 @@ pub(crate) async fn prepare_optional_services(
     }
 
     let registry = Registry::new(Limits::default(), Arc::new(ClientBridgePolicy))?;
-    let setup: Result<()> = async {
-        if let Some(path) = mcp_servers_file {
-            let installed =
-                install_mcp_servers_file(path, workspace, &registry, CancellationToken::new())
-                    .await
-                    .map_err(|error| format!("MCP servers install failed: {error}"))?;
-            report.mcp_installed = installed.installed.len();
-            report.mcp_skipped = installed.skipped.len();
-            resources.mcp = Some((registry.clone(), installed.installed));
-        }
-
-        if pi_compat_enabled {
-            #[cfg(feature = "pi-compat")]
-            {
-                let plugin_registry = Arc::new(cayw_plugins::PluginRegistry::new());
-                let pi_host = Arc::new(cayw_pi_compat::PiCompatHost::with_registry(
-                    Arc::clone(&plugin_registry),
-                    true,
-                ));
-                resources.pi = Some((Arc::clone(&pi_host), Vec::new()));
-                let pi = pi_compat.unwrap_or_default();
-                if pi.fixture
-                    || (pi_fixture_fallback && !pi.npm_hello && pi.sample_extension.is_none())
-                {
-                    pi_host
-                        .install_fixture()
-                        .map_err(|error| format!("install pi fixture: {error}"))?;
-                    let package = cayw_pi_compat::PiFixturePlugin::package_id();
-                    resources
-                        .pi
-                        .as_mut()
-                        .expect("Pi resources were initialized")
-                        .1
-                        .push(package.clone());
-                    pi_host
-                        .register_into_bridge(&package, &registry)
-                        .map_err(|error| format!("bridge pi fixture: {error}"))?;
-                    report.pi_installed += 1;
-                }
-                if let Some(sample_path) = pi.sample_extension {
-                    pi_host
-                        .install_sample_extension(&sample_path, CancellationToken::new())
-                        .await
-                        .map_err(|error| format!("install pi sample extension: {error}"))?;
-                    let package = cayw_pi_compat::PiSampleExtension::package_id();
-                    resources
-                        .pi
-                        .as_mut()
-                        .expect("Pi resources were initialized")
-                        .1
-                        .push(package.clone());
-                    pi_host
-                        .register_into_bridge(&package, &registry)
-                        .map_err(|error| format!("bridge pi sample extension: {error}"))?;
-                    report.pi_installed += 1;
-                }
-                if pi.npm_hello {
-                    pi_host
-                        .install_npm_hello_extension(CancellationToken::new())
-                        .await
-                        .map_err(|error| format!("install pi npm hello extension: {error}"))?;
-                    let package = cayw_pi_compat::PiNpmHelloExtension::package_id();
-                    resources
-                        .pi
-                        .as_mut()
-                        .expect("Pi resources were initialized")
-                        .1
-                        .push(package.clone());
-                    pi_host
-                        .register_into_bridge(&package, &registry)
-                        .map_err(|error| format!("bridge pi npm hello extension: {error}"))?;
-                    report.pi_installed += 1;
-                }
-                config.plugin_registry = Some(plugin_registry);
+    // Each source installs independently. One failing source keeps the other
+    // usable and never stops the workspace from opening.
+    if let Some(path) = mcp_servers_file {
+        match install_mcp_servers_file(path, workspace, &registry, CancellationToken::new()).await {
+            Ok(installed) => {
+                report.mcp_installed = installed.installed.len();
+                report.mcp_skipped = installed.skipped.len();
+                resources.mcp = Some((registry.clone(), installed.installed));
             }
-            #[cfg(not(feature = "pi-compat"))]
-            {
-                let _ = (pi_compat, pi_fixture_fallback);
-                return Err(
-                    "pi-compat requires the `pi-compat` feature to be enabled in this binary"
-                        .into(),
-                );
-            }
+            Err(error) => report.mcp_error = Some(format!("MCP servers install failed: {error}")),
         }
-        Ok(())
     }
-    .await;
-    if let Err(message) = setup.map_err(|error| error.to_string()) {
-        return cleanup_failed_setup(resources, message).await;
+    if pi_compat_enabled {
+        #[cfg(feature = "pi-compat")]
+        install_pi(
+            &registry,
+            &mut resources,
+            &mut report,
+            pi_compat,
+            pi_fixture_fallback,
+            config,
+        )
+        .await;
+        #[cfg(not(feature = "pi-compat"))]
+        {
+            let _ = (pi_compat, pi_fixture_fallback);
+            report.pi_error = Some(
+                "pi-compat requires the `pi-compat` feature to be enabled in this binary".into(),
+            );
+        }
     }
-    config.bridge = Some(registry.consumer());
+    if report.mcp_installed + report.pi_installed > 0 {
+        config.bridge = Some(registry.consumer());
+    } else if report.mcp_error.is_some() || report.pi_error.is_some() {
+        // Nothing usable was installed. Release partially prepared sources once
+        // and report any failure; cleanup is never retried or replayed.
+        match std::mem::take(&mut resources).shutdown().await {
+            Ok(()) => {}
+            Err(error) => report.cleanup_error = Some(error.to_string()),
+        }
+    }
     Ok((resources, report))
+}
+
+#[cfg(feature = "pi-compat")]
+async fn install_pi(
+    registry: &Registry,
+    resources: &mut WorkspaceResources,
+    report: &mut OptionalServicesReport,
+    pi_compat: Option<PiCompatConfig>,
+    pi_fixture_fallback: bool,
+    config: &mut RuntimeConfig,
+) {
+    let plugin_registry = Arc::new(cayw_plugins::PluginRegistry::new());
+    let pi_host = Arc::new(cayw_pi_compat::PiCompatHost::with_registry(
+        Arc::clone(&plugin_registry),
+        true,
+    ));
+    resources.pi = Some((Arc::clone(&pi_host), Vec::new()));
+    let pi = pi_compat.unwrap_or_default();
+    let mut failures = Vec::new();
+    if pi.fixture || (pi_fixture_fallback && !pi.npm_hello && pi.sample_extension.is_none()) {
+        match pi_host.install_fixture() {
+            Ok(_) => {
+                let package = cayw_pi_compat::PiFixturePlugin::package_id();
+                resources
+                    .pi
+                    .as_mut()
+                    .expect("Pi resources were initialized")
+                    .1
+                    .push(package.clone());
+                match pi_host.register_into_bridge(&package, registry) {
+                    Ok(_) => report.pi_installed += 1,
+                    Err(error) => failures.push(format!("bridge pi fixture: {error}")),
+                }
+            }
+            Err(error) => failures.push(format!("install pi fixture: {error}")),
+        }
+    }
+    if let Some(sample_path) = pi.sample_extension {
+        match pi_host
+            .install_sample_extension(&sample_path, CancellationToken::new())
+            .await
+        {
+            Ok(_) => {
+                let package = cayw_pi_compat::PiSampleExtension::package_id();
+                resources
+                    .pi
+                    .as_mut()
+                    .expect("Pi resources were initialized")
+                    .1
+                    .push(package.clone());
+                match pi_host.register_into_bridge(&package, registry) {
+                    Ok(_) => report.pi_installed += 1,
+                    Err(error) => failures.push(format!("bridge pi sample extension: {error}")),
+                }
+            }
+            Err(error) => failures.push(format!("install pi sample extension: {error}")),
+        }
+    }
+    if pi.npm_hello {
+        match pi_host
+            .install_npm_hello_extension(CancellationToken::new())
+            .await
+        {
+            Ok(_) => {
+                let package = cayw_pi_compat::PiNpmHelloExtension::package_id();
+                resources
+                    .pi
+                    .as_mut()
+                    .expect("Pi resources were initialized")
+                    .1
+                    .push(package.clone());
+                match pi_host.register_into_bridge(&package, registry) {
+                    Ok(_) => report.pi_installed += 1,
+                    Err(error) => failures.push(format!("bridge pi npm hello extension: {error}")),
+                }
+            }
+            Err(error) => failures.push(format!("install pi npm hello extension: {error}")),
+        }
+    }
+    config.plugin_registry = Some(plugin_registry);
+    if !failures.is_empty() {
+        report.pi_error = Some(failures.join("; "));
+    }
 }
 
 #[derive(Clone)]
@@ -456,15 +464,25 @@ async fn open_workspace(
     let pi_compat = headless.pi_compat().cloned();
     let pi_enabled = pi_compat.as_ref().is_some_and(|config| config.enabled);
     let mut config = headless.into_runtime_config()?;
-    let request_timeout = config
-        .max_run_time
-        .checked_add(Duration::from_secs(60))
-        .ok_or("workspace request timeout calculation overflowed")?;
-    let request_timeout_ms = u64::try_from(request_timeout.as_millis())
-        .map_err(|_| "workspace request timeout exceeds u64")?;
-    if request_timeout.is_zero() || request_timeout_ms == 0 {
-        return Err("workspace request timeout must be positive".into());
-    }
+    let request_timeout = match config.max_run_time {
+        Some(max_run_time) => Some(
+            max_run_time
+                .checked_add(Duration::from_secs(60))
+                .ok_or("workspace request timeout calculation overflowed")?,
+        ),
+        None => None,
+    };
+    let request_timeout_ms = match request_timeout {
+        Some(request_timeout) => {
+            let timeout_ms = u64::try_from(request_timeout.as_millis())
+                .map_err(|_| "workspace request timeout exceeds u64")?;
+            if request_timeout.is_zero() || timeout_ms == 0 {
+                return Err("workspace request timeout must be positive".into());
+            }
+            Some(timeout_ms)
+        }
+        None => None,
+    };
     let (provider, model): (Arc<dyn Provider>, Model) = if let Some(selected) = selected {
         let configured = selected.build()?;
         (configured.provider, configured.model)
@@ -479,7 +497,7 @@ async fn open_workspace(
             Model::new("unconfigured", "unconfigured"),
         )
     };
-    let (resources, _) = prepare_optional_services(
+    let (resources, optional_services) = prepare_optional_services(
         &paths.workspace,
         mcp_servers_file.as_deref(),
         pi_enabled,
@@ -492,6 +510,9 @@ async fn open_workspace(
         Ok(runtime) => Arc::new(runtime),
         Err(error) => return cleanup_failed_setup(resources, error.to_string()).await,
     };
+    let mut disabled = runtime.disabled_services().to_vec();
+    disabled.extend(optional_services.disabled_services());
+    crate::warn_disabled_services(&disabled);
     let settings = cli_settings::Settings {
         #[cfg(feature = "plugins")]
         plugins,
@@ -501,15 +522,13 @@ async fn open_workspace(
         paths: paths.clone(),
     };
     #[cfg(feature = "plugins")]
-    let restore_error = match settings.plugins.restore(&paths, &runtime).await {
-        Ok(()) => None,
-        Err(error) => Some(WorkspaceOpenError::from_error(error)),
-    };
-    #[cfg(feature = "plugins")]
-    if let Some(error) = restore_error {
-        drop(settings);
-        drop(runtime);
-        return cleanup_failed_setup_error(resources, error).await;
+    if let Err(error) = settings.plugins.restore(&paths, &runtime).await {
+        // Plugin restore only degrades the plugin subsystem. The workspace keeps
+        // opening, and doctor plus the settings RPC report the same reason.
+        eprintln!(
+            "cayw: workspace plugin restore failed in {}; the workspace continues without plugin supervision: {error}",
+            paths.workspace.display()
+        );
     }
     Ok(WorkspaceHost::new(
         runtime,
@@ -518,6 +537,7 @@ async fn open_workspace(
         resources,
         model_available,
         local_model_setup_hint(&paths),
+        optional_services,
     ))
 }
 
@@ -545,4 +565,138 @@ pub fn optional_tools(pi_enabled: bool) -> Result<Value> {
         "trace":{"installed":installed("cayw-trace-debug"),"status":"external_service_required","install":install("cayw-trace-debug","cayw-trace-debug",""),"start":"cayw-trace-debug --help"},
         "pi":{"installed":cfg!(feature="pi-compat"),"enabled":pi_enabled,"install":install("cayw-runtime","cayw","--features pi-compat"),"start":"cayw serve --pi-compat"}
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mcp_failure_is_reported_without_stopping_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let missing = temp.path().join("missing-mcp.json");
+        let mut config = RuntimeConfig::default();
+        let (resources, report) =
+            prepare_optional_services(&workspace, Some(&missing), false, None, false, &mut config)
+                .await
+                .expect("an optional source failure must not fail setup");
+        assert!(report.mcp_error.is_some());
+        assert_eq!(report.mcp_installed, 0);
+        assert!(config.bridge.is_none());
+        assert!(
+            report
+                .disabled_services()
+                .iter()
+                .any(|service| service.name == "mcp" && !service.reason.is_empty())
+        );
+        resources
+            .shutdown()
+            .await
+            .expect("nothing installed needs no cleanup");
+    }
+
+    #[tokio::test]
+    async fn all_skipped_mcp_file_with_request_policy_still_opens() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mcp = temp.path().join("mcp-remote.json");
+        std::fs::write(
+            &mcp,
+            serde_json::to_vec(
+                &json!({"mcpServers":{"remote":{"url":"https://example.invalid/mcp"}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut config = RuntimeConfig {
+            request_policy: Some(cayw_runtime::RequestPolicy {
+                permission_policy_id: "mcp-request-policy".into(),
+                operations: vec![cayw_requests::OperationScope::exact(
+                    "mcp-discover",
+                    "mcp.discover",
+                    json!({}),
+                    "mcp-discover-binding",
+                )],
+            }),
+            ..Default::default()
+        };
+        let (resources, report) =
+            prepare_optional_services(&workspace, Some(&mcp), false, None, false, &mut config)
+                .await
+                .expect("a valid file with only skipped entries must not fail setup");
+        assert_eq!(report.mcp_installed, 0);
+        assert!(report.mcp_error.is_none());
+        assert!(config.bridge.is_none());
+        let runtime = Runtime::open(
+            temp.path().join("sessions.db"),
+            &workspace,
+            Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+            Model::new("fixture", "mcp-all-skipped"),
+            config,
+        )
+        .expect("a request policy for an uninstalled source must not fail open");
+        assert!(
+            runtime
+                .capabilities()
+                .unwrap()
+                .iter()
+                .any(|definition| definition.name == "capability.request")
+        );
+        resources
+            .shutdown()
+            .await
+            .expect("skipped sources need no cleanup");
+    }
+
+    #[cfg(feature = "pi-compat")]
+    #[tokio::test]
+    async fn mcp_failure_does_not_prevent_pi_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let missing = temp.path().join("missing-mcp.json");
+        let mut config = RuntimeConfig::default();
+        let (resources, report) = prepare_optional_services(
+            &workspace,
+            Some(&missing),
+            true,
+            Some(PiCompatConfig {
+                enabled: true,
+                fixture: true,
+                sample_extension: None,
+                npm_hello: false,
+            }),
+            false,
+            &mut config,
+        )
+        .await
+        .expect("one source failing must not fail setup");
+        assert!(report.mcp_error.is_some());
+        assert!(report.pi_installed > 0, "{report:?}");
+        assert!(report.pi_error.is_none(), "{report:?}");
+        assert!(config.bridge.is_some());
+        resources
+            .shutdown()
+            .await
+            .expect("installed Pi source unloads");
+    }
+
+    #[cfg(not(feature = "pi-compat"))]
+    #[tokio::test]
+    async fn pi_without_feature_is_reported_and_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let mut config = RuntimeConfig::default();
+        let (resources, report) =
+            prepare_optional_services(&workspace, None, true, None, false, &mut config)
+                .await
+                .expect("a missing optional feature must not fail setup");
+        assert!(report.pi_error.is_some());
+        assert!(config.bridge.is_none());
+        resources.shutdown().await.expect("nothing to clean up");
+    }
 }

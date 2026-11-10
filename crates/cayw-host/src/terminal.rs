@@ -31,42 +31,40 @@ use std::{
 use tokio::sync::Notify;
 
 const MAX_ID_BYTES: usize = 128;
-const MAX_SESSIONS: usize = 1024;
-const MAX_TOTAL_SESSIONS: usize = 65_536;
-const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
-const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
-const MAX_READ_BYTES: usize = 1024 * 1024;
-const MAX_WAIT: Duration = Duration::from_secs(300);
-const MAX_REQUESTS_PER_SESSION: usize = 4096;
+/// Default page size for one `read` operation when the caller omits `max_bytes`.
+const DEFAULT_READ_BYTES: usize = 64 * 1024;
+/// Buffer capacity used when a terminal has no explicit output or write limit.
+const INTERACTIVE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 /// Bounds applying to one Host's terminal manager.
 ///
 /// Counts are lifetime budgets for this manager. They are not reset by a wait,
-/// read, close, or cancel. The per-session output budget is also capped by the
-/// selected profile's `max_output_bytes`.
+/// read, close, or cancel. Every optional field is unlimited when it is `None`.
+/// The per-session output budget is also capped by the selected profile's
+/// `max_output_bytes`.
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalLimits {
     pub max_sessions: usize,
-    pub max_sessions_total: usize,
-    pub max_input_bytes_per_write: usize,
-    pub max_input_bytes_per_session: usize,
-    pub max_output_bytes_per_session: usize,
-    pub max_read_bytes: usize,
-    pub max_wait: Duration,
+    pub max_sessions_total: Option<usize>,
+    pub max_input_bytes_per_write: Option<usize>,
+    pub max_input_bytes_per_session: Option<usize>,
+    pub max_output_bytes_per_session: Option<usize>,
+    pub max_read_bytes: Option<usize>,
+    pub max_wait: Option<Duration>,
 }
 
 impl Default for TerminalLimits {
     fn default() -> Self {
         Self {
-            max_sessions: 4,
-            max_sessions_total: 64,
-            max_input_bytes_per_write: 64 * 1024,
-            max_input_bytes_per_session: 1024 * 1024,
-            max_output_bytes_per_session: 1024 * 1024,
-            max_read_bytes: 64 * 1024,
-            max_wait: Duration::from_secs(30),
+            max_sessions: 16,
+            max_sessions_total: None,
+            max_input_bytes_per_write: None,
+            max_input_bytes_per_session: None,
+            max_output_bytes_per_session: None,
+            max_read_bytes: None,
+            max_wait: None,
         }
     }
 }
@@ -87,21 +85,28 @@ pub(crate) fn validate_config(config: &TerminalConfig) -> Result<(), CapabilityE
     }
     let limits = config.limits;
     if limits.max_sessions == 0
-        || limits.max_sessions > MAX_SESSIONS
-        || limits.max_sessions_total < limits.max_sessions
-        || limits.max_sessions_total > MAX_TOTAL_SESSIONS
-        || limits.max_input_bytes_per_write == 0
-        || limits.max_input_bytes_per_write > MAX_INPUT_BYTES
-        || limits.max_input_bytes_per_session < limits.max_input_bytes_per_write
-        || limits.max_input_bytes_per_session > MAX_INPUT_BYTES
-        || limits.max_output_bytes_per_session == 0
-        || limits.max_output_bytes_per_session > MAX_OUTPUT_BYTES
-        || limits.max_read_bytes == 0
-        || limits.max_read_bytes > MAX_READ_BYTES
-        || limits.max_read_bytes > limits.max_output_bytes_per_session
-        || limits.max_wait.is_zero()
-        || limits.max_wait > MAX_WAIT
-        || Instant::now().checked_add(limits.max_wait).is_none()
+        || limits
+            .max_sessions_total
+            .is_some_and(|total| total < limits.max_sessions)
+        || limits.max_input_bytes_per_write == Some(0)
+        || limits.max_input_bytes_per_session == Some(0)
+        || limits.max_output_bytes_per_session == Some(0)
+        || limits.max_read_bytes == Some(0)
+        || limits
+            .max_wait
+            .is_some_and(|wait| wait.is_zero() || Instant::now().checked_add(wait).is_none())
+    {
+        return Err(failure("invalid terminal limits"));
+    }
+    if let (Some(write), Some(session)) = (
+        limits.max_input_bytes_per_write,
+        limits.max_input_bytes_per_session,
+    ) && session < write
+    {
+        return Err(failure("invalid terminal limits"));
+    }
+    if let (Some(read), Some(output)) = (limits.max_read_bytes, limits.max_output_bytes_per_session)
+        && read > output
     {
         return Err(failure("invalid terminal limits"));
     }
@@ -113,9 +118,9 @@ pub(crate) fn validate_config(config: &TerminalConfig) -> Result<(), CapabilityE
         if profile.allow_filter {
             return Err(failure("terminal profiles cannot allow a filter"));
         }
-        if profile.timeout.is_zero()
-            || Instant::now().checked_add(profile.timeout).is_none()
-            || profile.max_output_bytes == 0
+        if profile.timeout.is_some_and(|timeout| {
+            timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
+        }) || profile.max_output_bytes == Some(0)
             || profile.args.len() > 256
             || profile
                 .args
@@ -151,6 +156,21 @@ pub(crate) fn validate_config(config: &TerminalConfig) -> Result<(), CapabilityE
 pub(crate) fn definitions(config: &TerminalConfig) -> Vec<ToolDefinition> {
     let profiles: Vec<String> = config.profiles.keys().cloned().collect();
     let limits = config.limits;
+    let data = match limits.max_input_bytes_per_write {
+        Some(limit) => json!({"type":"string","maxLength":limit}),
+        None => json!({"type":"string"}),
+    };
+    let max_bytes = match limits.max_read_bytes {
+        Some(limit) => json!({"type":"integer","minimum":1,"maximum":limit}),
+        None => json!({"type":"integer","minimum":1}),
+    };
+    let wait_ms = match limits.max_wait {
+        Some(wait) => json!({
+            "type":"integer","minimum":0,
+            "maximum":wait.as_millis().min(u64::MAX as u128) as u64
+        }),
+        None => json!({"type":"integer","minimum":0}),
+    };
     vec![
         ToolDefinition {
             name: "exec_command".into(),
@@ -171,11 +191,11 @@ pub(crate) fn definitions(config: &TerminalConfig) -> Vec<ToolDefinition> {
                     "session_id":{"type":"string","minLength":1,"maxLength":MAX_ID_BYTES},
                     "action":{"type":"string","enum":["write","read","wait","close","cancel"]},
                     "request_id":{"type":"string","minLength":1,"maxLength":MAX_ID_BYTES},
-                    "data":{"type":"string","maxLength":limits.max_input_bytes_per_write},
+                    "data":data,
                     "cursor":{"type":"integer","minimum":0},
                     "expected_cursor":{"type":"integer","minimum":0},
-                    "max_bytes":{"type":"integer","minimum":1,"maximum":limits.max_read_bytes},
-                    "wait_ms":{"type":"integer","minimum":0,"maximum":limits.max_wait.as_millis().min(u64::MAX as u128) as u64}
+                    "max_bytes":max_bytes,
+                    "wait_ms":wait_ms
                 },
                 "required":["session_id","action","request_id"],
                 "additionalProperties":false
@@ -220,7 +240,11 @@ fn validate_write_stdin(arguments: &Value, config: &TerminalConfig) -> Result<()
     match action {
         "write" => {
             let data = data.ok_or_else(|| failure("terminal write requires data"))?;
-            if data.len() > config.limits.max_input_bytes_per_write {
+            if config
+                .limits
+                .max_input_bytes_per_write
+                .is_some_and(|limit| data.len() > limit)
+            {
                 return Err(failure("terminal write exceeds max_input_bytes_per_write"));
             }
             if cursor.is_some() || max_bytes.is_some() || wait_ms.is_some() {
@@ -239,7 +263,11 @@ fn validate_write_stdin(arguments: &Value, config: &TerminalConfig) -> Result<()
                 ));
             }
             if let Some(max_bytes) = max_bytes
-                && (max_bytes == 0 || max_bytes > config.limits.max_read_bytes as u64)
+                && (max_bytes == 0
+                    || config
+                        .limits
+                        .max_read_bytes
+                        .is_some_and(|limit| max_bytes > limit as u64))
             {
                 return Err(failure("terminal read max_bytes is out of range"));
             }
@@ -253,7 +281,10 @@ fn validate_write_stdin(arguments: &Value, config: &TerminalConfig) -> Result<()
                 return Err(failure("terminal wait only accepts wait_ms"));
             }
             if wait_ms.is_some_and(|value| {
-                value > config.limits.max_wait.as_millis().min(u64::MAX as u128) as u64
+                config
+                    .limits
+                    .max_wait
+                    .is_some_and(|wait| value > wait.as_millis().min(u64::MAX as u128) as u64)
             }) {
                 return Err(failure("terminal wait_ms is out of range"));
             }
@@ -327,8 +358,8 @@ struct TerminalSession {
     id: String,
     profile: String,
     started: Instant,
-    deadline: Instant,
-    max_output: usize,
+    deadline: Option<Instant>,
+    max_output: Option<usize>,
     limits: TerminalLimits,
     stdin: tokio::sync::Mutex<Option<ManagedStdin>>,
     control: ProcessControl,
@@ -529,7 +560,7 @@ impl TerminalManager {
         runner: Arc<ProcessRunner>,
         profile_name: &str,
         cancel: &CancellationToken,
-        call_deadline: Instant,
+        call_deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         // Hold the startup gate across launch and registration so `drain` cannot
         // snapshot the session map while a process is being launched.
@@ -545,16 +576,25 @@ impl TerminalManager {
             .cloned()
             .ok_or_else(|| failure("terminal profile is not configured"))?;
         let limits = self.config.limits;
-        let max_output = profile
-            .max_output_bytes
-            .min(limits.max_output_bytes_per_session);
+        let max_output = crate::min_opt(
+            profile.max_output_bytes,
+            limits.max_output_bytes_per_session,
+        );
         let started = Instant::now();
-        let deadline = started
-            .checked_add(profile.timeout)
-            .ok_or_else(|| failure("terminal session lifetime is not representable"))?;
+        let deadline = match profile.timeout {
+            Some(timeout) => Some(
+                started
+                    .checked_add(timeout)
+                    .ok_or_else(|| failure("terminal session lifetime is not representable"))?,
+            ),
+            None => None,
+        };
         {
             let mut totals = lock(&self.totals);
-            if totals.created >= limits.max_sessions_total {
+            if limits
+                .max_sessions_total
+                .is_some_and(|total| totals.created >= total)
+            {
                 return Err(failure("terminal session lifetime budget exhausted"));
             }
             totals.created += 1;
@@ -579,8 +619,10 @@ impl TerminalManager {
         };
         let session_cancel = CancellationToken::new();
         let interactive_limits = InteractiveLimits {
-            max_write_bytes: limits.max_input_bytes_per_write,
-            max_buffered_stdout_bytes: max_output,
+            max_write_bytes: limits
+                .max_input_bytes_per_write
+                .unwrap_or(INTERACTIVE_BUFFER_BYTES),
+            max_buffered_stdout_bytes: max_output.unwrap_or(INTERACTIVE_BUFFER_BYTES),
         };
         let start = runner.start_interactive_in_directory_with_permit(
             spec,
@@ -598,7 +640,7 @@ impl TerminalManager {
                     "exec_command cancelled during terminal startup; process cleanup is pending",
                 ));
             }
-            _ = tokio::time::sleep_until(call_deadline.into()) => {
+            _ = crate::sleep_deadline(call_deadline) => {
                 session_cancel.cancel();
                 self.mark_unknown("terminal startup deadline reached");
                 return Err(CapabilityError::unknown(
@@ -665,7 +707,7 @@ impl TerminalManager {
             "state": "running",
             "output_cursor": 0,
             "input_bytes": 0,
-            "remaining_ms": deadline.saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64,
+            "remaining_ms": deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64),
         }))
     }
 
@@ -695,7 +737,7 @@ impl TerminalManager {
         &self,
         arguments: &Value,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         check(cancel, deadline)?;
         let session_id = identifier(arguments, "session_id")?;
@@ -723,7 +765,9 @@ impl TerminalManager {
                 let cursor = optional_u64(arguments, "cursor")?
                     .ok_or_else(|| failure("terminal read requires cursor"))?;
                 let max_bytes = optional_u64(arguments, "max_bytes")?
-                    .map_or(session.limits.max_read_bytes, |value| value as usize);
+                    .map_or(DEFAULT_READ_BYTES, |value| {
+                        value.min(usize::MAX as u64) as usize
+                    });
                 session.read(request_id, cursor, max_bytes)
             }
             "wait" => {
@@ -743,7 +787,7 @@ impl TerminalManager {
 fn spec(
     root: &cap_std::fs::Dir,
     profile: &Profile,
-    max_output: usize,
+    max_output: Option<usize>,
 ) -> Result<DirectoryProcessSpec, CapabilityError> {
     Ok(DirectoryProcessSpec {
         program: profile.program.clone(),
@@ -752,6 +796,7 @@ fn spec(
         env: profile.env.clone(),
         timeout: profile.timeout,
         max_output_bytes: max_output,
+        output_spill_dir: None,
         io: profile.io,
     })
 }
@@ -876,7 +921,7 @@ impl TerminalSession {
             "unread_bytes": output.bytes.len().saturating_sub(output.delivered),
             "input_bytes": input_bytes,
             "elapsed_ms": self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-            "remaining_ms": self.deadline.saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64,
+            "remaining_ms": self.deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()).as_millis().min(u64::MAX as u128) as u64),
             "unknown": unknown,
         })
     }
@@ -902,7 +947,11 @@ impl TerminalSession {
             return Err(failure("terminal output cursor is ahead of the session"));
         }
         let end = cursor
-            .saturating_add(max_bytes.min(self.limits.max_read_bytes))
+            .saturating_add(
+                self.limits
+                    .max_read_bytes
+                    .map_or(max_bytes, |limit| max_bytes.min(limit)),
+            )
             .min(output.bytes.len());
         // The canonical payload is raw bytes. `text` is display-only and may
         // contain replacement characters when a page splits a UTF-8 sequence.
@@ -936,7 +985,7 @@ impl TerminalSession {
         data: &str,
         expected_cursor: Option<u64>,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         let _write = self.write_lock.lock().await;
         if let Some(record) = lock(&self.requests).get(request_id).cloned() {
@@ -958,21 +1007,22 @@ impl TerminalSession {
         {
             return Err(failure("terminal output cursor is stale"));
         }
-        if data.len() > self.limits.max_input_bytes_per_write {
+        if self
+            .limits
+            .max_input_bytes_per_write
+            .is_some_and(|limit| data.len() > limit)
+        {
             return Err(failure("terminal write exceeds max_input_bytes_per_write"));
         }
-        {
+        if let Some(limit) = self.limits.max_input_bytes_per_session {
             let input = lock(&self.input_bytes);
             if data
                 .len()
                 .checked_add(*input)
-                .is_none_or(|total| total > self.limits.max_input_bytes_per_session)
+                .is_none_or(|total| total > limit)
             {
                 return Err(failure("terminal session input budget exhausted"));
             }
-        }
-        if lock(&self.requests).len() >= MAX_REQUESTS_PER_SESSION {
-            return Err(failure("terminal request ledger is full"));
         }
         let mut stdin = self.stdin.lock().await;
         let result = {
@@ -989,7 +1039,7 @@ impl TerminalSession {
                         "terminal write cancelled; a partial write may have reached the process",
                     ));
                 }
-                _ = tokio::time::sleep_until(deadline.into()) => {
+                _ = crate::sleep_deadline(deadline) => {
                     self.mark_unknown("terminal write deadline reached; a partial write may have reached the process");
                     return Err(CapabilityError::unknown(
                         "terminal write deadline reached; a partial write may have reached the process",
@@ -1037,25 +1087,26 @@ impl TerminalSession {
         request_id: &str,
         wait_ms: u64,
         cancel: &CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         if let Some(error) = self.terminal_error() {
             return Err(error);
         }
         if self.is_live() {
-            let wait = Duration::from_millis(
-                wait_ms.min(self.limits.max_wait.as_millis().min(u64::MAX as u128) as u64),
-            );
-            let end = Instant::now()
-                .checked_add(wait)
-                .map_or(deadline, |value| value.min(deadline));
+            let wait = Duration::from_millis(wait_ms);
+            let natural = Instant::now().checked_add(wait);
+            let end = match (natural, deadline) {
+                (Some(natural), Some(deadline)) => Some(natural.min(deadline)),
+                (natural, None) => natural,
+                (None, deadline) => deadline,
+            };
             let control = self.control.clone();
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
                     return Err(failure("cancelled while waiting for terminal"));
                 }
-                _ = tokio::time::sleep_until(end.into()) => {}
+                _ = crate::sleep_deadline(end) => {}
                 outcome = control.wait() => self.finish(outcome),
             }
         }
@@ -1104,15 +1155,13 @@ impl TerminalSession {
             )));
         }
         let mut requests = lock(&self.requests);
-        if requests.len() < MAX_REQUESTS_PER_SESSION {
-            requests.insert(
-                request_id.into(),
-                Request {
-                    action,
-                    result: result.clone(),
-                },
-            );
-        }
+        requests.insert(
+            request_id.into(),
+            Request {
+                action,
+                result: result.clone(),
+            },
+        );
         drop(requests);
         Ok(result)
     }
@@ -1148,15 +1197,21 @@ async fn read_output(session: Arc<TerminalSession>, mut stdout: ManagedStdout) {
         match stdout.recv().await {
             Ok(Some(chunk)) => {
                 let mut output = lock(&session.output);
-                if output.bytes.len() < session.max_output {
-                    let room = session.max_output - output.bytes.len();
-                    let keep = chunk.len().min(room);
-                    output.bytes.extend_from_slice(&chunk[..keep]);
-                    if keep < chunk.len() {
-                        output.truncated = true;
+                match session.max_output {
+                    Some(max_output) if output.bytes.len() < max_output => {
+                        let room = max_output - output.bytes.len();
+                        let keep = chunk.len().min(room);
+                        output.bytes.extend_from_slice(&chunk[..keep]);
+                        if keep < chunk.len() {
+                            output.truncated = true;
+                        }
                     }
-                } else if !chunk.is_empty() {
-                    output.truncated = true;
+                    Some(_) => {
+                        if !chunk.is_empty() {
+                            output.truncated = true;
+                        }
+                    }
+                    None => output.bytes.extend_from_slice(&chunk),
                 }
                 let truncated = output.truncated;
                 drop(output);
@@ -1197,7 +1252,7 @@ pub(crate) async fn execute(
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     match name {
         "exec_command" => {

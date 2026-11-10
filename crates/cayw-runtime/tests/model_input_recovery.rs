@@ -83,8 +83,8 @@ async fn respond(stream: &mut TcpStream, body: &str) {
 
 fn open(root: &Path, base: &str) -> Runtime {
     let mut config = RuntimeConfig {
-        max_total_tokens: 1000,
-        max_turns: 12,
+        max_total_tokens: Some(1000),
+        max_turns: Some(12),
         ..Default::default()
     };
     config.permissions.push(ScopedPermission::exact(
@@ -263,7 +263,7 @@ async fn fragmented_arguments_write_once_complete_wait_and_survive_reopen() {
             }
             count
         });
-        let mut config = RuntimeConfig { max_total_tokens: 100_000, max_turns: 12, ..Default::default() };
+        let mut config = RuntimeConfig { max_total_tokens: Some(100_000), max_turns: Some(12), ..Default::default() };
         config.permissions.push(ScopedPermission::exact("fs.write", json!({"path":"result.txt","content":CONTENT})));
         let mut model = Model::new("magpie", "opencode-go/deepseek-v4.1-flash");
         model.max_output_tokens = Some(8192);
@@ -284,7 +284,7 @@ async fn fragmented_arguments_write_once_complete_wait_and_survive_reopen() {
         assert_eq!(final_view.executions.len(), 1);
         let ledger = runtime.model_requests(&id).unwrap();
         assert_eq!(ledger.reserved_tokens, 0);
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
         assert_eq!(ledger.settled_tokens, 32300 + (ledger.requests.len() as u64 - 1) * 8);
         drop(runtime);
         let runtime = open();
@@ -353,7 +353,7 @@ async fn truncated_tool_input_continues_without_repeating_a_completed_host_write
         assert!(!before.iter().any(|row| matches!(&row.event, CoreEvent::ToolStarted { call_id } if call_id == "truncated-call")));
         let ledger = runtime.model_requests(&id).unwrap();
         assert_eq!(ledger.reserved_tokens, 0);
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
         drop(runtime);
         let runtime = open(root.path(), &base);
         assert_eq!(runtime.get(&id).unwrap().messages, first.messages);
@@ -369,6 +369,6 @@ async fn truncated_tool_input_continues_without_repeating_a_completed_host_write
         assert_eq!(bodies.len(), after.requests.len());
         assert_eq!(after.settled_tokens, bodies.len() as u64 * 8);
         assert_eq!(after.reserved_tokens, 0);
-        assert!(!after.budget_unknown);
+        assert!(!after.usage_unknown);
     }).await.expect("model input recovery stalled");
 }

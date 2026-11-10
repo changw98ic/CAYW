@@ -1,5 +1,5 @@
 use crate::{
-    ApprovalChoice, ModelBudgetContinuation, ModelRequestOrigin, Runtime, RuntimeError,
+    ApprovalChoice, Runtime, RuntimeError,
     input::{ImageInput, TaskInput},
 };
 use async_trait::async_trait;
@@ -145,21 +145,6 @@ struct Fork {
 #[serde(deny_unknown_fields)]
 struct Task {
     task_id: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelBudgetStatus {
-    session_id: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ContinueModelBudget {
-    session_id: String,
-    task_id: String,
-    expected: Vec<ModelRequestOrigin>,
-    additional_tokens: u64,
-    token_limit: u64,
-    confirm: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -461,77 +446,6 @@ impl Runtime {
                 let p: Session = parse(params)?;
                 encode(self.grants(&p.session_id)?)
             }
-            "model.budget.status" => {
-                let p: ModelBudgetStatus = parse(params)?;
-                let ledger = self.model_requests(&p.session_id)?;
-                let occupied = ledger
-                    .settled_tokens
-                    .checked_add(ledger.reserved_tokens)
-                    .ok_or(RuntimeError::Budget("model token budget overflow"))?;
-                let expected = ledger
-                    .requests
-                    .iter()
-                    .filter(|request| request.outstanding_reservation_tokens > 0)
-                    .map(ModelRequestOrigin::from)
-                    .collect::<Vec<_>>();
-                let continuation = if ledger.budget_unknown {
-                    let additional_tokens = ledger.token_limit;
-                    let token_limit = occupied
-                        .checked_add(additional_tokens)
-                        .ok_or(RuntimeError::Budget("model token budget overflow"))?;
-                    let unknown_request_count = expected.len();
-                    Some(json!({
-                        "expected": expected,
-                        "unknown_request_count": unknown_request_count,
-                        "additional_tokens": additional_tokens,
-                        "token_limit": token_limit,
-                    }))
-                } else {
-                    None
-                };
-                Ok(json!({
-                    "budget_session_id": ledger.budget_session_id,
-                    "base_token_limit": ledger.token_limit,
-                    "settled_tokens": ledger.settled_tokens,
-                    "reserved_tokens": ledger.reserved_tokens,
-                    "remaining_tokens": ledger.remaining_tokens,
-                    "budget_unknown": ledger.budget_unknown,
-                    "continuation": continuation,
-                    "cost_status": ledger.cost_status,
-                }))
-            }
-            "model.budget.continue" => {
-                let p: ContinueModelBudget = parse(params)?;
-                if !p.confirm {
-                    return Err(RpcError::new(
-                        "confirmation_required",
-                        "model budget continuation requires explicit user confirmation",
-                    ));
-                }
-                let task = self.task(&p.task_id)?;
-                if task.session_id != p.session_id {
-                    return Err(RpcError::new(
-                        "invalid_params",
-                        "model budget continuation task belongs to another session",
-                    ));
-                }
-                let evidence = format!(
-                    "rpc user confirmed {} additional tokens with {} exact unknown model request hold(s); historical usage and cost remain unknown",
-                    p.additional_tokens,
-                    p.expected.len()
-                );
-                encode(
-                    self.authorize_model_budget_continuation(ModelBudgetContinuation {
-                        task_id: p.task_id,
-                        expected: p.expected,
-                        additional_tokens: p.additional_tokens,
-                        token_limit: p.token_limit,
-                        actor: "rpc-user".into(),
-                        evidence,
-                    })
-                    .await?,
-                )
-            }
             "session.prompt" => {
                 let p: Prompt = parse(params)?;
                 let input = TaskInput {
@@ -748,6 +662,33 @@ impl RpcHandler for Runtime {
             .await
             .map_err(|error| with_operation_context(error, &context))
     }
+    /// Query methods only observe durable state. An oversized response cannot
+    /// mean that an external effect happened, so the transport reports a known
+    /// `response_too_large` instead of `outcome_unknown`.
+    fn read_only(&self, method: &str) -> bool {
+        matches!(
+            method,
+            "runtime.health"
+                | "runtime.resources"
+                | "runtime.scheduler"
+                | "runtime.fleet"
+                | "runtime.background.list"
+                | "runtime.background.inspect"
+                | "runtime.background.logs"
+                | "runtime.background.result"
+                | "content.inspect"
+                | "session.list"
+                | "session.get"
+                | "session.events"
+                | "session.run_inspector"
+                | "session.audit"
+                | "session.context_overview"
+                | "session.grants"
+                | "capabilities.list"
+                | "session.tasks"
+                | "task.get"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -755,9 +696,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unresolved_session_error_keeps_unknown_outcome_on_rpc_transport() {
-        let error = RpcError::from(RuntimeError::NeedsReconciliation);
-        assert_eq!(error.code, "needs_reconciliation_outcome_unknown");
+    fn unresolved_worker_error_keeps_unknown_outcome_on_rpc_transport() {
+        let error = RpcError::from(RuntimeError::WorkerPanicked("boom".into()));
+        assert_eq!(error.code, "worker_panicked_outcome_unknown");
         let error = cayw_ipc::ClientError::from(error);
         assert!(error.outcome_unknown);
         let known = cayw_ipc::ClientError::from(RpcError::from(RuntimeError::Busy));

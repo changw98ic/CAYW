@@ -102,13 +102,19 @@ pub(crate) async fn call(
         &mut source,
         child.clone(),
     );
-    let candidate=crate::requests::watch(scope,child.clone(),async {
+    let candidate = crate::requests::watch(scope, child.clone(), async {
         tokio::select! { biased;
-            _=child.cancelled()=>Err(CapabilityError::new("original read cancelled")),
-            _=tokio::time::sleep_until(deadline.into())=>Err(CapabilityError::new("frozen read deadline reached")),
-            result=read=>result,
+            _ = child.cancelled() => Err(CapabilityError::new("original read cancelled")),
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err(CapabilityError::new("frozen read deadline reached")),
+            result = read => result,
         }
-    }).await;
+    })
+    .await;
     let (candidate, accepted) = match candidate {
         Ok(candidate) => {
             let result = scope
@@ -137,17 +143,10 @@ pub(crate) async fn call(
             dependencies: candidate.dependencies.clone(),
             result_sha256: cayw_cells::HostResult::value_hash(value.value()),
         };
+        // A read has no external side effect. Its own serialization and size
+        // checks are known refusals, never an uncertain durable write.
         let data = serde_json::to_value(evidence)
-            .map_err(|error| scope.context.persistence_failed(error))?;
-        if serde_json::to_vec(&data)
-            .map_err(|error| scope.context.persistence_failed(error))?
-            .len()
-            > cayw_core::MAX_METADATA_BYTES
-        {
-            return Err(scope
-                .context
-                .persistence_failed("shared read evidence exceeds canonical metadata limit"));
-        }
+            .map_err(|error| CapabilityError::new(error.to_string()))?;
         scope.context.host_event("runtime_shared_read", data)?;
     }
     let result = ticket.settle(accepted).await;
@@ -175,13 +174,6 @@ pub(crate) async fn call(
         error
     });
     scope.settle(&result)?;
-    // Evidence keeps the original raw hash, but Core, Cells and the model share
-    // the same bounded durable receipt or handle when the bytes exceed the Core
-    // metadata limit.
-    let result = match result {
-        Ok(value) => Ok(scope.durable_result(value)),
-        Err(error) => Err(error),
-    };
     let presentation = match &result {
         Ok(value) => crate::results::maybe_externalize(scope, value.clone()).await,
         Err(error) => Err(error.clone()),

@@ -49,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 
 use preview::PreviewState;
 
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUDIT_LINE_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_AUDIT: usize = 100_000;
 const EVENT_LOG: &str = "server-events.jsonl";

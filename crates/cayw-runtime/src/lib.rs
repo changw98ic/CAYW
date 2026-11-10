@@ -70,11 +70,10 @@ pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::{HeadlessConfig, PiCompatConfig};
 pub use model_requests::{
-    ModelBudgetContinuation, ModelBudgetContinuationRecord, ModelCostStatus, ModelRequestIdentity,
-    ModelRequestLedger, ModelRequestObservation, ModelRequestOrigin, ModelRequestReconciledOutcome,
-    ModelRequestReconciliation, ModelRequestReconciliationRecord,
-    ModelRequestReconciliationVerifier, ModelRequestRecord, ModelRequestTerminal,
-    ModelReservationPolicy, ModelUsageObservation,
+    ModelCostStatus, ModelRequestIdentity, ModelRequestLedger, ModelRequestObservation,
+    ModelRequestOrigin, ModelRequestReconciledOutcome, ModelRequestReconciliation,
+    ModelRequestReconciliationRecord, ModelRequestReconciliationVerifier, ModelRequestRecord,
+    ModelRequestTerminal, ModelUsageObservation,
 };
 pub use permissions::{ApprovalChoice, ScopedPermission};
 pub use plannotator::PlanFeedbackInput;
@@ -94,7 +93,7 @@ pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
 
 use cayw_ai::{CancellationToken, Model, Provider, ToolDefinition};
-use cayw_core::{ApprovalRequest, EventRecord, SessionState, SessionStore};
+use cayw_core::{ApprovalRequest, EventRecord, SessionStore};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -118,15 +117,17 @@ pub struct RuntimeConfig {
     pub content: Option<ContentConfig>,
     /// Optional persistent background commands (F13).
     pub background: Option<BackgroundConfig>,
-    pub max_prompt_bytes: usize,
-    pub max_history_bytes: usize,
-    pub max_event_bytes: usize,
-    pub max_total_tokens: u64,
-    pub max_turns: usize,
-    pub max_run_time: Duration,
-    pub max_queue_time: Duration,
-    pub max_capability_calls: usize,
-    pub max_capability_bytes: usize,
+    pub max_prompt_bytes: Option<usize>,
+    pub max_history_bytes: Option<usize>,
+    pub max_event_bytes: Option<usize>,
+    /// Task budgets are off unless the trusted host configures them. `None`
+    /// means the limit is not applied at all.
+    pub max_total_tokens: Option<u64>,
+    pub max_turns: Option<usize>,
+    pub max_run_time: Option<Duration>,
+    pub max_queue_time: Option<Duration>,
+    pub max_capability_calls: Option<usize>,
+    pub max_capability_bytes: Option<usize>,
     /// Soft UTF-8 JSON size (bytes) above which Host/tool results are stored in
     /// ContentStore and replaced with a result handle stub for the model.
     /// Requires `content`. `0` disables. Default: 32 KiB.
@@ -169,15 +170,15 @@ impl Default for RuntimeConfig {
             resources: ResourcePolicy::default(),
             content: None,
             background: None,
-            max_prompt_bytes: 256 * 1024,
-            max_history_bytes: 16 * 1024 * 1024,
-            max_event_bytes: 2 * 1024 * 1024,
-            max_total_tokens: 128_000,
-            max_turns: 32,
-            max_run_time: Duration::from_secs(300),
-            max_queue_time: Duration::from_secs(60),
-            max_capability_calls: 128,
-            max_capability_bytes: 8 * 1024 * 1024,
+            max_prompt_bytes: None,
+            max_history_bytes: None,
+            max_event_bytes: None,
+            max_total_tokens: None,
+            max_turns: None,
+            max_run_time: None,
+            max_queue_time: None,
+            max_capability_calls: None,
+            max_capability_bytes: None,
             auto_externalize_threshold_bytes:
                 crate::results::DEFAULT_AUTO_EXTERNALIZE_THRESHOLD_BYTES,
             grant_lifetime: Duration::from_secs(300),
@@ -205,34 +206,66 @@ impl RuntimeConfig {
         if let Some(content) = &self.content {
             content.validate()?;
         }
-        background::validate(self.background.as_ref())?;
-        if self.auto_externalize_threshold_bytes > 1024 * 1024 {
-            return Err(RuntimeError::InvalidInput(
-                "auto_externalize_threshold_bytes must be at most 1 MiB".into(),
-            ));
-        }
+        let budgets_invalid = self.max_total_tokens == Some(0)
+            || self.max_turns == Some(0)
+            || self.max_capability_calls == Some(0)
+            || self.max_capability_bytes == Some(0)
+            || self.max_prompt_bytes == Some(0)
+            || self.max_history_bytes == Some(0)
+            || self.max_event_bytes == Some(0)
+            || [self.max_run_time, self.max_queue_time]
+                .into_iter()
+                .flatten()
+                .any(|d| d.is_zero() || std::time::Instant::now().checked_add(d).is_none());
         if self.max_concurrent_runs == 0
             || self.max_concurrent_runs > 1024
             || self.max_queued_runs < self.max_concurrent_runs
             || self.max_queued_runs > 100_000
             || self.fairness_after_dispatches == 0
             || self.fairness_after_dispatches > 100_000
-            || self.max_prompt_bytes == 0
-            || self.max_history_bytes == 0
-            || self.max_event_bytes == 0
-            || self.max_total_tokens == 0
-            || self.max_turns == 0
-            || self.max_capability_calls == 0
-            || self.max_capability_bytes == 0
-            || [self.max_run_time, self.max_queue_time, self.grant_lifetime]
-                .into_iter()
-                .any(|d| d.is_zero() || std::time::Instant::now().checked_add(d).is_none())
+            || budgets_invalid
+            || self.grant_lifetime.is_zero()
+            || std::time::Instant::now()
+                .checked_add(self.grant_lifetime)
+                .is_none()
         {
             return Err(RuntimeError::InvalidInput(
                 "runtime budgets must be positive and queue capacity must cover concurrency".into(),
             ));
         }
         Ok(())
+    }
+}
+
+/// One optional Runtime service that was disabled instead of stopping startup.
+/// The reason is user-facing and never contains credentials or file contents.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DisabledService {
+    pub name: String,
+    pub reason: String,
+}
+
+impl From<cayw_host::DisabledService> for DisabledService {
+    fn from(service: cayw_host::DisabledService) -> Self {
+        Self {
+            name: service.name.into(),
+            reason: service.reason,
+        }
+    }
+}
+
+/// Map a capability name to the optional service that owns it.
+pub(crate) fn service_for_capability(name: &str) -> Option<&'static str> {
+    if name.starts_with("web.") {
+        Some("web_access")
+    } else if name.starts_with("vision.") {
+        Some("vision")
+    } else if name.starts_with("bg.") {
+        Some("background")
+    } else if name.starts_with("mcp.") || name.starts_with("skills.") {
+        Some("mcp")
+    } else {
+        None
     }
 }
 
@@ -245,6 +278,7 @@ pub struct Health {
     pub max_concurrent_runs: usize,
     pub provider: String,
     pub model: String,
+    pub disabled_services: Vec<DisabledService>,
 }
 
 struct ActiveRun {
@@ -266,10 +300,17 @@ pub(crate) struct Inner {
     background: Option<Arc<background::BackgroundRegistry>>,
     root: PathBuf,
     host_root: cayw_host::Host,
+    disabled_services: Vec<DisabledService>,
+    /// Operation IDs from a configured request policy whose owning service is
+    /// disabled. Opening succeeds; using one reports the reason.
+    disabled_operations: BTreeMap<String, String>,
     selection: Mutex<ConfiguredProvider>,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
     budget_locks: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    /// Requests this process currently has in flight, keyed by request id.
+    /// The projection uses this to tell live holds from crash-abandoned ones.
+    in_flight: Mutex<BTreeMap<String, ModelRequestIdentity>>,
     fleet: fleet::FleetRegistry,
     binding_cache: session::BindingCache,
     changed: Notify,
@@ -281,6 +322,11 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    pub(crate) fn disabled_operation_reason(&self, arguments: &serde_json::Value) -> Option<&str> {
+        let id = arguments.get("operation_id")?.as_str()?;
+        self.disabled_operations.get(id).map(String::as_str)
+    }
+
     pub(crate) fn budget_lock(&self, budget_session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = lock(&self.budget_locks);
         locks.retain(|_, weak| weak.strong_count() > 0);
@@ -291,6 +337,18 @@ impl Inner {
             locks.insert(budget_session_id.to_string(), Arc::downgrade(&lock));
             lock
         }
+    }
+
+    pub(crate) fn in_flight_requests(&self) -> BTreeMap<String, ModelRequestIdentity> {
+        lock(&self.in_flight).clone()
+    }
+
+    pub(crate) fn mark_in_flight(&self, identity: ModelRequestIdentity) {
+        lock(&self.in_flight).insert(identity.request_id.clone(), identity);
+    }
+
+    pub(crate) fn clear_in_flight(&self, request_id: &str) {
+        lock(&self.in_flight).remove(request_id);
     }
 }
 
@@ -312,6 +370,12 @@ impl Runtime {
         model: Model,
         config: RuntimeConfig,
     ) -> Result<Self, RuntimeError> {
+        let mut config = config;
+        // Normalize orderable optional limits before validation, binding and
+        // store construction so every layer sees the same values.
+        if let Some(content) = config.content.take() {
+            config.content = Some(content.normalized());
+        }
         config.validate()?;
         if model.provider.trim().is_empty() || model.id.trim().is_empty() {
             return Err(RuntimeError::InvalidInput(
@@ -352,11 +416,18 @@ impl Runtime {
         // the Host's own result cap here; the durable Core bound still applies
         // before the terminal, Cells projection or model presentation.
         let mut read_limits = config.cells.clone();
-        let read_result_cap = config.host.max_result_bytes.min(16 * 1024 * 1024 - 1024);
-        read_limits.item_bytes = read_limits.item_bytes.max(read_result_cap);
-        read_limits.max_output_tokens = read_limits
-            .max_output_tokens
-            .max(read_limits.item_bytes.saturating_add(1024));
+        if let Some(host_cap) = config.host.max_result_bytes {
+            read_limits.item_bytes = Some(
+                read_limits
+                    .item_bytes
+                    .map_or(host_cap, |current| current.max(host_cap)),
+            );
+        }
+        if let (Some(item_cap), Some(token_cap)) =
+            (read_limits.item_bytes, read_limits.max_output_tokens)
+        {
+            read_limits.max_output_tokens = Some(token_cap.max(item_cap.saturating_add(1024)));
+        }
         let reads = cayw_cells::ReadCoordinator::new(
             vec![cayw_cells::ReadPolicy {
                 capability: "fs.read".into(),
@@ -378,23 +449,85 @@ impl Runtime {
         // Open ContentStore before Host so F02 can externalize filtered originals
         // into the same Device store Runtime already holds for content.*.
         let content = content::open(store_path.as_ref(), &root, config.content.as_ref())?;
-        let background = match &config.background {
+        let mut disabled_services = Vec::new();
+        let background = match config.background.take() {
             Some(cfg) => {
-                let host_cfg = bridge::effective_host_config(&config);
-                let runner = Arc::new(
-                    cayw_host::runner(&host_cfg)
-                        .map_err(|e| RuntimeError::Workspace(e.to_string()))?,
-                );
-                Some(Arc::new(background::BackgroundRegistry::open_with_runner(
-                    store_path.as_ref(),
-                    cfg,
-                    runner,
-                    coordination.clone(),
-                )?))
+                let opened = (|| -> Result<Arc<background::BackgroundRegistry>, RuntimeError> {
+                    let host_cfg = bridge::effective_host_config(&config);
+                    let runner = Arc::new(
+                        cayw_host::runner(&host_cfg)
+                            .map_err(|e| RuntimeError::Workspace(e.to_string()))?,
+                    );
+                    Ok(Arc::new(background::BackgroundRegistry::open_with_runner(
+                        store_path.as_ref(),
+                        &cfg,
+                        runner,
+                        coordination.clone(),
+                    )?))
+                })();
+                match opened {
+                    Ok(registry) => {
+                        config.background = Some(cfg);
+                        Some(registry)
+                    }
+                    Err(error) => {
+                        disabled_services.push(DisabledService {
+                            name: "background".into(),
+                            reason: error.to_string(),
+                        });
+                        None
+                    }
+                }
             }
             None => None,
         };
+        if config.content.is_none() && config.host.output_filter.take().is_some() {
+            disabled_services.push(DisabledService {
+                name: "output_filter".into(),
+                reason: "output_filter requires content".into(),
+            });
+        }
         let host_root = cells::catalog_host(&root, bridge::effective_host_config(&config))?;
+        disabled_services.extend(
+            host_root
+                .disabled_services()
+                .iter()
+                .cloned()
+                .map(DisabledService::from),
+        );
+        let mut disabled_operations = BTreeMap::new();
+        // Without a bridge or an explicit external Host there is no MCP or Pi
+        // catalog in the Host. Keep the policy usable and report the reason when
+        // one of its operations is used instead of failing the whole workspace.
+        let external_unavailable = config.bridge.is_none() && config.host.external.is_none();
+        if let Some(policy) = config.request_policy.as_mut() {
+            if policy.operations.is_empty() {
+                return Err(RuntimeError::InvalidInput(
+                    "request policy must select at least one operation".into(),
+                ));
+            }
+            policy.operations.retain(|operation| {
+                let reason = match service_for_capability(&operation.capability) {
+                    Some("mcp") if external_unavailable => {
+                        Some("MCP and Pi sources are not installed".to_string())
+                    }
+                    Some(service) => disabled_services
+                        .iter()
+                        .find(|service_status| service_status.name == service)
+                        .map(|service_status| service_status.reason.clone()),
+                    None => None,
+                };
+                match reason {
+                    Some(reason) => {
+                        disabled_operations.insert(operation.id.clone(), reason);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            // Keep the policy even when every operation is disabled, so the
+            // request tools stay advertised and using one reports its reason.
+        }
         // RequestStore owns its authority fence and database as one unit. It
         // must not mistake the pre-existing Core database for a new authority.
         let requests = Arc::new(request_recovery::open_requests(
@@ -434,9 +567,12 @@ impl Runtime {
                 background,
                 root,
                 host_root,
+                disabled_services,
+                disabled_operations,
                 selection: Mutex::new(ConfiguredProvider { provider, model }),
                 active: Mutex::new(BTreeMap::new()),
                 budget_locks: Mutex::new(BTreeMap::new()),
+                in_flight: Mutex::new(BTreeMap::new()),
                 fleet: fleet::FleetRegistry::default(),
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
@@ -487,6 +623,12 @@ impl Runtime {
         Ok(())
     }
 
+    /// Optional services that were disabled during open, with a user-safe
+    /// reason. An empty slice means every configured service is running.
+    pub fn disabled_services(&self) -> &[DisabledService] {
+        &self.inner.disabled_services
+    }
+
     pub fn health(&self) -> Result<Health, RuntimeError> {
         let (running, queued) = self.inner.queue.counts()?;
         let selection = lock(&self.inner.selection);
@@ -498,6 +640,7 @@ impl Runtime {
             max_concurrent_runs: self.inner.config.max_concurrent_runs,
             provider: selection.model.provider.clone(),
             model: selection.model.id.clone(),
+            disabled_services: self.inner.disabled_services.clone(),
         })
     }
     pub fn create(&self, label: Option<String>) -> Result<SessionView, RuntimeError> {
@@ -691,10 +834,6 @@ impl Runtime {
         }
         let _coordinate = self.inner.coordination.enter()?;
         self.ensure_artifact_executor_idle(id)?;
-        let snapshot = self.inner.store.snapshot(id)?;
-        if results::has_pending_storage(self, id, snapshot.cursor)? {
-            return Err(RuntimeError::NeedsReconciliation);
-        }
         if self.tasks(id)?.iter().any(|t| {
             matches!(
                 t.state,
@@ -711,9 +850,14 @@ impl Runtime {
             .cells
             .is_frozen(id)
             .map_err(|error| RuntimeError::Workspace(error.to_string()))?
-            || self.has_artifact_unknown(id)?
         {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::RecoveryRequired {
+                cause: Box::new(RuntimeError::Worker(
+                    "cells storage is frozen pending recovery".into(),
+                )),
+                cleanup: None,
+                outcome_unknown: true,
+            });
         }
         let fork = self.inner.store.fork_session(id, label, confirmed)?;
         self.get(&fork.id)
@@ -754,37 +898,41 @@ impl Runtime {
     pub(crate) fn check_ready(&self, id: &str) -> Result<SessionView, RuntimeError> {
         let snapshot = self.get(id)?;
         self.ensure_artifact_executor_idle(id)?;
-        let artifact_unknown = self.has_artifact_unknown(id)?;
-        self.check_ready_snapshot(id, snapshot, artifact_unknown)
+        self.check_ready_snapshot(id, snapshot)
     }
     /// Same readiness contract while the caller already owns this Session's
     /// artifact executor. Artifact state is observed without re-acquiring the
     /// executor, so a live action does not reject itself.
     pub(crate) fn check_ready_locked(&self, id: &str) -> Result<SessionView, RuntimeError> {
         let snapshot = self.get(id)?;
-        let artifact_unknown = self.artifact_unknown(id, false)?;
-        self.check_ready_snapshot(id, snapshot, artifact_unknown)
+        let _ = self.artifact_unknown(id, true)?;
+        self.check_ready_snapshot(id, snapshot)
     }
     fn check_ready_snapshot(
         &self,
         id: &str,
         snapshot: SessionView,
-        artifact_unknown: bool,
     ) -> Result<SessionView, RuntimeError> {
-        if snapshot.state == SessionState::NeedsReconciliation
-            || self
-                .inner
-                .cells
-                .is_frozen(id)
-                .map_err(|error| RuntimeError::Workspace(error.to_string()))?
-            || artifact_unknown
+        if self
+            .inner
+            .cells
+            .is_frozen(id)
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?
         {
-            return Err(RuntimeError::NeedsReconciliation);
+            return Err(RuntimeError::RecoveryRequired {
+                cause: Box::new(RuntimeError::Worker(
+                    "cells storage is frozen pending recovery".into(),
+                )),
+                cleanup: None,
+                outcome_unknown: true,
+            });
         }
         if snapshot.attempt.is_some() {
             return Err(RuntimeError::Busy);
         }
-        if serde_json::to_vec(&snapshot.messages)?.len() > self.inner.config.max_history_bytes {
+        if let Some(max_history_bytes) = self.inner.config.max_history_bytes
+            && serde_json::to_vec(&snapshot.messages)?.len() > max_history_bytes
+        {
             return Err(RuntimeError::Budget("history byte"));
         }
         if snapshot.frozen {
@@ -944,7 +1092,7 @@ mod tests {
         let id = runtime.create(None).unwrap().id;
         let mut view = runtime.get(&id).unwrap();
         view.frozen = true;
-        let error = runtime.check_ready_snapshot(&id, view, false).unwrap_err();
+        let error = runtime.check_ready_snapshot(&id, view).unwrap_err();
         assert!(matches!(error, RuntimeError::Frozen(_)), "{error:?}");
     }
 
@@ -965,7 +1113,13 @@ mod tests {
         .unwrap();
         let error = runtime.check_ready_locked(&id).unwrap_err();
         assert!(
-            matches!(error, RuntimeError::NeedsReconciliation),
+            matches!(
+                error,
+                RuntimeError::RecoveryRequired {
+                    outcome_unknown: true,
+                    ..
+                }
+            ),
             "{error:?}"
         );
     }

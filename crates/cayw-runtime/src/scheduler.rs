@@ -84,7 +84,20 @@ impl Activity {
             }
             let record = context.inner.queue.get(&context.task.id)?;
             if record.state == crate::TaskState::Running && !record.cancel_requested {
-                context.inner.queue.park(&context.task)?;
+                if let Err(error) = context.inner.queue.park(&context.task) {
+                    // A failed park retains the task's slot as a lifecycle
+                    // obligation. It never proves that an external effect is
+                    // unknown, so callers receive a known scheduler error.
+                    if matches!(error, crate::queue::QueueError::Database(_)) {
+                        let _ = context
+                            .inner
+                            .queue
+                            .block(&context.task, &format!("scheduler park failed: {error}"));
+                    }
+                    return Err(RuntimeError::Worker(format!(
+                        "scheduler park failed: {error}"
+                    )));
+                }
                 context.inner.changed.notify_waiters();
             }
         }
@@ -230,7 +243,7 @@ impl ModelActivity {
 impl Drop for ModelActivity {
     fn drop(&mut self) {
         if let Err(error) = self.finish() {
-            self.context.persistence_failed(error);
+            let _ = self.context.record_error(error);
         }
     }
 }

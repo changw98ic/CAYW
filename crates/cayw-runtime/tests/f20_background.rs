@@ -49,8 +49,8 @@ impl Provider for FixedUsageProvider {
 
 fn test_config() -> RuntimeConfig {
     let mut config = RuntimeConfig::default();
-    config.codemode.timeout = Duration::from_secs(20);
-    config.max_run_time = Duration::from_secs(30);
+    config.codemode.timeout = Some(Duration::from_secs(20));
+    config.max_run_time = Some(Duration::from_secs(30));
     config.background = Some(BackgroundConfig::default());
     config.host.profiles.insert(
         "bg-f20-worker".into(),
@@ -62,8 +62,8 @@ fn test_config() -> RuntimeConfig {
                 "echo 'f20-worker-active'; /bin/sleep 60 & wait".into(),
             ],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },

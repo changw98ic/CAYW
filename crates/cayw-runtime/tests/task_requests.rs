@@ -59,7 +59,7 @@ impl ExternalHost for BlockingService {
 
 fn settings() -> RuntimeConfig {
     RuntimeConfig {
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         request_policy: Some(RequestPolicy {
             permission_policy_id: "runtime-fixture-policy".into(),
             operations: vec![OperationScope::exact(
@@ -483,7 +483,7 @@ async fn expiring_request_cancels_original_dispatched_call_and_preserves_unknown
         .unwrap()
         .unwrap();
     assert_eq!(service.calls.load(Ordering::Acquire), 1);
-    assert_eq!(result.state, SessionState::NeedsReconciliation);
+    assert_eq!(result.state, SessionState::Idle);
     assert_eq!(result.unresolved_capabilities.len(), 1);
     assert_eq!(result.unresolved_capabilities[0].name, "search.query");
     assert!(matches!(
@@ -499,12 +499,12 @@ async fn expiring_request_cancels_original_dispatched_call_and_preserves_unknown
         rt.request_task_state(&task.id).unwrap(),
         cayw_requests::TaskState::Ended { .. }
     ));
-    assert!(rt.enqueue(&session, "retry uncertain query").is_err());
+    assert!(rt.enqueue(&session, "retry uncertain query").is_ok());
     drop(rt);
     let reopened = open(&temp, config, "return 1");
     assert_eq!(
         reopened.recover(&session).unwrap().state,
-        SessionState::NeedsReconciliation
+        SessionState::Idle
     );
     assert_eq!(service.calls.load(Ordering::Acquire), 1);
 }

@@ -12,8 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-
 /// Explicit host settings shared by the SDK client and `cayw serve --config`.
 /// Profiles do not grant permission; each invocation still uses the normal gate.
 /// This launch format supports pipe-based profiles, not terminal handoffs.
@@ -95,20 +93,14 @@ struct ProcessProfile {
     args: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
-    #[serde(default = "process_timeout_ms")]
-    timeout_ms: u64,
-    #[serde(default = "process_output_bytes")]
-    max_output_bytes: usize,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    max_output_bytes: Option<usize>,
     #[serde(default)]
     allow_filter: bool,
     #[serde(default)]
     io: ProfileIo,
-}
-fn process_timeout_ms() -> u64 {
-    30_000
-}
-fn process_output_bytes() -> usize {
-    256 * 1024
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -153,20 +145,16 @@ fn invalid(reason: &str) -> RuntimeError {
 impl HeadlessConfig {
     /// Read one explicitly named JSON file. Diagnostics never echo its values.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
-        let file = File::open(path).map_err(|_| invalid("cannot be opened"))?;
+        let mut file = File::open(path).map_err(|_| invalid("cannot be opened"))?;
         let metadata = file
             .metadata()
             .map_err(|_| invalid("cannot be inspected"))?;
-        if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
-            return Err(invalid("must be a regular file of at most 1 MiB"));
+        if !metadata.is_file() {
+            return Err(invalid("must be a regular file"));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_CONFIG_BYTES + 1)
-            .read_to_end(&mut bytes)
+        file.read_to_end(&mut bytes)
             .map_err(|_| invalid("cannot be read"))?;
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
-            return Err(invalid("exceeds 1 MiB"));
-        }
         let config: Self = serde_json::from_slice(&bytes)
             .map_err(|_| invalid("must be valid JSON with only supported fields and values"))?;
         if let Some(model) = &config.model {
@@ -250,42 +238,23 @@ impl HeadlessConfig {
             config.fairness_after_dispatches = value;
         }
         if let Some(value) = self.scheduler.max_queue_time_ms {
-            config.max_queue_time = Duration::from_millis(value);
+            config.max_queue_time = Some(Duration::from_millis(value));
         }
         let budgets = self.budgets;
-        if let Some(value) = budgets.max_total_tokens {
-            config.max_total_tokens = value;
-        }
-        if let Some(value) = budgets.max_turns {
-            config.max_turns = value;
-        }
-        if let Some(value) = budgets.max_run_time_ms {
-            config.max_run_time = Duration::from_millis(value);
-        }
-        if let Some(value) = budgets.max_capability_calls {
-            config.max_capability_calls = value;
-        }
-        if let Some(value) = budgets.max_capability_bytes {
-            config.max_capability_bytes = value;
-        }
+        config.max_total_tokens = budgets.max_total_tokens;
+        config.max_turns = budgets.max_turns;
+        config.max_run_time = budgets.max_run_time_ms.map(Duration::from_millis);
+        config.max_capability_calls = budgets.max_capability_calls;
+        config.max_capability_bytes = budgets.max_capability_bytes;
         if let Some(value) = budgets.auto_externalize_threshold_bytes {
             config.auto_externalize_threshold_bytes = value;
         }
-        if let Some(value) = budgets.host_wait_ms {
-            config.codemode.host_wait = Duration::from_millis(value);
-        }
-        if let Some(value) = budgets.host_call_timeout_ms {
-            config.host.call_timeout = Duration::from_millis(value);
-        }
-        if config.codemode.host_wait.is_zero()
-            || config.codemode.host_wait > Duration::from_secs(3600)
-            || Instant::now()
-                .checked_add(config.codemode.host_wait)
-                .is_none()
+        config.codemode.host_wait = budgets.host_wait_ms.map(Duration::from_millis);
+        config.host.call_timeout = budgets.host_call_timeout_ms.map(Duration::from_millis);
+        if let Some(host_wait) = config.codemode.host_wait
+            && (host_wait.is_zero() || Instant::now().checked_add(host_wait).is_none())
         {
-            return Err(invalid(
-                "host_wait_ms must be positive and at most one hour",
-            ));
+            return Err(invalid("host_wait_ms must be positive and representable"));
         }
         config.host.profiles = self
             .profiles
@@ -298,7 +267,7 @@ impl HeadlessConfig {
                         program: profile.program,
                         args: profile.args,
                         env: profile.env,
-                        timeout: Duration::from_millis(profile.timeout_ms),
+                        timeout: profile.timeout_ms.map(Duration::from_millis),
                         max_output_bytes: profile.max_output_bytes,
                         allow_filter: profile.allow_filter,
                         io: match profile.io {
@@ -311,6 +280,21 @@ impl HeadlessConfig {
         config
             .validate()
             .map_err(|_| invalid("has invalid runtime budgets"))?;
+        // A user-written file must not silently lose a service because of a
+        // hard-invalid value. Programmatic callers still degrade at Host
+        // construction; only orderable soft limits are normalized here.
+        if let Some(web) = &config.host.web_access {
+            web.limits
+                .clone()
+                .normalized()
+                .validate()
+                .map_err(|_| invalid("has invalid web_access limits"))?;
+        }
+        if let Some(vision) = config.host.vision {
+            vision
+                .validate()
+                .map_err(|_| invalid("has invalid vision limits"))?;
+        }
         // The catalog scope cannot authorize or execute. Host::new performs the
         // same profile/path validation used when opening the actual workspace.
         let mut catalog_config = config.host.clone();
@@ -320,9 +304,22 @@ impl HeadlessConfig {
         let host = crate::cells::catalog_host(Path::new("/"), catalog_config)
             .map_err(|_| invalid("has an invalid process profile or Host budget"))?;
         let definitions = crate::requests::operation_definitions_for_config(&config, &host);
+        let disabled_services = host.disabled_services();
+        let disabled = |capability: &str| {
+            let service = crate::service_for_capability(capability)?;
+            disabled_services
+                .iter()
+                .find(|disabled| disabled.name == service)
+                .map(|disabled| disabled.reason.clone())
+        };
         for permission in self.permissions {
             if !permission.arguments.is_object() {
                 return Err(invalid("permission arguments must be an object"));
+            }
+            // A permission for a service that could not start stays unused; it
+            // must not stop the workspace from opening.
+            if disabled(&permission.capability).is_some() {
+                continue;
             }
             let definition = definitions
                 .iter()
@@ -341,19 +338,32 @@ impl HeadlessConfig {
                 .limits
                 .validate()
                 .map_err(|_| invalid("has invalid request limits"))?;
-            let identity = cayw_requests::HostIdentity::from_host(
-                &host,
-                &config.host,
-                &requests.permission_policy_id,
-            )
-            .map_err(|_| invalid("has an invalid request policy identity"))?;
-            let catalog =
-                cayw_requests::OperationCatalog::bind(identity, &definitions, requests.operations)
-                    .map_err(|_| invalid("request operations do not match the configured Host"))?;
+            if requests.operations.is_empty() {
+                return Err(invalid("request policy must select at least one operation"));
+            }
+            // Request operations for a disabled service are dropped from the
+            // binding. Opening succeeds; the full list is carried so Runtime
+            // can report the reason when the operation is used.
+            let all_operations = requests.operations.clone();
+            let mut operations = requests.operations;
+            operations.retain(|operation| disabled(&operation.capability).is_none());
             config.request_limits = requests.limits;
+            if !operations.is_empty() {
+                let identity = cayw_requests::HostIdentity::from_host(
+                    &host,
+                    &config.host,
+                    &requests.permission_policy_id,
+                )
+                .map_err(|_| invalid("has an invalid request policy identity"))?;
+                let _catalog =
+                    cayw_requests::OperationCatalog::bind(identity, &definitions, operations)
+                        .map_err(|_| {
+                            invalid("request operations do not match the configured Host")
+                        })?;
+            }
             config.request_policy = Some(crate::RequestPolicy {
                 permission_policy_id: requests.permission_policy_id,
-                operations: catalog.operations(),
+                operations: all_operations,
             });
         }
         Ok(config)

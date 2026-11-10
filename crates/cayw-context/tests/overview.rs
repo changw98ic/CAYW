@@ -59,16 +59,28 @@ fn snapshot(
         budget_session_id: budget.into(),
         parent_session_id: parent.map(str::to_owned),
         label: label.map(str::to_owned),
-        token_limit: 1_000_000,
+        token_limit: Some(1_000_000),
         settled_tokens: settled,
         reserved_tokens: 0,
-        remaining_tokens: 1_000_000 - settled,
-        budget_unknown: false,
+        charged_unknown_tokens: 0,
+        remaining_tokens: Some(1_000_000 - settled),
+        usage_unknown: false,
         cost_status: CostStatus::Unknown,
         cost_amount: None,
         cost_currency: None,
         requests,
     }
+}
+
+#[test]
+fn unlimited_limit_reports_no_remaining_amount() {
+    let mut snap = snapshot("root", None, "root", None, vec![]);
+    snap.token_limit = None;
+    snap.remaining_tokens = None;
+    let overview = build_session_overview(&snap);
+    assert_eq!(overview.ledger_token_limit, None);
+    assert_eq!(overview.ledger_remaining_tokens, None);
+    assert!(!overview.usage_unknown);
 }
 
 #[test]

@@ -69,7 +69,7 @@ fn open(
         ],
         max_concurrent_runs: 1,
         max_queued_runs: 2,
-        max_run_time: Duration::from_secs(120),
+        max_run_time: Some(Duration::from_secs(120)),
         reconciliation_verifier: verifier,
         ..Default::default()
     };
@@ -401,7 +401,7 @@ async fn run(point: &str, committed: bool, terminal_known: bool, ipc: bool) {
             })
         );
     } else {
-        assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+        assert_eq!(recovered.state, SessionState::Idle);
         assert_eq!(recovered.unresolved_capabilities.len(), 1);
         let unknown = &recovered.unresolved_capabilities[0];
         assert_eq!(unknown.key, original.key);
@@ -410,8 +410,9 @@ async fn run(point: &str, committed: bool, terminal_known: bool, ipc: bool) {
             unknown.outcome,
             Some(CapabilityOutcome::OutcomeUnknown { .. })
         ));
-        assert!(rt.enqueue(session, "must not replay").is_err());
-        rt.recover(session).unwrap();
+        let re_recovered = rt.recover(session).unwrap();
+        assert_eq!(re_recovered.state, SessionState::Idle);
+        assert_eq!(re_recovered.unresolved_capabilities.len(), 1);
         assert_eq!(inspect(&rt, client.as_ref(), session).await, view);
         if let Some(view) = view.clone() {
             reconcile_observed(&root, &rt, &calls, session, &original, &view, ipc).await;

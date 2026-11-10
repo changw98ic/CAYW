@@ -20,55 +20,38 @@ use cayw_codemode::CapabilityError;
 use serde_json::{Value, json};
 use std::{future::Future, sync::OnceLock};
 
-/// Host-selected limits. Depth counts the logical root as one; object keys count
-/// as nodes. Rows limit each array/CSV table/XML child list/diff side separately.
-#[derive(Debug, Clone, Copy)]
+/// Host-selected optional limits. `None` means this crate imposes no artificial
+/// bound for that dimension. Depth counts the logical root as one; object keys
+/// count as nodes. Rows limit each array/CSV table/XML child list/diff side
+/// separately.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Limits {
     /// Complete JSON-encoded argument envelope, including all explicit text.
-    pub input_bytes: usize,
+    pub input_bytes: Option<usize>,
     /// Complete JSON-encoded result envelope, including escaping and metadata.
-    pub output_bytes: usize,
-    pub max_depth: usize,
-    pub max_nodes: usize,
-    pub max_rows: usize,
+    pub output_bytes: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub max_nodes: Option<usize>,
+    pub max_rows: Option<usize>,
     /// Maximum matrix cells plus charged byte comparisons for line diff.
-    pub max_diff_work: usize,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            input_bytes: 1024 * 1024,
-            output_bytes: 1024 * 1024,
-            max_depth: 32,
-            max_nodes: 100_000,
-            max_rows: 10_000,
-            max_diff_work: 1_000_000,
-        }
-    }
+    pub max_diff_work: Option<usize>,
 }
 
 impl Limits {
-    /// Checks the configured budgets without executing a capability.
+    /// Checks the configured budgets without executing a capability. Only an
+    /// explicitly configured limit is validated: every `Some` value must be
+    /// positive. No artificial upper ceiling is applied.
     pub fn validate(self) -> std::result::Result<(), CapabilityError> {
-        // Hard ceilings protect recursive dependencies and unchecked host configuration.
-        if self.input_bytes == 0
-            || self.input_bytes > 16 * 1024 * 1024
-            || self.output_bytes == 0
-            || self.output_bytes > 16 * 1024 * 1024
-            || self.max_depth == 0
-            || self.max_depth > 64
-            || self.max_nodes == 0
-            || self.max_nodes > 1_000_000
-            || self.max_rows == 0
-            || self.max_rows > 1_000_000
-            || self.max_diff_work == 0
-            || self.max_diff_work > 16_000_000
-        {
-            return Err(error(
-                "invalid_limits",
-                "limits must be nonzero and within documented hard ceilings",
-            ));
+        let values = [
+            self.input_bytes,
+            self.output_bytes,
+            self.max_depth,
+            self.max_nodes,
+            self.max_rows,
+            self.max_diff_work,
+        ];
+        if values.into_iter().flatten().any(|value| value == 0) {
+            return Err(error("invalid_limits", "configured limits must be nonzero"));
         }
         Ok(())
     }

@@ -139,6 +139,17 @@ async fn server(
     oneshot::Receiver<Value>,
     tokio::task::JoinHandle<()>,
 ) {
+    server_with_chunk(case, events, 7).await
+}
+async fn server_with_chunk(
+    case: &str,
+    events: Vec<Value>,
+    chunk_size: usize,
+) -> (
+    String,
+    oneshot::Receiver<Value>,
+    tokio::task::JoinHandle<()>,
+) {
     let body = sse(&events);
     save(
         case,
@@ -161,8 +172,8 @@ async fn server(
         if socket.write_all(head.as_bytes()).await.is_err() {
             return;
         }
-        for chunk in body.chunks(7) {
-            if socket.write_all(chunk).await.is_err() {
+        for part in body.chunks(chunk_size.max(1)) {
+            if socket.write_all(part).await.is_err() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -818,8 +829,8 @@ async fn empty_thinking_deltas_still_obey_the_shared_fragment_limit() {
         start(),
         block_start(0, json!({"type":"thinking","thinking":"","signature":""})),
     ];
-    wire.extend((0..4096).map(|_| delta(0, json!({"type":"thinking_delta","thinking":""}))));
-    let (base, rx, task) = server("thinking-fragment-limit", wire).await;
+    wire.extend((0..65_536).map(|_| delta(0, json!({"type":"thinking_delta","thinking":""}))));
+    let (base, rx, task) = server_with_chunk("thinking-fragment-limit", wire, 8192).await;
     let events = collect(&AnthropicProvider::new(base, KEY).unwrap(), request()).await;
     save("thinking-fragment-limit", "events.json", &events);
     assert_error(&events);

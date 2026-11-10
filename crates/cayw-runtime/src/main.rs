@@ -27,21 +27,23 @@ const USAGE: &str = "cayw [--workspace DIR] [--offline]                 # defaul
 
 pub(crate) struct WorkspaceHost {
     runtime: Arc<Runtime>,
-    request_timeout_ms: u64,
+    request_timeout_ms: Option<u64>,
     settings: Option<tokio::sync::Mutex<cli_settings::Settings>>,
     resources: tokio::sync::Mutex<Option<cli_workspaces::WorkspaceResources>>,
     model_available: bool,
     model_setup_hint: String,
+    disabled_services: Vec<cayw_runtime::DisabledService>,
 }
 
 impl WorkspaceHost {
     fn new(
         runtime: Arc<Runtime>,
-        request_timeout_ms: u64,
+        request_timeout_ms: Option<u64>,
         settings: Option<cli_settings::Settings>,
         resources: cli_workspaces::WorkspaceResources,
         model_available: bool,
         model_setup_hint: String,
+        optional_services: cli_workspaces::OptionalServicesReport,
     ) -> Self {
         Self {
             runtime,
@@ -50,6 +52,7 @@ impl WorkspaceHost {
             resources: tokio::sync::Mutex::new(Some(resources)),
             model_available,
             model_setup_hint,
+            disabled_services: optional_services.disabled_services(),
         }
     }
 
@@ -131,8 +134,32 @@ impl WorkspaceHost {
                 "request_timeout_ms".to_string(),
                 json!(self.request_timeout_ms),
             );
+            let mut disabled = map
+                .get("disabled_services")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for service in &self.disabled_services {
+                disabled.push(json!(service));
+            }
+            map.insert("disabled_services".into(), Value::Array(disabled));
         }
         Ok(response)
+    }
+
+    fn read_only(&self, method: &str) -> bool {
+        self.runtime.read_only(method)
+    }
+}
+
+/// Print one startup warning per disabled optional service. Health and doctor
+/// carry the same reasons for later inspection.
+pub(crate) fn warn_disabled_services(services: &[cayw_runtime::DisabledService]) {
+    for service in services {
+        eprintln!(
+            "warning: optional service disabled: {}: {}",
+            service.name, service.reason
+        );
     }
 }
 
@@ -158,8 +185,6 @@ struct RoutedRpc {
 
 fn workspace_error(error: Box<dyn Error>) -> RpcError {
     let code = if let Some(error) = error.downcast_ref::<cayw_runtime::RuntimeError>() {
-        error.code()
-    } else if let Some(error) = error.downcast_ref::<cli_workspaces::WorkspaceOpenError>() {
         error.code()
     } else if cli_settings::error_outcome_unknown(error.as_ref()) {
         "workspace_outcome_unknown"
@@ -317,6 +342,20 @@ impl RpcHandler for CliRpcHandler {
                 .await;
         }
         self.primary.call(method, params, cancel).await
+    }
+    fn read_only(&self, method: &str) -> bool {
+        if matches!(method, "client.health" | "client.workspaces.list") {
+            true
+        } else if method == "client.workspace.call"
+            || method.starts_with("client.plugins.")
+            || method.starts_with("settings.")
+        {
+            // Routed calls and settings mutations need the actual request to
+            // decide; keep the conservative unknown classification.
+            false
+        } else {
+            self.primary.read_only(method)
+        }
     }
 }
 
@@ -623,69 +662,77 @@ async fn run() -> Result<(), Box<dyn Error>> {
         &mut config,
     )
     .await?;
-    let mcp_installed = optional_services.mcp_installed;
-    let mcp_skipped = optional_services.mcp_skipped;
-    let pi_installed = optional_services.pi_installed;
-
-    let configuration = json!({
+    let web_access_configured = config.host.web_access.is_some();
+    let vision_configured = config.host.vision.is_some();
+    let mut configuration = json!({
         "max_total_tokens":config.max_total_tokens,
         "max_turns":config.max_turns,
-        "max_run_time_ms":config.max_run_time.as_millis(),
+        "max_run_time_ms":config.max_run_time.map(|time| time.as_millis()),
         "max_capability_calls":config.max_capability_calls,
         "max_capability_bytes":config.max_capability_bytes,
-        "host_wait_ms":config.codemode.host_wait.as_millis(),
-        "host_call_timeout_ms":config.host.call_timeout.as_millis(),
+        "host_wait_ms":config.codemode.host_wait.map(|time| time.as_millis()),
+        "host_call_timeout_ms":config.host.call_timeout.map(|time| time.as_millis()),
         "profiles":config.host.profiles.keys().collect::<Vec<_>>(),
         "profile_io":"pipes",
         "exact_permission_count":config.permissions.len(),
-        "mcp_installed":mcp_installed,
-        "mcp_skipped":mcp_skipped,
-        "web_access_enabled":config.host.web_access.is_some(),
-        "vision_enabled":config.host.vision.is_some(),
+        "mcp_installed":optional_services.mcp_installed,
+        "mcp_skipped":optional_services.mcp_skipped,
+        "web_access_enabled":web_access_configured,
+        "vision_enabled":vision_configured,
         "pi_compat_enabled":pi_compat_enabled,
-        "pi_installed":pi_installed,
+        "pi_installed":optional_services.pi_installed,
+        "mcp_error":optional_services.mcp_error,
+        "pi_error":optional_services.pi_error,
+        "cleanup_error":optional_services.cleanup_error,
+        "disabled_services":optional_services.disabled_services(),
     });
-    let request_timeout = match config
-        .max_run_time
-        .checked_add(std::time::Duration::from_secs(60))
-    {
-        Some(timeout) => timeout,
-        None => {
-            return cli_workspaces::cleanup_failed_setup(
-                workspace_resources,
-                "server request timeout calculation overflowed".into(),
-            )
-            .await;
-        }
+    let request_timeout = match config.max_run_time {
+        Some(max_run_time) => match max_run_time.checked_add(std::time::Duration::from_secs(60)) {
+            Some(timeout) => Some(timeout),
+            None => {
+                return cli_workspaces::cleanup_failed_setup(
+                    workspace_resources,
+                    "server request timeout calculation overflowed".into(),
+                )
+                .await;
+            }
+        },
+        None => None,
     };
-    if request_timeout.is_zero()
-        || std::time::Instant::now()
-            .checked_add(request_timeout)
-            .is_none()
-    {
-        return cli_workspaces::cleanup_failed_setup(
-            workspace_resources,
-            "server request timeout is invalid or non-representable".into(),
-        )
-        .await;
-    }
-    let request_timeout_ms: u64 = match u64::try_from(request_timeout.as_millis()) {
-        Ok(timeout) => timeout,
-        Err(_) => {
-            return cli_workspaces::cleanup_failed_setup(
-                workspace_resources,
-                "server request timeout in milliseconds exceeds u64".into(),
-            )
-            .await;
+    let request_timeout_ms: Option<u64> = match request_timeout {
+        Some(request_timeout) => {
+            if request_timeout.is_zero()
+                || std::time::Instant::now()
+                    .checked_add(request_timeout)
+                    .is_none()
+            {
+                return cli_workspaces::cleanup_failed_setup(
+                    workspace_resources,
+                    "server request timeout is invalid or non-representable".into(),
+                )
+                .await;
+            }
+            let timeout_ms = match u64::try_from(request_timeout.as_millis()) {
+                Ok(timeout) => timeout,
+                Err(_) => {
+                    return cli_workspaces::cleanup_failed_setup(
+                        workspace_resources,
+                        "server request timeout in milliseconds exceeds u64".into(),
+                    )
+                    .await;
+                }
+            };
+            if timeout_ms == 0 {
+                return cli_workspaces::cleanup_failed_setup(
+                    workspace_resources,
+                    "server request timeout in milliseconds must be non-zero".into(),
+                )
+                .await;
+            }
+            Some(timeout_ms)
         }
+        None => None,
     };
-    if request_timeout_ms == 0 {
-        return cli_workspaces::cleanup_failed_setup(
-            workspace_resources,
-            "server request timeout in milliseconds must be non-zero".into(),
-        )
-        .await;
-    }
     let provider_name = model.provider.clone();
     let model_name = model.id.clone();
     let mut local_server = if default_database {
@@ -713,12 +760,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 .await;
         }
     };
+    let mut disabled_services = runtime.disabled_services().to_vec();
+    disabled_services.extend(optional_services.disabled_services());
+    warn_disabled_services(&disabled_services);
+    let disabled = |name: &str| disabled_services.iter().any(|service| service.name == name);
+    configuration["web_access_enabled"] = json!(web_access_configured && !disabled("web_access"));
+    configuration["vision_enabled"] = json!(vision_configured && !disabled("vision"));
+    configuration["disabled_services"] = json!(disabled_services);
     #[cfg(feature = "plugins")]
     if let Some(settings) = settings.as_ref()
         && let Err(error) = settings.plugins.restore(&settings.paths, &runtime).await
     {
-        drop(runtime);
-        return cli_workspaces::cleanup_failed_setup(workspace_resources, error.to_string()).await;
+        // Plugin restore only degrades the plugin subsystem. The Client keeps
+        // starting, and doctor plus the settings RPC report the same reason.
+        eprintln!(
+            "cayw: plugin restore failed; the Client continues without plugin supervision: {error}"
+        );
     }
     let listener = match tokio::net::TcpListener::bind(address).await {
         Ok(listener) => listener,
@@ -761,6 +818,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         workspace_resources,
         model_available,
         setup_hint,
+        optional_services,
     ));
     let client_role_plugins = if discoverable {
         match cli_client_plugins::ClientPlugins::new(

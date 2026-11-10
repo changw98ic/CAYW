@@ -62,14 +62,17 @@ pub fn content_sha256(content: &str) -> String {
     digest(content.as_bytes())
 }
 
-pub(crate) fn size(value: &impl Serialize, limit: usize) -> Result<usize, CapabilityError> {
+pub(crate) fn size(value: &impl Serialize, limit: Option<usize>) -> Result<usize, CapabilityError> {
     struct Counter {
         used: usize,
-        limit: usize,
+        limit: Option<usize>,
     }
     impl Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.len() > self.limit.saturating_sub(self.used) {
+            if self
+                .limit
+                .is_some_and(|limit| bytes.len() > limit.saturating_sub(self.used))
+            {
                 return Err(io::Error::other("bridge JSON byte budget exceeded"));
             }
             self.used += bytes.len();
@@ -87,7 +90,7 @@ pub(crate) fn size(value: &impl Serialize, limit: usize) -> Result<usize, Capabi
 
 /// Reject deep trees before serialization, validation, or cloning can recurse.
 /// Reference-based traversal allocates no copy of untrusted source content.
-pub(crate) fn value_size(value: &Value, limit: usize) -> Result<usize, CapabilityError> {
+pub(crate) fn value_size(value: &Value, limit: Option<usize>) -> Result<usize, CapabilityError> {
     fn check(value: &Value, depth: usize) -> Result<(), CapabilityError> {
         if depth > 48 {
             return Err(failure("bridge JSON nesting exceeds 48"));

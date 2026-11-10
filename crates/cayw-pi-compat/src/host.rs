@@ -160,11 +160,23 @@ impl PiCompatHost {
             .map(|c| c.name.clone())
             .collect();
         let context = PluginContext::new(granted, []);
-        match self.registry.load_external(config, context, cancel).await {
+        match self
+            .registry
+            .load_external(config, context, cancel.clone())
+            .await
+        {
             Ok(desc) => Ok(desc),
             Err(PluginError::Conflict(name)) => Err(PiCompatError::AlreadyLoaded(name)),
-            Err(PluginError::Cancelled) => Err(PiCompatError::Cancelled),
-            Err(PluginError::Timeout) => Err(PiCompatError::Timeout),
+            // A retained process identity is a real unknown; never downgrade it
+            // to a cancelled or incompatible verdict.
+            Err(err) if err.outcome_unknown() => Err(map_plugin_err(err)),
+            // The caller cancelled the install (possibly before launch). No
+            // process remains, so this is a known cancellation.
+            Err(_) if cancel.is_cancelled() => Err(PiCompatError::Cancelled),
+            // A start that never launched, or is confirmed exited, is a known
+            // failure the host may retry. Do not freeze the matrix as
+            // incompatible for a transient startup problem.
+            Err(PluginError::Unavailable(detail)) => Err(PiCompatError::Unavailable(detail)),
             Err(err) => {
                 let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
                 matrix.record_incompatible(package, surface, err.to_string());
@@ -340,7 +352,13 @@ impl PiCompatHost {
 
         match self
             .registry
-            .call_exact(description, tool, arguments, cancel, Duration::from_secs(5))
+            .call_exact(
+                description,
+                tool,
+                arguments,
+                cancel,
+                Some(Duration::from_secs(5)),
+            )
             .await
         {
             Ok(value) => Ok(value),
@@ -614,7 +632,7 @@ mod tests {
                         name: PiFixturePlugin::TOOL.into(),
                         arguments: json!({"text":"stale"}),
                     },
-                    max_result_bytes: 4096,
+                    max_result_bytes: Some(4096),
                 },
                 CancellationToken::new(),
             )

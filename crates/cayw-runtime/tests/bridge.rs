@@ -189,7 +189,7 @@ fn setup() -> tempfile::TempDir {
 fn config(registry: &Registry, calls: &[(&str, Value)]) -> RuntimeConfig {
     RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         permissions: calls
             .iter()
             .map(|(name, arguments)| ScopedPermission::exact(*name, arguments.clone()))
@@ -649,7 +649,7 @@ async fn source_cancellation_retains_unknown_across_reopen_and_rejects_wrong_pro
         .unwrap();
     assert_eq!(state.count(), 1);
     let view = rt.get(&id).unwrap();
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     let events = history(&rt, &id);
     assert!(matches!(
         events.last().unwrap().outcome,
@@ -674,7 +674,11 @@ async fn source_cancellation_retains_unknown_across_reopen_and_rejects_wrong_pro
         )
         .is_err()
     );
-    assert!(rt.enqueue(&id, "retry").is_err());
+    let retry_task = rt
+        .enqueue(&id, "retry")
+        .expect("an unreconciled unknown outcome must not block enqueue");
+    rt.cancel(&rt.task(&retry_task.id).unwrap().cancel_target())
+        .unwrap();
     assert!(registry.snapshot("local").unwrap().outcome_unknown);
     registry.disconnect("local").unwrap();
     let replacement = SourceState::new();
@@ -700,11 +704,8 @@ async fn source_cancellation_retains_unknown_across_reopen_and_rejects_wrong_pro
     let model_calls = provider.calls.load(Ordering::Acquire);
     drop(rt);
     let (reopened, second) = open(&temp, settings, "return 1", None);
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(reopened.enqueue(&id, "retry").is_err());
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+    assert!(reopened.enqueue(&id, "retry").is_ok());
     assert_eq!(state.count(), 1);
     assert_eq!(second.calls.load(Ordering::Acquire), 0);
     assert!(model_calls > 0);
@@ -845,7 +846,7 @@ async fn host_result_bound_retains_explicit_unknown_even_with_known_bridge_termi
         None,
     );
     let mut settings = config(&registry, &calls());
-    settings.host.max_result_bytes = 512;
+    settings.host.max_result_bytes = Some(512);
     let (rt, _) = open(
         &temp,
         settings,
@@ -861,14 +862,8 @@ async fn host_result_bound_retains_explicit_unknown_even_with_known_bridge_termi
         history(&rt, &id).last().unwrap().outcome,
         Some(DispatchOutcome::Succeeded { .. })
     ));
-    assert_eq!(
-        rt.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert_eq!(
-        rt.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
+    assert_eq!(rt.recover(&id).unwrap().state, SessionState::Idle);
 }
 
 #[tokio::test]
@@ -881,7 +876,7 @@ async fn bridge_result_bound_is_known_for_skill_and_unknown_for_effectful_tool()
             Behavior::Large(3000),
             true,
             Limits {
-                max_result_bytes: 2048,
+                max_result_bytes: Some(2048),
                 ..Default::default()
             },
             None,
@@ -910,10 +905,7 @@ async fn bridge_result_bound_is_known_for_skill_and_unknown_for_effectful_tool()
                 events.last().unwrap().outcome,
                 Some(DispatchOutcome::Unknown { .. })
             ));
-            assert_eq!(
-                rt.recover(&id).unwrap().state,
-                SessionState::NeedsReconciliation
-            );
+            assert_eq!(rt.recover(&id).unwrap().state, SessionState::Idle);
         }
     }
 }
@@ -977,7 +969,7 @@ async fn host_call_budget_is_shared_across_fresh_bridge_scopes() {
         None,
     );
     let mut settings = config(&registry, &calls());
-    settings.host.max_calls = 1;
+    settings.host.max_calls = Some(1);
     let (rt, _) = open(
         &temp,
         settings,
@@ -1133,13 +1125,10 @@ async fn dropped_prompt_durably_records_source_unknown_and_fences_original_regis
         Some(DispatchOutcome::Unknown { .. })
     ));
     assert!(registry.snapshot("local").unwrap().outcome_unknown);
-    assert!(rt.enqueue(&id, "retry dropped effects").is_err());
+    assert!(rt.enqueue(&id, "retry dropped effects").is_ok());
     drop(rt);
     let (reopened, provider) = open(&temp, settings, "return 1", None);
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
     assert_eq!(provider.calls.load(Ordering::Acquire), 0);
     assert_eq!(state.count(), 1);
 }
@@ -1186,16 +1175,13 @@ async fn failed_bridge_terminal_commit_keeps_prepare_unknown_and_holds_capacity(
         .unwrap();
     drop(rt);
     let (reopened, _) = open(&temp, settings, "return 1", None);
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
     assert_eq!(state.count(), 1);
-    assert!(reopened.enqueue(&id, "retry missing terminal").is_err());
+    assert!(reopened.enqueue(&id, "retry missing terminal").is_ok());
 }
 
 #[test]
-fn oversized_bindings_are_rejected_before_task_or_source_admission() {
+fn large_binding_metadata_is_admitted_without_an_artificial_ceiling() {
     let temp = setup();
     let state = SourceState::new();
     let registry = Registry::new(Limits::default(), Arc::new(Policy(true))).unwrap();
@@ -1231,11 +1217,15 @@ fn oversized_bindings_are_rejected_before_task_or_source_admission() {
         Model::new("fixture", "bounded-pins"),
         settings,
     );
-    assert!(matches!(
-        result,
-        Err(cayw_runtime::RuntimeError::InvalidInput(_))
-    ));
+    let rt = result.expect("the removed binding metadata ceiling must admit the bindings");
     assert_eq!(state.count(), 0);
     assert_eq!(provider.calls.load(Ordering::Acquire), 0);
-    assert!(!temp.path().join("session.db").exists());
+    assert!(temp.path().join("session.db").exists());
+    assert!(
+        rt.capabilities()
+            .unwrap()
+            .iter()
+            .any(|definition| definition.name == "mcp.call"),
+        "the admitted bindings must still expose the source catalog"
+    );
 }

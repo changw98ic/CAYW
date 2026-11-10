@@ -49,7 +49,7 @@ async fn coalesced_usage_retains_all_original_text_events_and_reopened_history()
     let provider = Arc::new(FragmentedProvider(AtomicUsize::new(0)));
     let model = Model::new("fixture", "streaming-history");
     let config = RuntimeConfig {
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         ..Default::default()
     };
     let runtime = Runtime::open(
@@ -147,10 +147,13 @@ async fn coalesced_usage_retains_all_original_text_events_and_reopened_history()
             .all(|entry| entry.observation.usage_status == UsageStatus::Unknown)
     );
     assert_eq!(request.settled_tokens, None);
-    assert_eq!(request.outstanding_reservation_tokens, ledger.token_limit);
-    assert_eq!(ledger.reserved_tokens, ledger.token_limit);
+    assert_eq!(request.charged_tokens, None);
+    assert_eq!(request.outstanding_reservation_tokens, 0);
+    assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.settled_tokens, 0);
-    assert!(ledger.budget_unknown);
+    assert_eq!(ledger.charged_unknown_tokens, 0);
+    assert_eq!(ledger.remaining_tokens, None);
+    assert!(ledger.usage_unknown);
     assert_eq!(ledger.cost_status, ModelCostStatus::Unknown);
     assert!(ledger.cost_amount.is_none() && ledger.cost_currency.is_none());
     assert!(

@@ -64,12 +64,12 @@ impl Provider for CompletionGate {
 fn limits() -> TerminalLimits {
     TerminalLimits {
         max_sessions: 2,
-        max_sessions_total: 8,
-        max_input_bytes_per_write: 64,
-        max_input_bytes_per_session: 256,
-        max_output_bytes_per_session: 4096,
-        max_read_bytes: 64,
-        max_wait: Duration::from_secs(10),
+        max_sessions_total: Some(8),
+        max_input_bytes_per_write: Some(64),
+        max_input_bytes_per_session: Some(256),
+        max_output_bytes_per_session: Some(4096),
+        max_read_bytes: Some(64),
+        max_wait: Some(Duration::from_secs(10)),
     }
 }
 fn profile(program: impl Into<PathBuf>, args: &[String]) -> Profile {
@@ -78,21 +78,21 @@ fn profile(program: impl Into<PathBuf>, args: &[String]) -> Profile {
         program: program.into(),
         args: args.to_vec(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: ProcessIo::Pipes,
     }
 }
 fn runtime_config(profile: Profile, permissions: Vec<ScopedPermission>) -> RuntimeConfig {
     RuntimeConfig {
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         codemode: cayw_codemode::Limits {
-            timeout: Duration::from_secs(10),
+            timeout: Some(Duration::from_secs(10)),
             ..Default::default()
         },
         host: cayw_host::HostConfig {
-            call_timeout: Duration::from_secs(10),
+            call_timeout: Some(Duration::from_secs(10)),
             terminal_handoffs: Some(TerminalConfig {
                 profiles: BTreeMap::from([("terminal".into(), profile)]),
                 limits: limits(),

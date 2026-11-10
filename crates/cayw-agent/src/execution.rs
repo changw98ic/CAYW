@@ -1,14 +1,11 @@
 use crate::{
-    AgentContext, AgentEvent, AgentHooks, AgentTool, ExecutionMode, ToolArgumentLimit, ToolContext,
-    ToolHookContext, ToolProgress, ToolResult,
+    AgentContext, AgentEvent, AgentHooks, AgentTool, ExecutionMode, ToolContext, ToolHookContext,
+    ToolProgress, ToolResult,
 };
 use cayw_ai::{
-    ArgumentValidator, AssistantMessage, CancellationToken, Content, StopReason, ToolCall,
-    ToolDefinition,
+    ArgumentValidator, AssistantMessage, CancellationToken, StopReason, ToolCall, ToolDefinition,
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
@@ -57,126 +54,6 @@ struct PreparedCall {
     invocation: Invocation,
 }
 
-/// The Agent itself imposes no product argument limit. The host supplies one
-/// when its durable event store has stricter metadata bounds.
-const ARGUMENTS_OMITTED: &str = "tool_arguments_omitted";
-
-struct ArgumentOverflow {
-    bytes: usize,
-    sha256: Option<String>,
-    limit_bytes: usize,
-}
-
-/// Replace oversized tool-call arguments before the assistant message or any
-/// execution event reaches the host store. The summary keeps call pairing and
-/// exact identity while the arguments error prevents execution.
-pub(crate) fn bound_tool_arguments(
-    message: &mut AssistantMessage,
-    limit: Option<ToolArgumentLimit>,
-) {
-    let Some(limit) = limit else {
-        return;
-    };
-    for content in &mut message.content {
-        let Content::ToolCall(call) = content else {
-            continue;
-        };
-        let Some(overflow) = argument_overflow(&call.arguments, limit) else {
-            continue;
-        };
-        call.arguments = argument_summary(&overflow);
-        call.arguments_error = Some(oversized_arguments_error(&overflow));
-    }
-}
-
-fn argument_overflow(value: &Value, limit: ToolArgumentLimit) -> Option<ArgumentOverflow> {
-    let serialized = serde_json::to_vec(value);
-    let too_large = match &serialized {
-        Ok(bytes) => bytes.len() > limit.bytes,
-        Err(_) => true,
-    };
-    if !too_large && within_argument_bounds(value, limit) {
-        return None;
-    }
-    let bytes = serialized.as_ref().map_or(0, Vec::len);
-    let sha256 = serialized
-        .ok()
-        .map(|bytes| format!("sha256:{:x}", Sha256::digest(&bytes)));
-    Some(ArgumentOverflow {
-        bytes,
-        sha256,
-        limit_bytes: limit.bytes,
-    })
-}
-
-fn within_argument_bounds(value: &Value, limit: ToolArgumentLimit) -> bool {
-    let mut pending = vec![(value, 0usize)];
-    let mut nodes = 0usize;
-    while let Some((value, depth)) = pending.pop() {
-        nodes += 1;
-        let children = match value {
-            Value::Array(values) => values.len(),
-            Value::Object(values) => values.len(),
-            _ => 0,
-        };
-        if depth > limit.depth || nodes + pending.len() + children > limit.nodes {
-            return false;
-        }
-        match value {
-            Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
-            Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, depth + 1)));
-            }
-            _ => {}
-        }
-    }
-    true
-}
-
-fn argument_summary(overflow: &ArgumentOverflow) -> Value {
-    json!({
-        "tool_arguments_omitted": true,
-        "bytes": overflow.bytes,
-        "sha256": overflow.sha256,
-        "limit_bytes": overflow.limit_bytes,
-        "reason": "tool arguments exceeded the configured durable metadata limit; the tool was not executed",
-    })
-}
-
-fn oversized_arguments_error(overflow: &ArgumentOverflow) -> String {
-    format!(
-        "Tool arguments exceed the configured durable metadata limit ({} bytes, {}); the tool was not executed",
-        overflow.bytes,
-        overflow.sha256.as_deref().unwrap_or("sha256:unavailable")
-    )
-}
-
-/// Streaming providers accumulate tool-call arguments in each partial message
-/// and every non-terminal update is stored. Bound the partial carried by the
-/// event itself so a large argument never reaches the host store raw.
-pub(crate) fn bound_event_arguments(
-    event: &mut cayw_ai::AssistantEvent,
-    limit: Option<ToolArgumentLimit>,
-) {
-    use cayw_ai::AssistantEvent::*;
-    match event {
-        Start { message } | Done { message } | Error { message } => {
-            bound_tool_arguments(message, limit)
-        }
-        UsageUpdate { partial }
-        | TextStart { partial, .. }
-        | TextDelta { partial, .. }
-        | TextEnd { partial, .. }
-        | ThinkingStart { partial, .. }
-        | ThinkingDelta { partial, .. }
-        | ThinkingEnd { partial, .. }
-        | ToolCallStart { partial, .. }
-        | ToolCallDelta { partial, .. }
-        | ToolCallEnd { partial, .. } => bound_tool_arguments(partial, limit),
-    }
-}
-
-#[cfg(test)]
 pub(crate) async fn execute_batch(
     assistant: &AssistantMessage,
     context: &AgentContext,
@@ -184,18 +61,6 @@ pub(crate) async fn execute_batch(
     hooks: Arc<dyn AgentHooks>,
     cancel: CancellationToken,
     emit: EventSink,
-) -> Vec<ToolOutcome> {
-    execute_batch_with_limit(assistant, context, mode, hooks, cancel, emit, None).await
-}
-
-pub(crate) async fn execute_batch_with_limit(
-    assistant: &AssistantMessage,
-    context: &AgentContext,
-    mode: ExecutionMode,
-    hooks: Arc<dyn AgentHooks>,
-    cancel: CancellationToken,
-    emit: EventSink,
-    argument_limit: Option<ToolArgumentLimit>,
 ) -> Vec<ToolOutcome> {
     let calls = assistant.tool_calls();
     if calls.is_empty() {
@@ -246,7 +111,6 @@ pub(crate) async fn execute_batch_with_limit(
                 &hooks,
                 &batch_cancel,
                 &emit,
-                argument_limit,
             )
             .await;
             let outcome = finish_call(prepared, hooks.clone(), emit.clone()).await;
@@ -272,7 +136,6 @@ pub(crate) async fn execute_batch_with_limit(
                 &hooks,
                 &batch_cancel,
                 &emit,
-                argument_limit,
             )
             .await,
         );
@@ -332,7 +195,6 @@ async fn prepare_call(
     hooks: &Arc<dyn AgentHooks>,
     cancel: &CancellationToken,
     emit: &EventSink,
-    argument_limit: Option<ToolArgumentLimit>,
 ) -> PreparedCall {
     let mut prepared = PreparedCall {
         call,
@@ -345,14 +207,6 @@ async fn prepare_call(
             active: Arc::new(AtomicBool::new(false)),
         },
     };
-    // Defense in depth for callers that bypass the Agent turn loop. This keeps
-    // the start/end pair and every persisted event within the host limit.
-    if let Some(limit) = argument_limit
-        && let Some(overflow) = argument_overflow(&prepared.call.arguments, limit)
-    {
-        prepared.call.arguments = argument_summary(&overflow);
-        prepared.call.arguments_error = Some(oversized_arguments_error(&overflow));
-    }
     emit(AgentEvent::ToolExecutionStart {
         call: prepared.call.clone(),
     })
@@ -363,20 +217,6 @@ async fn prepare_call(
     }
     if prepared.invocation.cancel.is_cancelled() {
         prepared.result = Some(cancelled(false));
-        return prepared;
-    }
-    if prepared
-        .call
-        .arguments
-        .get(ARGUMENTS_OMITTED)
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        prepared.result = Some(ToolResult::error(
-            prepared.call.arguments_error.clone().unwrap_or_else(|| {
-                "Tool arguments exceed the configured durable metadata limit".into()
-            }),
-        ));
         return prepared;
     }
     if let Some(error) = &prepared.call.arguments_error {

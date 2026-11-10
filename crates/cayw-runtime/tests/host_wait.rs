@@ -103,10 +103,10 @@ fn start(
 
 fn assert_known_ended_wait(rt: &Runtime, id: &str, question_id: &str) -> TaskState {
     let view = rt.get(id).unwrap();
-    assert_ne!(
+    assert_eq!(
         view.state,
-        SessionState::NeedsReconciliation,
-        "a known stop must not require reconciliation"
+        SessionState::Idle,
+        "a known stop must settle back to Idle"
     );
     assert!(
         view.unresolved_capabilities.is_empty(),
@@ -193,7 +193,7 @@ async fn short_host_call_timeout_ends_the_wait_as_a_known_failure() {
     };
     // The service stops at 3/4 of the Host deadline, before the Host's own
     // unknown-outcome timeout and far before CodeMode's 60-second host wait.
-    config.host.call_timeout = Duration::from_millis(1500);
+    config.host.call_timeout = Some(Duration::from_millis(1500));
     let (_dir, rt) = setup(config);
     let id = rt.create(None).unwrap().id;
     let task = start(&rt, &id);
@@ -215,7 +215,7 @@ async fn short_host_call_timeout_ends_the_wait_as_a_known_failure() {
 async fn runtime_absolute_deadline_still_ends_a_paused_human_wait() {
     let (_dir, rt) = setup(RuntimeConfig {
         permissions: vec![ask_permission()],
-        max_run_time: Duration::from_secs(4),
+        max_run_time: Some(Duration::from_secs(4)),
         ..Default::default()
     });
     let id = rt.create(None).unwrap().id;

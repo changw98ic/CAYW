@@ -10,6 +10,18 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
+/// Explicit caps for tests that exercise item/depth rejection. Runtime defaults
+/// are unlimited, so these tests state the budgets they depend on.
+const ITEM_BYTES: usize = 64 * 1024;
+const JSON_DEPTH: usize = 32;
+fn capped_limits() -> CellLimits {
+    CellLimits {
+        item_bytes: Some(ITEM_BYTES),
+        json_depth: Some(JSON_DEPTH),
+        ..CellLimits::default()
+    }
+}
+
 struct Backend {
     fail_finished: bool,
     entered: Semaphore,
@@ -54,7 +66,7 @@ impl CellBackend for Backend {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let result = match name {
             "unknown" => Err(CapabilityError::unknown("receipt lost")),
-            "oversized" => Ok(json!("x".repeat(CellLimits::default().item_bytes + 1))),
+            "oversized" => Ok(json!("x".repeat(ITEM_BYTES + 1))),
             "deep" => {
                 let mut value = Value::Null;
                 for _ in 0..10_000 {
@@ -119,7 +131,7 @@ fn manager(
         journal,
         backend,
         reads,
-        CellLimits::default(),
+        capped_limits(),
         Limits {
             shutdown_grace: Duration::from_millis(100),
             ..Limits::default()
@@ -484,7 +496,7 @@ fn stopped_crash_windows_accept_host_facts_and_preserve_known_terminals() {
     record.calls[0].result = Some(json!(7));
     record.calls[1].status = IntentStatus::Failed;
     record.calls[1].error = Some("known rejection".into());
-    let huge_result = json!("x".repeat(CellLimits::default().item_bytes + 1));
+    let huge_result = json!("x".repeat(ITEM_BYTES + 1));
     let huge_hash = format!(
         "sha256:{:x}",
         Sha256::digest(serde_json::to_vec(&huge_result).unwrap())
@@ -789,10 +801,10 @@ fn inherited_file_handles_do_not_extend_a_dropped_executor_lease() {
     );
 }
 
-// Break caught: legacy capability reconciliation removes the durable freeze
-// while a different owned VM remains paused and could later dispatch effects.
+// Reconciling one cell's uncertain effect must not disturb another live VM in
+// the same session or freeze later execution.
 #[tokio::test]
-async fn capability_reconciliation_cannot_thaw_while_any_session_vm_is_alive() {
+async fn capability_reconciliation_leaves_other_live_cells_running() {
     let dir = tempfile::tempdir().unwrap();
     let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
     let cells = manager(
@@ -823,7 +835,7 @@ async fn capability_reconciliation_cannot_thaw_while_any_session_vm_is_alive() {
     )
     .await;
     let record = cells.record(&unknown.cell_id).unwrap();
-    cells
+    let reconciled = cells
         .reconcile(
             &record.cell_id,
             ReconciliationEvidence {
@@ -836,9 +848,24 @@ async fn capability_reconciliation_cannot_thaw_while_any_session_vm_is_alive() {
             },
         )
         .unwrap();
-    assert!(
-        journal.is_frozen("session").unwrap(),
-        "another live VM must block durable thaw"
+    assert_eq!(reconciled.status, CellStatus::Reconciled);
+    assert!(!journal.is_frozen("session").unwrap());
+    let resumed = cells
+        .wait(
+            WaitRequest {
+                cell_id: paused.cell_id.clone(),
+                cursor: paused.next_cursor,
+                yield_time_ms: 1000,
+                max_output_tokens: 4096,
+                continue_execution: true,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal(&cells, resumed).await.status,
+        CellStatus::Completed
     );
     cells.close().await;
 }
@@ -873,9 +900,7 @@ async fn omitted_actual_success_keeps_digest_and_rejects_changed_receipts() {
     assert!(record.calls[0].result_omitted);
     let hash = format!(
         "sha256:{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&json!("x".repeat(CellLimits::default().item_bytes + 1))).unwrap()
-        )
+        Sha256::digest(serde_json::to_vec(&json!("x".repeat(ITEM_BYTES + 1))).unwrap())
     );
     assert_eq!(record.calls[0].result_hash, Some(hash.clone()));
     cells.close().await;
@@ -1106,8 +1131,8 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
             multi_cells.close().await;
             drop(multi_cells);
 
-            assert!(journal.is_frozen("session").unwrap());
-            assert!(journal.is_frozen("session-multi").unwrap());
+            assert!(!journal.is_frozen("session").unwrap());
+            assert!(!journal.is_frozen("session-multi").unwrap());
 
             let scope = journal
                 .stopped_scope(
@@ -1115,7 +1140,7 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
                         identity: identity("old"),
                         evidence: "executor stopped".into(),
                     },
-                    CellLimits::default(),
+                    capped_limits(),
                 )
                 .unwrap();
             for shape in ["arguments", "result", "bad-origin"] {
@@ -1159,7 +1184,7 @@ fn unchecked_host_settlement_values_are_rejected_without_process_abort() {
                         identity: multi_identity,
                         evidence: "executor stopped multi".into(),
                     },
-                    CellLimits::default(),
+                    capped_limits(),
                 )
                 .unwrap();
             for shape in [
@@ -1381,7 +1406,7 @@ async fn dropped_invocation_bounds_uncooperative_cleanup_without_close() {
     })
     .await
     .unwrap();
-    assert!(journal.is_frozen("session").unwrap());
+    assert!(!journal.is_frozen("session").unwrap());
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     cells.close().await;
 }

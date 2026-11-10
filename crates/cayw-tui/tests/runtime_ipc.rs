@@ -125,7 +125,7 @@ async fn canonical_frozen_view_and_confirmed_fork_use_runtime_not_invented_fixtu
 }
 
 #[tokio::test]
-async fn unknown_core_effects_prevent_fork_in_both_tui_and_actual_runtime() {
+async fn recovered_interrupted_call_settles_to_idle_and_allows_confirmed_fork_of_frozen_session() {
     let fixture = support::OfflineRuntime::new();
     let runtime = fixture.runtime.clone();
     let id = fixture.frozen_id.clone();
@@ -158,23 +158,23 @@ async fn unknown_core_effects_prevent_fork_in_both_tui_and_actual_runtime() {
         .request("session.get", json!({"session_id":id}))
         .await
         .unwrap();
-    assert_eq!(value["state"], "needs_reconciliation");
+    assert_eq!(value["state"], "idle");
+    assert_eq!(value["unresolved_calls"].as_array().unwrap().len(), 1);
+    assert_eq!(value["unresolved_calls"][0]["call"]["id"], "unsettled-call");
     assert_eq!(value["unresolved_calls"][0]["state"], "outcome_unknown");
     assert_eq!(value["frozen"], true);
     let mut app = App::default();
     app.set_connected();
     app.upsert_snapshot(value, true).unwrap();
     press(&mut app, KeyCode::Char('f'), KeyModifiers::CONTROL);
-    assert!(app.dialog.is_none());
-    assert!(press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).is_empty());
-    let result = client
-        .request(
-            "session.fork",
-            json!({"session_id":id,"label":"must not fork","confirm":true,"mode":"chat"}),
-        )
-        .await;
-    assert!(result.is_err());
-    assert_eq!(runtime.list().unwrap().len(), 1);
+    assert!(app.dialog.is_some());
+    let commands = press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert_eq!(commands.len(), 1);
+    let fork = execute(&client, commands.into_iter().next().unwrap()).await;
+    assert_ne!(fork["id"], id);
+    assert_eq!(fork["frozen"], false);
+    assert_eq!(fork["state"], "idle");
+    assert_eq!(runtime.list().unwrap().len(), 2);
     client.close().await;
     stop.cancel();
     task.await.unwrap().unwrap();
@@ -483,10 +483,7 @@ async fn busy_other_client_run_survives_rejected_tui_shutdown() {
     app.input.insert("rejected draft");
     let mut driver = Driver::default();
     let commands = press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(matches!(
-        commands.as_slice(),
-        [Command::PreparePrompt { .. }]
-    ));
+    assert!(matches!(commands.as_slice(), [Command::Prompt { .. }]));
     driver.dispatch(&mut app, &transport, commands);
     loop {
         let update = next(&mut transport).await;
@@ -503,16 +500,8 @@ async fn busy_other_client_run_survives_rejected_tui_shutdown() {
             );
             break;
         }
-        let budget_status = matches!(
-            &update,
-            Update::Response { request, result: Ok(_) }
-                if request.method == "model.budget.prepare_prompt"
-        );
         let commands = driver.update(&mut app, update);
-        if budget_status {
-            assert!(matches!(commands.as_slice(), [Command::Prompt { .. }]));
-            driver.dispatch(&mut app, &transport, commands);
-        }
+        driver.dispatch(&mut app, &transport, commands);
     }
     assert_eq!(app.input.text(), "rejected draft");
     assert_eq!(json!(app.selected().unwrap().messages), original_messages);

@@ -226,6 +226,9 @@ pub enum PluginError {
 
 impl PluginError {
     /// Conservative: transport failures and interrupted calls never prove rollback.
+    /// This only classifies an in-flight call that may have taken effect. A start
+    /// attempt that is confirmed exited before it ever accepted a call is a known
+    /// failure and is reported as `Unavailable` by the caller instead.
     pub fn outcome_unknown(&self) -> bool {
         matches!(
             self,

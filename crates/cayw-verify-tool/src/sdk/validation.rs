@@ -1197,9 +1197,9 @@ mod tests {
             running_first_page: running,
         });
         let mut config = super::super::scenarios::config(false, &root);
-        config.cells.max_output_tokens = 16 * 1024;
-        config.cells.item_bytes = 12 * 1024;
-        config.cells.max_yield_time = Duration::from_millis(50);
+        config.cells.max_output_tokens = Some(16 * 1024);
+        config.cells.item_bytes = Some(12 * 1024);
+        config.cells.max_yield_time = Some(Duration::from_millis(50));
         let runtime = cayw_runtime::Runtime::open(
             root.join("session.sqlite"),
             root.join("workspace"),

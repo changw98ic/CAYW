@@ -78,7 +78,11 @@ impl State {
                 "connection is closed; this request was not sent",
             ));
         }
-        if metadata.next >= self.config.max_requests_per_connection {
+        if self
+            .config
+            .max_requests_per_connection
+            .is_some_and(|limit| metadata.next >= limit)
+        {
             return Err(ClientError::known(
                 "connection_limit",
                 "connection request ID budget exhausted; explicitly open a new connection",
@@ -107,12 +111,6 @@ impl State {
         params: Value,
         deadline: Option<Instant>,
     ) -> Result<(String, oneshot::Receiver<Reply>), ClientError> {
-        wire::validate_value(&params, 1).map_err(|_| {
-            ClientError::known(
-                "invalid_params",
-                "request params exceed the JSON nesting limit; request was not sent",
-            )
-        })?;
         let permit = self.outgoing.try_reserve().map_err(|_| {
             ClientError::known(
                 "client_busy",
@@ -199,7 +197,10 @@ impl State {
             id.clone(),
             Pending {
                 reply: None,
-                deadline: Some(Instant::now() + self.config.request_timeout),
+                deadline: self
+                    .config
+                    .request_timeout
+                    .map(|timeout| Instant::now() + timeout),
                 sent: false,
             },
         );
@@ -364,7 +365,9 @@ impl Client {
             if limits.version != PROTOCOL_VERSION
                 || limits.max_frame_bytes < 256
                 || limits.max_in_flight == 0
-                || limits.max_requests_per_connection < 2
+                || limits
+                    .max_requests_per_connection
+                    .is_some_and(|limit| limit < 2)
                 || limits.max_id_bytes == 0
             {
                 return Err(ClientError::known(
@@ -378,9 +381,13 @@ impl Client {
         .map_err(|_| ClientError::known("connect_timeout", "IPC connect/hello timed out"))??;
         config.max_frame_bytes = config.max_frame_bytes.min(limits.max_frame_bytes);
         config.max_in_flight = config.max_in_flight.min(limits.max_in_flight);
-        config.max_requests_per_connection = config
-            .max_requests_per_connection
-            .min(limits.max_requests_per_connection);
+        config.max_requests_per_connection = match (
+            config.max_requests_per_connection,
+            limits.max_requests_per_connection,
+        ) {
+            (Some(local), Some(remote)) => Some(local.min(remote)),
+            (local, remote) => local.or(remote),
+        };
         config.max_id_bytes = config.max_id_bytes.min(limits.max_id_bytes);
         config.validate()?;
         if config.max_id_bytes < 34 {
@@ -437,9 +444,13 @@ impl Client {
         params: Value,
         cancel: CancellationToken,
     ) -> Reply {
-        let deadline = Instant::now() + self.owner.state.config.request_timeout;
-        self.request_inner(method, params, cancel, Some(deadline))
-            .await
+        let deadline = self
+            .owner
+            .state
+            .config
+            .request_timeout
+            .map(|timeout| Instant::now() + timeout);
+        self.request_inner(method, params, cancel, deadline).await
     }
 
     /// Send one call without a client-side response deadline. The server may

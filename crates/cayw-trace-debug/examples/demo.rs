@@ -203,7 +203,7 @@ pub async fn start_with_token(options: &Options, token: String) -> DemoResult<De
         RuntimeConfig {
             permissions,
             codemode: cayw_codemode::Limits {
-                host_wait: Duration::from_secs(180),
+                host_wait: Some(Duration::from_secs(180)),
                 ..Default::default()
             },
             ..Default::default()
@@ -221,7 +221,7 @@ pub async fn start_with_token(options: &Options, token: String) -> DemoResult<De
         std::sync::Arc::new(runtime.clone()),
         // Leave enough bounded time to inspect an approval wait in the browser.
         ServerConfig {
-            request_timeout: Duration::from_secs(180),
+            request_timeout: Some(Duration::from_secs(180)),
             frame_timeout: Duration::from_secs(240),
             ..ServerConfig::new(token)
         },

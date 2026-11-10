@@ -216,7 +216,7 @@ fn registered_wait_does_not_hide_unknown_child_or_replay_it() {
         .recover(&lease.session_id)
         .unwrap();
     assert!(snapshot.unresolved_calls.is_empty());
-    assert_eq!(snapshot.state, SessionState::NeedsReconciliation);
+    assert_eq!(snapshot.state, SessionState::Idle);
     assert_eq!(snapshot.unresolved_capabilities.len(), 1);
     assert!(matches!(
         snapshot.unresolved_capabilities[0].outcome,
@@ -238,7 +238,7 @@ fn unregistered_wait_and_arbitrary_tool_still_require_reconciliation() {
     start(&store, &lease, &waiting);
     start(&store, &lease, &other);
     let snapshot = store.recover(&lease.session_id).unwrap();
-    assert_eq!(snapshot.state, SessionState::NeedsReconciliation);
+    assert_eq!(snapshot.state, SessionState::Idle);
     assert_eq!(
         snapshot
             .unresolved_calls

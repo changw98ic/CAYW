@@ -61,7 +61,7 @@ fn store_policy() -> RequestPolicy {
 }
 fn base_config(policy: RequestPolicy, permissions: Vec<ScopedPermission>) -> RuntimeConfig {
     RuntimeConfig {
-        max_run_time: Duration::from_secs(10),
+        max_run_time: Some(Duration::from_secs(10)),
         local_agents: Some(LocalAgents::default()),
         permissions,
         request_policy: Some(policy),
@@ -391,10 +391,11 @@ async fn changed_dynamic_configuration_invalidates_the_old_catalog_and_receipt()
     let temp = tempfile::tempdir().unwrap();
     let pause = Arc::new(Semaphore::new(0));
     let script = "local input={purpose='store exact state',gap='protected value store unavailable',operation_id='store-a',capability='cells.store',arguments={key='state',value={count=7},expected_version=0}}; cayw.call('capability.request',input); cayw.call('capability.request',input); yield_control(); return cayw.call('cells.store',{key='state',value={count=7},expected_version=0})";
-    let original_config = base_config(
+    let mut original_config = base_config(
         store_policy(),
         vec![ScopedPermission::exact("cells.store", store_arguments())],
     );
+    original_config.max_capability_calls = Some(8);
     let rt = open(&temp, original_config.clone(), script, Some(pause.clone()));
     let id = rt.create(None).unwrap().id;
     let worker_rt = rt.clone();
@@ -439,7 +440,7 @@ async fn changed_dynamic_configuration_invalidates_the_old_catalog_and_receipt()
     ));
 
     let mut changed_cells = original_config.clone();
-    changed_cells.cells.store_bytes = 2 * 1024 * 1024;
+    changed_cells.cells.store_bytes = Some(2 * 1024 * 1024);
     let cells_rt = open(&temp, changed_cells, "return nil", None);
     assert_policy_mismatch(cells_rt.request_approve(
         &task_id,
@@ -461,7 +462,7 @@ async fn changed_dynamic_configuration_invalidates_the_old_catalog_and_receipt()
     ));
 
     let mut changed_runtime_budget = original_config.clone();
-    changed_runtime_budget.max_capability_calls += 1;
+    changed_runtime_budget.max_capability_calls = Some(9);
     let runtime_rt = open(&temp, changed_runtime_budget, "return nil", None);
     assert_policy_mismatch(runtime_rt.request_approve(
         &task_id,

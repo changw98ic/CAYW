@@ -217,7 +217,7 @@ impl Bridge {
         operation: Operation,
         field: &str,
         cancel: CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         let ids: Vec<_> = match server {
             Some(id) => {
@@ -250,7 +250,7 @@ impl Bridge {
                 .append(incoming);
             self.registry.bound_result(&result)?;
         }
-        if cancel.is_cancelled() || Instant::now() >= deadline {
+        if cancel.is_cancelled() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(failure("metadata collection cancelled or timed out"));
         }
         self.registry.validate_pins(
@@ -276,7 +276,11 @@ impl ExternalHost for ScopedBridge {
         Self: 'async_trait,
     {
         let arguments = OwnedJson(arguments);
-        let deadline = Instant::now() + self.bridge.registry.operation_timeout();
+        let deadline = self
+            .bridge
+            .registry
+            .operation_timeout()
+            .and_then(|timeout| Instant::now().checked_add(timeout));
         let admitted = self.capability == capability && !self.used.swap(true, Ordering::AcqRel);
         Box::pin(async move {
             if !admitted {
@@ -297,7 +301,7 @@ impl ScopedBridge {
         target: &str,
         arguments: Value,
         cancel: CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         self.bridge
             .registry
@@ -318,13 +322,13 @@ impl ScopedBridge {
         capability: &str,
         mut arguments: OwnedJson,
         cancel: CancellationToken,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> Result<Value, CapabilityError> {
         self.bridge.registry.bound_arguments(&arguments)?;
         if !arguments.is_object() {
             return Err(failure("bridge arguments must be an object"));
         }
-        if cancel.is_cancelled() || Instant::now() >= deadline {
+        if cancel.is_cancelled() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err(failure(
                 "bridge call cancelled or timed out before admission",
             ));

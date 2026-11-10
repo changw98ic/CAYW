@@ -114,7 +114,7 @@ async fn plan_feedback_persists_and_lists_via_rpc() {
     let (dir, rt) = setup(PLAN_SCRIPT);
     let id = rt.create(None).unwrap().id;
     let view = start(&rt, &id).await.unwrap().unwrap();
-    assert_ne!(view.state, cayw_core::SessionState::NeedsReconciliation);
+    assert_eq!(view.state, cayw_core::SessionState::Idle);
     assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
     let plan = rt.plan(&id).unwrap().expect("plan");
     assert_eq!(plan.version, 1);

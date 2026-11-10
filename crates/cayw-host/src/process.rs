@@ -426,8 +426,8 @@ impl GitView {
     }
 }
 struct MetadataBudget {
-    bytes: usize,
-    entries: usize,
+    bytes: Option<usize>,
+    entries: Option<usize>,
 }
 /// Returns the current pathname of an already-open directory or file handle.
 /// The query tracks renames without reopening the path; the caller still treats
@@ -530,7 +530,7 @@ fn copy_metadata(
     required: bool,
     budget: &mut MetadataBudget,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<(), CapabilityError> {
     check(cancel, deadline)?;
     let mut options = OpenOptions::new();
@@ -551,10 +551,12 @@ fn copy_metadata(
         if count == 0 {
             break;
         }
-        if count > budget.bytes {
-            return Err(failure("Git metadata byte budget exceeded"));
+        if let Some(left) = &mut budget.bytes {
+            if count > *left {
+                return Err(failure("Git metadata byte budget exceeded"));
+            }
+            *left -= count;
         }
-        budget.bytes -= count;
         bytes.extend_from_slice(&chunk[..count]);
     }
     target.write(name, bytes).map_err(io_error)
@@ -564,7 +566,7 @@ fn copy_refs(
     target: &Dir,
     budget: &mut MetadataBudget,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
     depth: usize,
 ) -> Result<(), CapabilityError> {
     if depth > 32 {
@@ -572,10 +574,12 @@ fn copy_refs(
     }
     for entry in source.entries().map_err(io_error)? {
         check(cancel, deadline)?;
-        if budget.entries == 0 {
-            return Err(failure("Git ref entry limit exceeded"));
+        if let Some(left) = &mut budget.entries {
+            if *left == 0 {
+                return Err(failure("Git ref entry limit exceeded"));
+            }
+            *left -= 1;
         }
-        budget.entries -= 1;
         let entry = entry.map_err(io_error)?;
         let name = entry
             .file_name()
@@ -733,14 +737,14 @@ async fn run_git_probe(
     view: &GitView,
     args: Vec<String>,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, CapabilityError> {
     check(cancel, deadline)?;
-    let timeout = host
-        .config
-        .process_timeout
-        .min(deadline.saturating_duration_since(Instant::now()));
-    if timeout.is_zero() {
+    let timeout = crate::min_opt(
+        host.config.process_timeout,
+        deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+    );
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(failure(
             "capability deadline reached before Git metadata view inspection",
         ));
@@ -756,6 +760,7 @@ async fn run_git_probe(
         env: git_environment(),
         timeout,
         max_output_bytes: host.config.max_process_output_bytes,
+        output_spill_dir: None,
         io: cayw_device::ProcessIo::Pipes,
     };
     let result = host
@@ -845,7 +850,7 @@ async fn git_spec(
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<
     (
         DirectoryProcessSpec,
@@ -959,10 +964,12 @@ async fn git_spec(
     // hooks, info/attributes and alternate commands never enter this view.
     for entry in source.entries().map_err(io_error)? {
         check(cancel, deadline)?;
-        if budget.entries == 0 {
-            return Err(failure("Git metadata entry limit exceeded"));
+        if let Some(left) = &mut budget.entries {
+            if *left == 0 {
+                return Err(failure("Git metadata entry limit exceeded"));
+            }
+            *left -= 1;
         }
-        budget.entries -= 1;
         let entry = entry.map_err(io_error)?;
         let filename = entry.file_name();
         let Some(filename) = filename.to_str() else {
@@ -1041,6 +1048,7 @@ async fn git_spec(
             env: read_environment(Path::new(".git/objects"), Some(Path::new(".git/index")))?,
             timeout: host.config.process_timeout,
             max_output_bytes: host.config.max_process_output_bytes,
+            output_spill_dir: None,
             io: cayw_device::ProcessIo::Pipes,
         },
         view,
@@ -1080,10 +1088,12 @@ fn profile_spec(
         args,
         env: profile.env.clone(),
         cwd: host.root.try_clone().map_err(io_error)?.into_std_file(),
-        timeout: profile.timeout.min(host.config.process_timeout),
-        max_output_bytes: profile
-            .max_output_bytes
-            .min(host.config.max_process_output_bytes),
+        timeout: profile.timeout,
+        max_output_bytes: crate::min_opt(
+            profile.max_output_bytes,
+            host.config.max_process_output_bytes,
+        ),
+        output_spill_dir: None,
         io: profile.io,
     })
 }
@@ -1111,7 +1121,7 @@ pub(crate) async fn execute(
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     match name {
         "git.status" | "git.diff" | "git.log" | "git.show" | "git.blame" => {
@@ -1124,10 +1134,11 @@ pub(crate) async fn execute(
             }
             let mut spec = profile_spec(host, name, arguments)?;
             check(cancel, deadline)?;
-            spec.timeout = spec
-                .timeout
-                .min(deadline.saturating_duration_since(Instant::now()));
-            if spec.timeout.is_zero() {
+            spec.timeout = crate::min_opt(
+                spec.timeout,
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+            );
+            if spec.timeout.is_some_and(|timeout| timeout.is_zero()) {
                 return Err(failure("capability deadline reached before process launch"));
             }
             let result = host
@@ -1154,7 +1165,7 @@ pub(crate) async fn execute_git_read(
     name: &str,
     arguments: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     check(cancel, deadline)?;
     if host.runner.is_closed() {
@@ -1162,10 +1173,11 @@ pub(crate) async fn execute_git_read(
     }
     let (mut spec, git_view, identity) = git_spec(host, name, arguments, cancel, deadline).await?;
     check(cancel, deadline)?;
-    spec.timeout = spec
-        .timeout
-        .min(deadline.saturating_duration_since(Instant::now()));
-    if spec.timeout.is_zero() {
+    spec.timeout = crate::min_opt(
+        spec.timeout,
+        deadline.map(|deadline| deadline.saturating_duration_since(Instant::now())),
+    );
+    if spec.timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(failure("capability deadline reached before process launch"));
     }
     let result = host
@@ -1242,6 +1254,7 @@ fn stream_filter_fields(
     original: &str,
     options: &cayw_output_filter::FilterOptions,
     store: Option<&dyn crate::FilteredOriginalStore>,
+    full_output_spilled: bool,
 ) -> Result<(String, Value), CapabilityError> {
     let filtered = cayw_output_filter::apply_filter(original, options.clone())
         .map_err(|error| failure(format!("output filter failed: {error}")))?;
@@ -1260,20 +1273,36 @@ fn stream_filter_fields(
         },
     });
     // When filtering drops bytes, externalize the full original first so the
-    // agent still has a retrieval path. Unchanged streams need no handle —
-    // the summary already is the complete capture.
+    // agent still has a retrieval path. A spilled stream already retains every
+    // byte in its spill file, so no ContentStore is required there. Unchanged
+    // streams need no handle — the summary already is the complete capture.
     if filtered.reduction.changed {
         if original.is_empty() {
             return Err(failure(format!(
                 "output filter reported a reduction on empty {stream}; refusing inconsistent state"
             )));
         }
-        let handle = externalize_original(store, stream, &dual.original_digest, original)?;
-        meta.as_object_mut()
-            .expect("object")
-            .insert("original_handle".into(), handle);
+        if let Some(store) = store {
+            let handle =
+                externalize_original(Some(store), stream, &dual.original_digest, original)?;
+            meta.as_object_mut()
+                .expect("object")
+                .insert("original_handle".into(), handle);
+        } else if !full_output_spilled {
+            return Err(failure(format!(
+                "output filter reduced {stream} but ContentStore is not configured; refusing to discard the only copy of the original"
+            )));
+        }
     }
     Ok((dual.summary, meta))
+}
+
+fn spill_value(spilled: &cayw_device::SpilledOutput) -> Value {
+    json!({
+        "path": spilled.path.to_string_lossy(),
+        "total_bytes": spilled.total_bytes,
+        "sha256": spilled.sha256,
+    })
 }
 
 fn process_value(
@@ -1295,6 +1324,8 @@ fn process_value(
     // are checked before allocation; the JSON result budget is checked afterward.
     let stdout_raw = String::from_utf8_lossy(&result.stdout).into_owned();
     let stderr_raw = String::from_utf8_lossy(&result.stderr).into_owned();
+    let stdout_spilled = result.spilled_stdout.as_ref().is_some();
+    let stderr_spilled = result.spilled_stderr.as_ref().is_some();
     let mut value = json!({
         "success": result.status.success(),
         "exit_code": result.status.code(),
@@ -1303,9 +1334,17 @@ fn process_value(
         "termination": "exited",
         "output_complete": result.output_complete,
     });
+    if let Some(spilled) = &result.spilled_stdout {
+        value["spilled_stdout"] = spill_value(spilled);
+    }
+    if let Some(spilled) = &result.spilled_stderr {
+        value["spilled_stderr"] = spill_value(spilled);
+    }
     if let Some(options) = filter.filter(|options| options.enabled) {
-        let (stdout, stdout_meta) = stream_filter_fields("stdout", &stdout_raw, &options, store)?;
-        let (stderr, stderr_meta) = stream_filter_fields("stderr", &stderr_raw, &options, store)?;
+        let (stdout, stdout_meta) =
+            stream_filter_fields("stdout", &stdout_raw, &options, store, stdout_spilled)?;
+        let (stderr, stderr_meta) =
+            stream_filter_fields("stderr", &stderr_raw, &options, store, stderr_spilled)?;
         value["stdout"] = json!(stdout);
         value["stderr"] = json!(stderr);
         // Deliberately omit stdout_original/stderr_original from the capability
@@ -1459,6 +1498,31 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    #[test]
+    fn explicit_profile_timeout_is_not_clamped_to_the_internal_probe_timeout() {
+        let root = Tree::new();
+        let config = HostConfig {
+            process_timeout: Some(Duration::from_secs(30)),
+            profiles: BTreeMap::from([(
+                "slow".into(),
+                crate::Profile {
+                    kind: ProfileKind::Test,
+                    program: "/usr/bin/true".into(),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                    timeout: Some(Duration::from_secs(120)),
+                    max_output_bytes: Some(4096),
+                    allow_filter: false,
+                    io: cayw_device::ProcessIo::Pipes,
+                },
+            )]),
+            ..Default::default()
+        };
+        let host = Host::new(&root.0, Arc::new(Boundary), Arc::new(Boundary), config).unwrap();
+        let spec = profile_spec(&host, "test.run", &json!({"profile":"slow"})).unwrap();
+        assert_eq!(spec.timeout, Some(Duration::from_secs(120)));
+    }
     // Only the macOS-only Git read tests below use this helper.
     #[cfg(target_os = "macos")]
     fn git(root: &Path, args: &[&str]) -> String {
@@ -1554,8 +1618,8 @@ mod tests {
                             program: "/bin/cat".into(),
                             args: vec!["marker".into()],
                             env: BTreeMap::new(),
-                            timeout: Duration::from_secs(10),
-                            max_output_bytes: 1024,
+                            timeout: Some(Duration::from_secs(10)),
+                            max_output_bytes: Some(1024),
                             allow_filter: false,
                             io: cayw_device::ProcessIo::Pipes,
                         },
@@ -1595,7 +1659,7 @@ mod tests {
             "git.status",
             &json!({}),
             &cancel,
-            Instant::now() + Duration::from_secs(10),
+            Some(Instant::now() + Duration::from_secs(10)),
         )
         .await
         .unwrap();
@@ -1639,7 +1703,7 @@ mod tests {
             std::fs::write(root.join("sub/note"), "opened\n").unwrap();
             let host = host(&root);
             let cancel = CancellationToken::new();
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Some(Instant::now() + Duration::from_secs(10));
             let (diff_spec, diff_view, identity) = git_spec(
                 &host,
                 "git.diff",

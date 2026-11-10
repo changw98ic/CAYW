@@ -108,11 +108,11 @@ fn handle(calls: Arc<AtomicUsize>, closed: Arc<AtomicUsize>) -> Handle {
 fn registry(cancel: bool, slow: bool) -> Registry {
     Registry::new(
         Limits {
-            operation_timeout: if slow {
+            operation_timeout: Some(if slow {
                 Duration::from_millis(5)
             } else {
                 Duration::from_secs(5)
-            },
+            }),
             ..Limits::default()
         },
         Arc::new(Policy { cancel, slow }),

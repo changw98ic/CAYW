@@ -126,7 +126,9 @@ impl Connections {
         let health = probe_api.health().await?;
         probe_api.close().await;
         let config = client_config_from_health(&health)?;
-        let timeout_ms = u64::try_from(config.request_timeout.as_millis()).unwrap_or(0);
+        let timeout_ms = config
+            .request_timeout
+            .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(0));
         let execute = Client::connect_with_config(address, token.clone(), config.clone()).await?;
         let observe = match Client::connect_with_config(address, token, config).await {
             Ok(client) => client,
@@ -150,29 +152,31 @@ impl Connections {
         self.observe.close().await;
     }
 }
-pub(crate) fn parse_server_request_timeout(health: &Value) -> Result<Duration> {
-    let timeout_ms = health
-        .get("request_timeout_ms")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            Failure::invalid("server health response missing valid integer request_timeout_ms")
-        })?;
+pub(crate) fn parse_server_request_timeout(health: &Value) -> Result<Option<Duration>> {
+    let Some(value) = health.get("request_timeout_ms") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let timeout_ms = value.as_u64().ok_or_else(|| {
+        Failure::invalid("server health request_timeout_ms must be a positive integer or null")
+    })?;
     if timeout_ms == 0 {
         return Err(Failure::invalid(
             "server request_timeout_ms must be non-zero",
         ));
     }
     let request_timeout = Duration::from_millis(timeout_ms);
-    if request_timeout.is_zero()
-        || std::time::Instant::now()
-            .checked_add(request_timeout)
-            .is_none()
+    if std::time::Instant::now()
+        .checked_add(request_timeout)
+        .is_none()
     {
         return Err(Failure::invalid(
-            "server request_timeout_ms is invalid or non-representable",
+            "server request_timeout_ms is not representable",
         ));
     }
-    Ok(request_timeout)
+    Ok(Some(request_timeout))
 }
 
 pub(crate) fn client_config_from_health(health: &Value) -> Result<ClientConfig> {
@@ -256,7 +260,10 @@ impl Api {
                         Ok(page) => return Ok(serde_json::from_value(page)?),
                         // Only this read may repeat, at the same unconsumed cursor.
                         Err(error)
-                            if error.code == "response_too_large_outcome_unknown" && limit > 1 =>
+                            if matches!(
+                                error.code.as_str(),
+                                "response_too_large" | "response_too_large_outcome_unknown"
+                            ) && limit > 1 =>
                         {
                             limit /= 2;
                         }
@@ -346,20 +353,29 @@ mod tests {
         });
         let timeout = parse_server_request_timeout(&health)
             .unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(timeout, Duration::from_millis(5000));
+        assert_eq!(timeout, Some(Duration::from_millis(5000)));
         let config =
             client_config_from_health(&health).unwrap_or_else(|error| panic!("{}", error.message));
-        assert_eq!(config.request_timeout, Duration::from_millis(5000));
+        assert_eq!(config.request_timeout, Some(Duration::from_millis(5000)));
     }
 
     #[test]
-    fn parse_server_request_timeout_missing() {
+    fn parse_server_request_timeout_missing_or_null_waits() {
         let health = json!({ "status": "ok" });
-        let err = parse_server_request_timeout(&health).unwrap_err();
         assert_eq!(
-            err.message,
-            "server health response missing valid integer request_timeout_ms"
+            parse_server_request_timeout(&health)
+                .unwrap_or_else(|error| panic!("{}", error.message)),
+            None
         );
+        let health = json!({ "status": "ok", "request_timeout_ms": null });
+        assert_eq!(
+            parse_server_request_timeout(&health)
+                .unwrap_or_else(|error| panic!("{}", error.message)),
+            None
+        );
+        let config =
+            client_config_from_health(&health).unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(config.request_timeout, None);
     }
 
     #[test]

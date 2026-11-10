@@ -50,8 +50,9 @@ async fn draining_a_real_precancelled_call_waits_for_its_registered_cleanup() {
         args: vec![],
         cwd: fs::File::open(&root).unwrap(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 1024,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(1024),
+        output_spill_dir: None,
         io: cayw_device::ProcessIo::Pipes,
     };
     let cancel = CancellationToken::new();

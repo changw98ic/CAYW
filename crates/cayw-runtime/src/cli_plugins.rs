@@ -36,7 +36,20 @@ const CLEANUP_SCHEMA: &str = "cayw.workspace-plugin-cleanup.v2";
 const LEGACY_CLEANUP_SCHEMA: &str = "cayw.workspace-plugin-cleanup.v1";
 const CLEANUP_FILE: &str = "workspace-plugin-cleanup.json";
 
-pub fn doctor(paths: &LocalPaths) -> Result<Value> {
+/// A plugin state failure degrades only the plugin subsystem in doctor output.
+pub fn doctor(paths: &LocalPaths) -> Value {
+    match plugin_state(paths) {
+        Ok(report) => report,
+        Err(error) => json!({
+            "name":"plugins",
+            "status":"warning",
+            "message":format!("插件状态不可用；Client 和其他功能继续运行。请核对或修复插件状态文件：{error}"),
+            "clear_command":"cayw plugins clear NAME",
+        }),
+    }
+}
+
+fn plugin_state(paths: &LocalPaths) -> Result<Value> {
     let inventory_path = paths.data_dir.join("plugins.json");
     let inventory = read_inventory(&inventory_path)?.1;
     let activation_path = paths.state_file(ACTIVATION_FILE);
@@ -72,6 +85,8 @@ pub fn doctor(paths: &LocalPaths) -> Result<Value> {
         "workspace_cleanup_schema":cleanup.schema,
         "workspace_cleanup_blocks":cleanup_blocks,
         "global_cleanup_block_count":cleanup.block_count(),
+        "clear_command":"cayw plugins clear NAME",
+        "clear_hint":"清理记录没有进程身份时可显式执行 cayw plugins clear NAME 丢弃；有活进程时必须先停止"
     }))
 }
 
@@ -268,6 +283,16 @@ fn valid_plugin_name(name: &str) -> bool {
         && name.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'@' | b'/')
         })
+}
+
+/// A block with no process identity cannot be observed, so its only exit is the
+/// explicit user assertion. Keep the hint in one place.
+fn stale_block_message(name: &str, message: &str) -> String {
+    if message.contains("cayw plugins clear") {
+        message.to_owned()
+    } else {
+        format!("{message}; run `cayw plugins clear {name}` to discard this stale block")
+    }
 }
 
 /// Cleanup is confirmed only when the exact macOS PID incarnation is gone and
@@ -560,6 +585,8 @@ impl Plugins {
 
     /// Start only plugins enabled for this workspace. Failed starts retain the
     /// user's enable intent and record the typed error instead of silently disabling it.
+    /// A blocked, identity-less or failed plugin only records that plugin's error and
+    /// is skipped; it never aborts the Client, the workspace or the other plugins.
     pub async fn restore(&self, paths: &LocalPaths, runtime: &Runtime) -> Result<()> {
         let _operation = self.operation.lock().await;
         let (_, inventory) = read_inventory(&self.inventory_path)?;
@@ -575,56 +602,53 @@ impl Plugins {
         let mut changed = migrated;
         let mut cleanup_changed = false;
         let mut loaded = Vec::new();
-        let mut fatal = None;
         for name in names {
             let activation = activations
                 .entries
                 .get_mut(&name)
                 .expect("enabled activation disappeared");
             if let Some(block) = cleanup.get(&paths.workspace, &name).cloned() {
-                if let Some(process) = block.process.as_ref() {
+                let blocked = if let Some(process) = block.process.as_ref() {
                     match cleanup_process_stopped(process) {
-                        Ok(true) => {
-                            cleanup_changed |= cleanup.remove(&paths.workspace, &name);
-                            // The exact process recorded by this block is gone, so
-                            // the matching cleanup outcome is now confirmed. Retry
-                            // the plugin instead of turning the stale activation
-                            // error into a new identity-less permanent block.
-                            if activation
-                                .last_error
-                                .as_ref()
-                                .is_some_and(|error| error.outcome_unknown)
-                            {
-                                activation.last_error = None;
-                                changed = true;
-                            }
-                        }
-                        Ok(false) => {
-                            fatal = Some(boxed_uncertain(std::io::Error::other(format!(
-                                "plugin {name} cleanup is still unconfirmed: {}; exact process {} is still running or its process group still has members",
-                                block.message, process.pid
-                            ))));
-                            break;
-                        }
-                        Err(error) => {
-                            fatal = Some(boxed_uncertain(std::io::Error::other(format!(
-                                "plugin {name} cleanup is still unconfirmed: {}; could not re-check exact process {}: {error}",
-                                block.message, process.pid
-                            ))));
-                            break;
-                        }
+                        Ok(true) => None,
+                        Ok(false) => Some(format!(
+                            "plugin {name} cleanup is still unconfirmed: {}; exact process {} is still running or its process group still has members",
+                            block.message, process.pid
+                        )),
+                        Err(error) => Some(format!(
+                            "plugin {name} cleanup is still unconfirmed: {}; could not re-check exact process {}: {error}",
+                            block.message, process.pid
+                        )),
                     }
                 } else {
-                    let next = if block.instance.is_some() {
-                        "explicit disable can retry that exact retained instance; the block remains until cleanup is confirmed"
-                    } else {
-                        "the exact process instance is unavailable, so cleanup cannot be confirmed automatically"
-                    };
-                    fatal = Some(boxed_uncertain(std::io::Error::other(format!(
-                        "plugin {name} cleanup is still unconfirmed: {}; {next}",
+                    Some(format!(
+                        "plugin {name} cleanup is still unconfirmed: {}; the exact process identity is unavailable; run `cayw plugins clear {name}` to discard this stale block",
                         block.message
-                    ))));
-                    break;
+                    ))
+                };
+                if let Some(message) = blocked {
+                    let recorded = ActivationError {
+                        message,
+                        outcome_unknown: true,
+                    };
+                    if activation.last_error.as_ref() != Some(&recorded) {
+                        activation.last_error = Some(recorded);
+                        changed = true;
+                    }
+                    continue;
+                }
+                cleanup_changed |= cleanup.remove(&paths.workspace, &name);
+                // The exact process recorded by this block is gone, so
+                // the matching cleanup outcome is now confirmed. Retry
+                // the plugin instead of turning the stale activation
+                // error into a new identity-less permanent block.
+                if activation
+                    .last_error
+                    .as_ref()
+                    .is_some_and(|error| error.outcome_unknown)
+                {
+                    activation.last_error = None;
+                    changed = true;
                 }
             }
             if let Some(prior) = activation
@@ -633,21 +657,25 @@ impl Plugins {
                 .filter(|error| error.outcome_unknown)
                 .cloned()
             {
-                let message = format!(
-                    "plugin {name} has an unconfirmed prior outcome: {}",
-                    prior.message
-                );
-                fatal = Some(
-                    match self.persist_cleanup_block(paths, &name, message.clone(), None, None) {
-                        Ok(()) => boxed_uncertain(std::io::Error::other(format!(
-                            "{message}; the exact process instance is unavailable, so cleanup cannot be confirmed automatically"
-                        ))),
-                        Err(persistence) => boxed_uncertain(std::io::Error::other(format!(
-                            "{message}; cleanup block was not persisted: {persistence}"
-                        ))),
-                    },
-                );
-                break;
+                let clear = format!("cayw plugins clear {name}");
+                // Keep the first recorded cause and wrap it only once, so
+                // repeated restores do not nest the same message.
+                let recorded = if prior.message.contains(&clear) {
+                    prior
+                } else {
+                    ActivationError {
+                        message: format!(
+                            "plugin {name} has an unconfirmed prior outcome: {}; the exact process instance is unavailable, so cleanup cannot be confirmed automatically; run `{clear}` to discard this stale block",
+                            prior.message
+                        ),
+                        outcome_unknown: true,
+                    }
+                };
+                if activation.last_error.as_ref() != Some(&recorded) {
+                    activation.last_error = Some(recorded);
+                    changed = true;
+                }
+                continue;
             }
             let result = match inventory.entries.get(&name) {
                 Some(entry) if runtime.plugin_registry().describe(&name).is_err() => {
@@ -669,25 +697,20 @@ impl Plugins {
                         activation.last_error = Some(recorded.clone());
                         changed = true;
                     }
-                    if recorded.outcome_unknown {
-                        let message = error.to_string();
-                        fatal = Some(
-                            match self.persist_cleanup_block(
-                                paths,
-                                &name,
-                                format!("plugin start cleanup was not confirmed: {message}"),
-                                None,
-                                cleanup_process(error.as_ref()),
-                            ) {
-                                Ok(()) => error,
-                                Err(persistence) => {
-                                    boxed_uncertain(std::io::Error::other(format!(
-                                        "{message}; cleanup block was not persisted: {persistence}"
-                                    )))
-                                }
-                            },
-                        );
-                        break;
+                    // Only a retained process identity justifies a block. A start
+                    // that never launched, or is confirmed exited, is a known
+                    // failure the next restore may retry on its own.
+                    if recorded.outcome_unknown
+                        && let Some(process) = cleanup_process(error.as_ref())
+                        && cleanup.insert(
+                            &paths.workspace,
+                            &name,
+                            format!("plugin start cleanup was not confirmed: {error}"),
+                            None,
+                            Some(process),
+                        )
+                    {
+                        cleanup_changed = true;
                     }
                 }
             }
@@ -711,9 +734,6 @@ impl Plugins {
             && let Err(error) =
                 save_activations(&activation_path, original.as_deref(), &activations)
         {
-            return rollback_restore(self, paths, runtime, &loaded, error).await;
-        }
-        if let Some(error) = fatal {
             return rollback_restore(self, paths, runtime, &loaded, error).await;
         }
         Ok(())
@@ -833,9 +853,6 @@ impl Plugins {
                     if put.name.is_some() || inventory.entries.contains_key(&id) {
                         return Err("plugin already installed or unexpected name".into());
                     }
-                    if inventory.entries.len() >= 64 {
-                        return Err("at most 64 local plugins are supported".into());
-                    }
                 } else {
                     if put.name.as_deref() != Some(&id) {
                         return Err("update must preserve the installed plugin name".into());
@@ -871,15 +888,14 @@ impl Plugins {
                 if let Some(block) = cleanup.get(&paths.workspace, &enable.name).cloned() {
                     let Some(process) = block.process.as_ref().filter(|_| block.instance.is_none())
                     else {
-                        let next = if block.instance.is_some() {
-                            "explicit disable can retry that exact retained instance; the block remains until cleanup is confirmed"
-                        } else {
-                            "the exact process instance is unavailable, so cleanup cannot be confirmed automatically"
-                        };
-                        return Err(boxed_uncertain(std::io::Error::other(format!(
-                            "plugin cleanup is still unconfirmed: {}; {next}",
-                            block.message
-                        ))));
+                        // No exact live process identity to re-observe. This is a
+                        // known refusal, not an unknown outcome: the user can stop
+                        // the recorded process and discard the stale block.
+                        return Err(format!(
+                            "plugin cleanup is still unconfirmed: {}; confirm the recorded process has stopped, then run `cayw plugins clear {}`",
+                            block.message, enable.name
+                        )
+                        .into());
                     };
                     match cleanup_process_stopped(process) {
                         Ok(true) => {
@@ -943,19 +959,13 @@ impl Plugins {
                     .filter(|error| error.outcome_unknown)
                     .cloned()
                 {
-                    let message =
-                        format!("plugin has an unconfirmed prior outcome: {}", prior.message);
-                    if cleanup.insert(&paths.workspace, &enable.name, message.clone(), None, None)
-                        && let Err(persistence) =
-                            save_cleanup(&self.cleanup_path, cleanup_bytes.as_deref(), &cleanup)
-                    {
-                        return Err(boxed_uncertain(std::io::Error::other(format!(
-                            "{message}; cleanup block was not persisted: {persistence}"
-                        ))));
-                    }
-                    return Err(boxed_uncertain(std::io::Error::other(format!(
-                        "{message}; the exact process instance is unavailable, so cleanup cannot be confirmed automatically"
-                    ))));
+                    // Never synthesize an identity-less block: there is no exact
+                    // process to observe, so an explicit clear is the only exit.
+                    return Err(format!(
+                        "plugin has an unconfirmed prior outcome: {}; confirm the recorded process has stopped, then run `cayw plugins clear {}` and enable again",
+                        prior.message, enable.name
+                    )
+                    .into());
                 }
                 if runtime.plugin_registry().describe(&enable.name).is_ok() {
                     return Err("plugin process is already loaded for this workspace".into());
@@ -973,12 +983,13 @@ impl Plugins {
                         );
                         let mut persistence = Vec::new();
                         if recorded.outcome_unknown
+                            && let Some(process) = cleanup_process(error.as_ref())
                             && cleanup.insert(
                                 &paths.workspace,
                                 &enable.name,
                                 format!("plugin start cleanup was not confirmed: {error}"),
                                 None,
-                                cleanup_process(error.as_ref()),
+                                Some(process),
                             )
                             && let Err(cleanup_error) =
                                 save_cleanup(&self.cleanup_path, cleanup_bytes.as_deref(), &cleanup)
@@ -1094,10 +1105,11 @@ impl Plugins {
                             }
                         }
                     } else {
-                        return Err(boxed_uncertain(std::io::Error::other(format!(
-                            "plugin cleanup remains blocked because the exact process instance is unavailable: {}",
-                            block.message
-                        ))));
+                        return Err(format!(
+                            "plugin cleanup remains blocked because the exact process instance is unavailable: {}; confirm the recorded process has stopped, then run `cayw plugins clear {}`",
+                            block.message, id.name
+                        )
+                        .into());
                     }
                     if cleanup_confirmed
                         && cleanup.remove(&paths.workspace, &id.name)
@@ -1123,19 +1135,14 @@ impl Plugins {
                         .into_iter()
                         .find(|instance| instance.manifest.name == id.name);
                     let Some(instance) = pending else {
-                        let message = format!(
-                            "plugin cleanup remains blocked because the prior outcome is unconfirmed and the exact process instance is unavailable: {}",
-                            prior.message
-                        );
-                        if cleanup.insert(&paths.workspace, &id.name, message.clone(), None, None)
-                            && let Err(persistence) =
-                                save_cleanup(&self.cleanup_path, cleanup_bytes.as_deref(), &cleanup)
-                        {
-                            return Err(boxed_uncertain(std::io::Error::other(format!(
-                                "{message}; cleanup block was not persisted: {persistence}"
-                            ))));
-                        }
-                        return Err(boxed_uncertain(std::io::Error::other(message)));
+                        // No exact instance to retry and no exact process identity
+                        // to observe: refuse with the explicit stale-block exit
+                        // instead of creating an identity-less permanent block.
+                        return Err(format!(
+                            "plugin cleanup remains blocked because the prior outcome is unconfirmed and the exact process instance is unavailable: {}; confirm the recorded process has stopped, then run `cayw plugins clear {}`",
+                            prior.message, id.name
+                        )
+                        .into());
                     };
                     if let Err(error) = runtime.retry_plugin_cleanup_exact(&instance).await {
                         let message =
@@ -1252,6 +1259,71 @@ impl Plugins {
                 inventory.entries.remove(&id.name);
                 save_inventory(&self.inventory_path, inventory_bytes.as_deref(), &inventory)?;
             }
+            "settings.plugins.clear" => {
+                let id: Name = serde_json::from_value(params)?;
+                if runtime.plugin_registry().describe(&id.name).is_ok() {
+                    return Err(
+                        "plugin process is loaded; disable it before clearing its cleanup block"
+                            .into(),
+                    );
+                }
+                if let Some(block) = cleanup.get(&paths.workspace, &id.name).cloned() {
+                    if let Some(process) = block.process.as_ref() {
+                        match cleanup_process_stopped(process) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                return Err(boxed_uncertain(std::io::Error::other(format!(
+                                    "plugin cleanup cannot be cleared: exact process {} is still running or its process group still has members",
+                                    process.pid
+                                ))));
+                            }
+                            Err(error) => {
+                                return Err(boxed_uncertain(std::io::Error::other(format!(
+                                    "plugin cleanup cannot be cleared: could not re-check exact process {}: {error}",
+                                    process.pid
+                                ))));
+                            }
+                        }
+                    }
+                    if let Some(instance) = block.instance.as_ref()
+                        && runtime
+                            .plugin_registry()
+                            .pending_cleanup()
+                            .iter()
+                            .any(|pending| pending == instance)
+                        && let Err(error) = runtime.retry_plugin_cleanup_exact(instance).await
+                    {
+                        // The exact instance is still in this Client's retiring
+                        // set. Keep the block until its cleanup is confirmed.
+                        let message =
+                            format!("plugin cleanup remains unconfirmed after retry: {error}");
+                        if cleanup.insert(
+                            &paths.workspace,
+                            &id.name,
+                            message,
+                            Some(instance.clone()),
+                            cleanup_process(&error).or_else(|| block.process.clone()),
+                        ) {
+                            save_cleanup(&self.cleanup_path, cleanup_bytes.as_deref(), &cleanup)?;
+                        }
+                        return Err(error.into());
+                    }
+                    if cleanup.remove(&paths.workspace, &id.name) {
+                        save_cleanup(&self.cleanup_path, cleanup_bytes.as_deref(), &cleanup)?;
+                    }
+                }
+                // The enabled flag is kept: the next restore tries again. Only the
+                // stale unknown outcome is discarded by this explicit user action.
+                if let Some(activation) = activations.entries.get_mut(&id.name)
+                    && activation
+                        .last_error
+                        .as_ref()
+                        .is_some_and(|error| error.outcome_unknown)
+                {
+                    activation.last_error = None;
+                    save_activations(&activation_path, activation_bytes.as_deref(), &activations)?;
+                }
+            }
             _ => return Err("unsupported plugin settings method".into()),
         }
         self.status(paths, runtime, inventory, activations, &cleanup)
@@ -1273,9 +1345,15 @@ impl Plugins {
                 let live = runtime.plugin_registry().check_available(&name);
                 let executable = executable_available(&entry);
                 let cleanup_block = cleanup.get(&paths.workspace, &name);
+                let cleanup_clearable =
+                    cleanup_block.is_some_and(|record| record.process.is_none());
                 let last_error = cleanup_block
                     .map(|record| ActivationError {
-                        message: record.message.clone(),
+                        message: if record.process.is_none() {
+                            stale_block_message(&name, &record.message)
+                        } else {
+                            record.message.clone()
+                        },
                         outcome_unknown: true,
                     })
                     .or_else(|| activation.and_then(|activation| activation.last_error.clone()))
@@ -1299,6 +1377,8 @@ impl Plugins {
                     "executable_available":executable.is_ok(),
                     "executable_error":executable.err(),
                     "cleanup_blocked":cleanup_block.is_some(),
+                    "cleanup_clearable":cleanup_clearable,
+                    "cleanup_command":cleanup_clearable.then(|| format!("cayw plugins clear {name}")),
                     "cleanup_process":cleanup_block.and_then(|record| record.process.clone()),
                     "last_error":last_error
                 })
@@ -1365,12 +1445,7 @@ fn validate_structure(descriptor: Descriptor) -> Result<Descriptor> {
     {
         return Err("only local External workspace architecture plugins with an absolute executable path are supported; Client plugins, npm, URLs and Native dynamic installation are unsupported".into());
     }
-    if descriptor.argv.len() > 128
-        || descriptor
-            .argv
-            .iter()
-            .any(|arg| arg.len() > 4096 || arg.contains('\0'))
-    {
+    if descriptor.argv.iter().any(|arg| arg.contains('\0')) {
         return Err("invalid plugin arguments".into());
     }
     Ok(descriptor)
@@ -1541,7 +1616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_cleanup_blocks_restore_and_blind_disable() {
+    async fn identity_less_block_does_not_stop_restore_and_is_reported() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -1583,10 +1658,73 @@ mod tests {
         );
         save_cleanup(&plugins.cleanup_path, None, &cleanup).unwrap();
 
-        let restore = plugins.restore(&paths, &runtime).await.unwrap_err();
-        assert!(crate::cli_settings::error_outcome_unknown(restore.as_ref()));
+        let restore = plugins.restore(&paths, &runtime).await;
+        assert!(restore.is_ok(), "restore must not abort: {restore:?}");
         assert!(runtime.plugin_registry().describe("fixture").is_err());
-        let disable = plugins
+        let (_, persisted, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
+        let last_error = persisted.entries["fixture"]
+            .last_error
+            .as_ref()
+            .expect("failed plugin keeps its error");
+        assert!(last_error.outcome_unknown);
+        assert!(
+            last_error.message.contains("cayw plugins clear fixture"),
+            "{}",
+            last_error.message
+        );
+
+        let listed = plugins
+            .call(
+                &paths,
+                &runtime,
+                "settings.plugins.list",
+                json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let entry = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "fixture")
+            .unwrap();
+        assert_eq!(entry["cleanup_blocked"], true);
+        assert_eq!(entry["available"], false);
+        assert_eq!(entry["cleanup_clearable"], true);
+        assert_eq!(entry["last_error"]["outcome_unknown"], true);
+        assert!(
+            entry["last_error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("cayw plugins clear fixture")
+        );
+        let reported = doctor(&paths);
+        assert_eq!(reported["clear_command"], "cayw plugins clear NAME");
+        assert!(reported["workspace_cleanup_blocks"]["fixture"].is_object());
+
+        plugins
+            .call(
+                &paths,
+                &runtime,
+                "settings.plugins.clear",
+                json!({"name":"fixture"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            read_cleanup(&plugins.cleanup_path)
+                .unwrap()
+                .1
+                .get(&paths.workspace, "fixture")
+                .is_none()
+        );
+        let (_, cleared, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
+        assert!(cleared.entries["fixture"].last_error.is_none());
+        assert!(cleared.entries["fixture"].enabled);
+
+        plugins
             .call(
                 &paths,
                 &runtime,
@@ -1595,14 +1733,110 @@ mod tests {
                 CancellationToken::new(),
             )
             .await
-            .unwrap_err();
-        assert!(crate::cli_settings::error_outcome_unknown(disable.as_ref()));
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_restore_does_not_nest_the_prior_unknown_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let paths = local_paths(&directory.path().join("state"), &workspace);
+        paths.initialize().unwrap();
+        let runtime = runtime(&paths);
+        let plugins = Plugins::new(paths.data_dir.join("plugins.json"));
+        let descriptor = validate(Descriptor {
+            executable: std::env::current_exe().unwrap(),
+            argv: Vec::new(),
+            manifest: manifest(PluginKind::External),
+        })
+        .unwrap();
+        let mut inventory = Inventory::default();
+        inventory.entries.insert(
+            "fixture".into(),
+            Installed {
+                executable_sha256: executable_digest(&descriptor).unwrap(),
+                descriptor,
+            },
+        );
+        save_inventory(&plugins.inventory_path, None, &inventory).unwrap();
+        let mut activations = Activations::default();
+        activations.entries.insert(
+            "fixture".into(),
+            Activation {
+                enabled: true,
+                last_error: Some(ActivationError {
+                    message: "original start failure".into(),
+                    outcome_unknown: true,
+                }),
+            },
+        );
+        save_activations(&paths.state_file(ACTIVATION_FILE), None, &activations).unwrap();
+
+        plugins.restore(&paths, &runtime).await.unwrap();
+        let (_, first, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
+        plugins.restore(&paths, &runtime).await.unwrap();
+        let (_, second, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
+        let first = first.entries["fixture"].last_error.as_ref().unwrap();
+        let second = second.entries["fixture"].last_error.as_ref().unwrap();
+        assert_eq!(second.message, first.message);
+        assert_eq!(
+            second.message.matches("unconfirmed prior outcome").count(),
+            1,
+            "{}",
+            second.message
+        );
+        assert!(runtime.plugin_registry().describe("fixture").is_err());
+    }
+
+    #[tokio::test]
+    async fn restore_continues_past_a_blocked_plugin() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let paths = local_paths(&directory.path().join("state"), &workspace);
+        paths.initialize().unwrap();
+        let runtime = runtime(&paths);
+        let plugins = Plugins::new(paths.data_dir.join("plugins.json"));
+        let mut activations = Activations::default();
+        for name in ["blocked", "continues"] {
+            activations.entries.insert(
+                name.into(),
+                Activation {
+                    enabled: true,
+                    last_error: None,
+                },
+            );
+        }
+        save_activations(&paths.state_file(ACTIVATION_FILE), None, &activations).unwrap();
+        let mut cleanup = CleanupLedger::default();
+        cleanup.insert(
+            &paths.workspace,
+            "blocked",
+            "prior cleanup is unconfirmed".into(),
+            None,
+            None,
+        );
+        save_cleanup(&plugins.cleanup_path, None, &cleanup).unwrap();
+
+        plugins.restore(&paths, &runtime).await.unwrap();
+        assert!(runtime.plugin_registry().describe("blocked").is_err());
+        let (_, persisted, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
         assert!(
-            read_cleanup(&plugins.cleanup_path)
-                .unwrap()
-                .1
-                .get(&paths.workspace, "fixture")
-                .is_some()
+            persisted.entries["blocked"]
+                .last_error
+                .as_ref()
+                .is_some_and(|error| error.outcome_unknown)
+        );
+        // The second plugin is visited and records its own known failure; the
+        // blocked first plugin neither breaks the loop nor returns Err.
+        assert!(
+            persisted.entries["continues"]
+                .last_error
+                .as_ref()
+                .is_some_and(
+                    |error| !error.outcome_unknown && error.message.contains("not installed")
+                )
         );
     }
 
@@ -1634,7 +1868,7 @@ mod tests {
         activations.entries.insert(
             "fixture".into(),
             Activation {
-                enabled: false,
+                enabled: true,
                 last_error: Some(ActivationError {
                     message: "prior cleanup record could not be persisted".into(),
                     outcome_unknown: true,
@@ -1653,7 +1887,12 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(crate::cli_settings::error_outcome_unknown(error.as_ref()));
+        // No exact instance to retry, so this is a known refusal with an exit.
+        assert!(!crate::cli_settings::error_outcome_unknown(error.as_ref()));
+        assert!(
+            error.to_string().contains("cayw plugins clear fixture"),
+            "{error}"
+        );
         let (_, persisted, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
         assert!(
             persisted.entries["fixture"]
@@ -1667,8 +1906,34 @@ mod tests {
                 .unwrap()
                 .1
                 .get(&paths.workspace, "fixture")
-                .is_some_and(|record| record.instance.is_none())
+                .is_none(),
+            "disable must not synthesize an identity-less block"
         );
+
+        plugins
+            .call(
+                &paths,
+                &runtime,
+                "settings.plugins.clear",
+                json!({"name":"fixture"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let (_, cleared, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
+        assert!(cleared.entries["fixture"].last_error.is_none());
+        assert!(cleared.entries["fixture"].enabled);
+
+        plugins
+            .call(
+                &paths,
+                &runtime,
+                "settings.plugins.disable",
+                json!({"name":"fixture"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1889,7 +2154,7 @@ mod tests {
         assert_eq!(listed["entries"][0]["name"], "missing");
         assert_eq!(listed["entries"][0]["executable_available"], false);
         assert!(listed["entries"][0]["executable_error"].is_string());
-        assert_eq!(doctor(&paths).unwrap()["unavailable"][0]["name"], "missing");
+        assert_eq!(doctor(&paths)["unavailable"][0]["name"], "missing");
 
         let enable = plugins
             .call(
@@ -2070,6 +2335,107 @@ mod tests {
                 .get(&paths.workspace, "fixture")
                 .is_none()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn clear_refuses_live_exact_process_and_clears_stale_instance() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let paths = local_paths(&directory.path().join("state"), &workspace);
+        paths.initialize().unwrap();
+        let runtime = runtime(&paths);
+        let plugins = Plugins::new(paths.data_dir.join("plugins.json"));
+        save_fixture_inventory(&plugins, manifest(PluginKind::External));
+
+        let live = PluginProcessIdentity::observe(
+            std::process::id(),
+            std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+        let mut cleanup = CleanupLedger::default();
+        cleanup.insert(
+            &paths.workspace,
+            "fixture",
+            "cleanup is still unconfirmed".into(),
+            None,
+            Some(live),
+        );
+        save_cleanup(&plugins.cleanup_path, None, &cleanup).unwrap();
+        let error = plugins
+            .call(
+                &paths,
+                &runtime,
+                "settings.plugins.clear",
+                json!({"name":"fixture"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(crate::cli_settings::error_outcome_unknown(error.as_ref()));
+        assert!(error.to_string().contains("still running"), "{error}");
+        assert!(
+            read_cleanup(&plugins.cleanup_path)
+                .unwrap()
+                .1
+                .get(&paths.workspace, "fixture")
+                .is_some_and(|record| record.process.is_some())
+        );
+
+        // A stale instance-only block from another registry generation has no
+        // live process, so the explicit clear removes it and its unknown error.
+        let mut activations = Activations::default();
+        activations.entries.insert(
+            "fixture".into(),
+            Activation {
+                enabled: true,
+                last_error: Some(ActivationError {
+                    message: "previous start cleanup was unconfirmed".into(),
+                    outcome_unknown: true,
+                }),
+            },
+        );
+        save_activations(&paths.state_file(ACTIVATION_FILE), None, &activations).unwrap();
+        let stale = PluginDescription {
+            manifest: manifest(PluginKind::External),
+            registry_id: "previous-client-registry".into(),
+            generation: 1,
+        };
+        let mut cleanup = CleanupLedger::default();
+        cleanup.insert(
+            &paths.workspace,
+            "fixture",
+            "cleanup is still unconfirmed".into(),
+            Some(stale),
+            None,
+        );
+        let previous = std::fs::read(&plugins.cleanup_path).unwrap();
+        save_cleanup(&plugins.cleanup_path, Some(&previous), &cleanup).unwrap();
+
+        plugins
+            .call(
+                &paths,
+                &runtime,
+                "settings.plugins.clear",
+                json!({"name":"fixture"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            read_cleanup(&plugins.cleanup_path)
+                .unwrap()
+                .1
+                .get(&paths.workspace, "fixture")
+                .is_none()
+        );
+        let (_, cleared, _) = read_activations(&paths.state_file(ACTIVATION_FILE)).unwrap();
+        assert!(cleared.entries["fixture"].last_error.is_none());
+        assert!(cleared.entries["fixture"].enabled);
     }
 
     #[test]

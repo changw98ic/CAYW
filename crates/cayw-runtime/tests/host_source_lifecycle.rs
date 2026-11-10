@@ -103,14 +103,14 @@ impl Case {
             "model":{"provider":"fixture","id":"issue9-lifecycle"},"real_model":false,
             "database":self.root.join("session.db"),"workspace":self.root.join("workspace"),
             "permissions":settings.permissions,"bridge":settings.bridge.as_ref().map(|b|b.binding_snapshot()),
-            "runtime":{"max_run_time_ms":settings.max_run_time.as_millis(),"max_turns":settings.max_turns,
+            "runtime":{"max_run_time_ms":settings.max_run_time.map(|time| time.as_millis()),"max_turns":settings.max_turns,
                 "max_total_tokens":settings.max_total_tokens,"max_capability_calls":settings.max_capability_calls,
                 "max_capability_bytes":settings.max_capability_bytes,"max_history_bytes":settings.max_history_bytes,"max_event_bytes":settings.max_event_bytes},
             "host":{"max_calls":settings.host.max_calls,"max_argument_bytes":settings.host.max_argument_bytes,
                 "max_result_bytes":settings.host.max_result_bytes,"max_total_bytes":settings.host.max_total_bytes,
-                "call_timeout_ms":settings.host.call_timeout.as_millis()},
+                "call_timeout_ms":settings.host.call_timeout.map(|time| time.as_millis())},
             "codemode":{"host_calls":settings.codemode.host_calls,"output_bytes":settings.codemode.output_bytes,
-                "timeout_ms":settings.codemode.timeout.as_millis()},"requests":settings.request_limits
+                "timeout_ms":settings.codemode.timeout.map(|time| time.as_millis())},"requests":settings.request_limits
         }));
         Runtime::open(
             self.root.join("session.db"),
@@ -176,7 +176,7 @@ impl ReconciliationVerifier for LifecycleReconciliationVerifier {
 fn settings(registry: &Registry) -> RuntimeConfig {
     RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: Duration::from_secs(30),
+        max_run_time: Some(Duration::from_secs(30)),
         permissions: vec![
             ScopedPermission::exact(
                 "mcp.call",
@@ -279,10 +279,7 @@ async fn actual_runtime_cancel_disconnect_and_revoke_preserve_original_unknown_w
             .unwrap()
             .unwrap();
         rt.wait_idle(&id).await;
-        assert_eq!(
-            rt.get(&id).unwrap().state,
-            SessionState::NeedsReconciliation
-        );
+        assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
         let terminals = records(&rt, &id);
         let terminal = terminals.last().unwrap();
         assert!(matches!(
@@ -305,7 +302,7 @@ async fn actual_runtime_cancel_disconnect_and_revoke_preserve_original_unknown_w
         );
         assert_eq!(terminal.record.key.source, original);
         assert!(registry.snapshot("local").unwrap().outcome_unknown);
-        assert!(rt.enqueue(&id, "must not replay").is_err());
+        let follow_up = rt.enqueue(&id, "follow-up enqueue is not blocked").unwrap();
         assert_eq!(control.snapshot().tool_calls, 1);
         if action == "cancel" {
             tokio::time::timeout(WATCHDOG, async {
@@ -324,15 +321,18 @@ async fn actual_runtime_cancel_disconnect_and_revoke_preserve_original_unknown_w
         let count = model.requests.lock().unwrap().len();
         drop(rt);
         let reopened = case.open(config, model.clone());
-        assert_eq!(
-            reopened.get(&id).unwrap().state,
-            SessionState::NeedsReconciliation
+        assert_eq!(reopened.get(&id).unwrap().state, SessionState::Idle);
+        assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+        // The accepted follow-up survives reopen and recovery as queued work;
+        // recovery must not silently discard it or start a replay.
+        assert!(
+            reopened
+                .tasks(&id)
+                .unwrap()
+                .iter()
+                .any(|task| task.id == follow_up.id),
+            "accepted follow-up work was lost"
         );
-        assert_eq!(
-            reopened.recover(&id).unwrap().state,
-            SessionState::NeedsReconciliation
-        );
-        assert!(reopened.enqueue(&id, "reopen cannot replay").is_err());
         assert_eq!(model.requests.lock().unwrap().len(), count);
         assert_eq!(control.snapshot().tool_calls, 1);
         case.capture("reopened", &reopened, &id, &control, &model);
@@ -426,7 +426,7 @@ async fn authenticated_ipc_cancel_targets_original_runtime_task_and_ignores_late
             .request("session.get", json!({"session_id":id}))
             .await
             .unwrap()["state"],
-        "needs_reconciliation"
+        "idle"
     );
     tokio::time::timeout(WATCHDOG, async {
         while control.snapshot().ignored_late == 0 {
@@ -558,13 +558,13 @@ async fn actual_host_call_output_and_runtime_budgets_do_not_reset_between_source
         registry.register(identity("2"), manifest, handle).unwrap();
         let mut config = settings(&registry);
         let script = if kind == "result-bytes" {
-            config.host.max_result_bytes = 32;
+            config.host.max_result_bytes = Some(32);
             ADD.to_owned()
         } else {
             if kind == "host-calls" {
-                config.host.max_calls = 1;
+                config.host.max_calls = Some(1);
             } else {
-                config.max_capability_calls = 1;
+                config.max_capability_calls = Some(1);
             }
             config.permissions.push(ScopedPermission::exact(
                 "mcp.discover",
@@ -578,10 +578,7 @@ async fn actual_host_call_output_and_runtime_budgets_do_not_reset_between_source
         let _ = rt.prompt(&id, kind, CancellationToken::new()).await;
         if kind == "result-bytes" {
             assert_eq!(control.snapshot().tool_calls, 1);
-            assert_eq!(
-                rt.get(&id).unwrap().state,
-                SessionState::NeedsReconciliation
-            );
+            assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
             assert!(matches!(
                 records(&rt, &id).last().unwrap().outcome,
                 Some(DispatchOutcome::Succeeded { .. })
@@ -662,7 +659,7 @@ async fn actual_service_error_is_bound_to_original_call_and_host_deadline_retain
         let script = if kind == "service-error" {
             ADD.to_owned()
         } else {
-            config.host.call_timeout = Duration::from_millis(300);
+            config.host.call_timeout = Some(Duration::from_millis(300));
             WAIT.to_owned()
         };
         let model = Arc::new(Fixed::new(&script));
@@ -690,10 +687,7 @@ async fn actual_service_error_is_bound_to_original_call_and_host_deadline_retain
                 last.outcome,
                 Some(DispatchOutcome::Unknown { .. })
             ));
-            assert_eq!(
-                rt.get(&id).unwrap().state,
-                SessionState::NeedsReconciliation
-            );
+            assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
         }
         case.capture("result", &rt, &id, &control, &model);
         registry.disconnect("local").unwrap();
@@ -734,9 +728,9 @@ async fn actual_stdio_mcp_disconnect_before_response_retains_unknown_and_reconci
     .await
     .unwrap();
 
-    // 1. Session must halt defensively with NeedsReconciliation, retaining unknown.
+    // 1. Session settles back to Idle while retaining the unknown call for audit.
     let session = rt.get(&id).unwrap();
-    assert_eq!(session.state, SessionState::NeedsReconciliation);
+    assert_eq!(session.state, SessionState::Idle);
     assert_eq!(session.unresolved_capabilities.len(), 1);
     let unresolved = &session.unresolved_capabilities[0];
     assert!(matches!(
@@ -761,21 +755,16 @@ async fn actual_stdio_mcp_disconnect_before_response_retains_unknown_and_reconci
     closed(&control).await;
     assert!(control.snapshot().reaped);
 
-    // 4. Independent reopen must preserve NeedsReconciliation and reject new work without replay.
+    // 4. Independent reopen keeps the unknown outcome internal and rejects replay.
     drop(rt);
     let reopened = case.open(config.clone(), model.clone());
-    assert_eq!(
-        reopened.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(reopened.get(&id).unwrap().state, SessionState::Idle);
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+    let follow_up = reopened.enqueue(&id, "follow-up enqueue is not blocked");
     assert!(
-        reopened
-            .enqueue(&id, "must not replay old unknown")
-            .is_err()
+        follow_up.is_ok(),
+        "follow-up enqueue is not blocked: {:?}",
+        follow_up.err()
     );
     assert_eq!(control.snapshot().tool_calls, 1);
 
@@ -849,9 +838,9 @@ async fn actual_stdio_mcp_terminal_persistence_failure_retains_chain_identity_re
     .await
     .unwrap();
 
-    // 1. Session must halt defensively with NeedsReconciliation.
+    // 1. Session settles back to Idle while retaining the unknown call for audit.
     let session = rt.get(&id).unwrap();
-    assert_eq!(session.state, SessionState::NeedsReconciliation);
+    assert_eq!(session.state, SessionState::Idle);
     assert_eq!(session.unresolved_capabilities.len(), 1);
 
     // 2. Check capability_settled outcome: it must retain error chain, call identity, response summary, and unknown state.
@@ -904,18 +893,16 @@ async fn actual_stdio_mcp_terminal_persistence_failure_retains_chain_identity_re
     closed(&control).await;
     assert!(control.snapshot().reaped);
 
-    // 5. Independent reopen must preserve NeedsReconciliation and reject uncoordinated replay.
+    // 5. Independent reopen keeps the unknown outcome internal and rejects uncoordinated replay.
     drop(rt);
     let reopened = case.open(config.clone(), model.clone());
-    assert_eq!(
-        reopened.get(&id).unwrap().state,
-        SessionState::NeedsReconciliation
+    assert_eq!(reopened.get(&id).unwrap().state, SessionState::Idle);
+    assert_eq!(reopened.recover(&id).unwrap().state, SessionState::Idle);
+    assert!(
+        reopened
+            .enqueue(&id, "follow-up enqueue is not blocked")
+            .is_ok()
     );
-    assert_eq!(
-        reopened.recover(&id).unwrap().state,
-        SessionState::NeedsReconciliation
-    );
-    assert!(reopened.enqueue(&id, "cannot replay").is_err());
     assert_eq!(control.snapshot().tool_calls, 1);
 
     // 6. Explicit reconciliation removes the trigger and settles the capability cleanly.

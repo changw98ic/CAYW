@@ -31,7 +31,7 @@ fn config(root: &Path) -> RuntimeConfig {
     let mut config = RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
-        max_run_time: Duration::from_secs(180),
+        max_run_time: Some(Duration::from_secs(180)),
         resources: ResourcePolicy {
             max_declared_memory_bytes: 100,
         },
@@ -50,8 +50,8 @@ fn config(root: &Path) -> RuntimeConfig {
         )],
         ..Default::default()
     };
-    config.codemode.timeout = Duration::from_secs(120);
-    config.host.call_timeout = Duration::from_secs(120);
+    config.codemode.timeout = Some(Duration::from_secs(120));
+    config.host.call_timeout = Some(Duration::from_secs(120));
     config.host.profiles.insert(
         "tree".into(),
         cayw_host::Profile {
@@ -59,8 +59,8 @@ fn config(root: &Path) -> RuntimeConfig {
             program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
             args: vec!["tree".into(), root.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(120),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(120)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -409,8 +409,9 @@ async fn a_live_original_host_keeps_ownership_after_its_cleanup_record_fails() {
     assert_eq!(cleanup.len(), 1);
     assert_eq!(cleanup[0].data["state"], "drained");
     assert!(
-        peer.enqueue(&session, "unknown effects cannot be replayed")
-            .is_err()
+        peer.enqueue(&session, "a new task does not replay unknown effects")
+            .is_ok(),
+        "an unreconciled unknown effect must not block a new task"
     );
 }
 
@@ -629,7 +630,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
         original_core
     );
     let blocked = reopened.get(&admitted.session_id).unwrap();
-    assert_eq!(blocked.state, cayw_core::SessionState::NeedsReconciliation);
+    assert_eq!(blocked.state, cayw_core::SessionState::Running);
     assert_eq!(blocked.messages, snapshot.messages);
     assert_eq!(blocked.attempt, snapshot.attempt);
     assert_eq!(blocked.executions, snapshot.executions);
@@ -653,6 +654,7 @@ fn stopped_authority_and_lost_process_owner_have_an_explicit_recovery_path() {
     assert!(
         reopened
             .enqueue(&admitted.session_id, "do not replay unknown effects")
-            .is_err()
+            .is_ok(),
+        "an unreconciled unknown effect must not block a new task"
     );
 }

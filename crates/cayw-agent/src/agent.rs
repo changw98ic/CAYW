@@ -1,4 +1,4 @@
-use crate::execution::{EventSink, execute_batch_with_limit};
+use crate::execution::{EventSink, execute_batch};
 use crate::*;
 use cayw_ai::{
     AssistantEvent, AssistantMessage, CancellationToken, Message, Model, ModelRequest, Provider,
@@ -24,16 +24,14 @@ struct Runtime {
     pending: BTreeSet<String>,
     error: Option<String>,
     listener_error: Option<String>,
-    needs_reconciliation: bool,
     cancel: Option<CancellationToken>,
     steering: VecDeque<Message>,
     follow_up: VecDeque<Message>,
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
     execution: ExecutionMode,
-    max_turns: usize,
+    max_turns: Option<usize>,
     hooks: Arc<dyn AgentHooks>,
-    tool_argument_limit: Option<ToolArgumentLimit>,
 }
 
 struct Shared {
@@ -72,7 +70,6 @@ impl AgentControl {
             streaming_message: state.streaming.clone(),
             pending_tool_calls: state.pending.clone(),
             error_message: state.error.clone(),
-            needs_reconciliation: state.needs_reconciliation,
         }
     }
     pub fn steer(&self, message: Message) {
@@ -173,10 +170,10 @@ impl Drop for RunGuard {
         self.cancel.cancel();
         let mut state = lock(&self.shared.runtime);
         if !self.settled {
-            state.needs_reconciliation |=
-                !state.pending.is_empty() || has_unresolved_tools(&state.context.messages);
+            append_interrupted_tool_results(&mut state.context.messages);
             state.error = Some(
-                "Run future dropped before settlement; inspect history before continuing".into(),
+                "Run future dropped before settlement; interrupted tool results were recorded"
+                    .into(),
             );
         }
         state.running = false;
@@ -208,16 +205,14 @@ impl Agent {
                     pending: BTreeSet::new(),
                     error: None,
                     listener_error: None,
-                    needs_reconciliation: false,
                     cancel: None,
                     steering: VecDeque::new(),
                     follow_up: VecDeque::new(),
                     steering_mode: QueueMode::OneAtATime,
                     follow_up_mode: QueueMode::OneAtATime,
                     execution: ExecutionMode::Parallel,
-                    max_turns: 64,
+                    max_turns: None,
                     hooks: Arc::new(NoHooks),
-                    tool_argument_limit: None,
                 }),
                 listeners: Mutex::new(vec![]),
                 next_listener: std::sync::atomic::AtomicUsize::new(1),
@@ -284,7 +279,6 @@ impl Agent {
     /// The host supplies reconciled history; unknown effects are never replayed automatically.
     pub fn replace_messages(&self, messages: Vec<Message>) -> Result<(), AgentError> {
         self.configure(|state| {
-            state.needs_reconciliation = has_unresolved_tools(&messages);
             state.context.messages = messages;
             Ok(())
         })
@@ -312,8 +306,10 @@ impl Agent {
             Ok(())
         })
     }
-    pub fn set_max_turns(&self, max_turns: usize) -> Result<(), AgentError> {
-        if max_turns == 0 {
+    /// Applies the optional host-configured turn limit. The Agent itself
+    /// imposes no product limit by default.
+    pub fn set_max_turns(&self, max_turns: Option<usize>) -> Result<(), AgentError> {
+        if max_turns == Some(0) {
             return Err(AgentError::InvalidConfiguration(
                 "max_turns must be positive".into(),
             ));
@@ -323,28 +319,8 @@ impl Agent {
             Ok(())
         })
     }
-    /// Applies the optional argument bound supplied by the host. The Agent
-    /// itself imposes no product limit by default.
-    pub fn set_tool_argument_limit(
-        &self,
-        limit: Option<ToolArgumentLimit>,
-    ) -> Result<(), AgentError> {
-        self.configure(|state| {
-            state.tool_argument_limit = limit;
-            Ok(())
-        })
-    }
-    /// Builder form used by a host that creates an Agent before running it.
-    pub fn with_tool_argument_limit(self, limit: Option<ToolArgumentLimit>) -> Self {
-        self.set_tool_argument_limit(limit)
-            .expect("the tool argument limit must be configured before the agent runs");
-        self
-    }
     pub fn reset(&self) -> Result<(), AgentError> {
         self.configure(|state| {
-            if state.needs_reconciliation {
-                return Err(AgentError::UnresolvedToolEffects);
-            }
             let system = cayw_ai::current_system(&state.context.messages);
             state.context.messages = vec![Message::System(cayw_ai::SystemMessage {
                 content: system.prompt,
@@ -354,7 +330,6 @@ impl Agent {
             state.steering.clear();
             state.follow_up.clear();
             state.error = None;
-            state.needs_reconciliation = false;
             Ok(())
         })
     }
@@ -376,9 +351,6 @@ impl Agent {
             let mut state = lock(&self.shared.runtime);
             if state.running {
                 return Err(AgentError::Busy);
-            }
-            if state.needs_reconciliation {
-                return Err(AgentError::UnresolvedToolEffects);
             }
             let mut pending = PendingMessages::new(self.shared.clone());
             if let Some(messages) = input {
@@ -466,7 +438,7 @@ impl Agent {
         .await;
         {
             let mut state = lock(&self.shared.runtime);
-            state.needs_reconciliation |= has_unresolved_tools(&state.context.messages);
+            append_interrupted_tool_results(&mut state.context.messages);
         }
         guard.settled = true;
         let listener_error = lock(&self.shared.runtime).listener_error.clone();
@@ -502,7 +474,7 @@ impl Agent {
                 }
                 AgentEvent::ToolExecutionEnd { call, result, .. } => {
                     state.pending.remove(&call.id);
-                    state.needs_reconciliation |= result.outcome_unknown;
+                    let _ = result;
                 }
                 _ => {}
             }
@@ -571,10 +543,9 @@ impl Agent {
         mut pending: PendingMessages,
         hooks: Arc<dyn AgentHooks>,
         execution: ExecutionMode,
-        max_turns: usize,
+        max_turns: Option<usize>,
         cancel: CancellationToken,
     ) -> RunResult {
-        let tool_argument_limit = lock(&self.shared.runtime).tool_argument_limit;
         let mut new_messages = Vec::new();
         let mut turn_number = 0;
         loop {
@@ -595,16 +566,13 @@ impl Agent {
                 pending.entries.pop_front();
                 self.emit(AgentEvent::MessageEnd { message }, &cancel).await;
             }
-            let unresolved_input = has_unresolved_tools(&context.messages);
-            if unresolved_input {
-                lock(&self.shared.runtime).needs_reconciliation = true;
-            }
-            let prepared = if unresolved_input {
+            let unpaired_input = has_unpaired_tool_calls(&context.messages);
+            let prepared = if unpaired_input {
                 Err(
-                    "Input contains unresolved tool effects; reconcile history before continuing"
+                    "Input contains unpaired tool calls; reconcile history before continuing"
                         .into(),
                 )
-            } else if turn_number > max_turns {
+            } else if let Some(max_turns) = max_turns.filter(|limit| turn_number > *limit) {
                 Err(format!("Agent reached max_turns ({max_turns})"))
             } else if cancel.is_cancelled() {
                 Err("Agent run cancelled".into())
@@ -622,8 +590,8 @@ impl Agent {
                     .await?
                     {
                         validate_tools(&replacement.tools).map_err(|error| error.to_string())?;
-                        if has_unresolved_tools(&replacement.messages) {
-                            return Err("prepare_request supplied unresolved tool effects".into());
+                        if has_unpaired_tool_calls(&replacement.messages) {
+                            return Err("prepare_request supplied unpaired tool calls".into());
                         }
                         context = replacement;
                         self.sync_context(&context);
@@ -636,7 +604,7 @@ impl Agent {
             } else {
                 prepared
             };
-            let mut assistant = match prepared {
+            let assistant = match prepared {
                 Ok(()) => self.stream_assistant(&context, &cancel).await,
                 Err(error) => {
                     let reason = if cancel.is_cancelled() {
@@ -655,10 +623,6 @@ impl Agent {
                     message
                 }
             };
-            // Bound tool arguments before the assistant message or any execution
-            // event can reach durable storage. Oversized arguments become a
-            // small digest summary and are never executed.
-            crate::execution::bound_tool_arguments(&mut assistant, tool_argument_limit);
             context.messages.push(Message::Assistant(assistant.clone()));
             new_messages.push(Message::Assistant(assistant.clone()));
             self.sync_context(&context);
@@ -679,14 +643,13 @@ impl Agent {
                     let signal = signal.clone();
                     async move { agent.emit(event, &signal).await }.boxed()
                 });
-                let outcomes = execute_batch_with_limit(
+                let outcomes = execute_batch(
                     &assistant,
                     &context,
                     execution,
                     hooks.clone(),
                     cancel.clone(),
                     sink,
-                    tool_argument_limit,
                 )
                 .await;
                 all_terminate =
@@ -720,9 +683,9 @@ impl Agent {
                 context: context.clone(),
                 new_messages: new_messages.clone(),
             };
-            let unresolved = lock(&self.shared.runtime).needs_reconciliation;
+            let unknown_outcome = tool_results.iter().any(|result| result.outcome_unknown);
             let decision =
-                if assistant.stop_reason.is_failure() || cancel.is_cancelled() || unresolved {
+                if assistant.stop_reason.is_failure() || cancel.is_cancelled() || unknown_outcome {
                     Ok(TurnDecision::Auto)
                 } else {
                     callback(&cancel, hooks.finish_turn(turn.clone(), cancel.clone())).await
@@ -741,15 +704,15 @@ impl Agent {
                     last_message: assistant,
                 };
             }
-            if cancel.is_cancelled() || decision.is_err() || unresolved {
+            if cancel.is_cancelled() || decision.is_err() || unknown_outcome {
                 let reason = if cancel.is_cancelled() {
                     StopReason::Aborted
                 } else {
                     StopReason::Error
                 };
                 let error = decision.err().unwrap_or_else(|| {
-                    if unresolved {
-                        "Tool effects are unresolved; reconcile history before continuing".into()
+                    if unknown_outcome {
+                        "Tool outcome is unknown; the interrupted turn was stopped".into()
                     } else {
                         "Agent run cancelled".into()
                     }
@@ -811,12 +774,12 @@ impl Agent {
                                 last_message: message,
                             };
                         }
-                        if has_unresolved_tools(&replacement.messages) {
+                        if has_unpaired_tool_calls(&replacement.messages) {
                             let message = self
                                 .error_turn(
                                     &context,
                                     StopReason::Error,
-                                    "prepare_next_turn supplied unresolved tool effects",
+                                    "prepare_next_turn supplied unpaired tool calls",
                                     &cancel,
                                     &mut new_messages,
                                 )
@@ -889,7 +852,6 @@ impl Agent {
         context: &AgentContext,
         cancel: &CancellationToken,
     ) -> AssistantMessage {
-        let tool_argument_limit = lock(&self.shared.runtime).tool_argument_limit;
         let mut partial = AssistantMessage::new(&context.model);
         let started = std::time::Instant::now();
         self.emit(
@@ -1000,14 +962,10 @@ impl Agent {
                 }
                 return with_duration(partial, started);
             }
-            let mut update = event.clone();
-            crate::execution::bound_event_arguments(&mut update, tool_argument_limit);
-            let mut snapshot = partial.clone();
-            crate::execution::bound_tool_arguments(&mut snapshot, tool_argument_limit);
             self.emit(
                 AgentEvent::MessageUpdate {
-                    message: snapshot,
-                    event: Box::new(update),
+                    message: partial.clone(),
+                    event: Box::new(event.clone()),
                 },
                 cancel,
             )
@@ -1065,7 +1023,7 @@ fn validate_tools(tools: &[Arc<dyn AgentTool>]) -> Result<(), AgentError> {
     })
 }
 
-fn has_unresolved_tools(messages: &[Message]) -> bool {
+fn has_unpaired_tool_calls(messages: &[Message]) -> bool {
     let mut pending = BTreeSet::new();
     for message in messages {
         match message {
@@ -1075,13 +1033,55 @@ fn has_unresolved_tools(messages: &[Message]) -> bool {
                 }
             }
             Message::ToolResult(result) => {
-                if result.outcome_unknown {
-                    return true;
-                }
                 pending.remove(&result.tool_call_id);
             }
             _ => {}
         }
     }
     !pending.is_empty()
+}
+
+// A dropped run future cannot execute the remaining calls. Record one paired
+// interrupted result per unanswered call so the history stays valid and the
+// next prompt can proceed without a session-wide lock.
+fn append_interrupted_tool_results(messages: &mut Vec<Message>) {
+    let missing = {
+        let Some(assistant) = messages.iter().rev().find_map(|message| match message {
+            Message::Assistant(assistant) => Some(assistant),
+            _ => None,
+        }) else {
+            return;
+        };
+        if assistant.stop_reason.is_failure() {
+            return;
+        }
+        let answered = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::ToolResult(result) => Some(result.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assistant
+            .tool_calls()
+            .into_iter()
+            .filter(|call| !answered.contains(call.id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    for call in missing {
+        messages.push(Message::ToolResult(ToolResultMessage {
+            tool_call_id: call.id,
+            tool_name: call.name,
+            content: vec![cayw_ai::Content::text(
+                "Tool execution was interrupted before completion.",
+            )],
+            details: None,
+            structured_content: None,
+            usage: None,
+            is_error: true,
+            outcome_unknown: true,
+            timestamp: timestamp_ms(),
+            duration_ms: None,
+        }));
+    }
 }

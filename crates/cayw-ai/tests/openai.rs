@@ -1048,50 +1048,64 @@ async fn system_tool_changes_and_tool_result_ids_are_preserved_in_request() {
 }
 
 #[tokio::test]
-async fn unknown_tool_effect_cannot_be_replayed_as_an_ordinary_result() {
-    use cayw_ai::{AssistantMessage, ToolCall, ToolResultMessage, timestamp_ms};
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider =
-        OpenAiProvider::new(format!("http://{}/v1", listener.local_addr().unwrap()), "").unwrap();
-    let mut input = request();
-    let mut assistant = AssistantMessage::new(&input.model);
-    assistant.stop_reason = StopReason::ToolUse;
-    assistant.content.push(Content::ToolCall(ToolCall::new(
-        "unknown",
-        "sum",
-        json!({}),
-    )));
-    input.messages.push(Message::Assistant(assistant));
-    input.messages.push(Message::ToolResult(ToolResultMessage {
-        tool_call_id: "unknown".into(),
-        tool_name: "sum".into(),
-        content: vec![Content::text("cancelled")],
-        details: None,
-        structured_content: None,
-        usage: None,
-        is_error: true,
-        outcome_unknown: true,
-        timestamp: timestamp_ms(),
-        duration_ms: None,
-    }));
-    let events = tokio::time::timeout(
-        Duration::from_secs(1),
-        provider
-            .stream(input, CancellationToken::new())
-            .collect::<Vec<_>>(),
-    )
-    .await
-    .expect("unknown effects must fail before networking");
-    let Some(AssistantEvent::Error { message }) = events.last() else {
-        panic!("{events:#?}");
+async fn unknown_tool_outcome_is_replayed_with_an_interruption_note() {
+    use cayw_ai::{
+        AssistantMessage, INTERRUPTED_TOOL_OUTCOME_NOTE, ToolCall, ToolResultMessage, timestamp_ms,
     };
-    assert!(
-        message
-            .error_message
-            .as_deref()
-            .unwrap()
-            .contains("unknown")
-    );
+    for (content, expected) in [
+        (vec![], INTERRUPTED_TOOL_OUTCOME_NOTE.to_owned()),
+        (
+            vec![Content::text("cancelled")],
+            format!("cancelled\n{INTERRUPTED_TOOL_OUTCOME_NOTE}"),
+        ),
+    ] {
+        let (provider, received) = fixture(stopped(), "200 OK", 100).await;
+        let mut input = request();
+        let mut assistant = AssistantMessage::new(&input.model);
+        assistant.stop_reason = StopReason::ToolUse;
+        assistant.content.push(Content::ToolCall(ToolCall::new(
+            "unknown",
+            "sum",
+            json!({}),
+        )));
+        input.messages.push(Message::Assistant(assistant));
+        input.messages.push(Message::ToolResult(ToolResultMessage {
+            tool_call_id: "unknown".into(),
+            tool_name: "sum".into(),
+            content: content.clone(),
+            details: None,
+            structured_content: None,
+            usage: None,
+            is_error: true,
+            outcome_unknown: true,
+            timestamp: timestamp_ms(),
+            duration_ms: None,
+        }));
+        let stored = input.messages.last().cloned().unwrap();
+        let events = tokio::time::timeout(
+            Duration::from_secs(10),
+            provider
+                .stream(input, CancellationToken::new())
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("unknown outcome must not be rejected before networking");
+        assert!(
+            matches!(events.last(), Some(AssistantEvent::Done { .. })),
+            "{events:#?}"
+        );
+        let (_, body) = received.await.unwrap();
+        assert_eq!(body["messages"][2]["content"][0]["text"], expected);
+        assert_eq!(
+            body["messages"][2],
+            json!({"role":"tool","tool_call_id":"unknown","content":[{"type":"text","text":expected}]})
+        );
+        let Message::ToolResult(stored) = stored else {
+            panic!("stored history changed shape");
+        };
+        assert_eq!(stored.content, content);
+        assert!(stored.outcome_unknown);
+    }
 }
 
 #[tokio::test]

@@ -133,10 +133,11 @@ impl ExternalPlugin {
     ) -> Result<Self, PluginError> {
         config.validate()?;
         if cancel.is_cancelled() {
-            return Err(PluginError::Cancelled);
+            return Err(start_failure("plugin start cancelled before launch"));
         }
         // Subscribe before spawning so an early exit cannot be missed.
-        let mut watcher = ProcessWatcher::new().map_err(io_error)?;
+        let mut watcher = ProcessWatcher::new()
+            .map_err(|error| start_failure(format!("plugin watcher could not start: {error}")))?;
         let mut command = Command::new(&config.executable);
         command
             .args(&config.argv)
@@ -152,7 +153,9 @@ impl ExternalPlugin {
         }
         #[cfg(unix)]
         command.process_group(0);
-        let child = command.spawn().map_err(io_error)?;
+        let child = command
+            .spawn()
+            .map_err(|error| start_failure(format!("plugin process could not start: {error}")))?;
         let mut process = ProcessGuard::new(child);
         let executable = config.executable.to_string_lossy().into_owned();
         let identity = process
@@ -218,8 +221,24 @@ impl ExternalPlugin {
                     .terminate();
                 let wait = wait_for_exit(&mut watcher, &process, config.shutdown_timeout).await;
                 process.lock().expect("plugin process poisoned").take();
-                match terminate.and(wait) {
-                    Ok(()) => return Err(error),
+                // A failed signal does not matter when the owned process is
+                // confirmed exited: this start never delivered a call. Only an
+                // unconfirmed exit keeps the outcome unknown.
+                let cleanup = match wait {
+                    Ok(()) => Ok(()),
+                    Err(exit) => Err(match terminate {
+                        Ok(()) => exit,
+                        Err(signal) => std::io::Error::other(format!(
+                            "termination failed ({signal}); exit was not confirmed: {exit}"
+                        )),
+                    }),
+                };
+                match cleanup {
+                    Ok(()) => {
+                        return Err(start_failure(format!(
+                            "plugin start failed after confirmed process exit: {error}"
+                        )));
+                    }
                     Err(cleanup) => {
                         return Err(PluginError::OutcomeUnknownProcess {
                             message: format!(
@@ -673,7 +692,7 @@ impl ProcessGuard {
                 self.terminated = true;
                 return Ok(());
             }
-            self.exit_pending()?;
+            let exited = self.exit_pending()?;
             if let Some(group) = self
                 .child
                 .id()
@@ -682,6 +701,10 @@ impl ProcessGuard {
             {
                 match nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL) {
                     Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    // macOS also returns EPERM when the group has no live member
+                    // left because its leader is already a zombie. A group with
+                    // a live descendant still accepts the signal.
+                    Err(nix::errno::Errno::EPERM) if exited => {}
                     Err(error) => return Err(std::io::Error::from_raw_os_error(error as i32)),
                 }
             }
@@ -855,6 +878,11 @@ async fn read_message(
 
 fn io_error(error: std::io::Error) -> PluginError {
     PluginError::Io(error.to_string())
+}
+/// A start attempt that never produced a live process, or whose process is
+/// confirmed exited, is a known failure. `Unavailable` is not `outcome_unknown`.
+fn start_failure(message: impl Into<String>) -> PluginError {
+    PluginError::Unavailable(message.into())
 }
 fn output_limit() -> PluginError {
     PluginError::Protocol("plugin output budget exceeded".into())

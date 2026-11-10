@@ -75,7 +75,7 @@ impl ResourceContent {
     pub(crate) fn validate(
         &self,
         spec: &ResourceSpec,
-        payload_limit: usize,
+        payload_limit: Option<usize>,
     ) -> Result<(), CapabilityError> {
         if self.uri != spec.uri {
             return Err(crate::bounds::failure("resource result URI mismatch"));
@@ -92,7 +92,7 @@ impl ResourceContent {
                 ));
             }
         };
-        if payload > payload_limit {
+        if payload_limit.is_some_and(|payload_limit| payload > payload_limit) {
             return Err(crate::bounds::failure(
                 "resource content exceeds its byte budget",
             ));
@@ -300,7 +300,7 @@ pub struct SourceRequest {
     pub key: RequestKey,
     pub operation: SourceOperation,
     /// A source must bound allocation/IO before constructing its reply too.
-    pub max_result_bytes: usize,
+    pub max_result_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,49 +342,50 @@ pub trait SourceHandle: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct Limits {
-    pub max_sources: usize,
-    pub max_tools_per_source: usize,
-    pub max_skills_per_source: usize,
-    pub max_resources_per_source: usize,
-    pub max_prompts_per_source: usize,
-    pub max_metadata_bytes: usize,
-    pub max_all_metadata_bytes: usize,
-    pub max_argument_bytes: usize,
-    pub max_result_bytes: usize,
-    pub max_skill_bytes: usize,
+    pub max_sources: Option<usize>,
+    pub max_tools_per_source: Option<usize>,
+    pub max_skills_per_source: Option<usize>,
+    pub max_resources_per_source: Option<usize>,
+    pub max_prompts_per_source: Option<usize>,
+    pub max_metadata_bytes: Option<usize>,
+    pub max_all_metadata_bytes: Option<usize>,
+    pub max_argument_bytes: Option<usize>,
+    pub max_result_bytes: Option<usize>,
+    pub max_skill_bytes: Option<usize>,
     /// Applied to the text bytes or encoded blob bytes of one resource read.
-    pub max_resource_bytes: usize,
+    pub max_resource_bytes: Option<usize>,
     /// Includes metadata operations, denied policy operations, and reconnections.
-    pub max_source_operations: usize,
+    pub max_source_operations: Option<usize>,
     /// Arguments and replies over all generations of one source.
-    pub max_source_bytes: usize,
+    pub max_source_bytes: Option<usize>,
     pub max_in_flight: usize,
     /// Validation, policy callbacks, journal waits and handle execution share one
     /// absolute deadline, starting when the scoped ExternalHost::call is created.
-    /// User synchronous callbacks cannot be preempted; time is checked again
-    /// before dispatch and after settlement. The synchronous dropped hook must
-    /// persist its state even if that deadline has already elapsed.
-    pub operation_timeout: Duration,
+    /// `None` waits only on cancellation. User synchronous callbacks cannot be
+    /// preempted; time is checked again before dispatch and after settlement. The
+    /// synchronous dropped hook must persist its state even if that deadline has
+    /// already elapsed.
+    pub operation_timeout: Option<Duration>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_sources: 32,
-            max_tools_per_source: 128,
-            max_skills_per_source: 128,
-            max_resources_per_source: 128,
-            max_prompts_per_source: 128,
-            max_metadata_bytes: 256 * 1024,
-            max_all_metadata_bytes: 2 * 1024 * 1024,
-            max_argument_bytes: 64 * 1024,
-            max_result_bytes: 256 * 1024,
-            max_skill_bytes: 64 * 1024,
-            max_resource_bytes: 64 * 1024,
-            max_source_operations: 1024,
-            max_source_bytes: 8 * 1024 * 1024,
-            max_in_flight: 8,
-            operation_timeout: Duration::from_secs(30),
+            max_sources: None,
+            max_tools_per_source: None,
+            max_skills_per_source: None,
+            max_resources_per_source: None,
+            max_prompts_per_source: None,
+            max_metadata_bytes: None,
+            max_all_metadata_bytes: None,
+            max_argument_bytes: None,
+            max_result_bytes: None,
+            max_skill_bytes: None,
+            max_resource_bytes: None,
+            max_source_operations: None,
+            max_source_bytes: None,
+            max_in_flight: 64,
+            operation_timeout: None,
         }
     }
 }

@@ -28,10 +28,10 @@ fn settings() -> RuntimeConfig {
         max_concurrent_runs: 2,
         max_queued_runs: 3,
         fairness_after_dispatches: 8,
-        max_run_time: Duration::from_secs(60),
+        max_run_time: Some(Duration::from_secs(60)),
         // Long enough for a real child process to claim a queued Task and wait
         // without being judged by a product deadline. The test kills it.
-        max_queue_time: Duration::from_secs(120),
+        max_queue_time: Some(Duration::from_secs(120)),
         permissions: vec![
             ScopedPermission::exact("fs.write", json!({"path":"a.txt","content":"approved-a"})),
             ScopedPermission::exact("fs.write", json!({"path":"b.txt","content":"approved-b"})),

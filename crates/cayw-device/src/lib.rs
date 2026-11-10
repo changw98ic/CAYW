@@ -4,8 +4,11 @@
 //! explicitly by the host. No shell command parser or agent tool is registered.
 //!
 //! On macOS, one supervisor owns the original child and process group. It drains
-//! stdout/stderr pipes or merged PTY output under one lifetime byte limit, stops
-//! remaining group members, and waits for the direct child. Orphan descendants
+//! stdout/stderr pipes or merged PTY output under optional lifetime byte limits,
+//! stops remaining group members, and waits for the direct child. Without a
+//! byte limit, output above [`INLINE_OUTPUT_BYTES`] spills to a private file
+//! while only a bounded head and tail remain in memory. Without a timeout, the
+//! process runs until it exits or the caller cancels it. Orphan descendants
 //! are reaped by the operating system's parent process. With a [`ProcessObserver`],
 //! it records PID/startup identities and also waits for every observed incarnation
 //! to stop, even if that process later leaves the group.
@@ -115,6 +118,13 @@ pub enum ProcessIo {
     },
 }
 
+/// Output per stream that remains in memory before spilling to disk.
+pub const INLINE_OUTPUT_BYTES: usize = 256 * 1024;
+/// Bytes kept from the start of a spilled stream.
+pub const HEAD_BYTES: usize = 128 * 1024;
+/// Bytes kept from the end of a spilled stream.
+pub const TAIL_BYTES: usize = 128 * 1024;
+
 /// A host-created command with explicit argv, working directory, and environment.
 ///
 /// `program` and `cwd` must be absolute. The environment starts empty; no OS or
@@ -122,14 +132,21 @@ pub enum ProcessIo {
 /// through the interactive API. PTY runs attach all three standard descriptors to
 /// one controlling terminal; only the interactive API writes input. Output bytes
 /// include terminal echo and line-ending conversion when PTY mode is selected.
+///
+/// `timeout: None` runs until the child exits or the caller cancels. `Some`
+/// enforces a positive, representable lifetime. `max_output_bytes: None` never
+/// kills the child for output volume: up to [`INLINE_OUTPUT_BYTES`] stay in
+/// memory, and larger streams spill to `output_spill_dir` (or the OS temporary
+/// directory). `Some` enforces the exact combined stdout+stderr lifetime limit.
 #[derive(Clone, Debug)]
 pub struct ProcessSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
-    pub timeout: Duration,
-    pub max_output_bytes: usize,
+    pub timeout: Option<Duration>,
+    pub max_output_bytes: Option<usize>,
+    pub output_spill_dir: Option<PathBuf>,
     pub io: ProcessIo,
 }
 
@@ -144,8 +161,9 @@ pub struct DirectoryProcessSpec {
     pub args: Vec<String>,
     pub cwd: std::fs::File,
     pub env: BTreeMap<String, String>,
-    pub timeout: Duration,
-    pub max_output_bytes: usize,
+    pub timeout: Option<Duration>,
+    pub max_output_bytes: Option<usize>,
+    pub output_spill_dir: Option<PathBuf>,
     pub io: ProcessIo,
 }
 
@@ -169,14 +187,37 @@ pub struct ProcessExit {
     pub output_complete: bool,
 }
 
+/// A fully captured output stream that exceeded [`INLINE_OUTPUT_BYTES`].
+///
+/// The spill file contains every byte of the stream in order. `head` and `tail`
+/// are the bounded in-memory copies also inserted into the corresponding
+/// `ProcessResult` field around an omission marker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpilledOutput {
+    pub path: PathBuf,
+    pub total_bytes: u64,
+    pub sha256: String,
+    pub head: Vec<u8>,
+    pub tail: Vec<u8>,
+}
+
 /// A launched process, including nonzero exits, timeout, cancellation, or overflow.
 #[derive(Debug)]
 pub struct ProcessResult {
     pub status: ExitStatus,
     pub termination: TerminationReason,
+    /// Head, omission marker, and tail when this stream spilled; otherwise the
+    /// raw bytes. A spilled stream is always bounded near [`INLINE_OUTPUT_BYTES`].
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Present only when `max_output_bytes` was `None` and stdout exceeded
+    /// [`INLINE_OUTPUT_BYTES`] and the spill file was written successfully.
+    pub spilled_stdout: Option<SpilledOutput>,
+    /// Present only when `max_output_bytes` was `None` and stderr exceeded
+    /// [`INLINE_OUTPUT_BYTES`] and the spill file was written successfully.
+    pub spilled_stderr: Option<SpilledOutput>,
     /// Both output pipes reached EOF after normal exit without truncation.
     /// A descendant that escapes its process group may force bounded pipe closure.
+    /// A failed spill write also makes this false.
     pub output_complete: bool,
 }

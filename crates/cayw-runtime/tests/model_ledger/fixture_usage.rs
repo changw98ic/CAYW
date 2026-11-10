@@ -56,7 +56,7 @@ async fn offline_demo_reports_explicit_synthetic_usage_and_completes_two_user_ro
                     && message.usage.total_tokens == 8)
         );
         let ledger = runtime.model_requests(&session.id).unwrap();
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
         assert_eq!(ledger.reserved_tokens, 0);
         assert!(ledger.cost_amount.is_none());
         assert!(

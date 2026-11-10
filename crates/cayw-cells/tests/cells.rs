@@ -109,8 +109,8 @@ fn manager_with_host(
         reads,
         limits,
         Limits {
-            timeout: Duration::from_secs(30),
-            host_calls: 256,
+            timeout: Some(Duration::from_secs(30)),
+            host_calls: Some(256),
             ..Limits::default()
         },
     )
@@ -144,8 +144,8 @@ fn shared_manager(
         reads,
         limits,
         Limits {
-            timeout: Duration::from_secs(30),
-            host_calls: 256,
+            timeout: Some(Duration::from_secs(30)),
+            host_calls: Some(256),
             ..Limits::default()
         },
     )
@@ -403,7 +403,7 @@ async fn store_load_are_durable_cas_snapshots_and_isolated_by_session() {
 }
 
 #[tokio::test]
-async fn unknown_freezes_survives_restart_and_requires_matching_evidence() {
+async fn unknown_outcome_is_audited_without_freezing_later_tasks() {
     let (dir, journal, host, cells) = setup();
     let page = cells
         .exec_fixture(
@@ -414,13 +414,19 @@ async fn unknown_freezes_survives_restart_and_requires_matching_evidence() {
         .unwrap();
     let done = terminal(&cells, page).await;
     assert_eq!(done.status, CellStatus::OutcomeUnknown);
-    assert!(journal.is_frozen("session").unwrap());
-    assert!(matches!(
+    assert!(done.outcome_unknown);
+    // The uncertain capability remains an audit fact for this cell, but it no
+    // longer freezes the session: a later cell may run normally.
+    assert!(!journal.is_frozen("session").unwrap());
+    let allowed = terminal(
+        &cells,
         cells
-            .exec_fixture(exec("text('forbidden')"), CancellationToken::new())
-            .await,
-        Err(CellError::Frozen)
-    ));
+            .exec_fixture(exec("text('allowed')"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(allowed.status, CellStatus::Completed);
     cells.close().await;
     drop(cells);
     drop(journal);
@@ -433,12 +439,17 @@ async fn unknown_freezes_survives_restart_and_requires_matching_evidence() {
         "session",
     );
     let record = cells.record(&done.cell_id).unwrap();
-    assert!(matches!(
+    assert_eq!(record.status, CellStatus::OutcomeUnknown);
+    assert!(!journal.is_frozen("session").unwrap());
+    let after_restart = terminal(
+        &cells,
         cells
-            .exec_fixture(exec("text('still forbidden')"), CancellationToken::new())
-            .await,
-        Err(CellError::Frozen)
-    ));
+            .exec_fixture(exec("text('still allowed')"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(after_restart.status, CellStatus::Completed);
     let mut evidence = ReconciliationEvidence {
         source_hash: record.source_hash,
         call_sequence: 1,
@@ -467,7 +478,10 @@ async fn unknown_freezes_survives_restart_and_requires_matching_evidence() {
     let next = terminal(
         &cells,
         cells
-            .exec_fixture(exec("text('allowed')"), CancellationToken::new())
+            .exec_fixture(
+                exec("text('allowed after reconcile')"),
+                CancellationToken::new(),
+            )
             .await
             .unwrap(),
     )
@@ -507,17 +521,8 @@ async fn cancel_close_and_drop_stop_owned_tasks_and_preserve_unknown() {
         })
         .await
         .unwrap();
-        // Let task cleanup release the process lock before reopening.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if journal.is_frozen("session").unwrap() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        // An unknown effect is recorded for the affected cell, not as a
+        // session-wide freeze. Reopening must show that same audit state.
         drop(journal);
         let reopened = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -529,7 +534,7 @@ async fn cancel_close_and_drop_stop_owned_tasks_and_preserve_unknown() {
         })
         .await
         .unwrap();
-        assert!(reopened.is_frozen("session").unwrap());
+        assert!(!reopened.is_frozen("session").unwrap());
     }
 }
 
@@ -587,7 +592,7 @@ async fn media_decoded_byte_boundary_and_notify_length_stop_before_host_effects(
     let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
     let host = Arc::new(Host::default());
     let limits = CellLimits {
-        media_bytes: 8,
+        media_bytes: Some(8),
         ..CellLimits::default()
     };
     let cells = manager(
@@ -657,13 +662,13 @@ async fn capacity_output_and_store_limits_are_enforced_without_cursor_overwrite(
     let host = Arc::new(Host::default());
     let limits = CellLimits {
         max_running: 1,
-        output_items: 2,
-        output_bytes: 16_384,
-        item_bytes: 4096,
-        media_bytes: 8,
-        store_bytes: 100,
-        store_keys: 1,
-        json_depth: 4,
+        output_items: Some(2),
+        output_bytes: Some(16_384),
+        item_bytes: Some(4096),
+        media_bytes: Some(8),
+        store_bytes: Some(100),
+        store_keys: Some(1),
+        json_depth: Some(4),
         ..CellLimits::default()
     };
     let cells = manager(
@@ -862,23 +867,30 @@ async fn single_agent_entry_schema_has_only_exec_and_wait_and_no_session_overrid
             "accepted {value}"
         );
     }
-    for (field, value) in [
-        ("yield_time_ms", "30001"),
-        ("max_output_tokens", "1023"),
-        ("max_output_tokens", "131073"),
+    let mut arguments =
+        json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1024});
+    arguments["max_output_tokens"] = json!("1023");
+    let prepared = tool.prepare_arguments(arguments).unwrap();
+    assert!(
+        validator.validate(&prepared).is_err(),
+        "accepted {prepared}"
+    );
+    // No artificial upper ceilings: unconfigured limits accept large values,
+    // and omitted fields fall back to the documented defaults.
+    for arguments in [
+        json!({"action":"exec","script":"return 1","yield_time_ms":30001,"max_output_tokens":1024}),
+        json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":131073}),
+        json!({"action":"exec","script":"return 1"}),
+        json!({"action":"exec","script":format!("-- {}", "x".repeat(2 * 1024 * 1024))}),
+        json!({"action":"wait","cell_id":"x","cursor":0}),
     ] {
-        let mut arguments =
-            json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1024});
-        arguments[field] = json!(value);
-        let prepared = tool.prepare_arguments(arguments).unwrap();
         assert!(
-            validator.validate(&prepared).is_err(),
-            "accepted {prepared}"
+            validator.validate(&arguments).is_ok(),
+            "rejected {arguments}"
         );
     }
     for arguments in [
         json!({"action":"exec","script":"return 1","yield_time_ms":-1,"max_output_tokens":1024}),
-        json!({"action":"exec","script":"return 1","yield_time_ms":30001,"max_output_tokens":1024}),
         json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1023}),
         json!({"action":"exec","script":"return 1","yield_time_ms":true,"max_output_tokens":1024}),
         json!({"action":"wait","cell_id":"x","cursor":"0","yield_time_ms":0,"max_output_tokens":1024}),
@@ -1170,7 +1182,9 @@ async fn restart_classifies_unstarted_interrupted_and_pending_across_tasks_witho
             )
             .unwrap();
     }
-    assert!(journal.is_frozen("session").unwrap());
+    // Settling dead cells records accurate Interrupted/OutcomeUnknown facts,
+    // but does not freeze the session for later work.
+    assert!(!journal.is_frozen("session").unwrap());
     let host = Arc::new(Host::default());
     let limits = CellLimits::default();
     let cells = manager(
@@ -1203,12 +1217,15 @@ async fn restart_classifies_unstarted_interrupted_and_pending_across_tasks_witho
         .unwrap();
     assert_eq!(page.status, CellStatus::NotStarted);
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(
+    let next = terminal(
+        &cells,
         cells
-            .exec_fixture(exec("text('blocked')"), CancellationToken::new())
-            .await,
-        Err(CellError::Frozen)
-    ));
+            .exec_fixture(exec("text('allowed')"), CancellationToken::new())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(next.status, CellStatus::Completed);
     cells.close().await;
 }
 
@@ -1220,8 +1237,8 @@ async fn continuous_exec_wait_paginate_and_release_reclaims_runtime_capacity_wit
     let host = Arc::new(Host::default());
     let limits = CellLimits {
         max_running: 1,
-        max_cells: 16,
-        output_items: 10,
+        max_cells: Some(16),
+        output_items: Some(10),
         ..CellLimits::default()
     };
     let session = "session-continuous";
@@ -1367,13 +1384,21 @@ async fn dropping_an_invocation_future_cancels_its_cell_and_bounds_its_task() {
     }
     drop(execution);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !host.dropped.load(Ordering::Acquire) || !journal.is_frozen("session").unwrap() {
+        loop {
+            let settled = journal
+                .records(&identity("session"), &CellLimits::default())
+                .unwrap()
+                .first()
+                .is_some_and(|record| record.status.is_terminal());
+            if host.dropped.load(Ordering::Acquire) && settled {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert!(journal.is_frozen("session").unwrap());
+    assert!(!journal.is_frozen("session").unwrap());
     assert!(host.dropped.load(Ordering::Acquire));
     cells.close().await;
 }
@@ -1467,30 +1492,44 @@ async fn write_during_coalesced_read_rejects_stale_result_for_both_callers() {
 }
 
 #[tokio::test]
-async fn unknown_read_result_freezes_and_is_not_retained_for_reuse() {
+async fn unknown_read_invalidates_cached_reads_without_freezing_later_cells() {
     let dir = tempfile::tempdir().unwrap();
     let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
     let host = Arc::new(Host::default());
     let reads = Arc::new(Reads::default());
-    reads.unknown.store(true, Ordering::Release);
     let limits = CellLimits::default();
     let cells = shared_manager(journal.clone(), host, reads.clone(), limits, "session");
+    // Seed a reusable read so a stale cache entry exists before the unknown one.
+    let seeded = terminal(
+        &cells,
+        cells
+            .exec_fixture(
+                exec("cayw.call('read',{a=1,b=2})"),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(seeded.status, CellStatus::Completed);
+    assert_eq!(reads.executed.load(Ordering::SeqCst), 1);
+    reads.unknown.store(true, Ordering::Release);
     let done = terminal(
         &cells,
         cells
-            .exec_fixture(exec("cayw.call('read',{})"), CancellationToken::new())
+            .exec_fixture(
+                exec("cayw.call('read',{different=true})"),
+                CancellationToken::new(),
+            )
             .await
             .unwrap(),
     )
     .await;
     assert_eq!(done.status, CellStatus::OutcomeUnknown);
-    assert!(journal.is_frozen("session").unwrap());
-    assert!(matches!(
-        cells
-            .exec_fixture(exec("cayw.call('read',{})"), CancellationToken::new())
-            .await,
-        Err(CellError::Frozen)
-    ));
+    assert!(done.outcome_unknown);
+    // The session is not frozen, but the failed capture invalidated the
+    // earlier reusable entry.
+    assert!(!journal.is_frozen("session").unwrap());
     let record = cells.record(&done.cell_id).unwrap();
     cells
         .reconcile(
@@ -1498,7 +1537,7 @@ async fn unknown_read_result_freezes_and_is_not_retained_for_reuse() {
             ReconciliationEvidence {
                 source_hash: record.source_hash,
                 call_sequence: 1,
-                expected_arguments: json!({}),
+                expected_arguments: json!({"different":true}),
                 observed_result: json!({"version":"1"}),
                 evidence: "trusted backend receipt 42".into(),
                 resolution: Resolution::Succeeded,
@@ -1509,13 +1548,25 @@ async fn unknown_read_result_freezes_and_is_not_retained_for_reuse() {
     let next = terminal(
         &cells,
         cells
-            .exec_fixture(exec("cayw.call('read',{})"), CancellationToken::new())
+            .exec_fixture(
+                exec("cayw.call('read',{a=1,b=2}); store('after_unknown',1,0)"),
+                CancellationToken::new(),
+            )
             .await
             .unwrap(),
     )
     .await;
     assert_eq!(next.status, CellStatus::Completed);
-    assert_eq!(reads.executed.load(Ordering::SeqCst), 2);
+    // The original cached read must be recaptured, never served stale.
+    assert_eq!(reads.executed.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        journal
+            .load("session", "after_unknown")
+            .unwrap()
+            .unwrap()
+            .version,
+        1
+    );
     cells.close().await;
 }
 
@@ -1558,7 +1609,10 @@ async fn cancellation_during_independent_authorization_has_a_durable_intent() {
 #[tokio::test]
 async fn vm_instruction_budget_and_cell_script_budget_stop_execution() {
     let dir = tempfile::tempdir().unwrap();
-    let limits = CellLimits::default();
+    let limits = CellLimits {
+        script_bytes: Some(64 * 1024),
+        ..CellLimits::default()
+    };
     let host = Arc::new(Host::default());
     let cells = CellManager::new(
         identity("session"),
@@ -1568,6 +1622,7 @@ async fn vm_instruction_budget_and_cell_script_budget_stop_execution() {
         limits.clone(),
         Limits {
             instruction_budget: 128,
+            timeout: Some(Duration::from_millis(100)),
             ..Limits::default()
         },
     )
@@ -1575,7 +1630,7 @@ async fn vm_instruction_budget_and_cell_script_budget_stop_execution() {
     assert!(matches!(
         cells
             .exec_fixture(
-                exec(&"x".repeat(limits.script_bytes + 1)),
+                exec(&"x".repeat(limits.script_bytes.unwrap() + 1)),
                 CancellationToken::new()
             )
             .await,

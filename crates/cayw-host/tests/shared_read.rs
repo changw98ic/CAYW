@@ -365,7 +365,7 @@ async fn frozen_tickets_keep_held_root_after_rename_and_reject_links_and_byte_li
         Arc::new(Audit::default()),
         HostConfig {
             frozen_reads: true,
-            max_file_bytes: 3,
+            max_file_bytes: Some(3),
             ..Default::default()
         },
     )
@@ -391,7 +391,7 @@ async fn each_original_ticket_charges_the_shared_host_call_and_response_budgets(
         Arc::new(Audit::default()),
         HostConfig {
             frozen_reads: true,
-            max_calls: 2,
+            max_calls: Some(2),
             ..Default::default()
         },
     )
@@ -432,7 +432,7 @@ async fn each_original_ticket_charges_the_shared_host_call_and_response_budgets(
         Arc::new(Audit::default()),
         HostConfig {
             frozen_reads: true,
-            max_total_bytes: allowance,
+            max_total_bytes: Some(allowance),
             ..Default::default()
         },
     )

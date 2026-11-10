@@ -38,8 +38,12 @@ use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
 use tokio_util::sync::CancellationToken;
 use workbench::{Workbench, panel_error_response};
 
-/// Requests are bounded before JSON parsing or IPC dispatch.
-pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
+/// Default maximum HTTP JSON request body bytes. This matches the IPC
+/// transport's default frame budget so a browser request is never the smaller
+/// of the two limits.
+pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+const MIN_REQUEST_BYTES: usize = 256;
+const MAX_REQUEST_LIMIT: usize = 256 * 1024 * 1024;
 
 /// The browser can only call methods from the shared runtime RPC contract.
 pub const PUBLIC_METHODS: &[&str] = &[
@@ -106,11 +110,13 @@ pub struct GatewayLimits {
     pub max_prompt_in_flight: usize,
     /// Includes reading bodies, queued requests and executing requests.
     pub max_pending_requests: usize,
+    /// Maximum JSON request body bytes read before parsing or IPC dispatch.
+    pub max_request_bytes: usize,
     pub queue_timeout: Duration,
     pub body_timeout: Duration,
     pub request_timeout: Duration,
     /// Persistent prompt and resume calls have no gateway deadline by default.
-    /// Their own event, cancellation and reconciliation contracts stay in force.
+    /// Their own event and cancellation contracts stay in force.
     pub prompt_timeout: Option<Duration>,
 }
 
@@ -120,6 +126,7 @@ impl Default for GatewayLimits {
             max_in_flight: 32,
             max_prompt_in_flight: 8,
             max_pending_requests: 64,
+            max_request_bytes: MAX_REQUEST_BYTES,
             queue_timeout: Duration::from_secs(2),
             body_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
@@ -139,6 +146,7 @@ impl GatewayLimits {
         if self.max_in_flight < 2
             || self.max_prompt_in_flight >= self.max_in_flight
             || counts.iter().any(|&n| n == 0 || n > 4096)
+            || !(MIN_REQUEST_BYTES..=MAX_REQUEST_LIMIT).contains(&self.max_request_bytes)
             || durations
                 .iter()
                 .any(|d| d.is_zero() || std::time::Instant::now().checked_add(*d).is_none())
@@ -182,7 +190,7 @@ impl IpcEndpoint {
             self.token.clone(),
             ClientConfig {
                 max_in_flight: 1,
-                request_timeout: budget.saturating_add(Duration::from_secs(1)),
+                request_timeout: Some(budget.saturating_add(Duration::from_secs(1))),
                 ..Default::default()
             },
         )
@@ -509,6 +517,7 @@ async fn serve_inner(
         management_authorities = vec![address.to_string(), format!("localhost:{}", address.port())];
         authorities.extend(management_authorities.clone());
     }
+    let max_request_bytes = limits.max_request_bytes;
     let state = Arc::new(Gateway {
         devices,
         web_token,
@@ -536,7 +545,7 @@ async fn serve_inner(
         .route("/api/panels", post(panels))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(DefaultBodyLimit::max(max_request_bytes))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state);
     // Cancellation also stops the paired listener when this serving future is
@@ -721,7 +730,7 @@ async fn guarded_request(state: &Gateway, mut request: Request, next: Next) -> R
     let (parts, body) = request.into_parts();
     let body = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
-        result = timeout(state.limits.body_timeout, to_bytes(body, MAX_REQUEST_BYTES)) => match result {
+        result = timeout(state.limits.body_timeout, to_bytes(body, state.limits.max_request_bytes)) => match result {
             Ok(Ok(body)) => body,
             Ok(Err(_)) => return error_response(StatusCode::PAYLOAD_TOO_LARGE, "invalid_body", "Request body could not be read within its byte limit", false),
             Err(_) => return error_response(StatusCode::REQUEST_TIMEOUT, "body_timeout", "Request body timed out; request was not dispatched", false),
@@ -1441,7 +1450,7 @@ mod outcome_tests {
     #[test]
     fn runtime_reported_unknown_is_preserved_for_reads_and_writes() {
         let error = ClientError {
-            code: "tool_outcome_unknown".into(),
+            code: "fixture_outcome_unknown".into(),
             message: "inspect the original execution".into(),
             outcome_unknown: true,
         };

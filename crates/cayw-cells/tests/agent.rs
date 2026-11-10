@@ -126,7 +126,6 @@ async fn agent_uses_one_entry_exec_then_wait_with_multiple_internal_host_operati
             .len(),
         2
     );
-    assert!(!agent.snapshot().needs_reconciliation);
     assert_eq!(
         manager
             .record(provider.cell.lock().unwrap().as_ref().unwrap())
@@ -170,7 +169,6 @@ async fn cell_exit_ends_only_the_cell_and_agent_produces_its_next_message() {
     assert_eq!(result.last_message.stop_reason, StopReason::Stop);
     assert!(provider.turn.load(Ordering::SeqCst) >= 2);
     assert_eq!(host.0.load(Ordering::SeqCst), 0);
-    assert!(!agent.snapshot().needs_reconciliation);
     let cell = provider.cell.lock().unwrap().clone().unwrap();
     assert_eq!(manager.record(&cell).unwrap().parent_call_id, "call-0");
     manager.close().await;

@@ -131,7 +131,7 @@ fn public_protocol_binds_original_task_before_reconciling_without_changing_histo
     dispatch_wire(&store, json!({"type":"recover", "session_id":id})).unwrap();
     let original = protocol_snapshot(&store, &id);
     let original_events = protocol_events(&store, &id);
-    assert_eq!(original.state, SessionState::NeedsReconciliation);
+    assert_eq!(original.state, SessionState::Idle);
     assert!(
         matches!(original.messages.last(), Some(Message::ToolResult(result)) if result.outcome_unknown)
     );

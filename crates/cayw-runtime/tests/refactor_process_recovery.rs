@@ -626,10 +626,13 @@ fn validate_expectations(point: &str, recovered: &SessionView, after: &Snapshot)
             assert!(!frozen, "a known recovery must thaw the frozen session");
         }
         "core.start.committed" => {
-            assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+            assert_eq!(recovered.state, SessionState::Idle);
             assert_eq!(recovered.unresolved_capabilities.len(), 1);
             assert_eq!(recovered.unresolved_capabilities[0].name, "test.run");
-            assert!(frozen, "an unknown process outcome must stay frozen");
+            assert!(
+                !frozen,
+                "a recovered process session must thaw Cells storage"
+            );
         }
         _ => panic!("unexpected checkpoint {point}"),
     }
@@ -832,7 +835,7 @@ async fn run_window(root: &Path, point: &str) -> Result<()> {
         "the offline fixture model request must be accounted before recovery"
     );
     assert!(
-        !ledger_before.budget_unknown,
+        !ledger_before.usage_unknown,
         "this fixture reports complete usage; recovery must not create a model unknown hold"
     );
     let recovered = reopened.recover(&identity.session_id)?;
@@ -890,12 +893,6 @@ async fn run_window(root: &Path, point: &str) -> Result<()> {
         .resume(&identity.task_id, CancellationToken::new())
         .await;
     assert!(replay.is_err(), "an interrupted process task was replayed");
-    if after.session.state == SessionState::NeedsReconciliation {
-        assert!(matches!(
-            reopened.enqueue(&identity.session_id, "must stay frozen"),
-            Err(RuntimeError::NeedsReconciliation)
-        ));
-    }
     let after_refusal = snapshot(&reopened, root, &identity)?;
     fixture::write_json(&root.join("replay-refusal-originals.json"), &after_refusal)?;
     assert_same(
@@ -909,20 +906,21 @@ async fn run_window(root: &Path, point: &str) -> Result<()> {
     let second = snapshot(&again, root, &identity)?;
     fixture::write_json(&root.join("second-reopen-originals.json"), &second)?;
     assert_same(&after, &second, "second open changed recovered facts");
-    if after.session.state == SessionState::NeedsReconciliation {
+    if !after.session.unresolved_capabilities.is_empty() {
         again.recover(&identity.session_id)?;
         let still = snapshot(&again, root, &identity)?;
         fixture::write_json(&root.join("recover-again-originals.json"), &still)?;
         assert_no_replay(&after, &still);
-        assert_eq!(still.session.state, SessionState::NeedsReconciliation);
+        assert_eq!(still.session.state, SessionState::Idle);
         assert_eq!(
             still.session.unresolved_capabilities,
             after.session.unresolved_capabilities
         );
-        assert!(matches!(
-            again.enqueue(&identity.session_id, "unknown remains frozen"),
-            Err(RuntimeError::NeedsReconciliation)
-        ));
+        assert!(
+            again
+                .enqueue(&identity.session_id, "follow-up after process recovery")
+                .is_ok()
+        );
     }
     eprintln!(
         "PROCESS_RECOVERY_WINDOW_VERIFIED point={point} originals={}",

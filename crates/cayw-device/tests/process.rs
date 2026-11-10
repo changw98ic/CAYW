@@ -61,8 +61,9 @@ fn spec(directory: &Path, mode: &str) -> ProcessSpec {
         args: vec![mode.into(), directory.to_string_lossy().into_owned()],
         cwd: directory.to_owned(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(20),
-        max_output_bytes: 1024 * 1024,
+        timeout: Some(Duration::from_secs(20)),
+        max_output_bytes: Some(1024 * 1024),
+        output_spill_dir: None,
         io: cayw_device::ProcessIo::Pipes,
     }
 }
@@ -155,8 +156,9 @@ async fn unrelated_non_utf8_process_name_does_not_retain_a_resource_permit() {
         args: Vec::new(),
         cwd: directory.0.clone(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(5),
-        max_output_bytes: 1024,
+        timeout: Some(Duration::from_secs(5)),
+        max_output_bytes: Some(1024),
+        output_spill_dir: None,
         io: cayw_device::ProcessIo::Pipes,
     };
     let result = tokio::time::timeout(
@@ -369,8 +371,9 @@ async fn directory_launch_failure_and_invalid_file_handle_release_reservations()
             })
             .unwrap(),
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(10),
-            max_output_bytes: 1024,
+            timeout: Some(Duration::from_secs(10)),
+            max_output_bytes: Some(1024),
+            output_spill_dir: None,
             io: cayw_device::ProcessIo::Pipes,
         };
         let error = runner
@@ -409,8 +412,9 @@ async fn executable_text_without_shebang_never_implicitly_runs_a_shell() {
                 args: vec![],
                 cwd: directory.0.clone(),
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 1024,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(1024),
+                output_spill_dir: None,
                 io: cayw_device::ProcessIo::Pipes,
             },
             CancellationToken::new(),
@@ -442,7 +446,7 @@ async fn both_full_pipes_are_drained_without_deadlock() {
 async fn combined_output_budget_terminates_the_process_and_bounds_retained_bytes() {
     let directory = TestDirectory::new();
     let mut spec = spec(&directory.0, "flood");
-    spec.max_output_bytes = 10_000;
+    spec.max_output_bytes = Some(10_000);
     let result = runner().run(spec, CancellationToken::new()).await.unwrap();
     assert_eq!(result.termination, TerminationReason::OutputLimit);
     assert_eq!(result.stdout.len() + result.stderr.len(), 10_000);
@@ -464,7 +468,7 @@ async fn nonzero_exit_is_reported_as_a_process_result() {
 async fn timeout_kills_a_running_process() {
     let directory = TestDirectory::new();
     let mut spec = spec(&directory.0, "sleep");
-    spec.timeout = Duration::from_secs(1);
+    spec.timeout = Some(Duration::from_secs(1));
     let result = runner().run(spec, CancellationToken::new()).await.unwrap();
     assert_eq!(result.termination, TerminationReason::TimedOut);
     assert_gone(pid(&directory.0, "root.pid").await).await;
@@ -757,12 +761,12 @@ async fn releasing_a_permit_waits_for_descendants_that_closed_their_output_pipes
 async fn exact_output_budget_is_complete_and_finite_overflow_is_reported() {
     let directory = TestDirectory::new();
     let mut exact = spec(&directory.0, "both");
-    exact.max_output_bytes = 256 * 1024;
+    exact.max_output_bytes = Some(256 * 1024);
     let result = runner().run(exact, CancellationToken::new()).await.unwrap();
     assert_eq!(result.termination, TerminationReason::Exited);
     assert!(result.output_complete);
     let mut overflow = spec(&directory.0, "both");
-    overflow.max_output_bytes = 256 * 1024 - 1;
+    overflow.max_output_bytes = Some(256 * 1024 - 1);
     let result = runner()
         .run(overflow, CancellationToken::new())
         .await
@@ -844,6 +848,7 @@ async fn cleanup_failure_waits_for_supervisor_join_and_retains_resource_after_la
             env: process_spec.env,
             timeout: process_spec.timeout,
             max_output_bytes: process_spec.max_output_bytes,
+            output_spill_dir: process_spec.output_spill_dir,
             io: cayw_device::ProcessIo::Pipes,
         };
         cloned
@@ -903,8 +908,9 @@ async fn last_runner_drop_cancels_supervisor_and_successful_cleanup_releases_res
             args: vec!["exit".into(), directory.0.display().to_string()],
             cwd: fs::File::open(&directory.0).unwrap(),
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(10),
-            max_output_bytes: 1024,
+            timeout: Some(Duration::from_secs(10)),
+            max_output_bytes: Some(1024),
+            output_spill_dir: None,
             io: cayw_device::ProcessIo::Pipes,
         },
         CancellationToken::new(),
@@ -963,8 +969,8 @@ async fn invalid_limits_environment_and_pre_cancelled_runs_do_not_spawn() {
     for invalid in 0..5 {
         let mut spec = spec(&directory.0, "sleep");
         match invalid {
-            0 => spec.timeout = Duration::ZERO,
-            1 => spec.max_output_bytes = 0,
+            0 => spec.timeout = Some(Duration::ZERO),
+            1 => spec.max_output_bytes = Some(0),
             2 => spec.cwd = PathBuf::from("relative"),
             3 => {
                 spec.env.insert("bad=name".into(), "value".into());
@@ -983,4 +989,168 @@ async fn invalid_limits_environment_and_pre_cancelled_runs_do_not_spawn() {
         Err(DeviceError::Cancelled)
     ));
     assert!(!directory.0.join("root.pid").exists());
+}
+
+#[tokio::test]
+async fn unlimited_output_spills_multi_megabyte_stdout_to_a_private_file() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    const TOTAL: usize = 3 * 1024 * 1024;
+    let directory = TestDirectory::new();
+    let spill_dir = directory.0.join("spill");
+    fs::create_dir(&spill_dir).unwrap();
+    let mut process_spec = spec(&directory.0, "large-stdout");
+    process_spec.timeout = None;
+    process_spec.max_output_bytes = None;
+    process_spec.output_spill_dir = Some(spill_dir.clone());
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        runner().run(process_spec, CancellationToken::new()),
+    )
+    .await
+    .expect("unlimited output run hung")
+    .unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.termination, TerminationReason::Exited);
+    assert!(result.output_complete);
+    assert!(result.stderr.is_empty());
+    assert!(result.spilled_stderr.is_none());
+
+    let spilled = result
+        .spilled_stdout
+        .as_ref()
+        .expect("multi-megabyte stdout must spill");
+    assert_eq!(spilled.path.parent(), Some(spill_dir.as_path()));
+    assert_eq!(spilled.total_bytes, TOTAL as u64);
+    let expected: Vec<u8> = (0..TOTAL).map(|index| (index % 256) as u8).collect();
+    assert_eq!(
+        spilled.head.as_slice(),
+        &expected[..cayw_device::HEAD_BYTES]
+    );
+    assert_eq!(
+        spilled.tail.as_slice(),
+        &expected[TOTAL - cayw_device::TAIL_BYTES..]
+    );
+    let stored = fs::read(&spilled.path).unwrap();
+    assert_eq!(stored, expected, "spill file is not byte-exact");
+    let mut hasher = Sha256::new();
+    hasher.update(&stored);
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(spilled.sha256, digest);
+    let mode = fs::metadata(&spilled.path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "spill file must be private");
+
+    assert!(
+        result.stdout.len() < cayw_device::INLINE_OUTPUT_BYTES + 512,
+        "in-memory summary grew beyond the inline bound: {}",
+        result.stdout.len()
+    );
+    assert!(result.stdout.starts_with(&spilled.head));
+    assert!(result.stdout.ends_with(&spilled.tail));
+    let omitted = TOTAL - cayw_device::HEAD_BYTES - cayw_device::TAIL_BYTES;
+    let marker = format!(
+        "... [omitted {omitted} bytes; full output saved to {}] ...",
+        spilled.path.display()
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stdout).contains(&marker),
+        "stdout summary is missing its omission marker"
+    );
+    fs::remove_file(&spilled.path).unwrap();
+}
+
+#[tokio::test]
+async fn unlimited_output_spills_multi_megabyte_stderr_to_a_private_file() {
+    use sha2::{Digest, Sha256};
+
+    const TOTAL: usize = 3 * 1024 * 1024;
+    let directory = TestDirectory::new();
+    let mut process_spec = spec(&directory.0, "large-stderr");
+    process_spec.timeout = None;
+    process_spec.max_output_bytes = None;
+    process_spec.output_spill_dir = Some(directory.0.join("spill"));
+    fs::create_dir(directory.0.join("spill")).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        runner().run(process_spec, CancellationToken::new()),
+    )
+    .await
+    .expect("unlimited stderr run hung")
+    .unwrap();
+    assert!(result.status.success());
+    assert_eq!(result.termination, TerminationReason::Exited);
+    assert!(result.output_complete);
+    assert!(result.spilled_stdout.is_none());
+    assert!(result.stdout.is_empty());
+
+    let spilled = result
+        .spilled_stderr
+        .as_ref()
+        .expect("multi-megabyte stderr must spill");
+    assert_eq!(spilled.total_bytes, TOTAL as u64);
+    let expected: Vec<u8> = (0..TOTAL).map(|index| (255 - index % 256) as u8).collect();
+    assert_eq!(fs::read(&spilled.path).unwrap(), expected);
+    let mut hasher = Sha256::new();
+    hasher.update(&expected);
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(spilled.sha256, digest);
+    assert!(result.stderr.len() < cayw_device::INLINE_OUTPUT_BYTES + 512);
+    assert!(result.stderr.starts_with(&spilled.head));
+    assert!(result.stderr.ends_with(&spilled.tail));
+    fs::remove_file(&spilled.path).unwrap();
+}
+
+#[tokio::test]
+async fn unlimited_output_below_the_inline_threshold_never_creates_a_file() {
+    let directory = TestDirectory::new();
+    let spill_dir = directory.0.join("spill");
+    fs::create_dir(&spill_dir).unwrap();
+    let mut process_spec = spec(&directory.0, "both");
+    process_spec.timeout = None;
+    process_spec.max_output_bytes = None;
+    process_spec.output_spill_dir = Some(spill_dir.clone());
+
+    let result = runner()
+        .run(process_spec, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.termination, TerminationReason::Exited);
+    assert!(result.output_complete);
+    assert_eq!(result.stdout, vec![b'o'; 128 * 1024]);
+    assert_eq!(result.stderr, vec![b'e'; 128 * 1024]);
+    assert!(result.spilled_stdout.is_none());
+    assert!(result.spilled_stderr.is_none());
+    assert_eq!(fs::read_dir(&spill_dir).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn none_timeout_runs_until_cancellation_instead_of_timing_out() {
+    let directory = TestDirectory::new();
+    let mut process_spec = spec(&directory.0, "sleep");
+    process_spec.timeout = None;
+    process_spec.max_output_bytes = None;
+    let cancel = CancellationToken::new();
+    let child = cancel.clone();
+    let task = tokio::spawn(async move { runner().run(process_spec, child).await });
+    let root = pid(&directory.0, "root.pid").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !task.is_finished(),
+        "timeout: None still enforced a lifetime deadline"
+    );
+    cancel.cancel();
+    let result = task.await.unwrap().unwrap();
+    assert_eq!(result.termination, TerminationReason::Cancelled);
+    assert_gone(root).await;
 }

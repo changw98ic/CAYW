@@ -191,28 +191,6 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     };
     let mut lines = Vec::new();
-    if session.has_unknown() {
-        append(
-            &mut lines,
-            "Effects unknown — 需要宿主核对。Sending and Fork are blocked.",
-            inner.width,
-            Color::Red,
-        );
-        for call in &session.unresolved_calls {
-            append(
-                &mut lines,
-                &format!(
-                    "  {} {} ({})",
-                    string(&call["call"], "name"),
-                    string(&call["call"], "id"),
-                    string(call, "state")
-                ),
-                inner.width,
-                Color::Yellow,
-            );
-        }
-        lines.push(Line::default());
-    }
     if session.frozen {
         let plugin_name = session
             .binding
@@ -313,9 +291,9 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 append(&mut lines, "No file records yet.", inner.width, Color::Gray);
             } else {
                 for file in &session.files {
-                    let color = if file.status == "outcome_unknown" || file.status == "failed" {
+                    let color = if file.status == "failed" {
                         Color::Red
-                    } else if file.status == "awaiting_approval" {
+                    } else if file.status == "awaiting_approval" || file.status == "interrupted" {
                         Color::Yellow
                     } else {
                         Color::Cyan
@@ -363,12 +341,12 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 append(&mut lines, "No log entries yet.", inner.width, Color::Gray);
             } else {
                 for entry in &session.logs {
-                    let color = if entry.contains("outcome_unknown")
-                        || entry.contains("failed")
-                        || entry.contains("error")
-                    {
+                    let color = if entry.contains("failed") || entry.contains("error") {
                         Color::Red
-                    } else if entry.contains("approval") || entry.contains("recovered") {
+                    } else if entry.contains("approval")
+                        || entry.contains("recovered")
+                        || entry.contains("interrupted")
+                    {
                         Color::Yellow
                     } else {
                         Color::Reset
@@ -436,7 +414,7 @@ fn draw_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
     let (max_w, max_h) = match dialog {
-        Dialog::Help | Dialog::ModelBudget { .. } => (74, 13),
+        Dialog::Help => (74, 13),
         _ => (68, 9),
     };
     let width = area.width.min(max_w);
@@ -460,19 +438,6 @@ fn draw_dialog(frame: &mut Frame<'_>, dialog: &Dialog, area: Rect) {
             "Confirm chat Fork",
             format!(
                 "The source session stays frozen.\nCreate “{label}” as a separate chat session without its workflow binding?\n\ny confirms · n / Esc back"
-            ),
-        ),
-        Dialog::ModelBudget {
-            unknown_request_count,
-            settled_tokens,
-            reserved_tokens,
-            additional_tokens,
-            token_limit,
-            ..
-        } => (
-            "Confirm model budget continuation",
-            format!(
-                "{unknown_request_count} earlier model request(s) have unknown usage.\nSettled usage is {settled_tokens} tokens. The existing {reserved_tokens} token hold and unknown cost stay unchanged.\nAdd at most {additional_tokens} tokens for this one new task?\nThe cumulative cap becomes {token_limit} tokens.\n\ny confirms · n / Esc creates no task"
             ),
         ),
         Dialog::Help => (

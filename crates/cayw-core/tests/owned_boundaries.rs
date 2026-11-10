@@ -1,8 +1,3 @@
-use cayw_agent::{AgentEvent, ToolResult};
-use cayw_ai::{
-    AssistantEvent, AssistantMessage, Content, Message, Model, SystemMessage, ToolCall,
-    ToolDefinition,
-};
 use cayw_core::*;
 use rusqlite::{Connection, params};
 use serde_json::Value;
@@ -19,13 +14,13 @@ fn lease() -> AttemptLease {
     }
 }
 #[test]
-fn invalid_envelope_id_drops_owned_deep_request_without_aborting() {
+fn invalid_envelope_id_rejects_owned_request_without_aborting() {
     const CHILD: &str = "CAYW_CORE_ENVELOPE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "invalid_envelope_id_drops_owned_deep_request_without_aborting",
+                "invalid_envelope_id_rejects_owned_request_without_aborting",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -39,7 +34,7 @@ fn invalid_envelope_id_drops_owned_deep_request_without_aborting() {
         );
         assert!(
             result.status.success(),
-            "ProtocolEnvelope::new rejection aborted while dropping owned deep CoreRequest"
+            "ProtocolEnvelope::new rejection aborted while dropping an owned request"
         );
         return;
     }
@@ -49,7 +44,7 @@ fn invalid_envelope_id_drops_owned_deep_request_without_aborting() {
             let request = CoreRequest::AppendHostEvent {
                 lease: lease(),
                 kind: "event".into(),
-                data: nested(25_000),
+                data: nested(200),
             };
             assert!(ProtocolEnvelope::new("", request).is_err());
             println!("envelope constructor rejection returned normally");
@@ -117,13 +112,13 @@ fn append_only_guards_reject_replacing_an_existing_event_key() {
 }
 
 #[test]
-fn owned_dispatch_deep_leaf_matrix_survives_on_small_stack() {
+fn accepted_deep_dispatch_value_survives_on_small_stack() {
     const CHILD: &str = "CAYW_CORE_DEEP_DISPATCH_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "owned_dispatch_deep_leaf_matrix_survives_on_small_stack",
+                "accepted_deep_dispatch_value_survives_on_small_stack",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -151,147 +146,12 @@ fn owned_dispatch_deep_leaf_matrix_survives_on_small_stack() {
             let store = SessionStore::open(&path).unwrap();
             let session = store.create_session("deep dispatch").unwrap();
             let lease = store.begin_attempt(&session.id, "worker").unwrap();
-            let before = store.snapshot(&session.id).unwrap();
-            let key = || CapabilityCallKey {
-                execution_id: "vm".into(),
-                sequence: 0,
-            };
-            for variant in 0..16 {
-                let deep = || nested(25_000);
-                let call = || ToolCall::new("invalid", "invalid", deep());
-                let result = || ToolResult {
-                    details: Some(deep()),
-                    structured_content: Some(deep()),
-                    ..ToolResult::error("untrusted")
-                };
-                let event = match variant {
-                    0 => AgentEvent::MessageStart {
-                        message: Message::System(SystemMessage {
-                            tools_added: vec![ToolDefinition {
-                                name: "tool".into(),
-                                description: String::new(),
-                                parameters: deep(),
-                            }],
-                            ..Default::default()
-                        }),
-                    },
-                    1 => AgentEvent::MessageEnd {
-                        message: Message::Custom {
-                            kind: "custom".into(),
-                            data: deep(),
-                        },
-                    },
-                    2 => AgentEvent::AgentEnd {
-                        messages: vec![Message::Custom {
-                            kind: "custom".into(),
-                            data: deep(),
-                        }],
-                    },
-                    3 => AgentEvent::ToolExecutionStart { call: call() },
-                    4 => AgentEvent::ToolExecutionUpdate {
-                        call: call(),
-                        result: result(),
-                    },
-                    5 => AgentEvent::ToolExecutionEnd {
-                        call: call(),
-                        result: result(),
-                        duration_ms: None,
-                    },
-                    6 => {
-                        let mut message = AssistantMessage::new(&Model::new("offline", "fixture"));
-                        message.content = vec![Content::ToolCall(call())];
-                        AgentEvent::MessageUpdate {
-                            message: AssistantMessage::new(&Model::new("offline", "fixture")),
-                            event: Box::new(AssistantEvent::ToolCallDelta {
-                                index: 0,
-                                delta: String::new(),
-                                partial: message,
-                            }),
-                        }
-                    }
-                    15 => {
-                        let mut message = AssistantMessage::new(&Model::new("offline", "fixture"));
-                        message.provider_metadata.insert("deep_meta".into(), deep());
-                        AgentEvent::MessageStart {
-                            message: Message::Assistant(message),
-                        }
-                    }
-                    _ => AgentEvent::AgentStart,
-                };
-                let request = match variant {
-                    0..=6 | 15 => CoreRequest::AppendAgentEvent {
-                        lease: lease.clone(),
-                        event: Box::new(event),
-                    },
-                    7 => CoreRequest::AppendHostEvent {
-                        lease: lease.clone(),
-                        kind: "event".into(),
-                        data: deep(),
-                    },
-                    8 => CoreRequest::AppendControlEvent {
-                        session_id: session.id.clone(),
-                        expected_cursor: before.cursor,
-                        expected_attempt: Some(lease.clone()),
-                        actor: "host".into(),
-                        kind: "event".into(),
-                        data: deep(),
-                    },
-                    9 => CoreRequest::RegisterExecutionWait {
-                        lease: lease.clone(),
-                        call_id: "wait".into(),
-                        execution_id: "vm".into(),
-                        task_id: "task".into(),
-                        arguments: deep(),
-                    },
-                    10 => CoreRequest::PlanCapability {
-                        lease: lease.clone(),
-                        input: CapabilityInput {
-                            key: key(),
-                            name: "cap".into(),
-                            arguments: deep(),
-                        },
-                    },
-                    11 => CoreRequest::StartCapability {
-                        lease: lease.clone(),
-                        key: key(),
-                        authorization: deep(),
-                    },
-                    12 => CoreRequest::SettleCapability {
-                        lease: lease.clone(),
-                        key: key(),
-                        outcome: CapabilityOutcome::Completed { result: deep() },
-                    },
-                    13 => CoreRequest::FinishExecution {
-                        lease: lease.clone(),
-                        execution_id: "vm".into(),
-                        outcome: ExecutionOutcome::Completed { result: deep() },
-                    },
-                    _ => CoreRequest::ReconcileCapability {
-                        session_id: session.id.clone(),
-                        reconciliation: CapabilityReconciliation {
-                            expected: Box::new(ReconciliationOrigin {
-                                lease: lease.clone(),
-                                task_id: "task".into(),
-                                execution_id: "vm".into(),
-                                parent_call_id: "parent".into(),
-                                source_hash: "source".into(),
-                            }),
-                            key: key(),
-                            actor: "host".into(),
-                            evidence: "checked".into(),
-                            outcome: CapabilityOutcome::Completed { result: deep() },
-                            external_provenance: Some(deep()),
-                        },
-                    },
-                };
-                assert!(
-                    matches!(store.dispatch(request), Err(CoreError::InvalidInput(_))),
-                    "variant {variant}"
-                );
-                assert_eq!(store.snapshot(&session.id).unwrap(), before);
-            }
             store
-                .append_agent_event(&lease, &AgentEvent::AgentStart)
+                .dispatch(CoreRequest::AppendHostEvent {
+                    lease: lease.clone(),
+                    kind: "deep".into(),
+                    data: nested(100),
+                })
                 .unwrap();
             store.events(&session.id, 0, 1000).unwrap();
             drop(store);

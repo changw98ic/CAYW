@@ -56,8 +56,8 @@ async fn waiting_approval_yields_the_only_slot_to_an_authorized_file_task() {
         RuntimeConfig {
             max_concurrent_runs: 1,
             max_queued_runs: 3,
-            max_queue_time: Duration::from_secs(10),
-            max_run_time: Duration::from_secs(20),
+            max_queue_time: Some(Duration::from_secs(10)),
+            max_run_time: Some(Duration::from_secs(20)),
             permissions: vec![ScopedPermission::exact(
                 "fs.write",
                 json!({

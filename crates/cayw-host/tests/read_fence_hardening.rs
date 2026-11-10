@@ -160,7 +160,7 @@ async fn invalid_utf8_directories_symlinks_and_oversized_files_are_never_reusabl
     let reader = host(
         &root,
         HostConfig {
-            max_file_bytes: 4,
+            max_file_bytes: Some(4),
             ..config()
         },
         false,
@@ -479,7 +479,7 @@ async fn unclassified_external_result_loss_is_unknown_and_retains_original_mutat
     let root = Root::new();
     let external = Arc::new(Unclassified(AtomicUsize::new(0)));
     let mut cfg = config();
-    cfg.max_result_bytes = 8;
+    cfg.max_result_bytes = Some(8);
     cfg.external = Some(external.clone());
     let writer = host(&root, cfg, false);
     let error = writer
@@ -517,7 +517,7 @@ async fn deadline_is_retained_while_waiting_for_original_fence() {
     let reader = host(
         &root,
         HostConfig {
-            call_timeout: Duration::from_millis(40),
+            call_timeout: Some(Duration::from_millis(40)),
             ..config()
         },
         false,

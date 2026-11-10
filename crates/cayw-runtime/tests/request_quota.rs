@@ -18,7 +18,7 @@ impl Provider for Script {
 
 fn settings(limits: RequestConfig) -> RuntimeConfig {
     RuntimeConfig {
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         request_policy: Some(RequestPolicy {
             permission_policy_id: "runtime-quota-policy".into(),
             operations: vec![OperationScope::exact(
@@ -57,8 +57,8 @@ fn setup() -> tempfile::TempDir {
 async fn finished_zero_request_tasks_release_runtime_operational_quota() {
     let temp = setup();
     let limits = RequestConfig {
-        max_tasks: 2,
-        max_state_bytes: 2 * 1024 * 1024,
+        max_tasks: Some(2),
+        max_state_bytes: Some(2 * 1024 * 1024),
         ..RequestConfig::default()
     };
     let rt = open(&temp, settings(limits));
@@ -87,8 +87,8 @@ async fn finished_zero_request_tasks_release_runtime_operational_quota() {
 async fn trusted_runtime_limit_adjustment_persists_without_clearing_audit() {
     let temp = setup();
     let limits = RequestConfig {
-        max_tasks: 2,
-        max_state_bytes: 2 * 1024 * 1024,
+        max_tasks: Some(2),
+        max_state_bytes: Some(2 * 1024 * 1024),
         ..RequestConfig::default()
     };
     let rt = open(&temp, settings(limits.clone()));
@@ -98,7 +98,7 @@ async fn trusted_runtime_limit_adjustment_persists_without_clearing_audit() {
         .await
         .unwrap();
     let adjusted = RequestConfig {
-        max_tasks: 1,
+        max_tasks: Some(1),
         ..limits.clone()
     };
     rt.request_limits_adjust(
@@ -125,7 +125,7 @@ async fn trusted_runtime_limit_adjustment_persists_without_clearing_audit() {
         adjusted
     );
     let offline = RequestConfig {
-        max_tasks: 3,
+        max_tasks: Some(3),
         ..adjusted.clone()
     };
     let applied = Runtime::adjust_request_limits(

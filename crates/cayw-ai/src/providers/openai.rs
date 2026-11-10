@@ -15,9 +15,9 @@ use thiserror::Error;
 // The supported response range is finite across the entire HTTP response, even
 // when comments, empty content or deferred tool deltas produce no output events.
 const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RESPONSE_FRAMES: usize = 8192;
-const MAX_FRAGMENTS: usize = 4096;
-const MAX_TOOL_CALLS: usize = 128;
+const MAX_RESPONSE_FRAMES: usize = 131_072;
+const MAX_FRAGMENTS: usize = 65_536;
+const MAX_TOOL_CALLS: usize = 1024;
 const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_WORK: usize = 64 * 1024 * 1024;
 const TOOL_ARGUMENT_BATCH_BYTES: usize = 256;
@@ -411,11 +411,6 @@ fn build_request(request: &ModelRequest) -> Result<Value, String> {
                 messages.push(wire);
             }
             Message::ToolResult(result) => {
-                if result.outcome_unknown {
-                    return Err(
-                        "Tool outcome is unknown; reconcile effects before another request".into(),
-                    );
-                }
                 let Some(name) = pending.remove(&result.tool_call_id) else {
                     return Err("History contains an unmatched or duplicate tool result".into());
                 };
@@ -432,6 +427,16 @@ fn build_request(request: &ModelRequest) -> Result<Value, String> {
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Some(structured) = &result.structured_content {
                     content.push(json!({"type":"text","text":structured.to_string()}));
+                }
+                if result.outcome_unknown {
+                    if let Some(Value::Object(last)) = content.last_mut() {
+                        let text = last.get("text").and_then(Value::as_str).unwrap_or_default();
+                        last["text"] = crate::interrupted_tool_text(text, true).into();
+                    } else {
+                        content.push(
+                            json!({"type":"text","text":crate::INTERRUPTED_TOOL_OUTCOME_NOTE}),
+                        );
+                    }
                 }
                 messages.push(
                     json!({"role":"tool","tool_call_id":result.tool_call_id,"content":content}),
@@ -999,7 +1004,7 @@ impl ResponseState {
         async_stream::try_stream! {
             if !self.deferred_calls.is_empty() { Err("Tool call indices are missing preceding calls")?; }
             let mut ids = BTreeSet::new();
-            // At most 128 scalar indices; no message or JSON tree snapshots.
+            // At most 1,024 scalar indices; no message or JSON tree snapshots.
             let indices = self.calls.keys().copied().collect::<Vec<_>>();
             for source_index in indices {
                 checkpoint(cancel).await?;

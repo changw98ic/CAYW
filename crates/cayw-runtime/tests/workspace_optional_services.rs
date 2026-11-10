@@ -318,6 +318,8 @@ async fn one_client_keeps_mcp_and_pi_instances_isolated_per_workspace() {
             }
         }
     });
+    // Per-workspace model selection is still the path the current Client reads;
+    // the device-wide migration is tracked separately.
     for workspace in [&first_workspace, &second_workspace] {
         let state = cayw_home
             .path()

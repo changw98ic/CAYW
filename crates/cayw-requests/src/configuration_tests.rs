@@ -80,7 +80,10 @@ fn same_store_adjustment_waits_for_the_active_task_check() {
     .unwrap();
     let actor = HostActor::new("trusted-host").unwrap();
     let identity = TaskIdentity::new("session", "task", "attempt").unwrap();
-    let config = RequestConfig::default();
+    let config = RequestConfig {
+        max_tasks: Some(2),
+        ..RequestConfig::default()
+    };
     let path = temp.path().join("requests.sqlite");
     let clock = Arc::new(PausingClock::default());
     let store = RequestStore::open_with_clock(&path, config.clone(), clock.clone()).unwrap();
@@ -89,7 +92,7 @@ fn same_store_adjustment_waits_for_the_active_task_check() {
         .start_task(&identity, TaskIntent::General, &catalog, &actor)
         .unwrap();
     let next = RequestConfig {
-        max_tasks: config.max_tasks - 1,
+        max_tasks: config.max_tasks.map(|limit| limit - 1),
         ..config
     };
     let (reached, wait_for_check) = sync_channel(0);

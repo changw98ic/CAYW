@@ -128,7 +128,7 @@ async fn plugin_calls_cannot_submit_model_claims_as_acceptance() {
                 "strongflow.ready",
                 json!({"workflow_id":"build"}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await
             .unwrap(),
@@ -141,7 +141,7 @@ async fn plugin_calls_cannot_submit_model_claims_as_acceptance() {
                 "strongflow.accept",
                 json!({"model_says_passed":true}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await,
         Err(PluginError::Denied(_))

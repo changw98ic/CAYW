@@ -208,7 +208,7 @@ fn direct_request(operation: cayw_bridge::SourceOperation, id: u64) -> cayw_brid
             target,
         },
         operation,
-        max_result_bytes: 4096,
+        max_result_bytes: Some(4096),
     }
 }
 #[tokio::test]

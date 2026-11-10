@@ -3,13 +3,13 @@ use rusqlite::{Connection, params};
 use serde_json::Value;
 
 #[test]
-fn invalid_envelope_id_drops_owned_deep_request_without_aborting() {
+fn invalid_envelope_id_rejects_owned_request_without_aborting() {
     const CHILD: &str = "CAYW_INDEPENDENT_ENVELOPE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "invalid_envelope_id_drops_owned_deep_request_without_aborting",
+                "invalid_envelope_id_rejects_owned_request_without_aborting",
                 "--nocapture",
             ])
             .env(CHILD, "1")
@@ -23,14 +23,14 @@ fn invalid_envelope_id_drops_owned_deep_request_without_aborting() {
         );
         assert!(
             result.status.success(),
-            "ProtocolEnvelope::new rejection aborted while dropping owned deep CoreRequest"
+            "ProtocolEnvelope::new rejection aborted while dropping an owned request"
         );
         return;
     }
     std::thread::Builder::new()
         .stack_size(256 * 1024)
         .spawn(|| {
-            let data = (0..25_000).fold(Value::Null, |value, _| Value::Array(vec![value]));
+            let data = (0..200).fold(Value::Null, |value, _| Value::Array(vec![value]));
             let request = CoreRequest::AppendHostEvent {
                 lease: cayw_core::AttemptLease {
                     session_id: "s".into(),

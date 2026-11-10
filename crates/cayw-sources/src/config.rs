@@ -45,9 +45,6 @@ pub fn import_mcp_servers_json(
     source_path: Option<&Path>,
     default_directory: &Path,
 ) -> Result<ImportReport, CapabilityError> {
-    if text.len() > 1024 * 1024 {
-        return Err(failure("MCP config exceeds 1 MiB bound"));
-    }
     let value: Value =
         serde_json::from_str(text).map_err(|_| failure("MCP config is not valid JSON"))?;
     import_mcp_servers_value(&value, source_path, default_directory)
@@ -76,9 +73,6 @@ pub fn import_mcp_servers_value(
         Value::Object(map) => map,
         _ => return Err(failure("MCP config root must be a JSON object")),
     };
-    if servers.len() > 128 {
-        return Err(failure("MCP config lists too many servers"));
-    }
     let mut report = ImportReport::default();
     for (name, entry) in servers {
         match parse_entry(name, entry, source_path, default_directory) {
@@ -131,28 +125,27 @@ fn parse_entry(
     }
     let arguments = match object.get("args") {
         None => Vec::new(),
-        Some(Value::Array(items)) if items.len() <= 128 => items
+        Some(Value::Array(items)) => items
             .iter()
             .map(|item| {
                 item.as_str()
-                    .filter(|text| text.len() <= 8192 && !text.contains('\0'))
+                    .filter(|text| !text.contains('\0'))
                     .map(str::to_owned)
                     .ok_or_else(|| "invalid args entry".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?,
-        _ => return Err("args must be an array of short strings".into()),
+        _ => return Err("args must be an array of strings".into()),
     };
     let environment = match object.get("env") {
         None => BTreeMap::new(),
-        Some(Value::Object(map)) if map.len() <= 128 => {
+        Some(Value::Object(map)) => {
             let mut env = BTreeMap::new();
             for (key, value) in map {
                 let value = value
                     .as_str()
-                    .filter(|text| text.len() <= 8192 && !text.contains('\0'))
-                    .ok_or_else(|| "env values must be short strings".to_string())?;
+                    .filter(|text| !text.contains('\0'))
+                    .ok_or_else(|| "env values must be strings".to_string())?;
                 if key.is_empty()
-                    || key.len() > 256
                     || key.contains(['=', '\0'])
                     || env.insert(key.clone(), value.to_owned()).is_some()
                 {
@@ -161,7 +154,7 @@ fn parse_entry(
             }
             env
         }
-        _ => return Err("env must be an object of short strings".into()),
+        _ => return Err("env must be an object of strings".into()),
     };
     let directory = match object.get("cwd").or_else(|| object.get("directory")) {
         None => default_directory.to_path_buf(),

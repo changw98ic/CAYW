@@ -37,11 +37,11 @@ fn config(root: &Path, io: cayw_host::ProcessIo) -> RuntimeConfig {
     let mut config = RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
-        max_run_time: Duration::from_secs(90),
+        max_run_time: Some(Duration::from_secs(90)),
         ..Default::default()
     };
-    config.codemode.timeout = Duration::from_secs(60);
-    config.host.call_timeout = Duration::from_secs(60);
+    config.codemode.timeout = Some(Duration::from_secs(60));
+    config.host.call_timeout = Some(Duration::from_secs(60));
     config.host.profiles.insert(
         "chain".into(),
         Profile {
@@ -53,8 +53,8 @@ fn config(root: &Path, io: cayw_host::ProcessIo) -> RuntimeConfig {
                 "0".into(),
             ],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(60),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(60)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io,
         },
@@ -208,7 +208,7 @@ async fn authenticated_ipc_cancel_stops_and_records_every_chain_generation_in_bo
         let address = listener.local_addr().unwrap();
         let stop = CancellationToken::new();
         let mut server_config = ServerConfig::new(TOKEN);
-        server_config.request_timeout = Duration::from_secs(90);
+        server_config.request_timeout = Some(Duration::from_secs(90));
         let server = tokio::spawn(serve(
             listener,
             Arc::new(rt.clone()),

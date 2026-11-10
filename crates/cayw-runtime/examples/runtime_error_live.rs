@@ -115,7 +115,7 @@ impl Access {
         let address = listener.local_addr()?;
         let token = format!("live-probe-{}", uuid::Uuid::new_v4());
         let mut config = ServerConfig::new(token.clone());
-        config.request_timeout = Duration::from_secs(240);
+        config.request_timeout = Some(Duration::from_secs(240));
         let handler = Arc::new(runtime.clone());
         let shutdown = stop.clone();
         let server = tokio::spawn(cayw_ipc::serve(listener, handler, config, shutdown));
@@ -123,7 +123,7 @@ impl Access {
             address,
             token,
             ClientConfig {
-                request_timeout: Duration::from_secs(240),
+                request_timeout: Some(Duration::from_secs(240)),
                 ..ClientConfig::default()
             },
         )
@@ -222,7 +222,7 @@ fn assert_assistant_reply(view: &Value, expected: &str) {
 
 fn completed_ledger(runtime: &Runtime, session: &str) -> Result<Value> {
     let ledger = runtime.model_requests(session)?;
-    assert!(!ledger.budget_unknown);
+    assert!(!ledger.usage_unknown);
     assert_eq!(ledger.reserved_tokens, 0);
     assert_eq!(ledger.requests.len(), 1);
     let request = &ledger.requests[0];

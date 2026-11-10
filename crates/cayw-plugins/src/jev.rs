@@ -126,7 +126,7 @@ impl JevEvaluator for PluginJevEvaluator {
                 serde_json::to_value(input)
                     .map_err(|error| PluginError::InvalidArguments(error.to_string()))?,
                 cancel,
-                self.timeout,
+                Some(self.timeout),
             )
             .await?;
         serde_json::from_value(value).map_err(|error| PluginError::Protocol(error.to_string()))

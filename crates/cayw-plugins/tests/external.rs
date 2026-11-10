@@ -119,7 +119,7 @@ async fn terminal_external_call_freezes_the_original_binding() {
                 "strongflow.describe",
                 json!({"workflow_id":"fixture"}),
                 CancellationToken::new(),
-                Duration::from_secs(20),
+                Some(Duration::from_secs(20)),
             ),
         )
         .await
@@ -444,7 +444,7 @@ async fn actual_process_handshake_and_multiple_paired_requests() {
                     "fixture.echo",
                     json!({"n":n}),
                     CancellationToken::new(),
-                    Duration::from_secs(3)
+                    Some(Duration::from_secs(3))
                 )
                 .await
                 .unwrap(),
@@ -463,7 +463,7 @@ async fn external_data_cannot_approve_or_expand_grants() {
                 "fixture.echo",
                 json!({"approved":true,"capabilities":["danger"]}),
                 CancellationToken::new(),
-                Duration::from_secs(3)
+                Some(Duration::from_secs(3))
             )
             .await
             .unwrap()["approved"],
@@ -476,7 +476,7 @@ async fn external_data_cannot_approve_or_expand_grants() {
                 "danger",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await,
         Err(PluginError::Denied(_))
@@ -497,7 +497,7 @@ async fn external_data_cannot_approve_or_expand_grants() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await,
         Err(PluginError::Denied(_))
@@ -508,20 +508,17 @@ async fn external_data_cannot_approve_or_expand_grants() {
 async fn handshake_mismatch_and_manifest_escalation_are_rejected() {
     for mode in ["version", "capabilities", "handshake_large"] {
         let registry = PluginRegistry::new();
-        let result = registry
+        let error = registry
             .load_external(config(mode), context(), CancellationToken::new())
-            .await;
-        if mode == "handshake_large" {
-            assert!(
-                result.as_ref().unwrap_err().outcome_unknown(),
-                "{mode}: {result:?}"
-            );
-        } else {
-            assert!(
-                matches!(result, Err(PluginError::Protocol(_))),
-                "{mode}: {result:?}"
-            );
-        }
+            .await
+            .unwrap_err();
+        // Terminate + wait confirmed the process exited, so this is a known
+        // start failure the host may retry, not an outcome-unknown state.
+        assert!(
+            matches!(error, PluginError::Unavailable(_)),
+            "{mode}: {error:?}"
+        );
+        assert!(!error.outcome_unknown(), "{mode}: {error:?}");
         assert!(registry.list().is_empty());
     }
 }
@@ -531,20 +528,20 @@ async fn handshake_timeout_and_cancel_do_not_load_plugin() {
     let registry = PluginRegistry::new();
     let mut configuration = config("handshake_hang");
     configuration.handshake_timeout = Duration::from_millis(200);
-    assert!(matches!(
-        registry
-            .load_external(configuration, context(), CancellationToken::new())
-            .await,
-        Err(PluginError::Timeout)
-    ));
+    let error = registry
+        .load_external(configuration, context(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PluginError::Unavailable(_)), "{error:?}");
+    assert!(!error.outcome_unknown(), "{error:?}");
     let cancel = CancellationToken::new();
     cancel.cancel();
-    assert!(matches!(
-        registry
-            .load_external(config("echo"), context(), cancel)
-            .await,
-        Err(PluginError::Cancelled)
-    ));
+    let error = registry
+        .load_external(config("echo"), context(), cancel)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PluginError::Unavailable(_)), "{error:?}");
+    assert!(!error.outcome_unknown(), "{error:?}");
     let mut invalid = config("echo");
     invalid.shutdown_timeout = Duration::ZERO;
     assert!(matches!(
@@ -557,6 +554,25 @@ async fn handshake_timeout_and_cancel_do_not_load_plugin() {
 }
 
 #[tokio::test]
+async fn confirmed_handshake_failure_is_known_and_retryable() {
+    for _ in 0..2 {
+        let registry = PluginRegistry::new();
+        let mut configuration = config("handshake_hang");
+        configuration.handshake_timeout = Duration::from_millis(200);
+        let error = registry
+            .load_external(configuration, context(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PluginError::Unavailable(_)), "{error:?}");
+        assert!(!error.outcome_unknown(), "{error:?}");
+        assert!(registry.list().is_empty());
+    }
+    // A retry after a confirmed failure is not permanently blocked.
+    let registry = load("echo").await;
+    assert_eq!(registry.list().len(), 1);
+}
+
+#[tokio::test]
 async fn wrong_request_id_crash_oversize_and_forged_envelope_are_terminal() {
     for mode in ["wrong_id", "crash", "oversize", "approval", "unknown"] {
         let registry = load(mode).await;
@@ -566,7 +582,7 @@ async fn wrong_request_id_crash_oversize_and_forged_envelope_are_terminal() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(3),
+                Some(Duration::from_secs(3)),
             )
             .await
             .unwrap_err();
@@ -577,7 +593,7 @@ async fn wrong_request_id_crash_oversize_and_forged_envelope_are_terminal() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(3),
+                Some(Duration::from_secs(3)),
             )
             .await;
         assert!(
@@ -597,7 +613,7 @@ async fn external_known_failure_is_retained_and_process_can_continue() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(3),
+                Some(Duration::from_secs(3)),
             )
             .await
             .unwrap_err();
@@ -622,7 +638,7 @@ async fn stderr_and_lifetime_stdout_budgets_are_enforced() {
             "fixture.echo",
             json!({}),
             CancellationToken::new(),
-            Duration::from_secs(3),
+            Some(Duration::from_secs(3)),
         )
         .await
         .unwrap_err();
@@ -643,7 +659,7 @@ async fn stderr_and_lifetime_stdout_budgets_are_enforced() {
                 "fixture.echo",
                 json!({"value":"x".repeat(500)}),
                 CancellationToken::new(),
-                Duration::from_secs(3),
+                Some(Duration::from_secs(3)),
             )
             .await;
         if result.is_err() {
@@ -670,7 +686,7 @@ async fn own_process_timeout_is_terminal() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(3)
+                Some(Duration::from_secs(3))
             )
             .await,
         Err(PluginError::Timeout)
@@ -682,7 +698,7 @@ async fn own_process_timeout_is_terminal() {
                 "fixture.echo",
                 json!({}),
                 CancellationToken::new(),
-                Duration::from_secs(1)
+                Some(Duration::from_secs(1))
             )
             .await,
         Err(PluginError::Unavailable(_))
@@ -730,9 +746,9 @@ async fn cancellation_unload_and_drop_kill_actual_running_process() {
                         json!({"started":started}),
                         cancel,
                         if action == "registry_timeout" {
-                            Duration::from_millis(500)
+                            Some(Duration::from_millis(500))
                         } else {
-                            Duration::from_secs(20)
+                            Some(Duration::from_secs(20))
                         },
                     )
                     .await
@@ -757,7 +773,7 @@ async fn cancellation_unload_and_drop_kill_actual_running_process() {
                             "fixture.echo",
                             json!({}),
                             CancellationToken::new(),
-                            Duration::from_secs(1),
+                            Some(Duration::from_secs(1),)
                         )
                         .await,
                     Err(PluginError::NotFound(_))
@@ -804,7 +820,7 @@ async fn unix_unload_kills_process_group_including_descendant() {
             "fixture.echo",
             json!({}),
             CancellationToken::new(),
-            Duration::from_secs(3),
+            Some(Duration::from_secs(3)),
         )
         .await
         .unwrap();

@@ -108,14 +108,14 @@ fn config(mode: &str) -> RuntimeConfig {
     RuntimeConfig {
         max_concurrent_runs: 1,
         max_queued_runs: 1,
-        max_run_time: Duration::from_secs(45),
+        max_run_time: Some(Duration::from_secs(45)),
         codemode: cayw_codemode::Limits {
-            timeout: Duration::from_secs(30),
+            timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         },
         host: cayw_host::HostConfig {
-            call_timeout: Duration::from_secs(30),
-            process_timeout: Duration::from_secs(20),
+            call_timeout: Some(Duration::from_secs(30)),
+            process_timeout: Some(Duration::from_secs(20)),
             profiles: BTreeMap::from([(
                 "project-test".into(),
                 Profile {
@@ -123,8 +123,8 @@ fn config(mode: &str) -> RuntimeConfig {
                     program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
                     args: vec!["project".into(), mode.into()],
                     env: BTreeMap::from([("CAYW_REQUEST_PROJECT".into(), "exact-project".into())]),
-                    timeout: Duration::from_secs(20),
-                    max_output_bytes: 16 * 1024,
+                    timeout: Some(Duration::from_secs(20)),
+                    max_output_bytes: Some(16 * 1024),
                     allow_filter: false,
                     io: ProcessIo::Pipes,
                 },
@@ -567,7 +567,7 @@ async fn revoking_a_running_project_stops_its_original_process_and_preserves_eff
     );
     let view = finished(worker).await.unwrap();
     stopped(&original).await;
-    assert_eq!(view.state, SessionState::NeedsReconciliation);
+    assert_eq!(view.state, SessionState::Idle);
     let call = unknown(&rt, &session);
     assert_eq!(call.task_id, task.id);
     assert_eq!(call.lease.attempt_id, record.identity.attempt_id);
@@ -583,10 +583,10 @@ async fn revoking_a_running_project_stops_its_original_process_and_preserves_eff
         cayw_requests::TaskState::Ended { .. }
     ));
     assert_eq!(rt.health().unwrap().running, 0);
-    assert!(
-        rt.enqueue(&session, "do not replay the cancelled project")
-            .is_err()
-    );
+    let admitted = rt
+        .enqueue(&session, "do not replay the cancelled project")
+        .unwrap();
+    rt.cancel(&admitted.cancel_target()).unwrap();
     snapshot(&project, &rt, &task, &record, "revoked-running-settled");
     drop(rt);
     let (reopened, _) = open(
@@ -597,14 +597,15 @@ async fn revoking_a_running_project_stops_its_original_process_and_preserves_eff
     );
     assert_eq!(
         reopened.recover(&session).unwrap().state,
-        SessionState::NeedsReconciliation
+        SessionState::Idle
     );
     assert!(
         reopened
             .request_evaluate(&task.id, &record.id, "late-host")
             .is_err()
     );
-    assert!(reopened.enqueue(&session, "replay is forbidden").is_err());
+    let admitted = reopened.enqueue(&session, "replay is forbidden").unwrap();
+    reopened.cancel(&admitted.cancel_target()).unwrap();
     assert_eq!(unknown(&reopened, &session), call);
     assert_eq!(project.effects(), "project test effect\n");
     snapshot(
@@ -659,10 +660,7 @@ async fn authenticated_revoke_stops_the_already_started_original_project_process
     assert_eq!(revoked.identity, record.identity);
     assert_eq!(revoked.state, RequestState::Revoked);
     assert_eq!(revoked.decision.as_ref().unwrap().actor, "rpc-user");
-    assert_eq!(
-        finished(worker).await.unwrap().state,
-        SessionState::NeedsReconciliation
-    );
+    assert_eq!(finished(worker).await.unwrap().state, SessionState::Idle);
     stopped(&original).await;
     let call = unknown(&rt, &session);
     assert_eq!(call.key, started[0].key);
@@ -684,20 +682,18 @@ async fn authenticated_revoke_stops_the_already_started_original_project_process
         rt.request_task_state(&task.id).unwrap(),
         cayw_requests::TaskState::Ended { .. }
     ));
-    let retry = client
+    client
         .request(
             "task.enqueue",
             json!({"session_id":session,"text":"do not replay the revoked process"}),
         )
         .await
-        .unwrap_err();
-    assert_eq!(retry.code, "needs_reconciliation_outcome_unknown");
-    assert!(retry.outcome_unknown);
+        .expect("follow-up enqueue must be admitted by the canonical contract");
     let recovered = client
         .request("session.recover", json!({"session_id":session}))
         .await
         .unwrap();
-    assert_eq!(recovered["state"], "needs_reconciliation");
+    assert_eq!(recovered["state"], "idle");
     assert_eq!(unknown(&rt, &session), call);
     assert_eq!(project.effects(), "project test effect\n");
     snapshot(
@@ -831,7 +827,7 @@ async fn revoked_project_keeps_its_slot_until_cleanup_is_recorded_and_recovery_r
         "cleanup-recorded-before-recovery",
     );
     let recovered = rt.recover(&session).unwrap();
-    assert_eq!(recovered.state, SessionState::NeedsReconciliation);
+    assert_eq!(recovered.state, SessionState::Idle);
     assert_eq!(rt.health().unwrap().running, 0);
     unknown(&rt, &session);
     assert!(matches!(
@@ -839,10 +835,10 @@ async fn revoked_project_keeps_its_slot_until_cleanup_is_recorded_and_recovery_r
         cayw_requests::TaskState::Ended { .. }
     ));
     assert_eq!(project.effects(), "project test effect\n");
-    assert!(
-        rt.enqueue(&session, "do not replay the original effect")
-            .is_err()
-    );
+    let admitted = rt
+        .enqueue(&session, "do not replay the original effect")
+        .unwrap();
+    rt.cancel(&admitted.cancel_target()).unwrap();
     snapshot(
         &project,
         &rt,
@@ -855,8 +851,8 @@ async fn revoked_project_keeps_its_slot_until_cleanup_is_recorded_and_recovery_r
 // Removing one selected time clamp cannot pass via a later fallback: the case
 // must settle before that fallback, with an actual started PID and no completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn requested_project_keeps_profile_host_process_and_call_time_limits() {
-    for boundary in ["profile", "process", "call"] {
+async fn requested_project_keeps_profile_and_call_time_limits() {
+    for boundary in ["profile", "call"] {
         let project = Project::new(&format!("project-time-{boundary}"));
         let mut settings = config("wait");
         match boundary {
@@ -866,10 +862,9 @@ async fn requested_project_keeps_profile_host_process_and_call_time_limits() {
                     .profiles
                     .get_mut("project-test")
                     .unwrap()
-                    .timeout = Duration::from_secs(3)
+                    .timeout = Some(Duration::from_secs(3))
             }
-            "process" => settings.host.process_timeout = Duration::from_secs(3),
-            "call" => settings.host.call_timeout = Duration::from_secs(3),
+            "call" => settings.host.call_timeout = Some(Duration::from_secs(3)),
             _ => unreachable!(),
         }
         let resume = Arc::new(Semaphore::new(0));
@@ -885,7 +880,7 @@ async fn requested_project_keeps_profile_host_process_and_call_time_limits() {
         let original = running(&project).await;
         assert_identity(&project, &original, "running-before-time-limit");
         let view = time_limited(&project, &original, worker).await;
-        assert_eq!(view.state, SessionState::NeedsReconciliation);
+        assert_eq!(view.state, SessionState::Idle);
         let call = unknown(&rt, &session);
         recorded_process(&project, &original, &call);
         assert!(
@@ -913,9 +908,9 @@ async fn requested_project_keeps_profile_and_host_combined_output_limits() {
                     .profiles
                     .get_mut("project-test")
                     .unwrap()
-                    .max_output_bytes = 1024
+                    .max_output_bytes = Some(1024)
             }
-            "host" => settings.host.max_process_output_bytes = 1024,
+            "host" => settings.host.max_process_output_bytes = Some(1024),
             _ => unreachable!(),
         }
         let resume = Arc::new(Semaphore::new(0));
@@ -933,7 +928,7 @@ async fn requested_project_keeps_profile_and_host_combined_output_limits() {
         fs::write(project.workspace().join("output-release"), "emit now").unwrap();
         let view = finished(worker).await.unwrap();
         stopped(&original).await;
-        assert_eq!(view.state, SessionState::NeedsReconciliation);
+        assert_eq!(view.state, SessionState::Idle);
         let call = unknown(&rt, &session);
         recorded_process(&project, &original, &call);
         assert!(
@@ -953,7 +948,7 @@ async fn requested_project_keeps_profile_and_host_combined_output_limits() {
 async fn project_request_and_execution_share_the_existing_host_call_budget() {
     let project = Project::new("project-call-budget");
     let mut settings = config("complete");
-    settings.host.max_calls = 2;
+    settings.host.max_calls = Some(2);
     let resume = Arc::new(Semaphore::new(0));
     let (rt, provider) = open(
         &project,

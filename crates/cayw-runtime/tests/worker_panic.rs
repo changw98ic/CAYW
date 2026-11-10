@@ -96,7 +96,11 @@ async fn worker_panic_keeps_its_safe_reason_and_unknown_state() {
         assert!(stored.holds_slot);
         assert_eq!(stored.error.as_deref(), Some(message.as_str()));
         assert_eq!(rt.health().unwrap().running, 1);
-        assert!(rt.enqueue(&session, "do not replay worker panic").is_err());
+        assert!(
+            rt.enqueue(&session, "record a follow-up without replaying the panic")
+                .is_ok(),
+            "an unknown worker outcome must never freeze the session"
+        );
     }
     assert_eq!(panics.load(Ordering::SeqCst), 3);
 }

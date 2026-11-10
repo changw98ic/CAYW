@@ -581,7 +581,7 @@ test('workbench_dom: usage panel displays session.context_overview tokens, cache
     ledger_settled_tokens: 3000,
     ledger_reserved_tokens: 500,
     ledger_remaining_tokens: 46500,
-    budget_unknown: false,
+    usage_unknown: false,
     cost: { status: 'unknown' },
     cache: { cache_read: 500, cache_write: 200, hit_rate: 0.714 },
     composition: [
@@ -664,7 +664,7 @@ test('workbench_dom: usage panel displays session.context_overview tokens, cache
   assert.ok(text.includes('Tokens 总量: 3500 (输入: 2000, 输出: 1000, 推理: 300)'), 'total tokens card rendered without distortion');
   assert.ok(text.includes('71.4%'), 'cache hit rate rendered');
   assert.ok(text.includes('缓存读取: 500, 缓存写入: 200'), 'cache read and write rendered');
-  assert.ok(text.includes('账本结算: 3000, 预留: 500, 剩余: 46500'), 'ledger tokens rendered');
+  assert.ok(text.includes('账本结算: 3000, 预留: 500, 未知计费: 0, 剩余: 46500'), 'ledger tokens rendered');
   assert.ok(text.includes('费用结算状态: unknown'), 'unpriced usage stays unknown');
   assert.ok(text.includes('请求次数: 5, 对话轮次: 2'), 'request count and turn count rendered');
   assert.ok(text.includes('Token 构成分析'), 'composition breakdown rendered');
@@ -680,7 +680,7 @@ test('workbench_dom: usage panel displays session.context_overview tokens, cache
   assert.ok(emptyText.includes('Tokens 总量: 0 (输入: 0, 输出: 0, 推理: 0)'), 'empty stats render zero tokens');
   assert.ok(emptyText.includes('命中率: 0.0%'), 'empty cache renders 0.0% hit rate');
   assert.ok(emptyText.includes('费用结算状态: unknown'), 'empty cost renders unknown');
-  assert.ok(emptyText.includes('账本结算: 0, 预留: 0, 剩余: 0'), 'empty ledger renders zero amounts');
+  assert.ok(emptyText.includes('账本结算: 0, 预留: 0, 未知计费: 0, 剩余: 不限'), 'a missing limit renders as unlimited, never zero');
 });
 
 test('workbench_dom: tasks panel displays plan, queue, and subagent fleet with stop and steer controls', async t => {
@@ -1117,10 +1117,17 @@ test('workbench_dom: session switching drops delayed usage and artifacts respons
   assert.ok(!sidebar.textContent.includes('产物仅归属于 s1'), 'delayed s1 artifact did not overwrite s2 view');
 });
 
-test('workbench_dom: needs_reconciliation_outcome_unknown is classified as admission fault and does not disguise as uncertain write', async t => {
+test('workbench_dom: interrupted tool history is presented cleanly and never locks the next prompt', async t => {
+  const interrupted = {
+    role: 'toolResult',
+    tool_name: 'execute_code',
+    content: [],
+    is_error: true,
+    outcome_unknown: true,
+    structured_content: { status: 'outcome_unknown', outputs: [] },
+  };
+  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [interrupted], attempt: null, pending_approvals: [], unresolved_calls: [{ call: { id: 'call-1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] };
   let enqueueAttempted = false;
-  let enqueueParams = null;
-  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [], attempt: null, pending_approvals: [], unresolved_calls: [] };
 
   const app = await setupApp(t, async (method, params, url) => {
     if (url === '/api/panels') {
@@ -1132,39 +1139,22 @@ test('workbench_dom: needs_reconciliation_outcome_unknown is classified as admis
     if (method === 'session.events') return [];
     if (method === 'task.enqueue') {
       enqueueAttempted = true;
-      enqueueParams = params;
-      // Real Runtime RPC response for RuntimeError::NeedsReconciliation
-      return {
-        status: 502,
-        error: {
-          code: 'needs_reconciliation_outcome_unknown',
-          message: 'session requires reconciliation before executing prompts',
-          outcome_unknown: true,
-        }
-      };
+      return { id: 'next-task', session_id: 's1', state: 'queued' };
     }
+    if (method === 'task.resume') return { ...current, cursor: 11 };
     return {};
   });
 
   await app.waitTick();
-  // App is connected and s1 is loaded
-  // Submit a prompt to s1
-  app.ui.prompt.value = '新任务';
+  assert.equal(app.ui['session-state'].textContent, '就绪', 'an interrupted tool leaves the session ready');
+  assert.equal(app.ui['blocked-notice'].hidden, true, 'no reconciliation notice is shown');
+  assert.ok(app.ui.messages.textContent.includes('已中断'), 'interrupted tool result is presented as interrupted');
+  assert.ok(!app.ui.messages.textContent.includes('待核对') && !app.ui.messages.textContent.includes('宿主核对'), 'no host reconciliation demand');
+  assert.equal(app.ui.prompt.disabled, false);
+
+  app.ui.prompt.value = '继续下一个任务';
   await app.ui.prompt.dispatch('input');
   await app.ui['prompt-form'].dispatch('submit');
   await app.waitTick(200);
-
-  assert.ok(enqueueAttempted, 'task.enqueue admission check was attempted');
-  assert.equal(enqueueParams?.session_id, 's1', 'task.enqueue targeted to session s1');
-  assert.equal(enqueueParams?.text, '新任务', 'task.enqueue passed prompt text');
-  // Global error should show clear reconciliation message, not connection lost
-  assert.ok(app.ui['global-error'].textContent.includes('工具副作用尚未核对'), 'global error displays reconciliation failure');
-  assert.ok(!app.ui['global-error'].textContent.includes('连接中断或请求结果待确认'), 'must not disguise admission rejection as connection lost');
-
-  // Blocked notice on conversation should be displayed
-  assert.equal(app.ui['blocked-notice'].hidden, false, 'blocked notice displayed');
-  assert.ok(app.ui['blocked-text'].textContent.includes('尚未核对'), 'blocked text displays reconciliation obligation');
-  // Prompt form must NOT say "连接中断，请求回执待确认"
-  assert.ok(!app.ui['prompt-status'].textContent.includes('请求回执待确认'), 'write must be rejected, not trapped in uncertain write lock');
-  assert.ok(!app.ui['prompt-status'].textContent.includes('发送和 Fork 已暂停'), 'write notice not triggered by rejected prompt');
+  assert.ok(enqueueAttempted, 'the next prompt is admitted immediately');
 });

@@ -37,8 +37,6 @@ pub enum RequestTerminal {
     Dropped,
     MissingTerminal,
     RecordingFailed,
-    InvalidUsage,
-    BudgetExceeded,
     Rejected,
 }
 
@@ -78,11 +76,16 @@ pub struct SessionLedgerSnapshot {
     pub parent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    pub token_limit: u64,
+    /// Current trusted host limit. `None` means unlimited.
+    pub token_limit: Option<u64>,
     pub settled_tokens: u64,
     pub reserved_tokens: u64,
-    pub remaining_tokens: u64,
-    pub budget_unknown: bool,
+    /// Reservations already charged once for requests whose usage is unknown.
+    pub charged_unknown_tokens: u64,
+    /// `None` means unlimited, never zero.
+    pub remaining_tokens: Option<u64>,
+    /// Some non-rejected request lacks exact usage. Informational only.
+    pub usage_unknown: bool,
     pub cost_status: CostStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_amount: Option<String>,

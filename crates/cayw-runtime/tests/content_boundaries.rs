@@ -1115,8 +1115,7 @@ async fn authenticated_ipc_inspection_validates_owner_shape_permissions_and_reco
 }
 
 #[tokio::test]
-async fn oversized_external_content_returns_an_explicit_ipc_frame_error_without_losing_the_connection()
- {
+async fn large_external_content_streams_over_ipc_without_losing_the_connection() {
     let write = put("notes", "seed");
     let h = Harness::new(Limits::default(), &[("content.put", write.clone())]);
     let s = h.rt.create(None).unwrap().id;
@@ -1128,7 +1127,9 @@ async fn oversized_external_content_returns_an_explicit_ipc_frame_error_without_
         Limits::default(),
     )
     .unwrap();
-    let text = "x".repeat(1024 * 1024 + 1);
+    // The default IPC frame is 8 MiB, so the stored text must exceed it once
+    // encoded as a JSON response.
+    let text = "x".repeat(9 * 1024 * 1024);
     let record = store
         .try_put(
             &first.record.name,
@@ -1146,7 +1147,7 @@ async fn oversized_external_content_returns_an_explicit_ipc_frame_error_without_
     assert_eq!(inspected.text, text);
     assert_eq!(inspected.record, record);
     let sdk_bytes = serde_json::to_vec(&inspected).unwrap().len();
-    assert!(sdk_bytes > 1024 * 1024);
+    assert!(sdk_bytes > 8 * 1024 * 1024);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let stop = CancellationToken::new();
@@ -1159,23 +1160,22 @@ async fn oversized_external_content_returns_an_explicit_ipc_frame_error_without_
     let client = Client::connect(address, "large-content-token")
         .await
         .unwrap();
-    let error = tokio::time::timeout(
+    let over_ipc = tokio::time::timeout(
         Duration::from_secs(20),
         client.request("content.inspect", json!({"session_id":s,"name":"notes"})),
     )
     .await
     .unwrap()
-    .unwrap_err();
+    .unwrap();
+    assert_eq!(over_ipc["text"].as_str().unwrap().len(), text.len());
     let healthy = client.request("runtime.health", json!({})).await.unwrap();
     client.close().await;
     stop.cancel();
     server.await.unwrap().unwrap();
     println!(
         "CAYW_CONTENT_LARGE_INSPECTION {}",
-        json!({"stored_text_bytes":text.len(),"sdk_value_bytes":sdk_bytes,"ipc_error":error,"connection_status":healthy["status"]})
+        json!({"stored_text_bytes":text.len(),"sdk_value_bytes":sdk_bytes,"connection_status":healthy["status"]})
     );
-    assert_eq!(error.code, "response_too_large_outcome_unknown");
-    assert!(error.outcome_unknown);
     assert_eq!(healthy["status"], "ok");
     assert_eq!(h.authority(), authority);
     assert_eq!(h.rt.get(&s).unwrap().cursor, cursor);
@@ -1283,4 +1283,78 @@ async fn external_process_content_lock_wait_is_cancellable_without_detaching_a_w
     assert!(worker.0.wait().unwrap().success());
     assert!(h.rt.content_inspect(&s, None, "notes").unwrap().is_none());
     assert_eq!(h.authority(), authority);
+}
+
+#[test]
+fn content_quota_below_content_size_is_clamped_not_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("workspace")).unwrap();
+    let provider = Arc::new(Script::default());
+    let cfg = config(
+        &root,
+        Limits {
+            max_content_bytes: 4096,
+            max_total_bytes: 8,
+            ..Limits::default()
+        },
+        &[],
+    );
+    let runtime = open(&root, provider.clone(), cfg.clone()).expect("order is clamped");
+    drop(runtime);
+    // The normalized values are stable, so the durable binding is unchanged
+    // across a reopen with the same configuration.
+    let runtime = open(&root, provider, cfg).expect("normalized binding is stable");
+    drop(runtime);
+
+    // A genuinely invalid value is still a clear configuration error.
+    let invalid = config(
+        &root,
+        Limits {
+            max_content_bytes: 0,
+            ..Limits::default()
+        },
+        &[],
+    );
+    let error = open(&root, Arc::new(Script::default()), invalid)
+        .err()
+        .expect("zero content size must be rejected");
+    assert!(
+        error.to_string().to_lowercase().contains("limit"),
+        "{error}"
+    );
+}
+
+#[test]
+fn headless_config_still_rejects_hard_invalid_optional_values() {
+    // Order-only values are accepted and normalized later.
+    headless(json!({"web_access":{"search":"fixture","limits":{
+        "default_search_limit":21,"max_search_limit":20,
+        "max_body_bytes":1024,"max_extract_chars":10
+    }}}))
+    .expect("default above max is normalized, not rejected");
+    headless(json!({"content":{
+        "directory":"/tmp/cayw-optional-content","device_id":"boundary-device",
+        "limits":{"max_content_bytes":1024,"max_total_bytes":8,"max_records":1,"max_security_entries":1}
+    }}))
+    .expect("total below content size is normalized, not rejected");
+
+    // Hard-invalid values are still clear configuration errors.
+    for value in [
+        json!({"web_access":{"search":"fixture","limits":{
+            "default_search_limit":1,"max_search_limit":0,
+            "max_body_bytes":1024,"max_extract_chars":10
+        }}}),
+        json!({"vision":{"input_bytes":0,"output_bytes":1,"max_image_bytes":1}}),
+        json!({"background":{"max_tasks":0,"max_log_bytes":4096,"max_retained_finished":1}}),
+        json!({"content":{
+            "directory":"/tmp/cayw-optional-content","device_id":"boundary-device",
+            "limits":{"max_content_bytes":0,"max_total_bytes":8,"max_records":1,"max_security_entries":1}
+        }}),
+    ] {
+        assert!(
+            headless(value.clone()).is_err(),
+            "accepted hard-invalid configuration: {value}"
+        );
+    }
 }

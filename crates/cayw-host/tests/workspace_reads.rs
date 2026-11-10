@@ -277,7 +277,7 @@ async fn scoped_reads_share_host_call_budget_and_cannot_expand_the_catalog() {
         &root,
         true,
         HostConfig {
-            max_calls: 1,
+            max_calls: Some(1),
             ..Default::default()
         },
     );
@@ -341,7 +341,7 @@ async fn read_result_limits_settle_known_failure_and_preserve_next_call() {
         &root,
         true,
         HostConfig {
-            max_result_bytes: 128,
+            max_result_bytes: Some(128),
             ..Default::default()
         },
     );

@@ -181,7 +181,7 @@ impl Example {
         let config = RuntimeConfig {
             bridge: Some(consumer),
             permissions,
-            max_run_time: Duration::from_secs(30),
+            max_run_time: Some(Duration::from_secs(30)),
             ..Default::default()
         };
         write_json(
@@ -192,13 +192,13 @@ impl Example {
                 "skill_path": workspace.join("addition.md"),
                 "skill_content_sha256": cayw_bridge::content_sha256(SKILL_BODY),
                 "permissions": config.permissions, "bindings": pins,
-                "runtime": {"max_run_time_ms": config.max_run_time.as_millis(),
+                "runtime": {"max_run_time_ms": config.max_run_time.map(|time| time.as_millis()),
                     "max_capability_calls": config.max_capability_calls,
                     "max_capability_bytes": config.max_capability_bytes,
                     "max_turns": config.max_turns, "max_total_tokens": config.max_total_tokens},
                 "host": {"max_calls": config.host.max_calls, "max_argument_bytes": config.host.max_argument_bytes,
                     "max_result_bytes": config.host.max_result_bytes, "max_total_bytes": config.host.max_total_bytes,
-                    "call_timeout_ms": config.host.call_timeout.as_millis()},
+                    "call_timeout_ms": config.host.call_timeout.map(|time| time.as_millis())},
                 "stdio": {"configuration": "StdioConfig::new defaults", "explicit_environment": {}},
                 "registry": "Limits::default", "real_model": false
             }),

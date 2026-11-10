@@ -53,12 +53,12 @@ impl StdioConfig {
             directory: directory.as_ref().into(),
             arguments: Vec::new(),
             environment: BTreeMap::new(),
-            max_frame_bytes: 512 * 1024,
-            max_pending: 8,
+            max_frame_bytes: 64 * 1024 * 1024,
+            max_pending: 64,
             max_observations: 256,
-            max_received_frames: 4096,
-            max_stderr_bytes: 16 * 1024,
-            request_timeout: Duration::from_secs(30),
+            max_received_frames: usize::MAX,
+            max_stderr_bytes: 256 * 1024,
+            request_timeout: Duration::from_secs(3600),
             cleanup_timeout: Duration::from_secs(5),
         }
     }
@@ -67,27 +67,15 @@ impl StdioConfig {
             || !self.directory.is_absolute()
             || !self.directory.is_dir()
             || !self.program.is_file()
-            || !(256..=4 * 1024 * 1024).contains(&self.max_frame_bytes)
-            || !(1..=128).contains(&self.max_pending)
-            || !(1..=4096).contains(&self.max_observations)
-            || !(1..=1_000_000).contains(&self.max_received_frames)
-            || self.max_stderr_bytes > 256 * 1024
+            || !(256..=256 * 1024 * 1024).contains(&self.max_frame_bytes)
+            || self.max_pending == 0
+            || self.max_observations == 0
+            || self.max_received_frames == 0
             || self.request_timeout.is_zero()
-            || self.request_timeout > Duration::from_secs(300)
             || self.cleanup_timeout.is_zero()
-            || self.cleanup_timeout > Duration::from_secs(30)
-            || self.arguments.len() > 128
-            || self.environment.len() > 128
-            || self
-                .arguments
-                .iter()
-                .any(|arg| arg.len() > 8192 || arg.contains('\0'))
+            || self.arguments.iter().any(|arg| arg.contains('\0'))
             || self.environment.iter().any(|(key, value)| {
-                key.is_empty()
-                    || key.len() > 256
-                    || key.contains(['=', '\0'])
-                    || value.len() > 8192
-                    || value.contains('\0')
+                key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
             })
         {
             return Err(failure(
@@ -378,8 +366,7 @@ impl StdioSource {
             }
             let tools = tools["tools"]
                 .as_array()
-                .filter(|tools| tools.len() <= 128)
-                .ok_or_else(|| failure("stdio tools catalog missing or too large"))?
+                .ok_or_else(|| failure("stdio tools catalog missing"))?
                 .iter()
                 .map(|tool| {
                     Ok(ToolSpec {
@@ -409,8 +396,7 @@ impl StdioSource {
             }
             let resources = resources["resources"]
                 .as_array()
-                .filter(|resources| resources.len() <= 128)
-                .ok_or_else(|| failure("stdio resource catalog missing or too large"))?
+                .ok_or_else(|| failure("stdio resource catalog missing"))?
                 .iter()
                 .map(|resource| {
                     Ok(ResourceSpec {
@@ -435,8 +421,7 @@ impl StdioSource {
             }
             let prompts = prompts["prompts"]
                 .as_array()
-                .filter(|prompts| prompts.len() <= 128)
-                .ok_or_else(|| failure("stdio prompt catalog missing or too large"))?
+                .ok_or_else(|| failure("stdio prompt catalog missing"))?
                 .iter()
                 .map(|prompt| {
                     Ok(PromptSpec {
@@ -608,7 +593,12 @@ impl SourceHandle for StdioHandle {
             }
             value
         };
-        if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > request.max_result_bytes) {
+        let serialized = serde_json::to_vec(&value)
+            .map_err(|_| uncertain(effect, "stdio reply could not be serialized"))?;
+        if request
+            .max_result_bytes
+            .is_some_and(|limit| serialized.len() > limit)
+        {
             return Err(uncertain(
                 effect,
                 "stdio reply exceeds the original result budget",
@@ -626,14 +616,14 @@ impl SourceHandle for StdioHandle {
 fn text(value: &Value, key: &str) -> Result<String, CapabilityError> {
     value[key]
         .as_str()
-        .filter(|text| !text.is_empty() && text.len() <= 8192)
+        .filter(|text| !text.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| failure("stdio required metadata string invalid"))
 }
 fn optional_text(value: &Value, key: &str) -> Result<String, CapabilityError> {
     match value.get(key) {
         None => Ok(String::new()),
-        Some(Value::String(text)) if text.len() <= 8192 => Ok(text.clone()),
+        Some(Value::String(text)) => Ok(text.clone()),
         _ => Err(failure("stdio optional metadata string invalid")),
     }
 }
@@ -726,7 +716,7 @@ async fn run(
                     let frame_bytes=line.len();line.clear();
                     let mut exhausted=false;
                     shared.update(|state|{state.received_frames+=1;state.observed_frame_bytes=state.observed_frame_bytes.max(frame_bytes);
-                        exhausted=state.received_frames>config.max_received_frames as u64;});
+                        exhausted=(state.received_frames as u128) > (config.max_received_frames as u128);});
                     if exhausted {return Err(CapabilityError::unknown("stdio received-message budget exhausted"));}
                     if value["jsonrpc"]!="2.0" || !value.is_object() {return Err(CapabilityError::unknown("stdio invalid JSON-RPC envelope"));}
                     if let Some(id)=value.get("id") {

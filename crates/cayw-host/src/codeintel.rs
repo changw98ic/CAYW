@@ -6,7 +6,6 @@ use cayw_codemode::CapabilityError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Instant;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RefreshArgs {
@@ -42,7 +41,7 @@ pub(crate) async fn execute(
     name: &str,
     args: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let bridge = host
         .codeintel_bridge()
@@ -61,7 +60,7 @@ async fn refresh(
     bridge: &SymbolVersionBridge,
     args: &Value,
     cancel: &CancellationToken,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let args: RefreshArgs = serde_json::from_value(args.clone())
         .map_err(|error| failure(format!("invalid codeintel.refresh arguments: {error}")))?;
@@ -74,7 +73,7 @@ async fn refresh(
                 "code.outline",
                 &json!({"path": &args.path, "language": "rust"}),
                 cancel.clone(),
-                workspace_deadline,
+                crate::deadline_instant(workspace_deadline),
             )
             .await
         {

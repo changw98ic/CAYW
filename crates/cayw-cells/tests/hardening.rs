@@ -219,7 +219,7 @@ async fn helpers_raw_catalog_and_globals_cannot_start_unauthorized_effects() {
 async fn every_emit_is_durable_at_yield_and_overflow_stops_the_next_write() {
     let (_dir, _journal, host, manager) = setup(
         CellLimits {
-            output_items: 2,
+            output_items: Some(2),
             ..CellLimits::default()
         },
         Limits::default(),
@@ -249,7 +249,7 @@ async fn every_emit_is_durable_at_yield_and_overflow_stops_the_next_write() {
 async fn small_item_budget_initializes_and_still_bounds_introspection_results() {
     let (_dir, _journal, host, manager) = setup(
         CellLimits {
-            item_bytes: 100,
+            item_bytes: Some(100),
             ..CellLimits::default()
         },
         Limits::default(),
@@ -291,14 +291,14 @@ async fn raw_emit_item_and_total_byte_limits_stop_following_effects() {
     for (limits, script) in [
         (
             CellLimits {
-                item_bytes: 100,
+                item_bytes: Some(100),
                 ..CellLimits::default()
             },
             "_G.cayw.emit(string.rep('x',200)); cayw.call('write',{})",
         ),
         (
             CellLimits {
-                output_bytes: 70,
+                output_bytes: Some(70),
                 ..CellLimits::default()
             },
             "cayw.emit('first'); _G.cayw.emit(string.rep('x',60)); cayw.call('write',{})",
@@ -324,7 +324,7 @@ async fn protected_output_budgets_and_exit_stop_before_another_effect() {
     for (limits, script, expected) in [
         (
             CellLimits {
-                output_items: 1,
+                output_items: Some(1),
                 ..CellLimits::default()
             },
             "text('one'); pcall(function() pcall(function() text('two') end) end); cayw.call('write',{})",
@@ -332,7 +332,7 @@ async fn protected_output_budgets_and_exit_stop_before_another_effect() {
         ),
         (
             CellLimits {
-                output_bytes: 45,
+                output_bytes: Some(45),
                 ..CellLimits::default()
             },
             "pcall(function() cayw.emit(string.rep('x',80)) end); cayw.call('write',{})",
@@ -340,7 +340,7 @@ async fn protected_output_budgets_and_exit_stop_before_another_effect() {
         ),
         (
             CellLimits {
-                item_bytes: 100,
+                item_bytes: Some(100),
                 ..CellLimits::default()
             },
             "pcall(function() text(string.rep('x',200)) end); cayw.call('write',{})",
@@ -348,7 +348,7 @@ async fn protected_output_budgets_and_exit_stop_before_another_effect() {
         ),
         (
             CellLimits {
-                store_keys: 1,
+                store_keys: Some(1),
                 ..CellLimits::default()
             },
             "store('first',1,0); pcall(function() store('second',2,0) end); cayw.call('write',{})",
@@ -356,7 +356,7 @@ async fn protected_output_budgets_and_exit_stop_before_another_effect() {
         ),
         (
             CellLimits {
-                media_bytes: 1,
+                media_bytes: Some(1),
                 ..CellLimits::default()
             },
             "pcall(function() image('image/png','YWJj') end); cayw.call('write',{})",
@@ -449,7 +449,7 @@ async fn store_load_round_trip_at_small_and_default_depth_boundaries() {
     for depth in [4, 32] {
         let (_dir, journal, _host, manager) = setup(
             CellLimits {
-                json_depth: depth,
+                json_depth: Some(depth),
                 ..CellLimits::default()
             },
             Limits::default(),
@@ -521,7 +521,10 @@ async fn cancel_and_close_preserve_actual_host_settlement_before_terminal() {
             let record = manager.record(&page.cell_id).unwrap();
             assert_eq!(record.calls[0].status, status);
             assert_eq!(record.calls.len(), 1);
-            assert_eq!(journal.is_frozen("s").unwrap(), unknown);
+            assert!(
+                !journal.is_frozen("s").unwrap(),
+                "an unknown cell does not freeze the session"
+            );
             assert_eq!(host.writes.load(Ordering::SeqCst), 0);
             if status == IntentStatus::Succeeded {
                 assert_eq!(record.calls[0].result, Some(json!({"settled":true})));
@@ -554,7 +557,7 @@ async fn pending_host_deadline_settles_unknown_and_yield_cancel_is_known() {
     assert!(host.observed.load(Ordering::SeqCst));
     assert_eq!(page.status, CellStatus::OutcomeUnknown);
     assert!(!page.vm_alive);
-    assert!(journal.is_frozen("s").unwrap());
+    assert!(!journal.is_frozen("s").unwrap());
     manager.close().await;
     let (_dir, _journal, _host, manager) = setup(CellLimits::default(), Limits::default());
     let page = manager
@@ -578,9 +581,9 @@ async fn controlled_yield_pauses_active_time_but_keeps_other_budgets() {
     let (_dir, _journal, host, manager) = setup(
         CellLimits::default(),
         Limits {
-            timeout: Duration::from_millis(100),
-            host_calls: 1,
-            instruction_budget: u64::MAX,
+            timeout: Some(Duration::from_millis(100)),
+            host_calls: Some(1),
+            instruction_budget: u32::MAX,
             ..Limits::default()
         },
     );
@@ -630,7 +633,7 @@ async fn host_wait_bounds_started_host_hang_and_records_unknown() {
     let (_dir, _journal, host, manager) = setup(
         CellLimits::default(),
         Limits {
-            host_wait: Duration::from_millis(40),
+            host_wait: Some(Duration::from_millis(40)),
             shutdown_grace: Duration::from_millis(20),
             ..Limits::default()
         },
@@ -700,7 +703,7 @@ async fn close_deadline_records_pending_unknown_without_detaching_work() {
     assert!(!page.vm_alive);
     assert_eq!(page.status, CellStatus::OutcomeUnknown);
     assert!(host.observed.load(Ordering::SeqCst));
-    assert!(journal.is_frozen("s").unwrap());
+    assert!(!journal.is_frozen("s").unwrap());
     assert_eq!(host.writes.load(Ordering::SeqCst), 0);
 }
 
@@ -710,7 +713,7 @@ async fn close_deadline_records_pending_unknown_without_detaching_work() {
 async fn store_load_logical_byte_boundary_and_receipt_budget_are_separate() {
     let (_dir, journal, _host, manager) = setup(
         CellLimits {
-            store_bytes: 64,
+            store_bytes: Some(64),
             ..CellLimits::default()
         },
         Limits::default(),
@@ -749,11 +752,11 @@ async fn store_load_logical_byte_boundary_and_receipt_budget_are_separate() {
     manager.close().await;
     let (_dir, journal, _host, manager) = setup(
         CellLimits {
-            store_bytes: 64,
+            store_bytes: Some(64),
             ..CellLimits::default()
         },
         Limits {
-            output_bytes: 90,
+            output_bytes: Some(90),
             ..Limits::default()
         },
     );
@@ -782,25 +785,20 @@ async fn store_load_logical_byte_boundary_and_receipt_budget_are_separate() {
 }
 
 #[tokio::test]
-async fn controlled_yield_keeps_output_instruction_and_memory_budgets() {
+async fn controlled_yield_keeps_output_and_memory_budgets() {
+    // instruction_budget is an interrupt cadence, not a cap; configured output
+    // and memory budgets still apply after a controlled yield.
     for (vm, source) in [
         (
             Limits {
-                instruction_budget: 1000,
-                ..Limits::default()
-            },
-            "local n=0; for round=1,5 do for i=1,300 do n+=i end; yield_control() end; cayw.call('write',{})",
-        ),
-        (
-            Limits {
-                output_bytes: 400,
+                output_bytes: Some(400),
                 ..Limits::default()
             },
             "cayw.emit(string.rep('x',250)); yield_control(); cayw.emit(string.rep('x',250)); cayw.call('write',{})",
         ),
         (
             Limits {
-                memory_bytes: 2 * 1024 * 1024,
+                memory_bytes: Some(2 * 1024 * 1024),
                 ..Limits::default()
             },
             "local keep=string.rep('x',500000); yield_control(); local extra=string.rep('y',1800000); cayw.call('write',{})",

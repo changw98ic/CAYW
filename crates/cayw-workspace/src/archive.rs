@@ -49,7 +49,11 @@ impl Names {
             name
         };
         let parts = fs::components(name, false)?;
-        if parts.len() > workspace.limits.max_depth {
+        if workspace
+            .limits
+            .max_depth
+            .is_some_and(|max| parts.len() > max)
+        {
             return Err(failure("archive entry depth limit exceeded"));
         }
         // Archive entries are names inside the archive, not paths on this
@@ -83,8 +87,14 @@ fn expand(
     size: u64,
     compressed: u64,
 ) -> Result<(), CapabilityError> {
-    if size > workspace.limits.max_file_bytes as u64
-        || size > compressed.saturating_mul(workspace.limits.max_compression_ratio)
+    if workspace
+        .limits
+        .max_file_bytes
+        .is_some_and(|limit| size > limit as u64)
+        || workspace
+            .limits
+            .max_compression_ratio
+            .is_some_and(|ratio| size > compressed.saturating_mul(ratio))
     {
         return Err(failure(
             "archive entry byte or compression ratio limit exceeded",
@@ -93,7 +103,11 @@ fn expand(
     *total = total
         .checked_add(size)
         .ok_or_else(|| failure("archive size overflow"))?;
-    if *total > workspace.limits.max_archive_expanded_bytes as u64 {
+    if workspace
+        .limits
+        .max_archive_expanded_bytes
+        .is_some_and(|limit| *total > limit as u64)
+    {
         return Err(failure("archive total expanded byte limit exceeded"));
     }
     Ok(())
@@ -210,7 +224,10 @@ fn zip_table(
         || u16_at(bytes, eocd + 6)? != 0
         || u16_at(bytes, eocd + 8)? as usize != count
         || count == 65_535
-        || count > workspace.limits.max_archive_entries
+        || workspace
+            .limits
+            .max_archive_entries
+            .is_some_and(|limit| count > limit)
         || cd_start.checked_add(cd_bytes) != Some(eocd)
     {
         return Err(failure(
@@ -352,7 +369,7 @@ fn zip(
     let mut file = archive
         .by_index(index)
         .map_err(|error| failure(error.to_string()))?;
-    let content = fs::read_bounded(&mut file, entries[index].bytes as usize, context)?;
+    let content = fs::read_bounded(&mut file, Some(entries[index].bytes as usize), context)?;
     if content.len() as u64 != entries[index].bytes {
         return Err(failure("ZIP actual size mismatch"));
     }
@@ -395,7 +412,11 @@ fn scan_tar(
     let mut content = None;
     for entry in iterator {
         context.check()?;
-        if entries.len() >= workspace.limits.max_archive_entries {
+        if workspace
+            .limits
+            .max_archive_entries
+            .is_some_and(|limit| entries.len() >= limit)
+        {
             return Err(failure("TAR entry limit exceeded"));
         }
         let mut entry = entry.map_err(io_error)?;
@@ -439,7 +460,7 @@ fn scan_tar(
         }
         expand(workspace, &mut total, size, size)?;
         if target == Some(path.as_str()) && !directory {
-            let data = fs::read_bounded(&mut entry, size as usize, context)?;
+            let data = fs::read_bounded(&mut entry, Some(size as usize), context)?;
             if data.len() as u64 != size {
                 return Err(failure("truncated TAR payload"));
             }
@@ -504,7 +525,7 @@ mod tests {
         let workspace =
             Workspace::open(root.path().canonicalize().unwrap(), Limits::default()).unwrap();
         let cancel = CancellationToken::new();
-        let context = Context::new(cancel.clone(), Duration::from_secs(5)).unwrap();
+        let context = Context::new(cancel.clone(), Some(Duration::from_secs(5)));
         let reader = InterruptedZeros {
             bytes: Cursor::new(vec![0; 8192]),
             reads: 0,
@@ -522,8 +543,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let workspace =
             Workspace::open(root.path().canonicalize().unwrap(), Limits::default()).unwrap();
-        let context = Context::new(CancellationToken::new(), Duration::from_millis(20)).unwrap();
-        let deadline = context.deadline;
+        let context = Context::new(CancellationToken::new(), Some(Duration::from_millis(20)));
+        let deadline = context.deadline.expect("configured deadline");
         let reader = InterruptedZeros {
             bytes: Cursor::new(vec![0; 8192]),
             reads: 0,

@@ -31,6 +31,14 @@ impl Provider for FixtureProvider {
 }
 
 fn runtime(temp: &tempfile::TempDir, supports_images: bool) -> (Runtime, Arc<FixtureProvider>) {
+    runtime_with_budget(temp, supports_images, None)
+}
+
+fn runtime_with_budget(
+    temp: &tempfile::TempDir,
+    supports_images: bool,
+    max_prompt_bytes: Option<usize>,
+) -> (Runtime, Arc<FixtureProvider>) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let mut model = Model::new("fixture", "typed-image-fixture");
@@ -43,7 +51,10 @@ fn runtime(temp: &tempfile::TempDir, supports_images: bool) -> (Runtime, Arc<Fix
         &workspace,
         provider.clone(),
         model,
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            max_prompt_bytes,
+            ..Default::default()
+        },
     )
     .unwrap();
     (runtime, provider)
@@ -270,10 +281,10 @@ fn task_input_validation_is_local_and_strict() {
         text: "hello".into(),
         images: vec![],
     };
-    assert!(text_only.validate(&model, 5).is_ok());
-    assert!(text_only.validate(&model, 4).is_err());
+    assert!(text_only.validate(&model, Some(5)).is_ok());
+    assert!(text_only.validate(&model, Some(4)).is_err());
     assert!(
-        TaskInput::default().validate(&model, 1024).is_err(),
+        TaskInput::default().validate(&model, Some(1024)).is_err(),
         "empty text with no images is not a prompt"
     );
 
@@ -286,12 +297,12 @@ fn task_input_validation_is_local_and_strict() {
         images: vec![image.clone()],
     };
     let exact = "hello".len() + image.mime_type.len() + image.data.len();
-    assert!(with_image.validate(&model, exact).is_ok());
-    assert!(with_image.validate(&model, exact - 1).is_err());
+    assert!(with_image.validate(&model, Some(exact)).is_ok());
+    assert!(with_image.validate(&model, Some(exact - 1)).is_err());
 
     model.supports_images = false;
     assert!(
-        with_image.validate(&model, usize::MAX).is_err(),
+        with_image.validate(&model, Some(usize::MAX)).is_err(),
         "a text-only model refuses images before enqueue"
     );
 }
@@ -351,7 +362,7 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
 
     // With budget strictly smaller than total_bytes, validation fails with byte budget error,
     // not MIME type or base64 decoding error.
-    let err_under_budget = input.validate(&model, total_bytes - 1).unwrap_err();
+    let err_under_budget = input.validate(&model, Some(total_bytes - 1)).unwrap_err();
     assert!(
         matches!(err_under_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error before mime/decode validation, got: {err_under_budget}"
@@ -359,7 +370,7 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
 
     // With budget sufficient for total_bytes, validation proceeds past budget check
     // and catches the invalid MIME type.
-    let err_sufficient_budget = input.validate(&model, total_bytes).unwrap_err();
+    let err_sufficient_budget = input.validate(&model, Some(total_bytes)).unwrap_err();
     assert!(
         matches!(err_sufficient_budget, QueueError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
         "expected mime type error when budget is sufficient, got: {err_sufficient_budget}"
@@ -377,13 +388,17 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
     let total_b64_bytes =
         "prompt text".len() + invalid_b64_image.mime_type.len() + invalid_b64_image.data.len();
 
-    let err_b64_under_budget = input_b64.validate(&model, total_b64_bytes - 1).unwrap_err();
+    let err_b64_under_budget = input_b64
+        .validate(&model, Some(total_b64_bytes - 1))
+        .unwrap_err();
     assert!(
         matches!(err_b64_under_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error before base64 decode, got: {err_b64_under_budget}"
     );
 
-    let err_b64_sufficient = input_b64.validate(&model, total_b64_bytes).unwrap_err();
+    let err_b64_sufficient = input_b64
+        .validate(&model, Some(total_b64_bytes))
+        .unwrap_err();
     assert!(
         matches!(err_b64_sufficient, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error when budget is sufficient, got: {err_b64_sufficient}"
@@ -393,10 +408,10 @@ fn task_input_budget_checked_before_decoding_or_mime_validation() {
 #[tokio::test]
 async fn task_enqueue_rejects_oversized_invalid_image_on_budget_first() {
     let temp = tempfile::tempdir().unwrap();
-    let (runtime, _) = runtime(&temp, true);
+    let (runtime, _) = runtime_with_budget(&temp, true, Some(256 * 1024));
     let session = runtime.create(None).unwrap().id;
 
-    // Construct oversized input (> default 256KiB prompt budget) with invalid base64 data.
+    // Construct oversized input (over the explicit 256KiB prompt budget) with invalid base64 data.
     let oversized_data = "x".repeat(300 * 1024);
     let error = rpc(
         &runtime,
@@ -452,19 +467,19 @@ fn task_input_multi_image_cumulative_budget_checked_before_decoding() {
     assert!(individual_budget < total_bytes);
 
     // Either image fits alone, but both exceed the cumulative budget.
-    let err_individual = input.validate(&model, individual_budget).unwrap_err();
+    let err_individual = input.validate(&model, Some(individual_budget)).unwrap_err();
     assert!(
         matches!(err_individual, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "multi-image cumulative budget must reject before decoding: {err_individual}"
     );
 
-    let err_under = input.validate(&model, total_bytes - 1).unwrap_err();
+    let err_under = input.validate(&model, Some(total_bytes - 1)).unwrap_err();
     assert!(
         matches!(err_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error at total - 1: {err_under}"
     );
 
-    let err_exact = input.validate(&model, total_bytes).unwrap_err();
+    let err_exact = input.validate(&model, Some(total_bytes)).unwrap_err();
     assert!(
         matches!(err_exact, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error once exact budget is met: {err_exact}"
@@ -485,8 +500,10 @@ fn task_input_multi_image_cumulative_budget_checked_before_decoding() {
         text: "prompt".into(),
         images: vec![valid_img1, valid_img2],
     };
-    assert!(valid_input.validate(&model, valid_total).is_ok());
-    let err_valid_under = valid_input.validate(&model, valid_total - 1).unwrap_err();
+    assert!(valid_input.validate(&model, Some(valid_total)).is_ok());
+    let err_valid_under = valid_input
+        .validate(&model, Some(valid_total - 1))
+        .unwrap_err();
     assert!(
         matches!(err_valid_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error for valid images at total - 1: {err_valid_under}"
@@ -496,10 +513,10 @@ fn task_input_multi_image_cumulative_budget_checked_before_decoding() {
 #[tokio::test]
 async fn task_enqueue_rejects_multi_image_cumulative_oversized_on_budget_first() {
     let temp = tempfile::tempdir().unwrap();
-    let (runtime, _) = runtime(&temp, true);
+    let (runtime, _) = runtime_with_budget(&temp, true, Some(256 * 1024));
     let session = runtime.create(None).unwrap().id;
 
-    // Two images, each 150KiB (< 256KiB default prompt budget), cumulatively 300KiB (> 256KiB).
+    // Two images, each 150KiB (< the explicit 256KiB prompt budget), cumulatively 300KiB (> 256KiB).
     let oversized_part = "x".repeat(150 * 1024);
     let error = rpc(
         &runtime,

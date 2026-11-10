@@ -41,8 +41,6 @@ use std::{
 use tokio::task;
 use uuid::Uuid;
 
-const MAX_DESCRIPTION_BYTES: usize = 8192;
-
 /// One explicit host-supplied Skill file. `name` is a logical name, never a path.
 #[derive(Debug, Clone)]
 pub struct FileSkill {
@@ -108,14 +106,17 @@ pub struct FileSkills {
     manifest: Manifest,
     entries: BTreeMap<String, Arc<Entry>>,
     stats: FileSkillStats,
-    max_skill_bytes: usize,
+    max_skill_bytes: Option<usize>,
 }
 
 impl FileSkills {
     /// Scans every explicitly listed file once for its manifest digest. The
     /// whole load fails on the first unsafe, unbounded or non-UTF-8 input.
     pub fn load(entries: Vec<FileSkill>, limits: &Limits) -> Result<Self, CapabilityError> {
-        if entries.len() > limits.max_skills_per_source {
+        if limits
+            .max_skills_per_source
+            .is_some_and(|max| entries.len() > max)
+        {
             return Err(failure("too many explicit Skill files"));
         }
         let stats = FileSkillStats {
@@ -130,7 +131,7 @@ impl FileSkills {
         let mut specs = Vec::with_capacity(entries.len());
         let mut loaded = BTreeMap::new();
         for skill in entries {
-            if !valid_name(&skill.name) || skill.description.len() > MAX_DESCRIPTION_BYTES {
+            if !valid_name(&skill.name) {
                 return Err(failure("invalid Skill name or description"));
             }
             if loaded.contains_key(&skill.name) {
@@ -181,8 +182,16 @@ impl FileSkills {
 struct FileHandle {
     entries: BTreeMap<String, Arc<Entry>>,
     stats: FileSkillStats,
-    max_skill_bytes: usize,
+    max_skill_bytes: Option<usize>,
     ownership_key: String,
+}
+
+fn min_limit(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
 }
 
 #[async_trait]
@@ -220,8 +229,8 @@ impl SourceHandle for FileHandle {
             self.stats.reject();
             failure("Skill is unavailable")
         })?;
-        let limit = self.max_skill_bytes.min(max_result_bytes);
-        if entry.size > limit as u64 {
+        let limit = min_limit(self.max_skill_bytes, max_result_bytes);
+        if limit.is_some_and(|limit| entry.size > limit as u64) {
             self.stats.reject();
             return Err(failure("Skill exceeds the read budget"));
         }
@@ -250,8 +259,9 @@ impl SourceHandle for FileHandle {
         }
         match result {
             Ok(Ok(content)) => {
-                if serde_json::to_vec(&content).map_or(true, |bytes| bytes.len() > max_result_bytes)
-                {
+                let bytes = serde_json::to_vec(&content)
+                    .map_err(|_| failure("Skill result could not be serialized"))?;
+                if max_result_bytes.is_some_and(|limit| bytes.len() > limit) {
                     self.stats.reject();
                     return Err(failure("Skill exceeds the result byte budget"));
                 }
@@ -302,7 +312,7 @@ impl FileId {
     }
 }
 
-fn scan_entry(skill: &FileSkill, limit: usize) -> Result<Entry, CapabilityError> {
+fn scan_entry(skill: &FileSkill, limit: Option<usize>) -> Result<Entry, CapabilityError> {
     if skill.path.extension().and_then(OsStr::to_str) != Some("md") {
         return Err(failure("Skill file must have the .md extension"));
     }
@@ -330,20 +340,26 @@ fn scan_entry(skill: &FileSkill, limit: usize) -> Result<Entry, CapabilityError>
         current = dir;
     }
 
-    let file = open_leaf(&current, &leaf)?;
+    let mut file = open_leaf(&current, &leaf)?;
     let metadata = file
         .metadata()
         .map_err(|error| io_failure("Skill file", error))?;
     if !metadata.file_type().is_file() {
         return Err(failure("Skill path is not a regular file"));
     }
-    if metadata.len() > limit as u64 {
+    if limit.is_some_and(|limit| metadata.len() > limit as u64) {
         return Err(failure("Skill file exceeds max_skill_bytes"));
     }
     let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_failure("Skill read", error))?;
+    match limit {
+        Some(limit) => file
+            .take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_failure("Skill read", error))?,
+        None => file
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_failure("Skill read", error))?,
+    };
     if bytes.len() as u64 != metadata.len() {
         return Err(failure("Skill file changed while it was scanned"));
     }
@@ -360,7 +376,7 @@ fn scan_entry(skill: &FileSkill, limit: usize) -> Result<Entry, CapabilityError>
     })
 }
 
-fn read_verified(entry: &Entry, limit: usize) -> Result<String, CapabilityError> {
+fn read_verified(entry: &Entry, limit: Option<usize>) -> Result<String, CapabilityError> {
     let root = open_root()?;
     let root_metadata = root
         .metadata()
@@ -380,7 +396,7 @@ fn read_verified(entry: &Entry, limit: usize) -> Result<String, CapabilityError>
         current = dir;
     }
 
-    let file = open_leaf(&current, entry.leaf.as_os_str())?;
+    let mut file = open_leaf(&current, entry.leaf.as_os_str())?;
     let metadata = file
         .metadata()
         .map_err(|error| io_failure("Skill file", error))?;
@@ -390,13 +406,19 @@ fn read_verified(entry: &Entry, limit: usize) -> Result<String, CapabilityError>
     {
         return Err(failure("Skill file changed after load"));
     }
-    if metadata.len() > limit as u64 {
+    if limit.is_some_and(|limit| metadata.len() > limit as u64) {
         return Err(failure("Skill file exceeds the read budget"));
     }
     let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_failure("Skill read", error))?;
+    match limit {
+        Some(limit) => file
+            .take(limit.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_failure("Skill read", error))?,
+        None => file
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_failure("Skill read", error))?,
+    };
     if bytes.len() as u64 != entry.size {
         return Err(failure("Skill file size changed while it was read"));
     }

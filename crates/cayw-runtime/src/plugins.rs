@@ -311,9 +311,6 @@ impl Runtime {
         if snapshot.attempt.is_some() {
             return Err(RuntimeError::Busy);
         }
-        if snapshot.state == cayw_core::SessionState::NeedsReconciliation {
-            return Err(RuntimeError::NeedsReconciliation);
-        }
         let mut binding = self
             .binding_at(&snapshot)?
             .ok_or_else(|| RuntimeError::InvalidInput("session has no plugin binding".into()))?;

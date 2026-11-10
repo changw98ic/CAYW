@@ -223,7 +223,7 @@ fn apply_input(
     if let Some(execution) = &settlement.execution_terminal {
         reference(&execution.evidence)?;
         if let Some(error) = &execution.terminal.error {
-            validate_json(&Value::String(error.clone()), 1, limits.item_bytes)?;
+            validate_json(&Value::String(error.clone()), Some(1), limits.item_bytes)?;
         }
         if record.unresolved()
             || settlement.calls.len() != record.calls.len()
@@ -262,6 +262,14 @@ fn apply_input(
     {
         record.status = CellStatus::Reconciled;
         record.error = None;
+    } else if record.unresolved() {
+        for call in &mut record.calls {
+            if call.status == IntentStatus::Pending {
+                call.status = IntentStatus::OutcomeUnknown;
+            }
+        }
+        record.backend_error = None;
+        record.status = CellStatus::OutcomeUnknown;
     }
     if already_applied {
         return Ok((record, false));
@@ -305,12 +313,11 @@ impl SqliteJournal {
         };
         for body in bodies {
             let record: CellRecord = serde_json::from_str(&body)?;
-            if record.unresolved()
-                || record.backend_error.is_some()
-                || matches!(
-                    record.status,
-                    CellStatus::Running | CellStatus::Yielded | CellStatus::OutcomeUnknown
-                )
+            // Only a live VM or an unrepaired backend lifecycle failure blocks
+            // thawing. A historical OutcomeUnknown is an audit fact for that
+            // cell, not a permanent session-wide freeze.
+            if record.backend_error.is_some()
+                || matches!(record.status, CellStatus::Running | CellStatus::Yielded)
             {
                 return Err(CellError::Frozen);
             }
@@ -362,7 +369,7 @@ fn settle_call(
             )
         }
         HostCallTerminal::Failed { error } => {
-            validate_json(&Value::String(error.clone()), 1, limits.item_bytes)?;
+            validate_json(&Value::String(error.clone()), Some(1), limits.item_bytes)?;
             (
                 IntentStatus::Failed,
                 None,
@@ -372,7 +379,7 @@ fn settle_call(
             )
         }
         HostCallTerminal::NotExecuted { reason } => {
-            validate_json(&Value::String(reason.clone()), 1, limits.item_bytes)?;
+            validate_json(&Value::String(reason.clone()), Some(1), limits.item_bytes)?;
             (
                 IntentStatus::NotExecuted,
                 None,

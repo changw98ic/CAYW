@@ -117,7 +117,7 @@ fn config(registry: &Registry, allow_read: bool) -> RuntimeConfig {
     }
     RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: Duration::from_secs(15),
+        max_run_time: Some(Duration::from_secs(15)),
         permissions,
         ..Default::default()
     }

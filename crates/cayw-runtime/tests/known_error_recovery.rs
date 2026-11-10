@@ -136,7 +136,7 @@ async fn empty_external_error_recovers_without_freezing_known_result() {
 #[tokio::test]
 async fn minimal_host_error_budget_recovers_without_freezing_known_nonexecution() {
     let mut settings = RuntimeConfig::default();
-    settings.host.max_total_bytes = 2;
+    settings.host.max_total_bytes = Some(2);
     settings.permissions.push(ScopedPermission::exact(
         "fs.read",
         json!({"path":"missing"}),

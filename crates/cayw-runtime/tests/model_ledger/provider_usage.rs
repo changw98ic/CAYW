@@ -41,7 +41,7 @@ fn open(root: &Path, provider: Arc<HttpProvider>, limit: u64) -> Runtime {
         provider,
         model,
         RuntimeConfig {
-            max_total_tokens: limit,
+            max_total_tokens: Some(limit),
             ..Default::default()
         },
     )
@@ -159,15 +159,16 @@ async fn reported_success_settles_tokens_and_reopen_preserves_identity_and_unkno
         for _ in 0..2 {
             let socket = request(&listener).await;
             let ledger = inspect.model_requests(&session_id).unwrap();
-            assert_eq!(
-                ledger.reserved_tokens,
-                ledger.token_limit - ledger.settled_tokens
-            );
             let active = ledger
                 .requests
                 .iter()
                 .find(|record| record.terminal.is_none())
                 .unwrap();
+            assert_eq!(ledger.reserved_tokens, active.reservation_tokens);
+            assert_eq!(
+                ledger.remaining_tokens,
+                Some(ledger.token_limit.unwrap() - ledger.settled_tokens - ledger.reserved_tokens)
+            );
             assert!(active.reservation_cursor.is_some() && active.started_cursor.is_some());
             assert_eq!(active.identity.lease.session_id, session_id);
             respond(socket, "200 OK", &body(Some(full_usage(11, 7)), true)).await;
@@ -180,8 +181,8 @@ async fn reported_success_settles_tokens_and_reopen_preserves_identity_and_unkno
     assert_eq!(ledger.requests.len(), 2);
     assert_eq!(ledger.settled_tokens, 36);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, 964);
-    assert!(!ledger.budget_unknown);
+    assert_eq!(ledger.remaining_tokens, Some(964));
+    assert!(!ledger.usage_unknown);
     assert_unknown_money(&ledger);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     for record in &ledger.requests {
@@ -225,7 +226,8 @@ async fn reported_success_settles_tokens_and_reopen_preserves_identity_and_unkno
     let reopened = open(temp.path(), provider.clone(), 2000);
     let raised = reopened.model_requests(&session.id).unwrap();
     assert_eq!(
-        raised.token_limit, 2000,
+        raised.token_limit,
+        Some(2000),
         "a trusted configured allocation raises the same session tree"
     );
     assert_eq!(
@@ -233,8 +235,8 @@ async fn reported_success_settles_tokens_and_reopen_preserves_identity_and_unkno
         "raising configuration must not reset consumed tokens"
     );
     assert_eq!(raised.reserved_tokens, 0);
-    assert_eq!(raised.remaining_tokens, 1964);
-    assert!(!raised.budget_unknown);
+    assert_eq!(raised.remaining_tokens, Some(1964));
+    assert!(!raised.usage_unknown);
     assert_eq!(
         raised.requests, ledger.requests,
         "historical records keep their original token limits and usage"
@@ -259,17 +261,17 @@ async fn trusted_configuration_increase_continues_the_same_session_after_settlem
     });
     prompt(&runtime, &session.id, "first settled request").await;
     let before = runtime.model_requests(&session.id).unwrap();
-    assert_eq!(before.token_limit, 1000);
+    assert_eq!(before.token_limit, Some(1000));
     assert_eq!(before.settled_tokens, 18);
-    assert_eq!(before.remaining_tokens, 982);
+    assert_eq!(before.remaining_tokens, Some(982));
     assert_eq!(before.reserved_tokens, 0);
     drop(runtime);
     // The trusted host explicitly increases the same session tree's allocation
     // after every old request settled. This is not a per-task reset.
     let reopened = open(temp.path(), provider.clone(), 2000);
     let raised = reopened.model_requests(&session.id).unwrap();
-    assert_eq!(raised.token_limit, 2000);
-    assert_eq!(raised.remaining_tokens, 1982);
+    assert_eq!(raised.token_limit, Some(2000));
+    assert_eq!(raised.remaining_tokens, Some(1982));
     assert_eq!(raised.requests, before.requests);
     prompt(
         &reopened,
@@ -281,19 +283,20 @@ async fn trusted_configuration_increase_continues_the_same_session_after_settlem
     let after = reopened.model_requests(&session.id).unwrap();
     assert_eq!(after.settled_tokens, 36);
     assert_eq!(after.reserved_tokens, 0);
-    assert_eq!(after.remaining_tokens, 1964);
-    assert!(!after.budget_unknown);
+    assert_eq!(after.remaining_tokens, Some(1964));
+    assert!(!after.usage_unknown);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     assert_eq!(
-        after.requests[0].token_limit, 1000,
+        after.requests[0].token_limit,
+        Some(1000),
         "the first record keeps the limit it was admitted under"
     );
-    assert_eq!(after.requests[1].token_limit, 2000);
+    assert_eq!(after.requests[1].token_limit, Some(2000));
     assert_unknown_money(&after);
 }
 
 #[tokio::test]
-async fn usage_only_reported_then_cancel_keeps_known_values_and_the_full_reservation() {
+async fn usage_only_reported_then_cancel_keeps_unknown_usage_after_reopen() {
     let (temp, runtime, provider, listener) = setup(1000).await;
     let session = runtime.create(None).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -340,8 +343,12 @@ async fn usage_only_reported_then_cancel_keeps_known_values_and_the_full_reserva
     let _ = stop.send(());
     server.await.unwrap();
     let ledger = runtime.model_requests(&session.id).unwrap();
-    assert!(ledger.budget_unknown);
-    assert_eq!(ledger.reserved_tokens, 1000);
+    assert!(ledger.usage_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(
+        ledger.charged_unknown_tokens,
+        ledger.requests[0].reservation_tokens
+    );
     assert_eq!(ledger.settled_tokens, 0);
     let record = &ledger.requests[0];
     assert!(matches!(
@@ -370,28 +377,29 @@ async fn usage_only_reported_then_cancel_keeps_known_values_and_the_full_reserva
     drop(unchanged);
     let reopened = open(temp.path(), provider.clone(), 2000);
     let raised = reopened.model_requests(&session.id).unwrap();
-    assert_eq!(raised.token_limit, 2000);
+    assert_eq!(raised.token_limit, Some(2000));
     assert_eq!(raised.reserved_tokens, ledger.reserved_tokens);
+    assert_eq!(raised.charged_unknown_tokens, ledger.charged_unknown_tokens);
     assert_eq!(raised.settled_tokens, ledger.settled_tokens);
     assert_eq!(raised.requests, ledger.requests);
-    assert!(raised.budget_unknown);
-    assert_eq!(raised.remaining_tokens, 1000);
+    assert!(raised.usage_unknown);
+    assert_eq!(
+        raised.remaining_tokens,
+        Some(2000 - raised.charged_unknown_tokens)
+    );
     prompt(
         &reopened,
         &session.id,
-        "new explicit user task cannot clear old unknown usage",
+        "a larger trusted allocation may run the next task",
     )
     .await;
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
     let after = reopened.model_requests(&session.id).unwrap();
-    assert_eq!(after.reserved_tokens, 1000);
+    assert_eq!(after.reserved_tokens, 0);
+    assert!(after.charged_unknown_tokens >= ledger.charged_unknown_tokens);
     assert_eq!(after.requests.len(), 2);
-    assert!(
-        after
-            .requests
-            .iter()
-            .any(|record| record.terminal == Some(ModelRequestTerminal::Rejected))
-    );
+    assert_eq!(after.requests[0], ledger.requests[0]);
+    assert!(after.usage_unknown);
     assert!(
         reopened
             .tasks(&session.id)
@@ -417,9 +425,17 @@ async fn failed_http_usage_settles_only_complete_reported_counts() {
         prompt(&runtime, &session.id, "model failure").await;
         server.await.unwrap();
         let ledger = runtime.model_requests(&session.id).unwrap();
-        assert_eq!(ledger.reserved_tokens, if truncated { 0 } else { 1000 });
+        assert_eq!(ledger.reserved_tokens, 0);
         assert_eq!(ledger.settled_tokens, if truncated { 18 } else { 0 });
-        assert_eq!(ledger.budget_unknown, !truncated);
+        assert_eq!(
+            ledger.charged_unknown_tokens,
+            if truncated {
+                0
+            } else {
+                ledger.requests[0].reservation_tokens
+            }
+        );
+        assert_eq!(ledger.usage_unknown, !truncated);
         assert_eq!(
             ledger.requests[0].terminal,
             Some(ModelRequestTerminal::Failed)
@@ -483,8 +499,12 @@ async fn missing_partial_and_invalid_usage_never_settle_default_zeroes() {
         server.await.unwrap();
         let ledger = runtime.model_requests(&session.id).unwrap();
         assert_eq!(ledger.settled_tokens, 0);
-        assert_eq!(ledger.reserved_tokens, 1000);
-        assert!(ledger.budget_unknown);
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(
+            ledger.charged_unknown_tokens,
+            ledger.requests[0].reservation_tokens
+        );
+        assert!(ledger.usage_unknown);
         assert_eq!(
             ledger.requests[0]
                 .observations
@@ -499,8 +519,8 @@ async fn missing_partial_and_invalid_usage_never_settle_default_zeroes() {
 }
 
 #[tokio::test]
-async fn reported_zero_settles_and_over_reservation_retains_the_original_hold() {
-    for (input, output, settles) in [(0, 0, true), (1001, 7, false)] {
+async fn reported_zero_settles_and_over_reservation_settles_the_actual_amount() {
+    for (input, output) in [(0, 0), (1001, 7)] {
         let (_temp, runtime, _provider, listener) = setup(1000).await;
         let session = runtime.create(None).unwrap();
         let server = tokio::spawn(async move {
@@ -520,16 +540,19 @@ async fn reported_zero_settles_and_over_reservation_retains_the_original_hold() 
         server.await.unwrap();
         let ledger = runtime.model_requests(&session.id).unwrap();
         let record = &ledger.requests[0];
-        assert_eq!(record.settled_tokens, settles.then_some(0));
-        assert_eq!(ledger.reserved_tokens, if settles { 0 } else { 1000 });
+        let actual = input + output;
+        assert_eq!(record.settled_tokens, Some(actual));
+        assert_eq!(record.charged_tokens, Some(actual));
+        assert_eq!(record.outstanding_reservation_tokens, 0);
+        assert_eq!(ledger.settled_tokens, actual);
+        assert_eq!(ledger.reserved_tokens, 0);
+        assert_eq!(ledger.charged_unknown_tokens, 0);
         assert_eq!(
-            record.terminal,
-            Some(if settles {
-                ModelRequestTerminal::Completed
-            } else {
-                ModelRequestTerminal::BudgetExceeded
-            })
+            ledger.remaining_tokens,
+            Some(1000u64.saturating_sub(actual))
         );
+        assert!(!ledger.usage_unknown);
+        assert_eq!(record.terminal, Some(ModelRequestTerminal::Completed));
         assert_unknown_money(&ledger);
     }
 }
@@ -550,7 +573,7 @@ async fn exhausted_persistent_budget_never_invokes_a_second_http_request() {
     server.await.unwrap();
     let before = runtime.model_requests(&session.id).unwrap();
     assert_eq!(before.settled_tokens, 18);
-    assert_eq!(before.remaining_tokens, 0);
+    assert_eq!(before.remaining_tokens, Some(0));
     prompt(
         &runtime,
         &session.id,
@@ -605,8 +628,12 @@ async fn failed_start_record_never_invokes_the_http_adapter() {
         TaskState::Completed
     );
     let ledger = runtime.model_requests(&session.id).unwrap();
-    assert_eq!(ledger.reserved_tokens, 1000);
-    assert!(ledger.budget_unknown);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(
+        ledger.charged_unknown_tokens,
+        ledger.requests[0].reservation_tokens
+    );
+    assert!(ledger.usage_unknown);
 }
 
 #[tokio::test]
@@ -625,9 +652,9 @@ async fn parent_and_child_share_one_persistent_budget_without_duplicate_token_ch
     let mut model = Model::new("openai", "ledger-fixture");
     model.max_output_tokens = Some(16);
     let config = RuntimeConfig {
-        max_total_tokens: 1000,
+        max_total_tokens: Some(1000),
         local_agents: Some(LocalAgents {
-            shared_total_tokens: 500,
+            shared_total_tokens: Some(500),
             ..Default::default()
         }),
         permissions: vec![ScopedPermission::exact(
@@ -671,10 +698,10 @@ async fn parent_and_child_share_one_persistent_budget_without_duplicate_token_ch
     prompt(&runtime, &session.id, "run the child through the real Host").await;
     server.await.unwrap();
     let ledger = runtime.model_requests(&session.id).unwrap();
-    assert_eq!(ledger.token_limit, 500);
+    assert_eq!(ledger.token_limit, Some(500));
     assert_eq!(ledger.settled_tokens, 54);
     assert_eq!(ledger.reserved_tokens, 0);
-    assert_eq!(ledger.remaining_tokens, 446);
+    assert_eq!(ledger.remaining_tokens, Some(446));
     assert_eq!(ledger.requests.len(), 3);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
     let child = ledger
@@ -770,7 +797,11 @@ async fn failed_reservation_and_observation_writes_preserve_failure_and_known_us
                 "provider was never invoked and reservation never committed"
             );
         } else {
-            assert_eq!(ledger.reserved_tokens, 1000);
+            assert_eq!(ledger.reserved_tokens, 0);
+            assert_eq!(
+                ledger.charged_unknown_tokens,
+                ledger.requests[0].reservation_tokens
+            );
             assert_eq!(ledger.settled_tokens, 0);
             let last = &ledger.requests[0].observations.last().unwrap().observation;
             assert_eq!(last.usage_status, UsageStatus::Reported);
@@ -826,7 +857,11 @@ async fn failed_terminal_write_cannot_claim_completion_or_release_the_reservatio
     server.await.unwrap();
     let ledger = runtime.model_requests(&session.id).unwrap();
     assert_eq!(ledger.settled_tokens, 0);
-    assert_eq!(ledger.reserved_tokens, 1000);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(
+        ledger.charged_unknown_tokens,
+        ledger.requests[0].reservation_tokens
+    );
     assert_eq!(
         ledger.requests[0].terminal,
         Some(ModelRequestTerminal::RecordingFailed)

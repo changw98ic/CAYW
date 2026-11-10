@@ -57,7 +57,7 @@ let result = agent.prompt(Message::user("hello")).await?;
 - `AgentControl::steer`：当前模型和已发起工具批次结束后注入；不跳过当前工具。
 - `AgentControl::follow_up`：模型自然停止时消费。两类队列默认每次一条，也可 `QueueMode::All`。
 - `AgentControl::abort` / `wait_for_idle`：请求取消和等待全部结算。
-- `set_model`、`set_stream_options`、`set_tools`、`replace_messages`、`set_hooks`、`reset` 仅空闲可调用。同一 Agent 同时最多一次运行；默认最多 64 次模型请求，可用 `set_max_turns` 修改。
+- `set_model`、`set_stream_options`、`set_tools`、`replace_messages`、`set_hooks`、`reset` 仅空闲可调用。同一 Agent 同时最多一次运行；默认不限制模型请求次数，`set_max_turns(Some(n))` 可设置正数上限。
 
 `subscribe` 接收异步回调，按注册顺序等待，`agent_end` 回调处理完成后才变为空闲。回调可以读快照、排队或取消；不要在回调内部等待同一次运行空闲，也不要启动并等待同一 Agent 的新 prompt。回调应尽快返回并响应取消；内核不会为了取消而跳过等待中的存储回调。监听器错误会取消运行，其他监听器仍收到结算事件，prompt 返回 `AgentError::Listener`。
 

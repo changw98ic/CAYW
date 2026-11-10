@@ -55,28 +55,33 @@ struct GrepArgs {
 pub(crate) fn bound(
     value: Option<usize>,
     default: usize,
-    ceiling: usize,
+    ceiling: Option<usize>,
 ) -> Result<usize, CapabilityError> {
-    let value = value.unwrap_or(default.min(ceiling));
-    if value == 0 || value > ceiling {
-        return Err(failure("invalid read result or entry bound"));
+    match value {
+        Some(value) => {
+            if value == 0 || ceiling.is_some_and(|ceiling| value > ceiling) {
+                return Err(failure("invalid read result or entry bound"));
+            }
+            Ok(value)
+        }
+        None => Ok(ceiling.map_or(default, |ceiling| default.min(ceiling))),
     }
-    Ok(value)
 }
 
 // Charge JSON as each result is added, before an unbounded result can accumulate.
 pub(crate) struct OutputBudget {
     used: usize,
-    limit: usize,
+    limit: Option<usize>,
 }
 impl OutputBudget {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: Option<usize>) -> Self {
         Self { used: 0, limit }
     }
     pub(crate) fn add(&mut self, value: &Value) -> Result<(), CapabilityError> {
-        let size = json_size(value, self.limit.saturating_sub(self.used))?;
+        let available = self.limit.map(|limit| limit.saturating_sub(self.used));
+        let size = json_size(value, available)?;
         self.used = self.used.saturating_add(size).saturating_add(1);
-        if self.used > self.limit {
+        if self.limit.is_some_and(|limit| self.used > limit) {
             return Err(failure("read output byte limit exceeded"));
         }
         Ok(())
@@ -95,7 +100,7 @@ struct Scanner<'a> {
     workspace: &'a Workspace,
     context: &'a Context,
     respect: bool,
-    max_entries: usize,
+    max_entries: Option<usize>,
     entries: usize,
     files: usize,
     bytes: usize,
@@ -136,10 +141,11 @@ impl<'a> Scanner<'a> {
             .workspace
             .limits
             .max_batch_bytes
-            .saturating_sub(self.bytes);
-        let mut limit = self.workspace.limits.max_file_bytes.min(remaining);
+            .map(|limit| limit.saturating_sub(self.bytes));
+        let mut limit = crate::min_limit(self.workspace.limits.max_file_bytes, remaining);
         if ignore {
-            limit = limit.min(MAX_IGNORE_BYTES.saturating_sub(self.ignore_bytes));
+            let ignore_remaining = MAX_IGNORE_BYTES.saturating_sub(self.ignore_bytes);
+            limit = Some(limit.map_or(ignore_remaining, |limit| limit.min(ignore_remaining)));
         }
         let bytes = filesystem::read(dir, name, limit, self.context)?;
         self.bytes += bytes.len();
@@ -169,9 +175,12 @@ impl<'a> Scanner<'a> {
             for line in text.lines() {
                 self.context.check()?;
                 self.ignore_rules += 1;
-                if self.ignore_rules > MAX_IGNORE_RULES.min(self.workspace.limits.max_tree_entries)
-                    || line.len() > MAX_GLOB_BYTES
-                {
+                let rule_ceiling = self
+                    .workspace
+                    .limits
+                    .max_tree_entries
+                    .map_or(MAX_IGNORE_RULES, |max| MAX_IGNORE_RULES.min(max));
+                if self.ignore_rules > rule_ceiling || line.len() > MAX_GLOB_BYTES {
                     return Err(failure("gitignore rule complexity limit exceeded"));
                 }
                 builder
@@ -217,7 +226,12 @@ impl<'a> Scanner<'a> {
     }
     fn start(&mut self, path: &str, allow_file: bool) -> Result<Option<Start>, CapabilityError> {
         let parts = filesystem::components(path, true)?;
-        if parts.len() > self.workspace.limits.max_depth {
+        if self
+            .workspace
+            .limits
+            .max_depth
+            .is_some_and(|max| parts.len() > max)
+        {
             return Err(failure("scan depth limit exceeded"));
         }
         let mut dir = self.workspace.root.try_clone().map_err(io_error)?;
@@ -225,7 +239,7 @@ impl<'a> Scanner<'a> {
         let mut base = String::new();
         for (index, part) in parts.iter().enumerate() {
             self.context.check()?;
-            if self.entries >= self.max_entries {
+            if self.max_entries.is_some_and(|max| self.entries >= max) {
                 return Err(failure("scan entry limit exceeded"));
             }
             self.entries += 1;
@@ -290,7 +304,7 @@ impl<'a> Scanner<'a> {
         // Bound discovery before sorting, including ignored and protected names.
         for entry in dir.entries().map_err(io_error)? {
             self.context.check()?;
-            if self.entries >= self.max_entries {
+            if self.max_entries.is_some_and(|max| self.entries >= max) {
                 return Err(failure("scan entry limit exceeded"));
             }
             self.entries += 1;
@@ -321,7 +335,12 @@ impl<'a> Scanner<'a> {
                 continue;
             }
             if meta.is_dir() {
-                if depth >= self.workspace.limits.max_depth {
+                if self
+                    .workspace
+                    .limits
+                    .max_depth
+                    .is_some_and(|max| depth >= max)
+                {
                     return Err(failure("scan depth limit exceeded"));
                 }
                 let child = dir.open_dir_nofollow(&name).map_err(io_error)?;

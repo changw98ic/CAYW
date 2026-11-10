@@ -71,8 +71,10 @@ export function validatePlanFeedback(plan, draft) {
 
 export function messageText(message) {
   if (!object(message)) return clip(message);
-  const warning = message.outcome_unknown ? '工具结果待核对；需要由宿主核对真实副作用。' : message.is_error ? '工具执行失败。' : '';
   const content = messageContent(message);
+  const warning = message.outcome_unknown
+    ? (message.is_error || !content ? '工具执行已中断。' : '')
+    : message.is_error ? '工具执行失败。' : '';
   return clip([content, warning].filter(Boolean).join('\n'));
 }
 
@@ -96,10 +98,10 @@ export function messagePresentation(message) {
   const raw = messageText(message);
   if (message?.role === 'toolResult') {
     const page = message.structured_content;
-    const knownPage = message.tool_name === 'execute_code' && object(page) && ['completed', 'failed', 'cancelled', 'outcome_unknown', 'running', 'yielded'].includes(page.status) && Array.isArray(page.outputs);
-    const unknown = Boolean(message.outcome_unknown || (knownPage && (page.outcome_unknown || page.status === 'outcome_unknown')));
-    const status = unknown ? 'unknown' : message.is_error && page?.status !== 'cancelled' ? 'failed' : knownPage ? page.status : 'record';
-    const title = ({ completed: '执行完成', failed: '执行未完成', cancelled: '已停止', outcome_unknown: '执行结果待核对', unknown: '执行结果待核对', running: '仍在执行', yielded: '等待继续', record: '工具返回了执行记录' })[status];
+    const knownPage = message.tool_name === 'execute_code' && object(page) && ['completed', 'failed', 'cancelled', 'outcome_unknown', 'interrupted', 'running', 'yielded'].includes(page.status) && Array.isArray(page.outputs);
+    const interrupted = Boolean(message.outcome_unknown || (knownPage && (page.outcome_unknown || page.status === 'outcome_unknown' || page.status === 'interrupted')));
+    const status = interrupted ? 'interrupted' : message.is_error && page?.status !== 'cancelled' ? 'failed' : knownPage ? page.status : 'record';
+    const title = ({ completed: '执行完成', failed: '执行未完成', cancelled: '已停止', interrupted: '已中断', running: '仍在执行', yielded: '等待继续', record: '工具返回了执行记录' })[status];
     const values = [];
     if (knownPage && status === 'completed') {
       for (const item of page.outputs.slice(0, 20)) {
@@ -111,7 +113,7 @@ export function messagePresentation(message) {
       }
     }
     let detail = '';
-    if (unknown) detail = '请由宿主核对操作是否已发生；此结果不会自动重试。';
+    if (interrupted) detail = '本次工具执行已中断。';
     else if (status === 'cancelled') detail = '任务已停止。';
     else if (status === 'failed') {
       const reason = typeof page?.error === 'string' ? page.error : '';
@@ -151,7 +153,6 @@ const readMethods = new Set([
   'runtime.fleet',
   'session.context_overview',
   'session.run_inspector',
-  'model.budget.status',
   'artifacts.list',
   'artifacts.preview',
   'artifacts.action_list',
@@ -166,33 +167,6 @@ export class RpcError extends Error {
     this.status = status;
     this.auth = status === 403 || status === 401 || (code === 'forbidden' && status === 403);
   }
-}
-
-export function unstartedContinuationCancelTarget(task, sessionId, taskId) {
-  const pristine = object(task)
-    && task.id === taskId
-    && task.session_id === sessionId
-    && task.state === 'queued'
-    && task.worker_id === null
-    && task.attempt_id === null
-    && task.dispatches === 0
-    && task.holds_slot === false
-    && task.cancel_requested === false
-    && safeCursor(task.fence);
-  if (!pristine) {
-    throw new RpcError(
-      'budget_continuation_cleanup_unknown',
-      '新任务已不再是从未领取的 queued 状态；无法证明模型请求未开始。',
-      true
-    );
-  }
-  return {
-    session_id: task.session_id,
-    task_id: task.id,
-    worker_id: task.worker_id,
-    attempt_id: task.attempt_id,
-    fence: task.fence,
-  };
 }
 
 export function beginWrite(view, key, method, params = {}) {
@@ -218,12 +192,11 @@ export function noteSessionError(view, error) {
   const faults = { ...view.faults };
   const after = Math.max(view.cursor, view.snapshot?.cursor ?? 0);
   if (error.code === 'session_frozen') faults.frozen = { after };
-  if ((error.code === 'needs_reconciliation' || error.code === 'needs_reconciliation_outcome_unknown' || error.code === 'tool_outcome_unknown') && !faults.reconciliation) faults.reconciliation = { after, callIds: [], terminal: null };
   return { ...view, faults };
 }
 
 export function finishWrite(view, key, error = null, result = null) {
-  const rejected = error && (error.outcome_unknown === false || error.code === 'needs_reconciliation_outcome_unknown');
+  const rejected = error && error.outcome_unknown === false;
   const next = noteSessionError(view, error ?? {});
   next.writes = next.writes.flatMap(write => {
     if (write.key !== key) return [write];
@@ -248,11 +221,9 @@ function settleView(view) {
     const terminal = fact?.receipt ?? fact?.terminal;
     return safeCursor(terminal) && terminal > fact.after && view.cursor >= terminal && snapshot.cursor >= terminal && view.snapshotAfter >= terminal && view.snapshotEpoch >= (fact.terminalEpoch ?? 0);
   };
-  const idle = stateName(snapshot) === 'idle' && !sessionRunning(snapshot) && !unresolved(snapshot) && !array(snapshot.pending_approvals).length;
-  const faults = { ...view.faults };
-  if (idle && covered(faults.reconciliation)) delete faults.reconciliation;
+  const idle = stateName(snapshot) === 'idle' && !sessionRunning(snapshot) && !array(snapshot.pending_approvals).length;
   const writes = view.writes.map(write => write.method === 'session.cancel' && write.cancelled && safeCursor(write.promptReceipt) && write.promptTerminal?.cursor === write.promptReceipt ? { ...write, terminal: write.promptReceipt, terminalEpoch: write.promptTerminal.epoch ?? 0 } : write);
-  return { ...view, faults, activeAttempt: idle && covered(view.activeAttempt) ? null : view.activeAttempt, writes: writes.filter(write => write.phase === 'pending' || (write.method === 'session.cancel' && write.phase === 'uncertain') || !covered(write) || (!idle && write.method !== 'approval.decide')) };
+  return { ...view, activeAttempt: idle && covered(view.activeAttempt) ? null : view.activeAttempt, writes: writes.filter(write => write.phase === 'pending' || (write.method === 'session.cancel' && write.phase === 'uncertain') || !covered(write) || (!idle && write.method !== 'approval.decide')) };
 }
 
 function consumeWriteFact(view, record) {
@@ -276,14 +247,6 @@ function consumeWriteFact(view, record) {
     return next;
   });
   const faults = { ...view.faults };
-  if (faults.reconciliation && record.cursor > faults.reconciliation.after && event.type === 'reconciled') {
-    const fault = faults.reconciliation;
-    const callId = event.reconciliation?.call_id;
-    if (typeof callId === 'string' && fault.callIds.includes(callId)) {
-      const callIds = fault.callIds.filter(id => id !== callId);
-      faults.reconciliation = { ...fault, callIds, terminal: callIds.length ? null : record.cursor };
-    }
-  }
   let activeAttempt = view.activeAttempt;
   if (event.type === 'attempt_started' && event.lease?.session_id === view.id && (!activeAttempt || record.cursor > activeAttempt.after)) {
     activeAttempt = { lease:event.lease, after:record.cursor, terminal:null };
@@ -324,17 +287,6 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
   if (view.snapshot && snapshot.cursor < Math.max(view.snapshot.cursor, view.cursor)) return view;
   const faults = { ...view.faults };
   if (frozen(snapshot)) faults.frozen = { after: snapshot.cursor };
-  if (unresolved(snapshot)) {
-    const callIds = array(snapshot.unresolved_calls).map(call => call.call?.id).filter(id => typeof id === 'string');
-    if (!faults.reconciliation) faults.reconciliation = { after: snapshot.cursor, callIds, terminal: null };
-    else if (callIds.length) {
-      const fault = faults.reconciliation;
-      const added = callIds.filter(id => !fault.callIds.includes(id));
-      // Re-reading the same pending calls preserves already consumed evidence
-      // for the remaining calls. Only genuinely new ids add an obligation.
-      faults.reconciliation = { ...fault, callIds: [...fault.callIds, ...added], terminal: added.length ? null : fault.terminal };
-    }
-  }
   // A Core snapshot may predate the runtime binding view. Its missing metadata
   // never clears an explicit frozen rejection, even at the same durable cursor.
   return settleView({
@@ -391,11 +343,6 @@ function stateName(snapshot) {
   if (typeof snapshot?.state === 'string') return snapshot.state;
   return snapshot?.state?.type ?? snapshot?.state?.status ?? 'unknown';
 }
-function unresolved(snapshot) {
-  const calls = array(snapshot?.unresolved_calls);
-  const unknownCall = calls.some(call => !object(call) || !['planned', 'prepared', 'started'].includes(call.state) || call.result?.outcome_unknown);
-  return Boolean(snapshot?.needs_reconciliation) || unknownCall || (calls.length > 0 && !sessionRunning(snapshot)) || stateName(snapshot).includes('reconcil') || stateName(snapshot).includes('unknown');
-}
 function frozen(snapshot, view) {
   return Boolean(view?.faults.frozen || snapshot?.binding?.frozen) || /frozen|unavailable/.test(stateName(snapshot));
 }
@@ -404,17 +351,15 @@ export function sessionRunning(snapshot) {
 }
 export function sessionBlocked(snapshot, view) {
   if (!snapshot) return '请先选择会话。';
-  if (unresolved(snapshot) || view?.faults.reconciliation) return '存在尚未核对的工具副作用。请由宿主核对真实结果；网页无法清除该状态，也不会自动重试。';
   if (writeNotice(view)) return writeNotice(view);
   if (frozen(snapshot, view)) return '强流程目前不可用，此会话保持冻结。可明确确认后 Fork 为新的普通聊天会话。';
   if (!['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot))) return '会话状态尚未确认，请等待 Runtime 同步后再发送。';
   return '';
 }
-function canFork(view) {
-  return Boolean(view?.snapshot && frozen(view.snapshot, view) && !unresolved(view.snapshot) && !view.faults.reconciliation && !view.writes.length && !view.activeAttempt && !sessionRunning(view.snapshot) && !array(view.snapshot.pending_approvals).length);
+export function canFork(view) {
+  return Boolean(view?.snapshot && frozen(view.snapshot, view) && !view.writes.length && !view.activeAttempt && !sessionRunning(view.snapshot) && !array(view.snapshot.pending_approvals).length);
 }
-function stateLabel(snapshot, view) {
-  if (unresolved(snapshot) || view?.faults.reconciliation) return '待核对副作用';
+export function stateLabel(snapshot, view) {
   if (view?.writes.some(write => write.phase === 'uncertain')) return '连接结果待确认';
   if (array(snapshot?.pending_approvals).length) return '等待审批';
   if (view?.writes.length) return '正在处理';
@@ -434,7 +379,6 @@ function boot() {
     'blocked-notice', 'blocked-text', 'open-fork', 'approvals', 'live-section', 'live-text', 'event-log', 'event-count',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork',
-    'model-budget-dialog', 'model-budget-form', 'model-budget-summary', 'model-budget-confirm', 'model-budget-error', 'continue-model-budget', 'close-model-budget',
     'refresh-capabilities', 'capability-content',
     'panel-sidebar', 'panel-sidebar-status', 'panel-sidebar-guide', 'panel-sidebar-open', 'refresh-panels',
     'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
@@ -455,7 +399,6 @@ function boot() {
   let promptPending = new Set();
   let approvalPending = new Set();
   const taskAdmissions = new Map();
-  let budgetDecision = null;
   let selectionGeneration = 0;
   let listGeneration = 0;
   let promptRevision = 0;
@@ -470,10 +413,8 @@ function boot() {
   };
   const errorText = error => clip(({
     session_frozen: '强流程当前不可用，会话保持冻结。请在会话提示中确认后创建普通聊天分支。',
-    needs_reconciliation: '工具副作用尚未核对，需要由宿主检查真实结果。',
-    needs_reconciliation_outcome_unknown: '工具副作用尚未核对，需要由宿主检查真实结果。',
-    tool_outcome_unknown: '工具结果尚未核对，需要由宿主检查真实副作用。',
-  })[error?.code] ?? (error?.outcome_unknown ? '连接中断或请求结果待确认。页面不会自动重发，请等待事件同步或由宿主核对。' : error?.message ?? '发生未知错误。'), 2500);
+    budget_exceeded: '已用完配置的预算，本次执行已停止。',
+  })[error?.code] ?? (error?.outcome_unknown ? '连接中断或请求结果待确认。页面不会自动重发，请等待事件同步。' : error?.message ?? '发生未知错误。'), 2500);
   const report = error => {
     ui['global-error'].textContent = error ? errorText(error) : '';
     ui['global-error'].hidden = !error;
@@ -486,45 +427,6 @@ function boot() {
       promptRevision++;
     }
   };
-
-  function finishBudgetDecision(approved) {
-    const pending = budgetDecision;
-    budgetDecision = null;
-    if (ui['model-budget-dialog'].open) ui['model-budget-dialog'].close();
-    ui['model-budget-confirm'].checked = false;
-    ui['model-budget-error'].textContent = '';
-    if (pending) pending.resolve(approved ? pending.proposal : null);
-  }
-
-  function confirmModelBudget(status) {
-    const proposal = status?.continuation;
-    if (!status?.budget_unknown || !object(proposal) || !Array.isArray(proposal.expected)
-      || !Number.isSafeInteger(proposal.additional_tokens) || proposal.additional_tokens <= 0
-      || !Number.isSafeInteger(proposal.token_limit) || proposal.token_limit <= 0) {
-      throw new RpcError('invalid_response', 'Runtime 返回的模型预算恢复方案无效；没有创建新任务。');
-    }
-    finishBudgetDecision(false);
-    ui['model-budget-summary'].textContent = `先前有 ${proposal.unknown_request_count} 个模型请求用量未知，保留预留 ${status.reserved_tokens} token。本次只为一个新任务增加最多 ${proposal.additional_tokens} token；累计上限变为 ${proposal.token_limit} token。`;
-    ui['model-budget-confirm'].checked = false;
-    ui['model-budget-error'].textContent = '';
-    ui['model-budget-dialog'].showModal();
-    return new Promise(resolve => { budgetDecision = { proposal, resolve }; });
-  }
-
-  ui['model-budget-form'].addEventListener('submit', event => {
-    event.preventDefault();
-    if (!budgetDecision) return;
-    if (!ui['model-budget-confirm'].checked) {
-      ui['model-budget-error'].textContent = '请先确认保留未知预留并增加列明的有限额度。';
-      return;
-    }
-    finishBudgetDecision(true);
-  });
-  ui['close-model-budget'].addEventListener('click', () => finishBudgetDecision(false));
-  ui['model-budget-dialog'].addEventListener('cancel', event => {
-    event.preventDefault();
-    finishBudgetDecision(false);
-  });
 
   async function rpc(method, params = {}, scope = sessionWorkspaces.get(params.session_id) || workspaceId) {
     const controller = new AbortController();
@@ -1259,7 +1161,8 @@ function boot() {
 
           const pTokens = el('p', 'small', `Tokens 总量: ${tokens.total_tokens || 0} (输入: ${tokens.input || 0}, 输出: ${tokens.output || 0}, 推理: ${tokens.reasoning || 0})`);
           const pCache = el('p', 'small', `缓存读取: ${cache.cache_read || tokens.cache_read || 0}, 缓存写入: ${cache.cache_write || tokens.cache_write || 0}, 命中率: ${cache.hit_rate != null ? (cache.hit_rate * 100).toFixed(1) + '%' : '0.0%'}`);
-          const pLedger = el('p', 'small', `账本结算: ${stats.ledger_settled_tokens || 0}, 预留: ${stats.ledger_reserved_tokens || 0}, 剩余: ${stats.ledger_remaining_tokens || 0}${stats.budget_unknown ? ' [预算未知]' : ''}`);
+          const remaining = stats.ledger_remaining_tokens;
+          const pLedger = el('p', 'small', `账本结算: ${stats.ledger_settled_tokens || 0}, 预留: ${stats.ledger_reserved_tokens || 0}, 未知计费: ${stats.ledger_charged_unknown_tokens || 0}, 剩余: ${remaining == null ? '不限' : remaining}${stats.usage_unknown ? ' [用量未知]' : ''}`);
           const pCost = el('p', 'small', `费用结算状态: ${cost.status || 'unknown'}${cost.amount ? ` (${cost.amount} ${cost.currency || 'USD'})` : ''}`);
           const pRounds = el('p', 'small', `请求次数: ${stats.request_count || 0}, 对话轮次: ${stats.turn_count || 0}`);
 
@@ -1446,7 +1349,6 @@ function boot() {
     ui['session-picker'].open = true;
     setPromptValue('');
     ui['fork-dialog'].close();
-    finishBudgetDecision(false);
     if ($('settings-dialog')?.open) $('settings-dialog').close();
     panelCatalog = null;
     openedPanels = [];
@@ -1513,8 +1415,8 @@ function boot() {
   }
 
   function sessionSummary(snapshot) {
-    const { id, label, cursor, state, attempt, pending_approvals, unresolved_calls, binding } = snapshot;
-    return { id, label, cursor, state, attempt, pending_approvals, unresolved_calls, binding };
+    const { id, label, cursor, state, attempt, pending_approvals, binding } = snapshot;
+    return { id, label, cursor, state, attempt, pending_approvals, binding };
   }
 
   function updateSessionSummary(snapshot) {
@@ -1572,7 +1474,7 @@ function boot() {
     ui['session-title'].textContent = clip(snapshot?.label || (selected ? '正在读取会话…' : '选择或创建会话'), 160);
     ui['session-picker-label'].textContent = clip(snapshot?.label || '选择或新建', 60);
     ui['session-state'].textContent = snapshot ? stateLabel(snapshot, view) : '等待选择';
-    const attention = snapshot && (unresolved(snapshot) || view?.faults.reconciliation || frozen(snapshot, view) || view?.writes.some(write => write.phase === 'uncertain') || !['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot)));
+    const attention = snapshot && (frozen(snapshot, view) || view?.writes.some(write => write.phase === 'uncertain') || !['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot)));
     ui['blocked-text'].textContent = attention ? sessionBlocked(snapshot, view) : '';
     ui['blocked-notice'].hidden = !attention;
     ui['open-fork'].hidden = !snapshot || !frozen(snapshot, view);
@@ -1632,7 +1534,6 @@ function boot() {
         }
       }
       if (message.error_message) card.append(el('p', 'effect-warning', clip(message.error_message, 2000)));
-      if (message.outcome_unknown) card.append(el('p', 'effect-warning', '此工具调用的真实结果待宿主核对。'));
       fragment.append(card);
     }
     ui['messages'].replaceChildren(fragment);
@@ -1665,7 +1566,7 @@ function boot() {
     ui['send-button'].disabled = ui['prompt'].disabled || !ui['prompt'].value.trim();
     ui['send-button'].textContent = pending ? '等待完成…' : '发送';
     ui['cancel-button'].disabled = !snapshot || (!taskAdmissions.has(selected) && !view?.originalTaskId) || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
-    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !unresolved(snapshot) && !view?.writes.some(write => write.phase === 'uncertain') ? '请确认上方的操作请求，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
+    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !view?.writes.some(write => write.phase === 'uncertain') ? '请确认上方的操作请求，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
   }
 
   function renderApprovals(snapshot) {
@@ -1707,7 +1608,7 @@ function boot() {
           const button = el('button', className, approvalPending.has(`${snapshot.id}/${id}`) ? '正在记录…' : label);
           button.type = 'button';
           const view = views.get(snapshot.id);
-          button.disabled = approvalPending.has(`${snapshot.id}/${id}`) || unresolved(snapshot) || frozen(snapshot, view) || Boolean(view?.faults.reconciliation) || view?.writes.some(write => write.phase === 'uncertain' || write.method === 'approval.decide');
+          button.disabled = approvalPending.has(`${snapshot.id}/${id}`) || frozen(snapshot, view) || view?.writes.some(write => write.phase === 'uncertain' || write.method === 'approval.decide');
           button.addEventListener('click', () => decide(snapshot.id, id, decision));
           actions.append(button);
         }
@@ -1780,14 +1681,12 @@ function boot() {
   }
 
   let writeSequence = 0;
-  async function writeRpc(id, method, params, budgetProposal = null) {
+  async function writeRpc(id, method, params) {
     const scope = sessionWorkspaces.get(id) || workspaceId;
     sessionWorkspaces.set(id, scope);
     const login = loginGeneration;
     const key = ++writeSequence;
     const view = views.get(id);
-    let admittedTaskId = null;
-    let resumeStarted = false;
     if (view) rememberView(beginWrite(view, key, method, params));
     if (id === selected) renderView();
     try {
@@ -1803,43 +1702,11 @@ function boot() {
         taskAdmissions.set(id, admission);
         if (id === selected) renderComposer();
         const taskId = await admission;
-        admittedTaskId = taskId;
-        if (budgetProposal) {
-          await rpc('model.budget.continue', {
-            session_id: id,
-            task_id: taskId,
-            expected: budgetProposal.expected,
-            additional_tokens: budgetProposal.additional_tokens,
-            token_limit: budgetProposal.token_limit,
-            confirm: true,
-          }, scope);
-        }
-        resumeStarted = true;
         result = await rpc('task.resume', { task_id: taskId }, scope);
       } else result = await rpc(method, params, scope);
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, null, result));
       return result;
     } catch (error) {
-      if (admittedTaskId && !resumeStarted) {
-        const grantError = error;
-        try {
-          const task = await rpc('task.get', { task_id: admittedTaskId }, scope);
-          const target = unstartedContinuationCancelTarget(task, id, admittedTaskId);
-          const cancelled = await rpc('session.cancel', target, scope);
-          if (cancelled?.cancelled !== true) throw new Error('Runtime 未确认取消从未领取的新任务。');
-          error = new RpcError(
-            'budget_continuation_not_executed',
-            `模型预算授权失败；新任务已在从未领取的 queued 状态下取消，模型请求未开始：${grantError.message || String(grantError)}`,
-            false
-          );
-        } catch (cleanup) {
-          error = new RpcError(
-            'budget_continuation_cleanup_unknown',
-            `模型预算授权失败后，无法确认新任务是否已被领取或取消：${cleanup.message || String(cleanup)}`,
-            true
-          );
-        }
-      }
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, error));
       throw error;
     } finally {
@@ -2101,15 +1968,9 @@ function boot() {
     report(null);
     renderComposer();
     try {
-      const budget = await rpc('model.budget.status', { session_id: id }, scope);
-      let budgetProposal = null;
-      if (budget?.budget_unknown) {
-        budgetProposal = await confirmModelBudget(budget);
-        if (!budgetProposal || login !== loginGeneration || id !== selected || scope !== workspaceId) return;
-      }
       // Never await prompt from inside the polling loop. Approval/cancel/events
       // need separate concurrent HTTP and IPC requests while it is pending.
-      const snapshot = await writeRpc(id, 'session.prompt', { session_id: id, text }, budgetProposal);
+      const snapshot = await writeRpc(id, 'session.prompt', { session_id: id, text });
       if (login !== loginGeneration) return;
       const view = views.get(id);
       if (view) rememberView({ ...applySnapshot(view, snapshot, false, requestedAfter, requestedEpoch), liveText: '' });

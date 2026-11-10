@@ -117,7 +117,6 @@ pub enum RuntimeError {
     QueueFull,
     Cancelled,
     Budget(&'static str),
-    NeedsReconciliation,
     Frozen(String),
     StaleApproval,
     StaleCancellation,
@@ -148,9 +147,6 @@ impl fmt::Display for RuntimeError {
             Self::QueueFull => write!(f, "runtime task queue is full"),
             Self::Cancelled => write!(f, "task cancelled before execution"),
             Self::Budget(budget) => write!(f, "task exceeded its {budget} budget"),
-            Self::NeedsReconciliation => {
-                write!(f, "session requires reconciliation before it can continue")
-            }
             Self::Frozen(reason) => write!(f, "session is frozen: {reason}"),
             Self::StaleApproval => write!(f, "approval is no longer pending for an active attempt"),
             Self::StaleCancellation => {
@@ -268,7 +264,6 @@ impl RuntimeError {
             Self::QueueFull => "queue_full",
             Self::Cancelled => "cancelled",
             Self::Budget(_) => "budget_exceeded",
-            Self::NeedsReconciliation => "needs_reconciliation_outcome_unknown",
             Self::Frozen(_) => "session_frozen",
             Self::StaleApproval => "stale_approval",
             Self::StaleCancellation => "stale_cancellation",
@@ -301,8 +296,6 @@ impl RuntimeError {
     /// wrapper flag was not set.
     pub fn outcome_unknown(&self) -> bool {
         match self {
-            Self::NeedsReconciliation => true,
-            Self::Core(CoreError::NeedsReconciliation) => true,
             Self::Request(
                 RequestError::Clock
                 | RequestError::Poisoned
@@ -312,7 +305,6 @@ impl RuntimeError {
                 | RequestError::Io(_),
             ) => true,
             Self::Content(cayw_content::Error::CommitOutcomeUnknown(_)) => true,
-            Self::Agent(cayw_agent::AgentError::UnresolvedToolEffects) => true,
             #[cfg(feature = "plugins")]
             Self::Plugin(error) => error.outcome_unknown(),
             Self::WorkerPanicked(_) | Self::WorkerLost(_) => true,
@@ -382,7 +374,6 @@ fn core_code(error: &CoreError) -> &'static str {
     match error {
         CoreError::Database(error) => StorageFailure::from_sqlite(error).code(),
         CoreError::Json(_) | CoreError::CorruptStore(_) => "stored_data_corrupt",
-        CoreError::NeedsReconciliation => "needs_reconciliation_outcome_unknown",
         _ => "session_error",
     }
 }
@@ -396,11 +387,8 @@ fn content_code(error: &cayw_content::Error) -> &'static str {
     }
 }
 
-fn agent_code(error: &cayw_agent::AgentError) -> &'static str {
-    match error {
-        cayw_agent::AgentError::UnresolvedToolEffects => "agent_outcome_unknown",
-        _ => "agent_error",
-    }
+fn agent_code(_error: &cayw_agent::AgentError) -> &'static str {
+    "agent_error"
 }
 
 fn request_code(error: &RequestError) -> &'static str {
@@ -501,13 +489,6 @@ mod tests {
             "agent_error"
         );
         assert_eq!(
-            RuntimeError::Agent(cayw_agent::AgentError::UnresolvedToolEffects).code(),
-            "agent_outcome_unknown"
-        );
-        assert!(
-            RuntimeError::Agent(cayw_agent::AgentError::UnresolvedToolEffects).outcome_unknown()
-        );
-        assert_eq!(
             RuntimeError::WorkerPanicked("panicked".into()).worker_failure(),
             Some(WorkerFailure::Panic)
         );
@@ -545,7 +526,9 @@ mod tests {
     #[test]
     fn nested_unknown_outranks_a_false_wrapper_flag() {
         let nested = RuntimeError::RecoveryRequired {
-            cause: Box::new(RuntimeError::NeedsReconciliation),
+            cause: Box::new(RuntimeError::Content(
+                cayw_content::Error::CommitOutcomeUnknown(io::Error::other("commit uncertain")),
+            )),
             cleanup: None,
             outcome_unknown: false,
         };

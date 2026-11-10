@@ -8,7 +8,7 @@ use cayw_ipc::RpcHandler;
 use cayw_runtime::{
     ActionIntent, ActionKind, ActionRequest, ActionStatus, ArtifactKind, ArtifactReconciledOutcome,
     ArtifactReconciliation, ArtifactReconciliationVerifier, PutArtifactRequest, Runtime,
-    RuntimeConfig, RuntimeError, RuntimeHostDispatch, ScopedPermission, TaskState,
+    RuntimeConfig, RuntimeHostDispatch, ScopedPermission, TaskState,
 };
 use futures::stream;
 use serde_json::{Value, json};
@@ -170,17 +170,18 @@ impl Provider for UnknownEffectProvider {
 }
 
 #[tokio::test]
-async fn needs_reconciliation_blocks_artifact_invoke_tool_before_dispatch() {
+async fn unknown_effect_is_audited_but_artifact_invoke_tool_still_dispatches() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    std::fs::write(dir.path().join("workspace/note.txt"), "host-evidence").unwrap();
     let host = Arc::new(UnknownHost {
         calls: AtomicUsize::new(0),
     });
     let mut config = RuntimeConfig {
-        permissions: vec![ScopedPermission::exact(
-            "search.query",
-            json!({"query":"unknown"}),
-        )],
+        permissions: vec![
+            ScopedPermission::exact("search.query", json!({"query":"unknown"})),
+            ScopedPermission::exact("fs.read", json!({"path":"note.txt"})),
+        ],
         ..Default::default()
     };
     config.host.external = Some(host.clone());
@@ -197,32 +198,36 @@ async fn needs_reconciliation_blocks_artifact_invoke_tool_before_dispatch() {
     let _ = rt
         .prompt(&session, "unknown effect", CancellationToken::new())
         .await;
+    let view = rt.get(&session).unwrap();
+    assert_eq!(view.state, cayw_core::SessionState::Idle);
     assert_eq!(
-        rt.get(&session).unwrap().state,
-        cayw_core::SessionState::NeedsReconciliation
+        view.unresolved_capabilities.len(),
+        1,
+        "the unknown capability must stay in the internal audit record"
     );
-    let before = host.calls.load(Ordering::SeqCst);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
 
-    let error = rt
+    let outcome = rt
         .dispatch_artifact_action(ActionRequest {
             action_id: "act-blocked".into(),
             artifact_id: "card-blocked".into(),
             session_id: session.clone(),
             kind: ActionKind::Button,
             intent: ActionIntent::InvokeTool {
-                tool: "search.query".into(),
-                args_json: "{\"query\":\"artifact\"}".into(),
+                tool: "fs.read".into(),
+                args_json: "{\"path\":\"note.txt\"}".into(),
             },
             expected_content_version: Some(1),
             requested_at_ms: 20,
         })
-        .unwrap_err();
-    assert!(matches!(error, RuntimeError::NeedsReconciliation));
-    assert_eq!(
-        host.calls.load(Ordering::SeqCst),
-        before,
-        "the artifact Host call must not dispatch from a session requiring reconciliation"
+        .unwrap();
+    assert_eq!(outcome.record.status, ActionStatus::Applied, "{outcome:#?}");
+    let outcome_json = outcome.record.outcome_json.as_deref().unwrap();
+    assert!(
+        outcome_json.contains("host-evidence"),
+        "an unreconciled unknown capability must not block the artifact Host call: {outcome:#?}"
     );
+    assert_eq!(rt.get(&session).unwrap().unresolved_capabilities.len(), 1);
 }
 
 #[cfg(feature = "strongflow")]
@@ -259,7 +264,10 @@ async fn frozen_binding_blocks_artifact_invoke_tool_before_dispatch() {
             requested_at_ms: 21,
         })
         .unwrap_err();
-    assert!(matches!(error, RuntimeError::Frozen(_)), "{error:?}");
+    assert!(
+        matches!(error, cayw_runtime::RuntimeError::Frozen(_)),
+        "{error:?}"
+    );
     assert!(
         rt.list_artifact_actions(&session).unwrap().is_empty(),
         "the artifact action must not be recorded or dispatched while frozen"
@@ -720,10 +728,14 @@ async fn reconcile_controlled_cancellation_and_continue(
         rt.get_artifact_action(action_id).unwrap().status,
         ActionStatus::OutcomeUnknown
     );
-    assert!(matches!(
-        rt.enqueue(session, "blocked until trusted cancellation reconciliation"),
-        Err(RuntimeError::NeedsReconciliation)
-    ));
+    let queued = rt
+        .enqueue(
+            session,
+            "follow-up succeeds before trusted cancellation reconciliation",
+        )
+        .expect("an unreconciled unknown artifact outcome must not block enqueue");
+    rt.cancel(&rt.task(&queued.id).unwrap().cancel_target())
+        .unwrap();
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let audit = rt.audit(session, 0, 100).unwrap();
     assert!(

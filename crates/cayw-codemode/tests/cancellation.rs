@@ -111,8 +111,8 @@ async fn cancellation_or_host_wait_settles_the_same_host_before_return_and_start
                     Limits {
                         // A VM timeout only bounds computation, so the started Host
                         // needs an explicit short host_wait to reach its own limit.
-                        timeout: if timed_out { Duration::from_millis(50) } else { Duration::from_secs(5) },
-                        host_wait: if timed_out { Duration::from_millis(300) } else { Duration::from_secs(60) },
+                        timeout: Some(if timed_out { Duration::from_millis(50) } else { Duration::from_secs(5) }),
+                        host_wait: Some(if timed_out { Duration::from_millis(300) } else { Duration::from_secs(60) }),
                         shutdown_grace: Duration::from_secs(1),
                         ..Limits::default()
                     },
@@ -166,16 +166,16 @@ async fn permanently_pending_host_is_bounded_by_host_wait_then_explicit_unknown(
                 Limits {
                     // A VM timeout only bounds computation, so the started Host
                     // needs an explicit short host_wait to reach its own limit.
-                    timeout: if timed_out {
+                    timeout: Some(if timed_out {
                         Duration::from_millis(50)
                     } else {
                         Duration::from_secs(5)
-                    },
-                    host_wait: if timed_out {
+                    }),
+                    host_wait: Some(if timed_out {
                         Duration::from_millis(300)
                     } else {
                         Duration::from_secs(60)
-                    },
+                    }),
                     shutdown_grace: Duration::from_millis(25),
                     ..Limits::default()
                 },
@@ -398,7 +398,6 @@ async fn agent_abort_keeps_codemode_running_until_host_settlement() {
             assert_eq!(audit["report"]["calls"][0]["status"], status);
             assert_eq!(audit["report"]["calls"].as_array().unwrap().len(), 1);
             assert!(!results[1].outcome_unknown);
-            assert_eq!(agent.snapshot().needs_reconciliation, unknown);
             assert!(!agent.snapshot().is_running);
             assert!(host.settled.load(Ordering::SeqCst));
             assert!(!host.dropped.load(Ordering::SeqCst));

@@ -70,7 +70,7 @@ fn open(
         provider,
         model,
         RuntimeConfig {
-            max_total_tokens: limit,
+            max_total_tokens: Some(limit),
             model_request_reconciliation_verifier: verifier,
             ..Default::default()
         },
@@ -154,8 +154,11 @@ async fn responses_usage_update_details_admitted_without_redaction_and_reconcile
     assert_eq!(ledger.requests.len(), 1);
     let record = &ledger.requests[0];
     assert_eq!(record.settled_tokens, None);
-    assert_eq!(record.outstanding_reservation_tokens, LIMIT);
-    assert!(ledger.budget_unknown);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
+    assert_eq!(ledger.reserved_tokens, 0);
+    assert_eq!(ledger.charged_unknown_tokens, record.reservation_tokens);
+    assert!(ledger.usage_unknown);
 
     // Verify observation chain retained details without redaction
     assert!(!record.observations.is_empty());
@@ -232,11 +235,16 @@ async fn responses_usage_update_details_admitted_without_redaction_and_reconcile
     let updated_ledger = runtime.model_requests(&session).unwrap();
     let updated_record = &updated_ledger.requests[0];
     assert_eq!(updated_record.settled_tokens, Some(97));
+    assert_eq!(updated_record.charged_tokens, Some(97));
     assert_eq!(updated_record.outstanding_reservation_tokens, 0);
     assert_eq!(updated_ledger.settled_tokens, 97);
     assert_eq!(updated_ledger.reserved_tokens, 0);
-    assert_eq!(updated_ledger.remaining_tokens, LIMIT.saturating_sub(97));
-    assert!(!updated_ledger.budget_unknown);
+    assert_eq!(updated_ledger.charged_unknown_tokens, 0);
+    assert_eq!(
+        updated_ledger.remaining_tokens,
+        Some(LIMIT.saturating_sub(97))
+    );
+    assert!(!updated_ledger.usage_unknown);
 
     // Reopen and verify persistence
     drop(runtime);
@@ -245,7 +253,7 @@ async fn responses_usage_update_details_admitted_without_redaction_and_reconcile
     let reopened_record = &reopened_ledger.requests[0];
     assert_eq!(reopened_record.settled_tokens, Some(97));
     assert_eq!(reopened_record.outstanding_reservation_tokens, 0);
-    assert!(!reopened_ledger.budget_unknown);
+    assert!(!reopened_ledger.usage_unknown);
 }
 
 #[tokio::test]
@@ -305,7 +313,8 @@ async fn responses_unknown_detail_fields_are_redacted_and_reconciliation_rejecte
     let ledger = runtime.model_requests(&session).unwrap();
     let record = &ledger.requests[0];
     assert_eq!(record.settled_tokens, None);
-    assert_eq!(record.outstanding_reservation_tokens, LIMIT);
+    assert_eq!(record.charged_tokens, Some(record.reservation_tokens));
+    assert_eq!(record.outstanding_reservation_tokens, 0);
 
     // Verify metadata_redacted was set to true on the observation
     let update_obs = record
@@ -356,14 +365,15 @@ async fn responses_unknown_detail_fields_are_redacted_and_reconciliation_rejecte
     let err = runtime.reconcile_model_request(decision).await.unwrap_err();
     assert!(matches!(err, RuntimeError::InvalidInput(_)));
 
-    // Budget hold is preserved
+    // The unknown-usage charge is preserved
     let final_ledger = runtime.model_requests(&session).unwrap();
     assert_eq!(final_ledger.requests[0].settled_tokens, None);
+    assert_eq!(final_ledger.requests[0].outstanding_reservation_tokens, 0);
     assert_eq!(
-        final_ledger.requests[0].outstanding_reservation_tokens,
-        LIMIT
+        final_ledger.charged_unknown_tokens,
+        ledger.charged_unknown_tokens
     );
-    assert!(final_ledger.budget_unknown);
+    assert!(final_ledger.usage_unknown);
 }
 
 #[tokio::test]

@@ -1,8 +1,6 @@
 //! Grapheme-aware editing and removal of terminal escape/control sequences.
 use unicode_segmentation::UnicodeSegmentation;
 
-const MAX_DRAFT_BYTES: usize = 256 * 1024;
-
 #[derive(Clone, Debug, Default)]
 pub struct Editor {
     text: String,
@@ -27,18 +25,11 @@ impl Editor {
 
     pub fn insert(&mut self, text: &str) {
         let clean = sanitize(text);
-        let remaining = MAX_DRAFT_BYTES.saturating_sub(self.text.len());
-        let end = clean
-            .grapheme_indices(true)
-            .map(|(offset, grapheme)| offset + grapheme.len())
-            .take_while(|&end| end <= remaining)
-            .last()
-            .unwrap_or(0);
-        if end > 0 {
+        if !clean.is_empty() {
             self.revision = self.revision.wrapping_add(1);
         }
-        self.text.insert_str(self.cursor, &clean[..end]);
-        self.cursor += end;
+        self.text.insert_str(self.cursor, &clean);
+        self.cursor += clean.len();
         // A combining character or ZWJ can join the following grapheme.
         self.cursor = self.next_boundary_at_or_after(self.cursor);
     }

@@ -6,8 +6,8 @@ use crate::{
 use cayw_ai::{Message, StopReason};
 use cayw_cells::{CellExecution, HostCallTerminal, IntentStatus};
 use cayw_core::{
-    AttemptLease, CallState, CapabilityCallRecord, CapabilityOutcome, CapabilityReconciliation,
-    ReconciliationOrigin, ReconciliationRequest, SessionState,
+    AttemptLease, CapabilityCallRecord, CapabilityOutcome, CapabilityReconciliation,
+    ReconciliationOrigin, ReconciliationRequest,
 };
 use std::collections::BTreeSet;
 
@@ -165,14 +165,6 @@ impl Runtime {
             return Ok(messages.to_vec());
         }
         let snapshot = self.inner.store.snapshot(id)?;
-        if snapshot.state == SessionState::NeedsReconciliation
-            || snapshot
-                .unresolved_calls
-                .iter()
-                .any(|call| call.state == CallState::OutcomeUnknown)
-        {
-            return Err(RuntimeError::NeedsReconciliation);
-        }
         let mut started = BTreeSet::new();
         let mut visited = BTreeSet::new();
         let mut source = id.to_owned();
@@ -240,27 +232,33 @@ impl Runtime {
     /// untouched. Each cleared stop has an exact, already committed host decision.
     pub(crate) fn continuation_messages(&self, id: &str) -> Result<Vec<Message>, RuntimeError> {
         let facts = Facts::read(self, id)?;
-        if facts.snapshot.state == SessionState::NeedsReconciliation
-            || facts
-                .snapshot
-                .unresolved_calls
-                .iter()
-                .any(|call| call.state == CallState::OutcomeUnknown)
-        {
-            return Err(RuntimeError::NeedsReconciliation);
-        }
         let mut messages = facts.snapshot.messages.clone();
         let mut tool_decisions = std::collections::BTreeMap::new();
         for message in &mut messages {
-            if let Message::ToolResult(result) = message
-                && result.outcome_unknown
-            {
-                let decision = self
-                    .inner
-                    .store
-                    .committed_tool_reconciliation(id, &result.tool_call_id)?;
-                tool_decisions.insert(result.tool_call_id.clone(), decision);
-                result.outcome_unknown = false;
+            if let Message::ToolResult(result) = message {
+                if result.outcome_unknown {
+                    let still_unresolved = facts
+                        .snapshot
+                        .unresolved_calls
+                        .iter()
+                        .any(|call| call.call.id == result.tool_call_id);
+                    if !still_unresolved {
+                        let decision = self
+                            .inner
+                            .store
+                            .committed_tool_reconciliation(id, &result.tool_call_id)?;
+                        tool_decisions.insert(result.tool_call_id.clone(), decision);
+                        result.outcome_unknown = false;
+                    }
+                } else if facts.snapshot.unresolved_capabilities.iter().any(|cap| {
+                    cap.parent_call_id == result.tool_call_id
+                        && matches!(
+                            cap.outcome,
+                            Some(cayw_core::CapabilityOutcome::OutcomeUnknown { .. })
+                        )
+                }) {
+                    result.outcome_unknown = true;
+                }
             }
         }
         for decision in tool_decisions.values() {
@@ -314,7 +312,9 @@ fn project_model_input(
         if assistant.stop_reason == StopReason::Length {
             for (offset, call) in calls.iter().enumerate() {
                 let Some(Message::ToolResult(result)) = messages.get(index + 1 + offset) else {
-                    return Err(RuntimeError::NeedsReconciliation);
+                    return Err(RuntimeError::InvalidInput(
+                        "truncated assistant proposal is missing its preflight error result".into(),
+                    ));
                 };
                 if result.tool_call_id != call.id
                     || result.tool_name != call.name
@@ -322,7 +322,9 @@ fn project_model_input(
                     || result.outcome_unknown
                     || result.duration_ms.is_some()
                 {
-                    return Err(RuntimeError::NeedsReconciliation);
+                    return Err(RuntimeError::InvalidInput(
+                        "truncated assistant proposal has an invalid preflight error result".into(),
+                    ));
                 }
                 results.push(result);
             }
@@ -464,7 +466,7 @@ mod input_tests {
         let unknown = vec![Message::Assistant(assistant), Message::ToolResult(result)];
         assert!(matches!(
             project_model_input(&unknown, &BTreeSet::new()),
-            Err(RuntimeError::NeedsReconciliation)
+            Err(RuntimeError::InvalidInput(_))
         ));
     }
 }

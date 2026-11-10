@@ -353,19 +353,23 @@ pub struct RequestConfig {
     pub max_grant_lifetime_ms: u64,
     /// Maximum number of unfinished (Active/Closing) tasks. Finished tasks keep
     /// their tombstones but stop counting against this operational limit.
-    pub max_tasks: u32,
+    /// Unlimited when `None`.
+    pub max_tasks: Option<u32>,
     /// Across all attempts; old rows and terminal task tombstones are retained.
-    pub max_requests_per_task: u32,
-    pub max_attempts_per_task: u32,
+    /// Unlimited when `None`.
+    pub max_requests_per_task: Option<u32>,
+    /// Unlimited when `None`.
+    pub max_attempts_per_task: Option<u32>,
     /// Lifetime event-row budget. Event rows are immutable audit facts and are
-    /// never released.
-    pub max_events: u64,
+    /// never released. Unlimited when `None`.
+    pub max_events: Option<u64>,
     /// Operational state reservations of unfinished tasks and a repair awaiting
     /// activation. Task reservations return at `end_task`; a repair reservation
     /// returns in its activation commit. Retained audit records are not charged
-    /// again.
-    pub max_state_bytes: u64,
-    pub max_result_bytes: usize,
+    /// again. Unlimited when `None`.
+    pub max_state_bytes: Option<u64>,
+    /// Unlimited when `None`.
+    pub max_result_bytes: Option<usize>,
     pub sqlite_busy_timeout_ms: u64,
 }
 impl Default for RequestConfig {
@@ -375,44 +379,39 @@ impl Default for RequestConfig {
             request_lifetime_ms: 15 * 60 * 1000,
             evaluation_timeout_ms: 60 * 1000,
             max_grant_lifetime_ms: 15 * 60 * 1000,
-            max_tasks: 128,
-            max_requests_per_task: 64,
-            max_attempts_per_task: 16,
-            max_events: 100_000,
-            max_state_bytes: 128 * 1024 * 1024,
-            max_result_bytes: 1024 * 1024,
+            max_tasks: None,
+            max_requests_per_task: None,
+            max_attempts_per_task: None,
+            max_events: None,
+            max_state_bytes: None,
+            max_result_bytes: None,
             sqlite_busy_timeout_ms: 50,
         }
     }
 }
 impl RequestConfig {
     /// Check persisted authority limits without opening storage or issuing a grant.
+    /// Only explicitly configured quotas are validated; no artificial ceiling is
+    /// applied to a configured value.
     pub fn validate(&self) -> Result<()> {
         if self.repeated_valid_threshold == 0
-            || self.repeated_valid_threshold > 1000
-            || self.max_tasks == 0
-            || self.max_tasks > 10_000
-            || self.max_requests_per_task == 0
-            || self.max_requests_per_task > 1000
-            || self.max_attempts_per_task == 0
-            || self.max_attempts_per_task > 64
-            || self.max_events == 0
-            || self.max_events > 10_000_000
-            || self.max_state_bytes < 2 * TASK_BYTES as u64
-            || self.max_state_bytes > 4 * 1024 * 1024 * 1024
-            || self.max_result_bytes < TASK_BYTES + RECORD_BYTES
-            || self.max_result_bytes > 4 * 1024 * 1024
-            || self.sqlite_busy_timeout_ms > 1000
+            || self.max_tasks == Some(0)
+            || self.max_requests_per_task == Some(0)
+            || self.max_attempts_per_task == Some(0)
+            || self.max_events == Some(0)
+            || self.max_state_bytes == Some(0)
+            || self.max_result_bytes == Some(0)
             || [
                 self.request_lifetime_ms,
                 self.evaluation_timeout_ms,
                 self.max_grant_lifetime_ms,
             ]
             .iter()
-            .any(|ms| *ms == 0 || *ms > 7 * 24 * 60 * 60 * 1000)
+            .any(|ms| *ms == 0 || *ms > i64::MAX as u64)
+            || self.sqlite_busy_timeout_ms > i64::MAX as u64
         {
             return Err(RequestError::InvalidInput(
-                "configuration limits must be positive and bounded".into(),
+                "configuration limits must be positive and representable".into(),
             ));
         }
         Ok(())
@@ -517,6 +516,15 @@ pub(crate) fn bounded_json<T: Serialize>(value: &T, limit: usize) -> Result<Vec<
     serde_json::to_writer(&mut writer, value)
         .map_err(|_| RequestError::InvalidInput("JSON byte limit exceeded".into()))?;
     Ok(writer.bytes)
+}
+pub(crate) fn bounded_json_optional<T: Serialize>(
+    value: &T,
+    limit: Option<usize>,
+) -> Result<Vec<u8>> {
+    match limit {
+        Some(limit) => bounded_json(value, limit),
+        None => Ok(serde_json::to_vec(value)?),
+    }
 }
 pub(crate) fn argument_bounds(value: &Value) -> Result<()> {
     fn walk(value: &Value, depth: usize, left: &mut usize) -> Result<()> {

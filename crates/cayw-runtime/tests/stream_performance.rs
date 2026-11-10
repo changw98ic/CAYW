@@ -306,7 +306,7 @@ async fn local_stream_stages() {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].state, TaskState::Completed, "{tasks:?}");
         assert_eq!(host_calls, 0);
-        assert!(!ledger.budget_unknown);
+        assert!(!ledger.usage_unknown);
         assert_eq!(ledger.reserved_tokens, 0);
     }
 }

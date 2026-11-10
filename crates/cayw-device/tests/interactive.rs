@@ -50,8 +50,9 @@ fn spec(directory: &Directory, mode: &str) -> DirectoryProcessSpec {
         args: vec![mode.into(), directory.0.display().to_string()],
         cwd: fs::File::open(&directory.0).unwrap(),
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(15),
-        max_output_bytes: 1024 * 1024,
+        timeout: Some(Duration::from_secs(15)),
+        max_output_bytes: Some(1024 * 1024),
+        output_spill_dir: None,
         io: cayw_device::ProcessIo::Pipes,
     }
 }
@@ -277,7 +278,7 @@ async fn full_stdout_keeps_stderr_lifetime_budget_and_control_responsive() {
     let runner = runner();
     let scheduler = scheduler();
     let mut command = spec(&directory, "interactive-stderr");
-    command.max_output_bytes = 16384;
+    command.max_output_bytes = Some(16384);
     let process = start(
         &runner,
         &scheduler,
@@ -311,7 +312,7 @@ async fn raw_lifetime_budget_includes_ready_delimiters_and_stderr_across_exchang
         let runner = runner();
         let scheduler = scheduler();
         let mut command = spec(&directory, "interactive-budget");
-        command.max_output_bytes = budget;
+        command.max_output_bytes = Some(budget);
         let mut process = start(
             &runner,
             &scheduler,
@@ -347,7 +348,7 @@ async fn cancel_close_endpoint_drop_timeout_and_runner_close_stop_without_stdout
         let token = CancellationToken::new();
         let mut command = spec(&directory, "interactive-gated-output");
         if action == "timeout" {
-            command.timeout = Duration::from_secs(1);
+            command.timeout = Some(Duration::from_secs(1));
         }
         let mut process = start(&runner, &scheduler, command, limits(), token.clone()).await;
         let pid = marker(&directory, "root.pid").await;
@@ -467,7 +468,7 @@ async fn stdout_capacity_pauses_reads_without_blocking_a_new_stdin_write() {
     let mut capacity = limits();
     capacity.max_buffered_stdout_bytes = 6;
     let mut command = spec(&directory, "interactive-await-quit");
-    command.max_output_bytes = 6;
+    command.max_output_bytes = Some(6);
     let mut process = start(
         &runner,
         &scheduler,
@@ -498,7 +499,7 @@ async fn idle_prefetched_output_uses_the_same_raw_budget() {
         let runner = runner();
         let scheduler = scheduler();
         let mut command = spec(&directory, "interactive-await-quit");
-        command.max_output_bytes = budget;
+        command.max_output_bytes = Some(budget);
         let mut process = start(
             &runner,
             &scheduler,
@@ -568,7 +569,7 @@ async fn invalid_representability_and_exec_failure_do_not_leave_admission_owned(
         command.program = program.clone();
         let mut capacity = limits();
         match case {
-            "timeout" => command.timeout = Duration::MAX,
+            "timeout" => command.timeout = Some(Duration::MAX),
             "write" => capacity.max_write_bytes = usize::MAX,
             "stdout" => capacity.max_buffered_stdout_bytes = usize::MAX,
             _ => {}

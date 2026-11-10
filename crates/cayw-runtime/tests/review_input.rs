@@ -252,14 +252,14 @@ fn rt_06_prompt_budget_checked_before_image_decoding_or_mime_validation() {
         "test prompt".len() + malformed_image.mime_type.len() + malformed_image.data.len();
 
     // Budget lower than total: budget error MUST be returned first.
-    let err_budget = input.validate(&model, total_bytes - 1).unwrap_err();
+    let err_budget = input.validate(&model, Some(total_bytes - 1)).unwrap_err();
     assert!(
         matches!(err_budget, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error, got: {err_budget}"
     );
 
     // Budget sufficient: validation proceeds to MIME type check.
-    let err_mime = input.validate(&model, total_bytes).unwrap_err();
+    let err_mime = input.validate(&model, Some(total_bytes)).unwrap_err();
     assert!(
         matches!(err_mime, QueueError::InvalidInput(ref msg) if msg.contains("MIME type is not supported")),
         "expected MIME error once within budget, got: {err_mime}"
@@ -276,13 +276,13 @@ fn rt_06_prompt_budget_checked_before_image_decoding_or_mime_validation() {
     };
     let total_b64 = "test prompt".len() + malformed_b64.mime_type.len() + malformed_b64.data.len();
 
-    let err_budget_b64 = input_b64.validate(&model, total_b64 - 1).unwrap_err();
+    let err_budget_b64 = input_b64.validate(&model, Some(total_b64 - 1)).unwrap_err();
     assert!(
         matches!(err_budget_b64, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error before decoding, got: {err_budget_b64}"
     );
 
-    let err_decode = input_b64.validate(&model, total_b64).unwrap_err();
+    let err_decode = input_b64.validate(&model, Some(total_b64)).unwrap_err();
     assert!(
         matches!(err_decode, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error once within budget, got: {err_decode}"
@@ -300,13 +300,18 @@ async fn rt_06_task_enqueue_rejects_oversized_before_base64_decode() {
         dir.path().join("workspace"),
         Arc::new(Script("return 1")),
         model,
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            // No byte cap is applied by default; the test configures an explicit
+            // 256 KiB budget to exercise rejection before base64 decoding.
+            max_prompt_bytes: Some(256 * 1024),
+            ..RuntimeConfig::default()
+        },
     )
     .unwrap();
 
     let session = rt.create(None).unwrap().id;
 
-    // 500KB of non-base64 characters (> default 256KB max_prompt_bytes).
+    // 500KB of non-base64 characters (> configured 256KB max_prompt_bytes).
     let oversized_invalid_data = "!@#$%^&*()".repeat(50_000);
     let error = RpcHandler::call(
         &rt,
@@ -472,21 +477,21 @@ fn rt_06_multi_image_cumulative_budget_boundary_and_rejection_before_decode() {
     // Single image 1 + text = 58 bytes <= 60 bytes.
     // Single image 2 + text = 59 bytes <= 60 bytes.
     // Budget 60 would fit either image alone, but cumulative exceeds 60 on image 2.
-    let err_individual_fit = input.validate(&model, 60).unwrap_err();
+    let err_individual_fit = input.validate(&model, Some(60)).unwrap_err();
     assert!(
         matches!(err_individual_fit, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "cumulative budget must reject before decoding when second image pushes over budget: {err_individual_fit}"
     );
 
     // Exact boundary: 107 bytes (total_bytes - 1) -> byte budget error before decoding.
-    let err_boundary_under = input.validate(&model, total_bytes - 1).unwrap_err();
+    let err_boundary_under = input.validate(&model, Some(total_bytes - 1)).unwrap_err();
     assert!(
         matches!(err_boundary_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected byte budget error at total - 1, got: {err_boundary_under}"
     );
 
     // Exact boundary: 108 bytes (total_bytes) -> passes budget check, then fails on base64 decoding.
-    let err_boundary_exact = input.validate(&model, total_bytes).unwrap_err();
+    let err_boundary_exact = input.validate(&model, Some(total_bytes)).unwrap_err();
     assert!(
         matches!(err_boundary_exact, QueueError::InvalidInput(ref msg) if msg.contains("not valid base64")),
         "expected base64 error once exact budget is met, got: {err_boundary_exact}"
@@ -506,8 +511,10 @@ fn rt_06_multi_image_cumulative_budget_boundary_and_rejection_before_decode() {
         images: vec![valid_img1, valid_img2],
     };
     let valid_total = text.len() + (9 + 8) + (10 + 8); // 9 + 17 + 18 = 44 bytes.
-    assert!(valid_input.validate(&model, valid_total).is_ok());
-    let err_valid_under = valid_input.validate(&model, valid_total - 1).unwrap_err();
+    assert!(valid_input.validate(&model, Some(valid_total)).is_ok());
+    let err_valid_under = valid_input
+        .validate(&model, Some(valid_total - 1))
+        .unwrap_err();
     assert!(
         matches!(err_valid_under, QueueError::InvalidInput(ref msg) if msg.contains("exceeds the byte budget")),
         "expected budget error at valid_total - 1, got: {err_valid_under}"
@@ -525,14 +532,19 @@ async fn rt_06_task_enqueue_rejects_multi_image_cumulative_oversized_before_deco
         dir.path().join("workspace"),
         Arc::new(Script("return 1")),
         model,
-        RuntimeConfig::default(),
+        RuntimeConfig {
+            // No byte cap is applied by default; configure the boundary used by
+            // this cumulative-budget regression.
+            max_prompt_bytes: Some(256 * 1024),
+            ..RuntimeConfig::default()
+        },
     )
     .unwrap();
 
     let session = rt.create(None).unwrap().id;
 
     // Two images, each ~150KB of non-base64 characters. Individually each is below
-    // the default 256KiB max_prompt_bytes, but cumulatively ~300KB exceeds 256KiB.
+    // the configured 256KiB max_prompt_bytes, but cumulatively ~300KB exceeds 256KiB.
     let img1_data = "!@#$%^&*()".repeat(15_000);
     let img2_data = "!@#$%^&*()".repeat(15_000);
     let error = RpcHandler::call(

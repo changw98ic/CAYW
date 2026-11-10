@@ -85,14 +85,14 @@ fn settings() -> RuntimeConfig {
         local_agents: Some(LocalAgents {
             max_children: 2,
             max_depth: 1,
-            shared_total_tokens: 100_000,
-            max_calls: 8,
+            shared_total_tokens: Some(100_000),
+            max_calls: Some(8),
             max_output_bytes: 64 * 1024,
-            max_time: Duration::from_secs(10),
+            max_time: Some(Duration::from_secs(10)),
             permissions: vec![],
         }),
         max_concurrent_runs: 4,
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions: vec![ScopedPermission::exact(
             "agent.run",
             json!({"prompt":"child work","label":"F20Child"}),
@@ -369,11 +369,11 @@ async fn process_cleanup_and_settled_result_survive_reopen() {
     fn process_settings() -> RuntimeConfig {
         let mut config = RuntimeConfig {
             max_concurrent_runs: 1,
-            max_run_time: WATCHDOG,
+            max_run_time: Some(WATCHDOG),
             ..Default::default()
         };
-        config.codemode.timeout = Duration::from_secs(20);
-        config.host.call_timeout = Duration::from_secs(20);
+        config.codemode.timeout = Some(Duration::from_secs(20));
+        config.host.call_timeout = Some(Duration::from_secs(20));
         config.host.profiles.insert(
             "f20-true".into(),
             Profile {
@@ -381,8 +381,8 @@ async fn process_cleanup_and_settled_result_survive_reopen() {
                 program: "/usr/bin/true".into(),
                 args: vec![],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(10),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(10)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: cayw_host::ProcessIo::Pipes,
             },
@@ -506,7 +506,7 @@ async fn result_read_and_release_survive_reopen() {
             device_id: "f20-result-device".into(),
             limits: Default::default(),
         }),
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions: vec![
             ScopedPermission::exact(
                 "result.store",
@@ -722,7 +722,7 @@ async fn mcp_resources_share_session_and_survive_reopen() {
         .unwrap();
     let settings = RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions: vec![
             ScopedPermission::exact("mcp.resources.list", json!({})),
             ScopedPermission::exact("mcp.resources.read", json!({"server":"local","uri":URI})),
@@ -913,7 +913,7 @@ async fn mcp_stdio_process_lifecycle_cleanup_and_session_reopen() {
 
     let settings = RuntimeConfig {
         bridge: Some(registry.consumer()),
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions: vec![
             ScopedPermission::exact("mcp.resources.list", json!({"server":"local"})),
             ScopedPermission::exact("mcp.resources.read", json!({"server":"local","uri":URI})),
@@ -1166,7 +1166,7 @@ async fn session_child_process_and_mcp_stdio_survive_reopen() {
         bridge: Some(registry.consumer()),
         local_agents: settings().local_agents,
         max_concurrent_runs: 4,
-        max_run_time: WATCHDOG,
+        max_run_time: Some(WATCHDOG),
         permissions: vec![
             ScopedPermission::exact(
                 "agent.run",
@@ -1180,8 +1180,8 @@ async fn session_child_process_and_mcp_stdio_survive_reopen() {
         ],
         ..Default::default()
     };
-    config.codemode.timeout = Duration::from_secs(20);
-    config.host.call_timeout = Duration::from_secs(20);
+    config.codemode.timeout = Some(Duration::from_secs(20));
+    config.host.call_timeout = Some(Duration::from_secs(20));
     config.host.profiles.insert(
         "f20-true".into(),
         Profile {
@@ -1189,8 +1189,8 @@ async fn session_child_process_and_mcp_stdio_survive_reopen() {
             program: "/usr/bin/true".into(),
             args: vec![],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(10),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(10)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: cayw_host::ProcessIo::Pipes,
         },
@@ -1233,7 +1233,7 @@ async fn session_child_process_and_mcp_stdio_survive_reopen() {
         rt.model_requests(&session).unwrap(),
         rt.get(&session).unwrap().messages
     );
-    assert!(!rt.model_requests(&session).unwrap().budget_unknown);
+    assert!(!rt.model_requests(&session).unwrap().usage_unknown);
 
     run_prompt(&rt, &session, "run host process").await;
     let stopped: Vec<_> = rt

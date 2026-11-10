@@ -248,7 +248,7 @@ async fn journal_preparation_consumes_source_operation_budget_even_without_dispa
     let calls = Arc::new(AtomicUsize::new(0));
     let registry = Registry::new(
         Limits {
-            max_source_operations: 1,
+            max_source_operations: Some(1),
             ..Limits::default()
         },
         Arc::new(Allow),
@@ -297,7 +297,7 @@ fn setup(
     let calls = Arc::new(AtomicUsize::new(0));
     let registry = Registry::new(
         Limits {
-            operation_timeout: timeout,
+            operation_timeout: Some(timeout),
             ..Limits::default()
         },
         Arc::new(Allow),

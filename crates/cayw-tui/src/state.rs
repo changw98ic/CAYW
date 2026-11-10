@@ -84,20 +84,9 @@ pub enum Command {
     Get {
         session_id: String,
     },
-    PreparePrompt {
-        session_id: String,
-        text: String,
-    },
     Prompt {
         session_id: String,
         text: String,
-    },
-    PromptWithModelBudget {
-        session_id: String,
-        text: String,
-        expected: Value,
-        additional_tokens: u64,
-        token_limit: u64,
     },
     Cancel {
         session_id: String,
@@ -122,30 +111,9 @@ impl Command {
             Self::List => ("session.list", json!({})),
             Self::Create { label } => ("session.create", json!({"label":label})),
             Self::Get { session_id } => ("session.get", json!({"session_id":session_id})),
-            Self::PreparePrompt { session_id, text } => (
-                "model.budget.prepare_prompt",
-                json!({"session_id":session_id,"text":text}),
-            ),
             Self::Prompt { session_id, text } => (
                 "session.prompt",
                 json!({"session_id":session_id,"text":text}),
-            ),
-            Self::PromptWithModelBudget {
-                session_id,
-                text,
-                expected,
-                additional_tokens,
-                token_limit,
-            } => (
-                "session.prompt_with_model_budget",
-                json!({
-                    "session_id":session_id,
-                    "text":text,
-                    "expected":expected,
-                    "additional_tokens":additional_tokens,
-                    "token_limit":token_limit,
-                    "confirm":true,
-                }),
             ),
             // Transport resolves only this retained Task into its full queue identity.
             Self::Cancel {
@@ -175,19 +143,7 @@ impl Command {
 #[derive(Clone, Debug)]
 pub enum Dialog {
     Create(Editor),
-    Fork {
-        session_id: String,
-        label: String,
-    },
-    ModelBudget {
-        session_id: String,
-        expected: Value,
-        unknown_request_count: u64,
-        settled_tokens: u64,
-        reserved_tokens: u64,
-        additional_tokens: u64,
-        token_limit: u64,
-    },
+    Fork { session_id: String, label: String },
     Help,
 }
 
@@ -346,10 +302,7 @@ impl SessionView {
         let id = required_string(&value, "id")?.to_owned();
         let label = required_string(&value, "label")?.to_owned();
         let state = required_string(&value, "state")?;
-        if !matches!(
-            state,
-            "idle" | "running" | "awaiting_approval" | "needs_reconciliation"
-        ) {
+        if !matches!(state, "idle" | "running" | "awaiting_approval") {
             return Err("Snapshot contains an unsupported session state".into());
         }
         let cursor = value["cursor"]
@@ -410,7 +363,6 @@ impl SessionView {
             snapshot_executions,
             settled_capabilities: Vec::new(),
         };
-        view.protect_unknown();
         view.rebuild_inspectors();
         Ok(view)
     }
@@ -425,7 +377,6 @@ impl SessionView {
             && !self.frozen
             && self.state == "idle"
             && self.approvals.is_empty()
-            && self.unresolved_calls.is_empty()
     }
 
     pub fn can_fork(&self) -> bool {
@@ -438,21 +389,6 @@ impl SessionView {
             && !self.request_pending
             && self.state == "idle"
             && self.approvals.is_empty()
-            && self.unresolved_calls.is_empty()
-    }
-
-    pub fn has_unknown(&self) -> bool {
-        self.state == "needs_reconciliation"
-            || self
-                .unresolved_calls
-                .iter()
-                .any(|call| call["state"] == "outcome_unknown")
-    }
-
-    fn protect_unknown(&mut self) {
-        if self.has_unknown() {
-            self.state = "needs_reconciliation".into();
-        }
     }
 
     fn rebuild_inspectors(&mut self) {
@@ -514,9 +450,7 @@ impl SessionView {
         }
         match kind {
             "attempt_started" => {
-                if !self.has_unknown() {
-                    self.state = "running".into();
-                }
+                self.state = "running".into();
                 self.cancel_pending = false;
             }
             "attempt_finished" => {
@@ -525,9 +459,7 @@ impl SessionView {
                 self.synced = false;
                 self.cancel_pending = false;
                 self.tool_status = None;
-                self.state = if self.has_unknown() {
-                    "needs_reconciliation"
-                } else if !self.approvals.is_empty() {
+                self.state = if !self.approvals.is_empty() {
                     "awaiting_approval"
                 } else {
                     "idle"
@@ -539,9 +471,7 @@ impl SessionView {
                 let id = required_string(approval, "id")?;
                 self.approvals.retain(|value| value["id"] != id);
                 self.approvals.push(approval.clone());
-                if !self.has_unknown() {
-                    self.state = "awaiting_approval".into();
-                }
+                self.state = "awaiting_approval".into();
             }
             "approval_decided" => {
                 let approval = event.get("approval").ok_or("Missing approval")?;
@@ -554,11 +484,6 @@ impl SessionView {
             }
             "attempt_recovered" => {
                 self.synced = false;
-                if let Some(ids) = event["unknown_call_ids"].as_array() {
-                    for id in ids {
-                        self.remember_unknown(json!({"id":id}));
-                    }
-                }
             }
             "reconciled" => {
                 // These events alone cannot prove the complete current effects.
@@ -580,7 +505,6 @@ impl SessionView {
             }
             _ => {} // Forward-compatible core events still consume their envelope.
         }
-        self.protect_unknown();
         self.rebuild_inspectors();
         Ok(())
     }
@@ -593,7 +517,7 @@ impl SessionView {
             return Ok(());
         }
         match kind {
-            "agent_start" | "turn_start" if !self.has_unknown() && self.approvals.is_empty() => {
+            "agent_start" | "turn_start" if self.approvals.is_empty() => {
                 self.state = "running".into();
             }
             "message_update" => {
@@ -607,15 +531,9 @@ impl SessionView {
                     .get("message")
                     .filter(|v| v.is_object())
                     .ok_or("Missing completed message")?;
-                self.observe_unknown_message(message);
                 self.messages.push(message.clone());
             }
             "agent_end" => {
-                if let Some(messages) = event["messages"].as_array() {
-                    for message in messages {
-                        self.observe_unknown_message(message);
-                    }
-                }
                 // AttemptFinished and snapshots own the final session state.
                 self.tool_status = None;
             }
@@ -627,9 +545,6 @@ impl SessionView {
                     self.synced = false;
                 }
                 let call = &event["call"];
-                if event["result"]["outcome_unknown"] == true {
-                    self.remember_unknown(call.clone());
-                }
                 self.tool_status = Some(format!(
                     "{}: {}",
                     string(call, "name"),
@@ -640,26 +555,6 @@ impl SessionView {
         }
         self.rebuild_inspectors();
         Ok(())
-    }
-
-    fn observe_unknown_message(&mut self, message: &Value) {
-        if message["outcome_unknown"] == true {
-            self.remember_unknown(
-                json!({"id":message["tool_call_id"], "name":message["tool_name"]}),
-            );
-        }
-    }
-
-    fn remember_unknown(&mut self, call: Value) {
-        if !self
-            .unresolved_calls
-            .iter()
-            .any(|value| value["call"]["id"] == call["id"])
-        {
-            self.unresolved_calls
-                .push(json!({"call":call,"state":"outcome_unknown"}));
-        }
-        self.state = "needs_reconciliation".into();
     }
 }
 
@@ -699,24 +594,14 @@ impl App {
             "{} | Ctrl+R reconnect. Prompts are never replayed.",
             sanitize(reason)
         );
-        if matches!(self.dialog, Some(Dialog::ModelBudget { .. })) {
-            self.dialog = None;
-        }
         for session in &mut self.sessions {
             session.synced = false;
             session.request_pending = false;
-            if session
-                .pending_prompt
-                .as_ref()
-                .is_some_and(|prompt| prompt.admission_started)
-            {
-                if let Some(prompt) = &mut session.pending_prompt {
-                    prompt.uncertain = true;
-                }
-            } else {
-                // The budget-status lookup is read-only. Losing that response
-                // cannot have created a Task, so the draft remains safe to retry.
-                session.pending_prompt = None;
+            // Sending creates a Task immediately. A disconnect after that point
+            // may have admitted it, so keep the draft but never auto-resend:
+            // only an authoritative snapshot may release it.
+            if let Some(prompt) = &mut session.pending_prompt {
+                prompt.uncertain = true;
             }
             session.cancel_pending = false;
             session.decisions_pending.clear();
@@ -908,77 +793,6 @@ impl App {
         }
     }
 
-    pub fn model_budget_status(&mut self, id: &str, value: Value) -> Result<Vec<Command>, String> {
-        let budget_unknown = value["budget_unknown"]
-            .as_bool()
-            .ok_or("Model budget status is missing budget_unknown")?;
-        let session = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == id)
-            .ok_or("Model budget status references an unknown session")?;
-        let prompt = session
-            .pending_prompt
-            .as_ref()
-            .ok_or("Model budget status has no pending prompt")?;
-        if !budget_unknown {
-            let text = prompt.text.clone();
-            session
-                .pending_prompt
-                .as_mut()
-                .expect("checked above")
-                .admission_started = true;
-            return Ok(vec![Command::Prompt {
-                session_id: id.into(),
-                text,
-            }]);
-        }
-
-        let proposal = value
-            .get("continuation")
-            .filter(|proposal| proposal.is_object())
-            .ok_or("Model budget status is missing a continuation proposal")?;
-        let expected = proposal["expected"]
-            .as_array()
-            .filter(|expected| !expected.is_empty())
-            .ok_or("Model budget continuation has no exact unknown request set")?;
-        let unknown_request_count = proposal["unknown_request_count"]
-            .as_u64()
-            .filter(|count| *count as usize == expected.len())
-            .ok_or("Model budget continuation request count is inconsistent")?;
-        let settled_tokens = value["settled_tokens"]
-            .as_u64()
-            .ok_or("Model budget status is missing settled_tokens")?;
-        let reserved_tokens = value["reserved_tokens"]
-            .as_u64()
-            .ok_or("Model budget status is missing reserved_tokens")?;
-        let additional_tokens = proposal["additional_tokens"]
-            .as_u64()
-            .filter(|tokens| *tokens > 0)
-            .ok_or("Model budget continuation requires a positive finite allowance")?;
-        let minimum_limit = settled_tokens
-            .checked_add(reserved_tokens)
-            .and_then(|occupied| occupied.checked_add(additional_tokens))
-            .ok_or("Model budget continuation cumulative limit overflows")?;
-        let token_limit = proposal["token_limit"]
-            .as_u64()
-            .filter(|limit| *limit == minimum_limit)
-            .ok_or("Model budget continuation cumulative limit is invalid")?;
-
-        session.request_pending = false;
-        self.dialog = Some(Dialog::ModelBudget {
-            session_id: id.into(),
-            expected: Value::Array(expected.clone()),
-            unknown_request_count,
-            settled_tokens,
-            reserved_tokens,
-            additional_tokens,
-            token_limit,
-        });
-        self.status = "Model usage is unknown. Review the finite continuation allowance.".into();
-        Ok(vec![])
-    }
-
     pub fn task_admitted(&mut self, id: &str, task_id: &str) -> Vec<Command> {
         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else {
             return vec![];
@@ -1028,10 +842,17 @@ impl App {
     }
 
     pub fn request_failed(&mut self, id: &str, method: &str, error: &str) {
-        self.status = format!(
-            "{method}: {}. Refresh the session before retrying.",
-            sanitize(error)
-        );
+        let code = error.split(':').next().unwrap_or("").trim();
+        self.status = if code == "budget_exceeded" {
+            "已用完配置的预算，本次执行已停止。".into()
+        } else if code == "cancelled" {
+            "Execution cancelled.".into()
+        } else {
+            format!(
+                "{method}: {}. Refresh the session before retrying.",
+                sanitize(error)
+            )
+        };
         if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
             if method == "approval.decide" {
                 session.decisions_pending.clear();
@@ -1039,39 +860,33 @@ impl App {
             if method == "session.cancel" {
                 session.cancel_pending = false;
             }
-            if method == "model.budget.prepare_prompt" {
+            if method == "session.prompt" {
                 session.request_pending = false;
-                session.pending_prompt = None;
-            }
-            if matches!(
-                method,
-                "session.prompt" | "session.prompt_with_model_budget"
-            ) {
-                session.request_pending = false;
-                session.synced = false;
-                let code = error.split(':').next().unwrap_or("").trim();
+                // A request that provably never reached the host leaves the
+                // current snapshot valid, so the user can retry immediately.
+                let not_sent = error.contains("request was not sent")
+                    || error == "IPC request queue unavailable";
+                if !not_sent {
+                    session.synced = false;
+                }
                 if code == "session_frozen" {
                     session.frozen = true;
                 }
                 // A typed known terminal can release only this local prompt.
-                // A missing or unknown result must keep the lock.
-                let known_cancelled =
-                    code == "cancelled" && error.ends_with(" (outcome_unknown=false)");
-                let known_terminal = !error.contains("outcome_unknown=true")
-                    && (known_cancelled
-                        || error.contains("request was not sent")
-                        || error == "IPC request queue unavailable"
-                        || matches!(
-                            code,
-                            "busy"
-                                | "queue_full"
-                                | "client_busy"
-                                | "session_frozen"
-                                | "invalid_params"
-                                | "request_too_large"
-                                | "request_cancelled"
-                                | "budget_continuation_not_executed"
-                        ));
+                // A missing or unknown transport result must keep the lock.
+                let known_terminal = not_sent
+                    || matches!(
+                        code,
+                        "cancelled"
+                            | "busy"
+                            | "queue_full"
+                            | "client_busy"
+                            | "session_frozen"
+                            | "invalid_params"
+                            | "request_too_large"
+                            | "request_cancelled"
+                            | "budget_exceeded"
+                    );
                 if known_terminal {
                     // The editor still contains the original text unless the user
                     // edited it. Never restore over a newer draft or resend it.
@@ -1138,8 +953,7 @@ impl App {
                             label: format!("{} (chat fork)", session.label),
                         });
                     } else {
-                        self.status =
-                            "Fork requires a frozen session with all effects settled.".into();
+                        self.status = "Fork requires a frozen idle session.".into();
                     }
                     return vec![];
                 }
@@ -1244,7 +1058,7 @@ impl App {
     pub fn paste(&mut self, text: &str) {
         match &mut self.dialog {
             Some(Dialog::Create(editor)) => editor.insert(&text.replace(['\r', '\n'], " ")),
-            Some(Dialog::Fork { .. } | Dialog::ModelBudget { .. } | Dialog::Help) => {}
+            Some(Dialog::Fork { .. } | Dialog::Help) => {}
             None if self.focus == Focus::Composer => self.input.insert(text),
             None => {}
         }
@@ -1265,7 +1079,7 @@ impl App {
             return vec![];
         }
         let Some(session) = self.selected().filter(|session| session.can_prompt()) else {
-            self.status = "Send blocked: wait for completion, approval, reconnection, or host reconciliation.".into();
+            self.status = "Send blocked: wait for completion, approval, or reconnection.".into();
             return vec![];
         };
         let id = session.id.clone();
@@ -1277,14 +1091,14 @@ impl App {
             session.pending_prompt = Some(PendingPrompt {
                 text: text.clone(),
                 editor_revision,
-                admission_started: false,
+                admission_started: true,
                 uncertain: false,
             });
             session.request_pending = true;
             session.scroll = 0;
         }
-        self.status = "Checking the durable model budget before task admission…".into();
-        vec![Command::PreparePrompt {
+        self.status = "Sending prompt…".into();
+        vec![Command::Prompt {
             session_id: id,
             text,
         }]
@@ -1293,7 +1107,7 @@ impl App {
     fn decide(&mut self, decision: Decision) -> Vec<Command> {
         let Some(session) = self
             .selected_mut()
-            .filter(|session| session.synced && !session.frozen && !session.has_unknown())
+            .filter(|session| session.synced && !session.frozen)
         else {
             return vec![];
         };
@@ -1318,17 +1132,6 @@ impl App {
             return vec![];
         };
         if key.code == KeyCode::Esc {
-            if let Dialog::ModelBudget { session_id, .. } = &dialog
-                && let Some(session) = self
-                    .sessions
-                    .iter_mut()
-                    .find(|session| session.id == *session_id)
-            {
-                session.request_pending = false;
-                session.pending_prompt = None;
-                self.status =
-                    "Model budget continuation was not authorized; no task was created.".into();
-            }
             return vec![];
         }
         match dialog {
@@ -1351,67 +1154,6 @@ impl App {
                     }
                 } else if key.code != KeyCode::Char('n') {
                     self.dialog = Some(Dialog::Fork { session_id, label });
-                }
-            }
-            Dialog::ModelBudget {
-                session_id,
-                expected,
-                unknown_request_count,
-                settled_tokens,
-                reserved_tokens,
-                additional_tokens,
-                token_limit,
-            } => {
-                if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
-                    let connected = self.connected;
-                    let command = self
-                        .sessions
-                        .iter_mut()
-                        .find(|session| {
-                            connected && session.id == session_id && session.can_prompt()
-                        })
-                        .and_then(|session| {
-                            let prompt = session.pending_prompt.as_mut()?;
-                            let text = prompt.text.clone();
-                            prompt.admission_started = true;
-                            session.request_pending = true;
-                            Some(Command::PromptWithModelBudget {
-                                session_id: session_id.clone(),
-                                text,
-                                expected: expected.clone(),
-                                additional_tokens,
-                                token_limit,
-                            })
-                        });
-                    if let Some(command) = command {
-                        self.status = format!(
-                            "Confirmed {additional_tokens} additional tokens for one task; {unknown_request_count} unknown hold(s) remain."
-                        );
-                        return vec![command];
-                    }
-                    self.status =
-                        "Model budget continuation is no longer ready; refresh the session.".into();
-                } else if matches!(key.code, KeyCode::Char('n')) {
-                    if let Some(session) = self
-                        .sessions
-                        .iter_mut()
-                        .find(|session| session.id == session_id)
-                    {
-                        session.request_pending = false;
-                        session.pending_prompt = None;
-                    }
-                    self.status =
-                        "Model budget continuation was not authorized; no task was created.".into();
-                } else {
-                    self.dialog = Some(Dialog::ModelBudget {
-                        session_id,
-                        expected,
-                        unknown_request_count,
-                        settled_tokens,
-                        reserved_tokens,
-                        additional_tokens,
-                        token_limit,
-                    });
                 }
             }
             Dialog::Create(mut editor) => {
@@ -1568,12 +1310,12 @@ fn format_event_log(cursor: u64, attempt: Option<&Value>, event: &Value) -> Stri
             match inner_kind {
                 "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
                     let name = string(&inner["call"], "name");
-                    let unknown = if inner["result"]["outcome_unknown"] == true {
-                        " [outcome_unknown]"
+                    let interrupted = if inner["result"]["outcome_unknown"] == true {
+                        " [interrupted]"
                     } else {
                         ""
                     };
-                    format!("agent/{inner_kind} · {name}{unknown}")
+                    format!("agent/{inner_kind} · {name}{interrupted}")
                 }
                 "message_start" | "message_update" | "message_end" => {
                     let role = string(&inner["message"], "role");
@@ -1650,16 +1392,8 @@ fn project_files_and_diffs(
             files.push(FileEntry {
                 path: clip_text(path, 240),
                 action: clip_text(if name.is_empty() { "call" } else { name }, 64),
-                status: clip_text(
-                    if state.is_empty() {
-                        "unresolved"
-                    } else {
-                        state
-                    },
-                    64,
-                ),
-                preview: "Unresolved call — awaiting runtime settlement or host reconciliation."
-                    .into(),
+                status: clip_text(if state.is_empty() { "running" } else { state }, 64),
+                preview: "Call in progress — awaiting runtime settlement.".into(),
             });
         }
     }
@@ -1723,13 +1457,14 @@ fn collect_from_settled_capability(
     let outcome_type = call["outcome"]["type"].as_str().unwrap_or("settled");
     let result = &call["outcome"]["result"];
     if outcome_type == "outcome_unknown" {
-        files.push(FileEntry {
-            path: clip_text(if path.is_empty() { name } else { path }, 240),
-            action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
-            status: "outcome_unknown".into(),
-            preview: "Outcome unknown — host reconciliation required; unverified output hidden."
-                .into(),
-        });
+        if !path.is_empty() {
+            files.push(FileEntry {
+                path: clip_text(path, 240),
+                action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
+                status: "interrupted".into(),
+                preview: "Execution was interrupted before completion.".into(),
+            });
+        }
         return;
     }
     if outcome_type != "completed" {
@@ -1799,27 +1534,16 @@ fn collect_from_tool_result(
 ) {
     let page = &message["structured_content"];
     let page_unknown = page["outcome_unknown"] == true || page["status"] == "outcome_unknown";
-    let unknown = message["outcome_unknown"] == true || page_unknown;
-    let status = if unknown {
-        "outcome_unknown"
+    let interrupted =
+        message["outcome_unknown"] == true || page_unknown || page["status"] == "interrupted";
+    let status = if interrupted {
+        "interrupted"
     } else if message["is_error"] == true && page["status"] != "cancelled" {
         "failed"
     } else {
         page["status"].as_str().unwrap_or("completed")
     };
-    if unknown {
-        let tool = string(message, "tool_name");
-        files.push(FileEntry {
-            path: format!(
-                "{} ({})",
-                if tool.is_empty() { "tool" } else { tool },
-                string(message, "tool_call_id")
-            ),
-            action: "unknown".into(),
-            status: "outcome_unknown".into(),
-            preview: "Outcome unknown — host reconciliation required; unverified output hidden."
-                .into(),
-        });
+    if interrupted {
         return;
     }
     if let Some(outputs) = page["outputs"].as_array() {

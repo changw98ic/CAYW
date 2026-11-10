@@ -31,11 +31,19 @@ impl<'a> Budget<'a> {
 
     pub fn node(&mut self, depth: usize) -> Result<()> {
         self.checkpoint()?;
-        if depth > self.limits.max_depth {
+        if self
+            .limits
+            .max_depth
+            .is_some_and(|max_depth| depth > max_depth)
+        {
             return Err(error("depth_limit", "data nesting exceeds max_depth"));
         }
-        self.nodes += 1;
-        if self.nodes > self.limits.max_nodes {
+        self.nodes = self.nodes.saturating_add(1);
+        if self
+            .limits
+            .max_nodes
+            .is_some_and(|max_nodes| self.nodes > max_nodes)
+        {
             return Err(error("node_limit", "data exceeds max_nodes"));
         }
         Ok(())
@@ -43,7 +51,7 @@ impl<'a> Budget<'a> {
 
     pub fn rows(&self, rows: usize) -> Result<()> {
         self.checkpoint()?;
-        if rows > self.limits.max_rows {
+        if self.limits.max_rows.is_some_and(|max_rows| rows > max_rows) {
             Err(error("row_limit", "data exceeds max_rows"))
         } else {
             Ok(())
@@ -59,8 +67,8 @@ pub(crate) fn check_envelope(
     output: bool,
 ) -> Result<()> {
     let allowance = Limits {
-        max_depth: limits.max_depth + 8,
-        max_nodes: limits.max_nodes + 128,
+        max_depth: limits.max_depth.map(|value| value.saturating_add(8)),
+        max_nodes: limits.max_nodes.map(|value| value.saturating_add(128)),
         ..limits
     };
     check_value(value, &mut Budget::new(allowance, cancel), 1)?;
@@ -102,14 +110,14 @@ pub(crate) fn check_value(value: &Value, budget: &mut Budget<'_>, depth: usize) 
 pub(crate) struct Sink<'a> {
     bytes: Vec<u8>,
     written: usize,
-    maximum: usize,
+    maximum: Option<usize>,
     retain: bool,
     cancel: &'a CancellationToken,
     kind: &'static str,
 }
 
 impl<'a> Sink<'a> {
-    pub fn new(maximum: usize, cancel: &'a CancellationToken) -> Self {
+    pub fn new(maximum: Option<usize>, cancel: &'a CancellationToken) -> Self {
         Self {
             bytes: Vec::new(),
             written: 0,
@@ -119,7 +127,7 @@ impl<'a> Sink<'a> {
             kind: "output_limit",
         }
     }
-    fn counting(maximum: usize, cancel: &'a CancellationToken, kind: &'static str) -> Self {
+    fn counting(maximum: Option<usize>, cancel: &'a CancellationToken, kind: &'static str) -> Self {
         Self {
             retain: false,
             kind,
@@ -143,7 +151,9 @@ impl Write for Sink<'_> {
         if self.cancel.is_cancelled() {
             return Err(io::Error::other("cancelled: data operation cancelled"));
         }
-        if bytes.len() > self.maximum.saturating_sub(self.written) {
+        if let Some(maximum) = self.maximum
+            && bytes.len() > maximum.saturating_sub(self.written)
+        {
             return Err(io::Error::other(format!(
                 "{}: encoded payload exceeds byte limit",
                 self.kind

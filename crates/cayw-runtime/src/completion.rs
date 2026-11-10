@@ -1,7 +1,7 @@
 //! Completion depends on actual VM state and output delivered by the tool.
 use crate::{RuntimeError, execution::RunContext, lock};
 use cayw_ai::ToolResultMessage;
-use cayw_cells::{CellManager, CellOutput, CellPage, CellStatus};
+use cayw_cells::{CellManager, CellOutput, CellPage};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -79,7 +79,15 @@ impl Completion {
     pub(crate) fn check(&self) -> Result<(), RuntimeError> {
         let context = &self.context;
         let snapshot = context.inner.store.snapshot(&context.lease.session_id)?;
-        if !snapshot.unresolved_calls.is_empty() || !snapshot.unresolved_capabilities.is_empty() {
+        if snapshot
+            .unresolved_calls
+            .iter()
+            .any(|call| call.state == cayw_core::CallState::Started)
+            || snapshot
+                .unresolved_capabilities
+                .iter()
+                .any(|call| call.stage != cayw_core::CapabilityStage::Settled)
+        {
             return Err(RuntimeError::Worker(
                 "task still has unsettled calls".into(),
             ));
@@ -94,17 +102,21 @@ impl Completion {
             .map_err(|error| RuntimeError::Worker(error.to_string()))?;
         let delivered = lock(&self.delivered);
         for record in records {
-            if record.identity != crate::cells::identity(context) || record.unresolved() {
+            if record.identity != crate::cells::identity(context)
+                || record
+                    .calls
+                    .iter()
+                    .any(|call| call.status == cayw_cells::IntentStatus::Pending)
+            {
                 return Err(RuntimeError::Worker(
                     "cell still has unsettled calls".into(),
                 ));
             }
             let delivery = delivered.get(&record.cell_id);
-            if !record.status.is_terminal() || delivery.is_none_or(|page| page.vm_alive) {
+            // A terminal cell with no page to deliver (for example a known
+            // creation refusal) has nothing left to wait for.
+            if !record.status.is_terminal() || delivery.is_some_and(|page| page.vm_alive) {
                 return Err(RuntimeError::Worker("cell still requires wait".into()));
-            }
-            if record.status == CellStatus::OutcomeUnknown {
-                return Err(RuntimeError::NeedsReconciliation);
             }
             if record
                 .outputs

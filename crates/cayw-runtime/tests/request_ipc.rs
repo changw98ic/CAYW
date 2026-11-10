@@ -49,7 +49,7 @@ fn setup() -> (tempfile::TempDir, Runtime, Arc<Semaphore>) {
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("release"), "allowed to exit").unwrap();
     let mut config = RuntimeConfig {
-        max_run_time: Duration::from_secs(20),
+        max_run_time: Some(Duration::from_secs(20)),
         ..Default::default()
     };
     config.host.profiles.insert(
@@ -59,8 +59,8 @@ fn setup() -> (tempfile::TempDir, Runtime, Arc<Semaphore>) {
             program: env!("CARGO_BIN_EXE_cayw-runtime-process-fixture").into(),
             args: vec!["leaf".into(), root.to_string_lossy().into_owned()],
             env: BTreeMap::new(),
-            timeout: Duration::from_secs(10),
-            max_output_bytes: 4096,
+            timeout: Some(Duration::from_secs(10)),
+            max_output_bytes: Some(4096),
             allow_filter: false,
             io: ProcessIo::Pipes,
         },

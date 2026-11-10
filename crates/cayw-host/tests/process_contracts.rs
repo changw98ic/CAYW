@@ -87,8 +87,8 @@ fn profile(program: PathBuf, mode: &str) -> Profile {
         program,
         args: vec![mode.into()],
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(20),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(20)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: cayw_device::ProcessIo::Pipes,
     }

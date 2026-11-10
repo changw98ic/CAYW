@@ -73,7 +73,7 @@ impl HostIdentity {
             "max_argument_bytes":limits.max_argument_bytes,"max_output_bytes":limits.max_output_bytes,
             "max_archive_bytes":limits.max_archive_bytes,"max_archive_entries":limits.max_archive_entries,
             "max_archive_expanded_bytes":limits.max_archive_expanded_bytes,
-            "max_compression_ratio":limits.max_compression_ratio,"timeout_ns":limits.timeout.as_nanos().to_string(),
+            "max_compression_ratio":limits.max_compression_ratio,"timeout_ns":limits.timeout.map(|timeout| timeout.as_nanos().to_string()),
         }));
         let configuration = json!({
             "frozen_reads":config.frozen_reads,
@@ -84,11 +84,11 @@ impl HostIdentity {
             "max_argument_bytes":config.max_argument_bytes,"max_result_bytes":config.max_result_bytes,
             "max_total_bytes":config.max_total_bytes,"max_calls":config.max_calls,
             "max_file_bytes":config.max_file_bytes,"max_list_entries":config.max_list_entries,
-            "call_timeout_ns":config.call_timeout.as_nanos().to_string(),
-            "process_timeout_ns":config.process_timeout.as_nanos().to_string(),
+            "call_timeout_ns":config.call_timeout.map(|timeout| timeout.as_nanos().to_string()),
+            "process_timeout_ns":config.process_timeout.map(|timeout| timeout.as_nanos().to_string()),
             "max_process_output_bytes":config.max_process_output_bytes,
         });
-        let bytes = bounded_json(&configuration, CATALOG_BYTES)?;
+        let bytes = serde_json::to_vec(&configuration)?;
         Ok(Self {
             workspace,
             permission_policy_id: permission_policy_id.into(),
@@ -164,6 +164,19 @@ pub struct OperationCatalog {
     pub(crate) snapshot: CatalogSnapshot,
 }
 impl OperationCatalog {
+    /// A policy whose every selected operation belongs to a disabled service.
+    /// Request tools stay advertised so the Runtime can report the disabled
+    /// reason when one of those operations is used; no operation is protected.
+    /// Callers that accept a user-written policy must still use [`Self::bind`],
+    /// which rejects an empty selection.
+    pub fn empty(host: HostIdentity) -> Self {
+        Self {
+            snapshot: CatalogSnapshot {
+                host,
+                operations: Vec::new(),
+            },
+        }
+    }
     pub fn bind(
         host: HostIdentity,
         definitions: &[ToolDefinition],
@@ -216,7 +229,7 @@ impl OperationCatalog {
         }
         operations.sort_by(|a, b| a.scope.id.cmp(&b.scope.id));
         let snapshot = CatalogSnapshot { host, operations };
-        bounded_json(&snapshot, CATALOG_BYTES)?;
+        serde_json::to_vec(&snapshot)?;
         Ok(Self { snapshot })
     }
     pub fn fingerprint(&self) -> String {
@@ -254,7 +267,7 @@ fn profile_json(profile: &Profile) -> Value {
         "program":profile.program,
         "args":profile.args,
         "env":profile.env,
-        "timeout_ns":profile.timeout.as_nanos().to_string(),
+        "timeout_ns":profile.timeout.map(|timeout| timeout.as_nanos().to_string()),
         "max_output_bytes":profile.max_output_bytes,
         "allow_filter":profile.allow_filter,
         "io":match profile.io {
@@ -272,6 +285,6 @@ fn terminal_limits(limits: TerminalLimits) -> Value {
         "max_input_bytes_per_session":limits.max_input_bytes_per_session,
         "max_output_bytes_per_session":limits.max_output_bytes_per_session,
         "max_read_bytes":limits.max_read_bytes,
-        "max_wait_ns":limits.max_wait.as_nanos().to_string(),
+        "max_wait_ns":limits.max_wait.map(|wait| wait.as_nanos().to_string()),
     })
 }

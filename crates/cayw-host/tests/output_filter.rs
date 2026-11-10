@@ -141,8 +141,8 @@ fn noisy_profile(script: PathBuf) -> Profile {
         program: "/bin/sh".into(),
         args: vec![script.to_string_lossy().into_owned()],
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 64 * 1024,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(64 * 1024),
         allow_filter: false,
         io: cayw_device::ProcessIo::Pipes,
     }
@@ -341,8 +341,8 @@ async fn output_filter_none_keeps_stdout_only_shape() {
         program: PathBuf::from("/bin/echo"),
         args: vec!["legacy-shape".into()],
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: cayw_device::ProcessIo::Pipes,
     };
@@ -379,8 +379,8 @@ async fn unchanged_short_capture_needs_no_store_handle() {
         program: PathBuf::from("/bin/echo"),
         args: vec!["short-ok".into()],
         env: BTreeMap::new(),
-        timeout: Duration::from_secs(10),
-        max_output_bytes: 4096,
+        timeout: Some(Duration::from_secs(10)),
+        max_output_bytes: Some(4096),
         allow_filter: false,
         io: cayw_device::ProcessIo::Pipes,
     };

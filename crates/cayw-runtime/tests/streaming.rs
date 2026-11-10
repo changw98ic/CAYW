@@ -60,7 +60,7 @@ async fn fragmented_response_completes_with_durable_history() {
         Arc::new(FragmentedProvider),
         Model::new("fixture", "fragmented"),
         RuntimeConfig {
-            max_run_time: Duration::from_secs(30),
+            max_run_time: Some(Duration::from_secs(30)),
             ..Default::default()
         },
     )

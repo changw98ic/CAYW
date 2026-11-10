@@ -32,7 +32,7 @@ async fn injected_profiles_and_git_execute_from_luau_with_exact_host_grants() {
     let workspace = dir.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let mut config = RuntimeConfig::default();
-    config.codemode.timeout = Duration::from_secs(20);
+    config.codemode.timeout = Some(Duration::from_secs(20));
     config.host.git_program = Some("/usr/bin/git".into());
     config.host.profiles = BTreeMap::from([
         (
@@ -42,8 +42,8 @@ async fn injected_profiles_and_git_execute_from_luau_with_exact_host_grants() {
                 program: "/usr/bin/true".into(),
                 args: vec![],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(5),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(5)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: cayw_host::ProcessIo::Pipes,
             },
@@ -55,8 +55,8 @@ async fn injected_profiles_and_git_execute_from_luau_with_exact_host_grants() {
                 program: "/usr/bin/true".into(),
                 args: vec![],
                 env: BTreeMap::new(),
-                timeout: Duration::from_secs(5),
-                max_output_bytes: 4096,
+                timeout: Some(Duration::from_secs(5)),
+                max_output_bytes: Some(4096),
                 allow_filter: false,
                 io: cayw_host::ProcessIo::Pipes,
             },

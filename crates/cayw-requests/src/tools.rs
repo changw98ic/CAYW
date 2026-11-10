@@ -100,7 +100,7 @@ impl RequestTools {
             let input: StatusInput = serde_json::from_value(arguments)?;
             self.store.status(&self.identity, &input.request_id)?
         };
-        bounded_json(&record, self.store.config().max_result_bytes)?;
+        bounded_json_optional(&record, self.store.config().max_result_bytes)?;
         Ok(serde_json::to_value(record)?)
     }
 }

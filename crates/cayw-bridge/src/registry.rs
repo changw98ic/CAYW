@@ -13,6 +13,14 @@ use std::{
     time::Instant,
 };
 
+/// Without a configured timeout the operation waits only on cancellation.
+async fn until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 struct Tool {
     spec: ToolSpec,
     input: ArgumentValidator,
@@ -84,7 +92,7 @@ struct Capture {
 
 impl Registry {
     pub fn new(limits: Limits, policy: Arc<dyn RegistryPolicy>) -> Result<Self, CapabilityError> {
-        let positive = [
+        let values = [
             limits.max_sources,
             limits.max_tools_per_source,
             limits.max_skills_per_source,
@@ -95,22 +103,17 @@ impl Registry {
             limits.max_argument_bytes,
             limits.max_result_bytes,
             limits.max_skill_bytes,
+            limits.max_resource_bytes,
             limits.max_source_operations,
             limits.max_source_bytes,
-            limits.max_in_flight,
         ];
-        if positive.contains(&0)
-            || limits.max_sources > 1024
-            || limits.max_metadata_bytes > 16 * 1024 * 1024
-            || limits.max_all_metadata_bytes > 64 * 1024 * 1024
-            || limits.max_result_bytes > 16 * 1024 * 1024
-            || limits.max_resource_bytes > 16 * 1024 * 1024
-            || limits.operation_timeout.is_zero()
-            || Instant::now()
-                .checked_add(limits.operation_timeout)
-                .is_none()
+        if limits.max_in_flight == 0
+            || values.into_iter().flatten().any(|value| value == 0)
+            || limits.operation_timeout.is_some_and(|timeout| {
+                timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
+            })
         {
-            return Err(failure("bridge budgets must be positive and bounded"));
+            return Err(failure("configured bridge budgets must be positive"));
         }
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT
@@ -184,9 +187,22 @@ impl Registry {
         let id = metadata.provenance.source.id.clone();
         let mut state = lock(&self.0.state);
         let generation = match (state.sources.get(&id), reconnect) {
-            (None, false) if state.sources.len() < self.0.limits.max_sources => 1,
+            (None, false)
+                if self
+                    .0
+                    .limits
+                    .max_sources
+                    .is_none_or(|limit| state.sources.len() < limit) =>
+            {
+                1
+            }
             (Some(source), true) if source.status == SourceStatus::Disconnected => {
-                if source.operations >= self.0.limits.max_source_operations {
+                if self
+                    .0
+                    .limits
+                    .max_source_operations
+                    .is_some_and(|limit| source.operations >= limit)
+                {
                     return Err(failure("source operation budget exhausted"));
                 }
                 source
@@ -214,7 +230,12 @@ impl Registry {
             .saturating_sub(old_bytes)
             .checked_add(metadata.bytes)
             .ok_or_else(|| failure("metadata budget overflow"))?;
-        if total > self.0.limits.max_all_metadata_bytes {
+        if self
+            .0
+            .limits
+            .max_all_metadata_bytes
+            .is_some_and(|limit| total > limit)
+        {
             return Err(failure("total metadata budget exceeded"));
         }
         metadata.provenance.generation = generation;
@@ -259,10 +280,26 @@ impl Registry {
             || identity.origin.len() > 2048
             || identity.version.chars().any(char::is_control)
             || identity.origin.chars().any(char::is_control)
-            || manifest.tools.len() > self.0.limits.max_tools_per_source
-            || manifest.skills.len() > self.0.limits.max_skills_per_source
-            || manifest.resources.len() > self.0.limits.max_resources_per_source
-            || manifest.prompts.len() > self.0.limits.max_prompts_per_source
+            || self
+                .0
+                .limits
+                .max_tools_per_source
+                .is_some_and(|limit| manifest.tools.len() > limit)
+            || self
+                .0
+                .limits
+                .max_skills_per_source
+                .is_some_and(|limit| manifest.skills.len() > limit)
+            || self
+                .0
+                .limits
+                .max_resources_per_source
+                .is_some_and(|limit| manifest.resources.len() > limit)
+            || self
+                .0
+                .limits
+                .max_prompts_per_source
+                .is_some_and(|limit| manifest.prompts.len() > limit)
         {
             return Err(failure("invalid source identity or manifest count"));
         }
@@ -472,7 +509,7 @@ impl Registry {
         })
     }
 
-    pub(crate) fn operation_timeout(&self) -> std::time::Duration {
+    pub(crate) fn operation_timeout(&self) -> Option<std::time::Duration> {
         self.0.limits.operation_timeout
     }
 
@@ -501,10 +538,12 @@ impl Registry {
         id: &str,
         generation: u64,
         cancel: &CancellationToken,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(), CapabilityError> {
         self.check_journal()?;
-        if cancel.is_cancelled() || tokio::time::Instant::now() >= deadline {
+        if cancel.is_cancelled()
+            || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
             return Err(failure(
                 "source operation cancelled or timed out before dispatch",
             ));
@@ -521,7 +560,7 @@ impl Registry {
         target: &str,
         arguments: Value,
         cancel: CancellationToken,
-        deadline: tokio::time::Instant,
+        deadline: Option<tokio::time::Instant>,
         scope: &crate::ScopedBridge,
     ) -> Result<Value, CapabilityError> {
         self.before_dispatch(id, generation, &cancel, deadline)?;
@@ -542,7 +581,7 @@ impl Registry {
                 biased;
                 _ = child.cancelled() => return Err(failure("bridge permission cancelled")),
                 _ = capture.cancel.cancelled() => return Err(failure("source invalidated before permission")),
-                _ = tokio::time::sleep_until(deadline) => return Err(failure("bridge permission deadline")),
+                _ = until(deadline) => return Err(failure("bridge permission deadline")),
                 result = self.0.policy.authorize(&request, child.clone()) => result?,
             }
             self.capture(id, generation)?;
@@ -650,7 +689,7 @@ impl Registry {
                         biased;
                         _ = child.cancelled() => return Err(failure("dispatch journal preparation cancelled")),
                         _ = capture.cancel.cancelled() => return Err(failure("source invalidated during dispatch journal preparation")),
-                        _ = tokio::time::sleep_until(deadline) => return Err(failure("dispatch journal preparation deadline")),
+                        _ = until(deadline) => return Err(failure("dispatch journal preparation deadline")),
                         result = journal.journal.started(&journal.record) => {
                             result.map_err(|e|failure(format!("dispatch journal preparation failed: {}",failure(e.message).message)))?;
                         }
@@ -665,7 +704,7 @@ impl Registry {
                         biased;
                         _ = child.cancelled() => Err(interrupted(dispatched && effect, "source operation cancelled")),
                         _ = capture.cancel.cancelled() => Err(interrupted(dispatched && effect, "source disconnected or revoked")),
-                        _ = tokio::time::sleep_until(deadline) => Err(interrupted(dispatched && effect, "source operation deadline")),
+                        _ = until(deadline) => Err(interrupted(dispatched && effect, "source operation deadline")),
                         reply = async {
                             // This branch is polled only after ready cancellation
                             // branches. No await separates this check from request().
@@ -700,7 +739,11 @@ impl Registry {
                         }
                     } else if operation == Operation::ReadSkill {
                         let content = reply.value.as_str().ok_or_else(|| failure("skill result must be UTF-8 text"))?;
-                        if content.len() > self.0.limits.max_skill_bytes
+                        if self
+                            .0
+                            .limits
+                            .max_skill_bytes
+                            .is_some_and(|limit| content.len() > limit)
                             || content_sha256(content) != capture.metadata.skills[target].content_sha256
                         { return Err(failure("skill content size or digest mismatch")); }
                     } else if operation == Operation::ReadResource {
@@ -724,7 +767,9 @@ impl Registry {
                 )
             })?;
             let mut state = lock(&self.0.state);
-            if child.is_cancelled() || tokio::time::Instant::now() >= deadline {
+            if child.is_cancelled()
+                || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+            {
                 return Err(interrupted(
                     reservation.effect_pending,
                     "result acceptance cancelled or timed out",
@@ -737,7 +782,12 @@ impl Registry {
                     "source changed before result acceptance",
                 )
             })?;
-            if bytes > self.0.limits.max_source_bytes.saturating_sub(source.bytes) {
+            if self
+                .0
+                .limits
+                .max_source_bytes
+                .is_some_and(|limit| bytes > limit.saturating_sub(source.bytes))
+            {
                 return Err(interrupted(
                     reservation.effect_pending,
                     "source total byte budget exceeded",
@@ -787,7 +837,7 @@ impl Registry {
             // absolute budget. A synchronous fallback records unknown/zero execution.
             let persisted = tokio::select! {
                 biased;
-                _ = tokio::time::sleep_until(deadline) => Err(failure("dispatch journal terminal deadline")),
+                _ = until(deadline) => Err(failure("dispatch journal terminal deadline")),
                 result = journal.journal.settled(&journal.record,&outcome) => result,
             };
             match persisted {
@@ -812,7 +862,8 @@ impl Registry {
             }
             if journal.done
                 && result.is_ok()
-                && (child.is_cancelled() || tokio::time::Instant::now() >= deadline)
+                && (child.is_cancelled()
+                    || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline))
             {
                 // The exact successful outcome is already durable. Return known
                 // interruption and never replay; the journal retains the result.
@@ -851,9 +902,17 @@ impl Registry {
             .get_mut(&request.source.source.id)
             .ok_or_else(|| failure("source unavailable"))?;
         check_source(source, request.source.generation)?;
-        if source.operations >= self.0.limits.max_source_operations
+        if self
+            .0
+            .limits
+            .max_source_operations
+            .is_some_and(|limit| source.operations >= limit)
             || source.in_flight >= self.0.limits.max_in_flight
-            || bytes > self.0.limits.max_source_bytes.saturating_sub(source.bytes)
+            || self
+                .0
+                .limits
+                .max_source_bytes
+                .is_some_and(|limit| bytes > limit.saturating_sub(source.bytes))
         {
             return Err(failure(
                 "source operation, concurrency, or byte budget exhausted",
@@ -1222,7 +1281,7 @@ mod diagnostic_tests {
             "authorization": "fixture credential",
             "text": "Bearer fixture credential",
         });
-        value_size(&value, 1024 * 1024).unwrap();
+        value_size(&value, Some(1024 * 1024)).unwrap();
         let summary = bounded_structured_summary(&value, 0);
         assert_eq!(summary["nested"]["nested"]["omitted"], "[depth_exceeded]");
         assert_eq!(summary["items"].as_array().unwrap().len(), 9);
@@ -1234,7 +1293,7 @@ mod diagnostic_tests {
     #[test]
     fn diagnostic_streamed_digest_matches_full_response_serialization() {
         let value = json!({"number": 42, "text": "中文🚀\n", "array": [true, null]});
-        value_size(&value, 1024).unwrap();
+        value_size(&value, Some(1024)).unwrap();
         assert_eq!(
             response_digest(&value),
             content_sha256(&serde_json::to_string(&value).unwrap())
@@ -1271,7 +1330,7 @@ mod diagnostic_tests {
             arguments_sha256: content_sha256("{}"),
         };
         let response = json!({"result": "中🚀".repeat(1000)});
-        value_size(&response, 16 * 1024).unwrap();
+        value_size(&response, Some(16 * 1024)).unwrap();
         let hash = response_digest(&response);
         let outcome = DispatchOutcome::Succeeded {
             value: json!({"value": response}),
