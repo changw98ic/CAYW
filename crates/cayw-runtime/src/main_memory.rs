@@ -39,10 +39,11 @@ const EVENTS_FILE: &str = "events.jsonl";
 const ENTRY_SUFFIX: &str = ".md";
 
 /// Where one memory entry came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     /// The user said it directly.
+    #[default]
     Stated,
     /// Inferred from the user's conversation.
     Inferred,
@@ -59,7 +60,7 @@ pub struct MemoryEntry {
     pub source_log_ids: Vec<String>,
     pub status: MemoryStatus,
     pub updated_at: u64,
-    #[serde(skip)]
+    #[serde(default)]
     pub body: String,
     /// SHA-256 of the current file bytes. It is the entry version.
     #[serde(default)]
@@ -147,46 +148,10 @@ pub fn user_evidence(events: &[EventRecord]) -> UserEvidence {
 /// Collect the exact messages whose durable events fall inside a forgotten
 /// range. Provider input then drops the matching turns without rewriting the
 /// event log. Later events with identical text stay available.
-pub(crate) fn forgotten_messages(ranges: &[SourceRange], events: &[EventRecord]) -> Vec<Message> {
-    let mut messages = Vec::new();
-    for record in events {
-        if !ranges
-            .iter()
-            .any(|range| range.covers_cursor(&record.session_id, record.cursor))
-        {
-            continue;
-        }
-        let CoreEvent::Agent { event } = &record.event else {
-            continue;
-        };
-        match event.as_ref() {
-            AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
-                push_distinct(&mut messages, message.clone());
-            }
-            AgentEvent::TurnEnd {
-                message,
-                tool_results,
-            } => {
-                push_distinct(&mut messages, Message::Assistant(message.clone()));
-                for result in tool_results {
-                    push_distinct(&mut messages, Message::ToolResult(result.clone()));
-                }
-            }
-            _ => {}
-        }
-    }
-    messages
-}
-
-fn push_distinct(messages: &mut Vec<Message>, message: Message) {
-    if !messages.contains(&message) {
-        messages.push(message);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryOperation {
+    #[default]
     Upsert,
     Disable,
 }
@@ -196,12 +161,16 @@ pub enum MemoryOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryCandidate {
+    #[serde(default)]
     pub operation: MemoryOperation,
+    #[serde(default)]
     pub entry_id: Option<String>,
     pub kind: String,
     #[serde(default)]
     pub body: String,
+    #[serde(default)]
     pub source_type: SourceType,
+    #[serde(default)]
     pub source_log_ids: Vec<String>,
 }
 
@@ -875,6 +844,7 @@ impl MainMemory {
 /// Provider input for the main session. It keeps durable memory, preferences,
 /// the current request and active work, evicts older raw turns at the
 /// replacement threshold, and never starts cumulative compression.
+#[cfg(test)]
 pub(crate) fn prepare_main_session_input(
     memory: &MainMemory,
     messages: &[Message],
@@ -882,16 +852,50 @@ pub(crate) fn prepare_main_session_input(
     output_reserve: u64,
     forgotten_messages: &[Message],
 ) -> Result<Vec<Message>, RuntimeError> {
+    let spans = crate::session_context::units_from_ranges(messages, &[]);
+    let mut forgotten = Vec::new();
+    for span in &spans {
+        if messages[span.msg_from..span.msg_to]
+            .iter()
+            .any(|message| forgotten_messages.contains(message))
+        {
+            forgotten.push(
+                CursorRange::new(span.unit.start_cursor, span.unit.end_cursor)
+                    .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?,
+            );
+        }
+    }
+    prepare_main_session_input_with_ranges(
+        memory,
+        messages,
+        &[],
+        window,
+        output_reserve,
+        &forgotten,
+    )
+}
+
+pub(crate) fn prepare_main_session_input_with_ranges(
+    memory: &MainMemory,
+    messages: &[Message],
+    ranges: &[CursorRange],
+    window: Option<u64>,
+    output_reserve: u64,
+    forgotten: &[CursorRange],
+) -> Result<Vec<Message>, RuntimeError> {
     if messages.is_empty() {
         return Ok(Vec::new());
     }
+    let spans = crate::session_context::units_from_ranges(messages, ranges);
     let budget = match input_budget(window, output_reserve, DEFAULT_PROTOCOL_MARGIN) {
         Ok(budget) => budget,
         // The conservative window is only a fallback estimate. When it cannot
         // hold the requested output reserve, keep the non-forgotten input
         // rather than refusing a request the provider may accept.
         Err(_) if window.is_none() => {
-            return Ok(main_session_fallback_input(messages, forgotten_messages));
+            return Ok(main_session_fallback_input_with_spans(
+                messages, &spans, forgotten,
+            ));
         }
         Err(error) => return Err(RuntimeError::InvalidInput(error.to_string())),
     };
@@ -900,26 +904,13 @@ pub(crate) fn prepare_main_session_input(
         .as_ref()
         .map(|text| u64::try_from(text.len()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    let units = crate::session_context::units_from(messages);
-    // Forgetting is recorded against durable event cursors. Provider units use
-    // message positions, so map the exact forgotten messages onto their units.
-    let mut forgotten = Vec::new();
-    for unit in &units {
-        let from = (unit.start_cursor - 1) as usize;
-        let to = unit.end_cursor as usize;
-        if messages[from..to]
-            .iter()
-            .any(|message| forgotten_messages.contains(message))
-        {
-            forgotten.push(
-                CursorRange::new(unit.start_cursor, unit.end_cursor)
-                    .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?,
-            );
-        }
-    }
+    let units = spans
+        .iter()
+        .map(|span| span.unit.clone())
+        .collect::<Vec<_>>();
     let plan = plan_main_session(&cayw_context::MainSessionInput {
         units: &units,
-        forgotten: &forgotten,
+        forgotten,
         pinned_tokens,
         budget,
     })
@@ -933,19 +924,15 @@ pub(crate) fn prepare_main_session_input(
     if let Some(block) = block {
         output.push(Message::system(block));
     }
-    for unit in &units {
+    for span in &spans {
         let range = CursorRange {
-            start_cursor: unit.start_cursor,
-            end_cursor: unit.end_cursor,
+            start_cursor: span.unit.start_cursor,
+            end_cursor: span.unit.end_cursor,
         };
         if !retained.contains(&range) {
             continue;
         }
-        output.extend(
-            messages[(unit.start_cursor - 1) as usize..unit.end_cursor as usize]
-                .iter()
-                .cloned(),
-        );
+        output.extend(messages[span.msg_from..span.msg_to].iter().cloned());
     }
     let tokens = output
         .iter()
@@ -953,7 +940,9 @@ pub(crate) fn prepare_main_session_input(
         .fold(0_u64, u64::saturating_add);
     if tokens > budget.input_limit {
         return if budget.window_was_default {
-            Ok(main_session_fallback_input(messages, forgotten_messages))
+            Ok(main_session_fallback_input_with_spans(
+                messages, &spans, forgotten,
+            ))
         } else {
             Err(RuntimeError::Budget("context input"))
         };
@@ -963,16 +952,38 @@ pub(crate) fn prepare_main_session_input(
 
 // Preserve the normal planner's forget rules even when the estimated window
 // cannot fit the input. Keep whole units and leave active/pinned work unchanged.
+#[cfg(test)]
 fn main_session_fallback_input(messages: &[Message], forgotten: &[Message]) -> Vec<Message> {
+    let spans = crate::session_context::units_from_ranges(messages, &[]);
+    let forgotten_ranges = spans
+        .iter()
+        .filter(|span| {
+            messages[span.msg_from..span.msg_to]
+                .iter()
+                .any(|message| forgotten.contains(message))
+        })
+        .filter_map(|span| CursorRange::new(span.unit.start_cursor, span.unit.end_cursor).ok())
+        .collect::<Vec<_>>();
+    main_session_fallback_input_with_spans(messages, &spans, &forgotten_ranges)
+}
+
+fn main_session_fallback_input_with_spans(
+    messages: &[Message],
+    spans: &[crate::session_context::UnitSpan],
+    forgotten: &[CursorRange],
+) -> Vec<Message> {
     let mut output = Vec::new();
-    for unit in crate::session_context::units_from(messages) {
-        let source = &messages[(unit.start_cursor - 1) as usize..unit.end_cursor as usize];
+    for span in spans {
+        let source = &messages[span.msg_from..span.msg_to];
         let replaceable = matches!(
-            unit.kind,
+            span.unit.kind,
             cayw_context::UnitKind::CompletedTurn | cayw_context::UnitKind::ToolExchange
-        ) && !unit.pin_original
-            && !unit.outcome_unknown;
-        if replaceable && source.iter().any(|message| forgotten.contains(message)) {
+        ) && !span.unit.pin_original
+            && !span.unit.outcome_unknown;
+        let overlaps_forgotten = forgotten.iter().any(|range| {
+            span.unit.start_cursor <= range.end_cursor && range.start_cursor <= span.unit.end_cursor
+        });
+        if replaceable && overlaps_forgotten {
             continue;
         }
         output.extend_from_slice(source);

@@ -623,6 +623,8 @@ fn is_main_session_local(name: &str) -> bool {
             | "user.ask"
             | "plan.update"
     ) || name.starts_with("work.")
+        || name.starts_with("memory.")
+        || name.starts_with("proactive.")
 }
 
 pub(crate) fn is_workspace_mutation(name: &str) -> bool {

@@ -918,20 +918,31 @@ impl App {
         if value["session_id"].as_str() != Some(id) {
             return Err("Approval question belongs to another session".into());
         }
+        let is_model_auto = value["approval_mode"].as_str() == Some("model_auto");
         let options = value["options"]
             .as_array()
-            .filter(|options| options.len() == 3)
-            .ok_or("Approval question must offer exactly three options")?;
-        for expected in [
-            Decision::AllowOnce.reply(),
-            Decision::AllowTask.reply(),
-            Decision::Deny.reply(),
-        ] {
-            if !options
-                .iter()
-                .any(|option| option.as_str() == Some(expected))
-            {
-                return Err("Approval question options do not match the shared contract".into());
+            .ok_or("Approval question is missing its options array")?;
+        if is_model_auto {
+            if !options.is_empty() {
+                return Err(
+                    "Model-auto approval question must not offer manual reply options".into(),
+                );
+            }
+        } else {
+            if options.len() != 3 {
+                return Err("Approval question must offer exactly three options".into());
+            }
+            for expected in [
+                Decision::AllowOnce.reply(),
+                Decision::AllowTask.reply(),
+                Decision::Deny.reply(),
+            ] {
+                if !options
+                    .iter()
+                    .any(|option| option.as_str() == Some(expected))
+                {
+                    return Err("Approval question options do not match the shared contract".into());
+                }
             }
         }
         let session = self
@@ -1261,6 +1272,14 @@ impl App {
             let Some(id) = approval["id"].as_str().map(str::to_owned) else {
                 return vec![];
             };
+            if session
+                .approval_questions
+                .get(&id)
+                .is_some_and(|q| q["approval_mode"].as_str() == Some("model_auto"))
+            {
+                self.status = "模型正在自动评估该授权，无需手动回复。".into();
+                return vec![];
+            }
             if !session.decisions_pending.insert(id.clone()) {
                 return vec![];
             }

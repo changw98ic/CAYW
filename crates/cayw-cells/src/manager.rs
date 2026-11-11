@@ -131,6 +131,18 @@ impl CellManager {
             .expect("cell lock poisoned")
             .clone())
     }
+    pub fn notify_permission_wait(&self, cell_id: &str) {
+        if let Ok(run) = self.get(cell_id) {
+            run.waiting_permission.store(true, Ordering::Release);
+            run.changed
+                .send_modify(|revision| *revision = revision.wrapping_add(1));
+        }
+    }
+    pub fn clear_permission_wait(&self, cell_id: &str) {
+        if let Ok(run) = self.get(cell_id) {
+            run.waiting_permission.store(false, Ordering::Release);
+        }
+    }
     fn get(&self, id: &str) -> Result<Arc<Run>, CellError> {
         self.cells
             .lock()
@@ -366,14 +378,15 @@ impl CellManager {
         };
         tokio::pin!(deadline_elapsed);
         loop {
+            let permission_yield = run.waiting_permission.swap(false, Ordering::AcqRel);
             let ready = {
                 let record = run.record.lock().expect("cell lock poisoned");
                 let outputs = record.outputs.len() as u64;
                 let yielded = record.status == CellStatus::Yielded;
                 let dead = !run.live.load(Ordering::Acquire);
                 match progress_after {
-                    Some(baseline) => outputs > baseline || yielded || dead,
-                    None => outputs > request.cursor || yielded || dead,
+                    Some(baseline) => outputs > baseline || yielded || permission_yield || dead,
+                    None => outputs > request.cursor || yielded || permission_yield || dead,
                 }
             };
             let publishing_terminal = run
@@ -630,6 +643,7 @@ pub(crate) struct Run {
     pub(crate) cancel: CancellationToken,
     pub(crate) changed: watch::Sender<u64>,
     pub(crate) live: AtomicBool,
+    pub(crate) waiting_permission: AtomicBool,
     pub(crate) abort: Mutex<Option<AbortHandle>>,
     pub(crate) resume_rx: tokio::sync::Mutex<mpsc::Receiver<()>>,
     resume_tx: mpsc::Sender<()>,
@@ -665,6 +679,7 @@ impl Run {
             cancel,
             changed,
             live: AtomicBool::new(live),
+            waiting_permission: AtomicBool::new(false),
             abort: Mutex::default(),
             resume_rx: tokio::sync::Mutex::new(resume_rx),
             resume_tx,

@@ -337,6 +337,7 @@ pub struct Health {
     pub max_concurrent_runs: usize,
     pub provider: String,
     pub model: String,
+    pub approval_mode: ApprovalMode,
     pub disabled_services: Vec<DisabledService>,
 }
 
@@ -757,7 +758,10 @@ impl Runtime {
         if approval.decision.is_some() {
             return Err(RuntimeError::StaleApproval);
         }
-        Ok(permissions::question(&approval))
+        Ok(permissions::question(
+            &approval,
+            self.inner.config.approval_mode,
+        ))
     }
     /// Apply one main-session text answer to the original request. The reply must
     /// exactly equal one of the three option labels; it never goes through a
@@ -876,6 +880,13 @@ impl Runtime {
         self.require_main_session()?;
         self.inner.memory.dream(summaries, model_text)
     }
+    pub fn context_summaries(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<cayw_context::SummaryRecord>, RuntimeError> {
+        let _ = self.get(session_id)?;
+        Ok(lock(&self.inner.context).summaries(session_id))
+    }
     pub fn memory_context_block(&self) -> Result<Option<String>, RuntimeError> {
         self.require_main_session()?;
         self.inner.memory.context_block()
@@ -925,6 +936,30 @@ impl Runtime {
             .pause_work(&item.work_id, item.pause_version)?;
         Ok(item)
     }
+    pub async fn pause_work_item_routed(
+        &self,
+        work_id: &str,
+    ) -> Result<(work_items::WorkItem, Vec<work_router::WorkTargetOutcome>), RuntimeError> {
+        let item = self.pause_work_item(work_id)?;
+        let workspaces = work_tools::external_workspaces(&item);
+        let router = lock(&self.inner.work_router).clone();
+        let outcomes = if workspaces.is_empty() {
+            Vec::new()
+        } else if let Some(router) = router {
+            router
+                .control(
+                    work_router::WorkControl::Pause,
+                    &item.work_id,
+                    item.pause_version,
+                    &workspaces,
+                )
+                .await
+                .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        Ok((item, outcomes))
+    }
     pub fn resume_work_item(&self, work_id: &str) -> Result<work_items::WorkItem, RuntimeError> {
         self.require_main_session()?;
         self.inner.work_items.resume(work_id)
@@ -938,6 +973,30 @@ impl Runtime {
             .queue
             .stop_work(&item.work_id, item.stop_version)?;
         Ok(item)
+    }
+    pub async fn stop_work_item_routed(
+        &self,
+        work_id: &str,
+    ) -> Result<(work_items::WorkItem, Vec<work_router::WorkTargetOutcome>), RuntimeError> {
+        let item = self.stop_work_item(work_id)?;
+        let workspaces = work_tools::external_workspaces(&item);
+        let router = lock(&self.inner.work_router).clone();
+        let outcomes = if workspaces.is_empty() {
+            Vec::new()
+        } else if let Some(router) = router {
+            router
+                .control(
+                    work_router::WorkControl::Stop,
+                    &item.work_id,
+                    item.stop_version,
+                    &workspaces,
+                )
+                .await
+                .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        Ok((item, outcomes))
     }
     /// Run the fixed program check for one criterion. The result is observed
     /// here, so a model cannot map arbitrary tool output to a pass.
@@ -1048,13 +1107,150 @@ impl Runtime {
         usage_tokens: u64,
     ) -> Result<work_items::ProactiveTriggerOutcome, RuntimeError> {
         self.require_main_session()?;
-        self.inner.work_items.trigger_proactive(
+        let outcome = self.inner.work_items.trigger_proactive(
             mode,
             rule_id,
             condition_version,
             work_id,
             usage_tokens,
-        )
+        )?;
+        if let work_items::ProactiveTriggerOutcome::Dispatched {
+            ref work_id,
+            ref dispatch_key,
+            ref rule_id,
+            condition_version,
+            ..
+        } = outcome
+        {
+            self.enqueue_proactive_dispatch(work_id, dispatch_key, rule_id, condition_version)?;
+        }
+        Ok(outcome)
+    }
+    fn enqueue_proactive_dispatch(
+        &self,
+        work_id: &str,
+        dispatch_key: &str,
+        rule_id: &str,
+        condition_version: u64,
+    ) -> Result<Option<TaskRecord>, RuntimeError> {
+        let Some(item) = self.inner.work_items.get(work_id)? else {
+            return Ok(None);
+        };
+        if item.lifecycle != work_items::WorkLifecycle::Open {
+            return Ok(None);
+        }
+        let has_external_target = item
+            .session_refs
+            .iter()
+            .any(|r| r.workspace.as_deref().is_some_and(|w| w != "local"));
+        if has_external_target && lock(&self.inner.work_router).is_some() {
+            return Ok(None);
+        }
+        let session_id =
+            if self.get(&item.owner_main_session_id).is_ok() {
+                item.owner_main_session_id.clone()
+            } else if let Some(session_ref) = item.session_refs.iter().find(|r| {
+                r.workspace.as_deref() == Some("local") && self.get(&r.session_id).is_ok()
+            }) {
+                session_ref.session_id.clone()
+            } else if let Some(first) = self.list()?.first() {
+                first.id.clone()
+            } else {
+                self.create(Some(item.title.clone()))?.id
+            };
+        let task = self.enqueue_dispatched(
+            &session_id,
+            TaskInput {
+                text: format!(
+                    "Proactive trigger ({rule_id} v{condition_version}) for WorkItem {}: {}",
+                    item.title, item.goal
+                ),
+                images: Vec::new(),
+            },
+            TaskIntent::General,
+            TaskPriority::Normal,
+            TaskResources::default(),
+            TaskDispatch {
+                work_id: item.work_id.clone(),
+                dispatch_key: dispatch_key.to_owned(),
+                pause_version: item.pause_version,
+                stop_version: item.stop_version,
+            },
+        )?;
+        self.inner.work_items.attach_task_ref(
+            &item.work_id,
+            work_items::WorkTaskRef {
+                task_id: task.id.clone(),
+                session_id: Some(session_id),
+                workspace: Some("local".into()),
+            },
+        )?;
+        Ok(Some(task))
+    }
+    pub async fn run_proactive_dispatch(
+        &self,
+        outcome: &work_items::ProactiveTriggerOutcome,
+    ) -> Result<Option<TaskRecord>, RuntimeError> {
+        let work_items::ProactiveTriggerOutcome::Dispatched {
+            work_id,
+            dispatch_key,
+            rule_id,
+            condition_version,
+            ..
+        } = outcome
+        else {
+            return Ok(None);
+        };
+        let router = lock(&self.inner.work_router).clone();
+        if let Some(item) = self.inner.work_items.get(work_id)?
+            && item.lifecycle == work_items::WorkLifecycle::Open
+            && let Some(ext_ref) = item
+                .session_refs
+                .iter()
+                .find(|r| r.workspace.as_deref().is_some_and(|w| w != "local"))
+            && let Some(router) = router
+        {
+            let workspace = ext_ref.workspace.clone().unwrap_or_default();
+            let reply = router
+                .dispatch(work_router::WorkDispatchRequest {
+                    work_id: item.work_id.clone(),
+                    workspace: workspace.clone(),
+                    session_id: Some(ext_ref.session_id.clone()),
+                    label: Some(item.title.clone()),
+                    text: format!(
+                        "Proactive trigger ({rule_id} v{condition_version}) for WorkItem {}: {}",
+                        item.title, item.goal
+                    ),
+                    dispatch_key: dispatch_key.clone(),
+                    pause_version: item.pause_version,
+                    stop_version: item.stop_version,
+                    priority: TaskPriority::Normal,
+                    declared_memory_bytes: 0,
+                })
+                .await
+                .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+            self.inner.work_items.attach_task_ref(
+                &item.work_id,
+                work_items::WorkTaskRef {
+                    task_id: reply.task_id,
+                    session_id: Some(reply.session_id),
+                    workspace: Some(reply.workspace),
+                },
+            )?;
+            return Ok(None);
+        }
+        let Some(task) = self.task_by_dispatch_key(dispatch_key)? else {
+            return Ok(None);
+        };
+        if task.state == TaskState::Queued {
+            let busy = lock(&self.inner.active).contains_key(&task.session_id);
+            if !busy {
+                let _ = self
+                    .resume(&task.id, cayw_ai::CancellationToken::new())
+                    .await;
+            }
+        }
+        Ok(Some(self.task(&task.id)?))
     }
     pub fn proactive_mode(&self) -> work_items::ProactiveMode {
         self.inner.config.proactive_mode
@@ -1119,6 +1315,103 @@ impl Runtime {
     ) -> Result<Option<work_items::Notification>, RuntimeError> {
         self.require_main_session()?;
         self.inner.work_items.notification(notification_id)
+    }
+    /// Deliver a notification to a user-configured target after recording the
+    /// durable intent, then persist its delivery receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_notification(
+        &self,
+        notification_id: Option<&str>,
+        work_id: Option<&str>,
+        work_version: Option<u64>,
+        target: Option<&str>,
+        text: Option<&str>,
+        content_ref: Option<&str>,
+        artifact_refs: &[String],
+    ) -> Result<work_items::Notification, RuntimeError> {
+        self.require_main_session()?;
+        let pending = if let Some(notification_id) = notification_id {
+            self.inner
+                .work_items
+                .notification(notification_id)?
+                .ok_or_else(|| RuntimeError::InvalidInput("notification not found".into()))?
+        } else {
+            let target = target.ok_or_else(|| {
+                RuntimeError::InvalidInput("notification target is required".into())
+            })?;
+            let (resolved_work_id, resolved_version) = match work_id {
+                Some(id) => {
+                    let item =
+                        self.inner.work_items.get(id)?.ok_or_else(|| {
+                            RuntimeError::InvalidInput("WorkItem not found".into())
+                        })?;
+                    (item.work_id, work_version.unwrap_or(item.work_version))
+                }
+                None => ("main-session".into(), work_version.unwrap_or(1)),
+            };
+            self.prepare_notification(
+                &resolved_work_id,
+                resolved_version,
+                target,
+                content_ref.or(text),
+                artifact_refs,
+            )?
+        };
+        match self
+            .inner
+            .work_items
+            .notification_decision(&pending.notification_id)?
+        {
+            work_items::NotificationDecision::Complete => Ok(pending),
+            work_items::NotificationDecision::QueryReceipt => Err(RuntimeError::InvalidInput(
+                "notification delivery outcome is unknown; query receipt before resending".into(),
+            )),
+            work_items::NotificationDecision::Send => {
+                let receipt_ref = format!("receipt:{}", pending.notification_id);
+                let outbox_path = self.inner.root.join(".cayw-notifications.jsonl");
+                let envelope = serde_json::json!({
+                    "receipt_ref": receipt_ref,
+                    "notification_id": pending.notification_id,
+                    "work_id": pending.work_id,
+                    "work_version": pending.work_version,
+                    "target": pending.target,
+                    "text": text.or(pending.content_ref.as_deref()).unwrap_or(""),
+                    "content_ref": pending.content_ref,
+                    "artifact_refs": pending.artifact_refs,
+                });
+                let mut line = serde_json::to_vec(&envelope)?;
+                line.push(b'\n');
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut file = options.open(&outbox_path).map_err(|error| {
+                    let _ = self
+                        .inner
+                        .work_items
+                        .mark_notification_unknown(&pending.notification_id);
+                    RuntimeError::Workspace(format!("open notification outbox: {error}"))
+                })?;
+                use std::io::Write;
+                if let Err(error) = file.write_all(&line).and_then(|_| file.sync_all()) {
+                    let _ = self
+                        .inner
+                        .work_items
+                        .mark_notification_unknown(&pending.notification_id);
+                    return Err(RuntimeError::Workspace(format!(
+                        "write notification outbox: {error}"
+                    )));
+                }
+                self.inner.work_items.record_notification_receipt(
+                    &pending.notification_id,
+                    work_items::NotificationStatus::Delivered,
+                    &receipt_ref,
+                )
+            }
+        }
     }
     /// Push a pause version received from the Client to this workspace's live
     /// tasks. The WorkItem body stays in the main-session workspace.
@@ -1250,6 +1543,7 @@ impl Runtime {
             max_concurrent_runs: self.inner.config.max_concurrent_runs,
             provider: selection.model.provider.clone(),
             model: selection.model.id.clone(),
+            approval_mode: self.inner.config.approval_mode,
             disabled_services: self.inner.disabled_services.clone(),
         })
     }

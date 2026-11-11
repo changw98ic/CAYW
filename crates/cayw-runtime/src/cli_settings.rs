@@ -206,6 +206,16 @@ impl Put {
                 }
             }
         }
+        if let Some(previous) = previous {
+            let previous_json = serde_json::to_value(previous)?;
+            for field in ["context_window", "tokenizer"] {
+                if model.get(field).is_none()
+                    && let Some(existing) = previous_json.get(field).filter(|v| !v.is_null())
+                {
+                    model[field] = existing.clone();
+                }
+            }
+        }
         let model: ProviderConfig = parse(model)?;
         model.validate()?;
         Ok(model)
@@ -1069,5 +1079,31 @@ mod model_credential_tests {
             parse::<Put>(json!({"name":"daily","model":model(),"credential":"invalid"})).is_err()
         );
         assert!(put(json!([]), None).resolve_model(None).is_err());
+    }
+
+    #[test]
+    fn unrelated_edit_preserves_context_window_and_tokenizer_until_explicitly_changed() {
+        let mut with_window = model();
+        with_window["api_key"] = json!("SYNTHETIC_NOT_A_REAL_KEY");
+        with_window["context_window"] = json!(128000);
+        with_window["tokenizer"] = json!("cl100k_base");
+        let existing: ProviderConfig = parse(with_window).unwrap();
+
+        let preserved = put(model(), Some(CredentialUpdate::Keep))
+            .resolve_model(Some(&existing))
+            .unwrap();
+        let view = preserved.public_view();
+        assert_eq!(view["context_window"], json!(128000));
+        assert_eq!(view["tokenizer"], json!("cl100k_base"));
+
+        let mut cleared = model();
+        cleared["context_window"] = Value::Null;
+        cleared["tokenizer"] = Value::Null;
+        let cleared = put(cleared, Some(CredentialUpdate::Keep))
+            .resolve_model(Some(&existing))
+            .unwrap();
+        let view = cleared.public_view();
+        assert!(view.get("context_window").is_none() || view["context_window"].is_null());
+        assert!(view.get("tokenizer").is_none() || view["tokenizer"].is_null());
     }
 }

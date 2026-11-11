@@ -685,15 +685,28 @@ fn check_cover(units: &[SourceUnit], pieces: &[Piece]) -> Result<(), ContextErro
             "context assembly needs source units".into(),
         ));
     }
-    let mut expect = units[0].start_cursor;
-    let last = units.last().expect("nonempty").end_cursor;
+    let mut unit_index = 0usize;
     for piece in pieces {
         let (start, end, _, unknown) = piece.range();
-        if start != expect || end < start {
+        let Some(first_unit) = units.get(unit_index) else {
+            return Err(ContextError::Invalid(
+                "assembly skipped or repeated a source range".into(),
+            ));
+        };
+        if start != first_unit.start_cursor || end < start {
             return Err(ContextError::Invalid(
                 "assembly skipped or repeated a source range".into(),
             ));
         }
+        let Some(offset) = units[unit_index..]
+            .iter()
+            .position(|unit| unit.end_cursor == end)
+        else {
+            return Err(ContextError::Invalid(
+                "assembly skipped or repeated a source range".into(),
+            ));
+        };
+        let end_unit_index = unit_index + offset;
         if unknown {
             let original = units.iter().any(|unit| {
                 unit.start_cursor == start && unit.end_cursor == end && unit.outcome_unknown
@@ -716,9 +729,9 @@ fn check_cover(units: &[SourceUnit], pieces: &[Piece]) -> Result<(), ContextErro
                 ));
             }
         }
-        expect = end.saturating_add(1);
+        unit_index = end_unit_index + 1;
     }
-    if expect != last.saturating_add(1) {
+    if unit_index != units.len() {
         return Err(ContextError::Invalid(
             "assembly did not cover the source tail".into(),
         ));
@@ -737,18 +750,18 @@ fn validate_units(units: &[SourceUnit]) -> Result<(), ContextError> {
     if units.is_empty() {
         return Err(ContextError::Invalid("context source is empty".into()));
     }
-    let mut expect = None;
+    let mut min_next = None;
     for unit in units {
         if unit.start_cursor == 0 || unit.end_cursor < unit.start_cursor {
             return Err(ContextError::Invalid(
                 "source cursor range is invalid".into(),
             ));
         }
-        if let Some(next) = expect
-            && unit.start_cursor != next
+        if let Some(next) = min_next
+            && unit.start_cursor < next
         {
             return Err(ContextError::Invalid(
-                "source cursors must be contiguous".into(),
+                "source cursors must be strictly increasing".into(),
             ));
         }
         if unit.outcome_unknown
@@ -759,7 +772,7 @@ fn validate_units(units: &[SourceUnit]) -> Result<(), ContextError> {
                 "outcome_unknown only belongs on a tool exchange".into(),
             ));
         }
-        expect = Some(unit.end_cursor.saturating_add(1));
+        min_next = Some(unit.end_cursor.saturating_add(1));
     }
     Ok(())
 }

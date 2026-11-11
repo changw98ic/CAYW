@@ -35,7 +35,7 @@ impl Provider for Fixture {
             0 => Some(json!({
                 "action": "exec",
                 "script": self.script,
-                "yield_time_ms": 1000,
+                "yield_time_ms": 30000,
                 "max_output_tokens": 8192
             })),
             1 => {

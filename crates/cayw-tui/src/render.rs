@@ -246,13 +246,32 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             for approval in &session.approvals {
                 let id = string(approval, "id");
+                let details = if approval["input"].is_object() {
+                    &approval["input"]
+                } else {
+                    approval
+                };
+                let capability = string(details, "capability");
+                let question = session.approval_questions.get(id);
+                let is_model_auto =
+                    question.is_some_and(|q| q["approval_mode"].as_str() == Some("model_auto"));
+                let heading = match (is_model_auto, capability.is_empty()) {
+                    (true, true) => "自动审批 · 模型正在评估授权".to_owned(),
+                    (true, false) => format!("自动审批 · {capability} · 模型正在评估授权"),
+                    (false, true) => "询问 · 需要你的回答".to_owned(),
+                    (false, false) => format!("询问 · {capability} · 需要你的回答"),
+                };
                 append(
                     &mut lines,
-                    "询问 · 需要你的回答",
+                    &heading,
                     inner.width,
-                    Color::Yellow,
+                    if is_model_auto {
+                        Color::Cyan
+                    } else {
+                        Color::Yellow
+                    },
                 );
-                match session.approval_questions.get(id) {
+                match question {
                     Some(question) => {
                         append(
                             &mut lines,
@@ -260,17 +279,19 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                             inner.width,
                             Color::Reset,
                         );
-                        let options = question["options"]
-                            .as_array()
-                            .map(|options| {
-                                options
-                                    .iter()
-                                    .filter_map(|option| option.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" / ")
-                            })
-                            .unwrap_or_default();
-                        append(&mut lines, &options, inner.width, Color::Yellow);
+                        if !is_model_auto {
+                            let options = question["options"]
+                                .as_array()
+                                .map(|options| {
+                                    options
+                                        .iter()
+                                        .filter_map(|option| option.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(" / ")
+                                })
+                                .unwrap_or_default();
+                            append(&mut lines, &options, inner.width, Color::Yellow);
+                        }
                     }
                     None => append(
                         &mut lines,
@@ -279,12 +300,14 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         Color::Gray,
                     ),
                 }
-                append(
-                    &mut lines,
-                    "Alt+O 允许一次 · Alt+T 本任务允许 · Alt+D 拒绝；也可直接输入选项后回车",
-                    inner.width,
-                    Color::Gray,
-                );
+                if !is_model_auto {
+                    append(
+                        &mut lines,
+                        "Alt+O 允许一次 · Alt+T 本任务允许 · Alt+D 拒绝；也可直接输入选项后回车",
+                        inner.width,
+                        Color::Gray,
+                    );
+                }
             }
             if lines.is_empty() {
                 append(

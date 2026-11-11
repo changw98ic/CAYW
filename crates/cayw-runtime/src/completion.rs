@@ -101,6 +101,7 @@ impl Completion {
             )
             .map_err(|error| RuntimeError::Worker(error.to_string()))?;
         let delivered = lock(&self.delivered);
+        let mut last_exit_error = None;
         for record in records {
             if record.identity != crate::cells::identity(context)
                 || record
@@ -125,14 +126,19 @@ impl Completion {
             {
                 return Err(RuntimeError::Worker("unread cell output".into()));
             }
-            if let Some(code) = record.outputs.iter().find_map(|entry| match entry.output {
-                CellOutput::Exit { code } if code != 0 => Some(code),
-                _ => None,
-            }) {
-                return Err(RuntimeError::Worker(format!(
-                    "cell exited with code {code}"
-                )));
-            }
+            last_exit_error = record
+                .outputs
+                .iter()
+                .rev()
+                .find_map(|entry| match entry.output {
+                    CellOutput::Exit { code } if code != 0 => Some(code),
+                    _ => None,
+                });
+        }
+        if let Some(code) = last_exit_error {
+            return Err(RuntimeError::Worker(format!(
+                "cell exited with code {code}"
+            )));
         }
         drop(delivered);
         if let Some(host) = lock(&context.inner.processes).get(&context.task.id)

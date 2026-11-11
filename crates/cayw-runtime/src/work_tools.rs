@@ -40,6 +40,15 @@ const NOTIFY_NEXT: &str = "work.notify.next";
 const NOTIFY_GET: &str = "work.notify.get";
 const NOTIFY_LIST: &str = "work.notify.list";
 const NOTIFY_RECEIPT: &str = "work.notify.receipt";
+const NOTIFY_SEND: &str = "notify.send";
+const WORK_NOTIFY_SEND: &str = "work.notify.send";
+const PROACTIVE_TRIGGER: &str = "proactive.trigger";
+const MEMORY_STATUS: &str = "memory.status";
+const MEMORY_ENTRIES: &str = "memory.entries";
+const MEMORY_QUERY: &str = "memory.query";
+const MEMORY_APPLY: &str = "memory.apply";
+const MEMORY_FORGET: &str = "memory.forget";
+const MEMORY_DREAM: &str = "memory.dream";
 
 pub(crate) fn is_tool(name: &str) -> bool {
     matches!(
@@ -64,6 +73,15 @@ pub(crate) fn is_tool(name: &str) -> bool {
             | NOTIFY_GET
             | NOTIFY_LIST
             | NOTIFY_RECEIPT
+            | NOTIFY_SEND
+            | WORK_NOTIFY_SEND
+            | PROACTIVE_TRIGGER
+            | MEMORY_STATUS
+            | MEMORY_ENTRIES
+            | MEMORY_QUERY
+            | MEMORY_APPLY
+            | MEMORY_FORGET
+            | MEMORY_DREAM
     )
 }
 
@@ -274,6 +292,103 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
                 "notification_id":id(256),"status":notification_status(),"receipt_ref":text(1024)
             }}),
         },
+        ToolDefinition {
+            name: NOTIFY_SEND.into(),
+            description: "Deliver a notification to a configured user target, recording the intent first and persisting the delivery receipt.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "notification_id":id(256),
+                "work_id":id(256),
+                "work_version":{"type":"integer","minimum":1},
+                "target":text(256),
+                "text":{"type":"string","maxLength":16384},
+                "content_ref":{"type":"string","minLength":1,"maxLength":1024},
+                "artifact_refs":artifact_refs()
+            }}),
+        },
+        ToolDefinition {
+            name: WORK_NOTIFY_SEND.into(),
+            description: "Deliver a WorkItem notification to a configured user target, recording the intent first and persisting the delivery receipt.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "notification_id":id(256),
+                "work_id":id(256),
+                "work_version":{"type":"integer","minimum":1},
+                "target":text(256),
+                "text":{"type":"string","maxLength":16384},
+                "content_ref":{"type":"string","minLength":1,"maxLength":1024},
+                "artifact_refs":artifact_refs()
+            }}),
+        },
+        ToolDefinition {
+            name: PROACTIVE_TRIGGER.into(),
+            description: "Trigger a proactive rule for one WorkItem. In auto mode this idempotently creates and dispatches the corresponding Task.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"required":["rule_id","condition_version","work_id"],"properties":{
+                "mode":{"type":"string","enum":["off","observe","auto"]},
+                "rule_id":id(256),
+                "condition_version":{"type":"integer","minimum":1},
+                "work_id":id(256),
+                "usage_tokens":{"type":"integer","minimum":0}
+            }}),
+        },
+        ToolDefinition {
+            name: MEMORY_STATUS.into(),
+            description: "Read the main-session memory directory status, active count, user_set count, and forgotten ranges.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{}}),
+        },
+        ToolDefinition {
+            name: MEMORY_ENTRIES.into(),
+            description: "List visible active memory and preference entries in the main session.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{}}),
+        },
+        ToolDefinition {
+            name: MEMORY_QUERY.into(),
+            description: "Read back conversation, work, and recorded memory entries inside a session cursor range.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "session_id":id(256),
+                "start_cursor":{"type":"integer","minimum":0},
+                "end_cursor":{"type":"integer","minimum":1}
+            }}),
+        },
+        ToolDefinition {
+            name: MEMORY_APPLY.into(),
+            description: "Apply verified memory or preference writes in the main session. Every cited source_log_id must be a user-input turn.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "session_id":id(256),
+                "candidates":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["kind"],"properties":{
+                    "operation":{"type":"string","enum":["upsert","disable"]},
+                    "entry_id":id(128),
+                    "kind":text(128),
+                    "body":{"type":"string","maxLength":65536},
+                    "source_type":{"type":"string","enum":["stated","inferred","user_set"]},
+                    "source_log_ids":string_list(64,256)
+                }}},
+                "operation":{"type":"string","enum":["upsert","disable"]},
+                "entry_id":id(128),
+                "kind":text(128),
+                "body":{"type":"string","maxLength":65536},
+                "source_type":{"type":"string","enum":["stated","inferred","user_set"]},
+                "source_log_ids":string_list(64,256)
+            }}),
+        },
+        ToolDefinition {
+            name: MEMORY_FORGET.into(),
+            description: "Record a forgotten cursor range (or entry_id) in the main session so future context and memory reads omit it without deleting durable logs.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"required":["reason"],"properties":{
+                "session_id":id(256),
+                "start_cursor":{"type":"integer","minimum":1},
+                "end_cursor":{"type":"integer","minimum":1},
+                "entry_id":id(128),
+                "reason":text(4096)
+            }}),
+        },
+        ToolDefinition {
+            name: MEMORY_DREAM.into(),
+            description: "Organize summary references in the main session without rewriting summaries or logs.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+                "session_id":id(256),
+                "summaries":{"type":"array","items":{"type":"object"}},
+                "model_text":{"type":"string","maxLength":65536}
+            }}),
+        },
     ]
 }
 
@@ -399,6 +514,94 @@ struct ReceiptInput {
     receipt_ref: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifySendInput {
+    #[serde(default)]
+    notification_id: Option<String>,
+    #[serde(default)]
+    work_id: Option<String>,
+    #[serde(default)]
+    work_version: Option<u64>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    content_ref: Option<String>,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProactiveTriggerInput {
+    #[serde(default)]
+    mode: Option<crate::ProactiveMode>,
+    rule_id: String,
+    condition_version: u64,
+    work_id: String,
+    #[serde(default)]
+    usage_tokens: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryQueryInput {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    start_cursor: u64,
+    #[serde(default)]
+    end_cursor: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryApplyInput {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    candidates: Vec<crate::MemoryCandidate>,
+    #[serde(default)]
+    operation: Option<crate::MemoryOperation>,
+    #[serde(default)]
+    entry_id: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    source_type: Option<crate::SourceType>,
+    #[serde(default)]
+    source_log_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryForgetInput {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    start_cursor: Option<u64>,
+    #[serde(default)]
+    end_cursor: Option<u64>,
+    #[serde(default)]
+    entry_id: Option<String>,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryDreamInput {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    summaries: Option<Vec<cayw_context::SummaryRecord>>,
+    #[serde(default)]
+    model_text: Option<String>,
+}
+
 pub(crate) async fn invoke(
     scope: &Arc<crate::cells::CallScope>,
     base: &cayw_host::Host,
@@ -478,6 +681,13 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+pub(crate) fn external_workspaces(item: &WorkItem) -> Vec<String> {
+    target_workspaces(item)
+        .into_iter()
+        .filter(|workspace| workspace != "local")
+        .collect()
 }
 
 fn target_workspaces(item: &WorkItem) -> Vec<String> {
@@ -959,6 +1169,155 @@ impl cayw_host::ExternalHost for Service<'_> {
                         )
                         .map_err(known)?,
                 )
+            }
+            NOTIFY_SEND | WORK_NOTIFY_SEND => {
+                let input: NotifySendInput = serde_json::from_value(arguments).map_err(known)?;
+                if let Some(work_id) = input.work_id.as_deref() {
+                    self.item(work_id)?;
+                }
+                let notification = self
+                    .runtime()
+                    .send_notification(
+                        input.notification_id.as_deref(),
+                        input.work_id.as_deref(),
+                        input.work_version,
+                        input.target.as_deref(),
+                        input.text.as_deref(),
+                        input.content_ref.as_deref(),
+                        &input.artifact_refs,
+                    )
+                    .map_err(known)?;
+                encode(notification)
+            }
+            PROACTIVE_TRIGGER => {
+                let input: ProactiveTriggerInput =
+                    serde_json::from_value(arguments).map_err(known)?;
+                self.item(&input.work_id)?;
+                let runtime = self.runtime();
+                let outcome = match input.mode {
+                    Some(mode) => runtime.trigger_proactive(
+                        mode,
+                        &input.rule_id,
+                        input.condition_version,
+                        &input.work_id,
+                        input.usage_tokens,
+                    ),
+                    None => runtime.trigger_configured_proactive(
+                        &input.rule_id,
+                        input.condition_version,
+                        &input.work_id,
+                        input.usage_tokens,
+                    ),
+                }
+                .map_err(known)?;
+                let _ = runtime.run_proactive_dispatch(&outcome).await;
+                encode(outcome)
+            }
+            MEMORY_STATUS => {
+                let status = self.runtime().memory_status().map_err(known)?;
+                encode(status)
+            }
+            MEMORY_ENTRIES => {
+                let entries = self.runtime().memory_entries().map_err(known)?;
+                encode(entries)
+            }
+            MEMORY_QUERY => {
+                let input: MemoryQueryInput = serde_json::from_value(arguments).map_err(known)?;
+                let session_id = input.session_id.unwrap_or_else(|| self.owner().to_owned());
+                let view = self
+                    .runtime()
+                    .query_memory(crate::MemoryQuery {
+                        session_id,
+                        start_cursor: input.start_cursor,
+                        end_cursor: input.end_cursor,
+                    })
+                    .map_err(known)?;
+                encode(view)
+            }
+            MEMORY_APPLY => {
+                let input: MemoryApplyInput = serde_json::from_value(arguments).map_err(known)?;
+                let runtime = self.runtime();
+                let session_id = input.session_id.unwrap_or_else(|| self.owner().to_owned());
+                let mut candidates = input.candidates;
+                if candidates.is_empty() {
+                    let kind = input
+                        .kind
+                        .ok_or_else(|| known("memory.apply requires candidates or kind"))?;
+                    candidates.push(crate::MemoryCandidate {
+                        operation: input.operation.unwrap_or(crate::MemoryOperation::Upsert),
+                        entry_id: input.entry_id,
+                        kind,
+                        body: input.body.unwrap_or_default(),
+                        source_type: input.source_type.unwrap_or(crate::SourceType::Stated),
+                        source_log_ids: input.source_log_ids,
+                    });
+                }
+                let evidence = runtime.memory_user_evidence(&session_id).map_err(known)?;
+                let latest_user_log_id = evidence
+                    .sources()
+                    .max_by_key(|source| source.cursor())
+                    .map(|source| source.log_id().to_owned());
+                if let Some(latest) = latest_user_log_id {
+                    for candidate in &mut candidates {
+                        if candidate.source_log_ids.is_empty() {
+                            candidate.source_log_ids.push(latest.clone());
+                        }
+                    }
+                }
+                let report = runtime
+                    .apply_memory_candidates(&session_id, &candidates)
+                    .map_err(known)?;
+                encode(report)
+            }
+            MEMORY_FORGET => {
+                let input: MemoryForgetInput = serde_json::from_value(arguments).map_err(known)?;
+                let runtime = self.runtime();
+                let session_id = input.session_id.unwrap_or_else(|| self.owner().to_owned());
+                if let (Some(start_cursor), Some(end_cursor)) =
+                    (input.start_cursor, input.end_cursor)
+                {
+                    let range =
+                        cayw_context::SourceRange::new(&session_id, start_cursor, end_cursor)
+                            .map_err(known)?;
+                    runtime
+                        .forget_memory_range(range, &input.reason)
+                        .map_err(known)?;
+                } else if let Some(entry_id) = input.entry_id.as_deref() {
+                    let entries = runtime.memory_entries().map_err(known)?;
+                    let entry = entries
+                        .into_iter()
+                        .find(|entry| entry.entry_id == entry_id)
+                        .ok_or_else(|| known("memory entry not found"))?;
+                    for log_id in &entry.source_log_ids {
+                        let (src_session, cursor_str) = log_id
+                            .rsplit_once(':')
+                            .ok_or_else(|| known("invalid source log id"))?;
+                        let cursor = cursor_str.parse::<u64>().map_err(known)?;
+                        let range = cayw_context::SourceRange::new(src_session, cursor, cursor)
+                            .map_err(known)?;
+                        runtime
+                            .forget_memory_range(range, &input.reason)
+                            .map_err(known)?;
+                    }
+                } else {
+                    return Err(known(
+                        "memory.forget requires start_cursor and end_cursor, or entry_id",
+                    ));
+                }
+                Ok(json!({"forgotten": true}))
+            }
+            MEMORY_DREAM => {
+                let input: MemoryDreamInput = serde_json::from_value(arguments).map_err(known)?;
+                let runtime = self.runtime();
+                let session_id = input.session_id.unwrap_or_else(|| self.owner().to_owned());
+                let summaries = match input.summaries {
+                    Some(summaries) => summaries,
+                    None => runtime.context_summaries(&session_id).map_err(known)?,
+                };
+                let plan = runtime
+                    .dream_memory(&summaries, input.model_text.as_deref())
+                    .map_err(known)?;
+                encode(plan)
             }
             _ => Err(known("not a work capability")),
         }

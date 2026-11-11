@@ -158,6 +158,9 @@ struct MemoryForget {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MemoryDream {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
     summaries: Vec<cayw_context::SummaryRecord>,
     #[serde(default)]
     model_text: Option<String>,
@@ -227,7 +230,8 @@ struct InputQuery {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProactiveTrigger {
-    mode: crate::ProactiveMode,
+    #[serde(default)]
+    mode: Option<crate::ProactiveMode>,
     rule_id: String,
     condition_version: u64,
     work_id: String,
@@ -240,6 +244,24 @@ struct NotifyPrepare {
     work_id: String,
     work_version: u64,
     target: String,
+    #[serde(default)]
+    content_ref: Option<String>,
+    #[serde(default)]
+    artifact_refs: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifySend {
+    #[serde(default)]
+    notification_id: Option<String>,
+    #[serde(default)]
+    work_id: Option<String>,
+    #[serde(default)]
+    work_version: Option<u64>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
     #[serde(default)]
     content_ref: Option<String>,
     #[serde(default)]
@@ -555,7 +577,14 @@ impl Runtime {
             }
             "memory.dream" => {
                 let p: MemoryDream = parse(params)?;
-                encode(self.dream_memory(&p.summaries, p.model_text.as_deref())?)
+                let summaries = if !p.summaries.is_empty() {
+                    p.summaries
+                } else if let Some(session_id) = p.session_id.as_deref() {
+                    self.context_summaries(session_id)?
+                } else {
+                    Vec::new()
+                };
+                encode(self.dream_memory(&summaries, p.model_text.as_deref())?)
             }
             "work.create" => {
                 let p: WorkCreate = parse(params)?;
@@ -571,7 +600,12 @@ impl Runtime {
             }
             "work.pause" => {
                 let p: WorkId = parse(params)?;
-                encode(self.pause_work_item(&p.work_id)?)
+                let (item, targets) = self.pause_work_item_routed(&p.work_id).await?;
+                let mut value = encode(item)?;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("targets".into(), encode(targets)?);
+                }
+                Ok(value)
             }
             "work.resume" => {
                 let p: WorkId = parse(params)?;
@@ -579,7 +613,12 @@ impl Runtime {
             }
             "work.stop" => {
                 let p: WorkId = parse(params)?;
-                encode(self.stop_work_item(&p.work_id)?)
+                let (item, targets) = self.stop_work_item_routed(&p.work_id).await?;
+                let mut value = encode(item)?;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("targets".into(), encode(targets)?);
+                }
+                Ok(value)
             }
             "work.accept.program" => {
                 let p: WorkAcceptProgram = parse(params)?;
@@ -633,12 +672,34 @@ impl Runtime {
             }
             "proactive.trigger" => {
                 let p: ProactiveTrigger = parse(params)?;
-                encode(self.trigger_proactive(
-                    p.mode,
-                    &p.rule_id,
-                    p.condition_version,
-                    &p.work_id,
-                    p.usage_tokens,
+                let outcome = match p.mode {
+                    Some(mode) => self.trigger_proactive(
+                        mode,
+                        &p.rule_id,
+                        p.condition_version,
+                        &p.work_id,
+                        p.usage_tokens,
+                    )?,
+                    None => self.trigger_configured_proactive(
+                        &p.rule_id,
+                        p.condition_version,
+                        &p.work_id,
+                        p.usage_tokens,
+                    )?,
+                };
+                let _ = self.run_proactive_dispatch(&outcome).await;
+                encode(outcome)
+            }
+            "notify.send" | "work.notify.send" => {
+                let p: NotifySend = parse(params)?;
+                encode(self.send_notification(
+                    p.notification_id.as_deref(),
+                    p.work_id.as_deref(),
+                    p.work_version,
+                    p.target.as_deref(),
+                    p.text.as_deref(),
+                    p.content_ref.as_deref(),
+                    &p.artifact_refs,
                 )?)
             }
             "notify.prepare" => {
@@ -1070,6 +1131,17 @@ impl RpcHandler for Runtime {
                 | "capabilities.list"
                 | "session.tasks"
                 | "task.get"
+                | "approval.question"
+                | "memory.status"
+                | "memory.entries"
+                | "memory.query"
+                | "work.get"
+                | "work.list"
+                | "input.get"
+                | "notify.next"
+                | "notify.get"
+                | "recovery.status"
+                | "recovery.reconciliation"
         )
     }
 }

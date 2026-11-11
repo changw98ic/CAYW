@@ -356,6 +356,7 @@ struct Request {
 
 struct TerminalSession {
     id: String,
+    sequence: u64,
     profile: String,
     started: Instant,
     deadline: Option<Instant>,
@@ -499,6 +500,7 @@ impl TerminalManager {
         if let Some(reason) = lock(&self.unknown).clone() {
             return Some(format!("terminal manager outcome is unknown: {reason}"));
         }
+        let mut latest_exit: Option<(u64, Option<String>)> = None;
         for (id, session) in lock(&self.sessions).iter() {
             let state = lock(&session.state).clone();
             match &state {
@@ -516,14 +518,16 @@ impl TerminalManager {
                 return Some(format!("terminal session {id} supervisor has not joined"));
             }
             if let State::Exited { exit_code, .. } = state {
-                match exit_code {
-                    Some(0) => {}
-                    Some(code) => {
-                        return Some(format!("terminal session {id} exited with code {code}"));
-                    }
-                    None => {
-                        return Some(format!("terminal session {id} did not exit normally"));
-                    }
+                let exit_error = match exit_code {
+                    Some(0) => None,
+                    Some(code) => Some(format!("terminal session {id} exited with code {code}")),
+                    None => Some(format!("terminal session {id} did not exit normally")),
+                };
+                if latest_exit
+                    .as_ref()
+                    .is_none_or(|(seq, _)| session.sequence >= *seq)
+                {
+                    latest_exit = Some((session.sequence, exit_error));
                 }
             }
             let output = lock(&session.output);
@@ -539,6 +543,9 @@ impl TerminalManager {
                     output.bytes.len() - output.delivered
                 ));
             }
+        }
+        if let Some((_, Some(error))) = latest_exit {
+            return Some(error);
         }
         None
     }
@@ -599,7 +606,7 @@ impl TerminalManager {
             }
             totals.created += 1;
         }
-        let session_id = self.new_session_id();
+        let (session_id, sequence) = self.new_session_id();
         let permit = match self.scheduler.try_acquire(
             SessionId::new(session_id.clone()).map_err(|error| failure(error.to_string()))?,
             ResourceRequest::default(),
@@ -661,6 +668,7 @@ impl TerminalManager {
         };
         let session = Arc::new(TerminalSession {
             id: session_id.clone(),
+            sequence,
             profile: profile_name.into(),
             started,
             deadline,
@@ -711,21 +719,23 @@ impl TerminalManager {
         }))
     }
 
-    fn new_session_id(&self) -> String {
+    fn new_session_id(&self) -> (String, u64) {
         for _ in 0..16 {
+            let sequence = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
             let id = format!(
                 "term-{:x}-{:x}-{:x}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |duration| duration.as_nanos()),
-                NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
+                sequence
             );
             if !lock(&self.sessions).contains_key(&id) {
-                return id;
+                return (id, sequence);
             }
         }
-        format!("term-{}", NEXT_SESSION.fetch_add(1, Ordering::Relaxed))
+        let sequence = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        (format!("term-{sequence}"), sequence)
     }
 
     fn rollback_total(&self) {

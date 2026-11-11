@@ -83,6 +83,10 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "session.tasks",
     "session.cancel",
     "approval.decide",
+    "approval.question",
+    "approval.reply",
+    "approval.rule.propose",
+    "approval.rule.confirm",
     "session.fork",
     "capabilities.list",
     "session.plan",
@@ -100,6 +104,31 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "artifacts.recovery_load",
     "session.context_overview",
     "session.run_inspector",
+    "work.create",
+    "work.get",
+    "work.list",
+    "work.pause",
+    "work.resume",
+    "work.stop",
+    "work.accept.program",
+    "work.accept.user",
+    "work.proactive.set",
+    "proactive.status",
+    "proactive.trigger",
+    "notify.send",
+    "work.notify.send",
+    "memory.status",
+    "memory.entries",
+    "memory.query",
+    "memory.apply",
+    "memory.forget",
+    "memory.dream",
+    "recovery.status",
+    "recovery.reconciliation",
+    "recovery.disable",
+    "recovery.points",
+    "recovery.create",
+    "recovery.restore",
 ];
 
 /// Resource budgets apply independently from the IPC transport's own budgets.
@@ -1118,6 +1147,9 @@ fn side_effecting(method: &str) -> bool {
                 | "task.resume"
                 | "session.cancel"
                 | "approval.decide"
+                | "approval.reply"
+                | "approval.rule.propose"
+                | "approval.rule.confirm"
                 | "session.fork"
                 | "runtime.fleet.stop"
                 | "runtime.fleet.steer"
@@ -1130,6 +1162,22 @@ fn side_effecting(method: &str) -> bool {
                 | "artifacts.action_cancel"
                 | "artifacts.recovery_save"
                 | "artifacts.recovery_load"
+                | "work.create"
+                | "work.pause"
+                | "work.resume"
+                | "work.stop"
+                | "work.accept.program"
+                | "work.accept.user"
+                | "work.proactive.set"
+                | "proactive.trigger"
+                | "notify.send"
+                | "work.notify.send"
+                | "memory.apply"
+                | "memory.forget"
+                | "memory.dream"
+                | "recovery.disable"
+                | "recovery.create"
+                | "recovery.restore"
         )
 }
 
@@ -1499,5 +1547,60 @@ mod gateway_limits_tests {
         let limits = GatewayLimits::default();
         assert!(limits.prompt_timeout.is_none());
         assert_eq!(limits.request_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn public_methods_include_memory_work_approval_and_recovery_contracts() {
+        for read_method in [
+            "approval.question",
+            "work.list",
+            "work.get",
+            "proactive.status",
+            "memory.status",
+            "memory.entries",
+            "memory.query",
+            "recovery.status",
+            "recovery.points",
+            "recovery.reconciliation",
+        ] {
+            assert!(
+                PUBLIC_METHODS.contains(&read_method),
+                "missing public read method {read_method}"
+            );
+            assert!(
+                !side_effecting(read_method),
+                "{read_method} must be classified as read-only"
+            );
+        }
+        for method in [
+            "approval.reply",
+            "approval.rule.propose",
+            "approval.rule.confirm",
+            "work.create",
+            "work.pause",
+            "work.resume",
+            "work.stop",
+            "work.accept.program",
+            "work.accept.user",
+            "work.proactive.set",
+            "proactive.trigger",
+            "notify.send",
+            "work.notify.send",
+            "memory.apply",
+            "memory.forget",
+            "memory.dream",
+            "recovery.create",
+            "recovery.restore",
+            "recovery.disable",
+        ] {
+            assert!(
+                PUBLIC_METHODS.contains(&method),
+                "missing public write method {method}"
+            );
+            assert!(
+                side_effecting(method),
+                "{method} must be classified as write"
+            );
+        }
     }
 }

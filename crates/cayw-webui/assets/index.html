@@ -75,8 +75,11 @@
           <h1 id="session-title">选择或创建会话</h1>
           <nav class="workbench-bar" aria-label="工作台入口">
             <button id="wb-tasks" class="quiet wb-btn" type="button">任务 / 时间线</button>
+            <button id="wb-work" class="quiet wb-btn" type="button">工作项 (WorkItem)</button>
             <button id="wb-usage" class="quiet wb-btn" type="button">用量 / 状态</button>
+            <button id="wb-memory" class="quiet wb-btn" type="button">记忆管理</button>
             <button id="wb-artifacts" class="quiet wb-btn" type="button">产物与动作</button>
+            <button id="wb-recovery" class="quiet wb-btn" type="button">工作区恢复点</button>
             <button id="wb-plannotator" class="quiet wb-btn" type="button">版本批注</button>
             <button id="wb-editor" class="quiet wb-btn" type="button">可视化编辑器</button>
             <button id="wb-trace" class="quiet wb-btn" type="button">追踪调试</button>
@@ -138,6 +141,8 @@
       <p id="model-credential-status" class="small muted" role="status">新方案默认不使用认证。</p>
       <label>新的 API 密钥（明文保存）<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="选择设置 / 更换密钥后输入" disabled></label>
       <label>单次输出 token 上限<input name="max_output_tokens" type="number" required min="1" max="9007199254740991" value="4096"></label>
+      <label>上下文窗口 token 数（可选）<input name="context_window" type="number" min="1" max="9007199254740991" placeholder="留空表示不限制或使用默认"></label>
+      <label>分词器标识（可选）<input name="tokenizer" type="text" maxlength="256" placeholder="例如 o200k_base"></label>
       <button type="submit">保存模型方案</button>
     </form>
     <h3>插件</h3><p class="small muted">支持本机 External 工作区架构插件。登记和更新不执行代码；不支持 npm、URL 下载或动态 Native 安装。插件由唯一 Client 启动和监管，普通插件不绑定会话。</p>

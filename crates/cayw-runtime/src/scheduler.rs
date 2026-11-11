@@ -140,6 +140,13 @@ impl Activity {
             .ok_or_else(|| RuntimeError::Worker("approval has no live code cell".into()))?;
         *waiting = true;
         self.park_if_idle(context, &state)?;
+        if context.inner.config.approval_mode == crate::ApprovalMode::ModelAuto
+            && let Some(manager) = lock(&context.cells_manager)
+                .as_ref()
+                .and_then(|weak| weak.upgrade())
+        {
+            manager.notify_permission_wait(id);
+        }
         self.changed.notify_waiters();
         Ok(())
     }
@@ -149,6 +156,12 @@ impl Activity {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<(), RuntimeError> {
+        if let Some(manager) = lock(&context.cells_manager)
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+        {
+            manager.clear_permission_wait(id);
+        }
         self.acquire(context, cancel, Some(id)).await
     }
     async fn acquire(

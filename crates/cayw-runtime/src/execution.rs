@@ -35,6 +35,7 @@ pub(crate) struct RunContext {
     pub failed: Arc<AtomicBool>,
     pub failed_reason: Arc<Mutex<Option<String>>>,
     cells_stopping: AtomicBool,
+    pub(crate) cells_manager: Mutex<Option<std::sync::Weak<CellManager>>>,
     persistence_error: Mutex<Option<String>>,
     pub(crate) model_recording_error: Mutex<Option<String>>,
 }
@@ -56,6 +57,7 @@ impl RunContext {
             failed: Arc::new(AtomicBool::new(false)),
             failed_reason: Arc::new(Mutex::new(None)),
             cells_stopping: AtomicBool::new(false),
+            cells_manager: Mutex::new(None),
             persistence_error: Mutex::new(None),
             model_recording_error: Mutex::new(None),
         }
@@ -904,6 +906,7 @@ async fn run_worker(
         failed: flags.failed,
         failed_reason: flags.reason,
         cells_stopping: AtomicBool::new(false),
+        cells_manager: Mutex::new(None),
         persistence_error: Mutex::new(None),
         model_recording_error: Mutex::new(None),
     });
@@ -1052,6 +1055,7 @@ async fn execute_agent(
         inner.config.codemode.clone(),
     )
     .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+    *lock(&context.cells_manager) = Some(Arc::downgrade(&manager));
     let outcome = execute_with_cells(context.clone(), input, manager.clone()).await;
     // The model reply is not the lifetime of background code. Stop and join all
     // cells before this task can finish or release its persistent admission slot.
@@ -1240,7 +1244,7 @@ async fn execute_with_cells(
             Ok(())
         }
     });
-    const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
+    const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
     let run = async {
         let approval_instruction = match inner.config.approval_mode {
             crate::ApprovalMode::ModelAuto => {

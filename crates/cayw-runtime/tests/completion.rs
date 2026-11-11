@@ -335,3 +335,76 @@ async fn skipping_an_oversized_first_item_cannot_hide_unread_output() {
 async fn a_larger_page_and_repeated_wait_preserve_output_without_replaying_effects() {
     paged_run(ReadMode::Replay).await;
 }
+
+struct RecoverFromFailedCell;
+impl Provider for RecoverFromFailedCell {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let mut message = AssistantMessage::new(&request.model);
+        message.usage = Usage {
+            input: 4,
+            output: 4,
+            total_tokens: 8,
+            ..Default::default()
+        };
+        message.usage_status = UsageStatus::Reported;
+        let tool_results = request
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::ToolResult(_)))
+            .count();
+        match tool_results {
+            0 => {
+                message.stop_reason = StopReason::ToolUse;
+                message.content.push(Content::ToolCall(ToolCall::new(
+                    "cell-1",
+                    "execute_code",
+                    json!({
+                        "action": "exec",
+                        "script": "exit(7)",
+                        "yield_time_ms": 1000,
+                        "max_output_tokens": 1024,
+                    }),
+                )));
+            }
+            1 => {
+                message.stop_reason = StopReason::ToolUse;
+                message.content.push(Content::ToolCall(ToolCall::new(
+                    "cell-2",
+                    "execute_code",
+                    json!({
+                        "action": "exec",
+                        "script": "return 'recovered'",
+                        "yield_time_ms": 1000,
+                        "max_output_tokens": 1024,
+                    }),
+                )));
+            }
+            _ => {
+                message.stop_reason = StopReason::Stop;
+                message
+                    .content
+                    .push(Content::text("Recovered after first cell failed"));
+            }
+        }
+        Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+    }
+}
+
+#[tokio::test]
+async fn intermediate_failed_cell_can_recover_when_final_cell_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime::open(
+        dir.path().join("sessions.db"),
+        dir.path(),
+        Arc::new(RecoverFromFailedCell),
+        Model::new("fixture", "recover"),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    let id = runtime.create(None).unwrap().id;
+    runtime
+        .prompt(&id, "run", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(runtime.tasks(&id).unwrap()[0].state, TaskState::Completed);
+}

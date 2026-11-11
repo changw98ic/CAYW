@@ -163,6 +163,13 @@ impl SessionContexts {
         self.sessions.entry(session_id.to_owned()).or_default()
     }
 
+    pub(crate) fn summaries(&self, session_id: &str) -> Vec<SummaryRecord> {
+        self.sessions
+            .get(session_id)
+            .map(|derived| derived.summaries.clone())
+            .unwrap_or_default()
+    }
+
     fn reserve(&mut self, session_id: &str, spec: ReservationSpec) -> Result<u64, RuntimeError> {
         let ReservationSpec {
             kind,
@@ -519,10 +526,22 @@ pub(crate) fn publish_compression(
     Ok(decision)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_provider_input(
     context: &Mutex<SessionContexts>,
     session_id: &str,
     messages: &[Message],
+    window: Option<u64>,
+    output_reserve: u64,
+) -> Result<Vec<Message>, RuntimeError> {
+    prepare_provider_input_with_ranges(context, session_id, messages, &[], window, output_reserve)
+}
+
+pub(crate) fn prepare_provider_input_with_ranges(
+    context: &Mutex<SessionContexts>,
+    session_id: &str,
+    messages: &[Message],
+    ranges: &[cayw_context::CursorRange],
     window: Option<u64>,
     output_reserve: u64,
 ) -> Result<Vec<Message>, RuntimeError> {
@@ -541,7 +560,11 @@ pub(crate) fn prepare_provider_input(
         Err(_) if window.is_none() => return Ok(messages.to_vec()),
         Err(error) => return Err(RuntimeError::InvalidInput(error.to_string())),
     };
-    let units = units_from(messages);
+    let spans = units_from_ranges(messages, ranges);
+    let units = spans
+        .iter()
+        .map(|span| span.unit.clone())
+        .collect::<Vec<_>>();
     let mut contexts = crate::lock(context);
     let planned = {
         let derived = contexts.session_mut(session_id);
@@ -582,34 +605,6 @@ pub(crate) fn prepare_provider_input(
             changed = true;
         }
     }
-    {
-        let derived = contexts.session_mut(session_id);
-        let ready = derived
-            .summaries
-            .iter()
-            .map(|summary| (summary.start_cursor, summary.end_cursor))
-            .collect::<Vec<_>>();
-        if let Ok(frontier) = advance_frontier(0, &ready) {
-            derived.frontier = frontier;
-        }
-    }
-    if let Some(job) = &planned.compression_job
-        && contexts
-            .reserve(
-                session_id,
-                ReservationSpec {
-                    kind: JobKind::Compression,
-                    start_cursor: job.start_cursor,
-                    end_cursor: job.covered_through,
-                    input_bytes: job.input_bytes,
-                    margin: budget.margin,
-                    output_max: budget.output_reserve,
-                },
-            )
-            .is_ok()
-    {
-        changed = true;
-    }
     for pending in &planned.pending_summaries {
         if contexts
             .reserve(
@@ -627,9 +622,66 @@ pub(crate) fn prepare_provider_input(
         {
             changed = true;
         }
+        if let Some(unit) = units.iter().find(|unit| {
+            unit.start_cursor == pending.start_cursor && unit.end_cursor == pending.end_cursor
+        }) && let Ok(record) = build_pending_summary(
+            session_id,
+            unit,
+            &contexts.session_mut(session_id).summaries,
+        ) {
+            let accept = accept_summary(&contexts.session_mut(session_id).summaries, &record)
+                .unwrap_or(VersionDecision::Stale);
+            if accept == VersionDecision::Accepted {
+                contexts.release_local(session_id, JobKind::Summary, record.end_cursor);
+                contexts.session_mut(session_id).summaries.push(record);
+                changed = true;
+            }
+        }
+    }
+    if let Some(job) = &planned.compression_job {
+        if contexts
+            .reserve(
+                session_id,
+                ReservationSpec {
+                    kind: JobKind::Compression,
+                    start_cursor: job.start_cursor,
+                    end_cursor: job.covered_through,
+                    input_bytes: job.input_bytes,
+                    margin: budget.margin,
+                    output_max: budget.output_reserve,
+                },
+            )
+            .is_ok()
+        {
+            changed = true;
+        }
+        let record = {
+            let derived = contexts.session_mut(session_id);
+            build_compression_record(
+                session_id,
+                job,
+                &units,
+                &derived.summaries,
+                &derived.compressions,
+                budget.replace_at,
+            )
+        };
+        if let Ok(record) = record {
+            let accept =
+                accept_compression(&contexts.session_mut(session_id).compressions, &record)
+                    .unwrap_or(VersionDecision::Stale);
+            if accept == VersionDecision::Accepted {
+                contexts.release_local(session_id, JobKind::Compression, record.covered_through);
+                contexts.session_mut(session_id).compressions.push(record);
+                changed = true;
+            }
+        }
     }
     {
         let derived = contexts.session_mut(session_id);
+        if let Some(frontier) = compute_frontier(&units, &derived.summaries) {
+            derived.frontier = frontier;
+        }
         derived.epoch = derived.epoch.saturating_add(1);
     }
     if changed {
@@ -637,7 +689,7 @@ pub(crate) fn prepare_provider_input(
     }
     let replacement = planned.assembly.as_ref().and_then(|assembly| {
         if apply_assembly(assembly, budget.window_was_default) {
-            render(messages, assembly).ok()
+            render(messages, &spans, assembly).ok()
         } else {
             None
         }
@@ -653,56 +705,65 @@ pub(crate) fn prepare_provider_input(
     Ok(messages.to_vec())
 }
 
-pub(crate) fn units_from(messages: &[Message]) -> Vec<SourceUnit> {
-    let mut units = Vec::new();
+#[derive(Debug, Clone)]
+pub(crate) struct UnitSpan {
+    pub unit: SourceUnit,
+    pub msg_from: usize,
+    pub msg_to: usize,
+}
+
+pub(crate) fn units_from_ranges(
+    messages: &[Message],
+    ranges: &[cayw_context::CursorRange],
+) -> Vec<UnitSpan> {
+    let use_ranges = ranges.len() == messages.len();
+    let span_cursors = |from: usize, to: usize| -> (u64, u64) {
+        if use_ranges {
+            let start = ranges[from].start_cursor;
+            let end = ranges[to - 1].end_cursor.max(start);
+            (start, end)
+        } else {
+            (from as u64 + 1, to as u64)
+        }
+    };
+    let mut spans: Vec<UnitSpan> = Vec::new();
     let mut index = 0;
     while index < messages.len() {
-        let start = index as u64 + 1;
-        match &messages[index] {
-            Message::System(_) | Message::Custom { .. } => {
-                units.push(unit(
-                    start,
-                    start,
-                    UnitKind::Fixed,
-                    messages[index].text(),
-                    false,
-                    false,
-                ));
-                index += 1;
-            }
+        let (to, kind, text, outcome_unknown, pin_original) = match &messages[index] {
+            Message::System(_) | Message::Custom { .. } => (
+                index + 1,
+                UnitKind::Fixed,
+                messages[index].text(),
+                false,
+                false,
+            ),
             Message::User { .. } => {
                 if let Some(Message::Assistant(assistant)) = messages.get(index + 1)
                     && assistant.tool_calls().is_empty()
                 {
-                    units.push(unit(
-                        start,
-                        start + 1,
+                    (
+                        index + 2,
                         UnitKind::CompletedTurn,
                         joined(&messages[index..=index + 1]),
                         false,
                         false,
-                    ));
-                    index += 2;
+                    )
                 } else if index + 1 == messages.len() {
-                    units.push(unit(
-                        start,
-                        start,
+                    (
+                        index + 1,
                         UnitKind::Active,
                         messages[index].text(),
                         false,
                         true,
-                    ));
-                    index += 1;
+                    )
                 } else {
-                    units.push(unit(
-                        start,
-                        start,
+                    (
+                        index + 1,
                         UnitKind::CompletedTurn,
                         messages[index].text(),
                         false,
                         false,
-                    ));
-                    index += 1;
+                    )
                 }
             }
             Message::Assistant(assistant) => {
@@ -713,65 +774,258 @@ pub(crate) fn units_from(messages: &[Message]) -> Vec<SourceUnit> {
                     } else {
                         UnitKind::CompletedTurn
                     };
-                    units.push(unit(
-                        start,
-                        start,
-                        kind,
-                        messages[index].text(),
-                        false,
-                        false,
-                    ));
-                    index += 1;
-                    continue;
-                }
-                let mut next = index + 1;
-                let mut matched = 0;
-                let mut unknown = false;
-                while matched < calls.len() {
-                    let Some(Message::ToolResult(result)) = messages.get(next) else {
-                        break;
-                    };
-                    if result.tool_call_id != calls[matched].id
-                        || result.tool_name != calls[matched].name
-                    {
-                        break;
+                    (index + 1, kind, messages[index].text(), false, false)
+                } else {
+                    let mut next = index + 1;
+                    let mut matched = 0;
+                    let mut unknown = false;
+                    while matched < calls.len() {
+                        let Some(Message::ToolResult(result)) = messages.get(next) else {
+                            break;
+                        };
+                        if result.tool_call_id != calls[matched].id
+                            || result.tool_name != calls[matched].name
+                        {
+                            break;
+                        }
+                        unknown |= result.outcome_unknown;
+                        matched += 1;
+                        next += 1;
                     }
-                    unknown |= result.outcome_unknown;
-                    matched += 1;
-                    next += 1;
+                    let complete = matched == calls.len();
+                    (
+                        next,
+                        if complete {
+                            UnitKind::ToolExchange
+                        } else {
+                            UnitKind::Active
+                        },
+                        joined(&messages[index..next]),
+                        unknown,
+                        unknown || !complete,
+                    )
                 }
-                let complete = matched == calls.len();
-                units.push(unit(
-                    start,
-                    next as u64,
-                    if complete {
-                        UnitKind::ToolExchange
-                    } else {
-                        UnitKind::Active
-                    },
-                    joined(&messages[index..next]),
-                    unknown,
-                    unknown || !complete,
-                ));
-                index = next;
             }
-            Message::ToolResult(result) => {
-                units.push(unit(
-                    start,
-                    start,
-                    UnitKind::Active,
-                    messages[index].text(),
-                    result.outcome_unknown,
-                    true,
-                ));
-                index += 1;
+            Message::ToolResult(result) => (
+                index + 1,
+                UnitKind::Active,
+                messages[index].text(),
+                result.outcome_unknown,
+                true,
+            ),
+        };
+        let (mut start_cursor, mut end_cursor) = span_cursors(index, to);
+        if start_cursor == 0 {
+            start_cursor = 1;
+        }
+        if let Some(prev) = spans.last()
+            && start_cursor <= prev.unit.end_cursor
+        {
+            let shift = prev.unit.end_cursor.saturating_add(1) - start_cursor;
+            start_cursor = start_cursor.saturating_add(shift);
+            end_cursor = end_cursor.saturating_add(shift);
+        }
+        if end_cursor < start_cursor {
+            end_cursor = start_cursor;
+        }
+        spans.push(UnitSpan {
+            unit: unit(
+                start_cursor,
+                end_cursor,
+                kind,
+                text,
+                outcome_unknown,
+                pin_original,
+            ),
+            msg_from: index,
+            msg_to: to,
+        });
+        index = to;
+    }
+    if let Some(last) = spans.last_mut() {
+        last.unit.pin_original = true;
+    }
+    spans
+}
+
+fn compute_frontier(units: &[SourceUnit], summaries: &[SummaryRecord]) -> Option<u64> {
+    let mut ready = Vec::new();
+    let mut prev_end = 0_u64;
+    for unit in units {
+        let is_covered = match unit.kind {
+            UnitKind::Fixed => true,
+            UnitKind::CompletedTurn | UnitKind::ToolExchange
+                if !unit.pin_original && !unit.outcome_unknown =>
+            {
+                summaries.iter().any(|summary| {
+                    summary.start_cursor <= unit.start_cursor
+                        && summary.end_cursor >= unit.end_cursor
+                })
+            }
+            _ => false,
+        };
+        if is_covered {
+            if unit.start_cursor > prev_end.saturating_add(1) {
+                ready.push((prev_end.saturating_add(1), unit.start_cursor - 1));
+            }
+            ready.push((unit.start_cursor, unit.end_cursor));
+        }
+        prev_end = unit.end_cursor;
+    }
+    for summary in summaries {
+        ready.push((summary.start_cursor, summary.end_cursor));
+    }
+    advance_frontier(0, &ready).ok()
+}
+
+fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn build_pending_summary(
+    session_id: &str,
+    unit: &SourceUnit,
+    existing: &[SummaryRecord],
+) -> Result<SummaryRecord, cayw_context::ContextError> {
+    let mut evidence = vec![cayw_context::log_id(session_id, unit.start_cursor)?];
+    if unit.end_cursor != unit.start_cursor {
+        evidence.push(cayw_context::log_id(session_id, unit.end_cursor)?);
+    }
+    let version = existing
+        .iter()
+        .filter(|item| item.start_cursor == unit.start_cursor && item.end_cursor == unit.end_cursor)
+        .map(|item| item.version)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let prefix = format!(
+        "[summary {session_id}:{}-{}] ",
+        unit.start_cursor, unit.end_cursor
+    );
+    let condensed = unit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let source = if condensed.is_empty() {
+        unit.text.as_str()
+    } else {
+        condensed.as_str()
+    };
+    let max_total = (unit.text.len() / 2).clamp(32, 200);
+    let max_body = max_total.saturating_sub(prefix.len() + 3).max(8);
+    let body = truncate_on_char_boundary(source, max_body);
+    let text = if body.len() < source.len() {
+        format!("{prefix}{body}...")
+    } else {
+        format!("{prefix}{body}")
+    };
+    Ok(SummaryRecord {
+        summary_id: format!(
+            "sum-{session_id}-{}-{}-v{version}",
+            unit.start_cursor, unit.end_cursor
+        ),
+        version,
+        session_id: session_id.to_owned(),
+        kind: if unit.kind == UnitKind::ToolExchange {
+            cayw_context::SummaryKind::Segment
+        } else {
+            cayw_context::SummaryKind::UserTurn
+        },
+        start_cursor: unit.start_cursor,
+        end_cursor: unit.end_cursor,
+        text,
+        evidence,
+        local_reuse: false,
+    })
+}
+
+fn build_compression_record(
+    session_id: &str,
+    job: &cayw_context::CompressionJob,
+    units: &[SourceUnit],
+    summaries: &[SummaryRecord],
+    compressions: &[CompressionRecord],
+    replace_at: u64,
+) -> Result<CompressionRecord, cayw_context::ContextError> {
+    let version = compressions
+        .iter()
+        .map(|record| record.version)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let covered_units: Vec<&SourceUnit> = units
+        .iter()
+        .filter(|unit| {
+            matches!(unit.kind, UnitKind::CompletedTurn | UnitKind::ToolExchange)
+                && !unit.pin_original
+                && !unit.outcome_unknown
+                && unit.end_cursor <= job.covered_through
+        })
+        .collect();
+    let mut evidence = Vec::new();
+    let mut parts = Vec::new();
+    for unit in &covered_units {
+        let start_id = cayw_context::log_id(session_id, unit.start_cursor)?;
+        if !evidence.contains(&start_id) {
+            evidence.push(start_id);
+        }
+        if unit.end_cursor != unit.start_cursor {
+            let end_id = cayw_context::log_id(session_id, unit.end_cursor)?;
+            if !evidence.contains(&end_id) {
+                evidence.push(end_id);
             }
         }
+        if let Some(summary) = summaries
+            .iter()
+            .filter(|s| s.start_cursor == unit.start_cursor && s.end_cursor == unit.end_cursor)
+            .max_by_key(|s| s.version)
+        {
+            parts.push(
+                truncate_on_char_boundary(&summary.text, 96)
+                    .trim()
+                    .to_owned(),
+            );
+        } else {
+            let snippet = unit.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            parts.push(truncate_on_char_boundary(&snippet, 96).to_owned());
+        }
     }
-    if let Some(last) = units.last_mut() {
-        last.pin_original = true;
+    if evidence.is_empty() {
+        evidence.push(cayw_context::log_id(session_id, job.covered_through)?);
     }
-    units
+    let first_cursor = covered_units
+        .first()
+        .map(|unit| unit.start_cursor)
+        .unwrap_or(job.start_cursor);
+    let prefix = format!(
+        "[compressed {session_id}:{}-{}] ",
+        first_cursor, job.covered_through
+    );
+    let joined_parts = parts.join(" | ");
+    let max_total = (replace_at as usize / 3)
+        .clamp(48, 384)
+        .min((job.input_bytes as usize).saturating_sub(1).max(32));
+    let max_body = max_total.saturating_sub(prefix.len() + 3).max(8);
+    let body = truncate_on_char_boundary(&joined_parts, max_body);
+    let text = if body.is_empty() {
+        prefix.trim_end().to_owned()
+    } else if body.len() < joined_parts.len() {
+        format!("{prefix}{body}...")
+    } else {
+        format!("{prefix}{body}")
+    };
+    Ok(CompressionRecord {
+        compression_id: format!("comp-{session_id}-v{version}-{}", job.covered_through),
+        version,
+        session_id: session_id.to_owned(),
+        covered_through: job.covered_through,
+        text,
+        evidence,
+    })
 }
 
 fn unit(
@@ -815,16 +1069,36 @@ fn apply_assembly(assembly: &Assembly, window_was_default: bool) -> bool {
         .any(|piece| matches!(piece, Piece::Compression { .. } | Piece::Summary { .. }))
 }
 
-fn render(messages: &[Message], assembly: &Assembly) -> Result<Vec<Message>, ()> {
+fn render(
+    messages: &[Message],
+    spans: &[UnitSpan],
+    assembly: &Assembly,
+) -> Result<Vec<Message>, ()> {
+    if spans.is_empty() {
+        return Err(());
+    }
     let mut rendered = Vec::new();
-    let mut expect = 1_u64;
+    let mut span_index = 0usize;
     for piece in &assembly.pieces {
         let (start, end, text, _) = piece.range();
-        if start != expect || end < start || end as usize > messages.len() {
+        let Some(first_span) = spans.get(span_index) else {
+            return Err(());
+        };
+        if start != first_span.unit.start_cursor || end < start {
             return Err(());
         }
-        let from = (start - 1) as usize;
-        let to = end as usize;
+        let Some(offset) = spans[span_index..]
+            .iter()
+            .position(|span| span.unit.end_cursor == end)
+        else {
+            return Err(());
+        };
+        let end_span_index = span_index + offset;
+        let from = first_span.msg_from;
+        let to = spans[end_span_index].msg_to;
+        if from > to || to > messages.len() {
+            return Err(());
+        }
         match piece {
             Piece::Fixed { .. } | Piece::Original { .. } => {
                 let slice = &messages[from..to];
@@ -839,9 +1113,9 @@ fn render(messages: &[Message], assembly: &Assembly) -> Result<Vec<Message>, ()>
                 rendered.push(Message::system(text.to_owned()));
             }
         }
-        expect = end.saturating_add(1);
+        span_index = end_span_index + 1;
     }
-    if expect != messages.len() as u64 + 1 {
+    if span_index != spans.len() {
         Err(())
     } else {
         Ok(rendered)
@@ -1444,5 +1718,75 @@ mod tests {
 
         assert_eq!(prepared, before);
         assert_eq!(fs::read(&path).unwrap(), raw);
+    }
+
+    #[test]
+    fn units_from_ranges_uses_durable_event_cursors_not_message_indexes() {
+        let mut assistant = AssistantMessage::new(&Model::new("fixture", "model"));
+        assistant.content.push(Content::text("done"));
+        let ranges = vec![
+            cayw_context::CursorRange::new(10, 10).unwrap(),
+            cayw_context::CursorRange::new(25, 25).unwrap(),
+            cayw_context::CursorRange::new(40, 40).unwrap(),
+        ];
+        let messages = vec![
+            Message::user("first question"),
+            Message::Assistant(assistant),
+            Message::user("current question"),
+        ];
+        let context = Mutex::new(contexts());
+        prepare_provider_input_with_ranges(&context, "s", &messages, &ranges, None, 1_024).unwrap();
+        let summaries = context.lock().unwrap().summaries("s");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].start_cursor, 10);
+        assert_eq!(summaries[0].end_cursor, 25);
+        assert_eq!(
+            summaries[0].evidence,
+            vec!["s:10".to_string(), "s:25".to_string()]
+        );
+    }
+
+    #[test]
+    fn crossing_compress_threshold_publishes_compression_that_replaces_at_limit() {
+        let mut assistant = AssistantMessage::new(&Model::new("fixture", "model"));
+        assistant.content.push(Content::text("A".repeat(200)));
+        let messages = vec![
+            Message::user("U".repeat(200)),
+            Message::Assistant(assistant),
+            Message::user("CURRENT"),
+        ];
+        let ranges = vec![
+            cayw_context::CursorRange::new(10, 10).unwrap(),
+            cayw_context::CursorRange::new(20, 20).unwrap(),
+            cayw_context::CursorRange::new(30, 30).unwrap(),
+        ];
+        let context = Mutex::new(contexts());
+        let first =
+            prepare_provider_input_with_ranges(&context, "s", &messages, &ranges, Some(1_450), 1)
+                .unwrap();
+        assert_eq!(
+            first, messages,
+            "below replace_at the original messages are sent"
+        );
+        let compressions = context.lock().unwrap().sessions["s"].compressions.clone();
+        assert_eq!(
+            compressions.len(),
+            1,
+            "crossing compress_at must publish a CompressionRecord"
+        );
+        assert_eq!(compressions[0].covered_through, 20);
+        assert_eq!(
+            compressions[0].evidence,
+            vec!["s:10".to_string(), "s:20".to_string()]
+        );
+
+        let replaced =
+            prepare_provider_input_with_ranges(&context, "s", &messages, &ranges, Some(1_250), 1)
+                .unwrap();
+        assert!(
+            replaced.len() < messages.len(),
+            "published compression must replace the covered prefix at replace_at"
+        );
+        assert_eq!(replaced.last().unwrap().text(), "CURRENT");
     }
 }

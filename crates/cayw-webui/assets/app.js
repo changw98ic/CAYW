@@ -159,6 +159,14 @@ const readMethods = new Set([
   'artifacts.action_list',
   'artifacts.action_get',
   'plannotator.list',
+  'work.get',
+  'work.list',
+  'memory.status',
+  'memory.entries',
+  'memory.query',
+  'recovery.status',
+  'recovery.reconciliation',
+  'recovery.points',
 ]);
 export class RpcError extends Error {
   constructor(code, message, outcomeUnknown = false, status = 0) {
@@ -166,7 +174,7 @@ export class RpcError extends Error {
     this.code = code;
     this.outcome_unknown = outcomeUnknown;
     this.status = status;
-    this.auth = status === 403 || status === 401 || (code === 'forbidden' && status === 403);
+    this.auth = status === 401 || (status === 403 && (code === 'forbidden' || code === 'unauthorized'));
   }
 }
 
@@ -279,6 +287,24 @@ export function consumeTerminalRead(view, cursor, records) {
   return {...view, proofEpoch:epoch, writes:view.writes.map(write => write.method === 'session.cancel' && write.promptReceipt === cursor && write.promptKey !== null && write.promptKey !== undefined ? {...write, promptTerminal:{cursor, lease, epoch}} : write)};
 }
 
+function inferSnapshotTaskId(snapshot) {
+  if (!sessionRunning(snapshot) && !array(snapshot?.pending_approvals).length) return null;
+  for (const approval of array(snapshot?.pending_approvals)) {
+    const taskId = approval?.input?.task_id ?? approval?.task_id;
+    if (typeof taskId === 'string' && taskId) return taskId;
+  }
+  for (const call of array(snapshot?.unresolved_calls)) {
+    const taskId = call?.task_id ?? call?.call?.task_id;
+    if (typeof taskId === 'string' && taskId) return taskId;
+  }
+  for (const execution of array(snapshot?.executions).slice().reverse()) {
+    if (['running', 'awaiting_approval'].includes(execution?.state) && typeof execution.task_id === 'string' && execution.task_id) {
+      return execution.task_id;
+    }
+  }
+  return null;
+}
+
 export function applySnapshot(view, snapshot, initial = false, requestedAfter = view.cursor, requestedEpoch = view.proofEpoch) {
   if (!object(snapshot) || snapshot.id !== view.id || !Array.isArray(snapshot.messages) || !safeCursor(snapshot.cursor)) {
     throw new Error('Runtime 返回的会话快照不完整；保留当前会话和事件游标。');
@@ -291,9 +317,11 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
   // A Core snapshot may predate the runtime binding view. Its missing metadata
   // never clears an explicit frozen rejection, even at the same durable cursor.
   const pendingIds = new Set(array(snapshot.pending_approvals).map(approval => approval.id).filter(id => typeof id === 'string'));
+  const inferredTaskId = inferSnapshotTaskId(snapshot);
   return settleView({
     ...view,
     faults,
+    originalTaskId: view.originalTaskId || inferredTaskId || undefined,
     approvalQuestions: Object.fromEntries(Object.entries(view.approvalQuestions ?? {}).filter(([id]) => pendingIds.has(id))),
     activeAttempt: object(snapshot.attempt) && !sameLease(snapshot.attempt,view.activeAttempt?.lease) ? { lease:snapshot.attempt, after:snapshot.cursor, terminal:null } : view.activeAttempt,
     snapshot: { ...snapshot, messages: snapshot.messages.slice(-MAX_MESSAGES) },
@@ -362,13 +390,20 @@ export function sessionBlocked(snapshot, view) {
 export function canFork(view) {
   return Boolean(view?.snapshot && frozen(view.snapshot, view) && !view.writes.length && !view.activeAttempt && !sessionRunning(view.snapshot) && !array(view.snapshot.pending_approvals).length);
 }
-export function stateLabel(snapshot, view) {
+export function stateLabel(snapshot, view, defaultApprovalMode = 'explicit') {
   if (view?.writes.some(write => write.phase === 'uncertain')) return '连接结果待确认';
-  if (array(snapshot?.pending_approvals).length) return '等待审批';
+  if (array(snapshot?.pending_approvals).length) {
+    const allAuto = array(snapshot.pending_approvals).every(approval => {
+      const id = approval?.id ?? approval?.approval_id;
+      const q = view?.approvalQuestions?.[id];
+      return q ? q.approval_mode === 'model_auto' : defaultApprovalMode === 'model_auto';
+    });
+    return allAuto ? '自动审批中' : '等待审批';
+  }
   if (view?.writes.length) return '正在处理';
   if (frozen(snapshot, view)) return '强流程冻结';
   const name = stateName(snapshot);
-  return ({ idle: '就绪', ready: '就绪', running: '运行中', cancelled: '已取消', failed: '执行失败', completed: '已完成', unknown: '状态待确认' })[name] ?? clip(name, 60);
+  return ({ idle: '就绪', ready: '就绪', running: '运行中', awaiting_approval: defaultApprovalMode === 'model_auto' ? '自动审批中' : '等待审批', cancelled: '已取消', failed: '执行失败', completed: '已完成', unknown: '状态待确认' })[name] ?? clip(name, 60);
 }
 
 if (typeof document !== 'undefined') boot();
@@ -385,11 +420,12 @@ function boot() {
     'refresh-capabilities', 'capability-content',
     'panel-sidebar', 'panel-sidebar-status', 'panel-sidebar-guide', 'panel-sidebar-open', 'refresh-panels',
     'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
-    'wb-tasks', 'wb-usage', 'wb-artifacts', 'wb-plannotator', 'wb-editor', 'wb-trace',
+    'wb-tasks', 'wb-work', 'wb-usage', 'wb-memory', 'wb-artifacts', 'wb-recovery', 'wb-plannotator', 'wb-editor', 'wb-trace',
   ].map(id => [id, $(id)]));
   let authMode = 'local';
   let loginRequired = false;
   let connected = false;
+  let runtimeApprovalMode = 'explicit';
   let workspaceId = null;
   let workspaceBusy = false;
   let settings = { reset() {} };
@@ -816,7 +852,95 @@ function boot() {
 
       refreshBtn.addEventListener('click', loadArts);
       loadArts();
-      body.append(topActions, statusP, artContainer);
+
+      const recCard = el('div', 'item-card');
+      recCard.append(el('strong', '', '工作区文件恢复点 (recovery.*)'));
+      const recStatusP = el('p', 'small muted', '正在读取恢复点状态…');
+      const recCreateRow = el('div', 'control-row');
+      const recPathsInput = el('input');
+      recPathsInput.type = 'text';
+      recPathsInput.placeholder = '恢复相对路径（逗号分隔，如 src/lib.rs）';
+      const recCreateBtn = el('button', 'secondary', '创建恢复点');
+      recCreateBtn.type = 'button';
+      const recRefreshBtn = el('button', 'quiet', '刷新恢复点');
+      recRefreshBtn.type = 'button';
+      recCreateRow.append(recPathsInput, recCreateBtn, recRefreshBtn);
+      const recPointsBox = el('div', 'item-list');
+
+      const loadRecovery = async () => {
+        const login = loginGeneration;
+        try {
+          const st = await rpc('recovery.status', {});
+          if (login !== loginGeneration) return;
+          if (!st || st.enabled === false) {
+            recStatusP.textContent = `状态：未启用或已停用${st?.disabled_reason || st?.warning ? ` (${st.disabled_reason || st.warning})` : ''}`;
+          } else {
+            const count = st.snapshot_count ?? st.point_count ?? 0;
+            const unknown = st.restore_outcome_unknown || st.PendingRestore;
+            recStatusP.textContent = `状态：已启用 · 恢复点数量：${count}${unknown ? ' · 存在未完成恢复需核对' : ''}`;
+          }
+          const pts = await rpc('recovery.points', {});
+          if (login !== loginGeneration) return;
+          recPointsBox.replaceChildren();
+          const pointList = array(pts);
+          if (!pointList.length) {
+            recPointsBox.append(el('p', 'small muted', '当前工作区暂无恢复点。'));
+          } else {
+            for (const pt of pointList) {
+              const pRow = el('div', 'control-row');
+              const pid = typeof pt === 'string' ? pt : (pt.point_id || pt.id || '');
+              pRow.append(el('strong', '', clip(pid, 16)));
+              pRow.append(el('span', 'small muted', (typeof pt === 'object' && (pt.reason || pt.label)) || '恢复点'));
+              const restoreBtn = el('button', 'quiet', '恢复到此点');
+              restoreBtn.type = 'button';
+              restoreBtn.addEventListener('click', async () => {
+                const paths = recPathsInput.value
+                  .split(',')
+                  .map(s => s.trim())
+                  .filter(Boolean);
+                if (!paths.length) {
+                  recStatusP.textContent = '请先填写要恢复的文件相对路径（逗号分隔）。';
+                  return;
+                }
+                recStatusP.textContent = `正在恢复到 ${clip(pid, 16)}…`;
+                try {
+                  await rpc('recovery.restore', {
+                    snapshot: pid,
+                    paths,
+                    confirm_overwrite: paths,
+                  });
+                  recStatusP.textContent = `已恢复到恢复点 ${clip(pid, 16)}。`;
+                  await loadRecovery();
+                } catch (err) {
+                  if (err.auth) { handleError(err); return; }
+                  recStatusP.textContent = '恢复失败：' + (err.message || String(err));
+                }
+              });
+              pRow.append(restoreBtn);
+              recPointsBox.append(pRow);
+            }
+          }
+        } catch (err) {
+          if (err.auth) { handleError(err); return; }
+          recStatusP.textContent = '读取恢复点状态失败：' + (err.message || String(err));
+        }
+      };
+      recCreateBtn.addEventListener('click', async () => {
+        recStatusP.textContent = '正在创建工作区恢复点…';
+        try {
+          await rpc('recovery.create', {});
+          recStatusP.textContent = '工作区恢复点已创建。';
+          await loadRecovery();
+        } catch (err) {
+          if (err.auth) { handleError(err); return; }
+          recStatusP.textContent = '创建恢复点失败：' + (err.message || String(err));
+        }
+      });
+      recRefreshBtn.addEventListener('click', loadRecovery);
+      recCard.append(recStatusP, recCreateRow, recPointsBox);
+      loadRecovery();
+
+      body.append(topActions, statusP, artContainer, recCard);
     } else if (panelId === 'plannotator') {
       const planInfoCard = el('div', 'item-card');
       planInfoCard.append(el('strong', '', '权威共享计划状态 (session.plan)'));
@@ -1129,6 +1253,88 @@ function boot() {
             }
             contentBox.append(fleetCard);
           }
+
+          const workCard = el('div', 'item-card');
+          workCard.append(el('strong', '', '跨工作区工作项管理 (WorkItems · work.*)'));
+          const workNotice = el('p', 'small muted', '');
+          const createRow = el('div', 'control-row');
+          const workTitleInput = el('input');
+          workTitleInput.type = 'text';
+          workTitleInput.placeholder = '新工作项标题…';
+          const workGoalInput = el('input');
+          workGoalInput.type = 'text';
+          workGoalInput.placeholder = '目标说明（可选）';
+          const workCreateBtn = el('button', 'secondary', '创建工作项');
+          workCreateBtn.type = 'button';
+          createRow.append(workTitleInput, workGoalInput, workCreateBtn);
+          const workListBox = el('div', 'item-list');
+          workCard.append(createRow, workNotice, workListBox);
+
+          try {
+            const workItems = await rpc('work.list', {});
+            const items = array(workItems);
+            if (!items.length) {
+              workListBox.append(el('p', 'small muted', '暂无工作项。'));
+            } else {
+              for (const w of items) {
+                const wCard = el('div', 'item-card');
+                const wh = el('div', 'control-row');
+                wh.append(el('strong', '', w.title || w.work_id));
+                wh.append(el('span', 'badge', w.lifecycle || w.status || 'open'));
+                wh.append(el('span', 'small muted', `ID: ${clip(w.work_id || '', 20)}`));
+                wCard.append(wh);
+                if (w.goal) wCard.append(el('p', 'small', w.goal));
+                const wActions = el('div', 'control-row');
+                for (const [act, label] of [['pause', '暂停'], ['resume', '继续'], ['stop', '停止']]) {
+                  const btn = el('button', 'quiet', label);
+                  btn.type = 'button';
+                  btn.addEventListener('click', async () => {
+                    workNotice.textContent = `正在对工作项 ${w.work_id} 执行${label}…`;
+                    try {
+                      await rpc(`work.${act}`, { work_id: w.work_id });
+                      workNotice.textContent = `工作项 ${w.work_id} 已${label}。`;
+                      await loadTasksAndFleet();
+                    } catch (err) {
+                      if (err.auth) { handleError(err); return; }
+                      workNotice.textContent = `${label}失败：` + (err.message || String(err));
+                    }
+                  });
+                  wActions.append(btn);
+                }
+                wCard.append(wActions);
+                workListBox.append(wCard);
+              }
+            }
+          } catch (err) {
+            if (err.auth) { handleError(err); return; }
+            workListBox.append(el('p', 'small muted', `当前工作区未启用主会话 WorkItem 或读取失败：${err.message || String(err)}`));
+          }
+
+          workCreateBtn.addEventListener('click', async () => {
+            const title = workTitleInput.value.trim();
+            if (!title) return;
+            const workId = `work-${Date.now()}`;
+            workNotice.textContent = '正在创建工作项…';
+            try {
+              await rpc('work.create', {
+                spec: {
+                  work_id: workId,
+                  owner_main_session_id: targetSessionId,
+                  title,
+                  goal: workGoalInput.value.trim() || title,
+                  acceptance_criteria: [],
+                },
+              });
+              workTitleInput.value = '';
+              workGoalInput.value = '';
+              workNotice.textContent = `已创建工作项 ${workId}。`;
+              await loadTasksAndFleet();
+            } catch (err) {
+              if (err.auth) { handleError(err); return; }
+              workNotice.textContent = '创建工作项失败：' + (err.message || String(err));
+            }
+          });
+          contentBox.append(workCard);
         } catch (err) {
           if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
             return;
@@ -1201,7 +1407,129 @@ function boot() {
 
       usageBtn.addEventListener('click', loadUsage);
       loadUsage();
-      body.append(usageBtn, usageOutput);
+
+      const memCard = el('div', 'item-card');
+      memCard.append(el('strong', '', '记忆管理 (memory.*)'));
+      const memStatusP = el('p', 'small muted', '正在读取记忆状态…');
+      const memRefreshBtn = el('button', 'quiet', '刷新记忆条目');
+      memRefreshBtn.type = 'button';
+      const memForgetRow = el('div', 'control-row');
+      const memStartInput = el('input');
+      memStartInput.type = 'number';
+      memStartInput.min = '1';
+      memStartInput.placeholder = '起始事件游标';
+      const memEndInput = el('input');
+      memEndInput.type = 'number';
+      memEndInput.min = '1';
+      memEndInput.placeholder = '结束事件游标';
+      const memReasonInput = el('input');
+      memReasonInput.type = 'text';
+      memReasonInput.placeholder = '遗忘原因（如：用户要求忘掉）';
+      const memForgetBtn = el('button', 'secondary', '按范围忘掉');
+      memForgetBtn.type = 'button';
+      memForgetRow.append(memStartInput, memEndInput, memReasonInput, memForgetBtn);
+      const memListBox = el('div', 'item-list');
+
+      const loadMemory = async () => {
+        const login = loginGeneration;
+        try {
+          const st = await rpc('memory.status', {});
+          if (login !== loginGeneration) return;
+          const visibleCount = st?.active ?? st?.visible_entries ?? st?.entries ?? 0;
+          const forgottenCount = Array.isArray(st?.forgotten_ranges)
+            ? st.forgotten_ranges.length
+            : (st?.forgotten_ranges ?? 0);
+          memStatusP.textContent = `可见条目：${visibleCount} · 遗忘范围：${forgottenCount}`;
+          const entries = await rpc('memory.entries', {});
+          if (login !== loginGeneration) return;
+          memListBox.replaceChildren();
+          const list = array(entries);
+          if (!list.length) {
+            memListBox.append(el('p', 'small muted', '当前暂无已保存的记忆条目。'));
+          } else {
+            for (const entry of list) {
+              const eCard = el('div', 'item-card');
+              const entryId = entry.entry_id || entry.key || entry.id || '';
+              const entryKind = entry.kind || entry.category || 'memory';
+              eCard.append(
+                el('strong', '', `[${entryKind}] ${entryId}`),
+                el('p', 'small', entry.body || entry.value || entry.content || recordText(entry)),
+              );
+              const logIds = array(entry.source_log_ids);
+              const sources = array(entry.sources);
+              if (logIds.length || sources.length) {
+                const forgetEntryBtn = el('button', 'quiet', '忘掉此来源');
+                forgetEntryBtn.type = 'button';
+                forgetEntryBtn.addEventListener('click', async () => {
+                  try {
+                    if (logIds.length) {
+                      for (const logId of logIds) {
+                        const sep = String(logId).lastIndexOf(':');
+                        const srcSession = sep > 0 ? String(logId).slice(0, sep) : panelSessionId();
+                        const cursor = sep > 0 ? Number(String(logId).slice(sep + 1)) || 1 : 1;
+                        await rpc('memory.forget', {
+                          session_id: srcSession,
+                          start_cursor: cursor,
+                          end_cursor: cursor,
+                          reason: `忘掉记忆 ${entryId}`,
+                        });
+                      }
+                    } else {
+                      const s0 = sources[0];
+                      await rpc('memory.forget', {
+                        session_id: s0.session_id || panelSessionId(),
+                        start_cursor: s0.start_cursor || 1,
+                        end_cursor: s0.end_cursor || s0.start_cursor || 1,
+                        reason: `忘掉记忆 ${entryId}`,
+                      });
+                    }
+                    memStatusP.textContent = '已登记遗忘范围，后续上下文不再使用该记忆。';
+                    await loadMemory();
+                  } catch (err) {
+                    if (err.auth) { handleError(err); return; }
+                    memStatusP.textContent = '遗忘操作失败：' + (err.message || String(err));
+                  }
+                });
+                eCard.append(forgetEntryBtn);
+              }
+              memListBox.append(eCard);
+            }
+          }
+        } catch (err) {
+          if (err.auth) { handleError(err); return; }
+          memStatusP.textContent = `当前工作区未启用主会话记忆或读取失败：${err.message || String(err)}`;
+        }
+      };
+
+      memForgetBtn.addEventListener('click', async () => {
+        const startCursor = Number(memStartInput.value);
+        const endCursor = Number(memEndInput.value || memStartInput.value);
+        if (!Number.isSafeInteger(startCursor) || startCursor < 1 || !Number.isSafeInteger(endCursor) || endCursor < startCursor) {
+          memStatusP.textContent = '请填写有效的起止事件游标（正整数）。';
+          return;
+        }
+        try {
+          await rpc('memory.forget', {
+            session_id: panelSessionId(),
+            start_cursor: startCursor,
+            end_cursor: endCursor,
+            reason: memReasonInput.value.trim() || '用户界面手动忘掉',
+          });
+          memStartInput.value = '';
+          memEndInput.value = '';
+          memReasonInput.value = '';
+          memStatusP.textContent = '已登记遗忘范围，原事件日志保留，后续不再注入。';
+          await loadMemory();
+        } catch (err) {
+          if (err.auth) { handleError(err); return; }
+          memStatusP.textContent = '按范围忘掉失败：' + (err.message || String(err));
+        }
+      });
+      memRefreshBtn.addEventListener('click', loadMemory);
+      memCard.append(memStatusP, memRefreshBtn, memForgetRow, memListBox);
+      loadMemory();
+
+      body.append(usageBtn, usageOutput, memCard);
     }
 
     container.append(body);
@@ -1388,7 +1716,7 @@ function boot() {
       const button = el('button', 'session-item');
       button.type = 'button';
       button.setAttribute('aria-current', String(session.id === selected));
-      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', `${stateLabel(session, views.get(session.id))} · ${clip(session.id, 20)}`));
+      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', `${stateLabel(session, views.get(session.id), runtimeApprovalMode)} · ${clip(session.id, 20)}`));
       button.addEventListener('click', () => selectSession(session.id));
       fragment.append(button);
     }
@@ -1456,6 +1784,7 @@ function boot() {
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       const previous = views.get(id);
       rememberView(applySnapshot(previous, snapshot, !previous.snapshot, requestedAfter, requestedEpoch));
+      try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; }
       updateSessionSummary(snapshot);
       pollFailures = 0;
       renderView();
@@ -1475,7 +1804,7 @@ function boot() {
     const snapshot = view?.snapshot;
     ui['session-title'].textContent = clip(snapshot?.label || (selected ? '正在读取会话…' : '选择或创建会话'), 160);
     ui['session-picker-label'].textContent = clip(snapshot?.label || '选择或新建', 60);
-    ui['session-state'].textContent = snapshot ? stateLabel(snapshot, view) : '等待选择';
+    ui['session-state'].textContent = snapshot ? stateLabel(snapshot, view, runtimeApprovalMode) : '等待选择';
     const attention = snapshot && (frozen(snapshot, view) || view?.writes.some(write => write.phase === 'uncertain') || !['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot)));
     ui['blocked-text'].textContent = attention ? sessionBlocked(snapshot, view) : '';
     ui['blocked-notice'].hidden = !attention;
@@ -1541,24 +1870,27 @@ function boot() {
     for (const approval of pendingApprovals) {
       const approvalId = approval.id ?? approval.approval_id;
       const question = view?.approvalQuestions?.[approvalId];
+      const isModelAuto = question ? question.approval_mode === 'model_auto' : runtimeApprovalMode === 'model_auto';
       const card = el('article', 'message system approval-question');
-      card.append(el('div', 'role', '询问'));
+      card.append(el('div', 'role', isModelAuto ? '自动审批' : '询问'));
       if (!question) {
-        card.append(el('div', 'body', '正在读取这条询问的完整选项…'));
+        card.append(el('div', 'body', isModelAuto ? '模型正在自动评估授权…' : '正在读取这条询问的完整选项…'));
         fragment.append(card);
         continue;
       }
       card.append(el('div', 'body', typeof question.text === 'string' ? question.text : ''));
-      const actions = el('div', 'approval-actions');
-      for (const option of array(question.options)) {
-        if (typeof option !== 'string' || !option) continue;
-        const button = el('button', option === '拒绝' ? 'secondary deny' : option === '本任务允许' ? 'secondary' : '', approvalPending.has(`${view.id}/${approvalId}`) ? '正在记录…' : option);
-        button.type = 'button';
-        button.disabled = approvalPending.has(`${view.id}/${approvalId}`) || frozen(view?.snapshot, view) || view?.writes.some(write => write.phase === 'uncertain');
-        button.addEventListener('click', () => replyApproval(view.id, approvalId, option));
-        actions.append(button);
+      if (!isModelAuto) {
+        const actions = el('div', 'approval-actions');
+        for (const option of array(question.options)) {
+          if (typeof option !== 'string' || !option) continue;
+          const button = el('button', option === '拒绝' ? 'secondary deny' : option === '本任务允许' ? 'secondary' : '', approvalPending.has(`${view.id}/${approvalId}`) ? '正在记录…' : option);
+          button.type = 'button';
+          button.disabled = approvalPending.has(`${view.id}/${approvalId}`) || frozen(view?.snapshot, view) || view?.writes.some(write => write.phase === 'uncertain');
+          button.addEventListener('click', () => replyApproval(view.id, approvalId, option));
+          actions.append(button);
+        }
+        card.append(actions);
       }
-      card.append(actions);
       fragment.append(card);
     }
     ui['messages'].replaceChildren(fragment);
@@ -1587,11 +1919,38 @@ function boot() {
     const busy = pending || sessionRunning(snapshot);
     const blocked = sessionBlocked(snapshot, view);
     const decisionBusy = [...approvalPending].some(key => key.startsWith(`${selected}/`));
+    const allAutoApprovals = array(snapshot?.pending_approvals).length > 0 && array(snapshot.pending_approvals).every(approval => {
+      const id = approval?.id ?? approval?.approval_id;
+      const q = view?.approvalQuestions?.[id];
+      return q ? q.approval_mode === 'model_auto' : runtimeApprovalMode === 'model_auto';
+    });
     ui['prompt'].disabled = !snapshot || Boolean(blocked) || busy;
     ui['send-button'].disabled = ui['prompt'].disabled || !ui['prompt'].value.trim();
     ui['send-button'].textContent = pending ? '等待完成…' : '发送';
-    ui['cancel-button'].disabled = !snapshot || (!taskAdmissions.has(selected) && !view?.originalTaskId) || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
-    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !view?.writes.some(write => write.phase === 'uncertain') ? '请在对话中的询问里选择选项，也可以停止运行。' : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
+    ui['cancel-button'].disabled = !snapshot || (!taskAdmissions.has(selected) && !view?.originalTaskId && !busy && !array(snapshot.pending_approvals).length) || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
+    ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !view?.writes.some(write => write.phase === 'uncertain') ? (allAutoApprovals ? '模型正在自动评估授权，无需人工操作；也可以停止运行。' : '请在对话中的询问里选择选项，也可以停止运行。') : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
+  }
+
+  async function refreshActiveTaskId(id, login) {
+    const view = views.get(id);
+    const snapshot = view?.snapshot;
+    if (!snapshot || view.originalTaskId || taskAdmissions.has(id)) return;
+    if (!sessionRunning(snapshot) && !array(snapshot.pending_approvals).length) return;
+    const scope = sessionWorkspaces.get(id) || workspaceId;
+    const tasks = await rpc('session.tasks', { session_id: id }, scope);
+    if (login !== loginGeneration) return;
+    const active = array(tasks).slice().reverse().find(task =>
+      task?.session_id === id &&
+      typeof task.id === 'string' &&
+      task.id &&
+      ['running', 'awaiting_approval', 'draining', 'queued'].includes(task.state) &&
+      (!snapshot.attempt?.attempt_id || !task.attempt_id || task.attempt_id === snapshot.attempt.attempt_id)
+    );
+    if (!active) return;
+    const current = views.get(id);
+    if (current && !current.originalTaskId) {
+      rememberView({ ...current, originalTaskId: active.id });
+    }
   }
 
   // Read the exact question and three options that the runtime prepared for
@@ -1607,7 +1966,9 @@ function boot() {
       try {
         const question = await rpc('approval.question', { session_id: id, approval_id: approvalId });
         if (login !== loginGeneration) return;
-        if (question?.session_id !== id || question?.approval_id !== approvalId || array(question.options).length !== 3) {
+        const isModelAuto = question?.approval_mode === 'model_auto';
+        const validOptions = isModelAuto ? array(question.options).length === 0 : array(question.options).length === 3;
+        if (question?.session_id !== id || question?.approval_id !== approvalId || !validOptions) {
           throw new RpcError('invalid_response', 'Runtime 返回的审批询问不完整；页面未显示选项。', false);
         }
         questions[approvalId] = question;
@@ -1683,6 +2044,7 @@ function boot() {
       const snapshot = await rpc('session.get', { session_id: id });
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       rememberView(applySnapshot(views.get(id), snapshot, false, requestedAfter, requestedEpoch));
+      try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; }
       try { await refreshApprovalQuestions(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; rememberError(id, error); }
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       updateSessionSummary(snapshot);
@@ -1751,6 +2113,7 @@ function boot() {
     if (login !== loginGeneration) return;
     const previous = views.get(id);
     if (previous) rememberView(applySnapshot(previous, snapshot, false, requestedAfter, requestedEpoch));
+    try { await refreshActiveTaskId(id, login); } catch (error) { if (login === loginGeneration && error.auth) throw error; }
     try { await refreshApprovalQuestions(id, login); } catch (error) { if (login === loginGeneration) rememberError(id, error); }
     if (login !== loginGeneration) return;
     updateSessionSummary(snapshot);
@@ -1781,6 +2144,7 @@ function boot() {
       const health = await rpc('runtime.health');
       if (login !== loginGeneration) return;
       if (health?.status !== 'ok' || health?.protocol_version !== CORE_PROTOCOL_VERSION) throw new Error('本机运行服务的版本不匹配，请同步更新运行服务和网页界面。');
+      runtimeApprovalMode = health?.approval_mode === 'model_auto' ? 'model_auto' : 'explicit';
       connected = true;
       ui['login-panel'].hidden = true;
       ui['workspace'].hidden = false;
@@ -2015,7 +2379,11 @@ function boot() {
       // Capture the original admission before any await. A replacement prompt
       // in the same Session must never become this stop action's target.
       const admission = taskAdmissions.get(id);
-      const taskId = admission ? await admission : views.get(id)?.originalTaskId;
+      let taskId = admission ? await admission : views.get(id)?.originalTaskId;
+      if (typeof taskId !== 'string' || !taskId) {
+        await refreshActiveTaskId(id, login);
+        taskId = views.get(id)?.originalTaskId;
+      }
       if (typeof taskId !== 'string' || !taskId) throw new RpcError('invalid_params', '未保存原任务编号，请在宿主中指定原 Task 后取消。');
       const task = await rpc('task.get', { task_id: taskId }, scope);
       if (task?.id !== taskId || task.session_id !== id) throw new RpcError('invalid_response', '返回的任务与原取消目标不符。', true);
@@ -2110,8 +2478,11 @@ function boot() {
     });
   };
   setupWbButton('wb-tasks', 'tasks', 'sidebar');
+  setupWbButton('wb-work', 'tasks', 'sidebar');
   setupWbButton('wb-usage', 'usage', 'sidebar');
+  setupWbButton('wb-memory', 'usage', 'sidebar');
   setupWbButton('wb-artifacts', 'artifacts', 'sidebar');
+  setupWbButton('wb-recovery', 'artifacts', 'sidebar');
   setupWbButton('wb-plannotator', 'plannotator', 'sidebar');
   setupWbButton('wb-editor', 'editor', 'sidebar');
   setupWbButton('wb-trace', 'trace', 'sidebar');
@@ -2275,7 +2646,7 @@ function mountSettings(rpc) {
         serviceOptions(model.service, false);
         modelForm.elements.api_key.value = '';
         for (const [key, value] of Object.entries(model)) {
-          if (key !== 'api_key' && modelForm.elements[key]) modelForm.elements[key].value = value;
+          if (key !== 'api_key' && modelForm.elements[key]) modelForm.elements[key].value = value ?? '';
         }
         editingModel = { ...model };
         modelForm.elements.credential.value = 'keep'; $('keep-model-credential').disabled = false;
@@ -2313,6 +2684,18 @@ function mountSettings(rpc) {
       if (!editingModel && modelNames.has(name)) throw new Error('此方案名称已存在，请点击编辑后明确选择认证方式。');
       const credential = values.credential; delete values.credential;
       values.max_output_tokens = Number(values.max_output_tokens);
+      if (typeof values.context_window === 'string') {
+        const cw = values.context_window.trim();
+        if (cw) values.context_window = Number(cw);
+        else if (editingModel?.context_window != null) values.context_window = null;
+        else delete values.context_window;
+      }
+      if (typeof values.tokenizer === 'string') {
+        const tok = values.tokenizer.trim();
+        if (tok) values.tokenizer = tok;
+        else if (editingModel?.tokenizer != null) values.tokenizer = null;
+        else delete values.tokenizer;
+      }
       if (credential !== 'replace') delete values.api_key;
       if (credential === 'replace' && !values.api_key?.trim()) throw new Error('请输入新密钥，或选择保留 / 移除认证。');
       if (credential === 'keep' && editingModel?.authentication === 'plain_file' && ['service','api','base_url','api_version'].some(key => values[key] !== editingModel[key])) throw new Error('服务或接口地址已更改，请重新输入密钥或明确移除认证。');

@@ -677,8 +677,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if let Some(paths) = local.as_ref() {
         // The local Client enables CodeMode model decisions. Explicit
         // Headless/SDK callers retain their configured approval mode.
-        config.approval_rules = Some(cayw_runtime::device_rules(&paths.data_dir));
-        config.approval_mode = cayw_runtime::ApprovalMode::ModelAuto;
+        if default_database {
+            config.approval_rules = Some(cayw_runtime::device_rules(&paths.data_dir));
+            config.approval_mode = cayw_runtime::ApprovalMode::ModelAuto;
+        }
         config.main_session =
             cayw_runtime::local_cli::main_session_directory(main_session_override.as_deref())
                 .ok()

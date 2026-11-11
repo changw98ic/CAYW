@@ -62,25 +62,38 @@ pub struct ApprovalQuestion {
     pub capability: String,
     pub scope: String,
     pub reason: String,
+    pub approval_mode: crate::ApprovalMode,
     pub text: String,
     pub options: Vec<&'static str>,
 }
 
-pub(crate) fn question(approval: &ApprovalRequest) -> ApprovalQuestion {
-    let options = vec![
-        ApprovalChoice::AllowOnce.reply(),
-        ApprovalChoice::AllowTask.reply(),
-        ApprovalChoice::Deny.reply(),
-    ];
-    let text = format!(
-        "请求你的授权：{}。参数：{}。原因：{}。请只回复以下选项之一：{} / {} / {}",
-        approval.input.capability,
-        approval.input.scope,
-        approval.input.reason,
-        options[0],
-        options[1],
-        options[2],
-    );
+pub(crate) fn question(
+    approval: &ApprovalRequest,
+    approval_mode: crate::ApprovalMode,
+) -> ApprovalQuestion {
+    let options = match approval_mode {
+        crate::ApprovalMode::Explicit => vec![
+            ApprovalChoice::AllowOnce.reply(),
+            ApprovalChoice::AllowTask.reply(),
+            ApprovalChoice::Deny.reply(),
+        ],
+        crate::ApprovalMode::ModelAuto => Vec::new(),
+    };
+    let text = match approval_mode {
+        crate::ApprovalMode::Explicit => format!(
+            "请求你的授权：{}。参数：{}。原因：{}。请只回复以下选项之一：{} / {} / {}",
+            approval.input.capability,
+            approval.input.scope,
+            approval.input.reason,
+            options[0],
+            options[1],
+            options[2],
+        ),
+        crate::ApprovalMode::ModelAuto => format!(
+            "模型正在自动评估授权：{}。参数：{}。原因：{}。",
+            approval.input.capability, approval.input.scope, approval.input.reason,
+        ),
+    };
     ApprovalQuestion {
         session_id: approval.session_id.clone(),
         approval_id: approval.id.clone(),
@@ -88,6 +101,7 @@ pub(crate) fn question(approval: &ApprovalRequest) -> ApprovalQuestion {
         capability: approval.input.capability.clone(),
         scope: approval.input.scope.clone(),
         reason: approval.input.reason.clone(),
+        approval_mode,
         text,
         options,
     }

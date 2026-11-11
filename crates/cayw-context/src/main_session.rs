@@ -151,7 +151,7 @@ pub fn plan_main_session(input: &MainSessionInput<'_>) -> Result<MainSessionPlan
     for range in input.forgotten {
         let mut removed_any = false;
         for (index, unit) in input.units.iter().enumerate() {
-            if !keep[index] || !range.covers_turn(unit) {
+            if !keep[index] || !overlaps(unit, range) {
                 continue;
             }
             if replaceable(unit) {
@@ -229,18 +229,18 @@ fn validate_units(units: &[SourceUnit]) -> Result<(), ContextError> {
             "main session context needs source units".into(),
         ));
     }
-    let mut expect = None;
+    let mut min_next = None;
     for unit in units {
         if unit.start_cursor == 0 || unit.end_cursor < unit.start_cursor {
             return Err(ContextError::Invalid(
                 "main session source range is invalid".into(),
             ));
         }
-        if let Some(next) = expect
-            && unit.start_cursor != next
+        if let Some(next) = min_next
+            && unit.start_cursor < next
         {
             return Err(ContextError::Invalid(
-                "main session source cursors must be contiguous".into(),
+                "main session source cursors must be strictly increasing".into(),
             ));
         }
         if unit.outcome_unknown
@@ -251,7 +251,7 @@ fn validate_units(units: &[SourceUnit]) -> Result<(), ContextError> {
                 "outcome_unknown only belongs on a tool exchange".into(),
             ));
         }
-        expect = Some(unit.end_cursor.saturating_add(1));
+        min_next = Some(unit.end_cursor.saturating_add(1));
     }
     Ok(())
 }

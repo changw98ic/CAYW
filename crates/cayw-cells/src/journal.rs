@@ -375,7 +375,7 @@ fn load_records(
     let mut records = Vec::new();
     if let Some(max_cells) = max_cells {
         let mut statement = connection.prepare(
-            "SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY id LIMIT ?3",
+            "SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY rowid LIMIT ?3",
         )?;
         let rows = statement.query_map(
             params![
@@ -399,7 +399,7 @@ fn load_records(
         }
     } else {
         let mut statement = connection
-            .prepare("SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY id")?;
+            .prepare("SELECT body FROM cells_v1 WHERE session=?1 AND task=?2 ORDER BY rowid")?;
         let rows = statement.query_map(params![identity.session_id, identity.task_id], |row| {
             row.get::<_, String>(0)
         })?;

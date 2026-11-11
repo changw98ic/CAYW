@@ -421,12 +421,189 @@ async fn work_capabilities_are_absent_outside_the_main_session() {
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
     assert!(names.iter().all(|name| !name.starts_with("work.")));
+    assert!(names.iter().all(|name| !name.starts_with("memory.")));
     assert!(names.iter().all(|name| name != "notify.send"));
     let error = runtime.set_work_router(Arc::new(TargetRouter {
         target: runtime.clone(),
         workspace: "local".into(),
     }));
     assert!(error.is_err());
+}
+
+#[tokio::test]
+async fn main_session_exposes_memory_capabilities_in_codemode() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let script = r#"
+local status_before = cayw.call('memory.status', {})
+local queried = cayw.call('memory.query', {start_cursor=1})
+local user_log_id = queried.events[1].log_id
+local user_cursor = queried.events[1].cursor
+local applied = cayw.call('memory.apply', {
+  candidates={
+    {
+      kind='preference',
+      body='Prefer concise Rust helpers',
+      source_type='stated',
+      source_log_ids={user_log_id}
+    }
+  }
+})
+local entries = cayw.call('memory.entries', {})
+assert(#entries == 1, 'expected 1 visible memory entry before forget')
+assert(entries[1].body == 'Prefer concise Rust helpers', 'expected entry body in memory.entries')
+local dreamed = cayw.call('memory.dream', {})
+local forgotten = cayw.call('memory.forget', {
+  start_cursor=user_cursor, end_cursor=user_cursor, reason='user requested removal'
+})
+local after_forget = cayw.call('memory.query', {start_cursor=1})
+assert(#after_forget.entries == 0, 'forgotten source must be omitted from memory.query')
+return {
+  status_before=status_before,
+  applied=applied,
+  entries=entries,
+  queried=queried,
+  dreamed=dreamed,
+  forgotten=forgotten,
+  after_forget=after_forget
+}
+"#;
+    let main = open(
+        &root.join("main"),
+        Arc::new(Script(script.into())),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    let session = main.create(None).unwrap().id;
+    main.prompt(
+        &session,
+        "Prefer concise Rust helpers",
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(main.memory_entries().unwrap().is_empty());
+    let status = main.memory_status().unwrap();
+    assert_eq!(status.entries, 1);
+    assert_eq!(status.forgotten_ranges.len(), 1);
+}
+
+#[tokio::test]
+async fn rpc_work_pause_stop_proactive_trigger_and_notify_send_route_through_target_workspace() {
+    use cayw_ipc::RpcHandler;
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let target = open(
+        &root.join("target"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "target"),
+        RuntimeConfig {
+            permissions: vec![
+                cayw_runtime::ScopedPermission::exact(
+                    "fs.write",
+                    json!({"path":"cayw-demo.txt","content":"headless runtime demo"}),
+                ),
+                cayw_runtime::ScopedPermission::exact("fs.read", json!({"path":"cayw-demo.txt"})),
+            ],
+            ..Default::default()
+        },
+    );
+    let target_session = target.create(Some("Worker".into())).unwrap().id;
+    let main = open(
+        &root.join("main"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "main"),
+        main_config(&root, vec!["desk".into()]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: target.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let main_session = main.create(None).unwrap().id;
+    let created = main
+        .call(
+            "work.create",
+            json!({
+                "spec": {
+                    "owner_main_session_id": main_session,
+                    "title": "routed work",
+                    "goal": "verify rpc pause/stop/proactive/notify",
+                    "acceptance_criteria": [],
+                    "session_refs": [{"workspace": "target", "session_id": target_session}],
+                }
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let work_id = created["work_id"].as_str().unwrap().to_string();
+
+    // Triggering proactive in Auto mode enqueues a dispatched task in the target workspace.
+    let triggered = main
+        .call(
+            "proactive.trigger",
+            json!({
+                "mode": "auto",
+                "rule_id": "rule-auto",
+                "condition_version": 1,
+                "work_id": work_id,
+                "usage_tokens": 100
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(triggered["kind"], "dispatched");
+    let target_tasks = target.tasks(&target_session).unwrap();
+    assert_eq!(target_tasks.len(), 1);
+
+    // RPC work.pause pushes pause_version to the target workspace queue.
+    let paused = main
+        .call(
+            "work.pause",
+            json!({"work_id": work_id}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(paused["lifecycle"], "paused");
+    assert_eq!(paused["targets"][0]["workspace"], "target");
+    assert!(target.tasks(&target_session).unwrap()[0].dispatch_paused);
+
+    // RPC work.stop pushes stop_version and cancels the target workspace task.
+    let stopped = main
+        .call(
+            "work.stop",
+            json!({"work_id": work_id}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped["lifecycle"], "cancelled");
+    assert_eq!(stopped["targets"][0]["workspace"], "target");
+    assert!(target.tasks(&target_session).unwrap()[0].cancel_requested);
+
+    // RPC notify.send prepares and records delivery receipt for a configured target.
+    let sent = main
+        .call(
+            "notify.send",
+            json!({
+                "work_id": work_id,
+                "target": "desk",
+                "content_ref": "done:1"
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["status"], "delivered");
+    assert!(
+        sent["receipt_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("receipt:")
+    );
 }
 
 #[test]
