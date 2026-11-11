@@ -164,7 +164,7 @@ fn configuration_json(effect: bool) -> Value {
     let ns = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
     let opt_ns = |d: Option<std::time::Duration>| d.map(ns);
     // The Host defaults are shared with the existing Luau measurement config.
-    json!({"runtime":{"max_concurrent_runs":c.max_concurrent_runs,"max_queued_runs":c.max_queued_runs,
+    json!({"runtime":{"approval_mode":c.approval_mode,"max_concurrent_runs":c.max_concurrent_runs,"max_queued_runs":c.max_queued_runs,
         "max_prompt_bytes":c.max_prompt_bytes,"max_history_bytes":c.max_history_bytes,"max_event_bytes":c.max_event_bytes,
         "max_total_tokens":c.max_total_tokens,"max_turns":c.max_turns,"max_run_time_ns":opt_ns(c.max_run_time),"max_queue_time_ns":opt_ns(c.max_queue_time),
         "max_capability_calls":c.max_capability_calls,"max_capability_bytes":c.max_capability_bytes,"grant_lifetime_ns":ns(c.grant_lifetime),

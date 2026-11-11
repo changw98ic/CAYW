@@ -259,6 +259,7 @@ pub fn plan(input: &ContextInput<'_>) -> Result<Plan, ContextError> {
     let mut pending_summaries = Vec::new();
     for unit in input.units {
         if unit.outcome_unknown
+            || unit.pin_original
             || !matches!(unit.kind, UnitKind::CompletedTurn | UnitKind::ToolExchange)
         {
             continue;
@@ -454,16 +455,20 @@ fn assemble(input: &ContextInput<'_>, extra: &[SummaryRecord]) -> Result<Assembl
     let rest = &input.units[index..];
     let prefix_len = rest
         .iter()
-        .position(|unit| !replaceable(unit))
+        .position(|unit| !replaceable(unit) && unit.kind != UnitKind::Fixed)
         .unwrap_or(rest.len());
     let prefix = &rest[..prefix_len];
     let tail = &rest[prefix_len..];
     if let Some(record) = compression {
         if let Some(end_index) = prefix
             .iter()
-            .rposition(|unit| unit.end_cursor <= record.covered_through)
+            .rposition(|unit| replaceable(unit) && unit.end_cursor <= record.covered_through)
         {
-            let start = prefix[0].start_cursor;
+            let first_index = prefix.iter().position(replaceable).unwrap_or(0);
+            for unit in &prefix[..first_index] {
+                pieces.push(fixed_piece(unit));
+            }
+            let start = prefix[first_index].start_cursor;
             let end = prefix[end_index].end_cursor;
             if start <= record.covered_through {
                 pieces.push(Piece::Compression {
@@ -496,14 +501,14 @@ fn assemble(input: &ContextInput<'_>, extra: &[SummaryRecord]) -> Result<Assembl
     check_cover(input.units, &pieces)?;
     let mut input_tokens = pieces
         .iter()
-        .map(|piece| estimate_text(piece.range().2).tokens)
+        .map(|piece| piece_tokens(input.units, piece))
         .fold(0_u64, u64::saturating_add);
     let mut sendable = input_tokens <= input.budget.input_limit;
     if !sendable {
         excerpt_large_originals(&mut pieces);
         input_tokens = pieces
             .iter()
-            .map(|piece| estimate_text(piece.range().2).tokens)
+            .map(|piece| piece_tokens(input.units, piece))
             .fold(0_u64, u64::saturating_add);
         sendable = input_tokens <= input.budget.input_limit;
     }
@@ -542,6 +547,11 @@ fn emit_after(
     let mut index = 0;
     while index < units.len() {
         let unit = &units[index];
+        if unit.kind == UnitKind::Fixed {
+            pieces.push(fixed_piece(unit));
+            index += 1;
+            continue;
+        }
         if let Some(summary) = covering_summary(summaries, units, index, covered_through) {
             let end_index = units
                 .iter()
@@ -617,18 +627,39 @@ fn replaceable(unit: &SourceUnit) -> bool {
 
 fn compressible_cutoff(units: &[SourceUnit]) -> Option<u64> {
     let mut cutoff = None;
-    let mut seen_fixed_prefix = false;
     for unit in units {
-        if unit.kind == UnitKind::Fixed && cutoff.is_none() && !seen_fixed_prefix {
+        if unit.kind == UnitKind::Fixed {
             continue;
         }
-        seen_fixed_prefix = true;
         if !replaceable(unit) {
             break;
         }
         cutoff = Some(unit.end_cursor);
     }
     cutoff
+}
+
+fn piece_tokens(units: &[SourceUnit], piece: &Piece) -> u64 {
+    let base = estimate_text(piece.range().2).tokens;
+    match piece {
+        Piece::Compression {
+            start_cursor,
+            end_cursor,
+            ..
+        } => {
+            let fixed = units
+                .iter()
+                .filter(|unit| {
+                    unit.kind == UnitKind::Fixed
+                        && unit.start_cursor >= *start_cursor
+                        && unit.end_cursor <= *end_cursor
+                })
+                .map(|unit| estimate_text(&unit.text).tokens)
+                .fold(0_u64, u64::saturating_add);
+            base.saturating_add(fixed)
+        }
+        _ => base,
+    }
 }
 
 fn fixed_piece(unit: &SourceUnit) -> Piece {
@@ -1143,5 +1174,108 @@ mod tests {
             accept_compression(std::slice::from_ref(&published), &newer_compression).unwrap(),
             VersionDecision::Accepted
         );
+    }
+
+    #[test]
+    fn mid_transcript_fixed_declarations_allow_later_compression_summary_and_excerpt() {
+        let large_tool = "t".repeat(9_000);
+        let units = vec![
+            unit(1, 1, UnitKind::Fixed, "system", false, false),
+            unit(2, 2, UnitKind::CompletedTurn, "first prompt", false, false),
+            unit(3, 3, UnitKind::Fixed, "", false, false),
+            unit(
+                4,
+                5,
+                UnitKind::ToolExchange,
+                "first execute_code exchange",
+                false,
+                false,
+            ),
+            unit(
+                6,
+                7,
+                UnitKind::CompletedTurn,
+                "SECOND LONG TURN TO SUMMARIZE",
+                false,
+                false,
+            ),
+            unit(8, 9, UnitKind::ToolExchange, &large_tool, false, false),
+            unit(10, 10, UnitKind::Active, "follow-up", true, false),
+        ];
+        let summaries = vec![SummaryRecord {
+            summary_id: "sum-6-7".into(),
+            version: 1,
+            session_id: "s".into(),
+            kind: SummaryKind::UserTurn,
+            start_cursor: 6,
+            end_cursor: 7,
+            text: "sum67".into(),
+            evidence: vec!["s:6".into()],
+            local_reuse: false,
+        }];
+        let compressions = vec![CompressionRecord {
+            compression_id: "comp-5".into(),
+            version: 1,
+            session_id: "s".into(),
+            covered_through: 5,
+            text: "comp25".into(),
+            evidence: vec!["s:2".into(), "s:5".into()],
+        }];
+        let budget = input_budget(Some(2_500), 100, 100).unwrap();
+        let planned = plan(&ContextInput {
+            session_id: "s",
+            units: &units,
+            summaries: &summaries,
+            compressions: &compressions,
+            budget,
+            epoch: 1,
+        })
+        .unwrap();
+        assert_eq!(planned.compression_job.unwrap().covered_through, 7);
+        let assembly = planned.assembly.expect("threshold reached");
+        assert!(assembly.sendable);
+        assert!(assembly.replaces_history);
+        assert!(matches!(
+            &assembly.pieces[1],
+            Piece::Compression {
+                start_cursor: 2,
+                end_cursor: 5,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &assembly.pieces[2],
+            Piece::Summary {
+                start_cursor: 6,
+                end_cursor: 7,
+                ..
+            }
+        ));
+        assert!(
+            assembly.pieces[3]
+                .range()
+                .2
+                .contains("original history was not deleted")
+        );
+    }
+
+    #[test]
+    fn pinned_tail_is_not_queued_as_pending_summary() {
+        let pinned_body = "z".repeat(600);
+        let units = vec![
+            unit(1, 2, UnitKind::CompletedTurn, "short", false, false),
+            unit(3, 4, UnitKind::ToolExchange, &pinned_body, true, false),
+        ];
+        let budget = budget_for(50_000);
+        let planned = plan(&ContextInput {
+            session_id: "s",
+            units: &units,
+            summaries: &[],
+            compressions: &[],
+            budget,
+            epoch: 1,
+        })
+        .unwrap();
+        assert!(planned.pending_summaries.is_empty());
     }
 }

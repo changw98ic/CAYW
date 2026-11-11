@@ -687,8 +687,8 @@ impl Runtime {
                         p.usage_tokens,
                     )?,
                 };
-                let _ = self.run_proactive_dispatch(&outcome).await;
-                encode(outcome)
+                let task = self.run_proactive_dispatch(&outcome).await?;
+                encode(outcome.with_task_id(task.map(|item| item.id)))
             }
             "notify.send" | "work.notify.send" => {
                 let p: NotifySend = parse(params)?;
@@ -861,6 +861,10 @@ impl Runtime {
             "session.recover" => {
                 let p: Session = parse(params)?;
                 encode(self.recover(&p.session_id)?)
+            }
+            "session.maintenance.status" => {
+                let p: Session = parse(params)?;
+                encode(self.context_maintenance_status(&p.session_id)?)
             }
             "session.maintenance.reconcile" => {
                 let p: crate::MaintenanceReconciliation = parse(params)?;
@@ -1127,6 +1131,7 @@ impl RpcHandler for Runtime {
                 | "session.run_inspector"
                 | "session.audit"
                 | "session.context_overview"
+                | "session.maintenance.status"
                 | "session.grants"
                 | "capabilities.list"
                 | "session.tasks"

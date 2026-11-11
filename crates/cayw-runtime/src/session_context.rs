@@ -25,6 +25,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use crate::RuntimeError;
 
 const MAINTENANCE_FILE: &str = "context-maintenance.json";
+const SNAPSHOT_VERSION: u32 = 2;
 
 pub(crate) struct SessionContexts {
     sessions: BTreeMap<String, Derived>,
@@ -42,30 +43,33 @@ struct Derived {
     ledger: MaintenanceLedger,
     epoch: u64,
     frontier: u64,
+    failures: u64,
+    last_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JobKind {
+pub(crate) enum JobKind {
     Summary,
     Compression,
+    MemoryWriter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReservationState {
     Reserved,
     /// The maintenance call's effect is not confirmed. The reservation stays occupied.
-    #[allow(dead_code)]
     Unknown,
     Settled,
 }
 
-struct ReservationSpec {
-    kind: JobKind,
-    start_cursor: u64,
-    end_cursor: u64,
-    input_bytes: u64,
-    margin: u64,
-    output_max: u64,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReservationSpec {
+    pub kind: JobKind,
+    pub start_cursor: u64,
+    pub end_cursor: u64,
+    pub input_bytes: u64,
+    pub margin: u64,
+    pub output_max: u64,
 }
 
 struct Reservation {
@@ -91,6 +95,8 @@ struct MaintenanceLedger {
 #[derive(Deserialize)]
 struct StoredSnapshot {
     #[serde(default)]
+    version: u32,
+    #[serde(default)]
     sessions: BTreeMap<String, StoredSession>,
 }
 
@@ -100,6 +106,10 @@ struct StoredSession {
     epoch: u64,
     #[serde(default)]
     frontier: u64,
+    #[serde(default)]
+    failures: u64,
+    #[serde(default)]
+    last_error: Option<String>,
     #[serde(default)]
     summaries: Vec<SummaryRecord>,
     #[serde(default)]
@@ -146,6 +156,17 @@ pub struct MaintenanceReconciliationRecord {
     pub occupied_tokens: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ContextMaintenanceStatus {
+    pub session_id: String,
+    pub damaged: bool,
+    pub occupied_tokens: u64,
+    pub summaries: usize,
+    pub compressions: usize,
+    pub failures: u64,
+    pub last_error: Option<String>,
+}
+
 impl SessionContexts {
     pub(crate) fn new(dir: Option<PathBuf>) -> Self {
         let (sessions, damaged) = match dir.as_deref() {
@@ -170,7 +191,18 @@ impl SessionContexts {
             .unwrap_or_default()
     }
 
-    fn reserve(&mut self, session_id: &str, spec: ReservationSpec) -> Result<u64, RuntimeError> {
+    pub(crate) fn compressions(&self, session_id: &str) -> Vec<CompressionRecord> {
+        self.sessions
+            .get(session_id)
+            .map(|derived| derived.compressions.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn reserve(
+        &mut self,
+        session_id: &str,
+        spec: ReservationSpec,
+    ) -> Result<u64, RuntimeError> {
         let ReservationSpec {
             kind,
             start_cursor,
@@ -187,7 +219,7 @@ impl SessionContexts {
         let derived = self.session_mut(session_id);
         if kind == JobKind::Compression
             && derived.ledger.items.iter().any(|item| {
-                item.kind == JobKind::Compression && item.state != ReservationState::Settled
+                item.kind == JobKind::Compression && item.state == ReservationState::Reserved
             })
         {
             return Err(RuntimeError::InvalidInput(
@@ -198,7 +230,7 @@ impl SessionContexts {
             item.kind == kind
                 && item.start_cursor == start_cursor
                 && item.end_cursor == end_cursor
-                && item.state != ReservationState::Settled
+                && item.state == ReservationState::Reserved
         }) {
             return Err(RuntimeError::InvalidInput(
                 "this maintenance range is already active".into(),
@@ -223,8 +255,7 @@ impl SessionContexts {
         Ok(id)
     }
 
-    #[allow(dead_code)]
-    fn mark_unknown(
+    pub(crate) fn mark_unknown(
         &mut self,
         session_id: &str,
         id: u64,
@@ -268,22 +299,6 @@ impl SessionContexts {
         Ok(overage)
     }
 
-    #[allow(dead_code)]
-    fn release_local(&mut self, session_id: &str, kind: JobKind, end_cursor: u64) {
-        let Some(derived) = self.sessions.get_mut(session_id) else {
-            return;
-        };
-        if let Some(item) = derived.ledger.items.iter_mut().find(|item| {
-            item.kind == kind
-                && item.end_cursor == end_cursor
-                && item.state != ReservationState::Settled
-        }) {
-            item.confirmed = Some(0);
-            item.overage = false;
-            item.state = ReservationState::Settled;
-        }
-    }
-
     pub(crate) fn occupied(&self, session_id: &str) -> u64 {
         self.sessions
             .get(session_id)
@@ -304,23 +319,79 @@ impl SessionContexts {
         true
     }
 
-    fn persist(&self) {
+    pub(crate) fn rollback_reservation(&mut self, session_id: &str, id: u64) {
+        if let Some(derived) = self.sessions.get_mut(session_id) {
+            derived.ledger.items.retain(|item| item.id != id);
+        }
+    }
+
+    pub(crate) fn record_error(&mut self, session_id: &str, reason: impl Into<String>) {
+        let derived = self.session_mut(session_id);
+        derived.failures = derived.failures.saturating_add(1);
+        derived.last_error = Some(reason.into());
+        let _ = self.persist();
+    }
+
+    pub(crate) fn status(&self, session_id: &str) -> ContextMaintenanceStatus {
+        let occupied_tokens = self.occupied(session_id);
+        let damaged_error = self.damaged.then(|| {
+            format!(
+                "context maintenance file ({MAINTENANCE_FILE}) is damaged and cannot be overwritten"
+            )
+        });
+        match self.sessions.get(session_id) {
+            Some(derived) => ContextMaintenanceStatus {
+                session_id: session_id.to_owned(),
+                damaged: self.damaged,
+                occupied_tokens,
+                summaries: derived.summaries.len(),
+                compressions: derived.compressions.len(),
+                failures: derived.failures,
+                last_error: derived.last_error.clone().or(damaged_error),
+            },
+            None => ContextMaintenanceStatus {
+                session_id: session_id.to_owned(),
+                damaged: self.damaged,
+                occupied_tokens,
+                summaries: 0,
+                compressions: 0,
+                failures: 0,
+                last_error: damaged_error,
+            },
+        }
+    }
+
+    pub(crate) fn persist(&self) -> Result<(), RuntimeError> {
         let Some(dir) = &self.dir else {
-            return;
+            return Ok(());
         };
         // A damaged file may still describe unknown usage. Do not replace it
         // with a snapshot that would report that usage as zero.
         if self.damaged {
-            return;
+            return Err(RuntimeError::Workspace(format!(
+                "context maintenance file ({MAINTENANCE_FILE}) is damaged and cannot be overwritten"
+            )));
         }
-        let Ok(bytes) = serde_json::to_vec_pretty(&snapshot(self)) else {
-            return;
-        };
-        let _ = write_private(&dir.join(MAINTENANCE_FILE), &bytes);
+        let bytes = serde_json::to_vec_pretty(&snapshot(self)).map_err(|error| {
+            RuntimeError::Workspace(format!("cannot serialize context maintenance: {error}"))
+        })?;
+        write_private(&dir.join(MAINTENANCE_FILE), &bytes).map_err(|error| {
+            RuntimeError::Workspace(format!("cannot persist context maintenance: {error}"))
+        })
     }
 }
 
 impl crate::Runtime {
+    /// Read derived context maintenance counts and recorded background failure state
+    /// for one session without mutating history.
+    pub fn context_maintenance_status(
+        &self,
+        session_id: &str,
+    ) -> Result<ContextMaintenanceStatus, RuntimeError> {
+        let _ = self.get(session_id)?;
+        Ok(crate::lock(&self.inner.context).status(session_id))
+    }
+
     /// Reconciles one maintenance reservation with the provider's reported
     /// usage. This path is independent from `reconcile_model_request`: it
     /// appends no Core model-request event, takes no model budget lock, and
@@ -335,14 +406,38 @@ impl crate::Runtime {
         input: MaintenanceReconciliation,
     ) -> Result<MaintenanceReconciliationRecord, RuntimeError> {
         let mut contexts = crate::lock(&self.inner.context);
+        let prev = {
+            let item = reservation_mut(
+                &mut contexts,
+                &input.session_id,
+                input.reservation_id,
+                input.attempt,
+            )?;
+            (item.state, item.confirmed, item.overage)
+        };
         let overage = contexts.reconcile(
             &input.session_id,
             input.reservation_id,
             input.attempt,
             input.confirmed_tokens,
         )?;
+        if let Err(error) = contexts.persist() {
+            if let Ok(item) = reservation_mut(
+                &mut contexts,
+                &input.session_id,
+                input.reservation_id,
+                input.attempt,
+            ) {
+                item.state = prev.0;
+                item.confirmed = prev.1;
+                item.overage = prev.2;
+            }
+            let derived = contexts.session_mut(&input.session_id);
+            derived.failures = derived.failures.saturating_add(1);
+            derived.last_error = Some(error.to_string());
+            return Err(error);
+        }
         let occupied_tokens = contexts.occupied(&input.session_id);
-        contexts.persist();
         Ok(MaintenanceReconciliationRecord {
             session_id: input.session_id,
             reservation_id: input.reservation_id,
@@ -369,6 +464,7 @@ fn load(dir: &Path) -> (BTreeMap<String, Derived>, bool) {
         return (BTreeMap::new(), true);
     };
     let mut damaged = false;
+    let keep_derived = stored.version >= SNAPSHOT_VERSION;
     let sessions = stored
         .sessions
         .into_iter()
@@ -380,10 +476,13 @@ fn load(dir: &Path) -> (BTreeMap<String, Derived>, bool) {
             let mut ledger = MaintenanceLedger::default();
             for reservation in item.reservations {
                 // An unrecognized kind or state keeps the usage occupied. It
-                // is never turned into a settled zero.
+                // is never turned into a settled zero. Any crash-abandoned
+                // "reserved" entry from an earlier process becomes Unknown so
+                // its usage stays occupied without freezing future maintenance.
                 let kind = match reservation.kind.as_str() {
                     "compression" => JobKind::Compression,
                     "summary" => JobKind::Summary,
+                    "memory_writer" => JobKind::MemoryWriter,
                     _ => {
                         damaged = true;
                         JobKind::Summary
@@ -391,8 +490,7 @@ fn load(dir: &Path) -> (BTreeMap<String, Derived>, bool) {
                 };
                 let state = match reservation.state.as_str() {
                     "settled" => ReservationState::Settled,
-                    "reserved" => ReservationState::Reserved,
-                    "unknown" => ReservationState::Unknown,
+                    "reserved" | "unknown" => ReservationState::Unknown,
                     _ => {
                         damaged = true;
                         ReservationState::Unknown
@@ -414,11 +512,21 @@ fn load(dir: &Path) -> (BTreeMap<String, Derived>, bool) {
             Some((
                 session_id,
                 Derived {
-                    summaries: item.summaries,
-                    compressions: item.compressions,
+                    summaries: if keep_derived {
+                        item.summaries
+                    } else {
+                        Vec::new()
+                    },
+                    compressions: if keep_derived {
+                        item.compressions
+                    } else {
+                        Vec::new()
+                    },
                     ledger,
                     epoch: item.epoch,
-                    frontier: item.frontier,
+                    frontier: if keep_derived { item.frontier } else { 0 },
+                    failures: item.failures,
+                    last_error: item.last_error,
                 },
             ))
         })
@@ -426,7 +534,6 @@ fn load(dir: &Path) -> (BTreeMap<String, Derived>, bool) {
     (sessions, damaged)
 }
 
-#[allow(dead_code)]
 fn reservation_mut<'a>(
     contexts: &'a mut SessionContexts,
     session_id: &str,
@@ -463,6 +570,7 @@ fn snapshot(contexts: &SessionContexts) -> serde_json::Value {
                         "kind": match item.kind {
                             JobKind::Summary => "summary",
                             JobKind::Compression => "compression",
+                            JobKind::MemoryWriter => "memory_writer",
                         },
                         "start_cursor": item.start_cursor,
                         "end_cursor": item.end_cursor,
@@ -482,6 +590,8 @@ fn snapshot(contexts: &SessionContexts) -> serde_json::Value {
                 serde_json::json!({
                     "epoch": derived.epoch,
                     "frontier": derived.frontier,
+                    "failures": derived.failures,
+                    "last_error": derived.last_error,
                     "summaries": derived.summaries,
                     "compressions": derived.compressions,
                     "reservations": reservations,
@@ -489,7 +599,10 @@ fn snapshot(contexts: &SessionContexts) -> serde_json::Value {
             )
         })
         .collect::<serde_json::Map<_, _>>();
-    serde_json::json!({ "sessions": sessions })
+    serde_json::json!({
+        "version": SNAPSHOT_VERSION,
+        "sessions": sessions,
+    })
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -506,7 +619,71 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::rename(&temporary, path)
 }
 
-#[allow(dead_code)]
+pub(crate) fn effective_input_budget(
+    window: Option<u64>,
+    output_reserve: u64,
+) -> Result<cayw_context::InputBudget, RuntimeError> {
+    let margin = cayw_context::DEFAULT_PROTOCOL_MARGIN;
+    match input_budget(window, output_reserve, margin) {
+        Ok(budget) => Ok(budget),
+        Err(_) if window.is_none() && output_reserve > 0 => {
+            let fallback_window = output_reserve
+                .saturating_add(margin)
+                .saturating_add(cayw_context::CONSERVATIVE_CONTEXT_WINDOW);
+            let mut budget = input_budget(Some(fallback_window), output_reserve, margin)
+                .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+            budget.window_was_default = true;
+            Ok(budget)
+        }
+        Err(error) => Err(RuntimeError::InvalidInput(error.to_string())),
+    }
+}
+
+pub(crate) fn publish_summary(
+    context: &Mutex<SessionContexts>,
+    session_id: &str,
+    record: SummaryRecord,
+    units: Option<&[SourceUnit]>,
+) -> Result<VersionDecision, RuntimeError> {
+    let mut contexts = crate::lock(context);
+    let decision = {
+        let derived = contexts.session_mut(session_id);
+        accept_summary(&derived.summaries, &record)
+            .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
+    };
+    if decision == VersionDecision::Accepted {
+        let prev_frontier = {
+            let derived = contexts.session_mut(session_id);
+            let prev_frontier = derived.frontier;
+            derived.summaries.push(record);
+            if let Some(units) = units {
+                if let Some(frontier) = compute_frontier(units, &derived.summaries) {
+                    derived.frontier = frontier;
+                }
+            } else if let Ok(frontier) = advance_frontier(
+                derived.frontier,
+                &derived
+                    .summaries
+                    .iter()
+                    .map(|summary| (summary.start_cursor, summary.end_cursor))
+                    .collect::<Vec<_>>(),
+            ) {
+                derived.frontier = frontier;
+            }
+            prev_frontier
+        };
+        if let Err(error) = contexts.persist() {
+            let derived = contexts.session_mut(session_id);
+            derived.summaries.pop();
+            derived.frontier = prev_frontier;
+            derived.failures = derived.failures.saturating_add(1);
+            derived.last_error = Some(error.to_string());
+            return Err(error);
+        }
+    }
+    Ok(decision)
+}
+
 pub(crate) fn publish_compression(
     context: &Mutex<SessionContexts>,
     session_id: &str,
@@ -519,11 +696,109 @@ pub(crate) fn publish_compression(
             .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
     };
     if decision == VersionDecision::Accepted {
-        contexts.release_local(session_id, JobKind::Compression, record.covered_through);
         contexts.session_mut(session_id).compressions.push(record);
-        contexts.persist();
+        if let Err(error) = contexts.persist() {
+            let derived = contexts.session_mut(session_id);
+            derived.compressions.pop();
+            derived.failures = derived.failures.saturating_add(1);
+            derived.last_error = Some(error.to_string());
+            return Err(error);
+        }
     }
     Ok(decision)
+}
+
+pub(crate) struct MaintenanceInspection {
+    pub budget: cayw_context::InputBudget,
+    pub input_tokens: u64,
+    pub units: Vec<SourceUnit>,
+    pub pending_summaries: Vec<cayw_context::PendingSummary>,
+    pub compression_job: Option<cayw_context::CompressionJob>,
+    pub summaries: Vec<SummaryRecord>,
+    pub compressions: Vec<CompressionRecord>,
+}
+
+pub(crate) fn inspect_maintenance(
+    context: &Mutex<SessionContexts>,
+    session_id: &str,
+    messages: &[Message],
+    ranges: &[cayw_context::CursorRange],
+    window: Option<u64>,
+    output_reserve: u64,
+) -> Result<Option<MaintenanceInspection>, RuntimeError> {
+    if messages.is_empty() {
+        return Ok(None);
+    }
+    let budget = effective_input_budget(window, output_reserve)?;
+    let spans = units_from_ranges(messages, ranges);
+    let units = spans
+        .iter()
+        .map(|span| span.unit.clone())
+        .collect::<Vec<_>>();
+    let mut contexts = crate::lock(context);
+    let (planned, compressions, prev_len, prev_frontier) = {
+        let derived = contexts.session_mut(session_id);
+        let planned = plan(&ContextInput {
+            session_id,
+            units: &units,
+            summaries: &derived.summaries,
+            compressions: &derived.compressions,
+            budget,
+            epoch: derived.epoch,
+        })
+        .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+        (
+            planned,
+            derived.compressions.clone(),
+            derived.summaries.len(),
+            derived.frontier,
+        )
+    };
+    let mut changed = false;
+    for summary in &planned.new_summaries {
+        let accept = contexts
+            .sessions
+            .get(session_id)
+            .map(|derived| accept_summary(&derived.summaries, summary))
+            .transpose()
+            .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+        if accept == Some(VersionDecision::Accepted) {
+            contexts
+                .session_mut(session_id)
+                .summaries
+                .push(summary.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        {
+            let derived = contexts.session_mut(session_id);
+            if let Some(frontier) = compute_frontier(&units, &derived.summaries) {
+                derived.frontier = frontier;
+            }
+        }
+        if let Err(error) = contexts.persist() {
+            let derived = contexts.session_mut(session_id);
+            derived.summaries.truncate(prev_len);
+            derived.frontier = prev_frontier;
+            derived.failures = derived.failures.saturating_add(1);
+            derived.last_error = Some(error.to_string());
+        }
+    }
+    let summaries = contexts.summaries(session_id);
+    Ok(Some(MaintenanceInspection {
+        budget,
+        input_tokens: planned
+            .assembly
+            .as_ref()
+            .map(|assembly| assembly.input_tokens)
+            .unwrap_or(planned.input_tokens),
+        units,
+        pending_summaries: planned.pending_summaries,
+        compression_job: planned.compression_job,
+        summaries,
+        compressions,
+    }))
 }
 
 #[cfg(test)]
@@ -548,17 +823,13 @@ pub(crate) fn prepare_provider_input_with_ranges(
     if messages.is_empty() {
         return Ok(Vec::new());
     }
-    let budget = match input_budget(
-        window,
-        output_reserve,
-        cayw_context::DEFAULT_PROTOCOL_MARGIN,
-    ) {
+    let budget = match effective_input_budget(window, output_reserve) {
         Ok(budget) => budget,
         // A missing window is the conservative estimate, not the provider's
-        // real limit. If the requested output reserve already fills it, skip
-        // local assembly instead of refusing a request the provider may accept.
-        Err(_) if window.is_none() => return Ok(messages.to_vec()),
-        Err(error) => return Err(RuntimeError::InvalidInput(error.to_string())),
+        // real limit. If an extreme output reserve exceeds the planner ceiling,
+        // skip local assembly instead of refusing a request the provider may accept.
+        Err(_) if window.is_none() && output_reserve > 0 => return Ok(messages.to_vec()),
+        Err(error) => return Err(error),
     };
     let spans = units_from_ranges(messages, ranges);
     let units = spans
@@ -566,21 +837,29 @@ pub(crate) fn prepare_provider_input_with_ranges(
         .map(|span| span.unit.clone())
         .collect::<Vec<_>>();
     let mut contexts = crate::lock(context);
-    let planned = {
+    let (planned, prev_len, prev_frontier) = {
         let derived = contexts.session_mut(session_id);
-        plan(&ContextInput {
-            session_id,
-            units: &units,
-            summaries: &derived.summaries,
-            compressions: &derived.compressions,
-            budget,
-            epoch: derived.epoch,
-        })
+        (
+            plan(&ContextInput {
+                session_id,
+                units: &units,
+                summaries: &derived.summaries,
+                compressions: &derived.compressions,
+                budget,
+                epoch: derived.epoch,
+            }),
+            derived.summaries.len(),
+            derived.frontier,
+        )
     };
     let planned = match planned {
         Ok(planned) => planned,
-        Err(_) if budget.window_was_default => return Ok(messages.to_vec()),
-        Err(_) => {
+        Err(error) if budget.window_was_default => {
+            contexts.record_error(session_id, error.to_string());
+            return Ok(messages.to_vec());
+        }
+        Err(error) => {
+            contexts.record_error(session_id, error.to_string());
             let raw = message_tokens(messages);
             return if raw > budget.input_limit {
                 Err(RuntimeError::Budget("context input"))
@@ -605,78 +884,6 @@ pub(crate) fn prepare_provider_input_with_ranges(
             changed = true;
         }
     }
-    for pending in &planned.pending_summaries {
-        if contexts
-            .reserve(
-                session_id,
-                ReservationSpec {
-                    kind: JobKind::Summary,
-                    start_cursor: pending.start_cursor,
-                    end_cursor: pending.end_cursor,
-                    input_bytes: pending.input_bytes,
-                    margin: budget.margin,
-                    output_max: budget.output_reserve,
-                },
-            )
-            .is_ok()
-        {
-            changed = true;
-        }
-        if let Some(unit) = units.iter().find(|unit| {
-            unit.start_cursor == pending.start_cursor && unit.end_cursor == pending.end_cursor
-        }) && let Ok(record) = build_pending_summary(
-            session_id,
-            unit,
-            &contexts.session_mut(session_id).summaries,
-        ) {
-            let accept = accept_summary(&contexts.session_mut(session_id).summaries, &record)
-                .unwrap_or(VersionDecision::Stale);
-            if accept == VersionDecision::Accepted {
-                contexts.release_local(session_id, JobKind::Summary, record.end_cursor);
-                contexts.session_mut(session_id).summaries.push(record);
-                changed = true;
-            }
-        }
-    }
-    if let Some(job) = &planned.compression_job {
-        if contexts
-            .reserve(
-                session_id,
-                ReservationSpec {
-                    kind: JobKind::Compression,
-                    start_cursor: job.start_cursor,
-                    end_cursor: job.covered_through,
-                    input_bytes: job.input_bytes,
-                    margin: budget.margin,
-                    output_max: budget.output_reserve,
-                },
-            )
-            .is_ok()
-        {
-            changed = true;
-        }
-        let record = {
-            let derived = contexts.session_mut(session_id);
-            build_compression_record(
-                session_id,
-                job,
-                &units,
-                &derived.summaries,
-                &derived.compressions,
-                budget.replace_at,
-            )
-        };
-        if let Ok(record) = record {
-            let accept =
-                accept_compression(&contexts.session_mut(session_id).compressions, &record)
-                    .unwrap_or(VersionDecision::Stale);
-            if accept == VersionDecision::Accepted {
-                contexts.release_local(session_id, JobKind::Compression, record.covered_through);
-                contexts.session_mut(session_id).compressions.push(record);
-                changed = true;
-            }
-        }
-    }
     {
         let derived = contexts.session_mut(session_id);
         if let Some(frontier) = compute_frontier(&units, &derived.summaries) {
@@ -684,8 +891,12 @@ pub(crate) fn prepare_provider_input_with_ranges(
         }
         derived.epoch = derived.epoch.saturating_add(1);
     }
-    if changed {
-        contexts.persist();
+    if changed && let Err(error) = contexts.persist() {
+        let derived = contexts.session_mut(session_id);
+        derived.summaries.truncate(prev_len);
+        derived.frontier = prev_frontier;
+        derived.failures = derived.failures.saturating_add(1);
+        derived.last_error = Some(error.to_string());
     }
     let replacement = planned.assembly.as_ref().and_then(|assembly| {
         if apply_assembly(assembly, budget.window_was_default) {
@@ -710,6 +921,18 @@ pub(crate) struct UnitSpan {
     pub unit: SourceUnit,
     pub msg_from: usize,
     pub msg_to: usize,
+}
+
+fn merge_unit_kind(left: UnitKind, right: UnitKind) -> UnitKind {
+    if left == UnitKind::Active || right == UnitKind::Active {
+        UnitKind::Active
+    } else if left == UnitKind::ToolExchange || right == UnitKind::ToolExchange {
+        UnitKind::ToolExchange
+    } else if left == UnitKind::CompletedTurn || right == UnitKind::CompletedTurn {
+        UnitKind::CompletedTurn
+    } else {
+        UnitKind::Fixed
+    }
 }
 
 pub(crate) fn units_from_ranges(
@@ -769,7 +992,9 @@ pub(crate) fn units_from_ranges(
             Message::Assistant(assistant) => {
                 let calls = assistant.tool_calls();
                 if calls.is_empty() {
-                    let kind = if index + 1 == messages.len() {
+                    let kind = if assistant.stop_reason == cayw_ai::StopReason::Pending
+                        || assistant.stop_reason.is_failure()
+                    {
                         UnitKind::Active
                     } else {
                         UnitKind::CompletedTurn
@@ -818,6 +1043,38 @@ pub(crate) fn units_from_ranges(
         if start_cursor == 0 {
             start_cursor = 1;
         }
+        if use_ranges
+            && let Some(prev) = spans.last_mut()
+            && prev.unit.start_cursor == start_cursor
+            && prev.unit.end_cursor == end_cursor
+        {
+            let prev_was_fixed = prev.unit.kind == UnitKind::Fixed;
+            prev.msg_to = to;
+            prev.unit.kind = merge_unit_kind(prev.unit.kind, kind);
+            prev.unit.outcome_unknown |= outcome_unknown;
+            prev.unit.pin_original |= pin_original;
+            if prev.unit.kind == UnitKind::Fixed {
+                if !text.is_empty() {
+                    if !prev.unit.text.is_empty() {
+                        prev.unit.text.push('\n');
+                    }
+                    prev.unit.text.push_str(&text);
+                }
+            } else if prev_was_fixed {
+                prev.unit.text = if kind == UnitKind::Fixed {
+                    String::new()
+                } else {
+                    text
+                };
+            } else if kind != UnitKind::Fixed && !text.is_empty() {
+                if !prev.unit.text.is_empty() {
+                    prev.unit.text.push('\n');
+                }
+                prev.unit.text.push_str(&text);
+            }
+            index = to;
+            continue;
+        }
         if let Some(prev) = spans.last()
             && start_cursor <= prev.unit.end_cursor
         {
@@ -842,7 +1099,9 @@ pub(crate) fn units_from_ranges(
         });
         index = to;
     }
-    if let Some(last) = spans.last_mut() {
+    if matches!(messages.last(), Some(Message::ToolResult(_)))
+        && let Some(last) = spans.last_mut()
+    {
         last.unit.pin_original = true;
     }
     spans
@@ -876,156 +1135,6 @@ fn compute_frontier(units: &[SourceUnit], summaries: &[SummaryRecord]) -> Option
         ready.push((summary.start_cursor, summary.end_cursor));
     }
     advance_frontier(0, &ready).ok()
-}
-
-fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
-}
-
-fn build_pending_summary(
-    session_id: &str,
-    unit: &SourceUnit,
-    existing: &[SummaryRecord],
-) -> Result<SummaryRecord, cayw_context::ContextError> {
-    let mut evidence = vec![cayw_context::log_id(session_id, unit.start_cursor)?];
-    if unit.end_cursor != unit.start_cursor {
-        evidence.push(cayw_context::log_id(session_id, unit.end_cursor)?);
-    }
-    let version = existing
-        .iter()
-        .filter(|item| item.start_cursor == unit.start_cursor && item.end_cursor == unit.end_cursor)
-        .map(|item| item.version)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let prefix = format!(
-        "[summary {session_id}:{}-{}] ",
-        unit.start_cursor, unit.end_cursor
-    );
-    let condensed = unit.text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let source = if condensed.is_empty() {
-        unit.text.as_str()
-    } else {
-        condensed.as_str()
-    };
-    let max_total = (unit.text.len() / 2).clamp(32, 200);
-    let max_body = max_total.saturating_sub(prefix.len() + 3).max(8);
-    let body = truncate_on_char_boundary(source, max_body);
-    let text = if body.len() < source.len() {
-        format!("{prefix}{body}...")
-    } else {
-        format!("{prefix}{body}")
-    };
-    Ok(SummaryRecord {
-        summary_id: format!(
-            "sum-{session_id}-{}-{}-v{version}",
-            unit.start_cursor, unit.end_cursor
-        ),
-        version,
-        session_id: session_id.to_owned(),
-        kind: if unit.kind == UnitKind::ToolExchange {
-            cayw_context::SummaryKind::Segment
-        } else {
-            cayw_context::SummaryKind::UserTurn
-        },
-        start_cursor: unit.start_cursor,
-        end_cursor: unit.end_cursor,
-        text,
-        evidence,
-        local_reuse: false,
-    })
-}
-
-fn build_compression_record(
-    session_id: &str,
-    job: &cayw_context::CompressionJob,
-    units: &[SourceUnit],
-    summaries: &[SummaryRecord],
-    compressions: &[CompressionRecord],
-    replace_at: u64,
-) -> Result<CompressionRecord, cayw_context::ContextError> {
-    let version = compressions
-        .iter()
-        .map(|record| record.version)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    let covered_units: Vec<&SourceUnit> = units
-        .iter()
-        .filter(|unit| {
-            matches!(unit.kind, UnitKind::CompletedTurn | UnitKind::ToolExchange)
-                && !unit.pin_original
-                && !unit.outcome_unknown
-                && unit.end_cursor <= job.covered_through
-        })
-        .collect();
-    let mut evidence = Vec::new();
-    let mut parts = Vec::new();
-    for unit in &covered_units {
-        let start_id = cayw_context::log_id(session_id, unit.start_cursor)?;
-        if !evidence.contains(&start_id) {
-            evidence.push(start_id);
-        }
-        if unit.end_cursor != unit.start_cursor {
-            let end_id = cayw_context::log_id(session_id, unit.end_cursor)?;
-            if !evidence.contains(&end_id) {
-                evidence.push(end_id);
-            }
-        }
-        if let Some(summary) = summaries
-            .iter()
-            .filter(|s| s.start_cursor == unit.start_cursor && s.end_cursor == unit.end_cursor)
-            .max_by_key(|s| s.version)
-        {
-            parts.push(
-                truncate_on_char_boundary(&summary.text, 96)
-                    .trim()
-                    .to_owned(),
-            );
-        } else {
-            let snippet = unit.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            parts.push(truncate_on_char_boundary(&snippet, 96).to_owned());
-        }
-    }
-    if evidence.is_empty() {
-        evidence.push(cayw_context::log_id(session_id, job.covered_through)?);
-    }
-    let first_cursor = covered_units
-        .first()
-        .map(|unit| unit.start_cursor)
-        .unwrap_or(job.start_cursor);
-    let prefix = format!(
-        "[compressed {session_id}:{}-{}] ",
-        first_cursor, job.covered_through
-    );
-    let joined_parts = parts.join(" | ");
-    let max_total = (replace_at as usize / 3)
-        .clamp(48, 384)
-        .min((job.input_bytes as usize).saturating_sub(1).max(32));
-    let max_body = max_total.saturating_sub(prefix.len() + 3).max(8);
-    let body = truncate_on_char_boundary(&joined_parts, max_body);
-    let text = if body.is_empty() {
-        prefix.trim_end().to_owned()
-    } else if body.len() < joined_parts.len() {
-        format!("{prefix}{body}...")
-    } else {
-        format!("{prefix}{body}")
-    };
-    Ok(CompressionRecord {
-        compression_id: format!("comp-{session_id}-v{version}-{}", job.covered_through),
-        version,
-        session_id: session_id.to_owned(),
-        covered_through: job.covered_through,
-        text,
-        evidence,
-    })
 }
 
 fn unit(
@@ -1110,6 +1219,11 @@ fn render(
                 }
             }
             Piece::Compression { .. } | Piece::Summary { .. } => {
+                for message in &messages[from..to] {
+                    if matches!(message, Message::System(_) | Message::Custom { .. }) {
+                        rendered.push(message.clone());
+                    }
+                }
                 rendered.push(Message::system(text.to_owned()));
             }
         }
@@ -1124,7 +1238,7 @@ fn render(
 
 fn excerpt_message(message: &Message, excerpt: &str) -> Message {
     match message {
-        Message::ToolResult(result) => {
+        Message::ToolResult(result) if cayw_ai::content_text(&result.content).len() > 8 * 1024 => {
             let mut copy = result.clone();
             copy.content = vec![Content::text(excerpt)];
             Message::ToolResult(copy)
@@ -1234,7 +1348,7 @@ mod tests {
                 .reserve(&session, spec(JobKind::Summary, 1, 2, 10, 2, 5))
                 .unwrap();
             contexts.mark_unknown(&session, id, 1).unwrap();
-            contexts.persist();
+            contexts.persist().unwrap();
             id
         };
         // Hold this session's budget lock. Reconciliation must not wait for it.
@@ -1747,7 +1861,7 @@ mod tests {
     }
 
     #[test]
-    fn crossing_compress_threshold_publishes_compression_that_replaces_at_limit() {
+    fn prepare_provider_input_does_not_fabricate_synchronous_prefix_summaries_or_compressions() {
         let mut assistant = AssistantMessage::new(&Model::new("fixture", "model"));
         assistant.content.push(Content::text("A".repeat(200)));
         let messages = vec![
@@ -1764,29 +1878,205 @@ mod tests {
         let first =
             prepare_provider_input_with_ranges(&context, "s", &messages, &ranges, Some(1_450), 1)
                 .unwrap();
-        assert_eq!(
-            first, messages,
-            "below replace_at the original messages are sent"
+        assert_eq!(first, messages);
+        assert!(
+            context.lock().unwrap().summaries("s").is_empty(),
+            "long turns wait for background model maintenance instead of synchronous prefix truncation"
         );
-        let compressions = context.lock().unwrap().sessions["s"].compressions.clone();
-        assert_eq!(
-            compressions.len(),
-            1,
-            "crossing compress_at must publish a CompressionRecord"
+        assert!(
+            context.lock().unwrap().compressions("s").is_empty(),
+            "compression runs as background model maintenance instead of synchronous prefix truncation"
         );
-        assert_eq!(compressions[0].covered_through, 20);
+    }
+
+    #[test]
+    fn forked_session_equal_cursors_merge_without_fake_cursor_shift() {
+        let mut system = Message::system("rules");
+        if let Message::System(inner) = &mut system {
+            inner.tools_added.push(ToolDefinition {
+                name: "execute_code".into(),
+                description: "run code".into(),
+                parameters: serde_json::json!({}),
+            });
+        }
+        let mut a1 = AssistantMessage::new(&Model::new("fixture", "model"));
+        a1.content.push(Content::text("inherited reply 1"));
+        let mut a2 = AssistantMessage::new(&Model::new("fixture", "model"));
+        a2.content.push(Content::text("inherited reply 2"));
+        let messages = vec![
+            system.clone(),
+            Message::user("inherited prompt 1"),
+            Message::Assistant(a1),
+            Message::user("inherited prompt 2"),
+            Message::Assistant(a2),
+            Message::user("post-fork prompt"),
+        ];
+        let ranges = vec![
+            cayw_context::CursorRange::new(2, 2).unwrap(),
+            cayw_context::CursorRange::new(2, 2).unwrap(),
+            cayw_context::CursorRange::new(2, 2).unwrap(),
+            cayw_context::CursorRange::new(2, 2).unwrap(),
+            cayw_context::CursorRange::new(2, 2).unwrap(),
+            cayw_context::CursorRange::new(5, 5).unwrap(),
+        ];
+        let spans = units_from_ranges(&messages, &ranges);
+        assert_eq!(spans.len(), 2);
         assert_eq!(
-            compressions[0].evidence,
-            vec!["s:10".to_string(), "s:20".to_string()]
+            (spans[0].unit.start_cursor, spans[0].unit.end_cursor),
+            (2, 2)
+        );
+        assert_eq!(
+            (spans[1].unit.start_cursor, spans[1].unit.end_cursor),
+            (5, 5)
         );
 
-        let replaced =
-            prepare_provider_input_with_ranges(&context, "s", &messages, &ranges, Some(1_250), 1)
-                .unwrap();
+        let context = Mutex::new(contexts());
+        prepare_provider_input_with_ranges(&context, "forked", &messages, &ranges, None, 1_024)
+            .unwrap();
+        let summaries = context.lock().unwrap().summaries("forked");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].evidence, vec!["forked:2".to_string()]);
+    }
+
+    #[test]
+    fn mid_transcript_tool_declarations_stay_intact_when_later_history_is_compressed() {
+        let mut tool_decl = Message::system("");
+        if let Message::System(inner) = &mut tool_decl {
+            inner.tools_added.push(ToolDefinition {
+                name: "execute_code".into(),
+                description: "run code".into(),
+                parameters: serde_json::json!({}),
+            });
+        }
+        let mut call1 = AssistantMessage::new(&Model::new("fixture", "model"));
+        call1.content.push(Content::ToolCall(ToolCall::new(
+            "c1",
+            "execute_code",
+            serde_json::json!({}),
+        )));
+        let res1 = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "c1".into(),
+            tool_name: "execute_code".into(),
+            content: vec![Content::text("O".repeat(400))],
+            details: None,
+            structured_content: None,
+            usage: None,
+            is_error: false,
+            outcome_unknown: false,
+            timestamp: 1,
+            duration_ms: Some(1),
+        });
+        let mut call2 = AssistantMessage::new(&Model::new("fixture", "model"));
+        call2.content.push(Content::ToolCall(ToolCall::new(
+            "c2",
+            "execute_code",
+            serde_json::json!({}),
+        )));
+        let res2 = Message::ToolResult(ToolResultMessage {
+            tool_call_id: "c2".into(),
+            tool_name: "execute_code".into(),
+            content: vec![Content::text("still active result")],
+            details: None,
+            structured_content: None,
+            usage: None,
+            is_error: false,
+            outcome_unknown: false,
+            timestamp: 2,
+            duration_ms: Some(1),
+        });
+        let messages = vec![
+            Message::system("base rules"),
+            Message::user("initial goal"),
+            tool_decl,
+            Message::Assistant(call1),
+            res1,
+            Message::Assistant(call2),
+            res2,
+            Message::user("CURRENT"),
+        ];
+        let context = Mutex::new(contexts());
+        publish_compression(
+            &context,
+            "s",
+            CompressionRecord {
+                compression_id: "comp-1".into(),
+                version: 1,
+                session_id: "s".into(),
+                covered_through: 5,
+                text: "compressed including post-declaration tool exchange".into(),
+                evidence: vec!["s:2".into(), "s:5".into()],
+            },
+        )
+        .unwrap();
+        let prepared = prepare_provider_input(&context, "s", &messages, Some(1_300), 1).unwrap();
         assert!(
-            replaced.len() < messages.len(),
-            "published compression must replace the covered prefix at replace_at"
+            prepared
+                .iter()
+                .any(|m| m.text() == "compressed including post-declaration tool exchange")
         );
-        assert_eq!(replaced.last().unwrap().text(), "CURRENT");
+        assert!(
+            !prepared.iter().any(|m| m.text().contains(&"O".repeat(400))),
+            "history after mid-transcript tool declaration must be replaced"
+        );
+        assert_eq!(
+            cayw_ai::current_system(&prepared).tools.len(),
+            1,
+            "tool declaration inside compressed range must stay active for remaining tool calls"
+        );
+    }
+
+    #[test]
+    fn legacy_v1_snapshot_drops_truncated_records_while_keeping_reservations_occupied() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(MAINTENANCE_FILE),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "sessions": {
+                    "s": {
+                        "epoch": 3,
+                        "frontier": 4,
+                        "summaries": [{
+                            "summary_id": "old",
+                            "version": 1,
+                            "session_id": "s",
+                            "kind": "user_turn",
+                            "start_cursor": 1,
+                            "end_cursor": 2,
+                            "text": "[summary s:1-2] truncated...",
+                            "evidence": ["s:1"],
+                            "local_reuse": false
+                        }],
+                        "compressions": [{
+                            "compression_id": "old-c",
+                            "version": 1,
+                            "session_id": "s",
+                            "covered_through": 2,
+                            "text": "[compressed s:1-2] truncated...",
+                            "evidence": ["s:1"]
+                        }],
+                        "reservations": [{
+                            "id": 1,
+                            "attempt": 1,
+                            "kind": "compression",
+                            "start_cursor": 1,
+                            "end_cursor": 2,
+                            "tokens": 42,
+                            "state": "reserved",
+                            "confirmed": null,
+                            "overage": false
+                        }]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut loaded = SessionContexts::new(Some(dir.path().to_path_buf()));
+        assert!(loaded.summaries("s").is_empty());
+        assert!(loaded.compressions("s").is_empty());
+        assert_eq!(loaded.occupied("s"), 42);
+        loaded
+            .reserve("s", spec(JobKind::Compression, 1, 4, 10, 2, 5))
+            .expect("abandoned reservation stays occupied as Unknown without freezing new jobs");
     }
 }

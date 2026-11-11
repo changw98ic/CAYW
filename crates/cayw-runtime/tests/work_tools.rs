@@ -223,10 +223,16 @@ end)
 local intent = cayw.call('work.notify.intent', {work_id=work.work_id, target='desk'})
 local notification_id = intent.notification.notification_id
 local next = cayw.call('work.notify.next', {notification_id=notification_id})
-local receipt = cayw.call('work.notify.receipt', {
-  notification_id=notification_id, status='delivered', receipt_ref='receipt-1'
-})
-local after_receipt = cayw.call('work.notify.next', {notification_id=notification_id})
+local model_receipt_ok = pcall(function()
+  cayw.call('work.notify.receipt', {
+    notification_id=notification_id, status='delivered', receipt_ref='receipt-1'
+  })
+end)
+assert(not model_receipt_ok, 'models must not be able to fabricate notification receipts')
+local sent = cayw.call('work.notify.send', {notification_id=notification_id, text='ready'})
+assert(sent.status == 'queued', 'local outbox write must stay queued, not delivered')
+assert(type(sent.receipt_ref) ~= 'string', 'local outbox write must not fabricate receipt_ref')
+local after_send = cayw.call('work.notify.next', {notification_id=notification_id})
 local listed = cayw.call('work.notify.list', {work_id=work.work_id})
 local stop = cayw.call('work.stop', {work_id=work.work_id})
 local after_stop = cayw.call('work.tasks', {work_id=work.work_id})
@@ -238,8 +244,8 @@ local fetched = cayw.call('work.get', {work_id=work.work_id})
 return {
   work=work, dispatch=dispatch, dispatch_again=dispatch_again, first=first,
   pause=pause, paused=paused, accept=accept, report_ok=report_ok,
-  bad_target=bad_target, intent=intent, next=next, receipt=receipt,
-  after_receipt=after_receipt, listed=listed, stop=stop,
+  bad_target=bad_target, intent=intent, next=next, sent=sent,
+  after_send=after_send, listed=listed, stop=stop,
   after_stop=after_stop, late=late, fetched=fetched,
 }
 "#
@@ -330,11 +336,17 @@ async fn main_session_manages_workitems_and_dispatches_through_the_client_router
     };
     assert!(failed("work.report", "the model says done"));
     assert!(failed("work.notify.intent", "not-configured"));
-    assert!(settled("work.notify.receipt", "receipt-1"));
+    assert!(settled("work.notify.send", "ready"));
+    assert!(events.iter().any(|record| {
+        record["event"]["type"] == "capability_settled"
+            && record["event"]["call"]["name"] == "work.notify.list"
+            && record["event"]["call"]["outcome"]["result"][0]["status"] == "queued"
+            && record["event"]["call"]["outcome"]["result"][0]["receipt_ref"].is_null()
+    }));
     assert!(events.iter().any(|record| {
         record["event"]["type"] == "capability_settled"
             && record["event"]["call"]["name"] == "work.notify.next"
-            && record["event"]["call"]["outcome"]["result"]["decision"] == "complete"
+            && record["event"]["call"]["outcome"]["result"]["decision"] == "await_delivery"
     }));
     assert_eq!(
         events
@@ -584,7 +596,8 @@ async fn rpc_work_pause_stop_proactive_trigger_and_notify_send_route_through_tar
     assert_eq!(stopped["targets"][0]["workspace"], "target");
     assert!(target.tasks(&target_session).unwrap()[0].cancel_requested);
 
-    // RPC notify.send prepares and records delivery receipt for a configured target.
+    // RPC notify.send writes to the local outbox with truthful `queued` status
+    // and no fabricated receipt_ref; host `notify.receipt` records real delivery.
     let sent = main
         .call(
             "notify.send",
@@ -597,13 +610,31 @@ async fn rpc_work_pause_stop_proactive_trigger_and_notify_send_route_through_tar
         )
         .await
         .unwrap();
-    assert_eq!(sent["status"], "delivered");
-    assert!(
-        sent["receipt_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("receipt:")
-    );
+    assert_eq!(sent["status"], "queued");
+    assert!(sent["receipt_ref"].is_null());
+    let next = main
+        .call(
+            "notify.next",
+            json!({"notification_id": sent["notification_id"]}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next, "await_delivery");
+    let delivered = main
+        .call(
+            "notify.receipt",
+            json!({
+                "notification_id": sent["notification_id"],
+                "status": "delivered",
+                "receipt_ref": "channel-msg-42"
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delivered["status"], "delivered");
+    assert_eq!(delivered["receipt_ref"], "channel-msg-42");
 }
 
 #[test]

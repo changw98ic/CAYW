@@ -380,11 +380,20 @@ fn public_models(models: &Models, selected: Option<&str>, fallback: Option<&str>
         .iter()
         .map(|(name, model)| (name.clone(), model.public_view()))
         .collect::<serde_json::Map<_, _>>();
+    let missing_window = models
+        .models
+        .iter()
+        .filter(|(_, model)| !model.has_context_window())
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     let mut response = json!({
         "selected": selected,
         "default": models.default,
         "models": profiles,
     });
+    if !missing_window.is_empty() {
+        response["context_window_missing"] = json!(missing_window);
+    }
     if let Some(fallback) = fallback {
         response["fallback"] = json!(fallback);
     }
@@ -660,6 +669,7 @@ impl Settings {
         if let Some(profile_name) = next_selection.as_deref() {
             write_selection(&self.paths, profile_name)?;
         }
+        let reloaded = hot_reload.is_some();
         if let Some(selection) = hot_reload {
             runtime.select_model(selection)?;
             self.available = true;
@@ -671,6 +681,16 @@ impl Settings {
             effective_name(&models, shown.as_deref()).as_deref(),
             choice.fallback.as_deref(),
         );
+        if let Some(warning) = choice
+            .model
+            .as_ref()
+            .and_then(|model| model.context_window_warning(runtime.is_main_session()))
+        {
+            if reloaded {
+                eprintln!("{warning}");
+            }
+            response["context_window_warning"] = json!(warning);
+        }
         response["health"] = serde_json::to_value(runtime.health()?)?;
         response["offline"] = json!(self.offline);
         Ok(response)

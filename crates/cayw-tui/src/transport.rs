@@ -417,24 +417,110 @@ async fn prompt_task(
     .map_err(failure)
 }
 
+fn select_active_external_task(tasks: &Value, session_id: &str, snapshot: &Value) -> Option<Value> {
+    let candidates: Vec<&Value> = tasks
+        .as_array()?
+        .iter()
+        .filter(|task| {
+            task["session_id"].as_str() == Some(session_id)
+                && task["id"].as_str().is_some_and(|id| !id.is_empty())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    if let Some(approval_task_id) = snapshot["pending_approvals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|approval| {
+            approval["input"]["task_id"]
+                .as_str()
+                .or_else(|| approval["task_id"].as_str())
+                .filter(|id| !id.is_empty())
+        })
+        && let Some(matched) = candidates.iter().find(|task| {
+            task["id"].as_str() == Some(approval_task_id)
+                && matches!(
+                    task["state"].as_str(),
+                    Some("waiting_approval" | "running" | "queued" | "draining")
+                )
+        })
+    {
+        return Some((*matched).clone());
+    }
+    if let Some(attempt_id) = snapshot["attempt"]["attempt_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        && let Some(matched) = candidates.iter().rev().find(|task| {
+            task["attempt_id"].as_str() == Some(attempt_id)
+                && matches!(task["state"].as_str(), Some("running" | "waiting_approval"))
+        })
+    {
+        return Some((*matched).clone());
+    }
+    for allowed in [
+        &["running", "waiting_approval"][..],
+        &["queued"][..],
+        &["draining"][..],
+    ] {
+        if let Some(found) = candidates.iter().rev().find(|task| {
+            task["state"]
+                .as_str()
+                .is_some_and(|state| allowed.contains(&state))
+        }) {
+            return Some((*found).clone());
+        }
+    }
+    None
+}
+
 async fn cancel_original_task(
     client: &Client,
     workspace_id: Option<&str>,
     params: &Value,
 ) -> Reply {
+    let session_id = params["session_id"].as_str().ok_or_else(|| Failure {
+        message: "Cancellation requires a Session ID".into(),
+        disconnected: false,
+    })?;
     let task_id = params["task_id"].as_str().ok_or_else(|| Failure {
         message: "Cancellation requires the original Task ID".into(),
         disconnected: false,
     })?;
-    let task = routed_request(client, workspace_id, "task.get", json!({"task_id":task_id}))
+    let task = if !task_id.is_empty() {
+        let task = routed_request(client, workspace_id, "task.get", json!({"task_id":task_id}))
+            .await
+            .map_err(failure)?;
+        if task["id"].as_str() != Some(task_id) || task["session_id"].as_str() != Some(session_id) {
+            return Err(Failure {
+                message: "Task response differs from the original cancellation target".into(),
+                disconnected: false,
+            });
+        }
+        task
+    } else {
+        let snapshot = routed_request(
+            client,
+            workspace_id,
+            "session.get",
+            json!({"session_id":session_id}),
+        )
         .await
         .map_err(failure)?;
-    if task["id"].as_str() != Some(task_id) || task["session_id"] != params["session_id"] {
-        return Err(Failure {
-            message: "Task response differs from the original cancellation target".into(),
-            disconnected: false,
-        });
-    }
+        let tasks = routed_request(
+            client,
+            workspace_id,
+            "session.tasks",
+            json!({"session_id":session_id}),
+        )
+        .await
+        .map_err(failure)?;
+        let Some(task) = select_active_external_task(&tasks, session_id, &snapshot) else {
+            return Ok(json!({"cancelled": false}));
+        };
+        task
+    };
     let target = json!({"session_id":task["session_id"],"task_id":task["id"],
         "worker_id":task["worker_id"],"attempt_id":task["attempt_id"],"fence":task["fence"]});
     routed_request(client, workspace_id, "session.cancel", target)

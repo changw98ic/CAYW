@@ -44,14 +44,25 @@ pub async fn run(workspace: &Path, explicit_config: Option<&Path>) -> Result<(),
             Err(error) => checks.push(failed("model_profiles", error.to_string())),
         }
     }
+    let is_main_session = explicit_config.is_none()
+        && cayw_runtime::local_cli::main_session_directory(None)
+            .ok()
+            .and_then(|directory| fs::canonicalize(directory).ok())
+            .is_some_and(|directory| directory == paths.workspace);
     match selected {
-        Some(model) => checks.push(json!({
-            "name":"model",
-            "status":"ok",
-            "message":"已选择模型；doctor 没有发送模型请求",
-            "model":model.public_view(),
-            "credential":if model.has_api_key() { "plain_file" } else { "none" },
-        })),
+        Some(model) => {
+            let window_warning = model.context_window_warning(is_main_session);
+            checks.push(json!({
+                "name":"model",
+                "status":if window_warning.is_none() { "ok" } else { "warning" },
+                "message":match window_warning {
+                    None => "已选择模型；doctor 没有发送模型请求".to_owned(),
+                    Some(msg) => format!("{msg} doctor 没有发送模型请求"),
+                },
+                "model":model.public_view(),
+                "credential":if model.has_api_key() { "plain_file" } else { "none" },
+            }));
+        }
         None => checks.push(warning(
             "model",
             "尚未选择模型；启动仍可继续，首次对话会提示运行 `cayw conf`",

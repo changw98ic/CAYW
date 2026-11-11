@@ -695,3 +695,66 @@ fn runtime_program_entry_disables_recovery_without_deleting_points() {
         false
     );
 }
+
+#[test]
+fn restore_accepts_over_256_paths_and_status_distinguishes_unborn_repo_from_damaged_files() {
+    let Some(git) = available_git() else {
+        return;
+    };
+    let fixture = Fixture::new();
+    let points = fixture.points(&git);
+
+    // Before any snapshot exists, unborn `refs/heads/recovery` reports `snapshot_count == 0` with no error.
+    let initial = points.status();
+    assert_eq!(initial["snapshot_count"], 0, "initial={initial}");
+    assert!(initial["points_error"].is_null(), "initial={initial}");
+    assert!(initial["state_error"].is_null(), "initial={initial}");
+
+    // Write 260 files (> old 256 cap), create a point, delete all 260, and restore them in one call.
+    let mut all_paths = Vec::with_capacity(260);
+    for idx in 0..260 {
+        let rel = format!("batch/file-{idx:03}.txt");
+        fixture.write(&rel, &format!("payload-{idx}\n"));
+        all_paths.push(rel);
+    }
+    let (snapshot, created, complete) = point(points.ensure_point("260-files").expect("snapshot"));
+    assert!(created);
+    assert!(complete);
+
+    for rel in &all_paths {
+        fs::remove_file(fixture.workspace.join(rel)).expect("delete before restore");
+    }
+    let report = points
+        .restore(RestoreRequest {
+            snapshot,
+            paths: all_paths.clone(),
+            confirm_overwrite: vec![],
+        })
+        .expect("restore > 256 files must succeed");
+    assert!(report.complete);
+    assert_eq!(report.restored.len(), 260);
+    assert_eq!(fixture.read("batch/file-259.txt"), "payload-259\n");
+
+    // Corrupt `state.json` and `repository.git/HEAD` -> `status()` surfaces explicit errors instead of `0`.
+    let recovery_dir = fixture.state.join("recovery");
+    fs::write(recovery_dir.join("state.json"), b"{corrupt").expect("corrupt state.json");
+    fs::write(
+        recovery_dir.join("repository.git").join("HEAD"),
+        b"not-a-valid-git-head\n",
+    )
+    .expect("corrupt HEAD");
+
+    let damaged = points.status();
+    assert!(
+        damaged["snapshot_count"].is_null(),
+        "damaged repository must report snapshot_count=null instead of 0: {damaged}"
+    );
+    assert!(
+        damaged["points_error"].is_string(),
+        "damaged repository must surface points_error: {damaged}"
+    );
+    assert!(
+        damaged["state_error"].is_string(),
+        "corrupted state.json must surface state_error: {damaged}"
+    );
+}

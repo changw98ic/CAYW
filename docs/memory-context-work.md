@@ -650,8 +650,8 @@ Git 恢复点用于在误删、误改后恢复文件，默认开启，可以按�
 
 `notification_id, work_id, work_version, target, content_ref, artifact_refs, status, receipt_ref, created_at, updated_at`
 
-- 发送前保存意图，发送后保存回执。
-- `accepted`、`sent`、`delivered`、`read` 分开记录，只使用服务实际提供的状态。
+- 发送前保存意图（`pending`）；写入本地待发队列时记录为 `queued`（`receipt_ref` 为空），不伪造送达回执；外部渠道返回真实状态后再保存回执。
+- `queued`、`accepted`、`sent`、`delivered`、`read` 分开记录，回执只使用外部服务实际提供的状态。
 - 结果不明时先查回执，不直接重发。
 - 工作完成与交付成功分开记录。产物已完成但交付失败时，保留待交付项，不重新计算。
 

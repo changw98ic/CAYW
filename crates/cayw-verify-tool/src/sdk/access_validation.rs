@@ -305,12 +305,15 @@ impl Snapshot {
                     "max_concurrent_runs",
                     "provider",
                     "model",
+                    "approval_mode",
                     "disabled_services",
                 ],
             ) && health["status"] == "ok"
                 && health["protocol_version"] == cayw_core::PROTOCOL_VERSION
                 && health["provider"] == report.specification["input"]["provider"]["provider"]
                 && health["model"] == report.specification["input"]["provider"]["id"]
+                && health["approval_mode"]
+                    == report.specification["configuration"]["runtime"]["approval_mode"]
                 && health["max_concurrent_runs"]
                     == report.specification["configuration"]["runtime"]["max_concurrent_runs"]
                 && health["queued"] == 0,

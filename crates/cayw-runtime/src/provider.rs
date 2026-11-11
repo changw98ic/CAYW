@@ -177,6 +177,33 @@ impl ProviderConfig {
         self.api_key.is_some()
     }
 
+    /// Recommended minimum context window for the main session (`128K` tokens).
+    pub const RECOMMENDED_MAIN_SESSION_WINDOW: u64 = 128 * 1024;
+
+    /// Whether an explicit `context_window` was configured for this model.
+    pub fn has_context_window(&self) -> bool {
+        self.context_window.is_some()
+    }
+
+    /// User-facing advisory when `context_window` is omitted or below the
+    /// recommended main-session size. Never blocks execution.
+    pub fn context_window_warning(&self, main_session: bool) -> Option<String> {
+        match self.context_window {
+            None => Some(format!(
+                "提示：模型 `{}` 未配置 context_window，补充前按保守默认窗口运行；建议在 `cayw conf` 中补充真实窗口。",
+                self.id
+            )),
+            Some(window) if main_session && window < Self::RECOMMENDED_MAIN_SESSION_WINDOW => {
+                Some(format!(
+                    "提示：主 session 当前模型 `{}` 的 context_window 为 {window}，低于推荐的 {}（128K）；仍可继续运行。",
+                    self.id,
+                    Self::RECOMMENDED_MAIN_SESSION_WINDOW
+                ))
+            }
+            Some(_) => None,
+        }
+    }
+
     /// Apply an explicit settings update without exposing a stored credential to the caller.
     /// Omitting a key preserves it only while the credential destination is unchanged.
     pub fn merge_saved_api_key(

@@ -395,6 +395,25 @@ fn notifications_save_intent_before_receipt_and_never_blindly_resend() {
         .is_err()
     );
 
+    let queued = work
+        .mark_notification_queued(&notification.notification_id)
+        .expect("queued in local outbox");
+    assert_eq!(queued.status, NotificationStatus::Queued);
+    assert_eq!(queued.receipt_ref, None);
+    assert_eq!(
+        work.notification_decision(&notification.notification_id)
+            .expect("decision"),
+        NotificationDecision::AwaitDelivery
+    );
+    assert!(
+        work.record_notification_receipt(
+            &notification.notification_id,
+            NotificationStatus::Queued,
+            "receipt",
+        )
+        .is_err()
+    );
+
     work.mark_notification_unknown(&notification.notification_id)
         .expect("unknown");
     assert_eq!(
@@ -443,10 +462,17 @@ fn notifications_save_intent_before_receipt_and_never_blindly_resend() {
 fn proactive_modes_merge_by_rule_and_condition_without_a_usage_cap() {
     let fixture = Fixture::new();
     let work = Arc::new(fixture.work_items());
+    work.create(spec(vec![path_check("out.txt")]))
+        .expect("create work-1");
     assert_eq!(
         work.trigger_proactive(ProactiveMode::Off, "rule-a", 1, "work-1", 10)
             .expect("off"),
         ProactiveTriggerOutcome::Ignored
+    );
+    // Unknown work items are rejected without burning `(rule_id, condition_version)`.
+    assert!(
+        work.trigger_proactive(ProactiveMode::Auto, "rule-missing", 1, "missing", 10)
+            .is_err()
     );
     let suggested = work
         .trigger_proactive(ProactiveMode::Observe, "rule-a", 1, "work-1", 10)

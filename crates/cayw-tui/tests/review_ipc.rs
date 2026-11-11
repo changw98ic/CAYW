@@ -494,3 +494,117 @@ async fn first_attach_and_refresh_read_all_real_event_pages_without_replaying_hi
     stop.cancel();
     server_task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn stopping_first_and_second_external_tasks_cancels_each_current_task() {
+    let fixture = support::OfflineRuntime::with_config(
+        RuntimeConfig::default(),
+        Some(CancellationToken::new()),
+    );
+    let runtime = fixture.runtime.clone();
+    let session = runtime.create(Some("external cancel TUI".into())).unwrap();
+    let id = session.id.clone();
+    let (address, stop, server_task) = server(runtime.clone()).await;
+    let owner = Client::connect(address, "review-offline-token")
+        .await
+        .unwrap();
+
+    let mut app = attached(serde_json::to_value(session).unwrap());
+    let mut driver = Driver::default();
+    let mut transport = Transport::start(address, "review-offline-token".into());
+    while !matches!(
+        next(&mut transport, "connect external cancel session").await,
+        Update::Connected
+    ) {}
+
+    // External task 1 starts from another client.
+    let ext1 = runtime.enqueue(&id, "external run 1").unwrap();
+    let runner1 = owner.clone();
+    let ext1_id = ext1.id.clone();
+    let run1 = tokio::spawn(async move {
+        runner1
+            .request("task.resume", json!({"task_id": ext1_id}))
+            .await
+    });
+    let snap1 = wait_partial(&owner, &id, "streamed fixture 你好").await;
+    app.upsert_snapshot(snap1, false).unwrap();
+
+    let commands = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert_eq!(
+        commands,
+        vec![Command::Cancel {
+            session_id: id.clone(),
+            task_id: String::new(),
+        }]
+    );
+    driver.dispatch(&mut app, &transport, commands);
+    loop {
+        let update = next(&mut transport, "cancel external task 1").await;
+        let done = matches!(&update, Update::Response { request, result: Ok(val) } if request.method == "session.cancel" && val["cancelled"] == json!(true));
+        let commands = driver.update(&mut app, update);
+        driver.dispatch(&mut app, &transport, commands);
+        if done {
+            break;
+        }
+    }
+    let _ = timeout(Duration::from_secs(8), run1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.task(&ext1.id).unwrap().state, TaskState::Cancelled);
+
+    // External task 2 starts immediately; TUI jumps straight to task 2's running snapshot.
+    let ext2 = runtime.enqueue(&id, "external run 2").unwrap();
+    let runner2 = owner.clone();
+    let ext2_id = ext2.id.clone();
+    let run2 = tokio::spawn(async move {
+        runner2
+            .request("task.resume", json!({"task_id": ext2_id}))
+            .await
+    });
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if runtime.task(&ext2.id).unwrap().state == TaskState::Running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let snap2 = owner
+        .request("session.get", json!({"session_id": &id}))
+        .await
+        .unwrap();
+    app.upsert_snapshot(snap2, false).unwrap();
+
+    let commands = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert_eq!(
+        commands,
+        vec![Command::Cancel {
+            session_id: id.clone(),
+            task_id: String::new(),
+        }],
+        "second external task must reset cancel_pending and dispatch a fresh cancel"
+    );
+    driver.dispatch(&mut app, &transport, commands);
+    loop {
+        let update = next(&mut transport, "cancel external task 2").await;
+        let done = matches!(&update, Update::Response { request, result: Ok(val) } if request.method == "session.cancel" && val["cancelled"] == json!(true));
+        let commands = driver.update(&mut app, update);
+        driver.dispatch(&mut app, &transport, commands);
+        if done {
+            break;
+        }
+    }
+    let _ = timeout(Duration::from_secs(8), run2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.task(&ext2.id).unwrap().state, TaskState::Cancelled);
+
+    transport.shutdown().await;
+    owner.close().await;
+    stop.cancel();
+    server_task.await.unwrap().unwrap();
+}

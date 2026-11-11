@@ -696,10 +696,17 @@ impl App {
                 .refresh_after
                 .filter(|cursor| *cursor > incoming.snapshot_cursor);
             incoming.synced = incoming.refresh_after.is_none();
+            let same_attempt = incoming.active_attempt == old.active_attempt;
             incoming.pending_prompt = old.pending_prompt.clone();
-            incoming.original_task_id = old.original_task_id.clone();
+            incoming.original_task_id = if incoming.pending_prompt.is_some() {
+                old.original_task_id.clone()
+            } else {
+                incoming.original_task_id
+            };
             incoming.request_pending = old.request_pending;
-            incoming.cancel_pending = old.cancel_pending && incoming.state != "idle";
+            incoming.cancel_pending = old.cancel_pending
+                && incoming.state != "idle"
+                && (incoming.pending_prompt.is_some() || same_attempt);
             incoming.decisions_pending = old
                 .decisions_pending
                 .iter()
@@ -795,6 +802,12 @@ impl App {
             }
             let attempt = AttemptIdentity::parse(&record["attempt"])?;
             let transition = next.stream_replay.event(id, attempt.as_ref(), event)?;
+            if let Some(AttemptTransition::Started(started)) = &transition
+                && next.pending_prompt.is_none()
+                && next.active_attempt.as_ref() != Some(started)
+            {
+                next.cancel_pending = false;
+            }
             if cursor > next.snapshot_cursor {
                 match transition {
                     Some(AttemptTransition::Started(attempt)) => {
@@ -881,6 +894,7 @@ impl App {
         self.clear_admitted_draft(id);
         if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
             session.request_pending = false;
+            session.original_task_id = None;
         }
     }
 
@@ -1034,6 +1048,7 @@ impl App {
                     // The editor still contains the original text unless the user
                     // edited it. Never restore over a newer draft or resend it.
                     session.pending_prompt = None;
+                    session.original_task_id = None;
                 } else if let Some(prompt) = &mut session.pending_prompt {
                     prompt.uncertain = true;
                 }
@@ -1075,17 +1090,26 @@ impl App {
                     if let Some(session) = self.selected_mut()
                         && !session.cancel_pending
                         && (session.request_pending
-                            || matches!(session.state.as_str(), "running" | "awaiting_approval"))
+                            || matches!(session.state.as_str(), "running" | "awaiting_approval")
+                            || !session.approvals.is_empty())
                     {
                         session.cancel_pending = true;
-                        if let Some(task_id) = &session.original_task_id {
+                        if session.pending_prompt.is_some() || session.request_pending {
+                            if let Some(task_id) = &session.original_task_id {
+                                return vec![Command::Cancel {
+                                    session_id: session.id.clone(),
+                                    task_id: task_id.clone(),
+                                }];
+                            }
+                            self.status =
+                                "Waiting for the original task admission before cancellation."
+                                    .into();
+                        } else {
                             return vec![Command::Cancel {
                                 session_id: session.id.clone(),
-                                task_id: task_id.clone(),
+                                task_id: String::new(),
                             }];
                         }
-                        self.status =
-                            "Waiting for the original task admission before cancellation.".into();
                     }
                     return vec![];
                 }

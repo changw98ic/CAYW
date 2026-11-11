@@ -24,7 +24,6 @@ use crate::RuntimeError;
 
 const MAX_TITLE_BYTES: usize = 1024;
 const MAX_GOAL_BYTES: usize = 64 * 1024;
-const MAX_CHECK_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
@@ -122,15 +121,6 @@ fn relative(path: &str) -> Result<PathBuf, RuntimeError> {
 
 fn read_check_file(workspace: &Path, path: &str) -> Result<String, RuntimeError> {
     let path = workspace.join(relative(path)?);
-    if std::fs::metadata(&path)
-        .map(|m| m.len())
-        .unwrap_or(u64::MAX)
-        > MAX_CHECK_FILE_BYTES
-    {
-        return Err(RuntimeError::Workspace(
-            "acceptance check file exceeds the byte bound".into(),
-        ));
-    }
     std::fs::read_to_string(&path)
         .map_err(|error| RuntimeError::Workspace(format!("acceptance check file: {error}")))
 }
@@ -431,19 +421,38 @@ pub enum ProactiveTriggerOutcome {
         condition_version: u64,
         work_id: String,
         dispatch_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     /// The same `(rule_id, condition_version)` already recorded usage and its
     /// dispatch intent. Concurrent triggers merge onto this one record.
     Duplicate {
         trigger_id: String,
         dispatch_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
+}
+
+impl ProactiveTriggerOutcome {
+    pub fn with_task_id(mut self, resolved_task_id: Option<String>) -> Self {
+        match &mut self {
+            Self::Dispatched { task_id, .. } | Self::Duplicate { task_id, .. } => {
+                if resolved_task_id.is_some() {
+                    *task_id = resolved_task_id;
+                }
+            }
+            Self::Ignored | Self::Suggested { .. } => {}
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationStatus {
     Pending,
+    Queued,
     Accepted,
     Sent,
     Delivered,
@@ -456,6 +465,7 @@ impl NotificationStatus {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Queued => "queued",
             Self::Accepted => "accepted",
             Self::Sent => "sent",
             Self::Delivered => "delivered",
@@ -468,6 +478,7 @@ impl NotificationStatus {
     fn parse(value: &str) -> Result<Self, RuntimeError> {
         match value {
             "pending" => Ok(Self::Pending),
+            "queued" => Ok(Self::Queued),
             "accepted" => Ok(Self::Accepted),
             "sent" => Ok(Self::Sent),
             "delivered" => Ok(Self::Delivered),
@@ -501,6 +512,8 @@ pub struct Notification {
 pub enum NotificationDecision {
     /// The intent is saved but no send attempt is recorded.
     Send,
+    /// Written to the local outbox; awaiting an external channel to deliver and report a receipt.
+    AwaitDelivery,
     /// The previous attempt's outcome is unknown. Query the receipt first.
     QueryReceipt,
     /// A real service status already arrived.
@@ -1178,7 +1191,25 @@ impl WorkItems {
             return Ok(ProactiveTriggerOutcome::Duplicate {
                 trigger_id,
                 dispatch_key,
+                task_id: None,
             });
+        }
+        let lifecycle: Option<String> = tx
+            .query_row(
+                "SELECT lifecycle FROM runtime_work_items WHERE work_id=?1",
+                [work_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(lifecycle) = lifecycle else {
+            return Err(RuntimeError::InvalidInput(format!(
+                "unknown work item: {work_id}"
+            )));
+        };
+        if mode == ProactiveMode::Auto && lifecycle != "open" {
+            return Err(RuntimeError::InvalidInput(format!(
+                "cannot dispatch proactive trigger while work item {work_id} is {lifecycle}"
+            )));
         }
         let (mode_text, action, dispatch_key) = match mode {
             ProactiveMode::Off => unreachable!("returned above"),
@@ -1216,9 +1247,33 @@ impl WorkItems {
                 condition_version,
                 work_id: work_id.into(),
                 dispatch_key: key,
+                task_id: None,
             },
             _ => unreachable!("only observe and auto reach this branch"),
         })
+    }
+
+    /// Look up the original `(rule_id, condition_version, work_id)` recorded for a
+    /// proactive `dispatch_key` so duplicate triggers can recover unfinished dispatches.
+    pub fn proactive_trigger_by_dispatch_key(
+        &self,
+        dispatch_key: &str,
+    ) -> Result<Option<(String, u64, String)>, RuntimeError> {
+        let db = lock(&self.connection);
+        let row: Option<(String, i64, String)> = db
+            .query_row(
+                "SELECT rule_id,condition_version,work_id FROM runtime_proactive_triggers WHERE dispatch_key=?1",
+                [dispatch_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(rule_id, version, work_id)| {
+            let condition_version = u64::try_from(version).map_err(|_| {
+                RuntimeError::InvalidInput("stored condition_version is negative".into())
+            })?;
+            Ok((rule_id, condition_version, work_id))
+        })
+        .transpose()
     }
 
     /// Save the send intent before any external action. The target must come
@@ -1287,6 +1342,15 @@ impl WorkItems {
         rows.into_iter().map(notification_from_row).collect()
     }
 
+    /// Record that the notification envelope has been persisted to the local
+    /// outbox and is waiting for an external delivery channel to report a receipt.
+    pub fn mark_notification_queued(
+        &self,
+        notification_id: &str,
+    ) -> Result<Notification, RuntimeError> {
+        self.set_notification(notification_id, NotificationStatus::Queued, None, true)
+    }
+
     /// A send attempt whose outcome is unknown. The next step is a receipt
     /// query, never a blind resend.
     pub fn mark_notification_unknown(
@@ -1304,7 +1368,7 @@ impl WorkItems {
     ) -> Result<Notification, RuntimeError> {
         if matches!(
             status,
-            NotificationStatus::Pending | NotificationStatus::Unknown
+            NotificationStatus::Pending | NotificationStatus::Queued | NotificationStatus::Unknown
         ) {
             return Err(RuntimeError::InvalidInput(
                 "a receipt needs a real service status".into(),
@@ -1368,6 +1432,7 @@ impl WorkItems {
             .ok_or_else(|| RuntimeError::InvalidInput("notification not found".into()))?;
         Ok(match notification.status {
             NotificationStatus::Pending => NotificationDecision::Send,
+            NotificationStatus::Queued => NotificationDecision::AwaitDelivery,
             NotificationStatus::Unknown => NotificationDecision::QueryReceipt,
             _ => NotificationDecision::Complete,
         })

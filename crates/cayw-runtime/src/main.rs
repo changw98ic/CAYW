@@ -62,7 +62,22 @@ impl WorkspaceHost {
         }
     }
 
+    pub(crate) async fn ensure_model_available(&self) -> Result<(), RpcError> {
+        let available = match self.settings.as_ref() {
+            Some(settings) => settings.lock().await.available,
+            None => self.model_available,
+        };
+        if !available {
+            return Err(RpcError::new(
+                "model_not_configured",
+                self.model_setup_hint.clone(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn shutdown(&self) -> Result<(), Box<dyn Error>> {
+        self.runtime.shutdown_background();
         let mut failures = Vec::new();
         #[cfg(feature = "plugins")]
         if let Some(settings) = self.settings.as_ref() {
@@ -121,16 +136,7 @@ impl WorkspaceHost {
                 | "task.enqueue_with_resources"
                 | "task.resume"
         ) {
-            let available = match self.settings.as_ref() {
-                Some(settings) => settings.lock().await.available,
-                None => self.model_available,
-            };
-            if !available {
-                return Err(RpcError::new(
-                    "model_not_configured",
-                    self.model_setup_hint.clone(),
-                ));
-            }
+            self.ensure_model_available().await?;
         }
         let mut response = self.runtime.call(method, params, cancel).await?;
         if method == "runtime.health"
@@ -707,6 +713,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
     let model_configuration = selected.as_ref().map(|model| model.public_view());
     let (provider, model): (Arc<dyn Provider>, Model) = if let Some(selected) = selected {
+        if let Some(warning) = selected.context_window_warning(config.main_session) {
+            eprintln!("{warning}");
+        }
         let configured = selected.build()?;
         (configured.provider, configured.model)
     } else if offline {

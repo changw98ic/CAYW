@@ -37,6 +37,9 @@ use crate::RuntimeError;
 pub const MEMORY_DIRECTORY: &str = "memory";
 const EVENTS_FILE: &str = "events.jsonl";
 const ENTRY_SUFFIX: &str = ".md";
+/// POSIX / macOS APFS filename component limit (`NAME_MAX = 255`) minus the
+/// 8-byte `.{entry_id}.md.tmp` atomic temporary filename wrapper.
+pub const MAX_MEMORY_ENTRY_ID_BYTES: usize = 255 - 8;
 
 /// Where one memory entry came from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +189,15 @@ pub struct RejectedCandidate {
     pub reason: String,
 }
 
+/// A background candidate retained for user review because an entry is `user_set`
+/// or changed concurrently on disk while the writer was running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMemoryCandidate {
+    pub candidate: MemoryCandidate,
+    pub reason: String,
+    pub at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryStatusView {
     pub memory_directory: String,
@@ -194,6 +206,10 @@ pub struct MemoryStatusView {
     pub user_set: usize,
     pub damaged: usize,
     pub forgotten_ranges: Vec<SourceRange>,
+    #[serde(default)]
+    pub writer_failures: u64,
+    #[serde(default)]
+    pub last_writer_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,12 +331,23 @@ pub struct MainMemory {
     state: Mutex<MemoryState>,
 }
 
+enum CandidateDecision {
+    Written(String),
+    Rejected(&'static str),
+}
+
 #[derive(Default)]
 struct MemoryState {
     known_versions: BTreeMap<String, String>,
     entries: BTreeMap<String, MemoryEntry>,
     forgotten: Vec<SourceRange>,
+    writer_frontiers: BTreeMap<String, u64>,
+    pending_candidates: Vec<PendingMemoryCandidate>,
     damaged: usize,
+    persisted_writer_failures: u64,
+    persisted_last_writer_error: Option<String>,
+    transient_writer_failures: u64,
+    transient_last_writer_error: Option<String>,
 }
 
 #[allow(dead_code)] // `at`, `reason` and the per-event audit fields are read from disk.
@@ -353,6 +380,21 @@ enum StoredEvent {
     },
     Forget {
         range: SourceRange,
+        reason: String,
+        at: u64,
+    },
+    WriterAdvanced {
+        session_id: String,
+        cursor: u64,
+        at: u64,
+    },
+    CandidatePending {
+        candidate: MemoryCandidate,
+        reason: String,
+        at: u64,
+    },
+    WriterFailed {
+        session_id: String,
         reason: String,
         at: u64,
     },
@@ -538,7 +580,36 @@ impl MainMemory {
                 .count(),
             damaged: state.damaged,
             forgotten_ranges: state.forgotten.clone(),
+            writer_failures: state
+                .persisted_writer_failures
+                .saturating_add(state.transient_writer_failures),
+            last_writer_error: state
+                .transient_last_writer_error
+                .clone()
+                .or_else(|| state.persisted_last_writer_error.clone()),
         })
+    }
+
+    pub fn record_writer_error(&self, session_id: &str, reason: impl Into<String>) {
+        let reason = reason.into();
+        let persisted = append_event(
+            &self.directory,
+            serde_json::json!({
+                "type": "writer_failed",
+                "session_id": session_id,
+                "reason": reason,
+                "at": now_ms(),
+            }),
+        )
+        .is_ok();
+        let mut state = crate::lock(&self.state);
+        if persisted {
+            state.persisted_writer_failures = state.persisted_writer_failures.saturating_add(1);
+            state.persisted_last_writer_error = Some(reason);
+        } else {
+            state.transient_writer_failures = state.transient_writer_failures.saturating_add(1);
+            state.transient_last_writer_error = Some(reason);
+        }
     }
 
     pub fn forgotten_ranges(&self) -> Result<Vec<SourceRange>, RuntimeError> {
@@ -626,16 +697,24 @@ impl MainMemory {
         evidence: &UserEvidence,
         candidates: &[MemoryCandidate],
     ) -> Result<ApplyReport, RuntimeError> {
+        self.apply_with_versions(evidence, candidates, None)
+    }
+
+    pub(crate) fn apply_with_versions(
+        &self,
+        evidence: &UserEvidence,
+        candidates: &[MemoryCandidate],
+        expected_versions: Option<&BTreeMap<String, String>>,
+    ) -> Result<ApplyReport, RuntimeError> {
         self.scan()?;
         let mut report = ApplyReport {
             written: Vec::new(),
             rejected: Vec::new(),
         };
         for candidate in candidates {
-            match self.apply_one(evidence, candidate) {
-                Ok(Some(entry_id)) => report.written.push(entry_id),
-                Ok(None) => {}
-                Err(reason) => report.rejected.push(RejectedCandidate {
+            match self.apply_one(evidence, candidate, expected_versions)? {
+                CandidateDecision::Written(entry_id) => report.written.push(entry_id),
+                CandidateDecision::Rejected(reason) => report.rejected.push(RejectedCandidate {
                     entry_id: candidate.entry_id.clone(),
                     reason: reason.to_owned(),
                 }),
@@ -644,46 +723,155 @@ impl MainMemory {
         Ok(report)
     }
 
+    pub fn writer_frontier(&self, session_id: &str) -> Result<u64, RuntimeError> {
+        let mut state = crate::lock(&self.state);
+        reload_events(&self.directory, &mut state)?;
+        Ok(state.writer_frontiers.get(session_id).copied().unwrap_or(0))
+    }
+
+    pub(crate) fn advance_writer_frontier(
+        &self,
+        session_id: &str,
+        cursor: u64,
+    ) -> Result<(), RuntimeError> {
+        if session_id.trim().is_empty() || cursor == 0 {
+            return Ok(());
+        }
+        let current = self.writer_frontier(session_id)?;
+        if cursor <= current {
+            return Ok(());
+        }
+        fs::create_dir_all(&self.directory).map_err(|error| {
+            RuntimeError::Workspace(format!("create memory directory: {error}"))
+        })?;
+        append_event(
+            &self.directory,
+            serde_json::json!({
+                "type": "writer_advanced",
+                "session_id": session_id,
+                "cursor": cursor,
+                "at": now_ms(),
+            }),
+        )?;
+        let mut state = crate::lock(&self.state);
+        let slot = state
+            .writer_frontiers
+            .entry(session_id.to_owned())
+            .or_insert(0);
+        *slot = (*slot).max(cursor);
+        Ok(())
+    }
+
+    pub fn pending_candidates(&self) -> Result<Vec<PendingMemoryCandidate>, RuntimeError> {
+        let mut state = crate::lock(&self.state);
+        reload_events(&self.directory, &mut state)?;
+        Ok(state.pending_candidates.clone())
+    }
+
+    fn record_pending_candidate(
+        &self,
+        candidate: &MemoryCandidate,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        fs::create_dir_all(&self.directory).map_err(|error| {
+            RuntimeError::Workspace(format!("create memory directory: {error}"))
+        })?;
+        let at = now_ms();
+        append_event(
+            &self.directory,
+            serde_json::json!({
+                "type": "candidate_pending",
+                "candidate": candidate,
+                "reason": reason,
+                "at": at,
+            }),
+        )?;
+        let mut state = crate::lock(&self.state);
+        state.pending_candidates.push(PendingMemoryCandidate {
+            candidate: candidate.clone(),
+            reason: reason.to_owned(),
+            at,
+        });
+        Ok(())
+    }
+
     fn apply_one(
         &self,
         evidence: &UserEvidence,
         candidate: &MemoryCandidate,
-    ) -> Result<Option<String>, &'static str> {
+        expected_versions: Option<&BTreeMap<String, String>>,
+    ) -> Result<CandidateDecision, RuntimeError> {
         if candidate.source_type == SourceType::UserSet {
-            return Err("background writes cannot set user_set");
+            return Ok(CandidateDecision::Rejected(
+                "background writes cannot set user_set",
+            ));
         }
         if candidate.source_log_ids.is_empty() {
-            return Err("a memory write needs user-input source logs");
+            return Ok(CandidateDecision::Rejected(
+                "a memory write needs user-input source logs",
+            ));
         }
         if candidate.kind.is_empty()
             || candidate.kind.contains('/')
             || candidate.kind.chars().any(char::is_control)
         {
-            return Err("memory kind is invalid");
+            return Ok(CandidateDecision::Rejected("memory kind is invalid"));
         }
         let state = crate::lock(&self.state);
         for log_id in &candidate.source_log_ids {
             if !evidence.contains(log_id) {
-                return Err("memory source is not user input");
+                return Ok(CandidateDecision::Rejected(
+                    "memory source is not user input",
+                ));
             }
             if state
                 .forgotten
                 .iter()
                 .any(|range| range_covers_log_id(range, log_id))
             {
-                return Err("memory source was forgotten");
+                return Ok(CandidateDecision::Rejected("memory source was forgotten"));
             }
         }
+        let duplicate_match = if candidate.entry_id.is_none()
+            && candidate.operation == MemoryOperation::Upsert
+            && !candidate.body.trim().is_empty()
+        {
+            state
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.status == MemoryStatus::Active
+                        && entry.kind == candidate.kind
+                        && entry.body.trim() == candidate.body.trim()
+                })
+                .cloned()
+        } else {
+            None
+        };
         drop(state);
         let existing = candidate
             .entry_id
             .as_ref()
-            .and_then(|entry_id| self.entry(entry_id));
+            .and_then(|entry_id| self.entry(entry_id))
+            .or(duplicate_match);
         if existing
             .as_ref()
             .is_some_and(|entry| entry.source_type == SourceType::UserSet)
         {
-            return Err("user_set entries are not overwritten by background writes");
+            let reason = "user_set entries are not overwritten by background writes";
+            if expected_versions.is_some() {
+                self.record_pending_candidate(candidate, reason)?;
+            }
+            return Ok(CandidateDecision::Rejected(reason));
+        }
+        if let (Some(versions), Some(entry)) = (expected_versions, existing.as_ref())
+            && versions
+                .get(&entry.entry_id)
+                .is_some_and(|expected| expected != &entry.version)
+        {
+            let reason = "memory entry changed on disk while background write was prepared";
+            self.record_pending_candidate(candidate, reason)?;
+            return Ok(CandidateDecision::Rejected(reason));
         }
         let entry_id = candidate
             .entry_id
@@ -691,11 +879,15 @@ impl MainMemory {
             .or_else(|| existing.as_ref().map(|entry| entry.entry_id.clone()))
             .unwrap_or_else(|| format!("mem-{}", uuid::Uuid::new_v4().simple()));
         if !safe_entry_id(&entry_id) {
-            return Err("memory entry id is invalid");
+            return Ok(CandidateDecision::Rejected(
+                "memory entry id is invalid (must be 1..=247 ASCII [a-zA-Z0-9_-] bytes)",
+            ));
         }
         let operation = candidate.operation;
         if operation == MemoryOperation::Disable && existing.is_none() {
-            return Err("cannot disable a missing memory entry");
+            return Ok(CandidateDecision::Rejected(
+                "cannot disable a missing memory entry",
+            ));
         }
         let mut entry = existing.unwrap_or(MemoryEntry {
             entry_id: entry_id.clone(),
@@ -710,11 +902,22 @@ impl MainMemory {
         match operation {
             MemoryOperation::Upsert => {
                 if candidate.body.trim().is_empty() {
-                    return Err("a memory entry needs a body");
+                    return Ok(CandidateDecision::Rejected("a memory entry needs a body"));
                 }
                 entry.kind = candidate.kind.clone();
-                entry.source_type = candidate.source_type;
-                entry.source_log_ids = candidate.source_log_ids.clone();
+                if entry.source_type == SourceType::Stated
+                    && candidate.source_type == SourceType::Inferred
+                    && entry.body.trim() == candidate.body.trim()
+                {
+                    // Explicit statements keep precedence over inferred duplicates.
+                } else {
+                    entry.source_type = candidate.source_type;
+                }
+                for log_id in &candidate.source_log_ids {
+                    if !entry.source_log_ids.contains(log_id) {
+                        entry.source_log_ids.push(log_id.clone());
+                    }
+                }
                 entry.status = MemoryStatus::Active;
                 entry.body = candidate.body.clone();
                 entry.updated_at = now_ms();
@@ -724,9 +927,8 @@ impl MainMemory {
                 entry.updated_at = now_ms();
             }
         }
-        self.write_entry(&entry, operation)
-            .map_err(|_| "memory entry could not be written")?;
-        Ok(Some(entry_id))
+        self.write_entry(&entry, operation)?;
+        Ok(CandidateDecision::Written(entry_id))
     }
 
     fn entry(&self, entry_id: &str) -> Option<MemoryEntry> {
@@ -930,6 +1132,11 @@ pub(crate) fn prepare_main_session_input_with_ranges(
             end_cursor: span.unit.end_cursor,
         };
         if !retained.contains(&range) {
+            for message in &messages[span.msg_from..span.msg_to] {
+                if matches!(message, Message::System(_) | Message::Custom { .. }) {
+                    output.push(message.clone());
+                }
+            }
             continue;
         }
         output.extend(messages[span.msg_from..span.msg_to].iter().cloned());
@@ -984,6 +1191,11 @@ fn main_session_fallback_input_with_spans(
             span.unit.start_cursor <= range.end_cursor && range.start_cursor <= span.unit.end_cursor
         });
         if replaceable && overlaps_forgotten {
+            for message in source {
+                if matches!(message, Message::System(_) | Message::Custom { .. }) {
+                    output.push(message.clone());
+                }
+            }
             continue;
         }
         output.extend_from_slice(source);
@@ -994,6 +1206,10 @@ fn main_session_fallback_input_with_spans(
 fn reload_events(directory: &Path, state: &mut MemoryState) -> Result<(), RuntimeError> {
     state.known_versions.clear();
     state.forgotten.clear();
+    state.writer_frontiers.clear();
+    state.pending_candidates.clear();
+    state.persisted_writer_failures = 0;
+    state.persisted_last_writer_error = None;
     state.damaged = 0;
     let path = directory.join(EVENTS_FILE);
     let bytes = match fs::read(&path) {
@@ -1033,6 +1249,27 @@ fn reload_events(directory: &Path, state: &mut MemoryState) -> Result<(), Runtim
                 state.known_versions.remove(&entry_id);
             }
             StoredEvent::Forget { range, .. } => state.forgotten.push(range),
+            StoredEvent::WriterAdvanced {
+                session_id, cursor, ..
+            } => {
+                let slot = state.writer_frontiers.entry(session_id).or_insert(0);
+                *slot = (*slot).max(cursor);
+            }
+            StoredEvent::CandidatePending {
+                candidate,
+                reason,
+                at,
+            } => {
+                state.pending_candidates.push(PendingMemoryCandidate {
+                    candidate,
+                    reason,
+                    at,
+                });
+            }
+            StoredEvent::WriterFailed { reason, .. } => {
+                state.persisted_writer_failures = state.persisted_writer_failures.saturating_add(1);
+                state.persisted_last_writer_error = Some(reason);
+            }
         }
     }
     Ok(())
@@ -1201,7 +1438,7 @@ pub(crate) fn now_ms() -> u64 {
 
 fn safe_entry_id(entry_id: &str) -> bool {
     !entry_id.is_empty()
-        && entry_id.len() <= 128
+        && entry_id.len() <= MAX_MEMORY_ENTRY_ID_BYTES
         && entry_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))

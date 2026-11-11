@@ -465,11 +465,19 @@ impl Workspaces {
         host.runtime
             .get(&session_id)
             .map_err(|error| WorkRouterError::known(error.to_string()))?;
-        let reused = host
+        let existing = host
             .runtime
             .task_by_dispatch_key(&request.dispatch_key)
-            .map_err(|error| WorkRouterError::known(error.to_string()))?
-            .is_some();
+            .map_err(|error| WorkRouterError::known(error.to_string()))?;
+        let reused = existing.is_some();
+        if existing
+            .as_ref()
+            .is_none_or(|record| record.state == cayw_runtime::TaskState::Queued)
+        {
+            host.ensure_model_available()
+                .await
+                .map_err(|error| WorkRouterError::known(error.message))?;
+        }
         let task = host
             .runtime
             .enqueue_dispatched(
@@ -492,6 +500,13 @@ impl Workspaces {
                 },
             )
             .map_err(router_runtime_error)?;
+        let task = if task.state == cayw_runtime::TaskState::Queued {
+            host.runtime
+                .start_queued(&task.id)
+                .map_err(router_runtime_error)?
+        } else {
+            task
+        };
         Ok(WorkDispatchReply {
             workspace,
             session_id: task.session_id,
@@ -840,6 +855,9 @@ async fn open_workspace(
         None => None,
     };
     let (provider, model): (Arc<dyn Provider>, Model) = if let Some(selected) = selected {
+        if let Some(warning) = selected.context_window_warning(config.main_session) {
+            eprintln!("{warning}");
+        }
         let configured = selected.build()?;
         (configured.provider, configured.model)
     } else if offline {
@@ -1059,5 +1077,145 @@ mod tests {
         assert!(report.pi_error.is_some());
         assert!(config.bridge.is_none());
         resources.shutdown().await.expect("nothing to clean up");
+    }
+
+    #[tokio::test]
+    async fn client_work_router_automatically_starts_and_completes_external_workspace_dispatch() {
+        use cayw_ai::{
+            AssistantEvent, AssistantMessage, Content, ModelRequest, StopReason, Usage, UsageStatus,
+        };
+
+        struct PlainReply(&'static str);
+        impl Provider for PlainReply {
+            fn stream(
+                &self,
+                request: ModelRequest,
+                _cancel: CancellationToken,
+            ) -> cayw_ai::AssistantStream {
+                let mut message = AssistantMessage::new(&request.model);
+                message.content.push(Content::text(self.0));
+                message.stop_reason = StopReason::Stop;
+                message.usage = Usage {
+                    input: 4,
+                    output: 4,
+                    total_tokens: 8,
+                    ..Default::default()
+                };
+                message.usage_status = UsageStatus::Reported;
+                Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let main_ws = temp.path().join("main-ws");
+        let ext_ws = temp.path().join("ext-ws");
+        std::fs::create_dir_all(&main_ws).unwrap();
+        std::fs::create_dir_all(&ext_ws).unwrap();
+
+        let main_paths = LocalPaths::from_environment(&main_ws).unwrap();
+        let main_runtime = Arc::new(
+            Runtime::open(
+                temp.path().join("main.sqlite"),
+                &main_ws,
+                Arc::new(PlainReply("main-done")),
+                Model::new("fixture", "main"),
+                RuntimeConfig {
+                    main_session: true,
+                    approval_rules: Some(Arc::new(cayw_runtime::FileRules::new(
+                        temp.path().join("rules.json"),
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let ext_runtime = Arc::new(
+            Runtime::open(
+                temp.path().join("ext.sqlite"),
+                &ext_ws,
+                Arc::new(PlainReply("external-task-finished")),
+                Model::new("fixture", "ext"),
+                RuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+
+        let main_host = Arc::new(WorkspaceHost::new(
+            main_runtime.clone(),
+            None,
+            None,
+            WorkspaceResources::default(),
+            true,
+            "configured".into(),
+            OptionalServicesReport::default(),
+        ));
+        let ext_host = Arc::new(WorkspaceHost::new(
+            ext_runtime.clone(),
+            None,
+            None,
+            WorkspaceResources::default(),
+            true,
+            "configured".into(),
+            OptionalServicesReport::default(),
+        ));
+
+        let workspaces = Workspaces::new(
+            main_paths,
+            true,
+            true,
+            main_host,
+            #[cfg(feature = "plugins")]
+            crate::cli_plugins::Plugins::new(temp.path().join("plugins.json")),
+        );
+        let ext_id = workspaces.id_for(&ext_ws.canonicalize().unwrap());
+        workspaces
+            .inner
+            .hosts
+            .write()
+            .await
+            .insert(ext_id.clone(), ext_host);
+
+        let router = workspaces.work_router();
+        main_runtime.set_work_router(router.clone()).unwrap();
+
+        let target_session = router
+            .create_session(&ext_id, "External Worker")
+            .await
+            .unwrap();
+        let target_session_id = target_session["id"].as_str().unwrap().to_owned();
+
+        let reply = router
+            .dispatch(WorkDispatchRequest {
+                work_id: "work-ext-auto".into(),
+                workspace: ext_id.clone(),
+                session_id: Some(target_session_id.clone()),
+                label: None,
+                text: "execute external work automatically".into(),
+                dispatch_key: "dk-ext-auto-1".into(),
+                pause_version: 0,
+                stop_version: 0,
+                priority: cayw_runtime::TaskPriority::Normal,
+                declared_memory_bytes: 0,
+            })
+            .await
+            .unwrap();
+        assert!(!reply.reused);
+        let claimed = ext_runtime.task(&reply.task_id).unwrap();
+        assert!(
+            claimed.worker_id.is_some(),
+            "external dispatch through ClientWorkRouter must claim and start a worker automatically"
+        );
+
+        ext_runtime.wait_idle(&target_session_id).await;
+        let finished = ext_runtime.task(&reply.task_id).unwrap();
+        assert_eq!(finished.state, cayw_runtime::TaskState::Completed);
+        let view = ext_runtime.get(&target_session_id).unwrap();
+        assert!(
+            view.messages
+                .iter()
+                .any(|m| m.text().contains("external-task-finished"))
+        );
+
+        workspaces.shutdown().await.unwrap();
     }
 }

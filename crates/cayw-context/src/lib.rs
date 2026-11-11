@@ -35,9 +35,9 @@ mod types;
 
 pub use assembly::{
     Assembly, CONSERVATIVE_CONTEXT_WINDOW, CompressionJob, CompressionRecord, ContextInput,
-    DEFAULT_OUTPUT_RESERVE, DEFAULT_PROTOCOL_MARGIN, Piece, SourceUnit, SummaryKind, SummaryRecord,
-    UnitKind, VersionDecision, accept_compression, accept_summary, advance_frontier, input_budget,
-    log_id, plan,
+    DEFAULT_OUTPUT_RESERVE, DEFAULT_PROTOCOL_MARGIN, InputBudget, PendingSummary, Piece,
+    SourceUnit, SummaryKind, SummaryRecord, UnitKind, VersionDecision, accept_compression,
+    accept_summary, advance_frontier, estimate_text, input_budget, log_id, plan,
 };
 pub use evolution::{EvolutionStep, build_evolution};
 pub use fleet::{FleetMember, FleetOverview, build_fleet_overview};

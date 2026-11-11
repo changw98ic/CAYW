@@ -206,6 +206,7 @@ export function noteSessionError(view, error) {
 
 export function finishWrite(view, key, error = null, result = null) {
   const rejected = error && error.outcome_unknown === false;
+  const rejectedPrompt = rejected && view.writes.some(write => write.key === key && write.method === 'session.prompt');
   const next = noteSessionError(view, error ?? {});
   next.writes = next.writes.flatMap(write => {
     if (write.key !== key) return [write];
@@ -216,6 +217,9 @@ export function finishWrite(view, key, error = null, result = null) {
     const receipt = !error && write.method === 'session.prompt' && result?.id === view.id && Array.isArray(result.messages) && safeCursor(result.cursor) && result.cursor > write.after ? result.cursor : null;
     return [{ ...write, phase: error ? 'uncertain' : 'settling', receipt, cancelled: !error && result?.cancelled === true }];
   });
+  if (rejectedPrompt && !next.writes.some(write => write.method === 'session.prompt')) {
+    next.originalTaskId = inferSnapshotTaskId(next.snapshot) || undefined;
+  }
   // A successful prompt receipt is tied to this HTTP request. Its final cursor
   // can identify the exact durable terminal, regardless of delivery order.
   const prompt = next.writes.find(write => write.key === key && write.method === 'session.prompt' && safeCursor(write.receipt));
@@ -231,8 +235,13 @@ function settleView(view) {
     return safeCursor(terminal) && terminal > fact.after && view.cursor >= terminal && snapshot.cursor >= terminal && view.snapshotAfter >= terminal && view.snapshotEpoch >= (fact.terminalEpoch ?? 0);
   };
   const idle = stateName(snapshot) === 'idle' && !sessionRunning(snapshot) && !array(snapshot.pending_approvals).length;
-  const writes = view.writes.map(write => write.method === 'session.cancel' && write.cancelled && safeCursor(write.promptReceipt) && write.promptTerminal?.cursor === write.promptReceipt ? { ...write, terminal: write.promptReceipt, terminalEpoch: write.promptTerminal.epoch ?? 0 } : write);
-  return { ...view, activeAttempt: idle && covered(view.activeAttempt) ? null : view.activeAttempt, writes: writes.filter(write => write.phase === 'pending' || (write.method === 'session.cancel' && write.phase === 'uncertain') || !covered(write) || (!idle && write.method !== 'approval.reply')) };
+  const hadPrompt = view.writes.some(write => write.method === 'session.prompt');
+  const writes = view.writes
+    .map(write => write.method === 'session.cancel' && write.cancelled && safeCursor(write.promptReceipt) && write.promptTerminal?.cursor === write.promptReceipt ? { ...write, terminal: write.promptReceipt, terminalEpoch: write.promptTerminal.epoch ?? 0 } : write)
+    .filter(write => write.phase === 'pending' || (write.method === 'session.cancel' && write.phase === 'uncertain') || !covered(write) || (!idle && write.method !== 'approval.reply' && write.method !== 'session.prompt'));
+  const ownsPrompt = writes.some(write => write.method === 'session.prompt');
+  const originalTaskId = hadPrompt && !ownsPrompt ? (inferSnapshotTaskId(snapshot) || undefined) : view.originalTaskId;
+  return { ...view, originalTaskId, activeAttempt: idle && covered(view.activeAttempt) ? null : view.activeAttempt, writes };
 }
 
 function consumeWriteFact(view, record) {
@@ -257,12 +266,17 @@ function consumeWriteFact(view, record) {
   });
   const faults = { ...view.faults };
   let activeAttempt = view.activeAttempt;
+  let originalTaskId = view.originalTaskId;
+  const ownsPrompt = writes.some(write => write.method === 'session.prompt');
   if (event.type === 'attempt_started' && event.lease?.session_id === view.id && (!activeAttempt || record.cursor > activeAttempt.after)) {
+    if (!ownsPrompt && !sameLease(activeAttempt?.lease, event.lease)) {
+      originalTaskId = undefined;
+    }
     activeAttempt = { lease:event.lease, after:record.cursor, terminal:null };
   } else if (activeAttempt && ['attempt_finished', 'attempt_recovered'].includes(event.type) && record.cursor > activeAttempt.after && sameLease(activeAttempt.lease,event.lease ?? record.attempt)) {
     activeAttempt = { ...activeAttempt, terminal:record.cursor };
   }
-  return { ...view, writes, faults, activeAttempt };
+  return { ...view, writes, faults, activeAttempt, originalTaskId };
 }
 
 function writeNotice(view) {
@@ -289,20 +303,100 @@ export function consumeTerminalRead(view, cursor, records) {
 
 function inferSnapshotTaskId(snapshot) {
   if (!sessionRunning(snapshot) && !array(snapshot?.pending_approvals).length) return null;
+  const attemptId = typeof snapshot?.attempt?.attempt_id === 'string' && snapshot.attempt.attempt_id ? snapshot.attempt.attempt_id : null;
   for (const approval of array(snapshot?.pending_approvals)) {
+    if (attemptId && typeof approval?.attempt_id === 'string' && approval.attempt_id && approval.attempt_id !== attemptId) continue;
     const taskId = approval?.input?.task_id ?? approval?.task_id;
     if (typeof taskId === 'string' && taskId) return taskId;
   }
   for (const call of array(snapshot?.unresolved_calls)) {
+    if (call?.state === 'outcome_unknown' || call?.result?.outcome_unknown) continue;
+    if (attemptId && typeof call?.attempt_id === 'string' && call.attempt_id && call.attempt_id !== attemptId) continue;
     const taskId = call?.task_id ?? call?.call?.task_id;
     if (typeof taskId === 'string' && taskId) return taskId;
   }
   for (const execution of array(snapshot?.executions).slice().reverse()) {
-    if (['running', 'awaiting_approval'].includes(execution?.state) && typeof execution.task_id === 'string' && execution.task_id) {
+    if (
+      ['running', 'awaiting_approval', 'waiting_approval'].includes(execution?.state) &&
+      (!attemptId || !execution?.lease?.attempt_id || execution.lease.attempt_id === attemptId) &&
+      typeof execution.task_id === 'string' &&
+      execution.task_id
+    ) {
       return execution.task_id;
     }
   }
   return null;
+}
+
+export function selectActiveTaskId(tasks, sessionId, snapshot = null) {
+  const candidates = array(tasks).filter(
+    task => task?.session_id === sessionId && typeof task.id === 'string' && task.id
+  );
+  if (!candidates.length) return null;
+  const approvalTaskId = array(snapshot?.pending_approvals)
+    .map(approval => approval?.input?.task_id ?? approval?.task_id)
+    .find(taskId => typeof taskId === 'string' && taskId);
+  if (approvalTaskId) {
+    const matchedApproval = candidates.find(
+      task => task.id === approvalTaskId && ['waiting_approval', 'awaiting_approval', 'running', 'queued', 'draining'].includes(task.state)
+    );
+    if (matchedApproval) return matchedApproval.id;
+  }
+  const attemptId = snapshot?.attempt?.attempt_id;
+  if (typeof attemptId === 'string' && attemptId) {
+    const matchedAttempt = candidates.slice().reverse().find(
+      task => task.attempt_id === attemptId && ['running', 'waiting_approval', 'awaiting_approval'].includes(task.state)
+    );
+    if (matchedAttempt) return matchedAttempt.id;
+  }
+  for (const states of [
+    ['running', 'waiting_approval', 'awaiting_approval'],
+    ['queued'],
+    ['draining'],
+  ]) {
+    const found = candidates.slice().reverse().find(task => states.includes(task.state));
+    if (found) return found.id;
+  }
+  return null;
+}
+
+export function summarizeRestoreReport(report) {
+  if (!object(report)) throw new Error('Runtime 未返回有效的恢复结果。');
+  const snapshot = typeof report.snapshot === 'string' ? report.snapshot : '';
+  const restored = array(report.restored).filter(p => typeof p === 'string' && p);
+  const unchanged = array(report.unchanged).filter(p => typeof p === 'string' && p);
+  const needsConfirmation = array(report.needs_confirmation).filter(p => typeof p === 'string' && p);
+  const notInSnapshot = array(report.not_in_snapshot).filter(p => typeof p === 'string' && p);
+  const undoSnapshot = typeof report.undo_snapshot === 'string' && report.undo_snapshot ? report.undo_snapshot : null;
+  const complete = report.complete === true && needsConfirmation.length === 0;
+  let headline;
+  if (!complete) {
+    headline = `恢复未完成：有 ${needsConfirmation.length} 个文件与当前内容冲突，需确认覆盖后才会写入（恢复点 ${clip(snapshot, 16)}）。`;
+  } else if (notInSnapshot.length && !restored.length && !unchanged.length) {
+    headline = `未恢复任何文件：所选路径均不在恢复点 ${clip(snapshot, 16)} 中。`;
+  } else if (notInSnapshot.length) {
+    headline = `恢复点 ${clip(snapshot, 16)} 处理完成（部分路径不在该恢复点中，未恢复）。`;
+  } else if (!restored.length && unchanged.length) {
+    headline = `恢复点 ${clip(snapshot, 16)} 检查完成：所选文件与恢复点一致，无需改动。`;
+  } else {
+    headline = `已从恢复点 ${clip(snapshot, 16)} 恢复 ${restored.length} 个文件。`;
+  }
+  const details = [];
+  if (restored.length) details.push({ kind: 'restored', label: '已恢复', paths: restored });
+  if (unchanged.length) details.push({ kind: 'unchanged', label: '与恢复点一致（未改动）', paths: unchanged });
+  if (needsConfirmation.length) details.push({ kind: 'needs_confirmation', label: '未恢复（当前内容不同，需确认覆盖）', paths: needsConfirmation });
+  if (notInSnapshot.length) details.push({ kind: 'not_in_snapshot', label: '未恢复（不在该恢复点中）', paths: notInSnapshot });
+  return {
+    snapshot,
+    complete,
+    headline,
+    restored,
+    unchanged,
+    needsConfirmation,
+    notInSnapshot,
+    undoSnapshot,
+    details,
+  };
 }
 
 export function applySnapshot(view, snapshot, initial = false, requestedAfter = view.cursor, requestedEpoch = view.proofEpoch) {
@@ -318,10 +412,16 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
   // never clears an explicit frozen rejection, even at the same durable cursor.
   const pendingIds = new Set(array(snapshot.pending_approvals).map(approval => approval.id).filter(id => typeof id === 'string'));
   const inferredTaskId = inferSnapshotTaskId(snapshot);
+  const ownsPrompt = array(view.writes).some(write => write.method === 'session.prompt');
+  const previousLease = view.snapshot?.attempt ?? view.activeAttempt?.lease;
+  const sameAttempt = object(snapshot.attempt) && sameLease(snapshot.attempt, previousLease);
+  const nextTaskId = ownsPrompt
+    ? (view.originalTaskId || inferredTaskId || undefined)
+    : (inferredTaskId || (sameAttempt && sessionRunning(snapshot) ? view.originalTaskId : undefined));
   return settleView({
     ...view,
     faults,
-    originalTaskId: view.originalTaskId || inferredTaskId || undefined,
+    originalTaskId: nextTaskId,
     approvalQuestions: Object.fromEntries(Object.entries(view.approvalQuestions ?? {}).filter(([id]) => pendingIds.has(id))),
     activeAttempt: object(snapshot.attempt) && !sameLease(snapshot.attempt,view.activeAttempt?.lease) ? { lease:snapshot.attempt, after:snapshot.cursor, terminal:null } : view.activeAttempt,
     snapshot: { ...snapshot, messages: snapshot.messages.slice(-MAX_MESSAGES) },
@@ -866,6 +966,46 @@ function boot() {
       recRefreshBtn.type = 'button';
       recCreateRow.append(recPathsInput, recCreateBtn, recRefreshBtn);
       const recPointsBox = el('div', 'item-list');
+      const recResultBox = el('div', 'item-list');
+
+      const renderRestoreSummary = (pid, paths, summary) => {
+        recResultBox.replaceChildren();
+        const card = el('div', 'item-card');
+        card.append(el('strong', '', summary.headline));
+        if (summary.undoSnapshot) {
+          card.append(el('p', 'small muted', `恢复前自动备份快照：${clip(summary.undoSnapshot, 16)}`));
+        }
+        for (const item of summary.details) {
+          card.append(el('p', 'small', `${item.label}（${item.paths.length}）：${item.paths.join(', ')}`));
+        }
+        if (!summary.complete && summary.needsConfirmation.length) {
+          const confirmBtn = el('button', 'secondary', '确认覆盖并恢复冲突文件');
+          confirmBtn.type = 'button';
+          confirmBtn.addEventListener('click', async () => {
+            confirmBtn.disabled = true;
+            await executeRestore(pid, paths, summary.needsConfirmation);
+          });
+          card.append(confirmBtn);
+        }
+        recResultBox.append(card);
+      };
+
+      const executeRestore = async (pid, paths, confirmOverwrite = []) => {
+        recStatusP.textContent = `正在处理恢复点 ${clip(pid, 16)}…`;
+        try {
+          const report = await rpc('recovery.restore', {
+            snapshot: pid,
+            paths,
+            confirm_overwrite: confirmOverwrite,
+          });
+          const summary = summarizeRestoreReport(report);
+          renderRestoreSummary(pid, paths, summary);
+          await loadRecovery();
+        } catch (err) {
+          if (err.auth) { handleError(err); return; }
+          recStatusP.textContent = '恢复失败：' + (err.message || String(err));
+        }
+      };
 
       const loadRecovery = async () => {
         const login = loginGeneration;
@@ -875,9 +1015,10 @@ function boot() {
           if (!st || st.enabled === false) {
             recStatusP.textContent = `状态：未启用或已停用${st?.disabled_reason || st?.warning ? ` (${st.disabled_reason || st.warning})` : ''}`;
           } else {
-            const count = st.snapshot_count ?? st.point_count ?? 0;
+            const count = typeof st.snapshot_count === 'number' ? st.snapshot_count : (typeof st.point_count === 'number' ? st.point_count : '暂不可用');
             const unknown = st.restore_outcome_unknown || st.PendingRestore;
-            recStatusP.textContent = `状态：已启用 · 恢复点数量：${count}${unknown ? ' · 存在未完成恢复需核对' : ''}`;
+            const errors = [st.state_error, st.points_error].filter(Boolean).join('；');
+            recStatusP.textContent = `状态：已启用 · 恢复点数量：${count}${unknown ? ' · 存在未完成恢复需核对' : ''}${errors ? ` · 读取异常：${errors}` : ''}`;
           }
           const pts = await rpc('recovery.points', {});
           if (login !== loginGeneration) return;
@@ -902,19 +1043,7 @@ function boot() {
                   recStatusP.textContent = '请先填写要恢复的文件相对路径（逗号分隔）。';
                   return;
                 }
-                recStatusP.textContent = `正在恢复到 ${clip(pid, 16)}…`;
-                try {
-                  await rpc('recovery.restore', {
-                    snapshot: pid,
-                    paths,
-                    confirm_overwrite: paths,
-                  });
-                  recStatusP.textContent = `已恢复到恢复点 ${clip(pid, 16)}。`;
-                  await loadRecovery();
-                } catch (err) {
-                  if (err.auth) { handleError(err); return; }
-                  recStatusP.textContent = '恢复失败：' + (err.message || String(err));
-                }
+                await executeRestore(pid, paths, []);
               });
               pRow.append(restoreBtn);
               recPointsBox.append(pRow);
@@ -937,7 +1066,7 @@ function boot() {
         }
       });
       recRefreshBtn.addEventListener('click', loadRecovery);
-      recCard.append(recStatusP, recCreateRow, recPointsBox);
+      recCard.append(recStatusP, recCreateRow, recResultBox, recPointsBox);
       loadRecovery();
 
       body.append(topActions, statusP, artContainer, recCard);
@@ -1435,11 +1564,14 @@ function boot() {
         try {
           const st = await rpc('memory.status', {});
           if (login !== loginGeneration) return;
-          const visibleCount = st?.active ?? st?.visible_entries ?? st?.entries ?? 0;
+          const visibleCount = typeof st?.active === 'number' ? st.active : (typeof st?.visible_entries === 'number' ? st.visible_entries : (typeof st?.entries === 'number' ? st.entries : '暂不可用'));
           const forgottenCount = Array.isArray(st?.forgotten_ranges)
             ? st.forgotten_ranges.length
-            : (st?.forgotten_ranges ?? 0);
-          memStatusP.textContent = `可见条目：${visibleCount} · 遗忘范围：${forgottenCount}`;
+            : (typeof st?.forgotten_ranges === 'number' ? st.forgotten_ranges : '暂不可用');
+          const writerFailureNote = st?.writer_failures > 0
+            ? ` · 后台写入失败：${st.writer_failures} 次${st.last_writer_error ? `（${clip(st.last_writer_error, 120)}）` : ''}`
+            : '';
+          memStatusP.textContent = `可见条目：${visibleCount} · 遗忘范围：${forgottenCount}${writerFailureNote}`;
           const entries = await rpc('memory.entries', {});
           if (login !== loginGeneration) return;
           memListBox.replaceChildren();
@@ -1784,10 +1916,15 @@ function boot() {
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       const previous = views.get(id);
       rememberView(applySnapshot(previous, snapshot, !previous.snapshot, requestedAfter, requestedEpoch));
-      try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; }
+      let auxError = null;
+      try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; auxError = error; rememberError(id, error); }
       updateSessionSummary(snapshot);
       pollFailures = 0;
       renderView();
+      if (auxError) {
+        report(auxError);
+        ui['poll-status'].textContent = `部分状态暂不可用：${errorText(auxError)}`;
+      }
       if (window.matchMedia('(max-width: 640px)').matches) ui['session-picker'].open = false;
       schedulePoll(0, generation);
     } catch (error) {
@@ -1931,26 +2068,22 @@ function boot() {
     ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !view?.writes.some(write => write.phase === 'uncertain') ? (allAutoApprovals ? '模型正在自动评估授权，无需人工操作；也可以停止运行。' : '请在对话中的询问里选择选项，也可以停止运行。') : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
   }
 
-  async function refreshActiveTaskId(id, login) {
+  async function refreshActiveTaskId(id, login, forceExternal = false) {
     const view = views.get(id);
     const snapshot = view?.snapshot;
-    if (!snapshot || view.originalTaskId || taskAdmissions.has(id)) return;
-    if (!sessionRunning(snapshot) && !array(snapshot.pending_approvals).length) return;
+    const ownsPrompt = promptPending.has(id) || taskAdmissions.has(id) || array(view?.writes).some(write => write.method === 'session.prompt');
+    if (!snapshot || ownsPrompt) return view?.originalTaskId ?? null;
+    if (!forceExternal && view.originalTaskId) return view.originalTaskId;
+    if (!forceExternal && !sessionRunning(snapshot) && !array(snapshot.pending_approvals).length) return null;
     const scope = sessionWorkspaces.get(id) || workspaceId;
     const tasks = await rpc('session.tasks', { session_id: id }, scope);
-    if (login !== loginGeneration) return;
-    const active = array(tasks).slice().reverse().find(task =>
-      task?.session_id === id &&
-      typeof task.id === 'string' &&
-      task.id &&
-      ['running', 'awaiting_approval', 'draining', 'queued'].includes(task.state) &&
-      (!snapshot.attempt?.attempt_id || !task.attempt_id || task.attempt_id === snapshot.attempt.attempt_id)
-    );
-    if (!active) return;
+    if (login !== loginGeneration) return null;
     const current = views.get(id);
-    if (current && !current.originalTaskId) {
-      rememberView({ ...current, originalTaskId: active.id });
+    const activeId = selectActiveTaskId(tasks, id, current?.snapshot ?? snapshot);
+    if (current && !promptPending.has(id) && !taskAdmissions.has(id) && !array(current.writes).some(write => write.method === 'session.prompt')) {
+      rememberView({ ...current, originalTaskId: activeId || undefined });
     }
+    return activeId;
   }
 
   // Read the exact question and three options that the runtime prepared for
@@ -2044,14 +2177,20 @@ function boot() {
       const snapshot = await rpc('session.get', { session_id: id });
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       rememberView(applySnapshot(views.get(id), snapshot, false, requestedAfter, requestedEpoch));
-      try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; }
-      try { await refreshApprovalQuestions(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; rememberError(id, error); }
+      let auxError = null;
+      try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; auxError = error; rememberError(id, error); }
+      try { await refreshApprovalQuestions(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; auxError = auxError ?? error; rememberError(id, error); }
       if (login !== loginGeneration || generation !== selectionGeneration) return;
       updateSessionSummary(snapshot);
       renderView();
       pollFailures = 0;
       ui['connection-status'].textContent = '已连接本机';
-      ui['poll-status'].textContent = '已同步';
+      if (auxError) {
+        report(auxError);
+        ui['poll-status'].textContent = `部分状态暂不可用：${errorText(auxError)}`;
+      } else {
+        ui['poll-status'].textContent = '已同步';
+      }
       if (records.length === 100) delay = 0;
     } catch (error) {
       if (login !== loginGeneration || generation !== selectionGeneration) return;
@@ -2075,6 +2214,7 @@ function boot() {
     const view = views.get(id);
     if (view) rememberView(beginWrite(view, key, method, params));
     if (id === selected) renderView();
+    let currentAdmission = null;
     try {
       let result;
       if (method === 'session.prompt') {
@@ -2085,6 +2225,7 @@ function boot() {
           if (login === loginGeneration && views.has(id)) rememberView({ ...views.get(id), originalTaskId: task.id });
           return task.id;
         });
+        currentAdmission = admission;
         taskAdmissions.set(id, admission);
         if (id === selected) renderComposer();
         const taskId = await admission;
@@ -2096,6 +2237,7 @@ function boot() {
       if (login === loginGeneration && views.has(id)) rememberView(finishWrite(views.get(id), key, error));
       throw error;
     } finally {
+      if (currentAdmission && taskAdmissions.get(id) === currentAdmission) taskAdmissions.delete(id);
       if (login === loginGeneration && id === selected) renderView();
     }
   }
@@ -2113,11 +2255,18 @@ function boot() {
     if (login !== loginGeneration) return;
     const previous = views.get(id);
     if (previous) rememberView(applySnapshot(previous, snapshot, false, requestedAfter, requestedEpoch));
-    try { await refreshActiveTaskId(id, login); } catch (error) { if (login === loginGeneration && error.auth) throw error; }
-    try { await refreshApprovalQuestions(id, login); } catch (error) { if (login === loginGeneration) rememberError(id, error); }
+    let auxError = null;
+    try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration) return; if (error.auth) throw error; auxError = error; rememberError(id, error); }
+    try { await refreshApprovalQuestions(id, login); } catch (error) { if (login !== loginGeneration) return; if (error.auth) throw error; auxError = auxError ?? error; rememberError(id, error); }
     if (login !== loginGeneration) return;
     updateSessionSummary(snapshot);
-    if (id === selected) renderView();
+    if (id === selected) {
+      renderView();
+      if (auxError) {
+        report(auxError);
+        ui['poll-status'].textContent = `部分状态暂不可用：${errorText(auxError)}`;
+      }
+    }
   }
 
   async function activateLaunchWorkspace() {
@@ -2361,6 +2510,19 @@ function boot() {
     } finally {
       if (login === loginGeneration) {
         promptPending.delete(id);
+        const current = views.get(id);
+        if (current && !taskAdmissions.has(id) && !array(current.writes).some(write => write.method === 'session.prompt') && (sessionRunning(current.snapshot) || array(current.snapshot?.pending_approvals).length)) {
+          refreshActiveTaskId(id, login).then(() => {
+            if (login === loginGeneration && id === selected) renderComposer();
+          }).catch(error => {
+            if (login !== loginGeneration) return;
+            rememberError(id, error);
+            if (id === selected) {
+              handleError(error);
+              ui['poll-status'].textContent = `部分状态暂不可用：${errorText(error)}`;
+            }
+          });
+        }
         if (id === selected) renderComposer();
       }
     }
@@ -2376,13 +2538,20 @@ function boot() {
     renderComposer();
     report(null);
     try {
-      // Capture the original admission before any await. A replacement prompt
-      // in the same Session must never become this stop action's target.
+      // Capture the original admission before any await when this client owns a
+      // prompt. External tasks resolve the live task from session.tasks instead
+      // of reusing a previous task's cached ID.
+      const currentView = views.get(id);
       const admission = taskAdmissions.get(id);
-      let taskId = admission ? await admission : views.get(id)?.originalTaskId;
-      if (typeof taskId !== 'string' || !taskId) {
-        await refreshActiveTaskId(id, login);
-        taskId = views.get(id)?.originalTaskId;
+      const ownsPrompt = promptPending.has(id) || Boolean(admission) || array(currentView?.writes).some(write => write.method === 'session.prompt');
+      let taskId;
+      if (ownsPrompt) {
+        taskId = admission ? await admission : currentView?.originalTaskId;
+      } else {
+        taskId = await refreshActiveTaskId(id, login, true);
+        if (typeof taskId !== 'string' || !taskId) {
+          taskId = inferSnapshotTaskId(views.get(id)?.snapshot);
+        }
       }
       if (typeof taskId !== 'string' || !taskId) throw new RpcError('invalid_params', '未保存原任务编号，请在宿主中指定原 Task 后取消。');
       const task = await rpc('task.get', { task_id: taskId }, scope);

@@ -434,3 +434,58 @@ async fn runtime_cancel_reaps_the_original_terminal_os_process() {
         "Runtime cancellation must clean the original terminal OS process"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn runtime_nonzero_terminal_exit_completes_after_reading_eof() {
+    let root = root();
+    let provider = Arc::new(Script(
+        "local t = cayw.call('exec_command',{profile='terminal'})\n\
+         local w = cayw.call('write_stdin',{session_id=t.session_id,action='wait',wait_ms=10000,request_id='wait-1'})\n\
+         local r = cayw.call('write_stdin',{session_id=t.session_id,action='read',cursor=0,max_bytes=256,request_id='read-1'})\n\
+         return tostring(w.status.exit_code) .. ':' .. tostring(r.eof)",
+    ));
+    let config = runtime_config(
+        profile("/usr/bin/false", &[]),
+        vec![ScopedPermission::exact(
+            "exec_command",
+            json!({"profile":"terminal"}),
+        )],
+    );
+    let rt = open(root.path(), provider, config);
+    let id = rt.create(None).unwrap().id;
+    let run = {
+        let rt = rt.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            rt.prompt(
+                &id,
+                "run failing terminal and inspect exit",
+                CancellationToken::new(),
+            )
+            .await
+        })
+    };
+    while !run.is_finished() {
+        if let Some(approval) = rt.get(&id).unwrap().pending_approvals.first() {
+            match rt.approve(
+                &id,
+                &approval.id,
+                ApprovalChoice::AllowOnce,
+                "terminal-test",
+            ) {
+                Ok(_) | Err(RuntimeError::StaleApproval) => {}
+                Err(error) => panic!("approval failed: {error}"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let view = timeout(WATCHDOG, run)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("read-to-EOF non-zero terminal exit must allow task completion");
+    assert_eq!(view.state, SessionState::Idle);
+    let task = rt.tasks(&id).unwrap().remove(0);
+    assert_eq!(task.state, TaskState::Completed);
+}

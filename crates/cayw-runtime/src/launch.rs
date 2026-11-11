@@ -242,6 +242,7 @@ impl HeadlessConfig {
             content: self.content,
             background: self.background,
             notification_targets: self.notification_targets,
+            background_model_maintenance: true,
             ..RuntimeConfig::default()
         };
         if let Some(bg) = &config.background {

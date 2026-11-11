@@ -7,7 +7,7 @@
 //! record, and notification capabilities only record intent and receipts.
 
 use crate::{
-    NotificationStatus, Runtime, RuntimeConfig, RuntimeError, TaskPriority, WorkControl,
+    Runtime, RuntimeConfig, RuntimeError, TaskPriority, WorkControl, WorkDispatchReply,
     WorkDispatchRequest, WorkItem, WorkLifecycle, WorkTargetOutcome, WorkTaskQuery, WorkTaskRef,
     lock,
     work_router::{WorkRouter, WorkRouterError},
@@ -39,7 +39,6 @@ const NOTIFY_INTENT: &str = "work.notify.intent";
 const NOTIFY_NEXT: &str = "work.notify.next";
 const NOTIFY_GET: &str = "work.notify.get";
 const NOTIFY_LIST: &str = "work.notify.list";
-const NOTIFY_RECEIPT: &str = "work.notify.receipt";
 const NOTIFY_SEND: &str = "notify.send";
 const WORK_NOTIFY_SEND: &str = "work.notify.send";
 const PROACTIVE_TRIGGER: &str = "proactive.trigger";
@@ -72,7 +71,6 @@ pub(crate) fn is_tool(name: &str) -> bool {
             | NOTIFY_NEXT
             | NOTIFY_GET
             | NOTIFY_LIST
-            | NOTIFY_RECEIPT
             | NOTIFY_SEND
             | WORK_NOTIFY_SEND
             | PROACTIVE_TRIGGER
@@ -93,8 +91,8 @@ fn text(max: usize) -> Value {
     json!({"type":"string","minLength":1,"maxLength":max})
 }
 
-fn string_list(max_items: usize, max_bytes: usize) -> Value {
-    json!({"type":"array","maxItems":max_items,"items":{"type":"string","minLength":1,"maxLength":max_bytes}})
+fn string_list(max_bytes: usize) -> Value {
+    json!({"type":"array","items":{"type":"string","minLength":1,"maxLength":max_bytes}})
 }
 
 fn file_check() -> Value {
@@ -110,7 +108,7 @@ fn file_check() -> Value {
 
 fn acceptance_criteria() -> Value {
     json!({
-        "type":"array","minItems":1,"maxItems":64,
+        "type":"array","minItems":1,
         "items":{"type":"object","additionalProperties":false,
             "required":["criterion_id","description"],
             "properties":{
@@ -123,18 +121,14 @@ fn acceptance_criteria() -> Value {
 }
 
 fn session_refs() -> Value {
-    json!({"type":"array","maxItems":64,"items":{
+    json!({"type":"array","items":{
         "type":"object","additionalProperties":false,"required":["session_id"],
         "properties":{"session_id":id(256),"workspace":{"type":"string","minLength":1,"maxLength":4096}}
     }})
 }
 
 fn artifact_refs() -> Value {
-    string_list(64, 1024)
-}
-
-fn notification_status() -> Value {
-    json!({"enum":["accepted","sent","delivered","read","failed"]})
+    string_list(1024)
 }
 
 /// Definitions are advertised only to the main-session workspace. The local
@@ -157,13 +151,13 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
                 "title":text(1024),
                 "goal":text(65536),
                 "acceptance_criteria":acceptance_criteria(),
-                "user_source_refs":string_list(64,1024),
-                "action_scope":string_list(64,256),
-                "approval_refs":string_list(64,256),
+                "user_source_refs":string_list(1024),
+                "action_scope":string_list(256),
+                "approval_refs":string_list(256),
                 "session_refs":session_refs(),
                 "artifact_refs":artifact_refs(),
-                "waiting_conditions":string_list(64,1024),
-                "pending_decisions":string_list(64,1024),
+                "waiting_conditions":string_list(1024),
+                "pending_decisions":string_list(1024),
                 "next_check_at":{"type":"integer","minimum":0}
             }}),
         },
@@ -211,8 +205,12 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TASKS.into(),
-            description: "Read the live status of every Task dispatched for one WorkItem. Tasks are read from their owning workspace through the unique Client. A terminal Task is a fact, not acceptance and not a new dispatch.".into(),
-            parameters: json!({"type":"object","additionalProperties":false,"required":["work_id"],"properties":{"work_id":id(256)}}),
+            description: "Read the live status of every Task dispatched for one WorkItem, and optionally recover an unattached Task by `workspace` and `dispatch_key`. Tasks are read from their owning workspace through the unique Client. A terminal Task is a fact, not acceptance and not a new dispatch.".into(),
+            parameters: json!({"type":"object","additionalProperties":false,"required":["work_id"],"properties":{
+                "work_id":id(256),
+                "workspace":text(4096),
+                "dispatch_key":text(512)
+            }}),
         },
         ToolDefinition {
             name: PAUSE.into(),
@@ -272,12 +270,12 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: NOTIFY_NEXT.into(),
-            description: "Return the next allowed notification step from durable facts. Pending asks to send; an unknown result asks to query its receipt and never resends; a real service status is complete.".into(),
+            description: "Return the next allowed notification step from durable facts. Pending asks to send; queued means the local outbox holds the notification while awaiting external channel delivery; an unknown result asks to query its receipt and never resends; a real service status is complete.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"required":["notification_id"],"properties":{"notification_id":id(256)}}),
         },
         ToolDefinition {
             name: NOTIFY_GET.into(),
-            description: "Read one notification intent and its recorded receipt.".into(),
+            description: "Read one notification intent and its recorded status or service receipt.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"required":["notification_id"],"properties":{"notification_id":id(256)}}),
         },
         ToolDefinition {
@@ -286,15 +284,8 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
             parameters: json!({"type":"object","additionalProperties":false,"required":["work_id"],"properties":{"work_id":id(256)}}),
         },
         ToolDefinition {
-            name: NOTIFY_RECEIPT.into(),
-            description: "Record a real service receipt for one notification. `unknown` and `pending` are not service results and are refused. A later query reads this receipt instead of resending.".into(),
-            parameters: json!({"type":"object","additionalProperties":false,"required":["notification_id","status","receipt_ref"],"properties":{
-                "notification_id":id(256),"status":notification_status(),"receipt_ref":text(1024)
-            }}),
-        },
-        ToolDefinition {
             name: NOTIFY_SEND.into(),
-            description: "Deliver a notification to a configured user target, recording the intent first and persisting the delivery receipt.".into(),
+            description: "Enqueue a notification for a configured user target into the local outbox (`status: queued`). Only an external delivery service or host may later record a delivery receipt.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "notification_id":id(256),
                 "work_id":id(256),
@@ -307,7 +298,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: WORK_NOTIFY_SEND.into(),
-            description: "Deliver a WorkItem notification to a configured user target, recording the intent first and persisting the delivery receipt.".into(),
+            description: "Enqueue a WorkItem notification for a configured user target into the local outbox (`status: queued`). Only an external delivery service or host may later record a delivery receipt.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "notification_id":id(256),
                 "work_id":id(256),
@@ -355,18 +346,18 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
                 "session_id":id(256),
                 "candidates":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["kind"],"properties":{
                     "operation":{"type":"string","enum":["upsert","disable"]},
-                    "entry_id":id(128),
+                    "entry_id":id(crate::main_memory::MAX_MEMORY_ENTRY_ID_BYTES),
                     "kind":text(128),
                     "body":{"type":"string","maxLength":65536},
                     "source_type":{"type":"string","enum":["stated","inferred","user_set"]},
-                    "source_log_ids":string_list(64,256)
+                    "source_log_ids":string_list(256)
                 }}},
                 "operation":{"type":"string","enum":["upsert","disable"]},
-                "entry_id":id(128),
+                "entry_id":id(crate::main_memory::MAX_MEMORY_ENTRY_ID_BYTES),
                 "kind":text(128),
                 "body":{"type":"string","maxLength":65536},
                 "source_type":{"type":"string","enum":["stated","inferred","user_set"]},
-                "source_log_ids":string_list(64,256)
+                "source_log_ids":string_list(256)
             }}),
         },
         ToolDefinition {
@@ -376,7 +367,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
                 "session_id":id(256),
                 "start_cursor":{"type":"integer","minimum":1},
                 "end_cursor":{"type":"integer","minimum":1},
-                "entry_id":id(128),
+                "entry_id":id(crate::main_memory::MAX_MEMORY_ENTRY_ID_BYTES),
                 "reason":text(4096)
             }}),
         },
@@ -422,6 +413,16 @@ struct CreateInput {
 #[serde(deny_unknown_fields)]
 struct WorkId {
     work_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TasksInput {
+    work_id: String,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    dispatch_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -504,14 +505,6 @@ struct NotifyIntent {
 #[serde(deny_unknown_fields)]
 struct NotificationId {
     notification_id: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReceiptInput {
-    notification_id: String,
-    status: NotificationStatus,
-    receipt_ref: String,
 }
 
 #[derive(Deserialize)]
@@ -660,6 +653,67 @@ impl Service<'_> {
         }
         Ok(item)
     }
+
+    async fn attach_and_sync_dispatched_task(
+        &self,
+        router: &Arc<dyn WorkRouter>,
+        item: &WorkItem,
+        workspace: &str,
+        session_id: &str,
+        task_id: &str,
+        dispatch_key: &str,
+    ) -> Result<WorkItem, CapabilityError> {
+        let updated = self
+            .scope
+            .context
+            .inner
+            .work_items
+            .attach_task_ref(
+                &item.work_id,
+                WorkTaskRef {
+                    task_id: task_id.to_owned(),
+                    session_id: Some(session_id.to_owned()),
+                    workspace: Some(workspace.to_owned()),
+                },
+            )
+            .map_err(|error| {
+                let detail = format!(
+                    "task {task_id} was created in workspace {workspace} (session {session_id}, work_id {}, dispatch_key {dispatch_key}), but attaching its task_ref to the WorkItem failed: {error}; call work.tasks with workspace={workspace} and dispatch_key={dispatch_key} or retry work.dispatch with the same dispatch_key to complete association without creating a duplicate task",
+                    item.work_id
+                );
+                if crate::execution::durable_failure(&error) {
+                    let _ = self.scope.context.persistence_failed(&error);
+                    CapabilityError::unknown(detail)
+                } else {
+                    known(detail)
+                }
+            })?;
+        if workspace != "local" {
+            let targets = vec![workspace.to_owned()];
+            if updated.stop_version > 0 {
+                router
+                    .control(
+                        WorkControl::Stop,
+                        &updated.work_id,
+                        updated.stop_version,
+                        &targets,
+                    )
+                    .await
+                    .map_err(router_error)?;
+            } else if updated.pause_version > 0 {
+                router
+                    .control(
+                        WorkControl::Pause,
+                        &updated.work_id,
+                        updated.pause_version,
+                        &targets,
+                    )
+                    .await
+                    .map_err(router_error)?;
+            }
+        }
+        Ok(updated)
+    }
 }
 
 fn router_error(error: WorkRouterError) -> CapabilityError {
@@ -799,11 +853,45 @@ impl cayw_host::ExternalHost for Service<'_> {
             DISPATCH => {
                 let input: DispatchInput = serde_json::from_value(arguments).map_err(known)?;
                 let item = self.item(&input.work_id)?;
+                let router = self.router()?;
                 if item.lifecycle != WorkLifecycle::Open {
+                    if let Some(existing) = router
+                        .task(WorkTaskQuery {
+                            workspace: input.workspace.clone(),
+                            task_id: None,
+                            dispatch_key: Some(input.dispatch_key.clone()),
+                        })
+                        .await
+                        .map_err(router_error)?
+                        && existing.work_id.as_deref() == Some(item.work_id.as_str())
+                    {
+                        let updated = self
+                            .attach_and_sync_dispatched_task(
+                                &router,
+                                &item,
+                                &input.workspace,
+                                &existing.session_id,
+                                &existing.id,
+                                &input.dispatch_key,
+                            )
+                            .await?;
+                        let reply = WorkDispatchReply {
+                            workspace: input.workspace,
+                            session_id: existing.session_id,
+                            task_id: existing.id,
+                            state: existing.state,
+                            work_id: item.work_id,
+                            dispatch_key: input.dispatch_key,
+                            reused: true,
+                        };
+                        return Ok(json!({"work":updated,"dispatch":reply}));
+                    }
                     return Err(known(
                         "only an open WorkItem can dispatch; paused or stopped work is refused",
                     ));
                 }
+                let target_workspace = input.workspace.clone();
+                let target_session = input.session_id.clone();
                 let request = WorkDispatchRequest {
                     work_id: item.work_id.clone(),
                     workspace: input.workspace,
@@ -816,40 +904,73 @@ impl cayw_host::ExternalHost for Service<'_> {
                     priority: input.priority,
                     declared_memory_bytes: input.declared_memory_bytes,
                 };
-                let reply = match self.router()?.dispatch(request).await {
+                let reply = match router.dispatch(request).await {
                     Ok(reply) => reply,
                     Err(error) if cancel.is_cancelled() => {
                         return Err(cancellation_unknown(format!(
-                            "dispatch {} may have been recorded; query work.tasks before retrying: {}",
-                            input.dispatch_key, error
+                            "dispatch to workspace {target_workspace} session {target_session} (work_id {}, dispatch_key {}) was cancelled while in flight ({error}); call work.tasks with workspace and dispatch_key or retry work.dispatch with the same dispatch_key to recover without duplicating work",
+                            item.work_id, input.dispatch_key
                         )));
                     }
                     Err(error) => return Err(router_error(error)),
                 };
                 let updated = self
-                    .scope
-                    .context
-                    .inner
-                    .work_items
-                    .attach_task_ref(
-                        &item.work_id,
-                        WorkTaskRef {
-                            task_id: reply.task_id.clone(),
-                            session_id: Some(reply.session_id.clone()),
-                            workspace: Some(reply.workspace.clone()),
-                        },
+                    .attach_and_sync_dispatched_task(
+                        &router,
+                        &item,
+                        &reply.workspace,
+                        &reply.session_id,
+                        &reply.task_id,
+                        &reply.dispatch_key,
                     )
-                    .map_err(known)?;
+                    .await?;
                 Ok(json!({"work":updated,"dispatch":reply}))
             }
             TASKS => {
-                let input: WorkId = serde_json::from_value(arguments).map_err(known)?;
-                let item = self.item(&input.work_id)?;
-                let router = if item.task_refs.is_empty() {
-                    None
-                } else {
+                let input: TasksInput = serde_json::from_value(arguments).map_err(known)?;
+                let mut item = self.item(&input.work_id)?;
+                let needs_router = !item.task_refs.is_empty() || input.dispatch_key.is_some();
+                let router = if needs_router {
                     Some(self.router()?)
+                } else {
+                    None
                 };
+                if let (Some(router), Some(dispatch_key)) =
+                    (router.as_ref(), input.dispatch_key.as_deref())
+                {
+                    let mut search_workspaces = Vec::new();
+                    if let Some(ws) = input.workspace.as_deref() {
+                        search_workspaces.push(ws.to_owned());
+                    } else {
+                        for ws in target_workspaces(&item) {
+                            search_workspaces.push(ws);
+                        }
+                    }
+                    for ws in search_workspaces {
+                        if let Some(found) = router
+                            .task(WorkTaskQuery {
+                                workspace: ws.clone(),
+                                task_id: None,
+                                dispatch_key: Some(dispatch_key.to_owned()),
+                            })
+                            .await
+                            .map_err(router_error)?
+                            && found.work_id.as_deref() == Some(item.work_id.as_str())
+                            && !item.task_refs.iter().any(|r| r.task_id == found.id)
+                        {
+                            item = self
+                                .attach_and_sync_dispatched_task(
+                                    router,
+                                    &item,
+                                    &ws,
+                                    &found.session_id,
+                                    &found.id,
+                                    dispatch_key,
+                                )
+                                .await?;
+                        }
+                    }
+                }
                 let mut tasks = Vec::new();
                 for task in &item.task_refs {
                     let workspace = task.workspace.clone().ok_or_else(|| {
@@ -1146,30 +1267,6 @@ impl cayw_host::ExternalHost for Service<'_> {
                         .map_err(known)?,
                 )
             }
-            NOTIFY_RECEIPT => {
-                let input: ReceiptInput = serde_json::from_value(arguments).map_err(known)?;
-                let notification = self
-                    .scope
-                    .context
-                    .inner
-                    .work_items
-                    .notification(&input.notification_id)
-                    .map_err(known)?
-                    .ok_or_else(|| known("notification not found"))?;
-                self.item(&notification.work_id)?;
-                encode(
-                    self.scope
-                        .context
-                        .inner
-                        .work_items
-                        .record_notification_receipt(
-                            &input.notification_id,
-                            input.status,
-                            &input.receipt_ref,
-                        )
-                        .map_err(known)?,
-                )
-            }
             NOTIFY_SEND | WORK_NOTIFY_SEND => {
                 let input: NotifySendInput = serde_json::from_value(arguments).map_err(known)?;
                 if let Some(work_id) = input.work_id.as_deref() {
@@ -1210,8 +1307,11 @@ impl cayw_host::ExternalHost for Service<'_> {
                     ),
                 }
                 .map_err(known)?;
-                let _ = runtime.run_proactive_dispatch(&outcome).await;
-                encode(outcome)
+                let task = runtime
+                    .run_proactive_dispatch(&outcome)
+                    .await
+                    .map_err(known)?;
+                encode(outcome.with_task_id(task.map(|item| item.id)))
             }
             MEMORY_STATUS => {
                 let status = self.runtime().memory_status().map_err(known)?;

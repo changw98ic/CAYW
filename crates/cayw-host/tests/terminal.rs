@@ -567,7 +567,7 @@ async fn pty_session_reports_controlling_terminal_and_normal_exit() {
 }
 
 #[tokio::test]
-async fn output_limit_retains_unknown_and_blocks_further_reads() {
+async fn output_limit_retains_prefix_reports_truncation_and_completes_once_read() {
     let root = Root::new();
     let profiles = BTreeMap::from([(
         "cat".into(),
@@ -591,24 +591,51 @@ async fn output_limit_retains_unknown_and_blocks_further_reads() {
     )
     .await
     .unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            match call(
-                &host,
-                "write_stdin",
-                json!({"session_id":id,"action":"read","request_id":"read","cursor":0,"max_bytes":8}),
-            )
-            .await
-            {
-                Err(error) if error.outcome_unknown => break error,
-                Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
-            }
+    let status = wait_status(&host, &id, 10_000).await;
+    assert_eq!(status["status"]["state"], "exited");
+    assert_eq!(status["status"]["termination"], "output_limit");
+    assert_eq!(status["status"]["output_complete"], false);
+    assert_eq!(status["status"]["truncated"], true);
+    assert!(status["status"]["unknown"].is_null());
+
+    let unread_gate = host
+        .terminal_completion_error()
+        .expect("unread truncated prefix must still gate completion");
+    assert!(
+        unread_gate.contains("unread") || unread_gate.contains("EOF"),
+        "{unread_gate}"
+    );
+
+    let mut cursor = 0u64;
+    let mut collected = Vec::new();
+    let mut step = 0usize;
+    let mut saw_truncated = false;
+    loop {
+        step += 1;
+        let page = call(
+            &host,
+            "write_stdin",
+            json!({"session_id":id,"action":"read","request_id":format!("read-{step}"),"cursor":cursor,"max_bytes":8}),
+        )
+        .await
+        .expect("retained output prefix remains readable after truncation");
+        if page["truncated"] == true {
+            saw_truncated = true;
         }
-    })
-    .await
-    .expect("output limit did not become unknown");
-    assert!(error.outcome_unknown);
-    assert!(host.drain_processes().await.is_err());
+        for byte in page["bytes"].as_array().unwrap() {
+            collected.push(byte.as_u64().unwrap() as u8);
+        }
+        cursor = page["next_cursor"].as_u64().unwrap();
+        if page["eof"] == true && cursor == page["status"]["output_cursor"].as_u64().unwrap() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(saw_truncated);
+    assert_eq!(collected, b"01234567");
+    assert!(!host.outcome_unknown());
+    assert_eq!(host.terminal_completion_error(), None);
+    host.drain_processes().await.unwrap();
 }
 
 #[tokio::test]
@@ -715,7 +742,7 @@ async fn live_terminal_blocks_completion_before_drain_and_after_cancel() {
 }
 
 #[tokio::test]
-async fn nonzero_terminal_exit_blocks_completion_and_survives_drain() {
+async fn nonzero_terminal_exit_allows_completion_once_output_is_read() {
     let root = Root::new();
     let profiles = BTreeMap::from([(
         "false".into(),
@@ -735,12 +762,10 @@ async fn nonzero_terminal_exit_blocks_completion_and_survives_drain() {
     );
     assert_eq!(read_until_eof(&host, &id, 64).await, b"");
     assert_eq!(host.active_terminal_sessions(), 0);
-    let error = completion_error(&host, "exited with code 1").await;
-    assert!(error.contains("exited with code 1"), "{error}");
+    assert_eq!(host.terminal_completion_error(), None);
 
     host.drain_processes().await.unwrap();
-    let error = host.terminal_completion_error().unwrap();
-    assert!(error.contains("exited with code 1"), "{error}");
+    assert_eq!(host.terminal_completion_error(), None);
 }
 
 #[tokio::test]

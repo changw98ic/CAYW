@@ -10,6 +10,7 @@ mod children;
 mod collaboration;
 mod completion;
 mod content;
+mod context_maintenance;
 mod context_overview;
 mod coordination;
 mod error;
@@ -20,6 +21,7 @@ mod input;
 pub mod launch;
 pub mod local_cli;
 mod main_memory;
+mod memory_writer;
 mod model_approvals;
 mod model_requests;
 mod permissions;
@@ -82,9 +84,10 @@ pub use fleet::{AgentRunMode, FleetMember, FleetMemberState, FleetView};
 pub use input::{ImageInput, TaskInput};
 pub use launch::{HeadlessConfig, PiCompatConfig};
 pub use main_memory::{
-    ApplyReport, MainMemory, MemoryCandidate, MemoryEntry, MemoryEvent, MemoryOperation,
-    MemoryOrigin, MemoryQuery, MemoryQueryEntry, MemoryQueryView, MemoryScan, MemoryStatus,
-    MemoryStatusView, RejectedCandidate, SourceType, UserEvidence, UserSource, user_evidence,
+    ApplyReport, MAX_MEMORY_ENTRY_ID_BYTES, MainMemory, MemoryCandidate, MemoryEntry, MemoryEvent,
+    MemoryOperation, MemoryOrigin, MemoryQuery, MemoryQueryEntry, MemoryQueryView, MemoryScan,
+    MemoryStatus, MemoryStatusView, PendingMemoryCandidate, RejectedCandidate, SourceType,
+    UserEvidence, UserSource, user_evidence,
 };
 pub use model_approvals::ApprovalMode;
 pub use model_requests::{
@@ -109,7 +112,9 @@ pub use results::{
 };
 pub use scheduler::SchedulerView;
 pub use session::{SessionBindingView, SessionView};
-pub use session_context::{MaintenanceReconciliation, MaintenanceReconciliationRecord};
+pub use session_context::{
+    ContextMaintenanceStatus, MaintenanceReconciliation, MaintenanceReconciliationRecord,
+};
 pub use work_items::{
     AcceptanceCheck, AcceptanceCriterion, AcceptanceRecord, AcceptanceResult, AcceptanceSource,
     InputRecord, InputState, InputStateEvent, LateWorkResult, Notification, NotificationDecision,
@@ -185,6 +190,12 @@ pub struct RuntimeConfig {
     /// This Runtime serves the main-session workspace. Only then may the
     /// built-in rules release its own local reads, memory and dispatches.
     pub main_session: bool,
+    /// Enable background model-backed context summaries, compression and
+    /// main-session memory extraction even when `Model::context_window` is
+    /// omitted (using the conservative fallback window). Bare SDK runtimes
+    /// default to `false` unless `Model::context_window` is set; product hosts
+    /// (`HeadlessConfig::into_runtime_config`) set this to `true`.
+    pub background_model_maintenance: bool,
     /// Proactive work mode. It is separate from approval rules: changing it
     /// never changes which operations are allowed or asked about.
     pub proactive_mode: work_items::ProactiveMode,
@@ -243,6 +254,7 @@ impl Default for RuntimeConfig {
             approval_mode: ApprovalMode::Explicit,
             approval_rules: None,
             main_session: false,
+            background_model_maintenance: false,
             proactive_mode: work_items::ProactiveMode::Off,
             notification_targets: Vec::new(),
             recovery_scope: None,
@@ -382,6 +394,7 @@ pub(crate) struct Inner {
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
+    maintenance_cancel: CancellationToken,
     /// Rule modifications shown in a main-session conversation, never saved
     /// until the user's exact confirmation. Keyed by session id.
     pending_rule_changes: Mutex<BTreeMap<String, approval_rules::PendingRuleChange>>,
@@ -432,6 +445,12 @@ impl Inner {
             Some(recovery) => recovery.approval_scope(base),
             None => Some(base.clone()),
         }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.maintenance_cancel.cancel();
     }
 }
 
@@ -715,6 +734,7 @@ impl Runtime {
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
+                maintenance_cancel: CancellationToken::new(),
                 pending_rule_changes: Mutex::new(BTreeMap::new()),
                 rule_edit: Mutex::new(()),
                 plannotator: Mutex::new(plannotator::PlannotatorState::default()),
@@ -804,6 +824,15 @@ impl Runtime {
     pub fn memory_entries(&self) -> Result<Vec<main_memory::MemoryEntry>, RuntimeError> {
         self.require_main_session()?;
         self.inner.memory.visible_entries()
+    }
+    pub fn pending_memory_candidates(
+        &self,
+    ) -> Result<Vec<main_memory::PendingMemoryCandidate>, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.memory.pending_candidates()
+    }
+    pub fn shutdown_background(&self) {
+        self.inner.maintenance_cancel.cancel();
     }
     /// Read conversation, work and recorded decisions inside one source range.
     /// This is read-only and omits forgotten ranges; `session.events` still
@@ -972,6 +1001,7 @@ impl Runtime {
         self.inner
             .queue
             .stop_work(&item.work_id, item.stop_version)?;
+        self.cancel_stopped_work_runs(&item.work_id);
         Ok(item)
     }
     pub async fn stop_work_item_routed(
@@ -1107,6 +1137,18 @@ impl Runtime {
         usage_tokens: u64,
     ) -> Result<work_items::ProactiveTriggerOutcome, RuntimeError> {
         self.require_main_session()?;
+        if mode == work_items::ProactiveMode::Auto
+            && let Some(item) = self.inner.work_items.get(work_id)?
+            && item
+                .session_refs
+                .iter()
+                .any(|r| r.workspace.as_deref().is_some_and(|w| w != "local"))
+            && lock(&self.inner.work_router).is_none()
+        {
+            return Err(RuntimeError::InvalidInput(
+                "workspace routing is unavailable; run the main session through the unique local Client".into(),
+            ));
+        }
         let outcome = self.inner.work_items.trigger_proactive(
             mode,
             rule_id,
@@ -1114,17 +1156,23 @@ impl Runtime {
             work_id,
             usage_tokens,
         )?;
-        if let work_items::ProactiveTriggerOutcome::Dispatched {
-            ref work_id,
-            ref dispatch_key,
-            ref rule_id,
-            condition_version,
-            ..
-        } = outcome
-        {
-            self.enqueue_proactive_dispatch(work_id, dispatch_key, rule_id, condition_version)?;
-        }
-        Ok(outcome)
+        let task = match &outcome {
+            work_items::ProactiveTriggerOutcome::Dispatched {
+                work_id,
+                dispatch_key,
+                rule_id,
+                condition_version,
+                ..
+            } => {
+                self.enqueue_proactive_dispatch(work_id, dispatch_key, rule_id, *condition_version)?
+            }
+            work_items::ProactiveTriggerOutcome::Duplicate {
+                dispatch_key: Some(key),
+                ..
+            } => self.task_by_dispatch_key(key)?,
+            _ => None,
+        };
+        Ok(outcome.with_task_id(task.map(|item| item.id)))
     }
     fn enqueue_proactive_dispatch(
         &self,
@@ -1134,30 +1182,82 @@ impl Runtime {
         condition_version: u64,
     ) -> Result<Option<TaskRecord>, RuntimeError> {
         let Some(item) = self.inner.work_items.get(work_id)? else {
-            return Ok(None);
+            return Err(RuntimeError::InvalidInput(format!(
+                "unknown work item: {work_id}"
+            )));
         };
         if item.lifecycle != work_items::WorkLifecycle::Open {
-            return Ok(None);
+            return Err(RuntimeError::InvalidInput(format!(
+                "cannot dispatch proactive trigger while work item {work_id} is {:?}",
+                item.lifecycle
+            )));
         }
         let has_external_target = item
             .session_refs
             .iter()
             .any(|r| r.workspace.as_deref().is_some_and(|w| w != "local"));
-        if has_external_target && lock(&self.inner.work_router).is_some() {
+        if has_external_target {
             return Ok(None);
         }
-        let session_id =
-            if self.get(&item.owner_main_session_id).is_ok() {
-                item.owner_main_session_id.clone()
-            } else if let Some(session_ref) = item.session_refs.iter().find(|r| {
-                r.workspace.as_deref() == Some("local") && self.get(&r.session_id).is_ok()
-            }) {
-                session_ref.session_id.clone()
-            } else if let Some(first) = self.list()?.first() {
-                first.id.clone()
-            } else {
-                self.create(Some(item.title.clone()))?.id
-            };
+        if let Some(existing) = self.task_by_dispatch_key(dispatch_key)? {
+            self.inner.work_items.attach_task_ref(
+                &item.work_id,
+                work_items::WorkTaskRef {
+                    task_id: existing.id.clone(),
+                    session_id: Some(existing.session_id.clone()),
+                    workspace: Some("local".into()),
+                },
+            )?;
+            return Ok(Some(existing));
+        }
+        let session_exists = |sid: &str| -> Result<bool, RuntimeError> {
+            match self.get(sid) {
+                Ok(_) => Ok(true),
+                Err(RuntimeError::Core(cayw_core::CoreError::SessionNotFound(_))) => Ok(false),
+                Err(error) => Err(error),
+            }
+        };
+        let session_has_live_task = |sid: &str| -> Result<bool, RuntimeError> {
+            if lock(&self.inner.active).contains_key(sid) {
+                return Ok(true);
+            }
+            let rows = self.tasks(sid)?;
+            Ok(rows.iter().any(|row| {
+                matches!(
+                    row.state,
+                    TaskState::Queued
+                        | TaskState::Running
+                        | TaskState::WaitingApproval
+                        | TaskState::Draining
+                )
+            }))
+        };
+        let mut selected_session = None;
+        for session_ref in &item.session_refs {
+            if session_ref.workspace.as_deref().unwrap_or("local") == "local"
+                && session_exists(&session_ref.session_id)?
+            {
+                selected_session = Some(session_ref.session_id.clone());
+                break;
+            }
+        }
+        let session_id = if let Some(existing_session) = selected_session {
+            existing_session
+        } else if session_exists(&item.owner_main_session_id)?
+            && !session_has_live_task(&item.owner_main_session_id)?
+        {
+            item.owner_main_session_id.clone()
+        } else {
+            let created = self.create(Some(format!("Proactive: {}", item.title)))?;
+            self.inner.work_items.attach_session_ref(
+                &item.work_id,
+                work_items::WorkSessionRef {
+                    session_id: created.id.clone(),
+                    workspace: Some("local".into()),
+                },
+            )?;
+            created.id
+        };
         let task = self.enqueue_dispatched(
             &session_id,
             TaskInput {
@@ -1191,26 +1291,78 @@ impl Runtime {
         &self,
         outcome: &work_items::ProactiveTriggerOutcome,
     ) -> Result<Option<TaskRecord>, RuntimeError> {
-        let work_items::ProactiveTriggerOutcome::Dispatched {
-            work_id,
-            dispatch_key,
-            rule_id,
-            condition_version,
-            ..
-        } = outcome
-        else {
-            return Ok(None);
+        let (work_id, dispatch_key, rule_id, condition_version) = match outcome {
+            work_items::ProactiveTriggerOutcome::Dispatched {
+                work_id,
+                dispatch_key,
+                rule_id,
+                condition_version,
+                ..
+            } => (
+                work_id.clone(),
+                dispatch_key.clone(),
+                rule_id.clone(),
+                *condition_version,
+            ),
+            work_items::ProactiveTriggerOutcome::Duplicate {
+                dispatch_key: Some(key),
+                ..
+            } => {
+                let Some((rule_id, condition_version, work_id)) = self
+                    .inner
+                    .work_items
+                    .proactive_trigger_by_dispatch_key(key)?
+                else {
+                    return Err(RuntimeError::InvalidInput(format!(
+                        "unknown proactive dispatch key: {key}"
+                    )));
+                };
+                (work_id, key.clone(), rule_id, condition_version)
+            }
+            _ => return Ok(None),
         };
-        let router = lock(&self.inner.work_router).clone();
-        if let Some(item) = self.inner.work_items.get(work_id)?
-            && item.lifecycle == work_items::WorkLifecycle::Open
-            && let Some(ext_ref) = item
-                .session_refs
-                .iter()
-                .find(|r| r.workspace.as_deref().is_some_and(|w| w != "local"))
-            && let Some(router) = router
+        let Some(item) = self.inner.work_items.get(&work_id)? else {
+            return Err(RuntimeError::InvalidInput(format!(
+                "unknown work item: {work_id}"
+            )));
+        };
+        if let Some(ext_ref) = item
+            .session_refs
+            .iter()
+            .find(|r| r.workspace.as_deref().is_some_and(|w| w != "local"))
         {
+            let router = lock(&self.inner.work_router).clone().ok_or_else(|| {
+                RuntimeError::InvalidInput(
+                    "workspace routing is unavailable; run the main session through the unique local Client".into(),
+                )
+            })?;
             let workspace = ext_ref.workspace.clone().unwrap_or_default();
+            if item.lifecycle != work_items::WorkLifecycle::Open {
+                if let Some(existing) = router
+                    .task(work_router::WorkTaskQuery {
+                        workspace: workspace.clone(),
+                        task_id: None,
+                        dispatch_key: Some(dispatch_key.clone()),
+                    })
+                    .await
+                    .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
+                    && existing.work_id.as_deref() == Some(item.work_id.as_str())
+                {
+                    self.inner.work_items.attach_task_ref(
+                        &item.work_id,
+                        work_items::WorkTaskRef {
+                            task_id: existing.id.clone(),
+                            session_id: Some(existing.session_id.clone()),
+                            workspace: Some(workspace),
+                        },
+                    )?;
+                    return Ok(Some(existing));
+                }
+                return Err(RuntimeError::InvalidInput(format!(
+                    "cannot dispatch proactive trigger while work item {} is {:?}",
+                    item.work_id, item.lifecycle
+                )));
+            }
             let reply = router
                 .dispatch(work_router::WorkDispatchRequest {
                     work_id: item.work_id.clone(),
@@ -1229,28 +1381,57 @@ impl Runtime {
                 })
                 .await
                 .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
-            self.inner.work_items.attach_task_ref(
-                &item.work_id,
-                work_items::WorkTaskRef {
-                    task_id: reply.task_id,
-                    session_id: Some(reply.session_id),
-                    workspace: Some(reply.workspace),
-                },
-            )?;
-            return Ok(None);
+            self.inner
+                .work_items
+                .attach_task_ref(
+                    &item.work_id,
+                    work_items::WorkTaskRef {
+                        task_id: reply.task_id.clone(),
+                        session_id: Some(reply.session_id.clone()),
+                        workspace: Some(reply.workspace.clone()),
+                    },
+                )
+                .map_err(|error| {
+                    RuntimeError::InvalidInput(format!(
+                        "task {} was created in workspace {} (session {}, work_id {}, dispatch_key {}), but attaching its task_ref failed: {error}; retry proactive.trigger with the same rule_id and condition_version to complete association",
+                        reply.task_id, reply.workspace, reply.session_id, item.work_id, reply.dispatch_key
+                    ))
+                })?;
+            let queried = router
+                .task(work_router::WorkTaskQuery {
+                    workspace: reply.workspace.clone(),
+                    task_id: Some(reply.task_id.clone()),
+                    dispatch_key: None,
+                })
+                .await
+                .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?
+                .ok_or_else(|| {
+                    RuntimeError::InvalidInput(format!(
+                        "task {} in workspace {} could not be loaded after dispatch",
+                        reply.task_id, reply.workspace
+                    ))
+                })?;
+            return Ok(Some(queried));
         }
-        let Some(task) = self.task_by_dispatch_key(dispatch_key)? else {
-            return Ok(None);
+        let task = match self.task_by_dispatch_key(&dispatch_key)? {
+            Some(existing) => Some(existing),
+            None => self.enqueue_proactive_dispatch(
+                &work_id,
+                &dispatch_key,
+                &rule_id,
+                condition_version,
+            )?,
+        };
+        let Some(task) = task else {
+            return Err(RuntimeError::InvalidInput(format!(
+                "proactive dispatch {dispatch_key} produced no task"
+            )));
         };
         if task.state == TaskState::Queued {
-            let busy = lock(&self.inner.active).contains_key(&task.session_id);
-            if !busy {
-                let _ = self
-                    .resume(&task.id, cayw_ai::CancellationToken::new())
-                    .await;
-            }
+            let started = self.start_queued(&task.id)?;
+            return Ok(Some(started));
         }
-        Ok(Some(self.task(&task.id)?))
+        Ok(Some(task))
     }
     pub fn proactive_mode(&self) -> work_items::ProactiveMode {
         self.inner.config.proactive_mode
@@ -1316,8 +1497,9 @@ impl Runtime {
         self.require_main_session()?;
         self.inner.work_items.notification(notification_id)
     }
-    /// Deliver a notification to a user-configured target after recording the
-    /// durable intent, then persist its delivery receipt.
+    /// Enqueue a notification for a user-configured target into the local outbox
+    /// (`status: queued`). Only a real external delivery service or host may
+    /// record a delivery receipt.
     #[allow(clippy::too_many_arguments)]
     pub fn send_notification(
         &self,
@@ -1362,15 +1544,14 @@ impl Runtime {
             .work_items
             .notification_decision(&pending.notification_id)?
         {
-            work_items::NotificationDecision::Complete => Ok(pending),
+            work_items::NotificationDecision::Complete
+            | work_items::NotificationDecision::AwaitDelivery => Ok(pending),
             work_items::NotificationDecision::QueryReceipt => Err(RuntimeError::InvalidInput(
                 "notification delivery outcome is unknown; query receipt before resending".into(),
             )),
             work_items::NotificationDecision::Send => {
-                let receipt_ref = format!("receipt:{}", pending.notification_id);
                 let outbox_path = self.inner.root.join(".cayw-notifications.jsonl");
                 let envelope = serde_json::json!({
-                    "receipt_ref": receipt_ref,
                     "notification_id": pending.notification_id,
                     "work_id": pending.work_id,
                     "work_version": pending.work_version,
@@ -1378,6 +1559,7 @@ impl Runtime {
                     "text": text.or(pending.content_ref.as_deref()).unwrap_or(""),
                     "content_ref": pending.content_ref,
                     "artifact_refs": pending.artifact_refs,
+                    "status": "queued",
                 });
                 let mut line = serde_json::to_vec(&envelope)?;
                 line.push(b'\n');
@@ -1389,10 +1571,6 @@ impl Runtime {
                     options.mode(0o600);
                 }
                 let mut file = options.open(&outbox_path).map_err(|error| {
-                    let _ = self
-                        .inner
-                        .work_items
-                        .mark_notification_unknown(&pending.notification_id);
                     RuntimeError::Workspace(format!("open notification outbox: {error}"))
                 })?;
                 use std::io::Write;
@@ -1405,11 +1583,9 @@ impl Runtime {
                         "write notification outbox: {error}"
                     )));
                 }
-                self.inner.work_items.record_notification_receipt(
-                    &pending.notification_id,
-                    work_items::NotificationStatus::Delivered,
-                    &receipt_ref,
-                )
+                self.inner
+                    .work_items
+                    .mark_notification_queued(&pending.notification_id)
             }
         }
     }
@@ -1420,10 +1596,35 @@ impl Runtime {
         work_id: &str,
         pause_version: u64,
     ) -> Result<usize, RuntimeError> {
-        Ok(self.inner.queue.pause_work(work_id, pause_version)?)
+        let updated = self.inner.queue.pause_work(work_id, pause_version)?;
+        if updated > 0 {
+            self.inner.changed.notify_waiters();
+        }
+        Ok(updated)
     }
     pub fn apply_work_stop(&self, work_id: &str, stop_version: u64) -> Result<usize, RuntimeError> {
-        Ok(self.inner.queue.stop_work(work_id, stop_version)?)
+        let updated = self.inner.queue.stop_work(work_id, stop_version)?;
+        self.cancel_stopped_work_runs(work_id);
+        Ok(updated)
+    }
+    fn cancel_stopped_work_runs(&self, work_id: &str) {
+        let tokens: Vec<CancellationToken> = {
+            let active = lock(&self.inner.active);
+            active
+                .values()
+                .filter(|run| {
+                    self.inner
+                        .queue
+                        .get(&run.task.id)
+                        .is_ok_and(|record| record.work_id.as_deref() == Some(work_id))
+                })
+                .map(|run| run.cancel.clone())
+                .collect()
+        };
+        for token in tokens {
+            token.cancel();
+        }
+        self.inner.changed.notify_waiters();
     }
     /// Read-only Git recovery status for this workspace. `None` when the host
     /// did not opt in (SDK or fully explicit Headless).
@@ -1460,10 +1661,14 @@ impl Runtime {
                 RuntimeError::Workspace(error.message)
             }
         })?;
-        let retained = recovery.point_ids().map_or(0, |points| points.len());
+        let (retained, points_error) = match recovery.point_ids() {
+            Ok(points) => (serde_json::json!(points.len()), serde_json::Value::Null),
+            Err(error) => (serde_json::Value::Null, serde_json::json!(error)),
+        };
         Ok(serde_json::json!({
             "enabled":false,
             "points_retained":retained,
+            "points_error":points_error,
             "snapshots_stopped":true,
             "existing_file_changes":"ask",
             "deleted_existing_points":0,
@@ -1530,6 +1735,11 @@ impl Runtime {
     /// reason. An empty slice means every configured service is running.
     pub fn disabled_services(&self) -> &[DisabledService] {
         &self.inner.disabled_services
+    }
+
+    /// Whether this Runtime serves the device main-session workspace.
+    pub fn is_main_session(&self) -> bool {
+        self.inner.config.main_session
     }
 
     pub fn health(&self) -> Result<Health, RuntimeError> {

@@ -356,7 +356,6 @@ struct Request {
 
 struct TerminalSession {
     id: String,
-    sequence: u64,
     profile: String,
     started: Instant,
     deadline: Option<Instant>,
@@ -373,6 +372,7 @@ struct TerminalSession {
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     waiter: Mutex<Option<tokio::task::JoinHandle<()>>>,
     joined: AtomicBool,
+    output_limit_stopped: AtomicBool,
     changed: Notify,
 }
 
@@ -490,9 +490,9 @@ impl TerminalManager {
     }
 
     /// Why this task must not be reported complete yet. A live session, an
-    /// unknown outcome, a non-zero exit, or output not fully delivered to the
-    /// caller all keep the task open. Reads advance one contiguous delivered
-    /// offset, so a caller cannot skip a cursor gap and hide unread bytes.
+    /// unknown outcome, or output not fully delivered to the caller all keep
+    /// the task open. Reads advance one contiguous delivered offset, so a
+    /// caller cannot skip a cursor gap and hide unread bytes.
     pub(crate) fn completion_error(&self) -> Option<String> {
         if let Some(reason) = lock(&self.retained_completion).clone() {
             return Some(reason);
@@ -500,7 +500,6 @@ impl TerminalManager {
         if let Some(reason) = lock(&self.unknown).clone() {
             return Some(format!("terminal manager outcome is unknown: {reason}"));
         }
-        let mut latest_exit: Option<(u64, Option<String>)> = None;
         for (id, session) in lock(&self.sessions).iter() {
             let state = lock(&session.state).clone();
             match &state {
@@ -517,23 +516,7 @@ impl TerminalManager {
             if !session.joined.load(Ordering::Acquire) {
                 return Some(format!("terminal session {id} supervisor has not joined"));
             }
-            if let State::Exited { exit_code, .. } = state {
-                let exit_error = match exit_code {
-                    Some(0) => None,
-                    Some(code) => Some(format!("terminal session {id} exited with code {code}")),
-                    None => Some(format!("terminal session {id} did not exit normally")),
-                };
-                if latest_exit
-                    .as_ref()
-                    .is_none_or(|(seq, _)| session.sequence >= *seq)
-                {
-                    latest_exit = Some((session.sequence, exit_error));
-                }
-            }
             let output = lock(&session.output);
-            if output.truncated {
-                return Some(format!("terminal session {id} output was truncated"));
-            }
             if !output.eof {
                 return Some(format!("terminal session {id} output has not reached EOF"));
             }
@@ -543,9 +526,6 @@ impl TerminalManager {
                     output.bytes.len() - output.delivered
                 ));
             }
-        }
-        if let Some((_, Some(error))) = latest_exit {
-            return Some(error);
         }
         None
     }
@@ -606,7 +586,7 @@ impl TerminalManager {
             }
             totals.created += 1;
         }
-        let (session_id, sequence) = self.new_session_id();
+        let session_id = self.new_session_id();
         let permit = match self.scheduler.try_acquire(
             SessionId::new(session_id.clone()).map_err(|error| failure(error.to_string()))?,
             ResourceRequest::default(),
@@ -668,7 +648,6 @@ impl TerminalManager {
         };
         let session = Arc::new(TerminalSession {
             id: session_id.clone(),
-            sequence,
             profile: profile_name.into(),
             started,
             deadline,
@@ -685,6 +664,7 @@ impl TerminalManager {
             reader: Mutex::default(),
             waiter: Mutex::default(),
             joined: AtomicBool::new(false),
+            output_limit_stopped: AtomicBool::new(false),
             changed: Notify::new(),
         });
         let reader = tokio::spawn(read_output(session.clone(), process.stdout));
@@ -719,7 +699,7 @@ impl TerminalManager {
         }))
     }
 
-    fn new_session_id(&self) -> (String, u64) {
+    fn new_session_id(&self) -> String {
         for _ in 0..16 {
             let sequence = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
             let id = format!(
@@ -731,11 +711,11 @@ impl TerminalManager {
                 sequence
             );
             if !lock(&self.sessions).contains_key(&id) {
-                return (id, sequence);
+                return id;
             }
         }
         let sequence = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
-        (format!("term-{sequence}"), sequence)
+        format!("term-{sequence}")
     }
 
     fn rollback_total(&self) {
@@ -875,13 +855,35 @@ impl TerminalSession {
     fn finish(&self, outcome: Result<ProcessExit, Arc<DeviceError>>) {
         self.joined.store(true, Ordering::Release);
         match outcome {
-            Ok(exit) if exit.termination == TerminationReason::Exited && exit.output_complete => {
+            Ok(exit)
+                if exit.termination == TerminationReason::Exited
+                    && exit.output_complete
+                    && !self.output_limit_stopped.load(Ordering::Acquire) =>
+            {
                 let mut state = lock(&self.state);
                 if !matches!(*state, State::Unknown { .. }) {
                     *state = State::Exited {
                         exit_code: exit.status.code(),
                         termination: "exited",
                         output_complete: true,
+                    };
+                }
+            }
+            Ok(exit)
+                if exit.termination == TerminationReason::OutputLimit
+                    || (self.output_limit_stopped.load(Ordering::Acquire)
+                        && matches!(
+                            exit.termination,
+                            TerminationReason::Exited | TerminationReason::Cancelled
+                        )) =>
+            {
+                lock(&self.output).truncated = true;
+                let mut state = lock(&self.state);
+                if !matches!(*state, State::Unknown { .. }) {
+                    *state = State::Exited {
+                        exit_code: exit.status.code(),
+                        termination: "output_limit",
+                        output_complete: false,
                     };
                 }
             }
@@ -1151,6 +1153,11 @@ impl TerminalSession {
         {
             return Err(failure("terminal output cursor is stale"));
         }
+        if self.is_live() {
+            self.mark_unknown(format!(
+                "terminal {action} stopped live process without rollback"
+            ));
+        }
         let cleanup = self.shutdown().await;
         let result = json!({
             "session_id": self.id,
@@ -1227,8 +1234,8 @@ async fn read_output(session: Arc<TerminalSession>, mut stdout: ManagedStdout) {
                 drop(output);
                 session.changed.notify_waiters();
                 if truncated {
-                    session.mark_unknown("terminal output limit exceeded");
-                    session.control.close();
+                    session.output_limit_stopped.store(true, Ordering::Release);
+                    session.signal_close();
                 }
             }
             Ok(None) => {

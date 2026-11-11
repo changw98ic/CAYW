@@ -24,7 +24,7 @@ use std::{
         Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const RECOVERY_SCHEMA: &str = "cayw.recovery.v1";
@@ -58,8 +58,6 @@ pub struct RecoveryLimits {
     pub max_bytes: u64,
     pub max_file_bytes: u64,
     pub max_backup_bytes: u64,
-    pub max_restore_files: usize,
-    pub lock_wait: Duration,
 }
 
 impl Default for RecoveryLimits {
@@ -69,8 +67,6 @@ impl Default for RecoveryLimits {
             max_bytes: 2 * 1024 * 1024 * 1024,
             max_file_bytes: 64 * 1024 * 1024,
             max_backup_bytes: 256 * 1024 * 1024,
-            max_restore_files: 256,
-            lock_wait: Duration::from_secs(5),
         }
     }
 }
@@ -83,10 +79,6 @@ impl RecoveryLimits {
             || self.max_file_bytes == 0
             || self.max_file_bytes > self.max_bytes
             || self.max_backup_bytes == 0
-            || self.max_restore_files == 0
-            || self.max_restore_files > 4096
-            || self.lock_wait.is_zero()
-            || Instant::now().checked_add(self.lock_wait).is_none()
         {
             return Err("invalid recovery limits".into());
         }
@@ -300,7 +292,7 @@ impl RecoveryPoints {
         }
         // Without a readable point state there is no evidence that the current
         // workspace content is covered. Fail closed: file changes ask.
-        let state = self.read_state()?;
+        let state = self.read_state().ok().flatten()?;
         let mut scope = base.clone();
         let mut excluded = BTreeSet::new();
         for path in state.out_of_scope_sample {
@@ -324,23 +316,46 @@ impl RecoveryPoints {
 
     /// Read-only status for `cayw doctor` and host diagnostics.
     pub fn status(&self) -> Value {
-        let state = self.read_state();
-        let points = self.point_ids().unwrap_or_default();
-        let warning = self.warning_for_availability();
+        let state_result = self.read_state();
+        let state_error = state_result.as_ref().err().cloned();
+        let state = state_result.ok().flatten();
+        let points_result = if self.git.is_some() {
+            self.point_ids()
+        } else {
+            Ok(vec![])
+        };
+        let points_error = points_result.as_ref().err().cloned();
+        let snapshot_count = points_result.as_ref().ok().map(Vec::len);
         let restore_intent = fs::read(self.recovery_dir().join(RESTORE_INTENT_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         let reconciliation = self.reconciliation();
         let restore_outcome_unknown = reconciliation["outcome_unknown"] == true;
+        let mut warnings = Vec::new();
+        if let Some(warning) = self.warning_for_availability() {
+            warnings.push(warning);
+        }
+        if let Some(error) = &state_error {
+            warnings.push(error.clone());
+        }
+        if let Some(error) = &points_error {
+            warnings.push(error.clone());
+        }
+        if restore_outcome_unknown && let Some(message) = reconciliation["message"].as_str() {
+            warnings.push(message.to_owned());
+        }
+        let warning = (!warnings.is_empty()).then(|| warnings.join("；"));
         json!({
             "schema":RECOVERY_SCHEMA,
             "enabled":self.enabled(),
             "repository":self.repository(),
             "git":self.git,
-            "snapshot_count":points.len(),
+            "snapshot_count":snapshot_count,
+            "state_error":state_error,
+            "points_error":points_error,
             "last_snapshot":state.as_ref().and_then(|state| state.last_snapshot.clone()),
             "last_complete":state.as_ref().map(|state| state.complete),
-            "out_of_scope":state.as_ref().map_or(0, |state| state.out_of_scope),
+            "out_of_scope":state.as_ref().map(|state| state.out_of_scope),
             "out_of_scope_sample":state.as_ref().map_or_else(Vec::new, |state| state.out_of_scope_sample.clone()),
             "restore_intent":restore_intent,
             "restore_outcome_unknown":restore_outcome_unknown,
@@ -609,12 +624,31 @@ impl RecoveryPoints {
             .git
             .as_ref()
             .ok_or_else(|| "Git is unavailable".to_string())?;
+        let verify = self
+            .run_status_output(git, &["show-ref", "--verify", "--quiet", RECOVERY_REF])
+            .map_err(|error| error.message)?;
+        if !verify.status.success() {
+            let stderr = String::from_utf8_lossy(&verify.stderr).trim().to_owned();
+            if verify.status.code() == Some(1) && stderr.is_empty() {
+                // Valid repository initialized without commits on refs/heads/recovery yet.
+                return Ok(vec![]);
+            }
+            return Err(if stderr.is_empty() {
+                "Git recovery repository reference check failed".to_string()
+            } else {
+                format!("Git recovery repository is unreadable: {stderr}")
+            });
+        }
         let output = self
-            .run_status_output(git, &["rev-list", "--max-count=1000", RECOVERY_REF])
+            .run_status_output(git, &["rev-list", RECOVERY_REF])
             .map_err(|error| error.message)?;
         if !output.status.success() {
-            // A repository without commits has no branch to list yet.
-            return Ok(vec![]);
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(if stderr.is_empty() {
+                "Git recovery point listing failed".to_string()
+            } else {
+                format!("Git recovery point listing failed: {stderr}")
+            });
         }
         let text = String::from_utf8(output.stdout)
             .map_err(|_| "Git returned a non-UTF8 point list".to_string())?;
@@ -812,9 +846,6 @@ impl RecoveryPoints {
             return Err(RecoveryError::known(
                 "restore requires at least one workspace-relative file path",
             ));
-        }
-        if request.paths.len() > self.config.limits.max_restore_files {
-            return Err(RecoveryError::known("restore path count exceeds its limit"));
         }
         validate_object_id(&request.snapshot)?;
         let mut unique = BTreeSet::new();
@@ -1212,9 +1243,18 @@ impl RecoveryPoints {
         .map_err(|error| error.to_string())
     }
 
-    fn read_state(&self) -> Option<RecoveryState> {
-        let bytes = read_bounded(&self.recovery_dir().join(STATE_FILE), 64 * 1024).ok()?;
-        serde_json::from_slice(&bytes).ok()
+    fn read_state(&self) -> Result<Option<RecoveryState>, String> {
+        let path = self.recovery_dir().join(STATE_FILE);
+        match fs::metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("恢复点状态文件无法读取：{error}")),
+            Ok(_) => {}
+        }
+        let bytes = read_bounded(&path, 64 * 1024)
+            .map_err(|error| format!("恢复点状态文件无法读取：{error}"))?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("恢复点状态文件损坏：{error}"))
     }
 
     fn write_restore_intent(&self, intent: &RestoreIntent) -> Result<(), RecoveryError> {
@@ -1558,14 +1598,14 @@ impl RecoveryPoints {
             create_private_dir(parent)?;
         }
         let file = open_lock_file(path)?;
-        acquire_flock(&file, self.config.limits.lock_wait)?;
+        acquire_flock(&file)?;
         Ok(file)
     }
 
     fn acquire_workspace_lock(&self) -> Result<File, RecoveryError> {
         let path = self.workspace.join(".cayw-host-lock");
         let file = open_lock_file(&path)?;
-        acquire_flock(&file, self.config.limits.lock_wait)?;
+        acquire_flock(&file)?;
         Ok(file)
     }
 }
@@ -1587,22 +1627,15 @@ fn open_lock_file(path: &Path) -> Result<File, RecoveryError> {
     Ok(file)
 }
 
-fn acquire_flock(file: &File, wait: Duration) -> Result<(), RecoveryError> {
+fn acquire_flock(file: &File) -> Result<(), RecoveryError> {
     use std::os::unix::io::AsRawFd as _;
-    let deadline = Instant::now() + wait;
     loop {
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
         if result == 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::WouldBlock {
-            if Instant::now() >= deadline {
-                return Err(RecoveryError::known(
-                    "timed out waiting for the workspace recovery lock",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        if error.kind() == io::ErrorKind::Interrupted {
             continue;
         }
         return Err(RecoveryError::known(format!(

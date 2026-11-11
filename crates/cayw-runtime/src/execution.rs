@@ -616,6 +616,59 @@ impl Runtime {
         )
         .await
     }
+
+    /// Claim and start a queued task on the current Tokio runtime without tying
+    /// its lifetime to a caller's RPC stream. Shutdown of the owning Runtime
+    /// cancels the background worker cleanly.
+    pub fn start_queued(&self, id: &str) -> Result<TaskRecord, RuntimeError> {
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            RuntimeError::Worker(
+                "background task execution requires an active Tokio runtime".into(),
+            )
+        })?;
+        let task = self.inner.queue.get(id)?;
+        if task.state != TaskState::Queued {
+            return Ok(task);
+        }
+        let child = self.inner.maintenance_cancel.child_token();
+        let flags = RunFlags::default();
+        let (lease, ownership) = {
+            let _coordinate = self.inner.coordination.enter()?;
+            self.check_ready(&task.session_id)?;
+            let current = self.inner.queue.get(id)?;
+            if current.state != TaskState::Queued {
+                return Ok(current);
+            }
+            let mut active = lock(&self.inner.active);
+            if active.contains_key(&task.session_id) {
+                return Err(RuntimeError::Busy);
+            }
+            let ownership = self.inner.coordination.task(id)?;
+            let lease = self.inner.queue.claim(id)?;
+            active.insert(
+                task.session_id.clone(),
+                ActiveRun {
+                    task: lease.clone(),
+                    cancel: child.clone(),
+                    unknown: flags.unknown.clone(),
+                },
+            );
+            (lease, ownership)
+        };
+        let task_id = task.id.clone();
+        let _worker = spawn_worker_task(
+            &handle,
+            self.inner.clone(),
+            task,
+            lease,
+            ownership,
+            child,
+            flags,
+            None,
+        );
+        self.inner.changed.notify_waiters();
+        self.inner.queue.get(&task_id)
+    }
 }
 
 async fn launch_worker(
@@ -627,14 +680,45 @@ async fn launch_worker(
     flags: RunFlags,
     scope: Option<Arc<crate::children::RunScope>>,
 ) -> Result<SessionView, RuntimeError> {
+    let handle = tokio::runtime::Handle::current();
+    let worker = spawn_worker_task(
+        &handle,
+        inner,
+        task,
+        lease,
+        ownership,
+        child.clone(),
+        flags,
+        scope,
+    );
+    let _cancel_on_drop = PromptGuard(child);
+    worker
+        .await
+        .map_err(|error| RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::WorkerLost(error)),
+            cleanup: None,
+            outcome_unknown: true,
+        })?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_worker_task(
+    handle: &tokio::runtime::Handle,
+    inner: Arc<Inner>,
+    task: TaskRecord,
+    lease: TaskLease,
+    ownership: std::fs::File,
+    worker_cancel: CancellationToken,
+    flags: RunFlags,
+    scope: Option<Arc<crate::children::RunScope>>,
+) -> tokio::task::JoinHandle<Result<SessionView, RuntimeError>> {
     let guard = ActiveGuard {
         inner: inner.clone(),
         session: task.session_id.clone(),
         task: lease.clone(),
         _ownership: ownership,
     };
-    let worker_cancel = child.clone();
-    let worker = tokio::spawn(async move {
+    handle.spawn(async move {
         let _active = guard;
         let outcome = AssertUnwindSafe(run_worker(
             inner.clone(),
@@ -763,15 +847,7 @@ async fn launch_worker(
             return Err(error);
         }
         outcome
-    });
-    let _cancel_on_drop = PromptGuard(child);
-    worker
-        .await
-        .map_err(|error| RuntimeError::RecoveryRequired {
-            cause: Box::new(RuntimeError::WorkerLost(error)),
-            cleanup: None,
-            outcome_unknown: true,
-        })?
+    })
 }
 
 pub(crate) async fn resume_child(
@@ -993,7 +1069,14 @@ async fn run_worker(
             })
         }
         (Some(error), Ok(())) => Err(error),
-        (None, Ok(())) => Runtime { inner }.get(&task.session_id),
+        (None, Ok(())) => {
+            if !context.unknown.load(Ordering::Acquire) && !context.cancel.is_cancelled() {
+                let weak = Arc::downgrade(&inner);
+                crate::context_maintenance::schedule_post_turn(weak.clone(), &task.session_id);
+                crate::memory_writer::schedule_post_turn(weak, &task.session_id);
+            }
+            Runtime { inner }.get(&task.session_id)
+        }
     }
 }
 
@@ -1212,6 +1295,16 @@ async fn execute_with_cells(
                 }
                 AgentEvent::ToolExecutionEnd { call, .. } => {
                     lock(&started_tools).remove(&call.id);
+                    crate::context_maintenance::schedule_mid_turn(
+                        Arc::downgrade(&ctx.inner),
+                        &ctx.lease.session_id,
+                    );
+                }
+                AgentEvent::TurnEnd { .. } => {
+                    crate::context_maintenance::schedule_mid_turn(
+                        Arc::downgrade(&ctx.inner),
+                        &ctx.lease.session_id,
+                    );
                 }
                 _ => {}
             }
