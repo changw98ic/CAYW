@@ -44,10 +44,11 @@ impl Provider for Fixture {
                     .iter()
                     .rev()
                     .find_map(|message| match message {
-                        Message::ToolResult(result) => result
-                            .structured_content
-                            .as_ref()
-                            .and_then(|value| serde_json::from_value::<CellPage>(value.clone()).ok()),
+                        Message::ToolResult(result) => {
+                            result.structured_content.as_ref().and_then(|value| {
+                                serde_json::from_value::<CellPage>(value.clone()).ok()
+                            })
+                        }
                         _ => None,
                     })
                     .expect("original cell page");
@@ -149,7 +150,8 @@ async fn run(choice: &'static str, request_authority: bool) {
     assert!(!events.contains("rpc-user"));
     if request_authority {
         let task = runtime.tasks(&session).unwrap().remove(0);
-        let events = serde_json::to_string(&runtime.request_events(&task.id, 0, 64).unwrap()).unwrap();
+        let events =
+            serde_json::to_string(&runtime.request_events(&task.id, 0, 64).unwrap()).unwrap();
         assert!(events.contains("model-auto"));
         assert!(events.contains("evaluation_started"));
     }
@@ -172,5 +174,8 @@ async fn model_decides_request_authority_and_upstream_approval_separately() {
 
 #[test]
 fn sdk_defaults_to_explicit_approval() {
-    assert_eq!(RuntimeConfig::default().approval_mode, ApprovalMode::Explicit);
+    assert_eq!(
+        RuntimeConfig::default().approval_mode,
+        ApprovalMode::Explicit
+    );
 }

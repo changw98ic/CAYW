@@ -1243,8 +1243,12 @@ async fn execute_with_cells(
     const INSTRUCTION: &str = "Use execute_code with action=exec, script, yield_time_ms and max_output_tokens for bounded Luau cells. A timed reply can leave the VM running: use action=wait with its cell_id, next_cursor, yield_time_ms and max_output_tokens until status is terminal and has_more is false. wait resumes yield_control unless continue_execution=false. Use tool_search(query,limit) or ALL_TOOLS to discover names and toolDefinition(name) for needed schemas. Invoke capabilities with cayw.call(name, arguments). Helpers store/load retain versioned session values; text, image, audio and notify produce typed output. return a JSON value or cayw.emit(value). Discovery is not permission. Every exact invocation needs host authorization. Never replay uncertain effects. No ambient shell, network or filesystem APIs are available.";
     let run = async {
         let approval_instruction = match inner.config.approval_mode {
-            crate::ApprovalMode::ModelAuto => "You decide operation approvals yourself through CodeMode. If a cell waits for permission, call approval.pending, review the exact operation, then call approval.decide with its approval_id and your decision. Continue waiting for the original cell, never replay it. For capability.request use capability.decide with the separate request_id. Approval is permission to execute, not successful execution or user acceptance.",
-            crate::ApprovalMode::Explicit => "Operation approvals are supplied by the caller. Do not claim to approve your own request.",
+            crate::ApprovalMode::ModelAuto => {
+                "You decide operation approvals yourself through CodeMode. If a cell waits for permission, call approval.pending, review the exact operation, then call approval.decide with its approval_id and your decision. Continue waiting for the original cell, never replay it. For capability.request use capability.decide with the separate request_id. Approval is permission to execute, not successful execution or user acceptance."
+            }
+            crate::ApprovalMode::Explicit => {
+                "Operation approvals are supplied by the caller. Do not claim to approve your own request."
+            }
         };
         let instruction = Message::System(cayw_ai::SystemMessage {
             sections: [

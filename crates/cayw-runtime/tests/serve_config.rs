@@ -840,12 +840,23 @@ async fn partial_explicit_paths_use_default_config_and_keep_local_settings() {
         &config,
         None,
         &serde_json::to_vec(&json!({
-            "model": {
-                "service":"openai", "api":"chat_completions", "id":"default-config-model",
-                "base_url":"http://127.0.0.1:9/v1", "api_version":"v1",
-                "max_output_tokens":1024, "api_key":"synthetic-provider-key-never-print"
-            },
             "permissions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    save_config(
+        &data_home.path().join("models.json"),
+        None,
+        &serde_json::to_vec(&json!({
+            "default": "configured",
+            "models": {
+                "configured": {
+                    "service":"openai", "api":"chat_completions", "id":"default-config-model",
+                    "base_url":"http://127.0.0.1:9/v1", "api_version":"v1",
+                    "max_output_tokens":1024, "api_key":"synthetic-provider-key-never-print"
+                }
+            }
         }))
         .unwrap(),
     )

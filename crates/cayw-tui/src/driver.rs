@@ -235,12 +235,8 @@ impl Driver {
                 let mut commands = if app.connected
                     && matches!(
                         request.method,
-                        "session.prompt"
-                            | "session.cancel"
-                            | "approval.decide"
-                            | "approval.reply"
-                    )
-                {
+                        "session.prompt" | "session.cancel" | "approval.decide" | "approval.reply"
+                    ) {
                     vec![Command::Get { session_id: id }]
                 } else {
                     vec![]

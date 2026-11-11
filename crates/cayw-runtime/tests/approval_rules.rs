@@ -115,9 +115,9 @@ fn open(root: &Path, provider: Arc<RuleProvider>, rules: Arc<dyn ApprovalRuleSou
         max_queue_time: Some(Duration::from_secs(60)),
         ..RuntimeConfig::default()
     };
-    config.cells.max_yield_time = Duration::from_secs(30);
-    config.codemode.timeout = Duration::from_secs(60);
-    config.host.call_timeout = Duration::from_secs(60);
+    config.cells.max_yield_time = Some(Duration::from_secs(30));
+    config.codemode.timeout = Some(Duration::from_secs(60));
+    config.host.call_timeout = Some(Duration::from_secs(60));
     Runtime::open(
         root.join("session.db"),
         &workspace,

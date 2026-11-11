@@ -34,9 +34,9 @@ mod tokens;
 mod types;
 
 pub use assembly::{
-    Assembly, CompressionRecord, ContextInput, DEFAULT_OUTPUT_RESERVE, DEFAULT_PROTOCOL_MARGIN,
-    Piece, SourceUnit, SummaryKind, SummaryRecord, UnitKind, VersionDecision, accept_compression,
-    accept_summary, advance_frontier, input_budget, plan,
+    Assembly, CONSERVATIVE_CONTEXT_WINDOW, CompressionRecord, ContextInput, DEFAULT_OUTPUT_RESERVE,
+    DEFAULT_PROTOCOL_MARGIN, Piece, SourceUnit, SummaryKind, SummaryRecord, UnitKind,
+    VersionDecision, accept_compression, accept_summary, advance_frontier, input_budget, plan,
 };
 pub use evolution::{EvolutionStep, build_evolution};
 pub use fleet::{FleetMember, FleetOverview, build_fleet_overview};

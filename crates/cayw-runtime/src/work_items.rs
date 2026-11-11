@@ -70,17 +70,9 @@ impl WorkLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AcceptanceCheck {
-    PathExists {
-        path: String,
-    },
-    FileContains {
-        path: String,
-        text: String,
-    },
-    FileEquals {
-        path: String,
-        text: String,
-    },
+    PathExists { path: String },
+    FileContains { path: String, text: String },
+    FileEquals { path: String, text: String },
 }
 
 impl AcceptanceCheck {

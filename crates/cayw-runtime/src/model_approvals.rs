@@ -204,7 +204,9 @@ impl cayw_host::ExternalHost for Service<'_> {
                     .request_evaluate(task, &input.request_id, "model-auto")
                     .map_err(error)?;
                 let result = match lifetime {
-                    Some(lifetime) => runtime.request_approve(task, &ticket, lifetime, &input.reason),
+                    Some(lifetime) => {
+                        runtime.request_approve(task, &ticket, lifetime, &input.reason)
+                    }
                     None => runtime.request_deny(task, &ticket, &input.reason),
                 }
                 .map_err(error)?;

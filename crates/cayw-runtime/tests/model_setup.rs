@@ -364,7 +364,7 @@ async fn removed_configure_command_is_rejected_without_creating_state() {
 }
 
 #[tokio::test]
-async fn selected_profile_wins_and_malformed_legacy_model_is_removed() {
+async fn cancelled_conf_preserves_selected_device_profile_and_config_file() {
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -377,25 +377,23 @@ async fn selected_profile_wins_and_malformed_legacy_model_is_removed() {
     .await;
     assert!(initialized.status.success());
     let state_dir = only_state_dir(root.path());
-    let models_file = state_dir.join("models.json");
+    let device_file = root.path().join("models.json");
     let profiles = json!({
-        "selected": "keep",
+        "default": "keep",
         "models": {"keep": model_config("keep-model", 64)}
     });
-    let profile_bytes = serde_json::to_vec_pretty(&profiles).unwrap();
-    write_private(&models_file, &profile_bytes);
+    write_private(&device_file, &serde_json::to_vec_pretty(&profiles).unwrap());
+    write_private(
+        &state_dir.join("model-selection.json"),
+        &serde_json::to_vec_pretty(&json!({"name": "keep"})).unwrap(),
+    );
 
     let config_file = root.path().join("config.json");
     let remaining = json!({
         "budgets": {"max_turns": 3},
         "permissions": [{"capability": "fs.read", "arguments": {"path": "notes.txt"}}]
     });
-    let mut legacy = remaining.clone();
-    legacy
-        .as_object_mut()
-        .unwrap()
-        .insert("model".into(), json!({"obsolete_invalid_shape": true}));
-    write_private(&config_file, &serde_json::to_vec(&legacy).unwrap());
+    write_private(&config_file, &serde_json::to_vec(&remaining).unwrap());
 
     let output = run_with_input(
         conf_command(home.path(), workspace.path(), root.path()),
@@ -410,11 +408,6 @@ async fn selected_profile_wins_and_malformed_legacy_model_is_removed() {
     let report = first_json(&output).unwrap();
     assert_eq!(report["configured"], false);
     assert_eq!(report["model_configured"], true);
-    assert!(
-        !models_file.exists(),
-        "legacy workspace models.json must be removed"
-    );
-    let device_file = root.path().join("models.json");
     let saved: Value = serde_json::from_slice(&std::fs::read(&device_file).unwrap()).unwrap();
     assert_eq!(saved["default"], "keep");
     assert_eq!(saved["models"]["keep"], model_config("keep-model", 64));

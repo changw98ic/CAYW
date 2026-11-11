@@ -1451,15 +1451,23 @@ impl Host {
     ) -> Result<Value, CapabilityError> {
         let deadline =
             call_deadline(self.config.call_timeout).map_err(|error| self.diagnostic(error))?;
-        // Ordinary calls retain ordered permission/audit admission. Frozen reads
-        // never need this lane to settle or acknowledge their original ticket.
-        let mut lane = Some(tokio::select! { biased;
+        // Wait for any already-started call on this lane before validating or
+        // asking permission, but do not hold the lane across an async permission
+        // wait so another cell can run approval.pending / approval.decide.
+        tokio::select! { biased;
             _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
             _ = sleep_deadline(deadline) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
-            guard = self.execution.lock() => guard,
-        });
-        let mut call = self
-            .admit_owned(capability, arguments, cancel, service.is_some(), deadline)
+            guard = self.execution.lock() => drop(guard),
+        }
+        let (mut call, mut lane) = self
+            .admit_owned(
+                capability,
+                arguments,
+                cancel,
+                service.is_some(),
+                true,
+                deadline,
+            )
             .await?;
         let name = capability.definition.name.as_str();
         let delegated = service.is_some_and(ExternalHost::delegates_workspace_calls);
@@ -1519,14 +1527,15 @@ impl Host {
     }
 
     /// The one admission pipeline used by ordinary calls and frozen read tickets.
-    async fn admit_owned(
-        &self,
+    async fn admit_owned<'a>(
+        &'a self,
         capability: &Capability,
         arguments: Arguments,
         cancel: CancellationToken,
         service: bool,
+        lock_execution: bool,
         deadline: Option<Instant>,
-    ) -> Result<OwnedCall, CapabilityError> {
+    ) -> Result<(OwnedCall, Option<tokio::sync::MutexGuard<'a, ()>>), CapabilityError> {
         let name = capability.definition.name.as_str();
         let child = cancel.child_token();
         let cancel_on_drop = CancelCall(child.clone());
@@ -1572,6 +1581,16 @@ impl Host {
                 }
             },
         }
+        let lane = if lock_execution {
+            Some(tokio::select! {
+                biased;
+                _ = child.cancelled() => return Err(response.error(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
+                _ = sleep_deadline(deadline) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
+                guard = self.execution.lock() => guard,
+            })
+        } else {
+            None
+        };
         self.check(&child, deadline)
             .map_err(|error| response.error(error))?;
         let mut starting = StartingGuard {
@@ -1596,15 +1615,18 @@ impl Host {
             max_error_bytes: self.config.max_result_bytes,
             settled: false,
         };
-        Ok(OwnedCall {
-            host: self.clone(),
-            arguments,
-            response,
-            child,
-            deadline,
-            guard,
-            _cancel_on_drop: cancel_on_drop,
-        })
+        Ok((
+            OwnedCall {
+                host: self.clone(),
+                arguments,
+                response,
+                child,
+                deadline,
+                guard,
+                _cancel_on_drop: cancel_on_drop,
+            },
+            lane,
+        ))
     }
     /// Independently validates, charges and authorizes this exact original call.
     /// The non-Clone ticket owns its audit and the shared generation lease.
@@ -1616,8 +1638,15 @@ impl Host {
         let capability = self.catalog.get("fs.read").expect("filesystem catalog");
         let deadline =
             call_deadline(self.config.call_timeout).map_err(|error| self.diagnostic(error))?;
-        let mut call = self
-            .admit_owned(capability, Arguments(arguments), cancel, false, deadline)
+        let (mut call, _) = self
+            .admit_owned(
+                capability,
+                Arguments(arguments),
+                cancel,
+                false,
+                false,
+                deadline,
+            )
             .await?;
         match self.read_lease(&call.child, call.deadline).await {
             Ok(lease) => Ok(FrozenReadTicket::new(call, lease)),

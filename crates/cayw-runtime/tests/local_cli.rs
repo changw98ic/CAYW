@@ -868,7 +868,8 @@ async fn one_client_routes_separate_in_process_workspaces() {
 }
 
 #[tokio::test]
-async fn legacy_local_model_moves_once_to_the_workspace_profile_file() {
+async fn device_model_catalog_and_workspace_selection_persist_across_restarts_without_leaking_keys()
+{
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());
     let home = tempfile::tempdir().unwrap();
@@ -879,53 +880,54 @@ async fn legacy_local_model_moves_once_to_the_workspace_profile_file() {
             .status
             .success()
     );
-    let key = "synthetic-migration-key-never-print";
-    let legacy = json!({
-        "permissions":[],
-        "model":{
-            "service":"openai",
-            "api":"chat_completions",
-            "id":"legacy-local-model",
-            "base_url":"http://127.0.0.1:9/v1",
-            "api_version":"v1",
-            "max_output_tokens":64,
-            "api_key":key
+    let key = "synthetic-device-key-never-print";
+    let models_path = root.path().join("models.json");
+    let models_doc = json!({
+        "default": "configured",
+        "models": {
+            "configured": {
+                "service": "openai",
+                "api": "chat_completions",
+                "id": "device-profile-model",
+                "base_url": "http://127.0.0.1:9/v1",
+                "api_version": "v1",
+                "max_output_tokens": 64,
+                "api_key": key
+            }
         }
     });
     std::fs::write(
-        root.path().join("config.json"),
-        serde_json::to_vec_pretty(&legacy).unwrap(),
+        &models_path,
+        serde_json::to_vec_pretty(&models_doc).unwrap(),
     )
     .unwrap();
-    std::fs::set_permissions(
-        root.path().join("config.json"),
-        std::fs::Permissions::from_mode(0o600),
+    std::fs::set_permissions(&models_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let selection_path = root
+        .path()
+        .join("workspaces")
+        .join(workspace_key(workspace.path()))
+        .join("model-selection.json");
+    std::fs::write(
+        &selection_path,
+        serde_json::to_vec_pretty(&json!({"name": "configured"})).unwrap(),
     )
     .unwrap();
+    std::fs::set_permissions(&selection_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let mut server = serve(home.path(), workspace.path(), root.path(), &[])
         .spawn()
         .unwrap();
     let ready = read_ready(&mut server).await;
     assert_eq!(ready["provider"], "openai");
-    assert_eq!(ready["model"], "legacy-local-model");
+    assert_eq!(ready["model"], "device-profile-model");
     assert_eq!(ready["model_configured"], true);
     assert!(!ready.to_string().contains(key));
 
-    let config: Value =
-        serde_json::from_slice(&std::fs::read(root.path().join("config.json")).unwrap()).unwrap();
-    assert_eq!(config, json!({"permissions":[]}));
-    let models_path = root.path().join("models.json");
     let models: Value = serde_json::from_slice(&std::fs::read(&models_path).unwrap()).unwrap();
     assert_eq!(models["default"], "configured");
-    assert_eq!(models["models"]["configured"]["id"], "legacy-local-model");
+    assert_eq!(models["models"]["configured"]["id"], "device-profile-model");
     assert_eq!(models["models"]["configured"]["api_key"], key);
     assert_private_file(&models_path);
-    let selection_path = root
-        .path()
-        .join("workspaces")
-        .join(workspace_key(workspace.path()))
-        .join("model-selection.json");
     let selection: Value =
         serde_json::from_slice(&std::fs::read(&selection_path).unwrap()).unwrap();
     assert_eq!(selection["name"], "configured");
@@ -965,7 +967,7 @@ async fn legacy_local_model_moves_once_to_the_workspace_profile_file() {
         .spawn()
         .unwrap();
     let ready = read_ready(&mut restarted).await;
-    assert_eq!(ready["model"], "legacy-local-model");
+    assert_eq!(ready["model"], "device-profile-model");
     assert!(
         serde_json::from_slice::<Value>(&std::fs::read(root.path().join("config.json")).unwrap())
             .unwrap()
