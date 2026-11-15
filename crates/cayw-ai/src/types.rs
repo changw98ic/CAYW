@@ -71,6 +71,28 @@ pub struct SystemMessage {
     pub tools_removed: Vec<String>,
 }
 
+/// Who produced a user-role message. The role alone is not the author: the
+/// runtime also uses that role to show a notice to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageAuthor {
+    /// Typed or submitted by the user.
+    #[default]
+    User,
+    /// Written by the runtime: a status notice, a due reminder, or a route prompt.
+    Runtime,
+}
+
+impl MessageAuthor {
+    pub fn is_user(self) -> bool {
+        matches!(self, Self::User)
+    }
+}
+
+fn author_is_user(author: &MessageAuthor) -> bool {
+    author.is_user()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {
@@ -78,6 +100,9 @@ pub enum Message {
     User {
         content: Vec<Content>,
         timestamp: u64,
+        /// Absent on older records. Those remain user-authored.
+        #[serde(default, skip_serializing_if = "author_is_user")]
+        author: MessageAuthor,
     },
     Assistant(AssistantMessage),
     ToolResult(ToolResultMessage),
@@ -93,7 +118,32 @@ impl Message {
         Self::User {
             content: vec![Content::text(text)],
             timestamp: timestamp_ms(),
+            author: MessageAuthor::User,
         }
+    }
+
+    /// A user-role message the runtime wrote. It can be shown to the model, but
+    /// it is not something the user said.
+    pub fn runtime(text: impl Into<String>) -> Self {
+        Self::user(text).with_author(MessageAuthor::Runtime)
+    }
+
+    pub fn with_author(mut self, author: MessageAuthor) -> Self {
+        if let Self::User { author: slot, .. } = &mut self {
+            *slot = author;
+        }
+        self
+    }
+
+    /// True only when this message is a user-role turn the user actually authored.
+    pub fn is_user_statement(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                author: MessageAuthor::User,
+                ..
+            }
+        )
     }
     pub fn system(text: impl Into<String>) -> Self {
         Self::System(SystemMessage {

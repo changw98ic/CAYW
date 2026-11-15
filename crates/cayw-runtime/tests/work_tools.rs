@@ -1462,3 +1462,92 @@ async fn due_check_tells_the_user_and_does_not_dispatch() {
     main.shutdown_background();
     child.shutdown_background();
 }
+
+struct HoldTalk {
+    release: Arc<Notify>,
+    started: Arc<Notify>,
+}
+
+impl Provider for HoldTalk {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let hold = request
+            .messages
+            .iter()
+            .any(|message| message.text().contains("hold this turn"));
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let model = request.model.clone();
+        Box::pin(futures::stream::once(async move {
+            if hold {
+                started.notify_one();
+                release.notified().await;
+            }
+            let mut message = AssistantMessage::new(&model);
+            message.content.push(Content::text("told the user"));
+            message.stop_reason = StopReason::Stop;
+            message.usage = Usage {
+                input: 1,
+                output: 1,
+                total_tokens: 2,
+                ..Default::default()
+            };
+            message.usage_status = UsageStatus::Reported;
+            AssistantEvent::Done { message }
+        }))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_busy_session_does_not_hold_another_sessions_due_report() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let release = Arc::new(Notify::new());
+    let started = Arc::new(Notify::new());
+    let main = open(
+        &root.join("main"),
+        Arc::new(HoldTalk {
+            release: release.clone(),
+            started: started.clone(),
+        }),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    let busy = main.create(Some("Busy".into())).unwrap().id;
+    let other = main.create(Some("Other".into())).unwrap().id;
+    let prompt = main.prompt(&busy, "hold this turn", CancellationToken::new());
+    tokio::pin!(prompt);
+    tokio::select! {
+        _ = started.notified() => {}
+        result = &mut prompt => panic!("hold turn ended before the model started: {result:?}"),
+    }
+    main.create_work_item(due_spec(&busy, "busy-due", "busy", 1))
+        .unwrap();
+    let due_at = cayw_ai::timestamp_ms().saturating_add(200);
+    main.create_work_item(due_spec(&other, "other-due", "other", due_at))
+        .unwrap();
+    let reported = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let done = main.tasks(&other).unwrap().iter().any(|task| {
+                task.state == TaskState::Completed && task.input.text.contains("other-due")
+            });
+            if done {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        reported.is_ok(),
+        "the other session's due report waited behind the busy session: {:?} error={:?}",
+        main.tasks(&other).unwrap(),
+        main.due_report_error()
+    );
+    assert_eq!(
+        main.work_item("busy-due").unwrap().unwrap().next_check_at,
+        Some(1)
+    );
+    release.notify_one();
+    prompt.await.expect("hold turn");
+    main.shutdown_background();
+}

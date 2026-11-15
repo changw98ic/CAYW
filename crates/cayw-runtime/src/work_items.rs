@@ -801,10 +801,20 @@ impl WorkItems {
 
     /// The soonest check time still scheduled on an open or paused WorkItem.
     pub fn earliest_open_check(&self) -> Result<Option<u64>, RuntimeError> {
+        self.earliest_open_check_except(&std::collections::BTreeSet::new())
+    }
+
+    /// The soonest check whose owning session is not in `busy`. A busy session
+    /// keeps its own time; it does not hide another session's later check.
+    pub fn earliest_open_check_except(
+        &self,
+        busy: &std::collections::BTreeSet<String>,
+    ) -> Result<Option<u64>, RuntimeError> {
         Ok(self
             .list()?
             .into_iter()
             .filter(|item| item.schedules_a_check())
+            .filter(|item| !busy.contains(&item.owner_main_session_id))
             .filter_map(|item| item.next_check_at)
             .min())
     }

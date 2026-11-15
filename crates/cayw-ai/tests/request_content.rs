@@ -1,7 +1,7 @@
 use cayw_ai::providers::OpenAiProvider;
 use cayw_ai::{
-    AssistantEvent, AssistantMessage, CancellationToken, Content, Message, Model, ModelRequest,
-    Provider, StopReason, StreamOptions, SystemMessage, ToolCall, ToolDefinition,
+    AssistantEvent, AssistantMessage, CancellationToken, Content, Message, MessageAuthor, Model,
+    ModelRequest, Provider, StopReason, StreamOptions, SystemMessage, ToolCall, ToolDefinition,
     ToolResultMessage, timestamp_ms,
 };
 use futures::StreamExt;
@@ -118,6 +118,7 @@ async fn disabled_user_images_fail_before_network_instead_of_sending_a_placehold
                 mime_type: "image/png".into(),
             }],
             timestamp: timestamp_ms(),
+            author: MessageAuthor::User,
         }];
         let (events, sent) = exchange(input).await;
         assert!(
@@ -203,6 +204,7 @@ async fn enabled_images_require_valid_mime_and_standard_base64_before_network() 
                     mime_type: mime.into(),
                 }],
                 timestamp: timestamp_ms(),
+                author: MessageAuthor::User,
             }];
             let (events, sent) = exchange(input).await;
             assert!(
@@ -388,6 +390,7 @@ async fn invalid_conversation_order_and_call_stops_fail_before_network() {
                 vec![Message::User {
                     content: vec![],
                     timestamp: timestamp_ms(),
+                    author: MessageAuthor::User,
                 }],
             ),
             (

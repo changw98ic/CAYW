@@ -117,8 +117,9 @@ impl UserEvidence {
 }
 
 /// Collect the only admissible memory sources from durable events: messages
-/// whose role is the user. Assistant messages, tool results, host events and
-/// every other record are ignored.
+/// the user authored. A user-role notice written by the runtime is not one of
+/// those. Assistant messages, tool results, host events and every other record
+/// are ignored.
 pub fn user_evidence(events: &[EventRecord]) -> UserEvidence {
     let mut evidence = UserEvidence::default();
     for record in events {
@@ -126,12 +127,11 @@ pub fn user_evidence(events: &[EventRecord]) -> UserEvidence {
             continue;
         };
         let user = match event.as_ref() {
-            AgentEvent::MessageStart {
-                message: message @ Message::User { .. },
+            AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message }
+                if message.is_user_statement() =>
+            {
+                message
             }
-            | AgentEvent::MessageEnd {
-                message: message @ Message::User { .. },
-            } => message,
             _ => continue,
         };
         let log_id = format!("{}:{}", record.session_id, record.cursor);
@@ -1787,6 +1787,44 @@ mod tests {
                 assert_eq!(output, vec![current]);
             }
         }
+    }
+
+    #[test]
+    fn runtime_notice_is_not_user_evidence_and_a_forgotten_source_stays_out_of_context() {
+        let said = record("s", 1, Message::user("I live in Shanghai"));
+        let notice = record("s", 2, Message::runtime("Task status updated."));
+        let evidence = user_evidence(&[said, notice]);
+        let texts: Vec<_> = evidence
+            .sources()
+            .map(|source| source.text().to_owned())
+            .collect();
+        assert_eq!(texts, vec!["I live in Shanghai".to_owned()]);
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let memory = MainMemory::open(directory.path());
+        memory
+            .apply(
+                &evidence,
+                &[MemoryCandidate {
+                    operation: MemoryOperation::Upsert,
+                    entry_id: Some("home".into()),
+                    kind: "base".into(),
+                    body: "User lives in Shanghai".into(),
+                    source_type: SourceType::Stated,
+                    source_log_ids: vec!["s:1".into()],
+                }],
+            )
+            .expect("apply");
+        memory
+            .forget(
+                SourceRange::new("s", 1, 1).expect("range"),
+                "user requested forget",
+                2,
+            )
+            .expect("forget");
+        assert!(memory.visible_entries().expect("visible").is_empty());
+        assert!(memory.context_block().expect("block").is_none());
+        assert_eq!(memory.entries().expect("entries").len(), 1);
     }
 
     fn record(session: &str, cursor: u64, message: Message) -> EventRecord {

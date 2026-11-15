@@ -1,7 +1,7 @@
 use cayw_ai::providers::OpenAiProvider;
 use cayw_ai::{
-    AssistantEvent, CancellationToken, Content, Message, Model, ModelRequest, Provider, StopReason,
-    StreamOptions, UsageStatus,
+    AssistantEvent, CancellationToken, Content, Message, MessageAuthor, Model, ModelRequest,
+    Provider, StopReason, StreamOptions, UsageStatus,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -839,6 +839,7 @@ async fn user_images_follow_model_capability_and_reasoning_is_explicit() {
                 mime_type: "image/png".into(),
             }],
             timestamp: timestamp_ms(),
+            author: MessageAuthor::User,
         }];
         let events = provider
             .stream(input, CancellationToken::new())

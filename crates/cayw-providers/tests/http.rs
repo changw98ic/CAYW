@@ -930,6 +930,7 @@ async fn invalid_history_and_unsupported_inputs_fail_before_network() {
                 mime_type: "image/png".into(),
             }],
             timestamp: 0,
+            author: cayw_ai::MessageAuthor::User,
         });
         cases.push(req);
         for bad_data in ["aGVsbG8-", "aGVsbG8", "aGVsbG8===", ""] {
@@ -941,6 +942,7 @@ async fn invalid_history_and_unsupported_inputs_fail_before_network() {
                     mime_type: "image/png".into(),
                 }],
                 timestamp: 0,
+                author: cayw_ai::MessageAuthor::User,
             });
             cases.push(req);
         }
@@ -993,6 +995,7 @@ async fn both_protocols_fold_system_changes_and_send_user_images_explicitly() {
                 mime_type: "image/png".into(),
             }],
             timestamp: 0,
+            author: cayw_ai::MessageAuthor::User,
         });
         assert_eq!(
             terminal(&collect(adapter(kind, &base).as_ref(), req).await).stop_reason,
@@ -2385,6 +2388,7 @@ async fn gemini_generate_content_maps_explicit_images_and_rejects_disabled_image
     req.messages.push(Message::User {
         content: vec![Content::text("describe"), image.clone()],
         timestamp: 0,
+        author: cayw_ai::MessageAuthor::User,
     });
     let body = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"fixture image"}]},"finishReason":"STOP"}]}).to_string();
     let (base, rx, server) = http_server("200 OK", "application/json", body).await;

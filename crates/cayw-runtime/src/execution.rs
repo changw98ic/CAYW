@@ -790,7 +790,7 @@ impl Runtime {
             let controls = lock(&self.inner.session_controls);
             for session_id in &notice.sessions {
                 if let Some(control) = controls.get(session_id) {
-                    control.steer(Message::user(&notice.text));
+                    control.steer(Message::runtime(&notice.text));
                     return Ok(crate::WorkSessionNoticeReply {
                         delivered: true,
                         steered: true,
@@ -889,6 +889,7 @@ fn spawn_worker_task(
 ) -> tokio::task::JoinHandle<Result<SessionView, RuntimeError>> {
     let flush = FlushPending {
         inner: inner.clone(),
+        session: task.session_id.clone(),
     };
     let guard = ActiveGuard {
         inner: inner.clone(),
@@ -1081,6 +1082,7 @@ async fn report_dispatched_status(
 /// while it was busy. No Tokio runtime means the reports stay pending.
 struct FlushPending {
     inner: Arc<Inner>,
+    session: String,
 }
 
 impl Drop for FlushPending {
@@ -1088,7 +1090,7 @@ impl Drop for FlushPending {
         if !self.inner.config.main_session {
             return;
         }
-        let pending = std::mem::take(&mut *lock(&self.inner.pending_status_reports));
+        let pending = take_status_reports_for(&self.inner, &self.session);
         if pending.is_empty() {
             return;
         }
@@ -1100,11 +1102,31 @@ impl Drop for FlushPending {
         handle.spawn(async move {
             tokio::task::yield_now().await;
             let runtime = Runtime { inner };
-            for report in pending {
-                let _ = runtime.relay_task_status(report);
+            for pending in pending {
+                let _ = runtime.relay_task_status(pending.report);
             }
         });
     }
+}
+
+/// Remove only the reports that belong to `session_id`. Reports for other main
+/// sessions stay where they are.
+fn take_status_reports_for(
+    inner: &Inner,
+    session_id: &str,
+) -> Vec<crate::work_router::PendingStatusReport> {
+    let mut pending = lock(&inner.pending_status_reports);
+    let mut kept = Vec::new();
+    let mut mine = Vec::new();
+    for report in pending.drain(..) {
+        if report.owner_session_id == session_id {
+            mine.push(report);
+        } else {
+            kept.push(report);
+        }
+    }
+    pending.extend(kept);
+    mine
 }
 
 pub(crate) async fn resume_child(
@@ -1421,7 +1443,7 @@ impl AgentHooks for RequestFence {
             && !self.context.route_notice_sent.swap(true, Ordering::AcqRel)
         {
             return Ok(cayw_agent::NextTurnUpdate {
-                messages: vec![Message::user(ROUTE_REQUIRED)],
+                messages: vec![Message::runtime(ROUTE_REQUIRED)],
                 ..Default::default()
             });
         }
@@ -1682,13 +1704,19 @@ async fn execute_with_cells(
             &context.lease.session_id,
         )?);
         if inner.config.main_session {
-            for report in std::mem::take(&mut *lock(&inner.pending_status_reports)) {
-                prompt.push(Message::user(crate::work_router::status_notice_text(
-                    &report,
+            for pending in take_status_reports_for(inner, &context.lease.session_id) {
+                prompt.push(Message::runtime(crate::work_router::status_notice_text(
+                    &pending.report,
                 )));
             }
         }
-        prompt.push(input.message());
+        let host_notice = inner.queue.get(&context.task.id)?.dispatch_key.is_some();
+        let turn = input.message();
+        prompt.push(if host_notice {
+            turn.with_author(cayw_ai::MessageAuthor::Runtime)
+        } else {
+            turn
+        });
         let result = agent.prompt_messages(prompt).await?;
         // The Agent reports hook rejections as failed model turns. Restore the
         // completion decision the hook actually made.

@@ -100,6 +100,7 @@ impl TaskInput {
         Message::User {
             content,
             timestamp: timestamp_ms(),
+            author: cayw_ai::MessageAuthor::User,
         }
     }
 }

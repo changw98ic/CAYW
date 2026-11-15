@@ -186,6 +186,14 @@ pub struct WorkStatusReport {
     pub error: Option<String>,
 }
 
+/// A status report waiting for one main session. `owner_session_id` is that
+/// session. Another main session must not take it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingStatusReport {
+    pub owner_session_id: String,
+    pub report: WorkStatusReport,
+}
+
 /// The text the main session relays to the user. It is the status, not a review.
 pub(crate) fn status_notice_text(report: &WorkStatusReport) -> String {
     let mut text = String::new();

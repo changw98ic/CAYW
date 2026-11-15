@@ -8,8 +8,8 @@
 
 use cayw_agent::{AgentEvent, ToolResult};
 use cayw_ai::{
-    AssistantEvent, AssistantMessage, Content, Message, StopReason, ToolCall, ToolResultMessage,
-    Usage, UsageStatus,
+    AssistantEvent, AssistantMessage, Content, Message, MessageAuthor, StopReason, ToolCall,
+    ToolResultMessage, Usage, UsageStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -59,6 +59,7 @@ fn fixtures() -> Golden {
     let user = Message::User {
         content: vec![Content::text("hello")],
         timestamp: 1_700_000_000_000,
+        author: MessageAuthor::User,
     };
     let reply = assistant(vec![Content::text("done")], StopReason::Stop);
     let streaming = assistant(vec![Content::text("hi")], StopReason::ToolUse);

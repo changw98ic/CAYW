@@ -24,7 +24,7 @@ use crate::{
         MaintenanceStreamOutcome, consume_maintenance_stream, model_is_configured,
         overlaps_forgotten, reserve_maintenance, settle_reservation,
     },
-    main_memory::{MemoryCandidate, MemoryStatus, now_ms, user_evidence},
+    main_memory::{MemoryCandidate, now_ms, user_evidence},
     session_context::{JobKind, ReservationSpec, effective_input_budget},
 };
 
@@ -187,11 +187,16 @@ async fn run_memory_writer(inner: Weak<Inner>, session_id: String, cancel: Cance
             continue;
         }
         if let CoreEvent::Agent { event } = &record.event
-            && let AgentEvent::MessageEnd {
-                message: user @ cayw_ai::Message::User { .. },
-            } = event.as_ref()
+            && let AgentEvent::MessageEnd { message } = event.as_ref()
+            && matches!(message, cayw_ai::Message::User { .. })
         {
             max_seen_cursor = max_seen_cursor.max(record.cursor);
+            // A status notice or route prompt uses the user role so the model can
+            // read it. It was not said by the user, so it is not a memory source.
+            if !message.is_user_statement() {
+                continue;
+            }
+            let user = message;
             if overlaps_forgotten(record.cursor, record.cursor, &forgotten) {
                 continue;
             }
@@ -263,10 +268,17 @@ async fn run_memory_writer(inner: Weak<Inner>, session_id: String, cancel: Cance
         .iter()
         .map(|entry| (entry.entry_id.clone(), entry.version.clone()))
         .collect();
-    let existing_entries: Vec<_> = all_entries
-        .iter()
-        .filter(|entry| entry.status == MemoryStatus::Active)
-        .collect();
+    // Same set the foreground injects. An active entry whose source was forgotten
+    // stays on disk, but its body is not sent to the writer.
+    let existing_entries = match strong.memory.visible_entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            strong
+                .memory
+                .record_writer_error(&session_id, error.to_string());
+            return;
+        }
+    };
 
     let mut prompt = String::new();
     prompt.push_str("Existing active memory entries:\n");

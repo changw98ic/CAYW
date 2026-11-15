@@ -389,9 +389,9 @@ pub(crate) struct Inner {
     /// Set on a child workspace by the Client. The child uses it to record a
     /// review and to tell the main session that a dispatched task changed state.
     work_owner: Mutex<Option<Arc<dyn work_router::WorkOwner>>>,
-    /// Status reports that could not be steered or started because the main
-    /// session was busy. The next main-session turn says them to the user.
-    pending_status_reports: Mutex<Vec<work_router::WorkStatusReport>>,
+    /// Status reports that could not be steered or started because their owning
+    /// main session was busy. Only that session's next turn says them.
+    pending_status_reports: Mutex<Vec<work_router::PendingStatusReport>>,
     /// Wakes the due-check loop when a check time is written or a session
     /// becomes free. The wait itself is the WorkItem's `next_check_at`.
     due_checks: Notify,
@@ -1089,16 +1089,23 @@ impl Runtime {
         match self.deliver_session_notice(&notice) {
             Ok(reply) if reply.delivered => Ok(reply),
             Ok(reply) => {
-                lock(&self.inner.pending_status_reports).push(report);
+                lock(&self.inner.pending_status_reports).push(work_router::PendingStatusReport {
+                    owner_session_id: item.owner_main_session_id,
+                    report,
+                });
                 Ok(reply)
             }
             Err(error) => {
                 let reason = error.to_string();
-                lock(&self.inner.pending_status_reports).push(report);
+                let owner_session_id = item.owner_main_session_id.clone();
+                lock(&self.inner.pending_status_reports).push(work_router::PendingStatusReport {
+                    owner_session_id: owner_session_id.clone(),
+                    report,
+                });
                 Ok(work_router::WorkSessionNoticeReply {
                     delivered: false,
                     steered: false,
-                    session_id: Some(item.owner_main_session_id),
+                    session_id: Some(owner_session_id),
                     task_id: None,
                     reason: Some(reason),
                 })
@@ -2328,20 +2335,28 @@ async fn due_report_loop(inner: Arc<Inner>) {
             inner: inner.clone(),
         };
         let scan = runtime.deliver_due_work_reports(now);
-        let waiting = match &scan {
-            Ok(replies) => replies.iter().any(|reply| !reply.delivered),
+        // A busy session keeps its own check time. It must not stop the loop from
+        // sleeping until a different session's later check.
+        let busy_sessions = match &scan {
+            Ok(replies) => replies
+                .iter()
+                .filter(|reply| !reply.delivered)
+                .filter_map(|reply| reply.session_id.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
             Err(error) => {
                 *lock(&inner.due_report_error) = Some(error.to_string());
-                true
+                std::collections::BTreeSet::new()
             }
         };
         if scan.is_ok() {
             *lock(&inner.due_report_error) = None;
         }
-        let next = if waiting {
+        // A failed scan can leave a check time already due. Sleeping until that
+        // past time would spin, so wait for the next wake instead.
+        let next = if scan.is_err() {
             None
         } else {
-            match inner.work_items.earliest_open_check() {
+            match inner.work_items.earliest_open_check_except(&busy_sessions) {
                 Ok(next) => next,
                 Err(error) => {
                     *lock(&inner.due_report_error) = Some(error.to_string());
@@ -2352,7 +2367,7 @@ async fn due_report_loop(inner: Arc<Inner>) {
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = notified => {}
-            _ = sleep_until_check(next), if !waiting => {}
+            _ = sleep_until_check(next), if next.is_some() => {}
         }
     }
 }
@@ -2390,6 +2405,25 @@ async fn sleep_until_check(at: Option<u64>) {
 mod tests {
     use super::*;
     use cayw_ai::{AssistantStream, Model, ModelRequest, Provider};
+
+    struct Talk;
+    impl Provider for Talk {
+        fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+            let mut message = cayw_ai::AssistantMessage::new(&request.model);
+            message.content.push(cayw_ai::Content::text("ok"));
+            message.stop_reason = cayw_ai::StopReason::Stop;
+            message.usage = cayw_ai::Usage {
+                input: 1,
+                output: 1,
+                total_tokens: 2,
+                ..Default::default()
+            };
+            message.usage_status = cayw_ai::UsageStatus::Reported;
+            Box::pin(futures::stream::iter([cayw_ai::AssistantEvent::Done {
+                message,
+            }]))
+        }
+    }
 
     struct NoopProvider;
     impl Provider for NoopProvider {
@@ -2560,5 +2594,68 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_status_is_not_taken_by_another_main_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let runtime = Runtime::open(
+            temp.path().join("session.db"),
+            workspace,
+            Arc::new(Talk),
+            Model::new("fixture", "test"),
+            RuntimeConfig {
+                main_session: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let owner = runtime.create(Some("Owner".into())).unwrap().id;
+        let other = runtime.create(Some("Other".into())).unwrap().id;
+        lock(&runtime.inner.pending_status_reports).push(work_router::PendingStatusReport {
+            owner_session_id: owner.clone(),
+            report: work_router::WorkStatusReport {
+                work_id: "work-owner".into(),
+                task_id: "task-owner".into(),
+                session_id: "child".into(),
+                state: "completed".into(),
+                error: None,
+            },
+        });
+        runtime
+            .prompt(
+                &other,
+                "hello from the other session",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        {
+            let pending = lock(&runtime.inner.pending_status_reports);
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].owner_session_id, owner);
+        }
+        let other_view = runtime.get(&other).unwrap();
+        assert!(
+            !other_view
+                .messages
+                .iter()
+                .any(|message| message.text().contains("work-owner"))
+        );
+        runtime
+            .prompt(&owner, "hello from the owner", CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(lock(&runtime.inner.pending_status_reports).is_empty());
+        let owner_view = runtime.get(&owner).unwrap();
+        assert!(
+            owner_view
+                .messages
+                .iter()
+                .any(|message| message.text().contains("work-owner"))
+        );
+        runtime.shutdown_background();
     }
 }
