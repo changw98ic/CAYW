@@ -6,7 +6,7 @@
 //! A Headless/SDK Runtime without the local Client has no router and therefore
 //! cannot claim that another workspace was updated.
 
-use crate::{AcceptanceCheck, TaskPriority, TaskRecord, TaskState};
+use crate::{AcceptanceCheck, TaskPriority, TaskRecord, TaskState, WorkItem};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -149,4 +149,97 @@ pub trait WorkRouter: Send + Sync {
         workspace: &str,
         check: &AcceptanceCheck,
     ) -> Result<bool, WorkRouterError>;
+
+    /// Tell one dispatched session that a program check failed. A running session
+    /// is steered. A finished session gets one new task. A session that already
+    /// has a live task and cannot be steered is reported as not delivered. This
+    /// does not run the check again.
+    async fn notify_session(
+        &self,
+        notice: WorkSessionNotice,
+    ) -> Result<WorkSessionNoticeReply, WorkRouterError>;
+}
+
+/// One failed program check to deliver to the session that is doing the work.
+/// `sessions` is newest first. The dispatch key identifies this notice, not the
+/// original task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkSessionNotice {
+    pub workspace: String,
+    pub sessions: Vec<String>,
+    pub text: String,
+    pub work_id: String,
+    pub dispatch_key: String,
+    pub pause_version: u64,
+    pub stop_version: u64,
+}
+
+/// One terminal state of a dispatched task, sent from the child workspace to the
+/// main session. It names the task and its state. It does not describe files or
+/// acceptance evidence; the child session owns that review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkStatusReport {
+    pub work_id: String,
+    pub task_id: String,
+    pub session_id: String,
+    pub state: String,
+    pub error: Option<String>,
+}
+
+/// The text the main session relays to the user. It is the status, not a review.
+pub(crate) fn status_notice_text(report: &WorkStatusReport) -> String {
+    let mut text = String::new();
+    text.push_str("Task status updated.\n");
+    text.push_str("work_id: ");
+    text.push_str(&report.work_id);
+    text.push('\n');
+    text.push_str("task_id: ");
+    text.push_str(&report.task_id);
+    text.push('\n');
+    text.push_str("state: ");
+    text.push_str(&report.state);
+    text.push('\n');
+    if let Some(error) = &report.error {
+        text.push_str("error: ");
+        text.push_str(error);
+        text.push('\n');
+    }
+    text.push_str(
+        "Tell the user this status. Do not read files, run checks, or dispatch another task.\n",
+    );
+    text
+}
+
+/// The child workspace's link back to the main session that owns the WorkItem.
+/// The child reviews in its own workspace and reports task status. The main
+/// session does not open the child's files.
+#[async_trait::async_trait]
+pub trait WorkOwner: Send + Sync {
+    async fn work_item(&self, work_id: &str) -> Result<WorkItem, WorkRouterError>;
+
+    async fn record_program_acceptance(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+        passed: bool,
+        evidence: String,
+    ) -> Result<WorkItem, WorkRouterError>;
+
+    async fn report_status(
+        &self,
+        report: WorkStatusReport,
+    ) -> Result<WorkSessionNoticeReply, WorkRouterError>;
+}
+
+/// What happened to that notice. A failure here does not undo the acceptance record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkSessionNoticeReply {
+    pub delivered: bool,
+    pub steered: bool,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }

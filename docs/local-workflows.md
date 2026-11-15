@@ -93,9 +93,11 @@ cayw models remove unused --workspace /你的项目
 - LAN URL 面向网络访问。
 - `local_url` 只允许真实回环连接，用于本机管理。
 
-账号配置在本机 WebUI 的“设置 → 局域网访问账号”中完成。保存后立即应用于当前 LAN 入口，并撤销旧登录会话。本机入口始终免登录。远端访客不能配置账号，也不能利用 Forwarded 或 X-Forwarded-For 伪装成本机。
+网页没有账号表单。账号用下面的命令创建。命令不覆盖已有文件，也不启动服务。已保存的账号在下次启动局域网模式时启用登录。本机入口始终免登录。远端访客不能配置账号，也不能利用 Forwarded 或 X-Forwarded-For 伪装成本机。
 
-账号文件是 Client 级 `CAYW_HOME/web-account.json`。它保护当前网页服务中的所有工作区，只保存用户名和加盐 Argon2id 摘要，使用 0600 原子写入。CLI 备用入口为：
+本机回环入口的 `POST /api/settings/account` 仍可立即保存。保存后当前局域网入口马上要求登录，并撤销旧会话。两次密码不一致时返回 `invalid_params`，不写文件。
+
+账号文件是 Client 级 `CAYW_HOME/web-account.json`。它保护当前网页服务中的所有工作区，只保存用户名和加盐 Argon2id 摘要，使用 0600 原子写入。入口为：
 
 ```sh
 cayw account --username admin

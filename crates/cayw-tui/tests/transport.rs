@@ -162,6 +162,8 @@ impl RpcHandler for Fixture {
 
 #[derive(Default)]
 struct WorkspaceRoutingFixture {
+    opens: Mutex<Vec<Value>>,
+    opened: Mutex<std::collections::BTreeSet<String>>,
     calls: Mutex<Vec<Value>>,
 }
 
@@ -173,10 +175,26 @@ impl RpcHandler for WorkspaceRoutingFixture {
         params: Value,
         _cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
+        if method == "client.workspaces.open" {
+            let id = params["id"].as_str().unwrap_or_default().to_owned();
+            if id.is_empty() {
+                return Err(RpcError::new("invalid_params", "missing workspace id"));
+            }
+            self.opens.lock().unwrap().push(params.clone());
+            self.opened.lock().unwrap().insert(id.clone());
+            return Ok(json!({"id": id, "state": "open"}));
+        }
         if method != "client.workspace.call" {
             return Err(RpcError::new(
                 "direct_runtime_call",
                 format!("TUI bypassed the Client workspace router with {method}"),
+            ));
+        }
+        let target = params["workspace_id"].as_str().unwrap_or_default();
+        if !self.opened.lock().unwrap().contains(target) {
+            return Err(RpcError::new(
+                "workspace_unavailable",
+                "workspace is not open in this Client; call client.workspaces.open first",
             ));
         }
         self.calls.lock().unwrap().push(params.clone());
@@ -426,6 +444,8 @@ async fn non_primary_workspace_routes_all_rpc_and_reconnects_without_replaying_w
         }
     }
 
+    // Simulate a Client restart where secondary workspaces start closed until reopened.
+    fixture.opened.lock().unwrap().clear();
     transport.reconnect().unwrap();
     connect(&mut transport).await;
     loop {
@@ -452,6 +472,11 @@ async fn non_primary_workspace_routes_all_rpc_and_reconnects_without_replaying_w
         .unwrap()
         .unwrap();
 
+    let opens = fixture.opens.lock().unwrap().clone();
+    assert_eq!(
+        opens,
+        vec![json!({"id": WORKSPACE_ID}), json!({"id": WORKSPACE_ID})]
+    );
     let calls = fixture.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 8);
     for envelope in &calls {

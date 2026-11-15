@@ -4,157 +4,84 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>CAYW 本机会话</title>
+  <title>CAYW</title>
   <link rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
-  <a class="skip" href="#conversation">跳到会话内容</a>
+  <a class="skip" href="#conversation">跳到对话</a>
   <header class="topbar">
-    <div class="identity"><span class="mark" aria-hidden="true">C</span><div><strong>CAYW</strong><span class="muted">本机会话</span></div></div>
+    <div class="identity"><span class="mark" aria-hidden="true">C</span><strong>CAYW</strong></div>
     <div class="connection"><span id="connection-status" role="status">尚未连接</span><button id="logout" class="quiet" hidden>退出登录</button></div>
   </header>
 
   <div id="network-notice" role="status"></div>
   <section id="login-panel" class="login-panel" aria-labelledby="login-heading">
-    <p class="eyebrow">从这里开始</p>
-    <h1 id="login-heading">连接本机会话</h1>
-    <p id="login-description" class="muted">本地模式自动连接，无需登录。局域网配置账号后，使用账号密码登录；未配置时直接连接。</p>
+    <h1 id="login-heading">开始对话</h1>
+    <p id="login-description" class="muted">这台电脑上会直接进入。从其他设备打开时，如果设置了账号，用账号密码登录。</p>
     <form id="login-form">
       <div id="account-fields" hidden>
         <label for="username">账号</label><input id="username" type="text" autocomplete="username" maxlength="80">
         <label for="password">密码</label><input id="password" type="password" autocomplete="current-password" maxlength="1024">
       </div>
-      <button id="login-button" type="submit">连接</button>
+      <button id="login-button" type="submit">进入</button>
     </form>
     <p id="login-error" class="error" role="alert"></p>
-
   </section>
 
-  <div id="workspace" class="workspace" hidden>
+  <div id="workspace" class="app" hidden>
     <aside class="sidebar" aria-labelledby="sessions-heading">
-      <details id="session-picker" class="session-picker" open>
-      <summary class="session-picker-summary"><span>工作区与会话</span><span id="session-picker-label" class="muted">选择或新建</span></summary>
-      <div class="session-picker-content">
-      <section class="workspace-switcher" aria-label="选择工作区">
-        <label for="workspace-choice">工作区</label><select id="workspace-choice"></select>
-        <button id="switch-workspace" type="button">打开 / 切换</button>
-        <button id="refresh-workspaces" type="button" class="quiet">刷新目录</button>
-        <p id="workspace-switch-status" class="small muted" role="status">连接后读取已登记工作区。</p>
+      <section class="workspace-switcher" aria-label="工作区">
+        <label for="workspace-choice">工作区</label>
+        <select id="workspace-choice"></select>
+        <div class="switch-row"><button id="switch-workspace" type="button">打开</button><button id="refresh-workspaces" type="button" class="quiet">刷新</button></div>
+        <p id="workspace-switch-status" class="small muted" role="status"></p>
       </section>
-      <details id="optional-tools"><summary>可选工具状态与安装</summary><button id="refresh-optional-tools" type="button" class="quiet">刷新安装状态</button><div id="optional-tools-status" class="small muted">连接后读取本机安装状态。</div></details>
-      <button id="open-settings" type="button">设置（模型 / 插件 / 账号）</button>
-      <div class="section-heading"><h2 id="sessions-heading">会话</h2><button id="refresh-sessions" class="quiet" type="button">刷新</button></div>
+      <div class="section-heading"><h2 id="sessions-heading">对话</h2><button id="refresh-sessions" class="quiet" type="button">刷新</button></div>
       <form id="create-form" class="create-form">
-        <label for="session-label" class="small">新会话名称</label>
-        <div class="create-row"><input id="session-label" type="text" maxlength="160" required placeholder="今天想做什么？"><button id="create-button" type="submit" aria-label="创建会话">新建</button></div>
-        <div class="create-device-row">
-          <label for="session-device" class="small muted">执行设备</label>
-          <input id="session-device" type="text" maxlength="128" placeholder="local (默认本机，可选设备标识)">
-        </div>
+        <label for="session-label" class="small">新对话</label>
+        <div class="create-row"><input id="session-label" type="text" maxlength="160" required placeholder="给这段对话起个名字"><button id="create-button" type="submit">新建</button></div>
       </form>
       <p id="list-status" class="small muted" role="status"></p>
-      <nav id="session-list" class="session-list" aria-label="选择会话"></nav>
-      <section id="panel-sidebar" class="panel-zone" aria-labelledby="panel-sidebar-heading">
-        <div class="section-heading"><h2 id="panel-sidebar-heading">面板</h2><button id="refresh-panels" class="quiet" type="button">刷新</button></div>
-        <p id="panel-sidebar-status" class="small muted" role="status">连接后显示已注册侧栏面板。</p>
-        <nav id="panel-sidebar-guide" class="panel-guide" aria-label="侧栏面板目录"></nav>
-        <div id="panel-sidebar-open" class="panel-open-list" aria-live="polite"></div>
-      </section>
-      <details class="capabilities"><summary>宿主能力</summary><button id="refresh-capabilities" class="quiet" type="button">读取能力</button><pre id="capability-content" class="small muted">读取后显示当前宿主公开的能力。</pre></details>
-      <p class="sidebar-note small muted">对话保存在本机。断线后继续接收结果，消息不会自动重发。</p>
-      </div>
-      </details>
+      <nav id="session-list" class="session-list" aria-label="选择对话"></nav>
     </aside>
 
     <main id="conversation" class="conversation" tabindex="-1">
       <div class="conversation-heading">
-        <div>
-          <p class="eyebrow">工作空间</p>
-          <h1 id="session-title">选择或创建会话</h1>
-          <nav class="workbench-bar" aria-label="工作台入口">
-            <button id="wb-tasks" class="quiet wb-btn" type="button">任务 / 时间线</button>
-            <button id="wb-work" class="quiet wb-btn" type="button">工作项 (WorkItem)</button>
-            <button id="wb-usage" class="quiet wb-btn" type="button">用量 / 状态</button>
-            <button id="wb-memory" class="quiet wb-btn" type="button">记忆管理</button>
-            <button id="wb-artifacts" class="quiet wb-btn" type="button">产物与动作</button>
-            <button id="wb-recovery" class="quiet wb-btn" type="button">工作区恢复点</button>
-            <button id="wb-plannotator" class="quiet wb-btn" type="button">版本批注</button>
-            <button id="wb-editor" class="quiet wb-btn" type="button">可视化编辑器</button>
-            <button id="wb-trace" class="quiet wb-btn" type="button">追踪调试</button>
-          </nav>
-        </div>
+        <h1 id="session-title">选择或新建一段对话</h1>
         <span id="session-state" class="state-label">等待选择</span>
       </div>
       <p id="global-error" class="error" role="alert" hidden></p>
       <p id="poll-status" class="small muted" role="status"></p>
-      <section id="blocked-notice" class="notice" hidden aria-labelledby="blocked-title"><h2 id="blocked-title">会话暂时不能继续</h2><p id="blocked-text"></p><button id="open-fork" type="button" hidden>确认后 Fork 为普通聊天</button></section>
-      <section aria-label="会话历史" class="history-section"><p id="history-note" class="small muted"></p><div id="messages" class="messages"><div class="empty"><h2>继续一段对话</h2><p>从左侧选择已有会话，或创建新会话。</p></div></div></section>
-      <section id="live-section" class="live-section" aria-labelledby="live-heading" hidden><h2 id="live-heading" class="small">正在接收</h2><pre id="live-text" aria-live="off"></pre></section>
-      <details class="event-details"><summary>事件记录 <span id="event-count" class="muted">0</span></summary><p class="small muted">最近 120 条已消费事件；无法识别的事件按原始记录展示。</p><div id="event-log"></div></details>
+      <section id="blocked-notice" class="notice" hidden>
+        <p id="blocked-text"></p>
+        <button id="open-fork" type="button" hidden>另开一段普通对话</button>
+      </section>
+      <section class="history-section" aria-label="对话内容">
+        <p id="history-note" class="small muted"></p>
+        <div id="messages" class="messages"><div class="empty"><h2>开始对话</h2><p>左边选一段已有的，或新建一段。</p></div></div>
+        <section id="live-section" class="live-section" aria-label="正在回复" hidden><h2 class="small">正在回复</h2><pre id="live-text"></pre></section>
+      </section>
       <form id="prompt-form" class="composer">
-        <label for="prompt">发送消息</label>
-        <textarea id="prompt" rows="3" maxlength="64000" placeholder="输入你想完成的事情…" disabled></textarea>
-        <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选择会话后即可输入。Enter 换行，Ctrl / ⌘ + Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止运行</button><button id="send-button" type="submit" disabled>发送</button></div></div>
+        <label for="prompt" class="visually-hidden">发送消息</label>
+        <textarea id="prompt" rows="3" maxlength="64000" placeholder="说你要做的事" disabled></textarea>
+        <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选好对话后就能输入。Enter 换行，Ctrl 或 ⌘ 加 Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止</button><button id="send-button" type="submit" disabled>发送</button></div></div>
       </form>
     </main>
-
-    <aside id="panel-bottom" class="panel-bottom" aria-labelledby="panel-bottom-heading" hidden>
-      <div class="section-heading"><h2 id="panel-bottom-heading">底部工作区</h2><span id="panel-bottom-status" class="small muted" role="status"></span></div>
-      <nav id="panel-bottom-guide" class="panel-guide" aria-label="底部面板目录"></nav>
-      <div id="panel-bottom-open" class="panel-open-list" aria-live="polite"></div>
-    </aside>
   </div>
 
   <dialog id="fork-dialog" aria-labelledby="fork-heading">
-    <h2 id="fork-heading">创建普通聊天分支</h2>
-    <p>强流程绑定的会话将保持冻结。确认后，Runtime 会创建新的普通聊天会话；原会话及其记录继续保留。</p>
-    <form id="fork-form"><label for="fork-label">新会话名称</label><input id="fork-label" maxlength="160" required><label class="confirm-label"><input id="fork-confirm" type="checkbox" required>我确认新建普通聊天分支，并理解原会话仍被冻结。</label><p id="fork-error" class="error" role="alert"></p><div class="dialog-actions"><button id="close-fork" class="secondary" type="button">返回</button><button id="fork-button" type="submit">确认 Fork</button></div></form>
+    <h2 id="fork-heading">另开一段普通对话</h2>
+    <p>当前这段先停在这里，记录还在。确认后会新建一段可以继续说的对话。</p>
+    <form id="fork-form">
+      <label for="fork-label">新对话的名字</label>
+      <input id="fork-label" maxlength="160" required>
+      <label class="confirm-label"><input id="fork-confirm" type="checkbox" required>我确认另开一段，原来的对话保持停住。</label>
+      <p id="fork-error" class="error" role="alert"></p>
+      <div class="dialog-actions"><button id="close-fork" class="secondary" type="button">返回</button><button id="fork-button" type="submit">另开</button></div>
+    </form>
   </dialog>
-  <dialog id="settings-dialog" aria-labelledby="settings-heading">
-    <div class="section-heading"><h2 id="settings-heading">设置</h2><button id="close-settings" type="button" class="quiet">关闭</button></div>
-    <p id="settings-workspace" class="small muted"></p>
-    <p class="small muted">每个工作区固定自己的目录和会话数据库。使用侧栏的工作区选择器切换；旧工作区的任务继续运行。新目录先通过本机 cayw init --workspace DIR 登记。</p>
-    <p id="settings-status" role="status" aria-live="polite"></p>
-    <h3>局域网访问账号（可选）</h3>
-    <p class="small muted">此账号保护本网页服务中的所有工作区。本地访问始终免登录，未配置账号时局域网直接放行。只有运行 CAYW 的电脑上的本机管理入口可以保存或修改账号。有局域网入口时保存立即生效，并要求局域网页面重新登录；仅本地模式时，账号供下次局域网启动使用。</p>
-    <p id="account-settings-status" role="status" aria-live="polite">正在读取账号状态…</p>
-    <form id="account-settings-form">
-      <label for="account-username">账号</label><input id="account-username" autocomplete="username" maxlength="80" required disabled>
-      <label for="account-password">新密码</label><input id="account-password" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required disabled>
-      <label for="account-confirm">确认新密码</label><input id="account-confirm" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required disabled>
-      <button id="save-account" type="submit" disabled>保存账号</button>
-    </form>
-    <button id="refresh-account" type="button" class="secondary">刷新账号状态</button>
-    <h3>模型</h3><p class="small muted">切换即时用于后续任务；正在运行的任务保留原模型。密钥可明文保存在当前工作区的普通私有配置文件。编辑时默认保留原认证；更改服务、接口、地址或版本后，须重新输入密钥或明确移除认证。保存不发送模型请求。</p>
-    <div id="model-profiles"></div>
-    <button id="new-model-profile" type="button" class="secondary">新建模型方案</button>
-    <form id="model-settings-form">
-      <label>方案名称<input name="name" required maxlength="80" pattern="[a-zA-Z0-9_.\-]+" placeholder="daily"></label>
-      <label>服务<select name="service"><option value="openai">OpenAI / 兼容服务</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="magpie">Magpie</option></select></label>
-      <label>接口<select name="api"><option>chat_completions</option><option>responses</option><option>messages</option><option>stream_generate_content</option><option>generate_content</option></select></label>
-      <label>服务地址<input name="base_url" type="url" required value="https://api.openai.com/v1"></label>
-      <label>模型名称<input name="id" required maxlength="256"></label>
-      <label>API 版本<input name="api_version" required value="v1"></label>
-      <label>认证方式<select name="credential"><option value="remove">不使用认证 / 移除密钥</option><option id="keep-model-credential" value="keep" disabled>保留已有认证</option><option value="replace">设置 / 更换密钥</option></select></label>
-      <p id="model-credential-status" class="small muted" role="status">新方案默认不使用认证。</p>
-      <label>新的 API 密钥（明文保存）<input name="api_key" type="password" autocomplete="off" maxlength="4096" placeholder="选择设置 / 更换密钥后输入" disabled></label>
-      <label>单次输出 token 上限<input name="max_output_tokens" type="number" required min="1" max="9007199254740991" value="4096"></label>
-      <label>上下文窗口 token 数（可选）<input name="context_window" type="number" min="1" max="9007199254740991" placeholder="留空表示不限制或使用默认"></label>
-      <label>分词器标识（可选）<input name="tokenizer" type="text" maxlength="256" placeholder="例如 o200k_base"></label>
-      <button type="submit">保存模型方案</button>
-    </form>
-    <h3>插件</h3><p class="small muted">支持本机 External 工作区架构插件。登记和更新不执行代码；不支持 npm、URL 下载或动态 Native 安装。插件由唯一 Client 启动和监管，普通插件不绑定会话。</p>
-    <div id="plugin-profiles"></div>
-    <form id="plugin-settings-form">
-      <label>本地插件描述 JSON<textarea name="descriptor" required rows="7" maxlength="240000" placeholder='{"executable":"/绝对路径/plugin","argv":[],"manifest":{"name":"example","version":"1.0.0","protocol_version":1,"role":"workspace_architecture","kind":"external","capabilities":[],"permissions":{}}}'></textarea></label>
-      <label>更新已有插件时填写名称<input name="name" maxlength="128" placeholder="留空表示安装新插件"></label>
-      <button type="submit">校验并登记</button>
-    </form>
-    <label class="confirm-label"><input id="plugin-process-approval" type="checkbox">我已审阅插件路径、参数、能力与权限，批准以我的身份执行此本地程序。进程隔离不是安全沙箱。</label>
-    <button id="refresh-settings" type="button" class="secondary">刷新状态</button>
-  </dialog>
-  <noscript><p class="notice">此界面需要 JavaScript 来读取本机会话和事件。请启用 JavaScript 后刷新。</p></noscript>
+  <noscript><p class="notice">这个页面需要 JavaScript 才能对话。请打开 JavaScript 后刷新。</p></noscript>
 </body>
 </html>

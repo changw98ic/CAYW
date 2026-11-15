@@ -429,10 +429,25 @@ fn frozen(connection: &Connection, session: &str) -> Result<bool, CellError> {
     )?)
 }
 fn validate_key(key: &str) -> Result<(), CellError> {
-    if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+    if key.is_empty() || key.chars().count() > 128 || key.chars().any(char::is_control) {
         return Err(CellError::Invalid(
-            "store key requires 1..=128 non-control bytes".into(),
+            "store key requires 1..=128 non-control characters".into(),
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_key;
+
+    #[test]
+    fn store_key_counts_characters_and_rejects_controls() {
+        assert!(validate_key(&"a".repeat(128)).is_ok());
+        assert!(validate_key(&"你".repeat(128)).is_ok());
+        assert_eq!("你".repeat(128).len(), 384);
+        assert!(validate_key(&"你".repeat(129)).is_err());
+        assert!(validate_key("a\nb").is_err());
+        assert!(validate_key("").is_err());
+    }
 }

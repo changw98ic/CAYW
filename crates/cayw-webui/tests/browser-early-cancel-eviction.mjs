@@ -18,9 +18,9 @@ async (page) => {
     stopDisabled:document.getElementById('cancel-button').disabled,
     sendDisabled:document.getElementById('send-button').disabled,
     sendLabel:document.getElementById('send-button').textContent,
-    cursor:document.getElementById('event-count').textContent,
+    cursor:document.getElementById('conversation').dataset.cursor,
     notice:document.getElementById('blocked-text').textContent,
-    cachedCursors:[...document.querySelectorAll('#event-log > details > summary')].map(node => Number(node.textContent.match(/^#(\d+)/)?.[1])),
+    cachedCursors:(document.getElementById('conversation').dataset.eventCursors || '').split(',').filter(Boolean).map(Number),
   }));
   const manifest = await (await page.request.get(new URL('/__test__/manifest', page.url()).href)).json();
   let eviction;
@@ -32,21 +32,21 @@ async (page) => {
     await page.reload();
     await until(() => page.locator('#prompt').isEnabled(), 'session did not load');
     check(await page.locator('#session-list [aria-current="true"]').count() === 1, 'selected session missing');
-    check((await page.locator('#session-list [aria-current="true"]').textContent()).includes(session.id.slice(0, 20)), 'runner requires a fresh service with its own session selected');
+    check(await page.locator('#session-list [aria-current="true"]').getAttribute('data-session-id') === session.id, 'runner requires a fresh service with its own session selected');
     await page.locator('#prompt').fill('Stop this offline task before any attempt is visible');
     await page.locator('#send-button').click();
     await until(async () => (await status()).observed.lastSnapshot?.result?.pending_approvals?.length > 0, 'offline task did not reach approval');
-    check((await state()).cursor.endsWith(`游标 ${session.cursor}`), 'attempt reached browser before early cancel');
+    check((await state()).cursor === String(session.cursor), 'attempt reached browser before early cancel');
     await page.locator('#cancel-button').click();
     await until(async () => (await status()).observed.cancel?.result?.cancelled && (await status()).held && (await status()).observed.withheldTerminal, 'original cancel/terminal/receipt missing');
     const terminal = (await status()).observed.withheldTerminal;
     check(terminal.protocol_version === 3 && terminal.session_id === session.id && JSON.stringify(terminal.attempt) === JSON.stringify(terminal.event.lease), 'invalid original terminal identity');
     await control('deliver-terminal');
-    await until(async () => (await state()).cursor.endsWith(`游标 ${terminal.cursor}`), 'original terminal not consumed');
+    await until(async () => (await state()).cursor === String(terminal.cursor), 'original terminal not consumed');
     for (let attempt = 0; attempt < 16; attempt++) {
       eviction = await control('advance-clients', {count:1});
       const cursor = eviction.terminals.at(-1).cursor;
-      await until(async () => (await state()).cursor.endsWith(`游标 ${cursor}`), 'browser did not consume the independent attempt');
+      await until(async () => (await state()).cursor === String(cursor), 'browser did not consume the independent attempt');
       before = await state();
       check(before.promptDisabled && before.sendDisabled && !before.stopDisabled, 'other attempts changed the original operation lock');
       if (eviction.completed >= 2 && before.cachedCursors.length === 120 && before.cachedCursors.every(cursor => cursor > terminal.cursor)) break;

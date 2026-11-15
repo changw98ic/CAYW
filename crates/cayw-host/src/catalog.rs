@@ -23,6 +23,19 @@ fn string(max: usize) -> Value {
 fn path() -> Value {
     string(4096)
 }
+fn codeintel_path() -> Value {
+    // Length is UTF-8 bytes, which JSON Schema maxLength cannot express.
+    // The bridge is the only length check.
+    json!({"type":"string","minLength":1})
+}
+fn codeintel_description(summary: &str) -> String {
+    format!(
+        "{summary} The path is workspace-relative, at most 512 UTF-8 bytes after trim, with no NUL and no parent segment. The bridge checks that once."
+    )
+}
+fn codeintel_name() -> Value {
+    json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"})
+}
 fn hash() -> Value {
     json!({"type":"string", "pattern":"^[0-9a-fA-F]{64}$"})
 }
@@ -89,12 +102,23 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
         );
     }
     if config.codeintel.is_some() {
+        let refresh = codeintel_description(
+            "Read one workspace file, publish its digest and outline into the shared symbol/version bridge (prefers code.outline; lightweight Rust scan otherwise).",
+        );
+        let definitions_tool = codeintel_description(
+            "Query same-index symbol definitions from the shared F04 bridge.",
+        );
+        let file_version =
+            codeintel_description("Return the indexed file version and content digest for a path.");
+        let symbols = codeintel_description(
+            "List symbols currently indexed for one path in the shared F04 bridge.",
+        );
         definitions.extend([
             (
                 definition(
                     "codeintel.refresh",
-                    "Read one workspace file, publish its digest and outline into the shared symbol/version bridge (prefers code.outline; lightweight Rust scan otherwise).",
-                    json!({"path":path(),"language":{"type":"string","minLength":1,"maxLength":64}}),
+                    &refresh,
+                    json!({"path":codeintel_path(),"language":codeintel_name()}),
                     &["path"],
                 ),
                 Executor::CodeIntel,
@@ -102,11 +126,11 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             (
                 definition(
                     "codeintel.definitions",
-                    "Query same-index symbol definitions from the shared F04 bridge.",
+                    &definitions_tool,
                     json!({
                         "name":string(256),
-                        "path":path(),
-                        "kind":string(64),
+                        "path":codeintel_path(),
+                        "kind":codeintel_name(),
                         "file_version":{"type":"integer","minimum":1}
                     }),
                     &["name"],
@@ -116,8 +140,8 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             (
                 definition(
                     "codeintel.file_version",
-                    "Return the indexed file version and content digest for a path.",
-                    json!({"path":path()}),
+                    &file_version,
+                    json!({"path":codeintel_path()}),
                     &["path"],
                 ),
                 Executor::CodeIntel,
@@ -125,8 +149,8 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<(ToolDefinition, Executor)
             (
                 definition(
                     "codeintel.symbols",
-                    "List symbols currently indexed for one path in the shared F04 bridge.",
-                    json!({"path":path()}),
+                    &symbols,
+                    json!({"path":codeintel_path()}),
                     &["path"],
                 ),
                 Executor::CodeIntel,

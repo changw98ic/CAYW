@@ -963,6 +963,7 @@ pub(crate) fn units_from_ranges(
             Message::User { .. } => {
                 if let Some(Message::Assistant(assistant)) = messages.get(index + 1)
                     && assistant.tool_calls().is_empty()
+                    && !assistant.stop_reason.is_failure()
                 {
                     (
                         index + 2,
@@ -1178,6 +1179,46 @@ fn apply_assembly(assembly: &Assembly, window_was_default: bool) -> bool {
         .any(|piece| matches!(piece, Piece::Compression { .. } | Piece::Summary { .. }))
 }
 
+pub(crate) fn update_turn_state(awaiting_model: &mut bool, message: &Message) {
+    match message {
+        Message::User { .. } | Message::ToolResult(_) => *awaiting_model = true,
+        Message::Assistant(_) => *awaiting_model = false,
+        Message::System(_) | Message::Custom { .. } => {}
+    }
+}
+
+pub(crate) fn first_conversational_is_assistant(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .find(|message| !matches!(message, Message::System(_) | Message::Custom { .. }))
+        .is_some_and(|message| matches!(message, Message::Assistant(_)))
+}
+
+fn needs_user_carrier(
+    awaiting_model: bool,
+    messages: &[Message],
+    remaining: &[(&Piece, usize, usize)],
+) -> bool {
+    if awaiting_model {
+        return false;
+    }
+    for (next_piece, next_from, next_to) in remaining {
+        match next_piece {
+            Piece::Compression { .. } | Piece::Summary { .. } => return false,
+            Piece::Fixed { .. } | Piece::Original { .. } => {
+                for message in &messages[*next_from..*next_to] {
+                    match message {
+                        Message::System(_) | Message::Custom { .. } => continue,
+                        Message::Assistant(_) => return true,
+                        Message::User { .. } | Message::ToolResult(_) => return false,
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn render(
     messages: &[Message],
     spans: &[UnitSpan],
@@ -1186,10 +1227,10 @@ fn render(
     if spans.is_empty() {
         return Err(());
     }
-    let mut rendered = Vec::new();
+    let mut resolved = Vec::with_capacity(assembly.pieces.len());
     let mut span_index = 0usize;
     for piece in &assembly.pieces {
-        let (start, end, text, _) = piece.range();
+        let (start, end, _, _) = piece.range();
         let Some(first_span) = spans.get(span_index) else {
             return Err(());
         };
@@ -1208,14 +1249,31 @@ fn render(
         if from > to || to > messages.len() {
             return Err(());
         }
+        resolved.push((piece, from, to));
+        span_index = end_span_index + 1;
+    }
+    if span_index != spans.len() {
+        return Err(());
+    }
+    let mut rendered = Vec::new();
+    let mut awaiting_model = false;
+    for (piece_index, &(piece, from, to)) in resolved.iter().enumerate() {
+        let (_, _, text, _) = piece.range();
         match piece {
             Piece::Fixed { .. } | Piece::Original { .. } => {
                 let slice = &messages[from..to];
                 let source_len: usize = slice.iter().map(|message| message.text().len()).sum();
                 if text.len() < source_len {
-                    rendered.extend(slice.iter().map(|message| excerpt_message(message, text)));
+                    for message in slice {
+                        let excerpted = excerpt_message(message, text);
+                        update_turn_state(&mut awaiting_model, &excerpted);
+                        rendered.push(excerpted);
+                    }
                 } else {
-                    rendered.extend(slice.iter().cloned());
+                    for message in slice {
+                        update_turn_state(&mut awaiting_model, message);
+                        rendered.push(message.clone());
+                    }
                 }
             }
             Piece::Compression { .. } | Piece::Summary { .. } => {
@@ -1224,16 +1282,17 @@ fn render(
                         rendered.push(message.clone());
                     }
                 }
-                rendered.push(Message::system(text.to_owned()));
+                if needs_user_carrier(awaiting_model, messages, &resolved[piece_index + 1..]) {
+                    let carrier = Message::user(text.to_owned());
+                    update_turn_state(&mut awaiting_model, &carrier);
+                    rendered.push(carrier);
+                } else {
+                    rendered.push(Message::system(text.to_owned()));
+                }
             }
         }
-        span_index = end_span_index + 1;
     }
-    if span_index != spans.len() {
-        Err(())
-    } else {
-        Ok(rendered)
-    }
+    Ok(rendered)
 }
 
 fn excerpt_message(message: &Message, excerpt: &str) -> Message {

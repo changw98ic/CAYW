@@ -22,11 +22,12 @@ use cayw_ai::{
 };
 use cayw_ipc::RpcHandler;
 use cayw_runtime::{
-    AcceptanceCheck, AcceptanceCriterion, FileRules, MemoryCandidate, MemoryOperation,
-    ProactiveMode, ProactiveTriggerOutcome, Runtime, RuntimeConfig, SourceType, TaskDispatch,
-    TaskInput, TaskIntent, TaskPriority, TaskResources, TaskState, WorkControl, WorkDispatchReply,
-    WorkDispatchRequest, WorkItemSpec, WorkRouter, WorkRouterError, WorkTargetOutcome,
-    WorkTaskQuery, fixture::script_response,
+    AcceptanceCheck, AcceptanceCriterion, AcceptanceResult, AcceptanceSource, FileRules,
+    MemoryCandidate, MemoryOperation, ProactiveMode, ProactiveTriggerOutcome, Runtime,
+    RuntimeConfig, SourceType, TaskDispatch, TaskInput, TaskIntent, TaskPriority, TaskResources,
+    TaskState, WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkItemSpec, WorkOwner,
+    WorkRouter, WorkRouterError, WorkStatusReport, WorkTargetOutcome, WorkTaskQuery,
+    fixture::script_response,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -854,13 +855,21 @@ async fn unattached_external_dispatch_recovers_via_work_tasks_and_work_dispatch_
     struct Script(String);
     impl Provider for Script {
         fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
-            Box::pin(futures::stream::iter([AssistantEvent::Done {
-                message: script_response(
+            let reminded = request.messages.last().is_some_and(|message| {
+                message
+                    .text()
+                    .contains("This main-session turn cannot finish yet")
+            });
+            let message = if reminded {
+                assistant_text(&request.model, "stopped after the route reminder")
+            } else {
+                script_response(
                     &request,
                     &self.0,
                     &format!("recover-{}", request.messages.len()),
-                ),
-            }]))
+                )
+            };
+            Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
         }
     }
 
@@ -1013,6 +1022,15 @@ async fn unattached_external_dispatch_recovers_via_work_tasks_and_work_dispatch_
         ) -> Result<bool, WorkRouterError> {
             Ok(false)
         }
+
+        async fn notify_session(
+            &self,
+            notice: cayw_runtime::WorkSessionNotice,
+        ) -> Result<cayw_runtime::WorkSessionNoticeReply, WorkRouterError> {
+            self.target
+                .deliver_session_notice(&notice)
+                .map_err(|error| WorkRouterError::known(error.to_string()))
+        }
     }
 
     fn open_rt(dir: &Path, provider: Arc<dyn Provider>, config: RuntimeConfig) -> Runtime {
@@ -1039,6 +1057,7 @@ async fn unattached_external_dispatch_recovers_via_work_tasks_and_work_dispatch_
 
     let script = format!(
         r#"
+cayw.call('work.list', {{}})
 local w1 = cayw.call('work.create', {{
   work_id='work-orphan-1',
   title='recover via work.tasks',
@@ -1075,10 +1094,20 @@ return {{w1=w1.work_id, w2=w2.work_id}}
         }))
         .unwrap();
     let main_session = main_step1.create(Some("Main".into())).unwrap().id;
-    main_step1
+    let refused = main_step1
         .prompt(&main_session, "create items", CancellationToken::new())
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("check existing WorkItems"),
+        "{refused}"
+    );
+    let created = main_step1.list_work_items().unwrap();
+    assert_eq!(created.len(), 2);
+    assert!(
+        created.iter().all(|item| item.task_refs.is_empty()),
+        "creating without dispatch must not attach the later orphan tasks"
+    );
     drop(main_step1);
 
     // Pre-seed two unattached dispatched tasks directly in `target` (simulating failure right before `attach_task_ref`).
@@ -1121,6 +1150,7 @@ return {{w1=w1.work_id, w2=w2.work_id}}
 
     let script_step2 = format!(
         r#"
+cayw.call('work.list', {{}})
 local recovered_tasks = cayw.call('work.tasks', {{
   work_id='work-orphan-1',
   workspace='target',
@@ -1599,11 +1629,13 @@ local created = cayw.call('work.create', {{
   user_source_refs = refs
 }})
 assert(#created.acceptance_criteria == 70, '70 criteria must be stored without truncation')
-local evaluated = cayw.call('work.accept.program', {{
-  work_id = 'work-70-items',
-  criterion_id = 'crit-70'
-}})
-assert(#evaluated.acceptance_records == 1 and evaluated.acceptance_records[1].result == 'passed', 'over-8MiB file check must pass')
+local ok_review, err_review = pcall(function()
+  return cayw.call('work.accept.program', {{
+    work_id = 'work-70-items',
+    criterion_id = 'crit-70'
+  }})
+end)
+assert(not ok_review, 'the main session must not review: ' .. tostring(err_review))
 return {{ written = applied.written[1], count = #created.acceptance_criteria }}
 "#,
                 legal_id = self.legal_max_id,
@@ -1690,8 +1722,8 @@ return {{ written = applied.written[1], count = #created.acceptance_criteria }}
         over_err.rejected[0]
     );
 
-    // Second turn executes `memory.apply` (247-byte legal upper bound), `work.create` (70 items),
-    // and `work.evaluate` (> 8 MiB file) end-to-end through CodeMode!
+    // Second turn stores the 247-byte entry and the 70 criteria. The main session
+    // does not review; the child session below reads the large file.
     runtime
         .prompt(
             &session,
@@ -1715,9 +1747,123 @@ return {{ written = applied.written[1], count = #created.acceptance_criteria }}
     let item = runtime.work_item("work-70-items").unwrap().unwrap();
     assert_eq!(item.acceptance_criteria.len(), 70);
     assert_eq!(item.user_source_refs.len(), 70);
-    assert_eq!(item.acceptance_records.len(), 1);
+    assert!(
+        item.acceptance_records.is_empty(),
+        "the main session must not record a program check"
+    );
+
+    struct BoundsOwner {
+        main: Runtime,
+    }
+
+    #[async_trait]
+    impl WorkOwner for BoundsOwner {
+        async fn work_item(
+            &self,
+            work_id: &str,
+        ) -> Result<cayw_runtime::WorkItem, WorkRouterError> {
+            self.main
+                .work_item(work_id)
+                .map_err(|error| WorkRouterError::known(error.to_string()))?
+                .ok_or_else(|| WorkRouterError::known("WorkItem not found"))
+        }
+
+        async fn record_program_acceptance(
+            &self,
+            work_id: &str,
+            criterion_id: &str,
+            passed: bool,
+            evidence: String,
+        ) -> Result<cayw_runtime::WorkItem, WorkRouterError> {
+            self.main
+                .record_child_program_acceptance(work_id, criterion_id, passed, evidence)
+                .map_err(|error| WorkRouterError::known(error.to_string()))
+        }
+
+        async fn report_status(
+            &self,
+            report: WorkStatusReport,
+        ) -> Result<cayw_runtime::WorkSessionNoticeReply, WorkRouterError> {
+            self.main
+                .relay_task_status(report)
+                .map_err(|error| WorkRouterError::known(error.to_string()))
+        }
+    }
+
+    struct ChildReview;
+
+    impl Provider for ChildReview {
+        fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+            let message = script_response(
+                &request,
+                r#"local evaluated = cayw.call('work.accept.program', {work_id='work-70-items', criterion_id='crit-70'})
+assert(evaluated.passed == true, 'over-8MiB file check must pass')"#,
+                &format!("child-review-{}", request.messages.len()),
+            );
+            Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+        }
+    }
+
+    let child = Runtime::open(
+        temp.path().join("child-bounds.sqlite"),
+        &workspace,
+        Arc::new(ChildReview),
+        Model::new("fixture", "child-bounds"),
+        RuntimeConfig {
+            approval_rules: Some(Arc::new(FileRules::new(
+                temp.path().join("child-rules.json"),
+            ))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    child
+        .set_work_owner(Arc::new(BoundsOwner {
+            main: runtime.clone(),
+        }))
+        .unwrap();
+    let child_session = child.create(Some("Reviewer".into())).unwrap().id;
+    let dispatched = child
+        .enqueue_dispatched(
+            &child_session,
+            TaskInput {
+                text: "review crit-70".into(),
+                images: Vec::new(),
+            },
+            TaskIntent::General,
+            TaskPriority::Normal,
+            TaskResources::default(),
+            TaskDispatch {
+                work_id: item.work_id.clone(),
+                dispatch_key: "review-crit-70".into(),
+                pause_version: item.pause_version,
+                stop_version: item.stop_version,
+            },
+        )
+        .unwrap();
+    child
+        .resume(&dispatched.id, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        child.task(&dispatched.id).unwrap().state,
+        TaskState::Completed
+    );
+
+    let reviewed = runtime.work_item("work-70-items").unwrap().unwrap();
+    assert_eq!(reviewed.acceptance_records.len(), 1);
+    assert_eq!(
+        reviewed.acceptance_records[0].result,
+        AcceptanceResult::Passed
+    );
+    assert_eq!(
+        reviewed.acceptance_records[0].source,
+        AcceptanceSource::Program
+    );
+    assert_eq!(reviewed.acceptance_records[0].writer, "child-session");
 
     runtime.shutdown_background();
+    child.shutdown_background();
 }
 
 #[tokio::test]
@@ -1825,6 +1971,15 @@ async fn proactive_auto_validates_preconditions_before_recording_trigger_and_ret
             _check: &AcceptanceCheck,
         ) -> Result<bool, WorkRouterError> {
             Ok(false)
+        }
+
+        async fn notify_session(
+            &self,
+            notice: cayw_runtime::WorkSessionNotice,
+        ) -> Result<cayw_runtime::WorkSessionNoticeReply, WorkRouterError> {
+            self.target
+                .deliver_session_notice(&notice)
+                .map_err(|error| WorkRouterError::known(error.to_string()))
         }
     }
 
@@ -1987,4 +2142,1587 @@ async fn proactive_auto_validates_preconditions_before_recording_trigger_and_ret
 
     main_rt.shutdown_background();
     target.shutdown_background();
+}
+
+#[tokio::test]
+async fn background_memory_writer_does_not_recreate_deleted_entry_and_queues_consecutive_session_updates()
+ {
+    #[derive(Default)]
+    struct WriterRaceState {
+        hold_next_writer: AtomicBool,
+        writer_entered: Notify,
+        release_writer: Notify,
+        active_writers: AtomicUsize,
+        max_concurrent_writers: AtomicUsize,
+        writer_prompts: Mutex<Vec<String>>,
+    }
+
+    struct RaceProvider(Arc<WriterRaceState>);
+
+    fn parse_turn_log_ids(prompt: &str) -> Vec<(String, String)> {
+        let Some((_, turns_section)) = prompt.split_once("New user-input turns:\n") else {
+            return Vec::new();
+        };
+        turns_section
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix('[')?;
+                let (id, text) = rest.split_once("] ")?;
+                Some((id.to_owned(), text.to_owned()))
+            })
+            .collect()
+    }
+
+    fn parse_first_existing_entry_id(prompt: &str) -> Option<String> {
+        prompt.lines().find_map(|line| {
+            let rest = line.strip_prefix("- entry_id=")?;
+            let (entry_id, _) = rest.split_once(' ')?;
+            Some(entry_id.to_owned())
+        })
+    }
+
+    impl Provider for RaceProvider {
+        fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantStream {
+            let sys = system_prompt_of(&request);
+            if !sys.contains("You are the main-session memory writer") {
+                return Box::pin(futures::stream::iter([AssistantEvent::Done {
+                    message: assistant_text(&request.model, "前台已立即响应"),
+                }]));
+            }
+            let state = self.0.clone();
+            let prompt = request
+                .messages
+                .last()
+                .map(Message::text)
+                .unwrap_or_default();
+            Box::pin(futures::stream::once(async move {
+                let concurrent = state.active_writers.fetch_add(1, Ordering::AcqRel) + 1;
+                state
+                    .max_concurrent_writers
+                    .fetch_max(concurrent, Ordering::AcqRel);
+                state.writer_prompts.lock().unwrap().push(prompt.clone());
+                let hold_this = state.hold_next_writer.swap(false, Ordering::AcqRel);
+                state.writer_entered.notify_waiters();
+                if hold_this {
+                    tokio::select! {
+                        () = cancel.cancelled() => {
+                            state.active_writers.fetch_sub(1, Ordering::AcqRel);
+                            return AssistantEvent::Error {
+                                message: AssistantMessage::new(&request.model)
+                                    .failure(StopReason::Aborted, "cancelled"),
+                            };
+                        }
+                        () = state.release_writer.notified() => {}
+                    }
+                }
+                let turns = parse_turn_log_ids(&prompt);
+                let existing_id = parse_first_existing_entry_id(&prompt);
+                let mut candidates = Vec::new();
+                for (log_id, text) in &turns {
+                    if text.contains("初始语言英文") {
+                        candidates.push(json!({
+                            "operation": "upsert",
+                            "entry_id": "mem-lang",
+                            "kind": "preference",
+                            "body": "默认使用英文回答",
+                            "source_type": "stated",
+                            "source_log_ids": [log_id],
+                        }));
+                    } else if text.contains("旧任务尝试更新已删条目") {
+                        candidates.push(json!({
+                            "operation": "upsert",
+                            "entry_id": existing_id.clone().unwrap_or_else(|| "mem-lang".into()),
+                            "kind": "preference",
+                            "body": "旧后台任务试图写回已删除条目",
+                            "source_type": "stated",
+                            "source_log_ids": [log_id],
+                        }));
+                    } else if text.contains("默认使用法文回答") {
+                        candidates.push(json!({
+                            "operation": "upsert",
+                            "entry_id": null,
+                            "kind": "preference",
+                            "body": "默认使用法文回答",
+                            "source_type": "stated",
+                            "source_log_ids": [log_id],
+                        }));
+                    } else if text.contains("统一改为默认使用中文回答") {
+                        candidates.push(json!({
+                            "operation": "upsert",
+                            "entry_id": existing_id.clone(),
+                            "kind": "preference",
+                            "body": "以后统一改为默认使用中文回答",
+                            "source_type": "stated",
+                            "source_log_ids": [log_id],
+                        }));
+                    } else if text.contains("测试优先使用离线夹具") {
+                        candidates.push(json!({
+                            "operation": "upsert",
+                            "entry_id": null,
+                            "kind": "preference",
+                            "body": "测试优先使用离线夹具",
+                            "source_type": "stated",
+                            "source_log_ids": [log_id],
+                        }));
+                    }
+                }
+                let payload = json!({
+                    "candidates": candidates,
+                    "forget": []
+                })
+                .to_string();
+                state.active_writers.fetch_sub(1, Ordering::AcqRel);
+                AssistantEvent::Done {
+                    message: assistant_text(&request.model, payload),
+                }
+            }))
+        }
+    }
+
+    let temp = TempDir::new().unwrap();
+    let workspace = temp.path().join("writer-race-ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let state = Arc::new(WriterRaceState::default());
+
+    let mut model = Model::new("openai", "writer-race-model");
+    model.context_window = Some(32_768);
+    model.max_output_tokens = Some(1_024);
+
+    let runtime = Runtime::open(
+        temp.path().join("writer-race.sqlite"),
+        &workspace,
+        Arc::new(RaceProvider(state.clone())),
+        model,
+        RuntimeConfig {
+            main_session: true,
+            background_model_maintenance: true,
+            approval_rules: Some(Arc::new(FileRules::new(temp.path().join("rules.json")))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let session = runtime.create(Some("Main Writer Queue".into())).unwrap().id;
+
+    // 1. Seed `mem-lang.md` via Turn 1's background writer.
+    runtime
+        .prompt(&session, "请记住：初始语言英文", CancellationToken::new())
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if runtime
+            .memory_entries()
+            .unwrap()
+            .iter()
+            .any(|e| e.entry_id == "mem-lang")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for initial mem-lang creation"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    let mem_lang_path = workspace.join("memory").join("mem-lang.md");
+    assert!(mem_lang_path.is_file());
+
+    // 2. Start Turn 2 while holding its background writer in flight after it snapshotted `mem-lang`.
+    state.hold_next_writer.store(true, Ordering::Release);
+    let entered_fut = state.writer_entered.notified();
+    runtime
+        .prompt(
+            &session,
+            "补充说明：旧任务尝试更新已删条目",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    entered_fut.await;
+
+    // Delete `mem-lang.md` on disk while the background write is in flight, then release the writer.
+    std::fs::remove_file(&mem_lang_path).unwrap();
+    let frontier_before_release = runtime.memory().writer_frontier(&session).unwrap();
+    state.release_writer.notify_one();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if runtime.memory().writer_frontier(&session).unwrap() > frontier_before_release {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for overlapping-delete writer frontier advance"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert!(
+        !mem_lang_path.exists(),
+        "stale background write must NOT recreate an entry deleted while the write was in flight"
+    );
+    assert!(runtime.memory_entries().unwrap().is_empty());
+    assert!(runtime.pending_memory_candidates().unwrap().is_empty());
+
+    // 3. Consecutive updates on the same session queue in the background without blocking foreground prompts.
+    state.hold_next_writer.store(true, Ordering::Release);
+    let turn3_entered = state.writer_entered.notified();
+    runtime
+        .prompt(
+            &session,
+            "请记住：默认使用法文回答",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    turn3_entered.await;
+
+    // Submit 10 consecutive foreground turns while Turn 3's background writer is still blocked in flight:
+    // all 10 foreground turns complete immediately without waiting, enter the session queue, and keep
+    // background concurrency strictly at 1!
+    let mut queued_turns = vec!["更正：以后统一改为默认使用中文回答".to_owned()];
+    for idx in 1..=8 {
+        queued_turns.push(format!("临时对话轮次-{idx}"));
+    }
+    queued_turns.push("补充：测试优先使用离线夹具".to_owned());
+    assert_eq!(queued_turns.len(), 10);
+    for turn_text in &queued_turns {
+        runtime
+            .prompt(&session, turn_text, CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        state.max_concurrent_writers.load(Ordering::Acquire),
+        1,
+        "same-session background memory writes must serialize rather than run overlapping model calls"
+    );
+
+    // Release Turn 3's writer: Turn 3 commits French, then the queued run starts with the latest
+    // `writer_frontier` and Turn 3's committed entry, updating it to Chinese cleanly with zero pending conflicts!
+    state.release_writer.notify_one();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let entries = runtime.memory_entries().unwrap();
+        let has_chinese = entries
+            .iter()
+            .any(|e| e.body.contains("以后统一改为默认使用中文回答"));
+        let has_fixture = entries
+            .iter()
+            .any(|e| e.body.contains("测试优先使用离线夹具"));
+        if has_chinese && has_fixture {
+            assert_eq!(
+                entries.len(),
+                2,
+                "Turn 4 correction must update Turn 3's entry in place rather than leaving stale French: {entries:?}"
+            );
+            assert!(
+                !entries.iter().any(|e| e.body.contains("默认使用法文回答")),
+                "superseded preference from Turn 3 must be updated by queued Turn 4: {entries:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for queued consecutive memory updates; entries={entries:?}, pending={:?}",
+            runtime.pending_memory_candidates().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert!(
+        runtime.pending_memory_candidates().unwrap().is_empty(),
+        "queued same-session correction must read latest version and avoid version-conflict pending state"
+    );
+    assert_eq!(state.max_concurrent_writers.load(Ordering::Acquire), 1);
+
+    let prompts = state.writer_prompts.lock().unwrap().clone();
+    let last_prompt = prompts.last().expect("queued writer prompt");
+    assert!(
+        !last_prompt.contains("默认使用法文回答\n")
+            || last_prompt.contains("Existing active memory entries:\n- entry_id="),
+        "queued writer must see Turn 3's active entry in existing entries: {last_prompt}"
+    );
+    let (_, queued_turns_section) = last_prompt
+        .split_once("New user-input turns:\n")
+        .expect("turns section");
+    assert!(
+        !queued_turns_section.contains("请记住：默认使用法文回答"),
+        "queued writer must read updated writer_frontier and not re-process Turn 3: {queued_turns_section}"
+    );
+    assert!(queued_turns_section.contains("更正：以后统一改为默认使用中文回答"));
+    assert!(queued_turns_section.contains("补充：测试优先使用离线夹具"));
+
+    runtime.shutdown_background();
+}
+
+#[tokio::test]
+async fn length_stop_reason_does_not_discard_valid_summary_compression_or_memory_json() {
+    struct LengthStopProvider {
+        truncate_writer_once: AtomicBool,
+    }
+
+    fn assistant_length_text(model: &Model, text: impl Into<String>) -> AssistantMessage {
+        let mut msg = assistant_text(model, text);
+        msg.stop_reason = StopReason::Length;
+        msg
+    }
+
+    impl Provider for LengthStopProvider {
+        fn stream(&self, request: ModelRequest, _cancel: CancellationToken) -> AssistantStream {
+            let sys = system_prompt_of(&request);
+            if sys.contains("Summarize this completed conversation segment") {
+                return Box::pin(futures::stream::iter([AssistantEvent::Done {
+                    message: assistant_length_text(
+                        &request.model,
+                        "触及输出上限但内容完整的有效分段摘要。",
+                    ),
+                }]));
+            }
+            if sys.contains("Compress this historical session prefix") {
+                return Box::pin(futures::stream::iter([AssistantEvent::Done {
+                    message: assistant_length_text(
+                        &request.model,
+                        "触及输出上限但预算与内容均有效的历史压缩文本。",
+                    ),
+                }]));
+            }
+            if sys.contains("You are the main-session memory writer") {
+                if self.truncate_writer_once.swap(false, Ordering::AcqRel) {
+                    return Box::pin(futures::stream::iter([AssistantEvent::Done {
+                        message: assistant_length_text(
+                            &request.model,
+                            "{\"candidates\":[{\"kind\":\"preference\"",
+                        ),
+                    }]));
+                }
+                let prompt = request
+                    .messages
+                    .last()
+                    .map(Message::text)
+                    .unwrap_or_default();
+                let log_id = prompt
+                    .lines()
+                    .find_map(|line| {
+                        let rest = line.strip_prefix('[')?;
+                        let (id, _) = rest.split_once(']')?;
+                        Some(id.to_owned())
+                    })
+                    .expect("writer log_id");
+                let payload = json!({
+                    "candidates": [{
+                        "operation": "upsert",
+                        "entry_id": null,
+                        "kind": "preference",
+                        "body": "结束原因为 Length 的完整 JSON 仍正常写入记忆",
+                        "source_type": "stated",
+                        "source_log_ids": [log_id],
+                    }],
+                    "forget": []
+                })
+                .to_string();
+                return Box::pin(futures::stream::iter([AssistantEvent::Done {
+                    message: assistant_length_text(&request.model, payload),
+                }]));
+            }
+            let reply = format!("前台长回复：{}", "历史载荷填充文本".repeat(60));
+            Box::pin(futures::stream::iter([AssistantEvent::Done {
+                message: assistant_text(&request.model, reply),
+            }]))
+        }
+    }
+
+    let temp = TempDir::new().unwrap();
+
+    // 1. Ordinary workspace: summary + compression with `StopReason::Length` still publish when valid.
+    let work_ws = temp.path().join("length-work-ws");
+    std::fs::create_dir_all(&work_ws).unwrap();
+    let mut small_model = Model::new("openai", "length-compress-model");
+    small_model.context_window = Some(2_200);
+    small_model.max_output_tokens = Some(256);
+
+    let work_rt = Runtime::open(
+        temp.path().join("length-work.sqlite"),
+        &work_ws,
+        Arc::new(LengthStopProvider {
+            truncate_writer_once: AtomicBool::new(false),
+        }),
+        small_model,
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    let work_session = work_rt.create(Some("Work Length".into())).unwrap().id;
+    for idx in 1..=3 {
+        work_rt
+            .prompt(
+                &work_session,
+                &format!("第{idx}轮长输入：{}", "需要压缩的上下文记录".repeat(25)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let summaries = work_rt.context_summaries(&work_session).unwrap();
+        let maint = work_rt.context_maintenance_status(&work_session).unwrap();
+        if summaries.iter().any(|s| !s.local_reuse) && maint.compressions > 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "valid summary/compression with StopReason::Length must not be discarded; summaries={summaries:?}, maint={maint:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // 2. Main session: truncated JSON on `Length` fails JSON validation without advancing frontier,
+    // while complete JSON on `Length` succeeds and writes memory.
+    let main_ws = temp.path().join("length-main-ws");
+    std::fs::create_dir_all(&main_ws).unwrap();
+    let mut main_model = Model::new("openai", "length-main-model");
+    main_model.context_window = Some(32_768);
+    main_model.max_output_tokens = Some(512);
+
+    let main_rt = Runtime::open(
+        temp.path().join("length-main.sqlite"),
+        &main_ws,
+        Arc::new(LengthStopProvider {
+            truncate_writer_once: AtomicBool::new(true),
+        }),
+        main_model,
+        RuntimeConfig {
+            main_session: true,
+            background_model_maintenance: true,
+            approval_rules: Some(Arc::new(FileRules::new(temp.path().join("rules.json")))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let main_session = main_rt.create(Some("Main Length".into())).unwrap().id;
+    main_rt
+        .prompt(
+            &main_session,
+            "请记住：结束原因为 Length 但 JSON 完整时不应丢弃",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if main_rt.memory().status().unwrap().writer_failures == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "truncated JSON must be caught by JSON parser"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    assert_eq!(main_rt.memory().writer_frontier(&main_session).unwrap(), 0);
+
+    main_rt
+        .prompt(&main_session, "继续下一步", CancellationToken::new())
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if main_rt.memory_entries().unwrap().iter().any(|e| {
+            e.body
+                .contains("结束原因为 Length 的完整 JSON 仍正常写入记忆")
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "complete JSON with StopReason::Length must be accepted"
+        );
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    work_rt.shutdown_background();
+    main_rt.shutdown_background();
+}
+
+#[tokio::test]
+async fn concurrent_memory_scan_during_stated_writes_never_reclassifies_entries_as_user_set() {
+    let temp = TempDir::new().unwrap();
+    let ws = temp.path().join("race-main-ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let memory = Arc::new(cayw_runtime::MainMemory::open(&ws));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let scanner_memory = memory.clone();
+    let scanner_stop = stop.clone();
+    let scanner = std::thread::spawn(move || {
+        while !scanner_stop.load(Ordering::Acquire) {
+            let status = scanner_memory.status().unwrap();
+            assert_eq!(
+                status.user_set, 0,
+                "concurrent scan must never reclassify background stated entries as UserSet: {status:?}"
+            );
+            let _ = scanner_memory.visible_entries().unwrap();
+        }
+    });
+
+    for idx in 1..=20_u64 {
+        let cursor = idx * 2;
+        let log_id = format!("race-session:{cursor}");
+        let events = vec![cayw_core::EventRecord {
+            protocol_version: 3,
+            session_id: "race-session".into(),
+            cursor,
+            timestamp: idx,
+            attempt: None,
+            event: cayw_core::CoreEvent::Agent {
+                event: Box::new(cayw_agent::AgentEvent::MessageStart {
+                    message: Message::user(format!("请记住第{idx}条事实")),
+                }),
+            },
+        }];
+        let evidence = cayw_runtime::user_evidence(&events);
+        let candidate = MemoryCandidate {
+            operation: MemoryOperation::Upsert,
+            entry_id: Some(format!("stated-entry-{idx}")),
+            kind: "preference".into(),
+            body: format!("口述内容 {idx}"),
+            source_type: SourceType::Stated,
+            source_log_ids: vec![log_id],
+        };
+        let report = memory.apply(&evidence, &[candidate]).unwrap();
+        assert_eq!(report.written.len(), 1);
+        assert!(report.rejected.is_empty());
+    }
+
+    stop.store(true, Ordering::Release);
+    scanner.join().unwrap();
+
+    // Reopen MainMemory from disk to ensure no UserSet event was persisted to events.jsonl.
+    let reopened = cayw_runtime::MainMemory::open(&ws);
+    let status = reopened.status().unwrap();
+    assert_eq!(status.entries, 20);
+    assert_eq!(status.active, 20);
+    assert_eq!(status.visible, 20);
+    assert_eq!(status.user_set, 0);
+    for entry in reopened.visible_entries().unwrap() {
+        assert_eq!(entry.source_type, SourceType::Stated);
+    }
+}
+
+async fn spawn_openai_echo_sse_server(
+    captured_requests: Arc<Mutex<Vec<Value>>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        let mut seq = 0_u64;
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let captured = captured_requests.clone();
+            seq += 1;
+            let resp_id = format!("echo-{seq}");
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut buf = [0_u8; 4096];
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let len = headers
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + len {
+                    let mut buf = [0_u8; 4096];
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + len]).unwrap();
+                captured.lock().unwrap().push(body.clone());
+
+                let sys_text = body["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|m| m["role"] == "system")
+                    .filter_map(|m| m["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let last_role = body["messages"]
+                    .as_array()
+                    .and_then(|m| m.last())
+                    .and_then(|m| m["role"].as_str())
+                    .unwrap_or("");
+                let has_exec_tool = body["tools"].as_array().is_some_and(|tools| {
+                    tools
+                        .iter()
+                        .any(|t| t["function"]["name"] == "execute_code")
+                });
+                let last_user_text = body["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .find(|m| m["role"] == "user")
+                    .and_then(|m| {
+                        m["content"].as_str().map(ToOwned::to_owned).or_else(|| {
+                            m["content"]
+                                .as_array()
+                                .and_then(|parts| parts.first())
+                                .and_then(|p| p["text"].as_str())
+                                .map(ToOwned::to_owned)
+                        })
+                    })
+                    .unwrap_or_default();
+
+                let chunk = if sys_text.contains("You are the main-session memory writer") {
+                    let payload = json!({"candidates": [], "forget": []}).to_string();
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": payload},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+                    })
+                } else if sys_text.contains("Summarize this completed conversation segment")
+                    || sys_text.contains("Compress this historical session prefix")
+                {
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": "压缩摘要：早期多消息工具轮已被安全压缩，保留关键上下文。"
+                            },
+                            "finish_reason": "length"
+                        }],
+                        "usage": {"prompt_tokens": 16, "completion_tokens": 16, "total_tokens": 32}
+                    })
+                } else if has_exec_tool
+                    && last_role == "user"
+                    && last_user_text.contains("TRIGGER_TOOL_TURN")
+                {
+                    let args = json!({
+                        "action": "exec",
+                        "script": "return {status = 'tool-turn-done'}",
+                        "yield_time_ms": 5000,
+                        "max_output_tokens": 4096
+                    });
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": format!("call-{resp_id}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": "execute_code",
+                                        "arguments": args.to_string()
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"prompt_tokens": 20, "completion_tokens": 12, "total_tokens": 32}
+                    })
+                } else {
+                    let reply = format!(
+                        "已收到回复（{}）",
+                        "填充模型历史窗口的稳定回复内容".repeat(12)
+                    );
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": reply},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 20, "completion_tokens": 24, "total_tokens": 44}
+                    })
+                };
+
+                let sse = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                    sse.len()
+                );
+                let _ = socket.write_all(http.as_bytes()).await;
+            });
+        }
+    });
+    (base_url, handle)
+}
+
+#[tokio::test]
+async fn multi_message_tool_turn_eviction_and_window_none_fallback_preserve_openai_turn_pairing_and_memory()
+ {
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let (base_url, server_handle) = spawn_openai_echo_sse_server(captured.clone()).await;
+    let temp = TempDir::new().unwrap();
+
+    // Part A: Tight context window with multi-message tool turn (`[User, Assistant(tool_call), ToolResult, Assistant(final)]`)
+    // in both ordinary Runtime and main-session Runtime through real `OpenAiProvider`.
+    // Previously, evicting `[User, Assistant(tool_call), ToolResult]` left a lone `Assistant(final)` after
+    // `Piece::Compression`/`Piece::Summary`, causing `OpenAiProvider` to reject with
+    // `"Assistant history needs a preceding user or tool-result turn"`.
+    for (name, is_main) in [("ordinary", false), ("main", true)] {
+        let ws = temp.path().join(format!("{name}-evict-ws"));
+        std::fs::create_dir_all(&ws).unwrap();
+        let provider: Arc<dyn Provider> =
+            Arc::new(cayw_ai::providers::OpenAiProvider::new(&base_url, "synthetic-key").unwrap());
+        let mut model = Model::new("openai", format!("{name}-evict-model"));
+        model.context_window = Some(2_300);
+        model.max_output_tokens = Some(256);
+
+        let approval_rules: Option<Arc<dyn cayw_runtime::ApprovalRuleSource>> = if is_main {
+            Some(Arc::new(FileRules::new(
+                temp.path().join(format!("{name}-rules.json")),
+            )))
+        } else {
+            None
+        };
+
+        let rt = Runtime::open(
+            temp.path().join(format!("{name}-evict.sqlite")),
+            &ws,
+            provider,
+            model,
+            RuntimeConfig {
+                main_session: is_main,
+                background_model_maintenance: true,
+                approval_rules,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let session = rt.create(Some(format!("{name}-session"))).unwrap().id;
+
+        // Turn 1: multi-message Luau tool turn.
+        rt.prompt(
+            &session,
+            &format!("TRIGGER_TOOL_TURN {}", "首轮工具调用长文本".repeat(16)),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        // Subsequent turns push Turn 1 partially/fully across the eviction boundary and wait for
+        // background compression/summary (`StopReason::Length`) to publish, then run one more turn
+        // with the published compression/summary active in the OpenAiProvider history!
+        for turn in 2..=6 {
+            rt.prompt(
+                &session,
+                &format!(
+                    "第{turn}轮普通对话：{}",
+                    "用于触发滑动窗口驱逐与摘要压缩的文本".repeat(18)
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{name} turn {turn} failed through real OpenAiProvider: {err}")
+            });
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let maint = rt.context_maintenance_status(&session).unwrap();
+            if maint.compressions > 0 || maint.summaries > 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{name} expected background maintenance to publish: {:?}",
+                rt.context_maintenance_status(&session).unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Turn 7 must succeed through real OpenAiProvider with active Compression/Summary pieces!
+        rt.prompt(
+            &session,
+            "验证压缩块生效后真实 OpenAiProvider 仍通过消息配对校验",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        rt.shutdown_background();
+    }
+
+    // Part B: `context_window: None` (`window: None` fallback in `main_memory.rs`) must:
+    // 1. Still inject `memory.context_block()` into the system prompt;
+    // 2. Keep valid `User`/`Assistant` turn pairing for `OpenAiProvider` even after `forget_memory_range`
+    //    excludes an early user turn whose assistant reply remains in history.
+    let none_ws = temp.path().join("window-none-main-ws");
+    std::fs::create_dir_all(&none_ws).unwrap();
+    let none_provider: Arc<dyn Provider> =
+        Arc::new(cayw_ai::providers::OpenAiProvider::new(&base_url, "synthetic-key").unwrap());
+    let mut none_model = Model::new("openai", "window-none-model");
+    none_model.context_window = None;
+    none_model.max_output_tokens = Some(256);
+
+    let none_rt = Runtime::open(
+        temp.path().join("window-none.sqlite"),
+        &none_ws,
+        none_provider,
+        none_model,
+        RuntimeConfig {
+            main_session: true,
+            background_model_maintenance: false,
+            approval_rules: Some(Arc::new(FileRules::new(
+                temp.path().join("none-rules.json"),
+            ))),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let none_session = none_rt.create(Some("Window None".into())).unwrap().id;
+
+    // Turn 1: establish a user preference turn we keep in memory, followed by Turn 2 whose user
+    // message cursor ONLY is forgotten while its assistant reply remains outside the forgotten range.
+    none_rt
+        .prompt(
+            &none_session,
+            "请记住我的无窗口回退偏好",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let pref_evidence = none_rt.memory_user_evidence(&none_session).unwrap();
+    let pref_log_id = pref_evidence
+        .sources()
+        .next()
+        .expect("turn 1 user source")
+        .log_id()
+        .to_owned();
+    none_rt
+        .apply_memory_candidates(
+            &none_session,
+            &[MemoryCandidate {
+                operation: MemoryOperation::Upsert,
+                entry_id: Some("fallback-pref".into()),
+                kind: "preference".into(),
+                body: "即使未配置 context_window 也必须注入记忆块。".into(),
+                source_type: SourceType::Stated,
+                source_log_ids: vec![pref_log_id],
+            }],
+        )
+        .unwrap();
+
+    let cursor_before_turn2 = none_rt.get(&none_session).unwrap().cursor;
+    none_rt
+        .prompt(
+            &none_session,
+            "第二轮将被单独遗忘的用户输入",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    // Find the exact cursor span of Turn 2's user message (`MessageStart..=MessageEnd`) so ONLY
+    // the user message events are forgotten while Turn 2's assistant reply remains non-forgotten!
+    let events = none_rt
+        .events(&none_session, cursor_before_turn2, 64)
+        .unwrap();
+    let user_cursors: Vec<u64> = events
+        .iter()
+        .filter(|ev| match &ev.event {
+            cayw_core::CoreEvent::Agent { event } => matches!(
+                event.as_ref(),
+                cayw_agent::AgentEvent::MessageStart {
+                    message: Message::User { .. }
+                } | cayw_agent::AgentEvent::MessageEnd {
+                    message: Message::User { .. }
+                }
+            ),
+            _ => false,
+        })
+        .map(|ev| ev.cursor)
+        .collect();
+    let start_c = *user_cursors.first().expect("turn 2 user start cursor");
+    let end_c = *user_cursors.last().expect("turn 2 user end cursor");
+    none_rt
+        .forget_memory_range(
+            cayw_context::SourceRange::new(&none_session, start_c, end_c).unwrap(),
+            "遗忘第二轮用户输入但保留助手回复以验证配对",
+        )
+        .unwrap();
+
+    captured.lock().unwrap().clear();
+    none_rt
+        .prompt(
+            &none_session,
+            "第三轮验证无窗口回退",
+            CancellationToken::new(),
+        )
+        .await
+        .expect(
+            "OpenAiProvider must accept history after forgetting only a preceding user message",
+        );
+
+    let reqs = captured.lock().unwrap().clone();
+    let main_req = reqs
+        .iter()
+        .find(|r| r["model"] == "window-none-model")
+        .expect("must capture window-none-model request");
+    let sys_joined = main_req["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .filter_map(|m| m["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        sys_joined.contains("[用户偏好]")
+            && sys_joined.contains("即使未配置 context_window 也必须注入记忆块。"),
+        "window: None fallback must include MainMemory context block, got: {sys_joined}"
+    );
+
+    none_rt.shutdown_background();
+    server_handle.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn full_chain_serve_ipc_luau_cross_workspace_openai_sse_memory_and_context_maintenance() {
+    use std::{os::unix::fs::PermissionsExt, process::Stdio};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+        net::TcpListener,
+        process::Command,
+    };
+
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let custom_main_dir = home.join("custom-main-session");
+    let project_alpha = temp.path().join("project-alpha");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(&project_alpha).unwrap();
+
+    let config_path = temp.path().join("device-config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "main_session_dir": custom_main_dir,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Start a real loopback HTTP SSE server speaking OpenAI `/v1/chat/completions`.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let project_alpha_id_slot = Arc::new(Mutex::new(String::new()));
+    let project_alpha_for_sse = project_alpha_id_slot.clone();
+
+    let sse_server = tokio::spawn(async move {
+        let mut seq = 0_u64;
+        while let Ok((mut socket, _)) = listener.accept().await {
+            seq += 1;
+            let resp_id = format!("fullchain-{seq}");
+            let alpha_slot = project_alpha_for_sse.clone();
+            tokio::spawn(async move {
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut buf = [0_u8; 4096];
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let len = headers
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + len {
+                    let mut buf = [0_u8; 4096];
+                    let Ok(n) = socket.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + len]).unwrap();
+                let sys_text = body["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|m| m["role"] == "system")
+                    .filter_map(|m| m["content"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let last_role = body["messages"]
+                    .as_array()
+                    .and_then(|m| m.last())
+                    .and_then(|m| m["role"].as_str())
+                    .unwrap_or("");
+                let last_user_text = body["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .find(|m| m["role"] == "user")
+                    .and_then(|m| {
+                        m["content"].as_str().map(ToOwned::to_owned).or_else(|| {
+                            m["content"]
+                                .as_array()
+                                .and_then(|parts| parts.first())
+                                .and_then(|p| p["text"].as_str())
+                                .map(ToOwned::to_owned)
+                        })
+                    })
+                    .unwrap_or_default();
+
+                let chunk = if sys_text.contains("You are the main-session memory writer") {
+                    // Extract `[<log_id>] <text>` from the `New user-input turns:` section!
+                    let turns_section = last_user_text
+                        .split_once("New user-input turns:\n")
+                        .map(|(_, rest)| rest)
+                        .unwrap_or(&last_user_text);
+                    let mut matched = None::<(String, &'static str, &'static str)>;
+                    for line in turns_section.lines() {
+                        if let Some(rest) = line.strip_prefix('[')
+                            && let Some((log_id, text_part)) = rest.split_once(']')
+                        {
+                            if text_part.contains("MEM_FACT_ONE") {
+                                matched = Some((
+                                    log_id.to_owned(),
+                                    "fullchain-fact-one",
+                                    "用户偏好全链路真实进程验证（第一条）。",
+                                ));
+                            } else if text_part.contains("MEM_FACT_TWO") {
+                                matched = Some((
+                                    log_id.to_owned(),
+                                    "fullchain-fact-two",
+                                    "重启后口述记忆仍保持 Stated 来源（第二条）。",
+                                ));
+                            }
+                        }
+                    }
+                    let payload = if let Some((log_id, id, fact_body)) = matched {
+                        json!({
+                            "candidates": [{
+                                "operation": "upsert",
+                                "entry_id": id,
+                                "kind": "preference",
+                                "body": fact_body,
+                                "source_type": "stated",
+                                "source_log_ids": [log_id]
+                            }],
+                            "forget": []
+                        })
+                        .to_string()
+                    } else {
+                        json!({"candidates": [], "forget": []}).to_string()
+                    };
+                    // Return with finish_reason="length" to verify valid JSON on Length is retained!
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": payload},
+                            "finish_reason": "length"
+                        }],
+                        "usage": {"prompt_tokens": 24, "completion_tokens": 32, "total_tokens": 56}
+                    })
+                } else if sys_text.contains("Summarize this completed conversation segment")
+                    || sys_text.contains("Compress this historical session prefix")
+                {
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "content": "全链路压缩摘要：跨工作区派发与早期对话已完成归档。"
+                            },
+                            "finish_reason": "length"
+                        }],
+                        "usage": {"prompt_tokens": 30, "completion_tokens": 20, "total_tokens": 50}
+                    })
+                } else if last_role == "user"
+                    && !last_user_text.contains("EXTERNAL_WORKER_TASK")
+                    && (last_user_text.contains("DISPATCH_CROSS_WORKSPACE")
+                        || last_user_text.contains('第')
+                        || last_user_text.contains("MEM_FACT_TWO")
+                        || last_user_text.contains("cannot finish yet"))
+                {
+                    let alpha_id = alpha_slot.lock().unwrap().clone();
+                    let script = format!(
+                        r#"
+local listed = cayw.call('work.list', {{}})
+local existing = nil
+for _, item in ipairs(listed) do
+  if item.work_id == 'work-fullchain-alpha' then
+    existing = item
+  end
+end
+if existing ~= nil then
+  local ref = existing.session_refs[1]
+  local dispatched = cayw.call('work.dispatch', {{
+    work_id = existing.work_id,
+    workspace = ref.workspace,
+    session_id = ref.session_id,
+    text = 'EXTERNAL_WORKER_TASK: 请返回子工作区执行结果',
+    dispatch_key = 'dk-fullchain-alpha-1'
+  }})
+  return {{work_id = existing.work_id, alpha_session = ref.session_id, task_id = dispatched.task_id}}
+end
+local created_session = cayw.call('work.session.create', {{
+  workspace = '{alpha_id}',
+  label = 'Alpha Worker Session'
+}})
+local w = cayw.call('work.create', {{
+  work_id = 'work-fullchain-alpha',
+  title = '跨工作区全链路任务',
+  goal = '在 project-alpha 自动创建会话并执行任务',
+  acceptance_criteria = {{ {{criterion_id = 'c1', description = '任务完成'}} }},
+  session_refs = {{ {{session_id = created_session.id, workspace = '{alpha_id}'}} }}
+}})
+local dispatched = cayw.call('work.dispatch', {{
+  work_id = w.work_id,
+  workspace = '{alpha_id}',
+  session_id = created_session.id,
+  text = 'EXTERNAL_WORKER_TASK: 请返回子工作区执行结果',
+  dispatch_key = 'dk-fullchain-alpha-1'
+}})
+return {{work_id = w.work_id, alpha_session = created_session.id, task_id = dispatched.task_id}}
+"#
+                    );
+                    let args = json!({
+                        "action": "exec",
+                        "script": script,
+                        "yield_time_ms": 10000,
+                        "max_output_tokens": 8192
+                    });
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": format!("call-{resp_id}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": "execute_code",
+                                        "arguments": args.to_string()
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": {"prompt_tokens": 32, "completion_tokens": 40, "total_tokens": 72}
+                    })
+                } else if last_user_text.contains("EXTERNAL_WORKER_TASK") {
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "ALPHA_EXTERNAL_DONE"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+                    })
+                } else {
+                    let reply = format!(
+                        "主会话已完成处理（{}）",
+                        "全链路多进程上下文填充响应".repeat(12)
+                    );
+                    json!({
+                        "id": resp_id,
+                        "model": body["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": reply},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 24, "completion_tokens": 28, "total_tokens": 52}
+                    })
+                };
+
+                let sse = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                    sse.len()
+                );
+                let _ = socket.write_all(http.as_bytes()).await;
+            });
+        }
+    });
+
+    let watchdog = Duration::from_secs(30);
+    let spawn_serve = || async {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cayw"))
+            .env_clear()
+            .env("HOME", &home)
+            .env("CAYW_HOME", &state)
+            .current_dir(&project_alpha)
+            .arg("serve")
+            .arg("--config")
+            .arg(&config_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let line = tokio::time::timeout(watchdog, lines.next_line())
+            .await
+            .expect("cayw serve startup timed out")
+            .unwrap()
+            .expect("cayw serve exited without ready JSON");
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        let token = std::fs::read_to_string(ready["token_file"].as_str().unwrap()).unwrap();
+        let client = cayw_ipc::Client::connect(
+            ready["listening"].as_str().unwrap().parse().unwrap(),
+            token.trim(),
+        )
+        .await
+        .unwrap();
+        (child, client)
+    };
+
+    let ipc_call = |client: &cayw_ipc::Client, method: &'static str, params: Value| {
+        let client = client.clone();
+        async move {
+            tokio::time::timeout(watchdog, client.request(method, params))
+                .await
+                .unwrap_or_else(|_| panic!("IPC {method} timed out"))
+                .unwrap_or_else(|err| panic!("IPC {method} failed: {err:?}"))
+        }
+    };
+
+    let ws_call = |client: &cayw_ipc::Client, ws_id: &str, method: &'static str, params: Value| {
+        let ws_id = ws_id.to_owned();
+        ipc_call(
+            client,
+            "client.workspace.call",
+            json!({"workspace_id": ws_id, "rpc": {"method": method, "params": params}}),
+        )
+    };
+
+    let (mut server1, client1) = spawn_serve().await;
+
+    // Verify custom `main_session_dir` from `--config` was opened and marked `main_session: true`!
+    let listed = ipc_call(&client1, "settings.workspaces.list", json!({})).await;
+    let entries = listed["workspaces"].as_array().unwrap();
+    let main_entry = entries
+        .iter()
+        .find(|e| e["main_session"] == true)
+        .expect("custom main_session_dir from --config must be opened with main_session=true");
+    let main_ws_id = main_entry["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        Path::new(main_entry["path"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        custom_main_dir.canonicalize().unwrap()
+    );
+    let alpha_entry = entries
+        .iter()
+        .find(|e| e["main_session"] == false)
+        .expect("project-alpha must be listed");
+    let alpha_ws_id = alpha_entry["id"].as_str().unwrap().to_owned();
+    *project_alpha_id_slot.lock().unwrap() = alpha_ws_id.clone();
+
+    // Configure real OpenAI SSE model profile (`context_window: 2300`) and select it for both workspaces.
+    ipc_call(
+        &client1,
+        "settings.models.put",
+        json!({
+            "name": "e2e-openai",
+            "model": {
+                "service": "openai",
+                "api": "chat_completions",
+                "base_url": base_url,
+                "id": "e2e-fullchain-model",
+                "api_version": "v1",
+                "context_window": 2300,
+                "max_output_tokens": 512,
+                "api_key": "SYNTHETIC_E2E_KEY"
+            }
+        }),
+    )
+    .await;
+    ipc_call(
+        &client1,
+        "settings.models.use",
+        json!({"name": "e2e-openai"}),
+    )
+    .await;
+    ws_call(
+        &client1,
+        &main_ws_id,
+        "settings.models.use",
+        json!({"name": "e2e-openai"}),
+    )
+    .await;
+
+    // Verify `proactive.status` + `work.proactive.set` RPCs on the main session workspace.
+    let initial_proactive = ws_call(&client1, &main_ws_id, "proactive.status", json!({})).await;
+    assert_eq!(initial_proactive["mode"], "off");
+    let updated_proactive = ws_call(
+        &client1,
+        &main_ws_id,
+        "work.proactive.set",
+        json!({"mode": "auto"}),
+    )
+    .await;
+    assert_eq!(updated_proactive["mode"], "auto");
+
+    // Create main session and execute Turn 1: cross-workspace Luau `work.session.create` + `work.create` + `work.dispatch` AND `MEM_FACT_ONE`!
+    let main_session = ws_call(
+        &client1,
+        &main_ws_id,
+        "session.create",
+        json!({"label": "Main FullChain"}),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    ws_call(
+        &client1,
+        &main_ws_id,
+        "session.prompt",
+        json!({
+            "session_id": main_session,
+            "text": format!("DISPATCH_CROSS_WORKSPACE 并记住 MEM_FACT_ONE {}", "跨工作区派发输入填充".repeat(14))
+        }),
+    )
+    .await;
+
+    // Wait for `project-alpha` external worker task to complete automatically via `ClientWorkRouter`,
+    // AND for background `memory_writer` (`finish_reason: "length"`) to write `fullchain-fact-one`!
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let works = ws_call(&client1, &main_ws_id, "work.list", json!({})).await;
+        let work_arr = works.as_array().unwrap();
+        let mem_status = ws_call(&client1, &main_ws_id, "memory.status", json!({})).await;
+        let alpha_sessions = ws_call(&client1, &alpha_ws_id, "session.list", json!({})).await;
+        let alpha_done = alpha_sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["label"] == "Alpha Worker Session");
+        let alpha_msg_done = if let Some(s) = alpha_sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["label"] == "Alpha Worker Session")
+        {
+            let view = ws_call(
+                &client1,
+                &alpha_ws_id,
+                "session.get",
+                json!({"session_id": s["id"]}),
+            )
+            .await;
+            view["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.to_string().contains("ALPHA_EXTERNAL_DONE"))
+        } else {
+            false
+        };
+
+        if !work_arr.is_empty()
+            && alpha_done
+            && alpha_msg_done
+            && mem_status["entries"] == 1
+            && mem_status["visible"] == 1
+            && mem_status["user_set"] == 0
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for cross-workspace worker + stated memory: works={works}, mem={mem_status}, alpha_sessions={alpha_sessions}"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    // Drive additional turns to push Turn 1's multi-message Luau tool turn into eviction + `StopReason::Length` compression/summary,
+    // then verify `session.maintenance.status` AND another turn with active compression!
+    for turn in 2..=6 {
+        ws_call(
+            &client1,
+            &main_ws_id,
+            "session.prompt",
+            json!({
+                "session_id": main_session,
+                "text": format!("第{turn}轮推进：{}", "主会话上下文压缩与多消息工具轮驱逐验证".repeat(16))
+            }),
+        )
+        .await;
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let maint = ws_call(
+            &client1,
+            &main_ws_id,
+            "session.maintenance.status",
+            json!({"session_id": main_session}),
+        )
+        .await;
+        if maint["compressions"].as_u64().unwrap_or(0) > 0
+            || maint["summaries"].as_u64().unwrap_or(0) > 0
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected session.maintenance.status to report published Length summary/compression: {maint}"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    // Forget `fullchain-fact-one`'s source range via `memory.forget`, verify `visible == 0` while `active == 1` on disk,
+    // then add `MEM_FACT_TWO` on a subsequent turn (which also exercises OpenAiProvider with active Compression/Summary!).
+    let entries_before_forget = ws_call(&client1, &main_ws_id, "memory.entries", json!({})).await;
+    let fact_one_log_id = entries_before_forget.as_array().unwrap()[0]["source_log_ids"]
+        .as_array()
+        .unwrap()[0]
+        .as_str()
+        .unwrap();
+    let (_, cursor_str) = fact_one_log_id.rsplit_once(':').unwrap();
+    let fact_one_cursor: u64 = cursor_str.parse().unwrap();
+    ws_call(
+        &client1,
+        &main_ws_id,
+        "memory.forget",
+        json!({
+            "session_id": main_session,
+            "start_cursor": fact_one_cursor,
+            "end_cursor": fact_one_cursor,
+            "reason": "全链路测试遗忘第一条记忆"
+        }),
+    )
+    .await;
+    let status_after_forget = ws_call(&client1, &main_ws_id, "memory.status", json!({})).await;
+    assert_eq!(status_after_forget["entries"], 1);
+    assert_eq!(status_after_forget["active"], 1);
+    assert_eq!(status_after_forget["visible"], 0);
+    assert_eq!(
+        ws_call(&client1, &main_ws_id, "memory.entries", json!({}))
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // Add second memory fact (`MEM_FACT_TWO`) while Compression/Summary is active in the session!
+    ws_call(
+        &client1,
+        &main_ws_id,
+        "session.prompt",
+        json!({
+            "session_id": main_session,
+            "text": "继续对话并记住 MEM_FACT_TWO"
+        }),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let st = ws_call(&client1, &main_ws_id, "memory.status", json!({})).await;
+        if st["entries"] == 2 && st["visible"] == 1 {
+            assert_eq!(st["active"], 2);
+            assert_eq!(st["user_set"], 0);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected MEM_FACT_TWO to be committed: {st}"
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+
+    // Restart `cayw serve --config <path>` and verify durable persistence of:
+    // 1. `proactive.status.mode == "auto"`
+    // 2. `memory.status`: `entries == 2, active == 2, visible == 1, user_set == 0` (never reclassified as UserSet!)
+    client1.close().await;
+    server1.kill().await.unwrap();
+    let _ = server1.wait().await;
+    let _ = std::fs::remove_file(state.join("client.json"));
+
+    let (mut server2, client2) = spawn_serve().await;
+    let reopened_proactive = ws_call(&client2, &main_ws_id, "proactive.status", json!({})).await;
+    assert_eq!(
+        reopened_proactive["mode"], "auto",
+        "proactive mode must persist across Client restart"
+    );
+    let reopened_mem = ws_call(&client2, &main_ws_id, "memory.status", json!({})).await;
+    assert_eq!(reopened_mem["entries"], 2);
+    assert_eq!(reopened_mem["active"], 2);
+    assert_eq!(reopened_mem["visible"], 1);
+    assert_eq!(
+        reopened_mem["user_set"], 0,
+        "stated memories must remain Stated (user_set == 0) across restart: {reopened_mem}"
+    );
+
+    client2.close().await;
+    server2.kill().await.unwrap();
+    let _ = server2.wait().await;
+    sse_server.abort();
 }

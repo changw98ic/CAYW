@@ -18,7 +18,7 @@ use cayw_codemode::{CapabilityError, CapabilityStop};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::Ordering;
 
 const CREATE: &str = "work.create";
 const LIST: &str = "work.list";
@@ -83,6 +83,40 @@ pub(crate) fn is_tool(name: &str) -> bool {
     )
 }
 
+/// Names the main session may call once a workspace router is installed.
+/// Everything else is the child session's work or review. The same list is used
+/// for the call refusal and the advertised catalog.
+pub(crate) fn main_session_relays(name: &str) -> bool {
+    if name == ACCEPT_PROGRAM {
+        return false;
+    }
+    if is_tool(name) {
+        return true;
+    }
+    matches!(
+        name,
+        "approval.pending"
+            | "approval.decide"
+            | "capability.decide"
+            | "cells.store"
+            | "cells.load"
+            | "user.ask"
+    )
+}
+
+/// The only work capability a child session advertises. It names the dispatched
+/// WorkItem and one fixed criterion. It has no workspace argument: the check runs
+/// in this workspace.
+pub(crate) fn child_review_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: ACCEPT_PROGRAM.into(),
+        description: "Run one fixed program check for the WorkItem this task was dispatched for, in this workspace, and record the observed result. The result is the file check, not caller text. A failed check stays in this result and does not start another task.".into(),
+        parameters: json!({"type":"object","additionalProperties":false,"required":["work_id","criterion_id"],"properties":{
+            "work_id":id(256),"criterion_id":id(256)
+        }}),
+    }
+}
+
 fn id(max: usize) -> Value {
     json!({"type":"string","minLength":1,"maxLength":max})
 }
@@ -145,7 +179,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: CREATE.into(),
-            description: "Create one durable WorkItem owned by this main session. Acceptance criteria with a file check are observed by the program; a model report can never mark them passed. Use a criterion without `check` when only the user can judge the result.".into(),
+            description: "Create one durable WorkItem owned by this main session. Acceptance criteria with a file check are observed by the program; a model report can never mark them passed. Use a criterion without `check` when only the user can judge the result. On a routed main-session user turn, call work.list first. Create only when no listed WorkItem is the same task, then call work.dispatch for the new work_id.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"required":["title","goal","acceptance_criteria"],"properties":{
                 "work_id":id(256),
                 "title":text(1024),
@@ -163,7 +197,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: LIST.into(),
-            description: "List WorkItems owned by this main session, including their lifecycle, acceptance records, task references and late results.".into(),
+            description: "List WorkItems owned by this main session, including their lifecycle, acceptance records, task references and late results. On a routed main-session user turn, call this before work.create or work.dispatch. Reuse a listed WorkItem when it is the same task.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"properties":{}}),
         },
         ToolDefinition {
@@ -191,7 +225,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: DISPATCH.into(),
-            description: "Dispatch one Task to an already registered workspace through the unique Client. The target stores only work_id and dispatch_key. Reusing the same dispatch_key and input returns the original Task; different input under the same key is a conflict. Paused or stopped WorkItems refuse new dispatches. The target workspace checks its pause/stop version before every later capability call.".into(),
+            description: "Dispatch one Task to an already registered workspace through the unique Client. The runtime writes the WorkItem title, work id, goal, and each acceptance criterion into the task text, then appends `text` as additional instructions. The target stores only work_id and dispatch_key. The same dispatch_key and the same composed text return the original Task. A different composed text under the same key is a conflict. Paused or stopped WorkItems refuse new dispatches. The target workspace checks its pause/stop version before every later capability call. On a routed main-session user turn, call work.list first. Dispatch an existing WorkItem when it is the same task. Create a new WorkItem only when none is.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"required":["work_id","workspace","session_id","text","dispatch_key"],"properties":{
                 "work_id":id(256),
                 "workspace":text(4096),
@@ -226,14 +260,6 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
             name: STOP.into(),
             description: "Stop one WorkItem permanently for this version and push its stop version to every already-dispatched Task through the unique Client. Late results stay recorded and never redispatch.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"required":["work_id"],"properties":{"work_id":id(256)}}),
-        },
-        ToolDefinition {
-            name: ACCEPT_PROGRAM.into(),
-            description: "Run the fixed file check of one acceptance criterion in the target workspace or the main workspace and record the observed result. Caller text is never used as the result. Model self-reports cannot replace this.".into(),
-            parameters: json!({"type":"object","additionalProperties":false,"required":["work_id","criterion_id"],"properties":{
-                "work_id":id(256),"criterion_id":id(256),
-                "workspace":{"type":"string","minLength":1,"maxLength":4096}
-            }}),
         },
         ToolDefinition {
             name: ACCEPT_USER.into(),
@@ -342,7 +368,10 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         ToolDefinition {
             name: MEMORY_APPLY.into(),
             description: "Apply verified memory or preference writes in the main session. Every cited source_log_id must be a user-input turn.".into(),
-            parameters: json!({"type":"object","additionalProperties":false,"properties":{
+            parameters: json!({"type":"object","additionalProperties":false,"anyOf":[
+                {"required":["candidates"],"properties":{"candidates":{"minItems":1}}},
+                {"required":["kind"]}
+            ],"properties":{
                 "session_id":id(256),
                 "candidates":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["kind"],"properties":{
                     "operation":{"type":"string","enum":["upsert","disable"]},
@@ -363,7 +392,10 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         ToolDefinition {
             name: MEMORY_FORGET.into(),
             description: "Record a forgotten cursor range (or entry_id) in the main session so future context and memory reads omit it without deleting durable logs.".into(),
-            parameters: json!({"type":"object","additionalProperties":false,"required":["reason"],"properties":{
+            parameters: json!({"type":"object","additionalProperties":false,"anyOf":[
+                {"required":["reason","start_cursor","end_cursor"]},
+                {"required":["entry_id","reason"]}
+            ],"properties":{
                 "session_id":id(256),
                 "start_cursor":{"type":"integer","minimum":1},
                 "end_cursor":{"type":"integer","minimum":1},
@@ -376,7 +408,17 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
             description: "Organize summary references in the main session without rewriting summaries or logs.".into(),
             parameters: json!({"type":"object","additionalProperties":false,"properties":{
                 "session_id":id(256),
-                "summaries":{"type":"array","items":{"type":"object"}},
+                "summaries":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["summary_id","version","session_id","kind","start_cursor","end_cursor","text","evidence","local_reuse"],"properties":{
+                    "summary_id":{"type":"string"},
+                    "version":{"type":"integer","minimum":0},
+                    "session_id":{"type":"string"},
+                    "kind":{"type":"string","enum":["segment","user_turn","stage"]},
+                    "start_cursor":{"type":"integer","minimum":0},
+                    "end_cursor":{"type":"integer","minimum":0},
+                    "text":{"type":"string"},
+                    "evidence":{"type":"array","items":{"type":"string"}},
+                    "local_reuse":{"type":"boolean"}
+                }}},
                 "model_text":{"type":"string","maxLength":65536}
             }}),
         },
@@ -457,11 +499,9 @@ struct DispatchInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProgramAccept {
+struct ChildReview {
     work_id: String,
     criterion_id: String,
-    #[serde(default)]
-    workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -601,11 +641,22 @@ pub(crate) async fn invoke(
     arguments: Value,
     cancel: CancellationToken,
 ) -> Result<Value, CapabilityError> {
-    let definitions = definitions(&scope.context.inner.config);
-    let definition = definitions
-        .into_iter()
-        .find(|definition| definition.name == scope.name)
-        .ok_or_else(|| known("work capability is not available in this Runtime"))?;
+    let definition = if scope.name == ACCEPT_PROGRAM {
+        if scope.context.inner.config.main_session {
+            return Err(known(
+                "the main session does not review work; the child session runs work.accept.program",
+            ));
+        }
+        if lock(&scope.context.inner.work_owner).is_none() {
+            return Err(known("work capability is not available in this Runtime"));
+        }
+        child_review_definition()
+    } else {
+        definitions(&scope.context.inner.config)
+            .into_iter()
+            .find(|definition| definition.name == scope.name)
+            .ok_or_else(|| known("work capability is not available in this Runtime"))?
+    };
     let host = crate::bridge::scoped_host(base, scope)?;
     let service = Service { scope };
     let child = cancel.child_token();
@@ -627,6 +678,17 @@ impl Service<'_> {
         Runtime {
             inner: self.scope.context.inner.clone(),
         }
+    }
+
+    fn require_listed(&self) -> Result<(), CapabilityError> {
+        if self.scope.context.routed_user_turn
+            && !self.scope.context.work_listed.load(Ordering::Acquire)
+        {
+            return Err(known(
+                "call work.list before creating or dispatching; reuse an existing WorkItem when it is the same task",
+            ));
+        }
+        Ok(())
     }
 
     fn router(&self) -> Result<Arc<dyn WorkRouter>, CapabilityError> {
@@ -730,13 +792,6 @@ fn cancellation_unknown(message: impl Into<String>) -> CapabilityError {
     error
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
-}
-
 pub(crate) fn external_workspaces(item: &WorkItem) -> Vec<String> {
     target_workspaces(item)
         .into_iter()
@@ -788,6 +843,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                         return Err(known("work session references must not be empty"));
                     }
                 }
+                self.require_listed()?;
                 let item = self
                     .scope
                     .context
@@ -810,6 +866,13 @@ impl cayw_host::ExternalHost for Service<'_> {
                         next_check_at: input.next_check_at,
                     })
                     .map_err(known)?;
+                self.scope.context.note_work_created(&item.work_id);
+                if item.next_check_at.is_some() {
+                    Runtime {
+                        inner: self.scope.context.inner.clone(),
+                    }
+                    .note_scheduled_check();
+                }
                 encode(item)
             }
             LIST => {
@@ -823,11 +886,14 @@ impl cayw_host::ExternalHost for Service<'_> {
                     .into_iter()
                     .filter(|item| item.owner_main_session_id == self.owner())
                     .collect::<Vec<_>>();
+                self.scope.context.note_work_listed();
                 encode(items)
             }
             GET => {
                 let input: WorkId = serde_json::from_value(arguments).map_err(known)?;
-                encode(self.item(&input.work_id)?)
+                let item = self.item(&input.work_id)?;
+                self.scope.context.note_work_status();
+                encode(item)
             }
             WORKSPACES => {
                 let workspaces = self.router()?.workspaces().await.map_err(router_error)?;
@@ -852,6 +918,7 @@ impl cayw_host::ExternalHost for Service<'_> {
             }
             DISPATCH => {
                 let input: DispatchInput = serde_json::from_value(arguments).map_err(known)?;
+                self.require_listed()?;
                 let item = self.item(&input.work_id)?;
                 let router = self.router()?;
                 if item.lifecycle != WorkLifecycle::Open {
@@ -875,6 +942,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                                 &input.dispatch_key,
                             )
                             .await?;
+                        self.scope.context.note_work_dispatched(&item.work_id);
                         let reply = WorkDispatchReply {
                             workspace: input.workspace,
                             session_id: existing.session_id,
@@ -897,7 +965,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                     workspace: input.workspace,
                     session_id: Some(input.session_id),
                     label: input.label,
-                    text: input.text,
+                    text: crate::work_items::task_requirements(&item, &input.text),
                     dispatch_key: input.dispatch_key.clone(),
                     pause_version: item.pause_version,
                     stop_version: item.stop_version,
@@ -924,6 +992,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                         &reply.dispatch_key,
                     )
                     .await?;
+                self.scope.context.note_work_dispatched(&item.work_id);
                 Ok(json!({"work":updated,"dispatch":reply}))
             }
             TASKS => {
@@ -988,6 +1057,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                         .map_err(router_error)?;
                     tasks.push(json!({"task_ref":task,"task":found}));
                 }
+                self.scope.context.note_work_status();
                 Ok(json!({
                     "work":item,
                     "tasks":tasks,
@@ -1089,73 +1159,59 @@ impl cayw_host::ExternalHost for Service<'_> {
                 encode(resumed)
             }
             ACCEPT_PROGRAM => {
-                let input: ProgramAccept = serde_json::from_value(arguments).map_err(known)?;
-                let item = self.item(&input.work_id)?;
+                if self.scope.context.inner.config.main_session {
+                    return Err(known(
+                        "the main session does not review work; the child session runs work.accept.program",
+                    ));
+                }
+                let input: ChildReview = serde_json::from_value(arguments).map_err(known)?;
+                let task = self
+                    .scope
+                    .context
+                    .inner
+                    .queue
+                    .get(&self.scope.context.task.id)
+                    .map_err(known)?;
+                if task.work_id.as_deref() != Some(input.work_id.as_str()) {
+                    return Err(known("this task was not dispatched for that work item"));
+                }
+                let owner = lock(&self.scope.context.inner.work_owner)
+                    .clone()
+                    .ok_or_else(|| {
+                        known("this workspace has no main session to record the review")
+                    })?;
+                let item = owner
+                    .work_item(&input.work_id)
+                    .await
+                    .map_err(router_error)?;
                 let criterion = item
                     .acceptance_criteria
                     .iter()
                     .find(|criterion| criterion.criterion_id == input.criterion_id)
                     .ok_or_else(|| known("unknown acceptance criterion"))?;
                 let check = criterion.check.clone().ok_or_else(|| {
-                    known("this criterion has no program check; ask the user with work.accept.user")
+                    known("this criterion has no program check; the user judges it")
                 })?;
-                let targets = target_workspaces(&item);
-                let workspace = input
-                    .workspace
-                    .or_else(|| (targets.len() == 1).then(|| targets[0].clone()));
-                let (passed, evidence, observed_in) = match workspace {
-                    Some(workspace) => {
-                        if !targets.iter().any(|target| target == &workspace) {
-                            return Err(known(
-                                "acceptance workspace is not associated with this WorkItem",
-                            ));
-                        }
-                        let passed = self
-                            .router()?
-                            .evaluate_check(&workspace, &check)
-                            .await
-                            .map_err(router_error)?;
-                        (
-                            passed,
-                            format!("program check {check:?} observed in workspace {workspace}"),
-                            workspace,
-                        )
-                    }
-                    None if targets.is_empty() => {
-                        let passed = check
-                            .evaluate(self.scope.context.inner.root.as_path())
-                            .map_err(known)?;
-                        (
-                            passed,
-                            format!("program check {check:?} observed in the main workspace"),
-                            "local".into(),
-                        )
-                    }
-                    None => {
-                        return Err(known(
-                            "multiple workspaces are associated with this WorkItem; pass workspace explicitly",
-                        ));
-                    }
-                };
-                let updated = self
-                    .scope
-                    .context
-                    .inner
-                    .work_items
-                    .record_program_acceptance_at(
+                let passed = check
+                    .evaluate(self.scope.context.inner.root.as_path())
+                    .map_err(known)?;
+                let work = owner
+                    .record_program_acceptance(
                         &item.work_id,
                         &input.criterion_id,
                         passed,
-                        vec![evidence],
-                        "runtime-program",
-                        now_ms(),
+                        format!(
+                            "child session observed the program check for {} in this workspace",
+                            input.criterion_id
+                        ),
                     )
-                    .map_err(known)?;
+                    .await
+                    .map_err(router_error)?;
                 Ok(json!({
-                    "work":updated,
+                    "work":work,
                     "criterion_id":input.criterion_id,
                     "passed":passed,
-                    "workspace":observed_in,
+                    "session_notice":Value::Null,
                 }))
             }
             ACCEPT_USER => {
@@ -1456,5 +1512,75 @@ mod tests {
                 None => assert!(schema.get("maxLength").is_none()),
             }
         }
+    }
+
+    fn accepts(name: &str, arguments: Value) -> bool {
+        let schema = definitions(&RuntimeConfig {
+            main_session: true,
+            ..Default::default()
+        })
+        .into_iter()
+        .find(|definition| definition.name == name)
+        .unwrap()
+        .parameters;
+        cayw_ai::ArgumentValidator::new(&schema)
+            .unwrap()
+            .validate(&arguments)
+            .is_ok()
+    }
+
+    fn summary_item() -> Value {
+        json!({
+            "summary_id":"s",
+            "version":1,
+            "session_id":"session",
+            "kind":"segment",
+            "start_cursor":1,
+            "end_cursor":2,
+            "text":"noted",
+            "evidence":["1"],
+            "local_reuse":false
+        })
+    }
+
+    #[test]
+    fn memory_schemas_match_the_handlers() {
+        assert!(!accepts(MEMORY_FORGET, json!({})));
+        assert!(!accepts(MEMORY_FORGET, json!({"reason":"gone"})));
+        assert!(!accepts(
+            MEMORY_FORGET,
+            json!({"reason":"gone","start_cursor":1})
+        ));
+        assert!(accepts(
+            MEMORY_FORGET,
+            json!({"reason":"gone","start_cursor":1,"end_cursor":2})
+        ));
+        assert!(accepts(
+            MEMORY_FORGET,
+            json!({"reason":"gone","entry_id":"entry"})
+        ));
+        assert!(accepts(
+            MEMORY_FORGET,
+            json!({"reason":"gone","start_cursor":1,"end_cursor":2,"entry_id":"entry"})
+        ));
+
+        assert!(!accepts(MEMORY_APPLY, json!({})));
+        assert!(accepts(
+            MEMORY_APPLY,
+            json!({"candidates":[{"kind":"note"}]})
+        ));
+        assert!(accepts(MEMORY_APPLY, json!({"kind":"note"})));
+        assert!(accepts(
+            MEMORY_APPLY,
+            json!({"candidates":[],"kind":"note"})
+        ));
+        assert!(!accepts(MEMORY_APPLY, json!({"candidates":[]})));
+
+        assert!(accepts(MEMORY_DREAM, json!({})));
+        assert!(accepts(MEMORY_DREAM, json!({"summaries":[summary_item()]})));
+        assert!(!accepts(MEMORY_DREAM, json!({"summaries":[{}]})));
+        let mut extra = summary_item();
+        extra["extra"] = json!(true);
+        assert!(!accepts(MEMORY_DREAM, json!({"summaries":[extra]})));
     }
 }

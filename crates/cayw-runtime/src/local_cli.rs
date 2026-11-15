@@ -429,7 +429,7 @@ fn private_lock(path: &Path) -> io::Result<File> {
 /// Explain how to configure the device model list used by every local workspace.
 pub fn local_model_setup_hint(paths: &LocalPaths) -> String {
     format!(
-        "尚未配置模型。设备模型方案文件：{}。运行 `cayw conf --workspace {}` 逐项配置模型，或进入 WebUI 的模型设置。密钥可以明文保存在普通本地配置文件中；无需认证的本地服务可留空。",
+        "尚未配置模型。设备模型方案文件：{}。运行 `cayw conf --workspace {}` 逐项配置模型。密钥可以明文保存在普通本地配置文件中；无需认证的本地服务可留空。",
         paths.data_dir.join("models.json").display(),
         shell_path(&paths.workspace)
     )

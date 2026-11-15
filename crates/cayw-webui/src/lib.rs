@@ -103,6 +103,7 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "artifacts.recovery_save",
     "artifacts.recovery_load",
     "session.context_overview",
+    "session.maintenance.status",
     "session.run_inspector",
     "work.create",
     "work.get",
@@ -1552,6 +1553,7 @@ mod gateway_limits_tests {
     #[test]
     fn public_methods_include_memory_work_approval_and_recovery_contracts() {
         for read_method in [
+            "session.maintenance.status",
             "approval.question",
             "work.list",
             "work.get",

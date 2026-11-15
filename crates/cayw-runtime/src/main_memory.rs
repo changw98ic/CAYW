@@ -203,6 +203,7 @@ pub struct MemoryStatusView {
     pub memory_directory: String,
     pub entries: usize,
     pub active: usize,
+    pub visible: usize,
     pub user_set: usize,
     pub damaged: usize,
     pub forgotten_ranges: Vec<SourceRange>,
@@ -457,7 +458,11 @@ impl MainMemory {
     /// appends one event and is marked `user_set`; the body is preserved.
     pub fn scan(&self) -> Result<MemoryScan, RuntimeError> {
         let mut state = crate::lock(&self.state);
-        reload_events(&self.directory, &mut state)?;
+        self.scan_locked(&mut state)
+    }
+
+    fn scan_locked(&self, state: &mut MemoryState) -> Result<MemoryScan, RuntimeError> {
+        reload_events(&self.directory, state)?;
         let files = entry_files(&self.directory)?;
         let mut seen = BTreeSet::new();
         let mut entries = Vec::new();
@@ -552,8 +557,8 @@ impl MainMemory {
     /// Active entries that may enter context. An entry whose provenance touches
     /// a forgotten range is not loaded; it stays on disk.
     pub fn visible_entries(&self) -> Result<Vec<MemoryEntry>, RuntimeError> {
-        self.scan()?;
-        let state = crate::lock(&self.state);
+        let mut state = crate::lock(&self.state);
+        self.scan_locked(&mut state)?;
         Ok(state
             .entries
             .values()
@@ -564,8 +569,8 @@ impl MainMemory {
     }
 
     pub fn status(&self) -> Result<MemoryStatusView, RuntimeError> {
-        self.scan()?;
-        let state = crate::lock(&self.state);
+        let mut state = crate::lock(&self.state);
+        self.scan_locked(&mut state)?;
         let entries = state.entries.values().collect::<Vec<_>>();
         Ok(MemoryStatusView {
             memory_directory: self.directory.display().to_string(),
@@ -573,6 +578,13 @@ impl MainMemory {
             active: entries
                 .iter()
                 .filter(|entry| entry.status == MemoryStatus::Active)
+                .count(),
+            visible: entries
+                .iter()
+                .filter(|entry| {
+                    entry.status == MemoryStatus::Active
+                        && !entry_has_forgotten_source(entry, &state.forgotten)
+                })
                 .count(),
             user_set: entries
                 .iter()
@@ -592,6 +604,7 @@ impl MainMemory {
 
     pub fn record_writer_error(&self, session_id: &str, reason: impl Into<String>) {
         let reason = reason.into();
+        let mut state = crate::lock(&self.state);
         let persisted = append_event(
             &self.directory,
             serde_json::json!({
@@ -602,7 +615,6 @@ impl MainMemory {
             }),
         )
         .is_ok();
-        let mut state = crate::lock(&self.state);
         if persisted {
             state.persisted_writer_failures = state.persisted_writer_failures.saturating_add(1);
             state.persisted_last_writer_error = Some(reason);
@@ -613,8 +625,8 @@ impl MainMemory {
     }
 
     pub fn forgotten_ranges(&self) -> Result<Vec<SourceRange>, RuntimeError> {
-        self.scan()?;
-        let state = crate::lock(&self.state);
+        let mut state = crate::lock(&self.state);
+        self.scan_locked(&mut state)?;
         Ok(state.forgotten.clone())
     }
 
@@ -706,13 +718,14 @@ impl MainMemory {
         candidates: &[MemoryCandidate],
         expected_versions: Option<&BTreeMap<String, String>>,
     ) -> Result<ApplyReport, RuntimeError> {
-        self.scan()?;
+        let mut state = crate::lock(&self.state);
+        self.scan_locked(&mut state)?;
         let mut report = ApplyReport {
             written: Vec::new(),
             rejected: Vec::new(),
         };
         for candidate in candidates {
-            match self.apply_one(evidence, candidate, expected_versions)? {
+            match self.apply_one_locked(&mut state, evidence, candidate, expected_versions)? {
                 CandidateDecision::Written(entry_id) => report.written.push(entry_id),
                 CandidateDecision::Rejected(reason) => report.rejected.push(RejectedCandidate {
                     entry_id: candidate.entry_id.clone(),
@@ -737,7 +750,9 @@ impl MainMemory {
         if session_id.trim().is_empty() || cursor == 0 {
             return Ok(());
         }
-        let current = self.writer_frontier(session_id)?;
+        let mut state = crate::lock(&self.state);
+        reload_events(&self.directory, &mut state)?;
+        let current = state.writer_frontiers.get(session_id).copied().unwrap_or(0);
         if cursor <= current {
             return Ok(());
         }
@@ -753,7 +768,6 @@ impl MainMemory {
                 "at": now_ms(),
             }),
         )?;
-        let mut state = crate::lock(&self.state);
         let slot = state
             .writer_frontiers
             .entry(session_id.to_owned())
@@ -768,8 +782,9 @@ impl MainMemory {
         Ok(state.pending_candidates.clone())
     }
 
-    fn record_pending_candidate(
+    fn record_pending_candidate_locked(
         &self,
+        state: &mut MemoryState,
         candidate: &MemoryCandidate,
         reason: &str,
     ) -> Result<(), RuntimeError> {
@@ -786,7 +801,6 @@ impl MainMemory {
                 "at": at,
             }),
         )?;
-        let mut state = crate::lock(&self.state);
         state.pending_candidates.push(PendingMemoryCandidate {
             candidate: candidate.clone(),
             reason: reason.to_owned(),
@@ -795,8 +809,9 @@ impl MainMemory {
         Ok(())
     }
 
-    fn apply_one(
+    fn apply_one_locked(
         &self,
+        state: &mut MemoryState,
         evidence: &UserEvidence,
         candidate: &MemoryCandidate,
         expected_versions: Option<&BTreeMap<String, String>>,
@@ -817,7 +832,6 @@ impl MainMemory {
         {
             return Ok(CandidateDecision::Rejected("memory kind is invalid"));
         }
-        let state = crate::lock(&self.state);
         for log_id in &candidate.source_log_ids {
             if !evidence.contains(log_id) {
                 return Ok(CandidateDecision::Rejected(
@@ -848,11 +862,10 @@ impl MainMemory {
         } else {
             None
         };
-        drop(state);
         let existing = candidate
             .entry_id
             .as_ref()
-            .and_then(|entry_id| self.entry(entry_id))
+            .and_then(|entry_id| state.entries.get(entry_id).cloned())
             .or(duplicate_match);
         if existing
             .as_ref()
@@ -860,7 +873,7 @@ impl MainMemory {
         {
             let reason = "user_set entries are not overwritten by background writes";
             if expected_versions.is_some() {
-                self.record_pending_candidate(candidate, reason)?;
+                self.record_pending_candidate_locked(state, candidate, reason)?;
             }
             return Ok(CandidateDecision::Rejected(reason));
         }
@@ -870,8 +883,18 @@ impl MainMemory {
                 .is_some_and(|expected| expected != &entry.version)
         {
             let reason = "memory entry changed on disk while background write was prepared";
-            self.record_pending_candidate(candidate, reason)?;
+            self.record_pending_candidate_locked(state, candidate, reason)?;
             return Ok(CandidateDecision::Rejected(reason));
+        }
+        if let (Some(versions), None, Some(entry_id)) = (
+            expected_versions,
+            existing.as_ref(),
+            candidate.entry_id.as_deref(),
+        ) && versions.contains_key(entry_id)
+        {
+            return Ok(CandidateDecision::Rejected(
+                "memory entry was removed on disk while background write was prepared",
+            ));
         }
         let entry_id = candidate
             .entry_id
@@ -927,17 +950,13 @@ impl MainMemory {
                 entry.updated_at = now_ms();
             }
         }
-        self.write_entry(&entry, operation)?;
+        self.write_entry_locked(state, &entry, operation)?;
         Ok(CandidateDecision::Written(entry_id))
     }
 
-    fn entry(&self, entry_id: &str) -> Option<MemoryEntry> {
-        let state = crate::lock(&self.state);
-        state.entries.get(entry_id).cloned()
-    }
-
-    fn write_entry(
+    fn write_entry_locked(
         &self,
+        state: &mut MemoryState,
         entry: &MemoryEntry,
         operation: MemoryOperation,
     ) -> Result<(), RuntimeError> {
@@ -963,7 +982,6 @@ impl MainMemory {
                 "at": entry.updated_at,
             }),
         )?;
-        let mut state = crate::lock(&self.state);
         state
             .known_versions
             .insert(entry.entry_id.clone(), version.clone());
@@ -979,7 +997,8 @@ impl MainMemory {
         range
             .validate()
             .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
-        self.scan()?;
+        let mut state = crate::lock(&self.state);
+        self.scan_locked(&mut state)?;
         append_event(
             &self.directory,
             serde_json::json!({
@@ -989,7 +1008,6 @@ impl MainMemory {
                 "at": at,
             }),
         )?;
-        let mut state = crate::lock(&self.state);
         state.forgotten.push(range);
         Ok(())
     }
@@ -1089,6 +1107,7 @@ pub(crate) fn prepare_main_session_input_with_ranges(
         return Ok(Vec::new());
     }
     let spans = crate::session_context::units_from_ranges(messages, ranges);
+    let block = memory.context_block()?;
     let budget = match input_budget(window, output_reserve, DEFAULT_PROTOCOL_MARGIN) {
         Ok(budget) => budget,
         // The conservative window is only a fallback estimate. When it cannot
@@ -1096,12 +1115,14 @@ pub(crate) fn prepare_main_session_input_with_ranges(
         // rather than refusing a request the provider may accept.
         Err(_) if window.is_none() => {
             return Ok(main_session_fallback_input_with_spans(
-                messages, &spans, forgotten,
+                block.as_deref(),
+                messages,
+                &spans,
+                forgotten,
             ));
         }
         Err(error) => return Err(RuntimeError::InvalidInput(error.to_string())),
     };
-    let block = memory.context_block()?;
     let pinned_tokens = block
         .as_ref()
         .map(|text| u64::try_from(text.len()).unwrap_or(u64::MAX))
@@ -1122,25 +1143,13 @@ pub(crate) fn prepare_main_session_input_with_ranges(
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    let mut output = Vec::new();
-    if let Some(block) = block {
-        output.push(Message::system(block));
-    }
-    for span in &spans {
+    let output = emit_main_session_spans(block.as_deref(), messages, &spans, |span| {
         let range = CursorRange {
             start_cursor: span.unit.start_cursor,
             end_cursor: span.unit.end_cursor,
         };
-        if !retained.contains(&range) {
-            for message in &messages[span.msg_from..span.msg_to] {
-                if matches!(message, Message::System(_) | Message::Custom { .. }) {
-                    output.push(message.clone());
-                }
-            }
-            continue;
-        }
-        output.extend(messages[span.msg_from..span.msg_to].iter().cloned());
-    }
+        !retained.contains(&range)
+    });
     let tokens = output
         .iter()
         .map(|message| u64::try_from(message.text().len()).unwrap_or(u64::MAX))
@@ -1148,7 +1157,10 @@ pub(crate) fn prepare_main_session_input_with_ranges(
     if tokens > budget.input_limit {
         return if budget.window_was_default {
             Ok(main_session_fallback_input_with_spans(
-                messages, &spans, forgotten,
+                block.as_deref(),
+                messages,
+                &spans,
+                forgotten,
             ))
         } else {
             Err(RuntimeError::Budget("context input"))
@@ -1171,17 +1183,16 @@ fn main_session_fallback_input(messages: &[Message], forgotten: &[Message]) -> V
         })
         .filter_map(|span| CursorRange::new(span.unit.start_cursor, span.unit.end_cursor).ok())
         .collect::<Vec<_>>();
-    main_session_fallback_input_with_spans(messages, &spans, &forgotten_ranges)
+    main_session_fallback_input_with_spans(None, messages, &spans, &forgotten_ranges)
 }
 
 fn main_session_fallback_input_with_spans(
+    block: Option<&str>,
     messages: &[Message],
     spans: &[crate::session_context::UnitSpan],
     forgotten: &[CursorRange],
 ) -> Vec<Message> {
-    let mut output = Vec::new();
-    for span in spans {
-        let source = &messages[span.msg_from..span.msg_to];
+    emit_main_session_spans(block, messages, spans, |span| {
         let replaceable = matches!(
             span.unit.kind,
             cayw_context::UnitKind::CompletedTurn | cayw_context::UnitKind::ToolExchange
@@ -1190,7 +1201,40 @@ fn main_session_fallback_input_with_spans(
         let overlaps_forgotten = forgotten.iter().any(|range| {
             span.unit.start_cursor <= range.end_cursor && range.start_cursor <= span.unit.end_cursor
         });
-        if replaceable && overlaps_forgotten {
+        replaceable && overlaps_forgotten
+    })
+}
+
+fn has_conversational_message(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|message| !matches!(message, Message::System(_) | Message::Custom { .. }))
+}
+
+fn emit_main_session_spans(
+    block: Option<&str>,
+    messages: &[Message],
+    spans: &[crate::session_context::UnitSpan],
+    should_drop: impl Fn(&crate::session_context::UnitSpan) -> bool,
+) -> Vec<Message> {
+    let mut output = Vec::new();
+    if let Some(block) = block {
+        output.push(Message::system(block.to_owned()));
+    }
+    let mut awaiting_model = false;
+    let mut dropped_conversational = false;
+    for span in spans {
+        let source = &messages[span.msg_from..span.msg_to];
+        let drop_this = should_drop(span)
+            || (dropped_conversational
+                && !awaiting_model
+                && !span.unit.pin_original
+                && !span.unit.outcome_unknown
+                && crate::session_context::first_conversational_is_assistant(source));
+        if drop_this {
+            if has_conversational_message(source) {
+                dropped_conversational = true;
+            }
             for message in source {
                 if matches!(message, Message::System(_) | Message::Custom { .. }) {
                     output.push(message.clone());
@@ -1198,7 +1242,18 @@ fn main_session_fallback_input_with_spans(
             }
             continue;
         }
-        output.extend_from_slice(source);
+        if dropped_conversational
+            && !awaiting_model
+            && crate::session_context::first_conversational_is_assistant(source)
+        {
+            let placeholder = Message::user("[prior user turn omitted]");
+            crate::session_context::update_turn_state(&mut awaiting_model, &placeholder);
+            output.push(placeholder);
+        }
+        for message in source {
+            crate::session_context::update_turn_state(&mut awaiting_model, message);
+            output.push(message.clone());
+        }
     }
     output
 }

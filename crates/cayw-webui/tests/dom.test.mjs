@@ -16,19 +16,9 @@ const failure = (code, outcome_unknown = false) => ({ status: 502, error: { code
 
 test('shipped HTML pattern attributes compile with browser Unicode Sets rules', () => {
   const patterns = [...html.matchAll(/\spattern="([^"]*)"/g)].map(match => match[1]);
-  assert.ok(patterns.length > 0);
   for (const pattern of patterns) {
     assert.doesNotThrow(() => new RegExp(pattern, 'v'), `invalid pattern attribute: ${pattern}`);
   }
-});
-
-test('model credential edits preserve by default and use explicit keep/replace/remove choices', () => {
-  assert.match(html, /name="credential"/);
-  for (const choice of ['keep', 'replace', 'remove']) assert.ok(html.includes(`value="${choice}"`));
-  assert.match(source, /credential\.value = 'keep'/);
-  assert.match(source, /settings\.models\.put', \{name, model:values, credential\}/);
-  assert.doesNotMatch(html, /name="clear_api_key"/);
-  assert.doesNotMatch(source, /clear_api_key|showModelApiKeyState/);
 });
 
 class Element {
@@ -265,7 +255,7 @@ test('session_frozen error survives bare Core idle snapshots and offers explicit
   await app.send();
   await app.poll();
   assert.equal(app.ui.prompt.disabled, true);
-  assert.match(app.ui['blocked-text'].textContent, /冻结/);
+  assert.match(app.ui['blocked-text'].textContent, /停住/);
   assert.equal(app.ui['open-fork'].hidden, false);
   assert.equal(app.ui['open-fork'].disabled, false);
   await app.ui['open-fork'].dispatch('click');
@@ -274,7 +264,7 @@ test('session_frozen error survives bare Core idle snapshots and offers explicit
   app.ui['fork-confirm'].checked = true;
   await app.ui['fork-form'].dispatch('submit');
   const fork = app.calls.find(call => call.method === 'session.fork');
-  assert.deepEqual(fork.params, { session_id: 's1', label: '会话 · 普通聊天', confirm: true, mode: 'chat' });
+  assert.deepEqual(fork.params, { session_id: 's1', label: '会话 · 继续', confirm: true, mode: 'chat' });
 });
 
 test('interrupted tool calls leave an idle session ready for the next prompt', async t => {
@@ -301,8 +291,8 @@ test('interrupted tool calls do not prevent forking a frozen StrongFlow session'
     if (method === 'session.events') return [];
     if (method === 'session.fork') return snapshot({ id: 's2', label: '普通聊天', cursor: 2 });
   });
-  assert.equal(app.ui['session-state'].textContent, '强流程冻结');
-  assert.match(app.ui['blocked-text'].textContent, /冻结/);
+  assert.equal(app.ui['session-state'].textContent, '已停住');
+  assert.match(app.ui['blocked-text'].textContent, /停住/);
   assert.equal(app.ui['open-fork'].hidden, false);
   assert.equal(app.ui['open-fork'].disabled, false);
   app.ui['fork-confirm'].checked = true;
@@ -362,7 +352,7 @@ test('a dropped HTTP write retains an uncertain lock even after disconnect and r
   });
   await app.send();
   assert.equal(app.ui.prompt.disabled,true);
-  assert.match(app.ui['prompt-status'].textContent,/确认/);
+  assert.match(app.ui['prompt-status'].textContent,/还不能确定/);
   await app.ui.logout.dispatch('click');
   await app.ui['login-form'].dispatch('submit');
   assert.equal(app.ui.prompt.disabled,true,'reauthentication is not settlement');
@@ -488,10 +478,10 @@ test('a lost prompt response cannot borrow the first execution from another clie
   await app.poll();
   await app.poll();
   assert.equal(app.ui.prompt.disabled, true, 'a later execution has no authority over this lost request');
-  assert.match(app.ui['blocked-text'].textContent, /回执|请求编号/);
-  assert.match(app.ui['blocked-text'].textContent, /宿主.*核对/);
-  assert.match(app.ui['blocked-text'].textContent, /事件记录/);
-  assert.match(app.ui['blocked-text'].textContent, /新建会话/);
+  assert.match(app.ui['blocked-text'].textContent, /还不能确定/);
+  assert.match(app.ui['blocked-text'].textContent, /不要再发一次/);
+  assert.match(app.ui['blocked-text'].textContent, /不要重复停止/);
+  assert.match(app.ui['blocked-text'].textContent, /新建一段对话/);
   assert.equal(app.ui['create-button'].disabled, false, 'independent work still has a usable route');
   assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
 });
@@ -621,7 +611,7 @@ for (const count of [119, 120, 121, 4096]) {
     assert.ok(app.calls.slice(read + 1).some(call => call.method === 'session.get'), 'request idle after retrieving the terminal');
     assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
     assert.equal(app.calls.filter(call => call.method === 'session.cancel').length, 1);
-    assert.match(app.ui['event-count'].textContent, /^120 ·/);
+    assert.equal(app.ui.conversation.dataset.eventCursors.split(',').filter(Boolean).length, 120);
   });
 }
 

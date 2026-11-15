@@ -251,27 +251,23 @@ try {
     rpcTrace.push({method, status: response.status()});
   });
 
+  await rpc('settings.models.put', {
+    name: 'live-browser-e2e',
+    model: {
+      service: 'magpie',
+      api: 'chat_completions',
+      id: modelId,
+      base_url: modelBaseUrl,
+      api_version: 'v1',
+      max_output_tokens: 2048,
+    },
+  });
+  await rpc('settings.models.use', {name: 'live-browser-e2e'});
   await page.goto(ready.open_url || ready.url);
   await page.locator('#workspace').waitFor({state: 'visible'});
-  await page.locator('#open-settings').click();
-  await page.locator('#settings-status').filter({hasText: '已完成'}).waitFor();
-  const form = page.locator('#model-settings-form');
-  await form.locator('[name=name]').fill('live-browser-e2e');
-  await form.locator('[name=service]').selectOption('magpie');
-  await form.locator('[name=api]').selectOption('chat_completions');
-  await form.locator('[name=base_url]').fill(modelBaseUrl);
-  await form.locator('[name=id]').fill(modelId);
-  await form.locator('[name=api_version]').fill('v1');
-  await form.locator('[name=max_output_tokens]').fill('2048');
-  assert.equal(await form.locator('[name=api_key]').inputValue(), '');
-  await form.locator('button[type=submit]').click();
-  const profile = page.locator('#model-profiles > div').filter({hasText: 'live-browser-e2e'});
-  await profile.waitFor();
-  await profile.getByRole('button', {name: '使用', exact: true}).click();
-  await page.locator('#model-profiles')
-    .filter({hasText: `当前：magpie / ${modelId}`})
-    .waitFor();
-  await profile.filter({hasText: '已保存选择'}).waitFor();
+  for (const id of ['open-settings', 'settings-dialog', 'model-settings-form']) {
+    assert.equal(await page.locator(`#${id}`).count(), 0, `${id} is not on the conversation page`);
+  }
 
   const models = await rpc('settings.models.list');
   assert.equal(models.selected, 'live-browser-e2e');
@@ -286,8 +282,7 @@ try {
     stored_without_api_key: true,
     stored_path: storedModelsPath,
   });
-  await page.locator('#close-settings').click();
-  checks('The browser saves and hot-selects a no-auth live model through settings RPC');
+  checks('The conversation page has no model form; settings RPC saves and hot-selects a no-auth live model');
 
   await page.locator('#session-label').fill('Live browser E2E');
   await page.locator('#create-button').click();
@@ -310,9 +305,9 @@ try {
   await page.locator('#prompt').fill(prompt);
   await page.locator('#send-button').click();
 
-  const approval = page.locator('#approvals .approval-card').filter({hasText: '写入文件'});
+  const approval = page.locator('#messages .approval-question').filter({hasText: 'fs.write'});
   await approval.waitFor({state: 'visible', timeout: 180000});
-  await approval.getByText('文件：live-e2e.txt', {exact: true}).waitFor();
+  await approval.filter({hasText: 'live-e2e.txt'}).waitFor();
   await screenshot('approval-visible');
   await approval.getByRole('button', {name: '允许一次', exact: true}).click();
   checks('The live model requests execute_code and the browser exposes the exact fs.write approval');
@@ -366,12 +361,10 @@ try {
   checks('A full page reload renders the durable final answer without replay');
 
   const requiredMethods = [
-    'settings.models.put',
-    'settings.models.use',
     'session.create',
     'task.enqueue',
     'task.resume',
-    'approval.decide',
+    'approval.reply',
     'session.events',
     'session.get',
   ];

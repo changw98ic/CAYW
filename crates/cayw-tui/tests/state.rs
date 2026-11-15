@@ -163,6 +163,36 @@ fn frozen_session_requires_explicit_confirmation_before_fork() {
 }
 
 #[test]
+fn fork_label_stays_within_the_existing_byte_limit() {
+    let binding = json!({"plugin":"fixture-binding", "version":"1.0.0", "registry_id":"f4d8cc10-9530-4536-ac3c-1cf08e8d980d", "generation":1, "manifest":{}, "frozen":true, "reason":"host unloaded plugin", "workflow_state":null});
+    for label in ["a".repeat(1024), "a".repeat(1011) + "你"] {
+        let mut app = app("idle");
+        let mut value = snapshot("idle", 0);
+        value["label"] = json!(label);
+        value["frozen"] = json!(true);
+        value["binding"] = binding.clone();
+        app.upsert_snapshot(value, true).unwrap();
+        assert!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+                .is_empty()
+        );
+        let commands = app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let [Command::Fork { label: forked, .. }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert!(forked.len() <= 1024, "{}", forked.len());
+        assert!(forked.ends_with(" (chat fork)"));
+        assert!(std::str::from_utf8(forked.as_bytes()).is_ok());
+        if label.len() == 1024 {
+            assert_eq!(forked.len(), 1024);
+        } else {
+            assert_eq!(forked.len(), 1023);
+            assert!(!forked.contains('你'));
+        }
+    }
+}
+
+#[test]
 fn approval_choices_use_pending_id_and_remain_pending_until_server_acknowledges() {
     let mut app = app("running");
     let mut value = snapshot("running", 1);

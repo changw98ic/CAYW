@@ -24,7 +24,7 @@ use crate::{
         MaintenanceStreamOutcome, consume_maintenance_stream, model_is_configured,
         overlaps_forgotten, reserve_maintenance, settle_reservation,
     },
-    main_memory::{MemoryCandidate, now_ms, user_evidence},
+    main_memory::{MemoryCandidate, MemoryStatus, now_ms, user_evidence},
     session_context::{JobKind, ReservationSpec, effective_input_budget},
 };
 
@@ -62,6 +62,27 @@ struct UserTurnSource {
     text: String,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct MemoryWriterQueue {
+    pending: bool,
+}
+
+struct QueueSlotGuard {
+    inner: Weak<Inner>,
+    session_id: String,
+    armed: bool,
+}
+
+impl Drop for QueueSlotGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Some(strong) = self.inner.upgrade()
+        {
+            crate::lock(&strong.memory_writer_queues).remove(&self.session_id);
+        }
+    }
+}
+
 pub(crate) fn schedule_post_turn(inner: Weak<Inner>, session_id: &str) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -72,12 +93,56 @@ pub(crate) fn schedule_post_turn(inner: Weak<Inner>, session_id: &str) {
     if !strong.config.main_session || strong.maintenance_cancel.is_cancelled() {
         return;
     }
+    {
+        let mut queues = crate::lock(&strong.memory_writer_queues);
+        if let Some(slot) = queues.get_mut(session_id) {
+            slot.pending = true;
+            return;
+        }
+        queues.insert(session_id.to_owned(), MemoryWriterQueue { pending: false });
+    }
     let sid = session_id.to_owned();
     let cancel = strong.maintenance_cancel.child_token();
     let weak = Arc::downgrade(&strong);
     handle.spawn(async move {
-        run_memory_writer(weak, sid, cancel).await;
+        run_session_memory_writer_queue(weak, sid, cancel).await;
     });
+}
+
+async fn run_session_memory_writer_queue(
+    inner: Weak<Inner>,
+    session_id: String,
+    cancel: CancellationToken,
+) {
+    let mut guard = QueueSlotGuard {
+        inner: inner.clone(),
+        session_id: session_id.clone(),
+        armed: true,
+    };
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        run_memory_writer(inner.clone(), session_id.clone(), cancel.clone()).await;
+        let Some(strong) = inner.upgrade() else {
+            guard.armed = false;
+            return;
+        };
+        if cancel.is_cancelled() {
+            return;
+        }
+        let mut queues = crate::lock(&strong.memory_writer_queues);
+        match queues.get_mut(&session_id) {
+            Some(slot) if slot.pending => {
+                slot.pending = false;
+            }
+            _ => {
+                queues.remove(&session_id);
+                guard.armed = false;
+                return;
+            }
+        }
+    }
 }
 
 async fn run_memory_writer(inner: Weak<Inner>, session_id: String, cancel: CancellationToken) {
@@ -185,7 +250,7 @@ async fn run_memory_writer(inner: Weak<Inner>, session_id: String, cancel: Cance
         .unwrap_or(frontier + 1);
     let end_cursor = max_seen_cursor;
 
-    let existing_entries = match strong.memory.visible_entries() {
+    let all_entries = match strong.memory.entries() {
         Ok(entries) => entries,
         Err(error) => {
             strong
@@ -194,9 +259,13 @@ async fn run_memory_writer(inner: Weak<Inner>, session_id: String, cancel: Cance
             return;
         }
     };
-    let expected_versions: BTreeMap<String, String> = existing_entries
+    let expected_versions: BTreeMap<String, String> = all_entries
         .iter()
         .map(|entry| (entry.entry_id.clone(), entry.version.clone()))
+        .collect();
+    let existing_entries: Vec<_> = all_entries
+        .iter()
+        .filter(|entry| entry.status == MemoryStatus::Active)
         .collect();
 
     let mut prompt = String::new();

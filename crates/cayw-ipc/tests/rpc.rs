@@ -82,7 +82,7 @@ impl RpcHandler for Fixture {
             }
         }
     }
-    fn read_only(&self, method: &str) -> bool {
+    fn read_only(&self, method: &str, _params: &Value) -> bool {
         method == "session.events"
     }
 }

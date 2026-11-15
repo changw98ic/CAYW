@@ -270,7 +270,7 @@ fn call_handler(
     let deadline = request_timeout.map(|timeout| Instant::now() + timeout);
     let grace = config.cancellation_grace;
     let cancel = token.clone();
-    let read_only = handler.read_only(&request.method);
+    let read_only = handler.read_only(&request.method, &request.params);
     let future = Box::pin(async move {
         let work = AssertUnwindSafe(handler.call(&request.method, request.params, token.clone()))
             .catch_unwind();

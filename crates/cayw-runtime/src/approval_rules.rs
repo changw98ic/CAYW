@@ -167,6 +167,16 @@ impl RulesSnapshot {
                         rule_index: Some(index),
                     };
                 }
+                // The child session reviews its own dispatched work. The main
+                // session does not approve that check. A missing rule file is
+                // still a loaded snapshot, so this does not wait for a person.
+                if !context.main_session && capability == "work.accept.program" {
+                    return RuleDecision::Allow {
+                        kind: "child_review",
+                        rule_version: None,
+                        rule_index: None,
+                    };
+                }
             }
         }
         if is_workspace_read(capability) {

@@ -125,6 +125,78 @@ fn read_check_file(workspace: &Path, path: &str) -> Result<String, RuntimeError>
         .map_err(|error| RuntimeError::Workspace(format!("acceptance check file: {error}")))
 }
 
+/// The text a dispatched session receives. It is built only from the durable
+/// WorkItem and the caller's additional instructions, so the same key and the
+/// same instructions still match the original task. Acceptance records are not
+/// included: they change after a check and must not turn a retry into a conflict.
+pub(crate) fn task_requirements(item: &WorkItem, instructions: &str) -> String {
+    let mut text = String::new();
+    text.push_str("Work item\n");
+    text.push_str("title: ");
+    text.push_str(&item.title);
+    text.push('\n');
+    text.push_str("work_id: ");
+    text.push_str(&item.work_id);
+    text.push('\n');
+    text.push_str("goal: ");
+    text.push_str(&item.goal);
+    text.push('\n');
+    text.push_str("acceptance criteria:\n");
+    for criterion in &item.acceptance_criteria {
+        text.push_str("- ");
+        text.push_str(&criterion.criterion_id);
+        text.push_str(": ");
+        text.push_str(&criterion.description);
+        text.push('\n');
+        text.push_str(&program_check_line(&criterion.check));
+        text.push('\n');
+    }
+    text.push_str(
+        "A file in a subdirectory does not satisfy a check for a path at the workspace root.\n",
+    );
+    text.push_str(
+        "Do this work in this workspace and review it here. Run each program check with work.accept.program. You decide whether to start a subagent.\n",
+    );
+    text.push_str("Additional instructions:\n");
+    text.push_str(instructions);
+    text
+}
+
+/// The text the main session relays when a WorkItem's own check time arrives.
+/// It is the stored lifecycle, not a review and not a new dispatch.
+pub(crate) fn due_report_text(item: &WorkItem) -> String {
+    let mut text = String::new();
+    text.push_str("Scheduled work check is due.\n");
+    text.push_str("work_id: ");
+    text.push_str(&item.work_id);
+    text.push('\n');
+    text.push_str("title: ");
+    text.push_str(&item.title);
+    text.push('\n');
+    text.push_str("lifecycle: ");
+    text.push_str(item.lifecycle.as_str());
+    text.push('\n');
+    text.push_str(
+        "Tell the user this status. Do not read files, run checks, or dispatch another task.\n",
+    );
+    text
+}
+
+fn program_check_line(check: &Option<AcceptanceCheck>) -> String {
+    match check {
+        None => "The user judges this criterion. There is no program check.".to_owned(),
+        Some(AcceptanceCheck::PathExists { path }) => {
+            format!("Program check: the workspace-relative path `{path}` must exist.")
+        }
+        Some(AcceptanceCheck::FileContains { path, text }) => format!(
+            "Program check: the workspace-relative file `{path}` must contain this text: {text}"
+        ),
+        Some(AcceptanceCheck::FileEquals { path, text }) => format!(
+            "Program check: the workspace-relative file `{path}` must equal this text exactly: {text}"
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcceptanceCriterion {
@@ -251,6 +323,16 @@ pub struct WorkItem {
 }
 
 impl WorkItem {
+    fn schedules_a_check(&self) -> bool {
+        matches!(self.lifecycle, WorkLifecycle::Open | WorkLifecycle::Paused)
+            && self.next_check_at.is_some()
+    }
+
+    fn check_is_due(&self, now: u64) -> bool {
+        matches!(self.lifecycle, WorkLifecycle::Open | WorkLifecycle::Paused)
+            && self.next_check_at.is_some_and(|due| due <= now)
+    }
+
     /// Every criterion has a latest passing record. A running Task or an idle
     /// Session never satisfies this check by itself.
     pub fn acceptance_complete(&self) -> bool {
@@ -402,6 +484,34 @@ pub enum ProactiveMode {
     Off,
     Observe,
     Auto,
+}
+
+impl ProactiveMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::Auto => "auto",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, RuntimeError> {
+        match value {
+            "off" => Ok(Self::Off),
+            "observe" => Ok(Self::Observe),
+            "auto" => Ok(Self::Auto),
+            other => Err(RuntimeError::InvalidInput(format!(
+                "invalid stored proactive mode: {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProactiveStatus {
+    pub mode: ProactiveMode,
+    pub recorded_triggers: u64,
+    pub total_usage_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,6 +692,11 @@ impl WorkItems {
                 receipt_ref TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS runtime_work_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
              );",
         )?;
         Ok(Self {
@@ -671,6 +786,51 @@ impl WorkItems {
             .into_iter()
             .map(|body| serde_json::from_str(&body).map_err(RuntimeError::Json))
             .collect()
+    }
+
+    /// Open or paused WorkItems whose own check time has arrived.
+    /// Completed and cancelled items are not woken. Stopping a work item
+    /// cancels its due check by leaving it out of this list.
+    pub fn due_items(&self, now: u64) -> Result<Vec<WorkItem>, RuntimeError> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|item| item.check_is_due(now))
+            .collect())
+    }
+
+    /// The soonest check time still scheduled on an open or paused WorkItem.
+    pub fn earliest_open_check(&self) -> Result<Option<u64>, RuntimeError> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|item| item.schedules_a_check())
+            .filter_map(|item| item.next_check_at)
+            .min())
+    }
+
+    /// Clear one check time after that report was accepted. A newer time, or a
+    /// WorkItem that is no longer open or paused, is left as it is.
+    pub fn consume_due_check(
+        &self,
+        work_id: &str,
+        expected: u64,
+        at: u64,
+    ) -> Result<bool, RuntimeError> {
+        let mut db = lock(&self.connection);
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(mut item) = load(&tx, work_id)? else {
+            return Ok(false);
+        };
+        if item.next_check_at != Some(expected) || !item.schedules_a_check() {
+            return Ok(false);
+        }
+        item.next_check_at = None;
+        item.work_version = item.work_version.saturating_add(1);
+        item.updated_at = at;
+        save(&tx, &item, at)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Record the exact Task created for this WorkItem. The target workspace
@@ -1250,6 +1410,73 @@ impl WorkItems {
                 task_id: None,
             },
             _ => unreachable!("only observe and auto reach this branch"),
+        })
+    }
+
+    pub fn configured_proactive_mode(
+        &self,
+        default: ProactiveMode,
+    ) -> Result<ProactiveMode, RuntimeError> {
+        let db = lock(&self.connection);
+        Self::read_proactive_mode(&db, default)
+    }
+
+    pub fn set_proactive_mode(&self, mode: ProactiveMode) -> Result<ProactiveStatus, RuntimeError> {
+        let at = now_ms();
+        let db = lock(&self.connection);
+        db.execute(
+            "INSERT INTO runtime_work_settings(key,value,updated_at) VALUES ('proactive_mode',?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            params![mode.as_str(), sql_u64(at, "proactive setting time")?],
+        )?;
+        Self::read_proactive_status(&db, mode)
+    }
+
+    pub fn proactive_status(
+        &self,
+        default: ProactiveMode,
+    ) -> Result<ProactiveStatus, RuntimeError> {
+        let db = lock(&self.connection);
+        let mode = Self::read_proactive_mode(&db, default)?;
+        Self::read_proactive_status(&db, mode)
+    }
+
+    fn read_proactive_mode(
+        db: &Connection,
+        default: ProactiveMode,
+    ) -> Result<ProactiveMode, RuntimeError> {
+        let raw: Option<String> = db
+            .query_row(
+                "SELECT value FROM runtime_work_settings WHERE key='proactive_mode'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match raw {
+            Some(value) => ProactiveMode::parse(&value),
+            None => Ok(default),
+        }
+    }
+
+    fn read_proactive_status(
+        db: &Connection,
+        mode: ProactiveMode,
+    ) -> Result<ProactiveStatus, RuntimeError> {
+        let mut stmt = db.prepare("SELECT usage_tokens FROM runtime_proactive_triggers")?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        let mut recorded_triggers = 0_u64;
+        let mut total_usage_tokens = 0_u64;
+        for row in rows {
+            let tokens = u64::try_from(row?).map_err(|_| {
+                RuntimeError::InvalidInput("stored proactive usage_tokens is negative".into())
+            })?;
+            recorded_triggers = recorded_triggers.saturating_add(1);
+            total_usage_tokens = total_usage_tokens.saturating_add(tokens);
+        }
+        Ok(ProactiveStatus {
+            mode,
+            recorded_triggers,
+            total_usage_tokens,
         })
     }
 

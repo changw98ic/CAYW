@@ -7,15 +7,26 @@ struct WaitArguments {
     cell_id: String,
     #[serde(deserialize_with = "wait_integer")]
     cursor: u64,
-    #[serde(deserialize_with = "wait_integer")]
+    /// Omitted means 0 ms. A present value still goes through `wait_integer`.
+    #[serde(default, deserialize_with = "wait_integer")]
     yield_time_ms: u64,
-    #[serde(deserialize_with = "wait_integer")]
+    /// Omitted passes this parse. The stand-in 131072 is not the page: the
+    /// stored call keeps the model's original JSON, and Cells applies its own
+    /// default (lower when a cap is configured). A present value below 1024
+    /// stays invalid so a wait Cells will refuse is not registered.
+    #[serde(
+        default = "default_wait_page_tokens",
+        deserialize_with = "wait_integer"
+    )]
     max_output_tokens: u64,
     #[serde(default = "continue_default")]
     continue_execution: bool,
 }
 fn continue_default() -> bool {
     true
+}
+fn default_wait_page_tokens() -> u64 {
+    128 * 1024
 }
 fn wait_integer<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     let value = Value::deserialize(deserializer)?;

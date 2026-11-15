@@ -384,11 +384,15 @@ async fn paths_symlinks_and_byte_limits_are_enforced() {
     );
     assert!(!root.path().join("too-big").exists());
     std::fs::write(root.path().join("too-big"), "123456789").unwrap();
-    assert!(
-        call(&host, "fs.read", json!({"path":"too-big"}))
-            .await
-            .is_err()
-    );
+    let preview = call(&host, "fs.read", json!({"path":"too-big"}))
+        .await
+        .unwrap();
+    assert_eq!(preview["content"], "12345678");
+    assert_eq!(preview["truncated"], true);
+    assert_eq!(preview["total_bytes"], 9);
+    assert_eq!(preview["next_offset_bytes"], 8);
+    assert_eq!(preview["lines_returned"], 0);
+    assert!(preview.get("next_start_line").is_none());
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
@@ -411,6 +415,40 @@ async fn paths_symlinks_and_byte_limits_are_enforced() {
             "outside"
         );
     }
+}
+
+#[tokio::test]
+async fn capped_unranged_read_returns_a_whole_file_or_a_bounded_preview() {
+    let root = Workspace::new();
+    let config = HostConfig {
+        max_file_bytes: Some(8),
+        ..Default::default()
+    };
+    let (host, _, _) = host(root.path(), config);
+    std::fs::write(root.path().join("fits"), "12345678").unwrap();
+    let whole = call(&host, "fs.read", json!({"path":"fits"}))
+        .await
+        .unwrap();
+    assert_eq!(whole["content"], "12345678");
+    assert_eq!(whole["bytes"], 8);
+    assert!(whole["sha256"].as_str().unwrap().len() == 64);
+    assert!(whole.get("truncated").is_none());
+    std::fs::write(root.path().join("over"), "123456789").unwrap();
+    let preview = call(&host, "fs.read", json!({"path":"over"}))
+        .await
+        .unwrap();
+    assert_eq!(preview["content"], "12345678");
+    assert_eq!(preview["truncated"], true);
+    assert_eq!(preview["total_bytes"], 9);
+    let ranged = call(
+        &host,
+        "fs.read",
+        json!({"path":"over","offset_bytes":0,"max_bytes":4}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ranged["content"], "1234");
+    assert_ne!(ranged["content"], "file exceeds byte limit");
 }
 
 #[tokio::test]

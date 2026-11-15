@@ -411,6 +411,12 @@ impl Backend {
         let plugins = Arc::new(crate::plugins::PluginCatalog::new(&context)?);
         #[cfg(feature = "plugins")]
         catalog.extend(plugins.definitions());
+        if context.inner.config.main_session && lock(&context.inner.work_router).is_some() {
+            catalog.retain(|tool| crate::work_tools::main_session_relays(&tool.name));
+        }
+        if !context.inner.config.main_session && lock(&context.inner.work_owner).is_some() {
+            catalog.push(crate::work_tools::child_review_definition());
+        }
         crate::processes::register(&context, base.clone())?;
         Ok(Self {
             context,
@@ -500,6 +506,14 @@ impl CellBackend for Backend {
         {
             return Err(CapabilityError::new(
                 "main session memory/ is read-only for model file capabilities",
+            ));
+        }
+        if self.context.inner.config.main_session
+            && lock(&self.context.inner.work_router).is_some()
+            && !crate::work_tools::main_session_relays(name)
+        {
+            return Err(CapabilityError::new(
+                "the main session only passes messages; the child session does this work and its review",
             ));
         }
         self.context

@@ -150,7 +150,7 @@ async fn held_root_rename_and_replacement_cannot_redirect_frozen_capture_or_work
 }
 
 #[tokio::test]
-async fn invalid_utf8_directories_symlinks_and_oversized_files_are_never_reusable_values() {
+async fn invalid_utf8_directories_and_symlinks_stay_unusable_and_oversized_reads_preview() {
     let root = Root::new();
     std::fs::write(root.0.join("invalid"), [0xff, 0xfe]).unwrap();
     std::fs::write(root.0.join("large"), "12345").unwrap();
@@ -165,7 +165,7 @@ async fn invalid_utf8_directories_symlinks_and_oversized_files_are_never_reusabl
         },
         false,
     );
-    let mut paths = vec!["invalid", "large", "directory"];
+    let mut paths = vec!["invalid", "directory"];
     #[cfg(unix)]
     paths.push("link");
     for path in paths {
@@ -185,6 +185,18 @@ async fn invalid_utf8_directories_symlinks_and_oversized_files_are_never_reusabl
         );
         ticket.acknowledge();
     }
+    // An un-ranged read above max_file_bytes is the published preview, not a
+    // refusal. The frozen ticket keeps that same bounded result.
+    let mut ticket = reader
+        .admit_frozen_read(json!({"path":"large"}), CancellationToken::new())
+        .await
+        .unwrap();
+    let value = ticket.capture().await.unwrap();
+    assert_eq!(value.value()["content"], "1234");
+    assert_eq!(value.value()["truncated"], true);
+    assert_eq!(value.value()["total_bytes"], 5);
+    ticket.settle(Ok(value)).await.unwrap();
+    ticket.acknowledge();
     assert!(!reader.outcome_unknown());
 }
 

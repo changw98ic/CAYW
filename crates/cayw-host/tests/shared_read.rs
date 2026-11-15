@@ -311,7 +311,7 @@ async fn abandoned_read_requires_exact_stopped_owner_recovery() {
 }
 
 #[tokio::test]
-async fn frozen_tickets_keep_held_root_after_rename_and_reject_links_and_byte_limits() {
+async fn frozen_tickets_keep_held_root_after_rename_reject_links_and_preview_oversized_reads() {
     let root = Root::new();
     std::fs::write(root.0.join("a.txt"), "original").unwrap();
     let reader = host(&root, Arc::default());
@@ -374,9 +374,11 @@ async fn frozen_tickets_keep_held_root_after_rename_and_reject_links_and_byte_li
         .admit_frozen_read(json!({"path":"a.txt"}), CancellationToken::new())
         .await
         .unwrap();
-    let error = ticket.capture().await.unwrap_err();
-    assert!(error.message.contains("byte limit"));
-    ticket.settle(Err(error)).await.unwrap_err();
+    let value = ticket.capture().await.unwrap();
+    assert_eq!(value.value()["content"], "ori");
+    assert_eq!(value.value()["truncated"], true);
+    assert_eq!(value.value()["total_bytes"], 8);
+    ticket.settle(Ok(value)).await.unwrap();
     ticket.acknowledge();
     std::fs::remove_dir_all(moved).unwrap();
 }

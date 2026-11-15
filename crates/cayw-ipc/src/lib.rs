@@ -54,7 +54,7 @@ pub trait RpcHandler: Send + Sync + 'static {
     ) -> Result<Value, RpcError>;
     /// Whether this method only observes state. The transport uses it to label
     /// an oversized response as a known failure instead of `outcome_unknown`.
-    fn read_only(&self, _method: &str) -> bool {
+    fn read_only(&self, _method: &str, _params: &Value) -> bool {
         false
     }
 }

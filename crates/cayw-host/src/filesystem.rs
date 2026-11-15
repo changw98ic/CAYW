@@ -483,12 +483,39 @@ pub(crate) async fn execute(
                 && !line_mode
                 && !byte_mode
             {
-                let bytes = read_bytes(&dir, name, Some(limit), cancel, deadline)?;
-                let sha256 = hash(&bytes);
-                let content = text(&bytes)?;
-                return Ok(
-                    json!({"path":path,"content":content,"bytes":content.len(),"sha256":sha256}),
-                );
+                let mut file = regular(&dir, name)?;
+                let total = file.metadata().map_err(io_error)?.len();
+                if total <= limit as u64 {
+                    let (bytes, _) = read_up_to(&mut file, limit, false, cancel, deadline)?;
+                    let sha256 = hash(&bytes);
+                    let content = text(&bytes)?;
+                    return Ok(
+                        json!({"path":path,"content":content,"bytes":content.len(),"sha256":sha256}),
+                    );
+                }
+                let (bytes, _) = read_up_to(
+                    &mut file,
+                    DEFAULT_PREVIEW_BYTES.min(limit),
+                    false,
+                    cancel,
+                    deadline,
+                )?;
+                let (content, consumed, returned) = preview(bytes)?;
+                let mut result = json!({
+                    "path":path,
+                    "content":content,
+                    "bytes":consumed,
+                    "total_bytes":total,
+                    "start_line":1,
+                    "lines_returned":returned,
+                    "offset_bytes":0,
+                    "next_offset_bytes":consumed,
+                    "truncated":true,
+                });
+                if returned > 0 {
+                    result["next_start_line"] = json!(1 + returned as u64);
+                }
+                return Ok(result);
             }
             if byte_mode {
                 let offset = args

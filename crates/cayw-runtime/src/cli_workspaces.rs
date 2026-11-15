@@ -7,8 +7,9 @@ use cayw_bridge::{AccessRequest, Limits, Provenance, Registry, RegistryPolicy, V
 use cayw_codemode::CapabilityError;
 use cayw_runtime::{
     HeadlessConfig, PiCompatConfig, Runtime, RuntimeConfig, TaskDispatch, TaskInput, TaskIntent,
-    TaskResources, WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkRouter,
-    WorkRouterError, WorkTargetOutcome, WorkTaskQuery,
+    TaskResources, WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkOwner, WorkRouter,
+    WorkRouterError, WorkSessionNotice, WorkSessionNoticeReply, WorkStatusReport,
+    WorkTargetOutcome, WorkTaskQuery,
     local_cli::{LocalPaths, local_model_setup_hint},
 };
 use cayw_sources::{InstalledServer, install_mcp_servers_file};
@@ -19,7 +20,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     os::unix::ffi::OsStrExt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -277,6 +278,7 @@ pub struct Workspaces {
 
 struct Inner {
     paths: LocalPaths,
+    explicit_config: Option<PathBuf>,
     offline: bool,
     discoverable: bool,
     hosts: tokio::sync::RwLock<BTreeMap<String, Arc<WorkspaceHost>>>,
@@ -298,6 +300,7 @@ pub(crate) struct Empty {}
 impl Workspaces {
     pub fn new(
         paths: LocalPaths,
+        explicit_config: Option<PathBuf>,
         offline: bool,
         discoverable: bool,
         primary: Arc<WorkspaceHost>,
@@ -308,6 +311,7 @@ impl Workspaces {
         Self {
             inner: Arc::new(Inner {
                 paths,
+                explicit_config,
                 offline,
                 discoverable,
                 hosts: tokio::sync::RwLock::new(hosts),
@@ -595,6 +599,17 @@ impl Workspaces {
             .map_err(router_runtime_error)
     }
 
+    async fn router_notify_session(
+        &self,
+        notice: WorkSessionNotice,
+    ) -> std::result::Result<WorkSessionNoticeReply, WorkRouterError> {
+        let workspace = self.router_resolve(&notice.workspace).await?;
+        let host = self.router_open(&workspace).await?;
+        host.runtime
+            .deliver_session_notice(&notice)
+            .map_err(router_runtime_error)
+    }
+
     pub async fn host(&self, id: &str) -> Result<Arc<WorkspaceHost>> {
         self.inner
             .hosts
@@ -619,6 +634,24 @@ impl Workspaces {
         match method {
             "settings.workspaces.list" => {
                 let _: Empty = serde_json::from_value(params)?;
+                let config_path = self
+                    .inner
+                    .explicit_config
+                    .as_deref()
+                    .unwrap_or(&self.inner.paths.config_file);
+                let configured_main = if config_path.try_exists()? {
+                    HeadlessConfig::load(config_path)?
+                        .main_session_dir()
+                        .map(Path::to_path_buf)
+                } else {
+                    None
+                };
+                let main_dir =
+                    cayw_runtime::local_cli::main_session_directory(configured_main.as_deref())
+                        .ok()
+                        .and_then(|directory| {
+                            std::fs::canonicalize(&directory).ok().or(Some(directory))
+                        });
                 let hosts = self.inner.hosts.read().await;
                 let mut rows = Vec::new();
                 for path in self.inner.paths.known_workspaces()? {
@@ -630,7 +663,11 @@ impl Workspaces {
                     } else {
                         "unavailable"
                     };
-                    rows.push(json!({"id":id,"path":path,"state":state}));
+                    let is_main = hosts
+                        .get(&id)
+                        .map(|host| host.runtime.is_main_session())
+                        .unwrap_or_else(|| main_dir.as_ref().is_some_and(|dir| dir == &path));
+                    rows.push(json!({"id":id,"path":path,"state":state,"main_session":is_main}));
                 }
                 Ok(json!({
                     "current":"local",
@@ -674,12 +711,20 @@ impl Workspaces {
                 let host = Arc::new(
                     open_workspace(
                         paths,
+                        self.inner.explicit_config.as_deref(),
                         self.inner.offline,
                         #[cfg(feature = "plugins")]
                         self.inner.plugins.clone(),
                     )
                     .await?,
                 );
+                if !host.runtime.is_main_session() {
+                    host.runtime
+                        .set_work_owner(Arc::new(ClientWorkOwner {
+                            inner: Arc::downgrade(&self.inner),
+                        }))
+                        .map_err(|error| error.to_string())?;
+                }
                 self.inner.hosts.write().await.insert(open.id.clone(), host);
                 Ok(json!({
                     "id":open.id,"path":path,"state":"open","reused":false
@@ -778,6 +823,65 @@ impl WorkRouter for ClientWorkRouter {
     ) -> std::result::Result<bool, WorkRouterError> {
         self.client()?.router_evaluate_check(workspace, check).await
     }
+
+    async fn notify_session(
+        &self,
+        notice: WorkSessionNotice,
+    ) -> std::result::Result<WorkSessionNoticeReply, WorkRouterError> {
+        self.client()?.router_notify_session(notice).await
+    }
+}
+
+/// The child workspace's link back to the main session. It holds the same weak
+/// Client catalog as the router, so a shut-down Client cannot be kept alive.
+struct ClientWorkOwner {
+    inner: Weak<Inner>,
+}
+
+impl ClientWorkOwner {
+    fn client(&self) -> std::result::Result<Workspaces, WorkRouterError> {
+        self.inner
+            .upgrade()
+            .map(|inner| Workspaces { inner })
+            .ok_or_else(|| WorkRouterError::known("the local Client is shut down"))
+    }
+}
+
+#[async_trait]
+impl WorkOwner for ClientWorkOwner {
+    async fn work_item(
+        &self,
+        work_id: &str,
+    ) -> std::result::Result<cayw_runtime::WorkItem, WorkRouterError> {
+        let host = self.client()?.router_open("local").await?;
+        host.runtime
+            .work_item(work_id)
+            .map_err(router_runtime_error)?
+            .ok_or_else(|| WorkRouterError::known("WorkItem not found"))
+    }
+
+    async fn record_program_acceptance(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+        passed: bool,
+        evidence: String,
+    ) -> std::result::Result<cayw_runtime::WorkItem, WorkRouterError> {
+        let host = self.client()?.router_open("local").await?;
+        host.runtime
+            .record_child_program_acceptance(work_id, criterion_id, passed, evidence)
+            .map_err(router_runtime_error)
+    }
+
+    async fn report_status(
+        &self,
+        report: WorkStatusReport,
+    ) -> std::result::Result<WorkSessionNoticeReply, WorkRouterError> {
+        let host = self.client()?.router_open("local").await?;
+        host.runtime
+            .relay_task_status(report)
+            .map_err(router_runtime_error)
+    }
 }
 
 fn router_runtime_error(error: cayw_runtime::RuntimeError) -> WorkRouterError {
@@ -790,11 +894,13 @@ fn router_runtime_error(error: cayw_runtime::RuntimeError) -> WorkRouterError {
 
 async fn open_workspace(
     paths: LocalPaths,
+    explicit_config: Option<&Path>,
     offline: bool,
     #[cfg(feature = "plugins")] plugins: crate::cli_plugins::Plugins,
 ) -> Result<WorkspaceHost> {
     paths.validate_existing()?;
-    let headless = HeadlessConfig::load(&paths.config_file)?;
+    let config_path = explicit_config.unwrap_or(&paths.config_file);
+    let headless = HeadlessConfig::load(config_path)?;
     let choice = cli_settings::model_choice(&paths)?;
     if let Some(message) = &choice.fallback {
         eprintln!("{message}");
@@ -1161,6 +1267,7 @@ mod tests {
 
         let workspaces = Workspaces::new(
             main_paths,
+            None,
             true,
             true,
             main_host,

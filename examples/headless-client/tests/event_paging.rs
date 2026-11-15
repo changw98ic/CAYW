@@ -30,8 +30,8 @@ impl cayw_ipc::RpcHandler for TestServerHandler {
         }
         Ok(response)
     }
-    fn read_only(&self, method: &str) -> bool {
-        self.runtime.read_only(method)
+    fn read_only(&self, method: &str, params: &Value) -> bool {
+        self.runtime.read_only(method, params)
     }
 }
 

@@ -118,12 +118,12 @@ pub use session_context::{
 pub use work_items::{
     AcceptanceCheck, AcceptanceCriterion, AcceptanceRecord, AcceptanceResult, AcceptanceSource,
     InputRecord, InputState, InputStateEvent, LateWorkResult, Notification, NotificationDecision,
-    NotificationStatus, ProactiveMode, ProactiveTriggerOutcome, WorkItem, WorkItemSpec, WorkItems,
-    WorkLifecycle, WorkSessionRef, WorkTaskRef,
+    NotificationStatus, ProactiveMode, ProactiveStatus, ProactiveTriggerOutcome, WorkItem,
+    WorkItemSpec, WorkItems, WorkLifecycle, WorkSessionRef, WorkTaskRef,
 };
 pub use work_router::{
-    WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkRouter, WorkRouterError,
-    WorkTargetOutcome, WorkTaskQuery,
+    WorkControl, WorkDispatchReply, WorkDispatchRequest, WorkOwner, WorkRouter, WorkRouterError,
+    WorkSessionNotice, WorkSessionNoticeReply, WorkStatusReport, WorkTargetOutcome, WorkTaskQuery,
 };
 
 use cayw_ai::{CancellationToken, Model, Provider, ToolDefinition};
@@ -132,7 +132,10 @@ use serde::Serialize;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::Notify;
@@ -383,6 +386,18 @@ pub(crate) struct Inner {
     /// Injected by the unique local Client. Headless/SDK Runtimes have none and
     /// cannot claim another workspace was updated.
     work_router: Mutex<Option<Arc<dyn work_router::WorkRouter>>>,
+    /// Set on a child workspace by the Client. The child uses it to record a
+    /// review and to tell the main session that a dispatched task changed state.
+    work_owner: Mutex<Option<Arc<dyn work_router::WorkOwner>>>,
+    /// Status reports that could not be steered or started because the main
+    /// session was busy. The next main-session turn says them to the user.
+    pending_status_reports: Mutex<Vec<work_router::WorkStatusReport>>,
+    /// Wakes the due-check loop when a check time is written or a session
+    /// becomes free. The wait itself is the WorkItem's `next_check_at`.
+    due_checks: Notify,
+    due_loop_started: AtomicBool,
+    /// The last due-check scan that failed. Cleared by the next successful scan.
+    due_report_error: Mutex<Option<String>>,
     recovery: Option<recovery_points::RecoveryPoints>,
     config: RuntimeConfig,
     active: Mutex<BTreeMap<String, ActiveRun>>,
@@ -391,10 +406,16 @@ pub(crate) struct Inner {
     /// The projection uses this to tell live holds from crash-abandoned ones.
     in_flight: Mutex<BTreeMap<String, ModelRequestIdentity>>,
     fleet: fleet::FleetRegistry,
+    /// Live agent control for the session that is running a task. Used to deliver
+    /// a status notice without enqueueing a second task.
+    session_controls: Mutex<BTreeMap<String, cayw_agent::AgentControl>>,
     binding_cache: session::BindingCache,
     changed: Notify,
     approvals: Notify,
     maintenance_cancel: CancellationToken,
+    /// Per-session background memory-writer queue state so consecutive turns on
+    /// the same session serialize in the background without blocking foreground prompts.
+    memory_writer_queues: Mutex<BTreeMap<String, memory_writer::MemoryWriterQueue>>,
     /// Rule modifications shown in a main-session conversation, never saved
     /// until the user's exact confirmation. Keyed by session id.
     pending_rule_changes: Mutex<BTreeMap<String, approval_rules::PendingRuleChange>>,
@@ -726,15 +747,22 @@ impl Runtime {
                 memory,
                 work_items,
                 work_router: Mutex::new(None),
+                work_owner: Mutex::new(None),
+                pending_status_reports: Mutex::new(Vec::new()),
+                due_checks: Notify::new(),
+                due_loop_started: AtomicBool::new(false),
+                due_report_error: Mutex::new(None),
                 recovery,
                 active: Mutex::new(BTreeMap::new()),
                 budget_locks: Mutex::new(BTreeMap::new()),
                 in_flight: Mutex::new(BTreeMap::new()),
                 fleet: fleet::FleetRegistry::default(),
+                session_controls: Mutex::new(BTreeMap::new()),
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
                 approvals: Notify::new(),
                 maintenance_cancel: CancellationToken::new(),
+                memory_writer_queues: Mutex::new(BTreeMap::new()),
                 pending_rule_changes: Mutex::new(BTreeMap::new()),
                 rule_edit: Mutex::new(()),
                 plannotator: Mutex::new(plannotator::PlannotatorState::default()),
@@ -752,6 +780,7 @@ impl Runtime {
         };
         *crate::lock(&rt.inner.artifacts) = artifacts::new_state(Arc::downgrade(&rt.inner));
         rt.capabilities()?; // Validate actual injected Host configuration before serving.
+        rt.ensure_due_reports();
         Ok(rt)
     }
     /// Trusted host access to Core storage. Runtime recovery must use
@@ -928,7 +957,43 @@ impl Runtime {
         spec: work_items::WorkItemSpec,
     ) -> Result<work_items::WorkItem, RuntimeError> {
         self.require_main_session()?;
-        self.inner.work_items.create(spec)
+        let item = self.inner.work_items.create(spec)?;
+        if item.next_check_at.is_some() {
+            self.note_scheduled_check();
+        }
+        Ok(item)
+    }
+    /// A check time was stored. Start the due loop if this process can, and
+    /// wake it so a sooner time is not missed.
+    pub(crate) fn note_scheduled_check(&self) {
+        self.ensure_due_reports();
+        self.inner.due_checks.notify_waiters();
+    }
+    /// The last due-check failure, if the scan has not succeeded since. `None`
+    /// means the last scan completed.
+    pub fn due_report_error(&self) -> Option<String> {
+        lock(&self.inner.due_report_error).clone()
+    }
+    fn ensure_due_reports(&self) {
+        if !self.inner.config.main_session {
+            return;
+        }
+        if self
+            .inner
+            .due_loop_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            self.inner.due_loop_started.store(false, Ordering::Release);
+            return;
+        };
+        let inner = self.inner.clone();
+        handle.spawn(async move {
+            due_report_loop(inner).await;
+        });
     }
     pub fn work_item(&self, work_id: &str) -> Result<Option<work_items::WorkItem>, RuntimeError> {
         self.require_main_session()?;
@@ -950,6 +1015,176 @@ impl Runtime {
         }
         *slot = Some(router);
         Ok(())
+    }
+    /// Install the link a child workspace uses to record a review and to report
+    /// task status. The main session does not receive one; it is the owner.
+    pub fn set_work_owner(
+        &self,
+        owner: Arc<dyn work_router::WorkOwner>,
+    ) -> Result<(), RuntimeError> {
+        if self.inner.config.main_session {
+            return Err(RuntimeError::InvalidInput(
+                "the main session does not report its own work".into(),
+            ));
+        }
+        let mut slot = lock(&self.inner.work_owner);
+        if slot.is_some() {
+            return Err(RuntimeError::InvalidInput(
+                "a work owner is already installed".into(),
+            ));
+        }
+        *slot = Some(owner);
+        Ok(())
+    }
+    /// Store a program-check result the child session already observed in its own
+    /// workspace. This does not read a file and does not run the check again.
+    pub fn record_child_program_acceptance(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+        passed: bool,
+        evidence: String,
+    ) -> Result<work_items::WorkItem, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.record_program_acceptance_at(
+            work_id,
+            criterion_id,
+            passed,
+            vec![evidence],
+            "child-session",
+            cayw_ai::timestamp_ms(),
+        )
+    }
+    /// Tell the owning main session that a dispatched task reached a terminal
+    /// state. A running session is steered. An idle session gets one task whose
+    /// only job is to tell the user. A session that cannot take either keeps the
+    /// report for the next turn. This does not inspect the child's files.
+    pub fn relay_task_status(
+        &self,
+        report: work_router::WorkStatusReport,
+    ) -> Result<work_router::WorkSessionNoticeReply, RuntimeError> {
+        self.require_main_session()?;
+        if report.work_id.trim().is_empty()
+            || report.task_id.trim().is_empty()
+            || report.state.trim().is_empty()
+        {
+            return Err(RuntimeError::InvalidInput(
+                "a status report needs a work id, task id, and state".into(),
+            ));
+        }
+        let item = self
+            .inner
+            .work_items
+            .get(&report.work_id)?
+            .ok_or_else(|| RuntimeError::InvalidInput("WorkItem not found".into()))?;
+        let notice = work_router::WorkSessionNotice {
+            workspace: "local".into(),
+            sessions: vec![item.owner_main_session_id.clone()],
+            text: work_router::status_notice_text(&report),
+            work_id: report.work_id.clone(),
+            dispatch_key: format!("status-notice:{}", report.task_id),
+            pause_version: item.pause_version,
+            stop_version: item.stop_version,
+        };
+        match self.deliver_session_notice(&notice) {
+            Ok(reply) if reply.delivered => Ok(reply),
+            Ok(reply) => {
+                lock(&self.inner.pending_status_reports).push(report);
+                Ok(reply)
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                lock(&self.inner.pending_status_reports).push(report);
+                Ok(work_router::WorkSessionNoticeReply {
+                    delivered: false,
+                    steered: false,
+                    session_id: Some(item.owner_main_session_id),
+                    task_id: None,
+                    reason: Some(reason),
+                })
+            }
+        }
+    }
+    /// Tell the owning session that a stored check time has arrived. This reads
+    /// the WorkItem row only. It does not open a file, run a check, or dispatch
+    /// work. A session that cannot take the notice keeps the check time.
+    pub fn deliver_due_work_reports(
+        &self,
+        now: u64,
+    ) -> Result<Vec<work_router::WorkSessionNoticeReply>, RuntimeError> {
+        self.require_main_session()?;
+        let due = self.inner.work_items.due_items(now)?;
+        let mut replies = Vec::new();
+        for item in due {
+            let Some(due_at) = item.next_check_at else {
+                continue;
+            };
+            let session_id = item.owner_main_session_id.clone();
+            // A live turn is not steered. The report is its own task, so it is not
+            // mixed into work the session is already doing. The check time stays
+            // until that task is accepted.
+            match self.enqueue_dispatched(
+                &session_id,
+                crate::TaskInput {
+                    text: work_items::due_report_text(&item),
+                    images: Vec::new(),
+                },
+                cayw_requests::TaskIntent::General,
+                crate::TaskPriority::Normal,
+                crate::TaskResources::default(),
+                crate::TaskDispatch {
+                    work_id: item.work_id.clone(),
+                    dispatch_key: format!("due-report:{}:{due_at}", item.work_id),
+                    pause_version: item.pause_version,
+                    stop_version: item.stop_version,
+                },
+            ) {
+                Ok(task) => {
+                    let started = if task.state == crate::TaskState::Queued {
+                        self.start_queued(&task.id)
+                    } else {
+                        Ok(task)
+                    };
+                    match started {
+                        Ok(task) => {
+                            self.inner
+                                .work_items
+                                .consume_due_check(&item.work_id, due_at, now)?;
+                            replies.push(work_router::WorkSessionNoticeReply {
+                                delivered: true,
+                                steered: false,
+                                session_id: Some(session_id),
+                                task_id: Some(task.id),
+                                reason: None,
+                            });
+                        }
+                        Err(RuntimeError::Busy) => replies.push(work_router::WorkSessionNoticeReply {
+                            delivered: false,
+                            steered: false,
+                            session_id: Some(session_id),
+                            task_id: None,
+                            reason: Some(
+                                "this session already has a live task, so the notice was not delivered"
+                                    .into(),
+                            ),
+                        }),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(RuntimeError::Busy) => replies.push(work_router::WorkSessionNoticeReply {
+                    delivered: false,
+                    steered: false,
+                    session_id: Some(session_id),
+                    task_id: None,
+                    reason: Some(
+                        "this session already has a live task, so the notice was not delivered"
+                            .into(),
+                    ),
+                }),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(replies)
     }
     pub fn list_work_items(&self) -> Result<Vec<work_items::WorkItem>, RuntimeError> {
         self.require_main_session()?;
@@ -1369,9 +1604,9 @@ impl Runtime {
                     workspace: workspace.clone(),
                     session_id: Some(ext_ref.session_id.clone()),
                     label: Some(item.title.clone()),
-                    text: format!(
-                        "Proactive trigger ({rule_id} v{condition_version}) for WorkItem {}: {}",
-                        item.title, item.goal
+                    text: work_items::task_requirements(
+                        &item,
+                        &format!("Proactive trigger ({rule_id} v{condition_version})."),
                     ),
                     dispatch_key: dispatch_key.clone(),
                     pause_version: item.pause_version,
@@ -1433,8 +1668,23 @@ impl Runtime {
         }
         Ok(Some(task))
     }
-    pub fn proactive_mode(&self) -> work_items::ProactiveMode {
-        self.inner.config.proactive_mode
+    pub fn proactive_mode(&self) -> Result<work_items::ProactiveMode, RuntimeError> {
+        self.inner
+            .work_items
+            .configured_proactive_mode(self.inner.config.proactive_mode)
+    }
+    pub fn proactive_status(&self) -> Result<work_items::ProactiveStatus, RuntimeError> {
+        self.require_main_session()?;
+        self.inner
+            .work_items
+            .proactive_status(self.inner.config.proactive_mode)
+    }
+    pub fn set_proactive_mode(
+        &self,
+        mode: work_items::ProactiveMode,
+    ) -> Result<work_items::ProactiveStatus, RuntimeError> {
+        self.require_main_session()?;
+        self.inner.work_items.set_proactive_mode(mode)
     }
     /// Apply the configured proactive mode. This never touches approval rules.
     pub fn trigger_configured_proactive(
@@ -1444,13 +1694,8 @@ impl Runtime {
         work_id: &str,
         usage_tokens: u64,
     ) -> Result<work_items::ProactiveTriggerOutcome, RuntimeError> {
-        self.trigger_proactive(
-            self.inner.config.proactive_mode,
-            rule_id,
-            condition_version,
-            work_id,
-            usage_tokens,
-        )
+        let mode = self.proactive_mode()?;
+        self.trigger_proactive(mode, rule_id, condition_version, work_id, usage_tokens)
     }
     /// Save a notification intent. Only a target from user configuration is
     /// accepted.
@@ -2064,6 +2309,80 @@ impl Runtime {
             ));
         }
         Ok(snapshot)
+    }
+}
+
+/// Wake at each open WorkItem's own check time and relay that status.
+/// A session that is busy keeps the check time. The next free session, or a
+/// newly stored check time, wakes this loop. There is no separate poll interval.
+async fn due_report_loop(inner: Arc<Inner>) {
+    let cancel = inner.maintenance_cancel.clone();
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let notified = inner.due_checks.notified();
+        tokio::pin!(notified);
+        let now = cayw_ai::timestamp_ms();
+        let runtime = Runtime {
+            inner: inner.clone(),
+        };
+        let scan = runtime.deliver_due_work_reports(now);
+        let waiting = match &scan {
+            Ok(replies) => replies.iter().any(|reply| !reply.delivered),
+            Err(error) => {
+                *lock(&inner.due_report_error) = Some(error.to_string());
+                true
+            }
+        };
+        if scan.is_ok() {
+            *lock(&inner.due_report_error) = None;
+        }
+        let next = if waiting {
+            None
+        } else {
+            match inner.work_items.earliest_open_check() {
+                Ok(next) => next,
+                Err(error) => {
+                    *lock(&inner.due_report_error) = Some(error.to_string());
+                    None
+                }
+            }
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = notified => {}
+            _ = sleep_until_check(next), if !waiting => {}
+        }
+    }
+}
+
+/// Sleep until `at`, or until the process clock cannot represent the whole
+/// delay. A delay the clock cannot hold is split; the report still happens at
+/// `at`. `None` waits until the caller is notified.
+async fn sleep_until_check(at: Option<u64>) {
+    let Some(at) = at else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    let now = cayw_ai::timestamp_ms();
+    if at <= now {
+        return;
+    }
+    let mut delay = Duration::from_millis(at - now);
+    loop {
+        if tokio::time::Instant::now().checked_add(delay).is_some() {
+            tokio::time::sleep(delay).await;
+            return;
+        }
+        let Some(shorter) = delay.checked_div(2) else {
+            return;
+        };
+        if shorter.is_zero() {
+            std::future::pending::<()>().await;
+            return;
+        }
+        delay = shorter;
     }
 }
 

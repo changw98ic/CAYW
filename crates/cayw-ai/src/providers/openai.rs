@@ -335,6 +335,12 @@ fn build_request(request: &ModelRequest) -> Result<Value, String> {
                 awaiting_model = true;
             }
             Message::Assistant(assistant) => {
+                if assistant.content.is_empty()
+                    && (matches!(assistant.stop_reason, StopReason::Stop | StopReason::Length)
+                        || assistant.stop_reason.is_failure())
+                {
+                    continue;
+                }
                 if !assistant.provider_metadata.is_empty() {
                     return Err("Chat Completions cannot replay another protocol's metadata".into());
                 }
@@ -687,14 +693,22 @@ impl ResponseState {
                             while let Some(update) = updates.next().await { yield update?; }
                         }
                     }
-                    if let Some(reason) = optional_string(choice, "finish_reason")? {
-                        self.finish_phase = true;
-                        let reason = match reason {
-                            "stop" => StopReason::Stop,
-                            "length" => StopReason::Length,
-                            "tool_calls" => StopReason::ToolUse,
-                            reason => Err(format!("Unsupported finish_reason: {reason}"))?,
+                    if let Some(reason_text) = optional_string(choice, "finish_reason")? {
+                        let parsed = match reason_text {
+                            "stop" => Ok(StopReason::Stop),
+                            "length" => Ok(StopReason::Length),
+                            "tool_calls" => Ok(StopReason::ToolUse),
+                            reason => Err(format!("Unsupported finish_reason: {reason}")),
                         };
+                        if let Ok(reason) = parsed
+                            && matches!(reason, StopReason::Stop | StopReason::Length)
+                            && self.calls.is_empty()
+                            && self.message.content.is_empty()
+                        {
+                            Err("Assistant completion contained no content")?;
+                        }
+                        self.finish_phase = true;
+                        let reason = parsed?;
                         if reason == StopReason::ToolUse && self.calls.is_empty() {
                             Err("tool_calls finish_reason without tool calls")?;
                         }

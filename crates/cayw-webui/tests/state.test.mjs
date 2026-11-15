@@ -58,13 +58,13 @@ test('interrupted tool effects leave a ready session usable while a frozen workf
   assert.equal(stateLabel(interrupted), '就绪');
   assert.equal(sessionBlocked(snapshot({ needs_reconciliation: true })), '');
   assert.equal(sessionBlocked(snapshot({ state: 'idle', unresolved_calls: [{ id: 'c1' }] })), '');
-  assert.match(sessionBlocked(snapshot({ state: 'frozen', workflow_unavailable: true })), /确认后 Fork/);
+  assert.match(sessionBlocked(snapshot({ state: 'frozen', workflow_unavailable: true })), /另开/);
 });
 
 test('interrupted calls never prevent forking a frozen StrongFlow session', () => {
   const view = initial({ state: 'idle', binding: { plugin: 'strongflow', frozen: true }, unresolved_calls: [{ call: { id: 'c1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] });
-  assert.equal(stateLabel(view.snapshot, view), '强流程冻结');
-  assert.match(sessionBlocked(view.snapshot, view), /冻结/);
+  assert.equal(stateLabel(view.snapshot, view), '已停住');
+  assert.match(sessionBlocked(view.snapshot, view), /停住/);
   assert.equal(canFork(view), true);
   assert.equal(canFork({ ...view, activeAttempt: { lease, after: 10, terminal: null } }), false, 'an active attempt still needs its durable terminal');
 });
@@ -91,12 +91,12 @@ test('an active durable attempt blocks sending even before its first running pro
 });
 
 test('an unrecognized runtime state never enables a new prompt', () => {
-  assert.match(sessionBlocked(snapshot({ state:'future_state' })), /状态/);
-  assert.match(sessionBlocked(snapshot({ state:null })), /状态/);
+  assert.match(sessionBlocked(snapshot({ state:'future_state' })), /同步/);
+  assert.match(sessionBlocked(snapshot({ state:null })), /同步/);
 });
 
 test('frozen binding is visible even when runtime returns the durable state as idle', () => {
-  assert.match(sessionBlocked(snapshot({ state:'idle', binding:{ plugin:'strongflow', frozen:true } })), /冻结/);
+  assert.match(sessionBlocked(snapshot({ state:'idle', binding:{ plugin:'strongflow', frozen:true } })), /停住/);
 });
 
 test('wrapped durable agent updates drive live text and their terminal clears it', () => {
@@ -170,7 +170,7 @@ test('an uncertain fork cannot settle on another execution in its source session
   view = consumeEvents(view,[fact(11,{type:'attempt_started',lease}),fact(12,{type:'attempt_finished',lease})]);
   view = applySnapshot(view,snapshot({cursor:12,binding:{plugin:'strongflow',frozen:true}}));
   assert.equal(view.writes.length,1);
-  assert.match(sessionBlocked(view.snapshot,view),/确认/);
+  assert.match(sessionBlocked(view.snapshot,view),/还不能确定/);
 });
 
 test('an unknown prompt cannot inherit an existing or subsequently observed execution', () => {
@@ -210,7 +210,7 @@ test('a known unrelated no-op cancel cannot erase an uncorrelated prompt', () =>
   view = applySnapshot(view, snapshot());
   assert.equal(view.writes.length, 1);
   assert.equal(view.writes[0].key, 1);
-  assert.match(sessionBlocked(view.snapshot, view), /确认/);
+  assert.match(sessionBlocked(view.snapshot, view), /还不能确定/);
 });
 
 test('a lost cancel receipt remains blocked after the original prompt succeeds', () => {
@@ -268,7 +268,7 @@ test('an early cancel keeps both unknown receipt obligations separate', () => {
     view = consumeEvents(view, [fact(11, {type:'attempt_started', lease}), fact(12, {type:'attempt_finished', lease})]);
     view = finishWrite(view, 1, unknown === 'session.prompt' ? {code:'transport_unknown', outcome_unknown:true} : null, snapshot({cursor:12}));
     view = applySnapshot(view, snapshot({cursor:12}));
-    assert.match(sessionBlocked(view.snapshot, view), /确认/, `${unknown} still needs its own receipt`);
+    assert.match(sessionBlocked(view.snapshot, view), /还不能确定/, `${unknown} still needs its own receipt`);
   }
 });
 
@@ -352,7 +352,7 @@ test('unknown prompt and cancel receipts do not schedule historical guesses', ()
     view = finishWrite(view, 2, unknown === 2 ? {code:'transport_unknown', outcome_unknown:true} : null, {cancelled:true});
     assert.equal(terminalReadCursor(view), null);
     view = applySnapshot(view, snapshot({cursor:14}));
-    assert.match(sessionBlocked(view.snapshot, view), /确认/);
+    assert.match(sessionBlocked(view.snapshot, view), /还不能确定/);
   }
 });
 

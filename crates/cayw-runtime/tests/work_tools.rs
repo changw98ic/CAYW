@@ -3,15 +3,20 @@
 //! No test reads a user directory, calls a real model or uses the network.
 
 use async_trait::async_trait;
-use cayw_ai::{AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider};
+use cayw_ai::{
+    AssistantEvent, AssistantMessage, AssistantStream, CancellationToken, Content, Model,
+    ModelRequest, Provider, StopReason, Usage, UsageStatus,
+};
 use cayw_runtime::{
-    AcceptanceCheck, FileRules, Runtime, RuntimeConfig, TaskPriority, WorkControl,
-    WorkDispatchReply, WorkDispatchRequest, WorkRouter, WorkRouterError, WorkTargetOutcome,
-    WorkTaskQuery, fixture::script_response,
+    AcceptanceCheck, FileRules, Runtime, RuntimeConfig, TaskPriority, TaskState, WorkControl,
+    WorkDispatchReply, WorkDispatchRequest, WorkItem, WorkItemSpec, WorkOwner, WorkRouter,
+    WorkRouterError, WorkSessionNotice, WorkSessionNoticeReply, WorkStatusReport,
+    WorkTargetOutcome, WorkTaskQuery, fixture::script_response,
 };
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, sync::Mutex, time::Duration};
 use tempfile::TempDir;
+use tokio::sync::Notify;
 
 struct Script(String);
 impl Provider for Script {
@@ -191,10 +196,21 @@ impl WorkRouter for TargetRouter {
             .evaluate(self.target.workspace())
             .map_err(|error| WorkRouterError::known(error.to_string()))
     }
+
+    async fn notify_session(
+        &self,
+        notice: WorkSessionNotice,
+    ) -> Result<WorkSessionNoticeReply, WorkRouterError> {
+        assert_eq!(notice.workspace, self.workspace);
+        self.target
+            .deliver_session_notice(&notice)
+            .map_err(|error| WorkRouterError::known(error.to_string()))
+    }
 }
 
 fn work_script() -> &'static str {
     r#"
+cayw.call('work.list', {})
 local work = cayw.call('work.create', {
   title='deliver the file',
   goal='deliver out.txt in the target workspace',
@@ -213,7 +229,14 @@ local dispatch_again = cayw.call('work.dispatch', {
 local first = cayw.call('work.tasks', {work_id=work.work_id})
 local pause = cayw.call('work.pause', {work_id=work.work_id})
 local paused = cayw.call('work.tasks', {work_id=work.work_id})
-local accept = cayw.call('work.accept.program', {work_id=work.work_id, criterion_id='file'})
+local accept_ok, accept_err = pcall(function()
+  cayw.call('work.accept.program', {work_id=work.work_id, criterion_id='file'})
+end)
+assert(not accept_ok, tostring(accept_err))
+local write_ok, write_err = pcall(function()
+  cayw.call('fs.write', {path='should-not-exist.txt', text='no'})
+end)
+assert(not write_ok, tostring(write_err))
 local report_ok = pcall(function()
   cayw.call('work.report', {work_id=work.work_id, text='the model says done'})
 end)
@@ -243,7 +266,7 @@ local late = cayw.call('work.late_result', {
 local fetched = cayw.call('work.get', {work_id=work.work_id})
 return {
   work=work, dispatch=dispatch, dispatch_again=dispatch_again, first=first,
-  pause=pause, paused=paused, accept=accept, report_ok=report_ok,
+  pause=pause, paused=paused, accept_ok=accept_ok, write_ok=write_ok, report_ok=report_ok,
   bad_target=bad_target, intent=intent, next=next, sent=sent,
   after_send=after_send, listed=listed, stop=stop,
   after_stop=after_stop, late=late, fetched=fetched,
@@ -288,7 +311,29 @@ async fn main_session_manages_workitems_and_dispatches_through_the_client_router
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].work_id.as_deref(), Some(work_id.as_str()));
     assert_eq!(tasks[0].dispatch_key.as_deref(), Some("dispatch-1"));
-    assert!(tasks[0].dispatch_paused);
+    assert!(
+        tasks[0].input.text.contains(&work_id),
+        "{}",
+        tasks[0].input.text
+    );
+    assert!(
+        tasks[0]
+            .input
+            .text
+            .contains("deliver out.txt in the target workspace"),
+        "{}",
+        tasks[0].input.text
+    );
+    assert!(
+        tasks[0].input.text.contains("out.txt"),
+        "{}",
+        tasks[0].input.text
+    );
+    assert!(
+        tasks[0].input.text.contains("write the result"),
+        "{}",
+        tasks[0].input.text
+    );
     assert!(tasks[0].cancel_requested);
     assert_eq!(tasks[0].state, cayw_runtime::TaskState::Cancelled);
 
@@ -300,14 +345,12 @@ async fn main_session_manages_workitems_and_dispatches_through_the_client_router
     assert_eq!(item.lifecycle, cayw_runtime::WorkLifecycle::Cancelled);
     assert_eq!(item.late_results.len(), 1);
     assert!(!item.late_results[0].redispatch_allowed);
-    let acceptance = item
-        .acceptance_records
-        .iter()
-        .find(|record| record.criterion_id == "file")
-        .expect("program acceptance was observed");
-    assert_eq!(item.acceptance_records.len(), 1);
-    assert_eq!(acceptance.source, cayw_runtime::AcceptanceSource::Program);
-    assert_eq!(acceptance.result, cayw_runtime::AcceptanceResult::Passed);
+    assert!(
+        item.acceptance_records.is_empty(),
+        "the main session must not record a review: {:?}",
+        item.acceptance_records
+    );
+    assert!(!main.workspace().join("should-not-exist.txt").exists());
 
     let events = main
         .events(&session, 0, 1000)
@@ -374,6 +417,7 @@ async fn a_main_session_can_create_a_target_session_and_dispatch_to_it() {
     let script = r#"
 local created = cayw.call('work.session.create', {workspace='target', label='Worker'})
 local sessions = cayw.call('work.sessions', {workspace='target'})
+cayw.call('work.list', {})
 local work = cayw.call('work.create', {
   title='delegate',
   goal='use the created target session',
@@ -408,6 +452,27 @@ return {created=created, sessions=sessions, work=work, dispatch=dispatch}
         tasks[0].dispatch_key.as_deref(),
         Some("created-session-dispatch")
     );
+    assert!(
+        tasks[0]
+            .input
+            .text
+            .contains("use the created target session"),
+        "{}",
+        tasks[0].input.text
+    );
+    assert!(
+        tasks[0].input.text.contains("do the work"),
+        "{}",
+        tasks[0].input.text
+    );
+    assert!(
+        tasks[0]
+            .input
+            .text
+            .contains("The user judges this criterion"),
+        "{}",
+        tasks[0].input.text
+    );
     let item = main.list_work_items().unwrap().pop().unwrap();
     assert_eq!(item.task_refs.len(), 1);
     assert_eq!(
@@ -440,6 +505,558 @@ async fn work_capabilities_are_absent_outside_the_main_session() {
         workspace: "local".into(),
     }));
     assert!(error.is_err());
+}
+
+#[tokio::test]
+async fn routed_main_session_turn_fails_without_work_create_and_dispatch() {
+    struct TextOnly;
+    impl Provider for TextOnly {
+        fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+            let mut message = AssistantMessage::new(&request.model);
+            message.content.push(Content::text("just talking"));
+            message.stop_reason = StopReason::Stop;
+            message.usage = Usage {
+                input: 4,
+                output: 4,
+                total_tokens: 8,
+                ..Default::default()
+            };
+            message.usage_status = UsageStatus::Reported;
+            Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+        }
+    }
+
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let target = open(
+        &root.join("target"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "target"),
+        RuntimeConfig::default(),
+    );
+    let target_session = target.create(Some("Worker".into())).unwrap().id;
+    let main = open(
+        &root.join("main"),
+        Arc::new(TextOnly),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: target.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(None).unwrap().id;
+    let refused = main
+        .prompt(&session, "hello", CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("check existing WorkItems"),
+        "{refused}"
+    );
+    assert!(main.list_work_items().unwrap().is_empty());
+    assert!(target.tasks(&target_session).unwrap().is_empty());
+    let task = main.tasks(&session).unwrap().pop().unwrap();
+    assert_eq!(task.state, cayw_runtime::TaskState::Failed);
+    assert_eq!(task.work_id, None);
+    assert_eq!(task.dispatch_key, None);
+}
+
+#[tokio::test]
+async fn routed_turn_reuses_the_same_work_item_without_creating_another() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let target = open(
+        &root.join("target"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "target"),
+        RuntimeConfig::default(),
+    );
+    let target_session = target.create(Some("Worker".into())).unwrap().id;
+    let script = format!(
+        r#"
+local listed = cayw.call('work.list', {{}})
+assert(#listed == 1, 'the existing WorkItem must be visible')
+assert(listed[1].work_id == 'same-task', listed[1].work_id)
+local dispatch = cayw.call('work.dispatch', {{
+  work_id='same-task', workspace='target', session_id='{target_session}',
+  text='continue the same task', dispatch_key='same-task-dispatch'
+}})
+return {{dispatch=dispatch, count=#listed}}
+"#
+    );
+    let main = open(
+        &root.join("main"),
+        Arc::new(Script(script)),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: target.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(None).unwrap().id;
+    main.create_work_item(cayw_runtime::WorkItemSpec {
+        work_id: Some("same-task".into()),
+        owner_main_session_id: session.clone(),
+        title: "fps".into(),
+        goal: "build the fps game".into(),
+        acceptance_criteria: vec![cayw_runtime::AcceptanceCriterion {
+            criterion_id: "play".into(),
+            description: "the game runs in a browser".into(),
+            check: None,
+        }],
+        user_source_refs: vec![],
+        action_scope: vec![],
+        approval_refs: vec![],
+        session_refs: vec![],
+        task_refs: vec![],
+        artifact_refs: vec![],
+        waiting_conditions: vec![],
+        pending_decisions: vec![],
+        next_check_at: None,
+    })
+    .unwrap();
+    main.prompt(&session, "continue the fps game", CancellationToken::new())
+        .await
+        .unwrap();
+    let items = main.list_work_items().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].work_id, "same-task");
+    let tasks = target.tasks(&target_session).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].work_id.as_deref(), Some("same-task"));
+    assert_eq!(tasks[0].dispatch_key.as_deref(), Some("same-task-dispatch"));
+    assert!(
+        tasks[0].input.text.contains("build the fps game"),
+        "{}",
+        tasks[0].input.text
+    );
+    assert!(
+        tasks[0].input.text.contains("continue the same task"),
+        "{}",
+        tasks[0].input.text
+    );
+}
+
+#[tokio::test]
+async fn routed_turn_refuses_create_and_dispatch_before_listing_existing_work() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let target = open(
+        &root.join("target"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "target"),
+        RuntimeConfig::default(),
+    );
+    let target_session = target.create(Some("Worker".into())).unwrap().id;
+    let script = format!(
+        r#"
+local create_ok, create_err = pcall(function()
+  cayw.call('work.create', {{
+    title='another',
+    goal='should not be stored',
+    acceptance_criteria={{ {{criterion_id='c', description='check'}} }}
+  }})
+end)
+assert(not create_ok, 'create before work.list must be refused')
+assert(string.find(tostring(create_err), 'work.list', 1, true) ~= nil, tostring(create_err))
+local dispatch_ok, dispatch_err = pcall(function()
+  cayw.call('work.dispatch', {{
+    work_id='missing', workspace='target', session_id='{target_session}',
+    text='skip the check', dispatch_key='skip-check'
+  }})
+end)
+assert(not dispatch_ok, 'dispatch before work.list must be refused')
+assert(string.find(tostring(dispatch_err), 'work.list', 1, true) ~= nil, tostring(dispatch_err))
+return {{create_ok=create_ok, dispatch_ok=dispatch_ok}}
+"#
+    );
+    let main = open(
+        &root.join("main"),
+        Arc::new(Script(script)),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: target.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(None).unwrap().id;
+    let refused = main
+        .prompt(&session, "start something else", CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("check existing WorkItems"),
+        "{refused}"
+    );
+    assert!(main.list_work_items().unwrap().is_empty());
+    assert!(target.tasks(&target_session).unwrap().is_empty());
+    let events = serde_json::to_string(
+        &main
+            .events(&session, 0, 1000)
+            .unwrap()
+            .into_iter()
+            .map(|record| serde_json::to_value(record).unwrap())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert!(
+        events.contains(
+            "call work.list before creating or dispatching; reuse an existing WorkItem when it is the same task"
+        ),
+        "{events}"
+    );
+}
+
+fn dispatch_page(session: &str) -> String {
+    format!(
+        r#"
+cayw.call('work.list', {{}})
+cayw.call('work.create', {{
+  work_id='page-work',
+  title='write the page',
+  goal='create index.html at the workspace root',
+  acceptance_criteria={{
+    {{criterion_id='page-exists', description='index.html exists', check={{kind='path_exists', path='index.html'}}}}
+  }}
+}})
+cayw.call('work.dispatch', {{
+  work_id='page-work', workspace='target', session_id='{session}',
+  text='write index.html', dispatch_key='dispatch-1'
+}})
+"#
+    )
+}
+
+fn child_config(root: &Path) -> RuntimeConfig {
+    RuntimeConfig {
+        approval_rules: Some(Arc::new(FileRules::new(root.join("approval-rules.json")))),
+        ..RuntimeConfig::default()
+    }
+}
+
+fn plain_stop(model: &Model, text: &str) -> AssistantMessage {
+    let mut message = AssistantMessage::new(model);
+    message.content.push(Content::text(text));
+    message.stop_reason = StopReason::Stop;
+    message.usage = Usage {
+        input: 1,
+        output: 1,
+        total_tokens: 2,
+        ..Default::default()
+    };
+    message.usage_status = UsageStatus::Reported;
+    message
+}
+
+struct MainOwner {
+    main: Runtime,
+}
+
+#[async_trait]
+impl WorkOwner for MainOwner {
+    async fn work_item(&self, work_id: &str) -> Result<WorkItem, WorkRouterError> {
+        self.main
+            .work_item(work_id)
+            .map_err(|error| WorkRouterError::known(error.to_string()))?
+            .ok_or_else(|| WorkRouterError::known("WorkItem not found"))
+    }
+
+    async fn record_program_acceptance(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+        passed: bool,
+        evidence: String,
+    ) -> Result<WorkItem, WorkRouterError> {
+        self.main
+            .record_child_program_acceptance(work_id, criterion_id, passed, evidence)
+            .map_err(|error| WorkRouterError::known(error.to_string()))
+    }
+
+    async fn report_status(
+        &self,
+        report: WorkStatusReport,
+    ) -> Result<WorkSessionNoticeReply, WorkRouterError> {
+        self.main
+            .relay_task_status(report)
+            .map_err(|error| WorkRouterError::known(error.to_string()))
+    }
+}
+
+/// Dispatch script until a status notice arrives. The status turn only tells
+/// the user; it does not dispatch again.
+struct StatusMain {
+    dispatch: String,
+}
+
+impl Provider for StatusMain {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let text = request
+            .messages
+            .iter()
+            .map(|message| message.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let message = if text.contains("Task status updated") {
+            plain_stop(&request.model, "told the user")
+        } else {
+            script_response(
+                &request,
+                &self.dispatch,
+                &format!("status-{}", request.messages.len()),
+            )
+        };
+        Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+    }
+}
+
+struct Done;
+
+impl Provider for Done {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        Box::pin(futures::stream::iter([AssistantEvent::Done {
+            message: plain_stop(&request.model, "done"),
+        }]))
+    }
+}
+
+struct HoldMain {
+    dispatch: String,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Provider for HoldMain {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let text = request
+            .messages
+            .iter()
+            .map(|message| message.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let index = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(text.clone());
+            calls.len()
+        };
+        if text.contains("Task status updated") {
+            let message = plain_stop(&request.model, "told the user");
+            return Box::pin(futures::stream::iter([AssistantEvent::Done { message }]));
+        }
+        if index == 1 {
+            let message = script_response(&request, &self.dispatch, "hold-dispatch");
+            return Box::pin(futures::stream::iter([AssistantEvent::Done { message }]));
+        }
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let model = request.model.clone();
+        Box::pin(futures::stream::once(async move {
+            started.notify_one();
+            if index == 2 {
+                release.notified().await;
+            }
+            AssistantEvent::Done {
+                message: plain_stop(&model, "holding"),
+            }
+        }))
+    }
+}
+
+const CHILD_REVIEW: &str = r#"
+local wrong_ok, wrong_err = pcall(function()
+  cayw.call('work.accept.program', {work_id='other-work', criterion_id='page-exists'})
+end)
+assert(not wrong_ok, 'a different work id must be refused')
+assert(string.find(tostring(wrong_err), 'not dispatched', 1, true) ~= nil, tostring(wrong_err))
+local accept = cayw.call('work.accept.program', {work_id='page-work', criterion_id='page-exists'})
+assert(accept.passed == false, 'the missing page must fail')
+"#;
+
+#[tokio::test]
+async fn child_session_reviews_its_own_work_and_reports_status() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let child = open(
+        &root.join("child"),
+        Arc::new(Script(CHILD_REVIEW.into())),
+        Model::new("fixture", "child"),
+        child_config(&root.join("child")),
+    );
+    let child_session = child.create(Some("Worker".into())).unwrap().id;
+    let main = open(
+        &root.join("main"),
+        Arc::new(StatusMain {
+            dispatch: dispatch_page(&child_session),
+        }),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: child.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(None).unwrap().id;
+    main.prompt(&session, "dispatch the page", CancellationToken::new())
+        .await
+        .unwrap();
+    child
+        .set_work_owner(Arc::new(MainOwner { main: main.clone() }))
+        .unwrap();
+    let dispatched = child.tasks(&child_session).unwrap();
+    assert_eq!(dispatched.len(), 1);
+    child
+        .resume(&dispatched[0].id, CancellationToken::new())
+        .await
+        .unwrap();
+    main.wait_idle(&session).await;
+
+    let child_tasks = child.tasks(&child_session).unwrap();
+    assert_eq!(
+        child_tasks.len(),
+        1,
+        "a failed check must not start another child task"
+    );
+    assert_eq!(
+        child.task(&child_tasks[0].id).unwrap().state,
+        cayw_runtime::TaskState::Completed
+    );
+    let item = main.work_item("page-work").unwrap().unwrap();
+    assert_eq!(item.acceptance_records.len(), 1);
+    assert_eq!(
+        item.acceptance_records[0].result,
+        cayw_runtime::AcceptanceResult::Failed
+    );
+    assert_eq!(
+        item.acceptance_records[0].source,
+        cayw_runtime::AcceptanceSource::Program
+    );
+    let notice = main
+        .tasks(&session)
+        .unwrap()
+        .into_iter()
+        .find(|task| {
+            task.dispatch_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("status-notice:"))
+        })
+        .expect("the idle main session receives the task status");
+    assert!(notice.input.text.contains("Task status updated"));
+    assert!(notice.input.text.contains("completed"));
+    assert!(!notice.input.text.contains("Program check"));
+}
+
+#[tokio::test]
+async fn child_completion_steers_a_running_main_session() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let child = open(
+        &root.join("child"),
+        Arc::new(Done),
+        Model::new("fixture", "child"),
+        RuntimeConfig::default(),
+    );
+    let child_session = child.create(Some("Worker".into())).unwrap().id;
+    let main = open(
+        &root.join("main"),
+        Arc::new(HoldMain {
+            dispatch: dispatch_page(&child_session),
+            started: started.clone(),
+            release: release.clone(),
+            calls: calls.clone(),
+        }),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: child.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(None).unwrap().id;
+    let main_run = main.clone();
+    let session_run = session.clone();
+    let running = tokio::spawn(async move {
+        main_run
+            .prompt(&session_run, "dispatch the page", CancellationToken::new())
+            .await
+    });
+    started.notified().await;
+    child
+        .set_work_owner(Arc::new(MainOwner { main: main.clone() }))
+        .unwrap();
+    let dispatched = child.tasks(&child_session).unwrap();
+    assert_eq!(dispatched.len(), 1);
+    child
+        .resume(&dispatched[0].id, CancellationToken::new())
+        .await
+        .unwrap();
+    release.notify_one();
+    running.await.unwrap().unwrap();
+
+    let seen = calls.lock().unwrap().join("\n");
+    assert!(
+        seen.contains("Task status updated"),
+        "the running main session did not receive the status: {seen}"
+    );
+    assert!(seen.contains("completed"), "{seen}");
+    assert!(!seen.contains("Program check"), "{seen}");
+    assert_eq!(child.tasks(&child_session).unwrap().len(), 1);
+    assert_eq!(main.tasks(&session).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn reading_one_work_item_status_finishes_without_dispatch() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let child = open(
+        &root.join("child"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "child"),
+        RuntimeConfig::default(),
+    );
+    let script = r#"
+cayw.call('work.list', {})
+local work = cayw.call('work.create', {
+  title='status only',
+  goal='read the status',
+  acceptance_criteria={{criterion_id='taste', description='the user accepts the result'}}
+})
+cayw.call('work.get', {work_id=work.work_id})
+"#;
+    let main = open(
+        &root.join("main"),
+        Arc::new(Script(script.into())),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: child.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(None).unwrap().id;
+    main.prompt(&session, "what is the status", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(main.list_work_items().unwrap().len(), 1);
+    assert!(
+        child
+            .list()
+            .unwrap()
+            .iter()
+            .all(|session| child.tasks(&session.id).unwrap().is_empty())
+    );
 }
 
 #[tokio::test]
@@ -691,4 +1308,157 @@ fn dispatched_runtime_retry_preserves_work_and_session_identity() {
     assert_eq!(stored.session_id, first_session);
     assert_eq!(stored.work_id.as_deref(), Some("work-a"));
     assert!(runtime.tasks(&second_session).unwrap().is_empty());
+}
+
+fn due_spec(session: &str, work_id: &str, title: &str, due: u64) -> WorkItemSpec {
+    WorkItemSpec {
+        work_id: Some(work_id.into()),
+        owner_main_session_id: session.into(),
+        title: title.into(),
+        goal: "report when the check time arrives".into(),
+        acceptance_criteria: vec![],
+        user_source_refs: vec![],
+        action_scope: vec![],
+        approval_refs: vec![],
+        session_refs: vec![],
+        task_refs: vec![],
+        artifact_refs: vec![],
+        waiting_conditions: vec![],
+        pending_decisions: vec![],
+        next_check_at: Some(due),
+    }
+}
+
+struct DueTalk;
+
+impl Provider for DueTalk {
+    fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+        let mut message = AssistantMessage::new(&request.model);
+        message.content.push(Content::text("told the user"));
+        message.stop_reason = StopReason::Stop;
+        message.usage = Usage {
+            input: 1,
+            output: 1,
+            total_tokens: 2,
+            ..Default::default()
+        };
+        message.usage_status = UsageStatus::Reported;
+        Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn due_check_tells_the_user_and_does_not_dispatch() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let child = open(
+        &root.join("child"),
+        Arc::new(cayw_runtime::fixture::OfflineProvider::default()),
+        Model::new("fixture", "child"),
+        RuntimeConfig::default(),
+    );
+    let main = open(
+        &root.join("main"),
+        Arc::new(DueTalk),
+        Model::new("fixture", "main"),
+        main_config(&root, vec![]),
+    );
+    main.set_work_router(Arc::new(TargetRouter {
+        target: child.clone(),
+        workspace: "target".into(),
+    }))
+    .unwrap();
+    let session = main.create(Some("Main".into())).unwrap().id;
+    main.create_work_item(due_spec(&session, "due-later", "later", u64::MAX))
+        .unwrap();
+    let cancelled = main
+        .create_work_item(due_spec(&session, "due-stopped", "stopped", 1))
+        .unwrap();
+    main.stop_work_item(&cancelled.work_id).unwrap();
+    let paused = main
+        .create_work_item(due_spec(&session, "due-paused", "paused", 1))
+        .unwrap();
+    main.pause_work_item(&paused.work_id).unwrap();
+    main.create_work_item(due_spec(&session, "due-open", "open", 1))
+        .unwrap();
+
+    let reports = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reports: Vec<_> = main
+                .tasks(&session)
+                .unwrap()
+                .into_iter()
+                .filter(|task| {
+                    task.dispatch_key
+                        .as_deref()
+                        .is_some_and(|key| key.starts_with("due-report:"))
+                })
+                .collect();
+            let open = main.work_item("due-open").unwrap().unwrap();
+            let paused = main.work_item("due-paused").unwrap().unwrap();
+            if reports.len() == 2
+                && reports
+                    .iter()
+                    .all(|task| task.state == TaskState::Completed)
+                && open.next_check_at.is_none()
+                && paused.next_check_at.is_none()
+            {
+                return reports;
+            }
+            if reports.iter().any(|task| task.state == TaskState::Failed) {
+                panic!(
+                    "due report failed: {reports:?} error={:?}",
+                    main.due_report_error()
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "due reports did not finish: {:?} error={:?}",
+            main.tasks(&session).unwrap(),
+            main.due_report_error()
+        );
+    });
+
+    assert!(reports.iter().all(|task| {
+        task.input.text.contains("Scheduled work check is due")
+            && task.input.text.contains("Tell the user this status")
+            && !task.input.text.contains("Program check")
+    }));
+    assert!(
+        reports
+            .iter()
+            .any(|task| task.input.text.contains("due-open")
+                && task.input.text.contains("lifecycle: open"))
+    );
+    assert!(
+        reports
+            .iter()
+            .any(|task| task.input.text.contains("due-paused")
+                && task.input.text.contains("lifecycle: paused"))
+    );
+    assert_eq!(
+        main.work_item("due-later").unwrap().unwrap().next_check_at,
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        main.work_item("due-stopped")
+            .unwrap()
+            .unwrap()
+            .next_check_at,
+        Some(1)
+    );
+    assert!(
+        child
+            .list()
+            .unwrap()
+            .iter()
+            .all(|session| child.tasks(&session.id).unwrap().is_empty())
+    );
+    assert!(main.due_report_error().is_none());
+    main.shutdown_background();
+    child.shutdown_background();
 }

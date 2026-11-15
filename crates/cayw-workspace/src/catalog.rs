@@ -93,7 +93,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         ),
         definition(
             "fs.remove",
-            "Remove one exact file or empty directory. Recursive directory removal requires explicit recursive=true, expected_root_sha256 and max_entries; never follows links.",
+            "Remove one exact file or empty directory. File removal requires expected_sha256. Empty directory removal requires no hash. Recursive directory removal requires explicit recursive=true, expected_root_sha256 and max_entries; never follows links.",
             json!({"path":path(),"expected_sha256":hash(),"recursive":{"type":"boolean"},"expected_root_sha256":hash(),"max_entries":bound()}),
             &["path"],
         ),

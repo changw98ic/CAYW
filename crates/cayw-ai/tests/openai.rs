@@ -89,6 +89,9 @@ fn chunk(delta: Value, finish: Value) -> Value {
 fn stopped() -> String {
     data(chunk(json!({}), json!("stop"))) + "data: [DONE]\r\n\r\n"
 }
+fn content_then_stop() -> String {
+    data(chunk(json!({"content":"ok"}), Value::Null)) + &stopped()
+}
 
 // Break caught: Chat silently drops another protocol's replay items and signatures.
 #[tokio::test]
@@ -695,7 +698,7 @@ async fn malformed_and_incomplete_streams_have_one_error_terminal() {
             data(chunk(json!({"content":"partial"}), Value::Null)) + "data: [DONE]\n\n",
             "finish_reason",
         ),
-        (data(chunk(json!({}), json!("stop"))), "[DONE]"),
+        (data(chunk(json!({}), json!("stop"))), "no content"),
         (
             data(json!({"choices":[{"index":0,"delta":{"refusal":"no"},"finish_reason":"stop"}]}))
                 + "data: [DONE]\n\n",
@@ -824,7 +827,7 @@ async fn creating_but_not_polling_stream_does_not_make_a_request() {
 async fn user_images_follow_model_capability_and_reasoning_is_explicit() {
     use cayw_ai::{ThinkingLevel, timestamp_ms};
     {
-        let (provider, received) = fixture(stopped(), "200 OK", 1024).await;
+        let (provider, received) = fixture(content_then_stop(), "200 OK", 1024).await;
         let mut input = request();
         input.model.supports_images = true;
         input.options.max_tokens = Some(123);
@@ -983,7 +986,7 @@ async fn system_tool_changes_and_tool_result_ids_are_preserved_in_request() {
     use cayw_ai::{
         AssistantMessage, SystemMessage, ToolCall, ToolDefinition, ToolResultMessage, timestamp_ms,
     };
-    let (provider, received) = fixture(stopped(), "200 OK", 100).await;
+    let (provider, received) = fixture(content_then_stop(), "200 OK", 100).await;
     let mut input = request();
     let tool = ToolDefinition {
         name: "sum".into(),
@@ -1059,7 +1062,7 @@ async fn unknown_tool_outcome_is_replayed_with_an_interruption_note() {
             format!("cancelled\n{INTERRUPTED_TOOL_OUTCOME_NOTE}"),
         ),
     ] {
-        let (provider, received) = fixture(stopped(), "200 OK", 100).await;
+        let (provider, received) = fixture(content_then_stop(), "200 OK", 100).await;
         let mut input = request();
         let mut assistant = AssistantMessage::new(&input.model);
         assistant.stop_reason = StopReason::ToolUse;
@@ -1552,4 +1555,72 @@ async fn drain_stalling_after_error_can_be_cancelled() {
     };
     assert_eq!(message.stop_reason, StopReason::Aborted);
     server.abort();
+}
+
+#[tokio::test]
+async fn empty_stop_and_length_are_visible_errors() {
+    for reason in ["stop", "length"] {
+        let body = data(chunk(json!({}), json!(reason))) + "data: [DONE]\r\n\r\n";
+        let (provider, received) = fixture(body, "200 OK", 64).await;
+        let events = provider
+            .stream(request(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        let Some(AssistantEvent::Error { message }) = events.last() else {
+            panic!("{reason}: {events:?}");
+        };
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("Assistant completion contained no content")
+        );
+        received.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn content_free_assistant_is_omitted_on_replay() {
+    for reason in [StopReason::Stop, StopReason::Length, StopReason::Error] {
+        let (provider, received) = fixture(content_then_stop(), "200 OK", 64).await;
+        let mut input = request();
+        let mut assistant = cayw_ai::AssistantMessage::new(&input.model);
+        assistant.stop_reason = reason;
+        input.messages.push(Message::Assistant(assistant));
+        input.messages.push(Message::user("next"));
+        let events = provider
+            .stream(input, CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(AssistantEvent::Done { .. })),
+            "{reason:?}: {events:?}"
+        );
+        let (_, body) = received.await.unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"][0]["text"], "hello");
+        assert_eq!(messages[1]["content"][0]["text"], "next");
+    }
+}
+
+#[tokio::test]
+async fn failed_assistant_with_text_is_rejected_before_networking() {
+    let (provider, mut received) = fixture(content_then_stop(), "200 OK", 11).await;
+    let mut input = request();
+    let mut assistant = cayw_ai::AssistantMessage::new(&input.model);
+    assistant.content.push(Content::text("partial"));
+    assistant.stop_reason = StopReason::Error;
+    input
+        .messages
+        .extend([Message::Assistant(assistant), Message::user("next")]);
+    let events: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(10),
+        provider.stream(input, CancellationToken::new()).collect(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(events.last(), Some(AssistantEvent::Error { .. })));
+    assert!(matches!(
+        received.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
 }

@@ -2,8 +2,8 @@ use cayw_agent::{AgentEvent, ToolResult};
 use cayw_ai::{AssistantMessage, Content, Message, StopReason, ToolCall, Usage};
 use cayw_core::{
     ApprovalDecision, AttemptLease, CapabilityAuthorization, CapabilityCallKey, CapabilityInput,
-    CapabilityOutcome, CoreEvent, ExecutionInput, ExecutionOutcome, ExecutionState, SessionState,
-    SessionStore,
+    CapabilityOutcome, CoreError, CoreEvent, ExecutionInput, ExecutionOutcome, ExecutionState,
+    SessionState, SessionStore,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -169,6 +169,59 @@ fn numeric_string_wait_keeps_original_arguments_across_reopen_and_recovery() {
             .unwrap()
             .contains(&event)
     );
+}
+
+#[test]
+fn omitted_wait_page_keeps_the_original_arguments() {
+    for arguments in [
+        json!({"action":"wait","cell_id":"vm","cursor":"0"}),
+        json!({"action":"wait","cell_id":"vm","cursor":"0","yield_time_ms":"10000"}),
+    ] {
+        let path = database();
+        let waiting = ToolCall::new("wait", "execute_code", arguments);
+        let (store, lease) = fixture(&path, &[launch(), waiting.clone()]);
+        store.yield_execution(&lease, "vm").unwrap();
+        start(&store, &lease, &waiting);
+        let event = store
+            .register_execution_wait(&lease, &waiting.id, "vm", "task", &waiting.arguments)
+            .unwrap();
+        assert!(
+            matches!(&event.event, CoreEvent::ExecutionWaitRegistered { binding } if binding.arguments == waiting.arguments)
+        );
+        let snapshot = store.snapshot(&lease.session_id).unwrap();
+        let saved = snapshot
+            .unresolved_calls
+            .iter()
+            .find(|call| call.call.id == waiting.id)
+            .expect("omitted page size must not finish the call");
+        assert_eq!(saved.call.arguments, waiting.arguments);
+    }
+}
+
+#[test]
+fn present_wait_page_below_minimum_stays_a_known_rejection() {
+    let path = database();
+    let waiting = ToolCall::new(
+        "wait",
+        "execute_code",
+        json!({
+            "action":"wait",
+            "cell_id":"vm",
+            "cursor":"0",
+            "yield_time_ms":"10000",
+            "max_output_tokens":1023
+        }),
+    );
+    let (store, lease) = fixture(&path, &[launch(), waiting.clone()]);
+    store.yield_execution(&lease, "vm").unwrap();
+    start(&store, &lease, &waiting);
+    let error = store
+        .register_execution_wait(&lease, &waiting.id, "vm", "task", &waiting.arguments)
+        .unwrap_err();
+    let text = error.to_string();
+    assert!(matches!(error, CoreError::InvalidEvent(_)), "{text}");
+    assert!(text.contains("Wait binding"), "{text}");
+    assert!(!text.contains("SQLite"), "{text}");
 }
 
 #[test]

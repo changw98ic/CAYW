@@ -59,7 +59,7 @@ test('history and event previews are bounded and preserve recent entries', () =>
 
 test('interrupted tool effects never block prompts while an unavailable workflow stays frozen', () => {
   assert.equal(sessionBlocked(snapshot({ unresolved_calls: [{ id: 'tool-1', outcome_unknown: true }] })), '');
-  assert.match(sessionBlocked(snapshot({ state: 'frozen' })), /冻结/);
+  assert.match(sessionBlocked(snapshot({ state: 'frozen' })), /停住/);
   assert.equal(sessionBlocked(snapshot()), '');
 });
 

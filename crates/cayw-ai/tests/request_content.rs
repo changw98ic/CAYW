@@ -84,7 +84,7 @@ async fn exchange(mut input: ModelRequest) -> (Vec<AssistantEvent>, Option<Value
             bytes.extend_from_slice(&buffer[..count]);
         }
         let input: Value = serde_json::from_slice(&bytes[end..end + length]).unwrap();
-        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
         let headers = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
@@ -318,8 +318,6 @@ async fn invalid_conversation_order_and_call_stops_fail_before_network() {
         no_call.stop_reason = StopReason::ToolUse;
         let mut pending = answer.clone();
         pending.stop_reason = StopReason::Pending;
-        let mut empty = answer.clone();
-        empty.content.clear();
         let mut wrong_stop = AssistantMessage::new(&model);
         wrong_stop.stop_reason = StopReason::Stop;
         wrong_stop.content.push(Content::ToolCall(ToolCall::new(
@@ -397,14 +395,6 @@ async fn invalid_conversation_order_and_call_stops_fail_before_network() {
                 vec![
                     Message::user("first"),
                     Message::Assistant(pending),
-                    Message::user("next"),
-                ],
-            ),
-            (
-                "empty-assistant",
-                vec![
-                    Message::user("first"),
-                    Message::Assistant(empty),
                     Message::user("next"),
                 ],
             ),

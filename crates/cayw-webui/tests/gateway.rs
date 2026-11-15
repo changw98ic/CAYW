@@ -1334,12 +1334,12 @@ async fn registered_panels_are_reachable_from_webui_product_entry() {
         .await
         .unwrap();
     assert!(
-        html.contains("id=\"panel-sidebar\""),
-        "product HTML must expose the sidebar panel surface"
+        html.contains("id=\"conversation\""),
+        "product HTML is the conversation"
     );
     assert!(
-        html.contains("id=\"panel-bottom\""),
-        "product HTML must expose the bottom panel surface"
+        !html.contains("id=\"panel-sidebar\"") && !html.contains("id=\"panel-bottom\""),
+        "product HTML must not expose panel surfaces"
     );
     let script = fixture
         .http
@@ -1351,8 +1351,8 @@ async fn registered_panels_are_reachable_from_webui_product_entry() {
         .await
         .unwrap();
     assert!(
-        script.contains("/api/panels"),
-        "shipped UI must call the panel workbench API"
+        !script.contains("/api/panels"),
+        "shipped conversation page must not call the panel API"
     );
     assert!(!html.contains(WEB_TOKEN) && !script.contains(WEB_TOKEN));
 

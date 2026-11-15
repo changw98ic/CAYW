@@ -384,7 +384,12 @@ async fn protocol_end_stops_before_invalid_or_oversized_tail_bytes() {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 read_request(&mut socket).await;
-                let body = [stop("stop").into_bytes(), tail].concat();
+                let body = [
+                    frame(json!({"content":"ok"}), Value::Null).into_bytes(),
+                    stop("stop").into_bytes(),
+                    tail,
+                ]
+                .concat();
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()

@@ -236,13 +236,35 @@ async fn run(
             _ = sleep_until(next_connect), if client.is_none() && !connecting => {
                 connecting = true;
                 let secret = token.clone();
+                let target_workspace = workspace_id.clone();
                 jobs.spawn(async move {
                     // Prompts run until completion, cancellation or disconnect; there
                     // is no client-side deadline when the host has no run budget.
                     let config = ClientConfig { request_timeout: None, ..ClientConfig::default() };
-                    let result = match timeout(CONNECT_TIMEOUT, Client::connect_with_config(address, secret.clone(), config)).await {
+                    let connected = match timeout(CONNECT_TIMEOUT, Client::connect_with_config(address, secret.clone(), config)).await {
                         Ok(result) => result.map_err(|error| redact(&error.to_string(), &secret)),
                         Err(_) => Err("IPC connection timed out".into()),
+                    };
+                    let result = match (connected, target_workspace.as_deref().filter(|id| *id != "local")) {
+                        (Ok(connection), Some(id)) => {
+                            let opened = timeout(
+                                REQUEST_TIMEOUT,
+                                connection.request("client.workspaces.open", json!({"id": id})),
+                            )
+                            .await;
+                            match opened {
+                                Ok(Ok(_)) => Ok(connection),
+                                Ok(Err(error)) => {
+                                    connection.close().await;
+                                    Err(redact(&error.message, &secret))
+                                }
+                                Err(_) => {
+                                    connection.close().await;
+                                    Err("workspace open timed out".into())
+                                }
+                            }
+                        }
+                        (other, _) => other,
                     };
                     Finished::Connect { epoch, result }
                 });

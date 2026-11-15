@@ -21,7 +21,7 @@ async (page) => {
     promptDisabled: document.getElementById('prompt').disabled,
     stopDisabled: document.getElementById('cancel-button').disabled,
     forkDisabled: document.getElementById('open-fork').disabled,
-    cursor: document.getElementById('event-count').textContent,
+    cursor: document.getElementById('conversation').dataset.cursor,
     notice: document.getElementById('blocked-text').textContent,
   }));
   const evidence = (await (await page.request.get(new URL('/__test__/manifest', page.url()).href)).json()).evidence;
@@ -39,7 +39,7 @@ async (page) => {
     await page.locator('#send-button').click();
     await until(async () => (await status()).observed.lastSnapshot?.result?.pending_approvals?.length > 0, 'real task never reached approval');
     const before = await state();
-    check(before.cursor.includes(`游标 ${session.cursor}`), 'attempt events reached the browser before Stop');
+    check(before.cursor === String(session.cursor), 'attempt events reached the browser before Stop');
     check(!before.stopDisabled, 'Stop should be available before observing the attempt');
     await page.locator('#cancel-button').click();
     await until(async () => (await status()).observed.cancel?.result?.cancelled === true, 'Runtime did not return cancelled:true');
@@ -61,12 +61,12 @@ async (page) => {
     await until(async () => !(await status()).held, 'prompt receipt was not delivered');
     await until(async () => (await page.locator('#send-button').innerText()) === '发送', 'original prompt receipt did not reach the browser');
     check(await page.locator('#prompt').isDisabled(), 'receipt and idle cannot replace the missing exact terminal');
-    check(!(await page.locator('#event-count').innerText()).includes(`游标 ${terminal.cursor}`), 'terminal was not withheld');
+    check((await page.locator('#conversation').getAttribute('data-cursor')) !== String(terminal.cursor), 'terminal was not withheld');
     await capture('early-exact-terminal-withheld', {session:session.id, terminal});
     await control('deliver-terminal');
     await until(() => page.locator('#prompt').isEnabled(), 'early known true cancel stranded the session');
     check(await page.locator('#cancel-button').isDisabled(), 'Stop remains enabled after settlement');
-    check((await page.locator('#event-count').innerText()).includes(`游标 ${terminal.cursor}`), 'exact terminal not consumed');
+    check((await page.locator('#conversation').getAttribute('data-cursor')) === String(terminal.cursor), 'exact terminal not consumed');
     await page.locator('#prompt').fill('Independent next task draft');
     check(await page.locator('#send-button').isEnabled(), 'Send did not re-enable after settlement');
     const storage = await page.evaluate(() => ({local:Object.keys(localStorage), session:Object.keys(sessionStorage)}));

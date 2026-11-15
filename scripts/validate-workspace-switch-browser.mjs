@@ -51,16 +51,10 @@ try {
   page.on('request',request=>{if(request.url().endsWith('/api/rpc')){const body=request.postDataJSON();requests.push({method:body.method,workspace_id:body.workspace_id,session_id:body.params.session_id,task_id:body.params.task_id});}});
   await page.goto(app.ready.url);
   await page.locator('#workspace-choice option').filter({hasText:roots.B}).waitFor({state:'attached'});
-  await until(async()=>/（(?:需连接|未安装)）/.test(await page.locator('#wb-editor').textContent()));
-  for (const id of ['wb-editor','wb-trace']) {
-    const control=page.locator(`#${id}`);const text=await control.textContent();
-    assert.match(text,await control.isDisabled()?/（未安装）/:/（需连接）/);
+  for (const id of ['wb-editor','wb-trace','optional-tools-status','session-device','open-settings','event-log','panel-sidebar']) {
+    assert.equal(await page.locator(`#${id}`).count(), 0, `${id} is not on the conversation page`);
   }
-  const optionalStatus=await page.locator('#optional-tools-status').textContent();
-  assert.match(optionalStatus,/cayw-visual-editor --help/);
-  assert.match(optionalStatus,/cayw-trace-debug/);
-  assert.match(optionalStatus,/Pi 兼容/);
-  checks.push('default UI reports the actual Editor/Trace installation state and always shows start paths and Pi build/enable state');
+  checks.push('conversation page has no editor, trace, settings, or event log');
   await page.locator('#session-label').fill('A in-flight');await page.locator('#create-button').click();
   await page.locator('#session-title').filter({hasText:'A in-flight'}).waitFor();
   await page.locator('#prompt').fill('Wait for exact file approval');await page.locator('#send-button').click();
@@ -69,7 +63,7 @@ try {
   const aTask=(await rpc('session.tasks',{session_id:aSession}))[0];assert(['running','waiting_approval'].includes(aTask.state));
   receipts.original_task={id:aTask.id,worker_id:aTask.worker_id,attempt_id:aTask.attempt_id,fence:aTask.fence};
   await page.locator('#workspace-choice').selectOption(id('B'));await page.locator('#switch-workspace').click();
-  await page.locator('#workspace-switch-status').filter({hasText:`当前：${roots.B}`}).waitFor();
+  await page.locator('#workspace-switch-status').filter({hasText:roots.B}).waitFor();
   assert.deepEqual(await rpc('session.list',{},id('B')),[]);
   const aAfter=await rpc('task.get',{task_id:aTask.id});
   for(const key of ['id','worker_id','attempt_id','fence']) assert.equal(aAfter[key],aTask[key]);
@@ -79,14 +73,14 @@ try {
   const reusedB=await rpc('settings.workspaces.open',{id:id('B')});
   assert.equal(reusedB.reused,true);assert.equal(reusedB.id,id('B'));assert(!('ipc_addr' in reusedB));
   checks.push('switch A to Client-routed B keeps original running Task/Attempt/fence and request; repeat open reuses runtime; cross-workspace requests rejected');
-  await page.locator('#session-label').fill('B isolated');await page.locator('#session-device').fill('local');await page.locator('#create-button').click();
+  await page.locator('#session-label').fill('B isolated');await page.locator('#create-button').click();
   await page.locator('#session-title').filter({hasText:'B isolated'}).waitFor();
   assert.equal((await rpc('session.list',{},id('B'))).length,1);
   assert.equal((await rpc('session.list')).length,1);
   await page.locator('#workspace-choice').selectOption('local');await page.locator('#switch-workspace').click();
-  await page.locator('#workspace-switch-status').filter({hasText:`当前：${roots.A}`}).waitFor();
+  await page.locator('#workspace-switch-status').filter({hasText:roots.A}).waitFor();
   await page.locator('#session-title').filter({hasText:'A in-flight'}).waitFor();
-  await page.locator('#approvals').waitFor({state:'visible'});
+  await page.locator('#messages .approval-question').waitFor({state:'visible'});
   assert.equal(requests.filter(r=>r.method==='task.resume').length,1,'switching does not replay or replace resume');
   assert.equal(requests.find(r=>r.method==='task.resume').workspace_id,'local');
   await page.locator('#cancel-button').click();
@@ -95,7 +89,7 @@ try {
   await assert.rejects(access(join(roots.A,'cayw-demo.txt')));
   checks.push('switch back restores original session/approval; only original task resumes, explicit cancellation prevents file effect');
   await page.locator('#workspace-choice').selectOption(id('C'));await page.locator('#switch-workspace').click();
-  await page.locator('#workspace-switch-status').filter({hasText:`当前：${roots.C}`}).waitFor();
+  await page.locator('#workspace-switch-status').filter({hasText:roots.C}).waitFor();
   const reusedC=await rpc('settings.workspaces.open',{id:id('C')});assert(reusedC.reused);assert.equal(reusedC.id,id('C'));assert(!('ipc_addr' in reusedC));
   checks.push('browser switches to Client-routed C and reuses its Runtime without a workspace connection endpoint');
   assert.deepEqual(errors,[]);

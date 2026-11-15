@@ -24,8 +24,9 @@ async (page) => {
   };
   const select = async id => {
     await page.locator('#refresh-sessions').click();
-    await until(()=>page.locator('#session-list button').filter({hasText:id.slice(0,20)}).count().then(Boolean),'new session missing');
-    await page.locator('#session-list button').filter({hasText:id.slice(0,20)}).click();
+    const item = page.locator(`#session-list button[data-session-id="${id}"]`);
+    await until(()=>item.count().then(Boolean),'new session missing');
+    await item.click();
     await until(()=>page.locator('#prompt').isEnabled(),'session did not become idle');
   };
   const capture = async name => {
@@ -37,15 +38,15 @@ async (page) => {
     await reconnect(); await select(lost.id);
     await page.locator('#prompt').fill('This request must never reach Runtime');
     await page.locator('#send-button').click();
-    await until(async()=> (await page.locator('#blocked-text').innerText()).includes('回执待确认'),'transport ambiguity not shown');
+    await until(async()=> (await page.locator('#blocked-text').innerText()).includes('还不能确定'),'transport ambiguity not shown');
     const other=await control('other-client');
-    await until(async()=> (await page.locator('#event-count').innerText()).includes(`游标 ${other.cursor}`),'other client terminal not consumed');
+    await until(async()=> (await page.locator('#conversation').getAttribute('data-cursor')) === String(other.cursor),'other client terminal not consumed');
     check(await page.locator('#prompt').isDisabled(),'unrelated execution unlocked unknown prompt');
     check((await status()).observed.dropped===1,'unexpected duplicate prompt dispatch');
     const storage=await page.evaluate(()=>({local:Object.keys(localStorage),session:Object.keys(sessionStorage)}));
     check(!storage.local.length&&!storage.session.length,'credentials or state leaked to browser storage');
     const notice=await page.locator('#blocked-text').innerText();
-    check(notice.includes('宿主核对')&&notice.includes('事件记录')&&notice.includes('新建会话'),'unknown result lacks usable guidance');
+    check(notice.includes('还不能确定')&&notice.includes('不要再发一次')&&notice.includes('新建一段对话'),'unknown result lacks usable guidance');
     await capture('unknown-request-stays-blocked');
     results.push({case:'unknown prompt and other client real Runtime execution',pass:true,session:lost.id,terminal:other.cursor,storage});
 
@@ -55,7 +56,7 @@ async (page) => {
     await page.locator('#send-button').click();
     await until(async()=> (await status()).held,'prompt receipt was not held');
     const terminal=(await status()).lastPromptResult.result.cursor;
-    await until(async()=> (await page.locator('#event-count').innerText()).includes(`游标 ${terminal}`),'completed prompt terminal not consumed');
+    await until(async()=> (await page.locator('#conversation').getAttribute('data-cursor')) === String(terminal),'completed prompt terminal not consumed');
     check(await page.locator('#cancel-button').isEnabled(),'reproduction requires stop while receipt is held');
     await page.locator('#cancel-button').click();
     await until(async()=> (await status()).observed.cancel?.result?.cancelled===false,'actual Runtime did not return no-op cancel');
@@ -70,7 +71,7 @@ async (page) => {
 
     const interrupted=await control('session/reconciliation');
     await page.locator('#refresh-sessions').click();
-    const item=page.locator('#session-list button').filter({hasText:interrupted.id.slice(0,20)});
+    const item=page.locator(`#session-list button[data-session-id="${interrupted.id}"]`);
     await until(()=>item.count().then(Boolean),'interrupted session missing');
     await item.click();
     await until(async()=>(await page.locator('#session-state').innerText()).includes('就绪'),'interrupted tool call did not leave the session ready');
@@ -79,7 +80,7 @@ async (page) => {
     const reconciled=await control('reconcile');
     await until(async()=>(await status()).observed.delayedSnapshot?.cursor===interrupted.cursor,'old snapshot was not injected');
     await until(()=>page.locator('#prompt').isEnabled(),'old snapshot locked the session');
-    check((await page.locator('#event-count').innerText()).includes(`游标 ${reconciled.cursor}`),'reconciliation fact not consumed');
+    check((await page.locator('#conversation').getAttribute('data-cursor')) === String(reconciled.cursor),'reconciliation fact not consumed');
     await capture('interrupted-tool-session-stays-ready');
     results.push({case:'real Core interrupted call remains usable before and after delayed unresolved projection',pass:true,session:interrupted.id,oldCursor:interrupted.cursor,terminal:reconciled.cursor});
     await save('results',{results,evidence});

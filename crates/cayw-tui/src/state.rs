@@ -1117,7 +1117,7 @@ impl App {
                     if let Some(session) = self.selected().filter(|session| session.can_fork()) {
                         self.dialog = Some(Dialog::Fork {
                             session_id: session.id.clone(),
-                            label: format!("{} (chat fork)", session.label),
+                            label: fork_label(&session.label),
                         });
                     } else {
                         self.status = "Fork requires a frozen idle session.".into();
@@ -1904,4 +1904,17 @@ fn format_numbered_lines(content: &str) -> String {
 fn looks_like_diff(text: &str) -> bool {
     text.lines()
         .any(|line| line.starts_with("@@ ") || line.starts_with("--- ") || line.starts_with("+++ "))
+}
+
+fn fork_label(label: &str) -> String {
+    const SUFFIX: &str = " (chat fork)";
+    const MAX: usize = 1024;
+    if label.len() + SUFFIX.len() <= MAX {
+        return format!("{label}{SUFFIX}");
+    }
+    let mut budget = MAX - SUFFIX.len();
+    while !label.is_char_boundary(budget) {
+        budget -= 1;
+    }
+    format!("{}{SUFFIX}", &label[..budget])
 }

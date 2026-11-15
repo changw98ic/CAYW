@@ -4,7 +4,9 @@ use crate::{
     queue::{TaskLease, TaskTerminal},
 };
 use async_trait::async_trait;
-use cayw_agent::{Agent, AgentContext, AgentEvent, AgentHooks, AgentTool, ToolContext, ToolResult};
+use cayw_agent::{
+    Agent, AgentContext, AgentControl, AgentEvent, AgentHooks, AgentTool, ToolContext, ToolResult,
+};
 use cayw_ai::{CancellationToken, Message, ToolDefinition};
 use cayw_cells::{CellManager, CellTool};
 use cayw_codemode::{CapabilityError, CapabilityStop};
@@ -12,6 +14,7 @@ use cayw_core::{ApprovalDecision, AttemptLease};
 use futures::FutureExt;
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     panic::AssertUnwindSafe,
     sync::{
         Arc, Mutex,
@@ -38,6 +41,22 @@ pub(crate) struct RunContext {
     pub(crate) cells_manager: Mutex<Option<std::sync::Weak<CellManager>>>,
     persistence_error: Mutex<Option<String>>,
     pub(crate) model_recording_error: Mutex<Option<String>>,
+    /// A user task on a main-session Runtime that already has a workspace router.
+    /// A dispatched worker and a Runtime without a router stay false.
+    pub(crate) routed_user_turn: bool,
+    /// This turn has called `work.list`. Create and dispatch before that are refused.
+    pub(crate) work_listed: AtomicBool,
+    /// WorkItem ids created in this turn. Dispatching any other id reuses existing work.
+    created_work_ids: Mutex<BTreeSet<String>>,
+    work_created: AtomicBool,
+    work_dispatched: AtomicBool,
+    /// A successful dispatch used a WorkItem this turn did not create.
+    work_reused: AtomicBool,
+    /// This turn read one WorkItem with work.get or work.tasks. That is enough
+    /// when the user is asking for status; it does not dispatch.
+    work_status_read: AtomicBool,
+    route_reminded: AtomicBool,
+    route_notice_sent: AtomicBool,
 }
 
 #[cfg(test)]
@@ -60,6 +79,15 @@ impl RunContext {
             cells_manager: Mutex::new(None),
             persistence_error: Mutex::new(None),
             model_recording_error: Mutex::new(None),
+            routed_user_turn: false,
+            work_listed: AtomicBool::new(false),
+            created_work_ids: Mutex::new(BTreeSet::new()),
+            work_created: AtomicBool::new(false),
+            work_dispatched: AtomicBool::new(false),
+            work_reused: AtomicBool::new(false),
+            work_status_read: AtomicBool::new(false),
+            route_reminded: AtomicBool::new(false),
+            route_notice_sent: AtomicBool::new(false),
         }
     }
 }
@@ -71,6 +99,39 @@ struct RunFlags {
     reason: Arc<Mutex<Option<String>>>,
 }
 impl RunContext {
+    pub(crate) fn note_work_listed(&self) {
+        self.work_listed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn note_work_created(&self, work_id: &str) {
+        lock(&self.created_work_ids).insert(work_id.to_string());
+        self.work_created.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn note_work_dispatched(&self, work_id: &str) {
+        if !lock(&self.created_work_ids).contains(work_id) {
+            self.work_reused.store(true, Ordering::Release);
+        }
+        self.work_dispatched.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn note_work_status(&self) {
+        self.work_status_read.store(true, Ordering::Release);
+    }
+
+    /// A routed user turn is unfinished until existing work was listed and one
+    /// WorkItem was dispatched, or until this turn read one WorkItem's status.
+    /// A new `work.create` is required only when this turn did not reuse one.
+    /// Reading status does not dispatch.
+    pub(crate) fn route_pending(&self) -> bool {
+        self.routed_user_turn
+            && !self.work_status_read.load(Ordering::Acquire)
+            && !(self.work_listed.load(Ordering::Acquire)
+                && self.work_dispatched.load(Ordering::Acquire)
+                && (self.work_created.load(Ordering::Acquire)
+                    || self.work_reused.load(Ordering::Acquire)))
+    }
+
     pub(crate) fn check(&self, cancel: &CancellationToken) -> Result<(), RuntimeError> {
         if self.cancel.is_cancelled() || cancel.is_cancelled() {
             return Err(RuntimeError::Cancelled);
@@ -149,6 +210,17 @@ impl RunContext {
             capability_error(error)
         }
     }
+
+    /// A known store rejection before an uncertain write stays a normal tool
+    /// error. Only a database, poisoned, or corrupt store can hide whether the
+    /// write landed.
+    fn recorded_store_error(&self, error: cayw_core::CoreError) -> String {
+        if store_effect_uncertain(&error) {
+            self.persistence_failed(error).to_string()
+        } else {
+            error.to_string()
+        }
+    }
     /// Model accounting uncertainty cannot assert or clear tool side effects.
     pub(crate) fn model_recording_failed(&self) {
         let reason =
@@ -182,16 +254,21 @@ impl RunContext {
 }
 /// True only when a write may have committed without a durable receipt. Every
 /// other error is a known refusal that must not freeze the session.
-pub(crate) fn durable_failure(error: &RuntimeError) -> bool {
+pub(crate) fn store_effect_uncertain(error: &cayw_core::CoreError) -> bool {
     matches!(
         error,
-        RuntimeError::Journal(_)
-            | RuntimeError::Core(
-                cayw_core::CoreError::Database(_)
-                    | cayw_core::CoreError::StorePoisoned
-                    | cayw_core::CoreError::CorruptStore(_)
-            )
+        cayw_core::CoreError::Database(_)
+            | cayw_core::CoreError::StorePoisoned
+            | cayw_core::CoreError::CorruptStore(_)
     )
+}
+
+pub(crate) fn durable_failure(error: &RuntimeError) -> bool {
+    match error {
+        RuntimeError::Journal(_) => true,
+        RuntimeError::Core(error) => store_effect_uncertain(error),
+        _ => false,
+    }
 }
 /// Core rejects these before any SQLite write commits, so the refusal is a
 /// known limit rather than an uncertain side effect.
@@ -263,12 +340,12 @@ impl AgentTool for DurableTool {
             .inner
             .store
             .bind_tool_origin(&self.context.lease, &input.call_id, &self.context.task.id)
-            .map_err(|error| self.context.persistence_failed(error).to_string())?;
+            .map_err(|error| self.context.recorded_store_error(error))?;
         self.context
             .inner
             .store
             .mark_tool_started(&self.context.lease, &input.call_id)
-            .map_err(|e| self.context.persistence_failed(e).to_string())?;
+            .map_err(|error| self.context.recorded_store_error(error))?;
         self.context.inner.changed.notify_waiters();
         let waited_execution =
             if input.arguments.get("action").and_then(Value::as_str) == Some("wait") {
@@ -292,7 +369,7 @@ impl AgentTool for DurableTool {
                     .inner
                     .store
                     .snapshot(&self.context.lease.session_id)
-                    .map_err(|error| self.context.persistence_failed(error).to_string())?
+                    .map_err(|error| self.context.recorded_store_error(error))?
                     .unresolved_calls
                     .into_iter()
                     .find(|call| call.call.id == input.call_id)
@@ -307,7 +384,7 @@ impl AgentTool for DurableTool {
                         &self.context.task.id,
                         &original.call.arguments,
                     )
-                    .map_err(|error| self.context.persistence_failed(error).to_string())?;
+                    .map_err(|error| self.context.recorded_store_error(error))?;
                 self.context.inner.changed.notify_waiters();
                 Some(execution_id.to_owned())
             } else {
@@ -399,6 +476,31 @@ impl Drop for ActiveGuard {
         }
         drop(active);
         self.inner.changed.notify_waiters();
+        if self.inner.config.main_session {
+            self.inner.due_checks.notify_waiters();
+        }
+    }
+}
+
+/// Removes the live agent control when the model turn ends, including on panic.
+struct SessionControlGuard {
+    inner: Arc<Inner>,
+    session: String,
+}
+
+impl SessionControlGuard {
+    fn attach(inner: &Arc<Inner>, session: String, control: AgentControl) -> Self {
+        lock(&inner.session_controls).insert(session.clone(), control);
+        Self {
+            inner: inner.clone(),
+            session,
+        }
+    }
+}
+
+impl Drop for SessionControlGuard {
+    fn drop(&mut self) {
+        lock(&self.inner.session_controls).remove(&self.session);
     }
 }
 
@@ -669,6 +771,79 @@ impl Runtime {
         self.inner.changed.notify_waiters();
         self.inner.queue.get(&task_id)
     }
+
+    /// Deliver one failed program check to a session in this workspace.
+    /// `sessions` is newest first. A running session is steered and no second
+    /// task is created. Otherwise the newest session gets one new task, unless
+    /// it already has a live task: that stays `Busy` and the caller keeps the
+    /// acceptance record. This does not run the check.
+    pub fn deliver_session_notice(
+        &self,
+        notice: &crate::WorkSessionNotice,
+    ) -> Result<crate::WorkSessionNoticeReply, RuntimeError> {
+        if notice.sessions.is_empty() {
+            return Err(RuntimeError::InvalidInput(
+                "a session notice needs a session".into(),
+            ));
+        }
+        {
+            let controls = lock(&self.inner.session_controls);
+            for session_id in &notice.sessions {
+                if let Some(control) = controls.get(session_id) {
+                    control.steer(Message::user(&notice.text));
+                    return Ok(crate::WorkSessionNoticeReply {
+                        delivered: true,
+                        steered: true,
+                        session_id: Some(session_id.clone()),
+                        task_id: None,
+                        reason: None,
+                    });
+                }
+            }
+        }
+        let session_id = &notice.sessions[0];
+        match self.enqueue_dispatched(
+            session_id,
+            crate::TaskInput {
+                text: notice.text.clone(),
+                images: Vec::new(),
+            },
+            cayw_requests::TaskIntent::General,
+            crate::TaskPriority::Normal,
+            crate::TaskResources::default(),
+            crate::TaskDispatch {
+                work_id: notice.work_id.clone(),
+                dispatch_key: notice.dispatch_key.clone(),
+                pause_version: notice.pause_version,
+                stop_version: notice.stop_version,
+            },
+        ) {
+            Ok(task) => {
+                let task = if task.state == TaskState::Queued {
+                    self.start_queued(&task.id)?
+                } else {
+                    task
+                };
+                Ok(crate::WorkSessionNoticeReply {
+                    delivered: true,
+                    steered: false,
+                    session_id: Some(session_id.clone()),
+                    task_id: Some(task.id),
+                    reason: None,
+                })
+            }
+            Err(RuntimeError::Busy) => Ok(crate::WorkSessionNoticeReply {
+                delivered: false,
+                steered: false,
+                session_id: Some(session_id.clone()),
+                task_id: None,
+                reason: Some(
+                    "this session already has a live task, so the notice was not delivered".into(),
+                ),
+            }),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 async fn launch_worker(
@@ -712,6 +887,9 @@ fn spawn_worker_task(
     flags: RunFlags,
     scope: Option<Arc<crate::children::RunScope>>,
 ) -> tokio::task::JoinHandle<Result<SessionView, RuntimeError>> {
+    let flush = FlushPending {
+        inner: inner.clone(),
+    };
     let guard = ActiveGuard {
         inner: inner.clone(),
         session: task.session_id.clone(),
@@ -719,6 +897,8 @@ fn spawn_worker_task(
         _ownership: ownership,
     };
     handle.spawn(async move {
+        // Flush is declared first so it runs after the session leaves `active`.
+        let _flush = flush;
         let _active = guard;
         let outcome = AssertUnwindSafe(run_worker(
             inner.clone(),
@@ -846,8 +1026,85 @@ fn spawn_worker_task(
             }
             return Err(error);
         }
+        report_dispatched_status(&inner, &task, terminal, settlement_error(&outcome, &flags)).await;
         outcome
     })
+}
+
+fn settlement_error(
+    outcome: &Result<SessionView, RuntimeError>,
+    flags: &RunFlags,
+) -> Option<String> {
+    outcome
+        .as_ref()
+        .err()
+        .map(ToString::to_string)
+        .or_else(|| lock(&flags.reason).clone())
+}
+
+fn terminal_state(terminal: TaskTerminal) -> &'static str {
+    match terminal {
+        TaskTerminal::Completed => "completed",
+        TaskTerminal::Failed => "failed",
+        TaskTerminal::Cancelled => "cancelled",
+        TaskTerminal::OutcomeUnknown => "outcome_unknown",
+    }
+}
+
+/// Tell the main session that a dispatched task reached a terminal state.
+/// A failure here stays on the main session's pending list. It does not change
+/// the task row that was just recorded.
+async fn report_dispatched_status(
+    inner: &Arc<Inner>,
+    task: &TaskRecord,
+    terminal: TaskTerminal,
+    error: Option<String>,
+) {
+    let Some(work_id) = task.work_id.clone() else {
+        return;
+    };
+    let Some(owner) = lock(&inner.work_owner).clone() else {
+        return;
+    };
+    let _ = owner
+        .report_status(crate::WorkStatusReport {
+            work_id,
+            task_id: task.id.clone(),
+            session_id: task.session_id.clone(),
+            state: terminal_state(terminal).to_string(),
+            error,
+        })
+        .await;
+}
+
+/// After the live session is released, deliver status reports that arrived
+/// while it was busy. No Tokio runtime means the reports stay pending.
+struct FlushPending {
+    inner: Arc<Inner>,
+}
+
+impl Drop for FlushPending {
+    fn drop(&mut self) {
+        if !self.inner.config.main_session {
+            return;
+        }
+        let pending = std::mem::take(&mut *lock(&self.inner.pending_status_reports));
+        if pending.is_empty() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            lock(&self.inner.pending_status_reports).extend(pending);
+            return;
+        };
+        let inner = self.inner.clone();
+        handle.spawn(async move {
+            tokio::task::yield_now().await;
+            let runtime = Runtime { inner };
+            for report in pending {
+                let _ = runtime.relay_task_status(report);
+            }
+        });
+    }
 }
 
 pub(crate) async fn resume_child(
@@ -969,6 +1226,11 @@ async fn run_worker(
         }
         lease
     };
+    let routed_user_turn = scope.is_none()
+        && inner.config.main_session
+        && lock(&inner.work_router).is_some()
+        && task.work_id.is_none()
+        && task.dispatch_key.is_none();
     let context = Arc::new(RunContext {
         selection: lock(&inner.selection).clone(),
         inner: inner.clone(),
@@ -985,6 +1247,15 @@ async fn run_worker(
         cells_manager: Mutex::new(None),
         persistence_error: Mutex::new(None),
         model_recording_error: Mutex::new(None),
+        routed_user_turn,
+        work_listed: AtomicBool::new(false),
+        created_work_ids: Mutex::new(BTreeSet::new()),
+        work_created: AtomicBool::new(false),
+        work_dispatched: AtomicBool::new(false),
+        work_reused: AtomicBool::new(false),
+        work_status_read: AtomicBool::new(false),
+        route_reminded: AtomicBool::new(false),
+        route_notice_sent: AtomicBool::new(false),
     });
     let outcome = execute_agent(context.clone(), &task.input).await;
     if let Err(cleanup) = crate::children::drain(&context).await {
@@ -1080,6 +1351,9 @@ async fn run_worker(
     }
 }
 
+const ROUTE_REQUIRED: &str = "This main-session turn cannot finish yet. Call work.list and read the existing WorkItems. If one is the same task, call work.dispatch for that work_id and do not create another. If none is the same task, call work.create and then work.dispatch for the new work_id. Or call work.get or work.tasks for one WorkItem and tell the user that status; that does not dispatch. A text answer is not accepted until work.list and a dispatch have both succeeded, or until one WorkItem status has been read.";
+const RELAY: &str = "The main session only passes messages. The child session does the work and the review. Do not read or write files, run checks, or start a subagent. After you dispatch, tell the user and stop. When a task status update arrives, tell the user that status and stop. Read a WorkItem status only when the user is talking to you, or when this turn is the status update.";
+
 struct RequestFence {
     context: Arc<RunContext>,
     completion: Arc<crate::completion::Completion>,
@@ -1119,8 +1393,39 @@ impl AgentHooks for RequestFence {
                 *lock(&self.rejection) = Some(error);
                 return Err(reason);
             }
+            if self.context.route_pending() {
+                // One reminder, then a known failure. max_turns stays None on
+                // the product path, so a repeated Continue would not stop.
+                if !self.context.route_reminded.swap(true, Ordering::AcqRel) {
+                    return Ok(cayw_agent::TurnDecision::Continue);
+                }
+                let error = RuntimeError::Worker(
+                    "the main session must check existing WorkItems and dispatch the same task, or create a new WorkItem and dispatch it, or read one WorkItem status, before this turn can finish"
+                        .into(),
+                );
+                let reason = error.to_string();
+                *lock(&self.rejection) = Some(error);
+                return Err(reason);
+            }
         }
         Ok(cayw_agent::TurnDecision::Auto)
+    }
+
+    async fn prepare_next_turn(
+        &self,
+        _turn: cayw_agent::TurnContext,
+        _cancel: CancellationToken,
+    ) -> Result<cayw_agent::NextTurnUpdate, String> {
+        if self.context.route_pending()
+            && self.context.route_reminded.load(Ordering::Acquire)
+            && !self.context.route_notice_sent.swap(true, Ordering::AcqRel)
+        {
+            return Ok(cayw_agent::NextTurnUpdate {
+                messages: vec![Message::user(ROUTE_REQUIRED)],
+                ..Default::default()
+            });
+        }
+        Ok(cayw_agent::NextTurnUpdate::default())
     }
 }
 async fn execute_agent(
@@ -1174,10 +1479,13 @@ async fn execute_with_cells(
         )),
         context.selection.model.clone(),
     );
-    // FleetView intervention: steer/stop need the live Agent control.
+    // FleetView intervention and a failed acceptance check both need the live
+    // Agent control. The guard removes it when this turn ends.
     inner
         .fleet
         .attach_control(&context.lease.session_id, agent.control());
+    let _session_control =
+        SessionControlGuard::attach(inner, context.lease.session_id.clone(), agent.control());
     let mut messages = Runtime {
         inner: inner.clone(),
     }
@@ -1347,15 +1655,24 @@ async fn execute_with_cells(
                 "Operation approvals are supplied by the caller. Do not claim to approve your own request."
             }
         };
+        let mut sections = std::collections::BTreeMap::from([
+            ("cayw-runtime-codemode".into(), Some(INSTRUCTION.into())),
+            (
+                "cayw-runtime-approval".into(),
+                Some(approval_instruction.into()),
+            ),
+        ]);
+        if context.routed_user_turn {
+            sections.insert(
+                "cayw-runtime-work-route".into(),
+                Some(ROUTE_REQUIRED.into()),
+            );
+        }
+        if inner.config.main_session && lock(&inner.work_router).is_some() {
+            sections.insert("cayw-runtime-relay".into(), Some(RELAY.into()));
+        }
         let instruction = Message::System(cayw_ai::SystemMessage {
-            sections: [
-                ("cayw-runtime-codemode".into(), Some(INSTRUCTION.into())),
-                (
-                    "cayw-runtime-approval".into(),
-                    Some(approval_instruction.into()),
-                ),
-            ]
-            .into(),
+            sections,
             ..Default::default()
         });
         // F08: fold Applied plannotator feedback into the next Agent attempt.
@@ -1364,6 +1681,13 @@ async fn execute_with_cells(
             inner,
             &context.lease.session_id,
         )?);
+        if inner.config.main_session {
+            for report in std::mem::take(&mut *lock(&inner.pending_status_reports)) {
+                prompt.push(Message::user(crate::work_router::status_notice_text(
+                    &report,
+                )));
+            }
+        }
         prompt.push(input.message());
         let result = agent.prompt_messages(prompt).await?;
         // The Agent reports hook rejections as failed model turns. Restore the
@@ -1494,6 +1818,12 @@ pub(crate) fn capabilities(inner: &Arc<Inner>) -> Result<Vec<ToolDefinition>, Ru
     for plugin in inner.registry.list() {
         catalog.extend(plugin.manifest.capabilities);
     }
+    if inner.config.main_session && lock(&inner.work_router).is_some() {
+        catalog.retain(|tool| crate::work_tools::main_session_relays(&tool.name));
+    }
+    if !inner.config.main_session && lock(&inner.work_owner).is_some() {
+        catalog.push(crate::work_tools::child_review_definition());
+    }
     Ok(catalog)
 }
 
@@ -1537,7 +1867,17 @@ mod tests {
             RuntimeError::Core(cayw_core::CoreError::CorruptStore("fixture".into())),
         ] {
             assert!(durable_failure(&error), "{error:?}");
+            let RuntimeError::Core(core) = &error else {
+                continue;
+            };
+            assert!(store_effect_uncertain(core), "{error:?}");
         }
+        assert!(!store_effect_uncertain(
+            &cayw_core::CoreError::InvalidEvent("Wait binding".into(),)
+        ));
+        assert!(!store_effect_uncertain(&cayw_core::CoreError::Json(
+            serde_json::from_str::<u64>("").unwrap_err(),
+        )));
     }
 
     // Break caught: overdue checks run again before a response that becomes ready

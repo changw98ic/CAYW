@@ -229,6 +229,11 @@ struct InputQuery {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkProactiveSet {
+    mode: crate::ProactiveMode,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProactiveTrigger {
     #[serde(default)]
     mode: Option<crate::ProactiveMode>,
@@ -669,6 +674,14 @@ impl Runtime {
             "input.get" => {
                 let p: InputQuery = parse(params)?;
                 encode(self.input_record(&p.log_id)?)
+            }
+            "proactive.status" => {
+                let _: Empty = parse(params)?;
+                encode(self.proactive_status()?)
+            }
+            "work.proactive.set" => {
+                let p: WorkProactiveSet = parse(params)?;
+                encode(self.set_proactive_mode(p.mode)?)
             }
             "proactive.trigger" => {
                 let p: ProactiveTrigger = parse(params)?;
@@ -1113,7 +1126,7 @@ impl RpcHandler for Runtime {
     /// Query methods only observe durable state. An oversized response cannot
     /// mean that an external effect happened, so the transport reports a known
     /// `response_too_large` instead of `outcome_unknown`.
-    fn read_only(&self, method: &str) -> bool {
+    fn read_only(&self, method: &str, _params: &Value) -> bool {
         matches!(
             method,
             "runtime.health"
@@ -1133,20 +1146,35 @@ impl RpcHandler for Runtime {
                 | "session.context_overview"
                 | "session.maintenance.status"
                 | "session.grants"
+                | "session.questions"
+                | "session.pending_questions"
+                | "session.plan"
                 | "capabilities.list"
                 | "session.tasks"
                 | "task.get"
+                | "task.by_dispatch_key"
                 | "approval.question"
                 | "memory.status"
                 | "memory.entries"
                 | "memory.query"
                 | "work.get"
                 | "work.list"
+                | "proactive.status"
                 | "input.get"
                 | "notify.next"
                 | "notify.get"
+                | "plannotator.list"
+                | "request.operations"
+                | "request.status"
+                | "request.events"
+                | "request.task_state"
+                | "artifacts.preview"
+                | "artifacts.list"
+                | "artifacts.action_list"
+                | "artifacts.action_get"
                 | "recovery.status"
                 | "recovery.reconciliation"
+                | "recovery.points"
         )
     }
 }

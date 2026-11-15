@@ -14,7 +14,7 @@ use std::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-const HELP: &str = "CAYW 可选网页界面\n\n推荐：cayw --ui web [--workspace DIR] [--no-open]\n本地默认仅监听回环地址，无登录。局域网须显式 --lan IP:PORT；账户可选，未配置时允许访问，配置后使用账号密码登录。\n配置账户：网页设置 → 局域网账号；本机入口保存后立即生效。备用 CLI：cayw account --username NAME [--workspace DIR]\n独立网关：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT] [--ownership PATH]\n  cayw-webui --lan IP:PORT --account-file FILE\n  cayw-webui account --username NAME --file FILE\n必需环境变量 CAYW_IPC_ADDR / CAYW_IPC_TOKEN 仅用于本机 Runtime 连接，不需要在浏览器中输入。\nCAYW_WEB_ADDR 默认为 127.0.0.1:0，不能通过此变量开放局域网。\n局域网地址须为本机明确的私有或回环 IP；不接受通配地址。账户配置交互式输入密码两次，不回显。\n";
+const HELP: &str = "CAYW 可选网页界面\n\n推荐：cayw --ui web [--workspace DIR] [--no-open]\n本地默认仅监听回环地址，无登录。局域网须显式 --lan IP:PORT；账户可选，未配置时允许访问，配置后使用账号密码登录。\n配置账户：cayw account --username NAME [--workspace DIR]。网页没有账号表单。该命令不覆盖已有账号，也不启动服务；下次启动局域网模式时启用登录。\n独立网关：cayw-webui [--ipc-addr 127.0.0.1:PORT] [--web-addr 127.0.0.1:PORT] [--ownership PATH]\n  cayw-webui --lan IP:PORT --account-file FILE\n  cayw-webui account --username NAME --file FILE\n必需环境变量 CAYW_IPC_ADDR / CAYW_IPC_TOKEN 仅用于本机 Runtime 连接，不需要在浏览器中输入。\nCAYW_WEB_ADDR 默认为 127.0.0.1:0，不能通过此变量开放局域网。\n局域网地址须为本机明确的私有或回环 IP；不接受通配地址。账户配置交互式输入密码两次，不回显。\n";
 struct Config {
     ipc_addr: SocketAddr,
     web_addr: SocketAddr,
@@ -220,7 +220,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     let login_required = matches!(config.access, WebAccess::Lan(Some(_)));
     if matches!(config.access, WebAccess::Lan(None)) {
         eprintln!(
-            "局域网访问已开放，未配置账号，网络内可直接访问。请在本机管理页面的设置中配置可选账号，保存后立即启用局域网登录。"
+            "局域网访问已开放，未配置账号，网络内可直接访问。要加账号，在这台电脑上执行 cayw account。保存的账号在下次启动局域网模式时启用。"
         );
     }
     let mode = if matches!(config.access, WebAccess::Lan(_)) {
@@ -236,7 +236,7 @@ async fn run(args: Vec<String>) -> Result<(), String> {
     } else {
         println!("网页界面：http://{address}/");
         if local_listener.is_some() {
-            println!("本机管理：http://{local_address}/（设置 → 局域网账号）");
+            println!("本机入口：http://{local_address}/");
         }
     }
     let cancel = CancellationToken::new();

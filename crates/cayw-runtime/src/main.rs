@@ -159,8 +159,8 @@ impl WorkspaceHost {
         Ok(response)
     }
 
-    fn read_only(&self, method: &str) -> bool {
-        self.runtime.read_only(method)
+    fn read_only(&self, method: &str, params: &Value) -> bool {
+        self.runtime.read_only(method, params)
     }
 }
 
@@ -355,18 +355,26 @@ impl RpcHandler for CliRpcHandler {
         }
         self.primary.call(method, params, cancel).await
     }
-    fn read_only(&self, method: &str) -> bool {
+    fn read_only(&self, method: &str, params: &Value) -> bool {
         if matches!(method, "client.health" | "client.workspaces.list") {
             true
-        } else if method == "client.workspace.call"
-            || method.starts_with("client.plugins.")
-            || method.starts_with("settings.")
-        {
-            // Routed calls and settings mutations need the actual request to
-            // decide; keep the conservative unknown classification.
+        } else if method.starts_with("client.plugins.") || method.starts_with("settings.") {
             false
+        } else if method == "client.workspace.call" {
+            let Some(inner) = params
+                .get("rpc")
+                .and_then(|rpc| rpc.get("method"))
+                .and_then(Value::as_str)
+            else {
+                return false;
+            };
+            let inner_params = params
+                .get("rpc")
+                .and_then(|rpc| rpc.get("params"))
+                .unwrap_or(&Value::Null);
+            self.primary.read_only(inner, inner_params)
         } else {
-            self.primary.read_only(method)
+            self.primary.read_only(method, params)
         }
     }
 }
@@ -528,7 +536,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         return Err("local runtime IPC must bind a loopback address".into());
     }
     let explicit_db = values.remove("--db").map(PathBuf::from);
-    let explicit_config = values.remove("--config").map(PathBuf::from);
+    let explicit_config = match values.remove("--config").map(PathBuf::from) {
+        Some(path) if path.is_absolute() => Some(path),
+        Some(path) => Some(std::env::current_dir()?.join(path)),
+        None => None,
+    };
     let explicit_token = values.remove("--token-env");
     if doctor_only {
         return cli_doctor::run(&workspace, explicit_config.as_deref()).await;
@@ -546,6 +558,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         } else {
             None
         };
+    let workspace_explicit_config = explicit_config.clone();
     let config_file =
         explicit_config.or_else(|| local.as_ref().map(|paths| paths.config_file.clone()));
     let settings_paths = local.as_ref().cloned();
@@ -939,6 +952,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         {
             Some(cli_workspaces::Workspaces::new(
                 local.as_ref().expect("local Client paths").clone(),
+                workspace_explicit_config,
                 offline,
                 discoverable,
                 primary.clone(),
@@ -949,6 +963,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         {
             Some(cli_workspaces::Workspaces::new(
                 local.as_ref().expect("local Client paths").clone(),
+                workspace_explicit_config,
                 offline,
                 discoverable,
                 primary.clone(),

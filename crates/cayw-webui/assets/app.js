@@ -16,17 +16,7 @@ function renderLanNotice(open) {
   const target = document.getElementById('network-notice');
   if (!target) return;
   target.replaceChildren();
-  if (open) { const note = document.createElement('p'); note.className = 'notice'; note.textContent = '局域网访问已开放，未配置账号，网络内可直接访问。请在运行 CAYW 的电脑上打开本机管理页面，在设置中配置可选账号。'; target.append(note); }
-}
-
-function localServiceUrl(baseUrl) {
-  let url;
-  try { url = new URL(baseUrl); } catch { throw new Error('请填写服务启动时输出的完整本机地址。'); }
-  const local = url.hostname === 'localhost' || url.hostname === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
-  if (!local || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error('服务地址必须是本机 HTTP 地址，不能包含令牌、查询参数或片段。');
-  }
-  return url.toString();
+  if (open) { const note = document.createElement('p'); note.className = 'notice'; note.textContent = '局域网可以直接打开这个页面。如果要加账号，在运行 CAYW 的这台电脑上执行 cayw account。'; target.append(note); }
 }
 
 export function workspaceIdFromHash(hash) {
@@ -38,35 +28,6 @@ export function workspaceIdFromHash(hash) {
   const id = values[0];
   if (id === 'local' || /^workspace-[0-9a-f]{64}$/.test(id)) return id;
   throw new Error('工作区链接包含无效的本地工作区 ID。');
-}
-
-export function buildVisualEditorLaunchUrl({ baseUrl } = {}) {
-  return localServiceUrl(baseUrl);
-}
-
-export function buildTraceDebugLaunchUrl({ baseUrl } = {}) {
-  return localServiceUrl(baseUrl);
-}
-
-export function validatePlanFeedback(plan, draft) {
-  if (!plan || !plan.task_id) {
-    throw new Error('当前会话尚未生成计划，无法提交批注');
-  }
-  if (!draft?.decision) {
-    throw new Error('必须选择批注决定 (decision)');
-  }
-  if (!Number.isSafeInteger(plan.version) || plan.version < 1 || !/^[0-9a-f]{64}$/.test(plan.content_sha256 || '')) {
-    throw new Error('计划缺少有效的版本和内容摘要，请重新读取计划。');
-  }
-  return {
-    session_id: draft.session_id,
-    expected_task_id: plan.task_id,
-    expected_version: plan.version,
-    expected_content_sha256: plan.content_sha256,
-    decision: draft.decision,
-    summary: draft.summary || '批注审查意见',
-    comments: draft.comments || [],
-  };
 }
 
 export function messageText(message) {
@@ -152,6 +113,7 @@ const readMethods = new Set([
   'session.plan',
   'runtime.fleet',
   'session.context_overview',
+  'session.maintenance.status',
   'session.run_inspector',
   'approval.question',
   'artifacts.list',
@@ -161,6 +123,7 @@ const readMethods = new Set([
   'plannotator.list',
   'work.get',
   'work.list',
+  'proactive.status',
   'memory.status',
   'memory.entries',
   'memory.query',
@@ -280,7 +243,7 @@ function consumeWriteFact(view, record) {
 }
 
 function writeNotice(view) {
-  if (view?.writes.some(write => write.phase === 'uncertain')) return `连接中断，请求回执待确认。此会话（${clip(view.id, 160)}）的发送和 Fork 已暂停。当前 Runtime 不提供可查询的请求编号，后续执行无法证明这次请求的结果。请查看下方事件记录，并由宿主核对原请求是否执行及真实副作用；请勿重发、重复取消或通过刷新绕过。可在左侧新建会话处理独立任务，原会话保留等待核对。`;
+  if (view?.writes.some(write => write.phase === 'uncertain')) return '连接断了，这次有没有完成还不能确定。不要再发一次，也不要重复停止。可以左边新建一段对话做别的事。这段先留着。';
   if (view?.writes.length || view?.activeAttempt) return '任务仍在处理，收到结束结果后即可继续发送。';
   return '';
 }
@@ -483,8 +446,8 @@ export function sessionRunning(snapshot) {
 export function sessionBlocked(snapshot, view) {
   if (!snapshot) return '请先选择会话。';
   if (writeNotice(view)) return writeNotice(view);
-  if (frozen(snapshot, view)) return '强流程目前不可用，此会话保持冻结。可明确确认后 Fork 为新的普通聊天会话。';
-  if (!['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot))) return '会话状态尚未确认，请等待 Runtime 同步后再发送。';
+  if (frozen(snapshot, view)) return '这段对话停住了。可以另开一段普通对话，原来的记录还在。';
+  if (!['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot))) return '还在同步，稍后再发送。';
   return '';
 }
 export function canFork(view) {
@@ -501,7 +464,7 @@ export function stateLabel(snapshot, view, defaultApprovalMode = 'explicit') {
     return allAuto ? '自动审批中' : '等待审批';
   }
   if (view?.writes.length) return '正在处理';
-  if (frozen(snapshot, view)) return '强流程冻结';
+  if (frozen(snapshot, view)) return '已停住';
   const name = stateName(snapshot);
   return ({ idle: '就绪', ready: '就绪', running: '运行中', awaiting_approval: defaultApprovalMode === 'model_auto' ? '自动审批中' : '等待审批', cancelled: '已取消', failed: '执行失败', completed: '已完成', unknown: '状态待确认' })[name] ?? clip(name, 60);
 }
@@ -512,25 +475,22 @@ function boot() {
   const $ = id => document.getElementById(id);
   const ui = Object.fromEntries([
     'login-panel', 'login-form', 'login-error', 'login-button', 'username', 'password', 'account-fields', 'workspace', 'logout', 'connection-status',
-    'create-form', 'session-label', 'session-device', 'create-button', 'refresh-sessions', 'list-status', 'session-list', 'session-picker', 'session-picker-label',
+    'create-form', 'session-label', 'create-button', 'refresh-sessions', 'list-status', 'session-list',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
-    'blocked-notice', 'blocked-text', 'open-fork', 'live-section', 'live-text', 'event-log', 'event-count',
+    'blocked-notice', 'blocked-text', 'open-fork', 'live-section', 'live-text',
     'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork',
-    'refresh-capabilities', 'capability-content',
-    'panel-sidebar', 'panel-sidebar-status', 'panel-sidebar-guide', 'panel-sidebar-open', 'refresh-panels',
-    'panel-bottom', 'panel-bottom-status', 'panel-bottom-guide', 'panel-bottom-open',
-    'wb-tasks', 'wb-work', 'wb-usage', 'wb-memory', 'wb-artifacts', 'wb-recovery', 'wb-plannotator', 'wb-editor', 'wb-trace',
   ].map(id => [id, $(id)]));
   let authMode = 'local';
   let loginRequired = false;
   let connected = false;
   let runtimeApprovalMode = 'explicit';
   let workspaceId = null;
+  let mainWorkspaceId = null;
   let workspaceBusy = false;
+  const mainWorkspaceScope = () => mainWorkspaceId || workspaceId;
   let settings = { reset() {} };
   const sessionWorkspaces = new Map();
-  let toolAvailability = {};
   let loginGeneration = 0;
   let selected = null;
   let sessions = [];
@@ -551,7 +511,7 @@ function boot() {
     return element;
   };
   const errorText = error => clip(({
-    session_frozen: '强流程当前不可用，会话保持冻结。请在会话提示中确认后创建普通聊天分支。',
+    session_frozen: '这段对话停住了。可以另开一段普通对话，原来的记录还在。',
     budget_exceeded: '已用完配置的预算，本次执行已停止。',
   })[error?.code] ?? (error?.outcome_unknown ? '连接中断或请求结果待确认。页面不会自动重发，请等待事件同步。' : error?.message ?? '发生未知错误。'), 2500);
   const report = error => {
@@ -602,1184 +562,6 @@ function boot() {
   }
 
 
-  let panelCatalog = null;
-  let openedPanels = [];
-  let openedPanelsSession = null;
-  const panelSessionId = () => selected || 'webui-local';
-
-  async function panelsApi(method, params = {}) {
-    const controller = new AbortController();
-    controllers.add(controller);
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    try {
-      const response = await fetch('/api/panels', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method, params }),
-        signal: controller.signal,
-        cache: 'no-store',
-        credentials: 'same-origin',
-      });
-      let payload;
-      try { payload = await response.json(); } catch { throw new RpcError('invalid_response', '面板接口返回了无效 JSON。', false, response.status); }
-      if (!response.ok || payload?.error) {
-        const detail = payload?.error;
-        throw new RpcError(typeof detail?.code === 'string' ? detail.code : 'http_error', detail?.code === 'forbidden' && response.status === 403 ? '登录已失效，请重新输入账号密码。' : detail?.message ?? `面板请求失败（HTTP ${response.status}）。`, false, response.status);
-      }
-      if (!object(payload) || !Object.hasOwn(payload, 'result')) throw new RpcError('invalid_response', '面板响应缺少 result。', false, response.status);
-      return payload.result;
-    } catch (error) {
-      if (error.name === 'AbortError') throw new RpcError('transport_unknown', '面板请求连接已中断或超时。', false);
-      if (error instanceof TypeError) throw new RpcError('transport_unknown', '无法连接本机面板接口。', false);
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-      controllers.delete(controller);
-    }
-  }
-
-  function renderPanelGuide(target, entries, zone) {
-    target.replaceChildren();
-    for (const panel of array(entries)) {
-      const button = el('button', 'secondary', panel.title || panel.id);
-      button.type = 'button';
-      button.dataset.panelId = panel.id;
-      button.title = panel.description || panel.id;
-      button.addEventListener('click', () => openRegisteredPanel(panel.id, zone));
-      target.append(button);
-    }
-  }
-
-  function renderOpenedPanels() {
-    const sidebarOpen = ui['panel-sidebar-open'];
-    const bottomOpen = ui['panel-bottom-open'];
-    sidebarOpen.replaceChildren();
-    bottomOpen.replaceChildren();
-    const currentSession = panelSessionId();
-    const activePanels = openedPanelsSession === currentSession ? openedPanels.filter(p => !p.session_id || p.session_id === currentSession) : [];
-    for (const opened of activePanels) {
-      const card = el('div', 'panel-card');
-      card.dataset.active = opened.active ? 'true' : 'false';
-      card.append(el('strong', '', opened.title || opened.panel_id));
-      card.append(el('span', 'small muted', `${opened.panel_id}${opened.path ? ` · ${opened.path}` : ''}`));
-      const actions = el('div', 'actions');
-      const activate = el('button', 'quiet', '激活');
-      activate.type = 'button';
-      activate.addEventListener('click', () => activateOpenedPanel(opened.instance_id));
-      const close = el('button', 'quiet', '关闭');
-      close.type = 'button';
-      close.addEventListener('click', () => closeOpenedPanel(opened.instance_id));
-      actions.append(activate, close);
-      if (opened.panel_id === 'files') {
-        const reveal = el('button', 'quiet', '揭示路径');
-        reveal.type = 'button';
-        reveal.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'editor', opened.path || 'README.md'));
-        actions.append(reveal);
-      }
-      if (opened.panel_id === 'terminal-bottom') {
-        const focus = el('button', 'quiet', '聚焦终端');
-        focus.type = 'button';
-        focus.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'terminal'));
-        actions.append(focus);
-      }
-      card.append(actions);
-      if (opened.active) {
-        renderActivePanelContent(card, opened);
-      }
-      if (opened.zone === 'bottom') bottomOpen.append(card);
-      else sidebarOpen.append(card);
-    }
-    ui['panel-bottom'].hidden = !(array(panelCatalog?.bottom).length || activePanels.some(item => item.zone === 'bottom'));
-    ui['panel-bottom-status'].textContent = activePanels.filter(item => item.zone === 'bottom').length ? `${activePanels.filter(item => item.zone === 'bottom').length} 个已打开` : '可从目录打开底部面板';
-  }
-
-  function renderActivePanelContent(container, opened) {
-    if (!opened.active) return;
-    const body = el('div', 'panel-body');
-    const panelId = opened.panel_id;
-
-    if (panelId === 'editor') {
-      const cfgCard = el('div', 'item-card');
-      cfgCard.append(el('strong', '', '可视化编辑器服务配置'));
-
-      const addrId = `ed-addr-${opened.instance_id}`;
-      const addrLabel = el('label', 'small', '本地服务地址');
-      addrLabel.htmlFor = addrId;
-      const addrInput = el('input');
-      addrInput.id = addrId;
-      addrInput.type = 'text';
-      addrInput.placeholder = '粘贴编辑器启动时输出的 editor_url';
-      addrInput.value = opened.editor_addr || '';
-
-      const pathId = `ed-path-${opened.instance_id}`;
-      const pathLabel = el('label', 'small', '宿主记录的文件路径');
-      pathLabel.htmlFor = pathId;
-      const pathInput = el('input');
-      pathInput.id = pathId;
-      pathInput.type = 'text';
-      pathInput.placeholder = 'index.html';
-      pathInput.value = opened.path || 'index.html';
-
-      const actionsRow = el('div', 'control-row');
-      const openBtn = el('button', 'primary', '新窗口打开编辑器服务');
-      openBtn.type = 'button';
-      openBtn.disabled = true;
-      const validateAddress = () => { try { localServiceUrl(addrInput.value.trim()); openBtn.disabled = false; } catch { openBtn.disabled = true; } };
-      addrInput.addEventListener('input', validateAddress);
-      validateAddress();
-      openBtn.addEventListener('click', () => {
-        try {
-          const url = buildVisualEditorLaunchUrl({ baseUrl: addrInput.value.trim() });
-          window.open(url, '_blank', 'noopener,noreferrer');
-        } catch (error) { handleError(error); }
-      });
-
-      const updatePathBtn = el('button', 'secondary', '更新宿主记录');
-      updatePathBtn.type = 'button';
-      updatePathBtn.addEventListener('click', () => interactOpenedPanel(opened.instance_id, 'editor', pathInput.value.trim()));
-
-      actionsRow.append(openBtn, updatePathBtn);
-      const notice = el('p', 'small muted', `${toolAvailability.editor?.installed ? '已安装，需单独启动服务。' : '未检测到同目录安装；请先安装或提供已启动的本机服务地址。'} cargo install --path crates/cayw-visual-editor --bin cayw-visual-editor --locked；cayw-visual-editor --help。 在新窗口中输入 CAYW_EDITOR_TOKEN 登录。编辑项目和页面由编辑器启动参数确定；这里的文件路径只更新宿主记录。主网页令牌和 IPC 凭据不会传给编辑器。`);
-      cfgCard.append(addrLabel, addrInput, pathLabel, pathInput, actionsRow, notice);
-      body.append(cfgCard);
-    } else if (panelId === 'trace') {
-      const cfgCard = el('div', 'item-card');
-      cfgCard.append(el('strong', '', 'Trace Debug 外部调试服务'));
-
-      const addrId = `trace-addr-${opened.instance_id}`;
-      const addrLabel = el('label', 'small', '本地 Trace Debug 服务地址');
-      addrLabel.htmlFor = addrId;
-      const addrInput = el('input');
-      addrInput.id = addrId;
-      addrInput.type = 'text';
-      addrInput.placeholder = '粘贴 Trace 启动时输出的 web_url';
-      addrInput.value = opened.trace_addr || '';
-
-      const actionsRow = el('div', 'control-row');
-      const openBtn = el('button', 'primary', '新窗口打开 Trace Debug');
-      openBtn.type = 'button';
-      openBtn.disabled = true;
-      const validateAddress = () => { try { localServiceUrl(addrInput.value.trim()); openBtn.disabled = false; } catch { openBtn.disabled = true; } };
-      addrInput.addEventListener('input', validateAddress);
-      validateAddress();
-      openBtn.addEventListener('click', () => {
-        try {
-          const url = buildTraceDebugLaunchUrl({ baseUrl: addrInput.value.trim() });
-          window.open(url, '_blank', 'noopener,noreferrer');
-        } catch (error) { handleError(error); }
-      });
-      actionsRow.append(openBtn);
-      const notice = el('p', 'small muted', `${toolAvailability.trace?.installed ? '已安装，需单独启动服务。' : '未检测到同目录安装；请先安装或提供已启动的本机服务地址。'} cargo install --path crates/cayw-trace-debug --bin cayw-trace-debug --locked；cayw-trace-debug --help。 在新窗口中输入 CAYW_TRACE_WEB_TOKEN 登录。采集的会话由 Trace 启动参数确定。主网页令牌和 IPC 凭据不会传给 Trace 页面。`);
-      cfgCard.append(addrLabel, addrInput, actionsRow, notice);
-
-      const inspectCard = el('div', 'item-card');
-      const inspectH = el('div', 'control-row');
-      inspectH.append(el('strong', '', '会话执行透视与重放追踪 (session.run_inspector)'));
-      const refreshBtn = el('button', 'secondary', '刷新执行步骤');
-      refreshBtn.type = 'button';
-      inspectH.append(refreshBtn);
-
-      const inspectContent = el('div', 'item-list');
-      inspectContent.textContent = '点击刷新读取会话执行步骤与恢复时间线…';
-
-      const loadInspect = async () => {
-        const targetSessionId = panelSessionId();
-        const generation = selectionGeneration;
-        const login = loginGeneration;
-        try {
-          inspectContent.textContent = '正在读取执行透视…';
-          const res = await rpc('session.run_inspector', { session_id: targetSessionId, after: 0, limit: 100 });
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          inspectContent.replaceChildren();
-
-          const metaP = el('p', 'small muted', `扫描事件: ${res?.events_scanned ?? 0} / 总事件: ${res?.events_total ?? 0}${res?.has_more ? ' (存在更多)' : ''} · 协议版本: ${res?.protocol_version ?? 2}`);
-          inspectContent.append(metaP);
-
-          const steps = array(res?.snapshot?.steps);
-          if (!steps.length) {
-            inspectContent.append(el('p', 'small muted', '当前会话暂无执行步骤记录。'));
-          } else {
-            const stepsTable = el('div', 'item-list');
-            for (const step of steps) {
-              const sc = el('div', 'item-card');
-              const sh = el('div', 'control-row');
-              sh.append(el('strong', '', `[轮次 ${step.turn} · 序 ${step.ordinal}] ${step.tool || 'model'}`));
-              const badge = el('span', `badge ${step.outcome || ''}`, step.outcome || 'unknown');
-              sh.append(badge);
-              sh.append(el('span', 'small muted', `${step.elapsed_ms || 0}ms`));
-              sc.append(sh);
-              if (step.error_summary) {
-                sc.append(el('p', 'small error', `错误: ${step.error_summary}`));
-              }
-              if (step.params_digest) {
-                sc.append(el('p', 'small muted', `参数指纹: ${clip(step.params_digest, 40)}`));
-              }
-              stepsTable.append(sc);
-            }
-            inspectContent.append(stepsTable);
-          }
-
-          const paths = array(res?.timeline?.paths);
-          if (paths.length) {
-            const pathCard = el('div', 'item-card');
-            pathCard.append(el('strong', '', `恢复重试路径 (${paths.length} 条)`));
-            for (const p of paths) {
-              pathCard.append(el('p', 'small', `[${p.kind}] 步骤 ${p.failed_step_id} ➔ ${p.recovered_step_id || '未恢复'}`));
-            }
-            inspectContent.append(pathCard);
-          }
-        } catch (err) {
-          inspectContent.textContent = '读取执行透视失败：' + (err.message || String(err));
-        }
-      };
-
-      refreshBtn.addEventListener('click', loadInspect);
-      inspectCard.append(inspectH, inspectContent);
-      body.append(cfgCard, inspectCard);
-    } else if (panelId === 'artifacts') {
-      const topActions = el('div', 'control-row');
-      const refreshBtn = el('button', 'secondary', '刷新产物');
-      refreshBtn.type = 'button';
-      const saveRecoveryBtn = el('button', 'quiet', '保存快照');
-      saveRecoveryBtn.type = 'button';
-      const loadRecoveryBtn = el('button', 'quiet', '恢复快照');
-      loadRecoveryBtn.type = 'button';
-      topActions.append(refreshBtn, saveRecoveryBtn, loadRecoveryBtn);
-
-      const statusP = el('p', 'small muted', '');
-      const artContainer = el('div', 'item-list');
-      artContainer.textContent = '正在读取会话产物…';
-
-      saveRecoveryBtn.addEventListener('click', async () => {
-        try {
-          statusP.textContent = '正在保存产物快照…';
-          const res = await rpc('artifacts.recovery_save', {});
-          statusP.textContent = `产物快照已保存到磁盘恢复点 (版本 ${res?.version ?? 1})。`;
-        } catch (err) {
-          statusP.textContent = '保存快照失败：' + (err.message || String(err));
-        }
-      });
-
-      loadRecoveryBtn.addEventListener('click', async () => {
-        try {
-          statusP.textContent = '正在从磁盘恢复产物快照…';
-          await rpc('artifacts.recovery_load', {});
-          statusP.textContent = '产物快照恢复完成。';
-          await loadArts();
-        } catch (err) {
-          statusP.textContent = '恢复快照失败：' + (err.message || String(err));
-        }
-      });
-
-      const loadArts = async () => {
-        const targetSessionId = panelSessionId();
-        const generation = selectionGeneration;
-        const login = loginGeneration;
-        try {
-          const list = await rpc('artifacts.list', { session_id: targetSessionId });
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          artContainer.replaceChildren();
-          if (!array(list).length) {
-            artContainer.textContent = '当前会话暂无生成产物。';
-            return;
-          }
-          for (const item of list) {
-            const itemCard = el('div', 'item-card');
-            const header = el('div', 'control-row');
-            header.append(el('strong', '', item.title || item.artifact_id));
-            header.append(el('span', 'badge', item.kind || 'card'));
-            header.append(el('span', 'small muted', `v${item.content_version || 1}`));
-
-            const previewBox = el('div', 'artifact-preview-box');
-            previewBox.textContent = clip(item.body || '', 500);
-
-            const previewRow = el('div', 'control-row');
-            const previewBtn = el('button', 'quiet', '获取渲染投影');
-            previewBtn.type = 'button';
-            const previewResult = el('div', 'small muted');
-            previewBtn.addEventListener('click', async () => {
-              try {
-                previewResult.textContent = '正在生成投影…';
-                const p = await rpc('artifacts.preview', { artifact_id: item.artifact_id });
-                previewResult.textContent = `类型: ${p?.content_type || 'text/html'}, 字符数: ${(p?.html || '').length}`;
-              } catch (err) {
-                previewResult.textContent = '生成投影失败：' + (err.message || String(err));
-              }
-            });
-            previewRow.append(previewBtn, previewResult);
-
-            const actionRow = el('div', 'control-row');
-            const promptId = `art-prompt-${item.artifact_id}`;
-            const promptLabel = el('label', 'small', '后续指令');
-            promptLabel.htmlFor = promptId;
-            const promptInput = el('input');
-            promptInput.id = promptId;
-            promptInput.type = 'text';
-            promptInput.placeholder = '输入后续任务动作指令';
-            promptInput.value = `根据产物“${item.title}”继续执行后续任务`;
-
-            const actionBtn = el('button', 'secondary', '转发动作到 Runtime');
-            actionBtn.type = 'button';
-            actionBtn.addEventListener('click', async () => {
-              statusP.textContent = '正在转发动作到 Runtime…';
-              try {
-                const actionRes = await rpc('artifacts.action', {
-                  session_id: panelSessionId(),
-                  artifact_id: item.artifact_id,
-                  action_id: `action-${Date.now()}`,
-                  kind: 'button',
-                  intent: { type: 'follow_up_task', prompt: promptInput.value.trim() },
-                  expected_content_version: item.content_version,
-                  requested_at_ms: Date.now(),
-                });
-                statusP.textContent = `动作已转发！状态：${actionRes?.record?.status || 'applied'}`;
-              } catch (err) {
-                statusP.textContent = '动作转发失败：' + (err.message || String(err));
-              }
-            });
-            actionRow.append(promptLabel, promptInput, actionBtn);
-            itemCard.append(header, previewBox, previewRow, actionRow);
-            artContainer.append(itemCard);
-          }
-        } catch (err) {
-          artContainer.textContent = '读取产物失败：' + (err.message || String(err));
-        }
-      };
-
-      refreshBtn.addEventListener('click', loadArts);
-      loadArts();
-
-      const recCard = el('div', 'item-card');
-      recCard.append(el('strong', '', '工作区文件恢复点 (recovery.*)'));
-      const recStatusP = el('p', 'small muted', '正在读取恢复点状态…');
-      const recCreateRow = el('div', 'control-row');
-      const recPathsInput = el('input');
-      recPathsInput.type = 'text';
-      recPathsInput.placeholder = '恢复相对路径（逗号分隔，如 src/lib.rs）';
-      const recCreateBtn = el('button', 'secondary', '创建恢复点');
-      recCreateBtn.type = 'button';
-      const recRefreshBtn = el('button', 'quiet', '刷新恢复点');
-      recRefreshBtn.type = 'button';
-      recCreateRow.append(recPathsInput, recCreateBtn, recRefreshBtn);
-      const recPointsBox = el('div', 'item-list');
-      const recResultBox = el('div', 'item-list');
-
-      const renderRestoreSummary = (pid, paths, summary) => {
-        recResultBox.replaceChildren();
-        const card = el('div', 'item-card');
-        card.append(el('strong', '', summary.headline));
-        if (summary.undoSnapshot) {
-          card.append(el('p', 'small muted', `恢复前自动备份快照：${clip(summary.undoSnapshot, 16)}`));
-        }
-        for (const item of summary.details) {
-          card.append(el('p', 'small', `${item.label}（${item.paths.length}）：${item.paths.join(', ')}`));
-        }
-        if (!summary.complete && summary.needsConfirmation.length) {
-          const confirmBtn = el('button', 'secondary', '确认覆盖并恢复冲突文件');
-          confirmBtn.type = 'button';
-          confirmBtn.addEventListener('click', async () => {
-            confirmBtn.disabled = true;
-            await executeRestore(pid, paths, summary.needsConfirmation);
-          });
-          card.append(confirmBtn);
-        }
-        recResultBox.append(card);
-      };
-
-      const executeRestore = async (pid, paths, confirmOverwrite = []) => {
-        recStatusP.textContent = `正在处理恢复点 ${clip(pid, 16)}…`;
-        try {
-          const report = await rpc('recovery.restore', {
-            snapshot: pid,
-            paths,
-            confirm_overwrite: confirmOverwrite,
-          });
-          const summary = summarizeRestoreReport(report);
-          renderRestoreSummary(pid, paths, summary);
-          await loadRecovery();
-        } catch (err) {
-          if (err.auth) { handleError(err); return; }
-          recStatusP.textContent = '恢复失败：' + (err.message || String(err));
-        }
-      };
-
-      const loadRecovery = async () => {
-        const login = loginGeneration;
-        try {
-          const st = await rpc('recovery.status', {});
-          if (login !== loginGeneration) return;
-          if (!st || st.enabled === false) {
-            recStatusP.textContent = `状态：未启用或已停用${st?.disabled_reason || st?.warning ? ` (${st.disabled_reason || st.warning})` : ''}`;
-          } else {
-            const count = typeof st.snapshot_count === 'number' ? st.snapshot_count : (typeof st.point_count === 'number' ? st.point_count : '暂不可用');
-            const unknown = st.restore_outcome_unknown || st.PendingRestore;
-            const errors = [st.state_error, st.points_error].filter(Boolean).join('；');
-            recStatusP.textContent = `状态：已启用 · 恢复点数量：${count}${unknown ? ' · 存在未完成恢复需核对' : ''}${errors ? ` · 读取异常：${errors}` : ''}`;
-          }
-          const pts = await rpc('recovery.points', {});
-          if (login !== loginGeneration) return;
-          recPointsBox.replaceChildren();
-          const pointList = array(pts);
-          if (!pointList.length) {
-            recPointsBox.append(el('p', 'small muted', '当前工作区暂无恢复点。'));
-          } else {
-            for (const pt of pointList) {
-              const pRow = el('div', 'control-row');
-              const pid = typeof pt === 'string' ? pt : (pt.point_id || pt.id || '');
-              pRow.append(el('strong', '', clip(pid, 16)));
-              pRow.append(el('span', 'small muted', (typeof pt === 'object' && (pt.reason || pt.label)) || '恢复点'));
-              const restoreBtn = el('button', 'quiet', '恢复到此点');
-              restoreBtn.type = 'button';
-              restoreBtn.addEventListener('click', async () => {
-                const paths = recPathsInput.value
-                  .split(',')
-                  .map(s => s.trim())
-                  .filter(Boolean);
-                if (!paths.length) {
-                  recStatusP.textContent = '请先填写要恢复的文件相对路径（逗号分隔）。';
-                  return;
-                }
-                await executeRestore(pid, paths, []);
-              });
-              pRow.append(restoreBtn);
-              recPointsBox.append(pRow);
-            }
-          }
-        } catch (err) {
-          if (err.auth) { handleError(err); return; }
-          recStatusP.textContent = '读取恢复点状态失败：' + (err.message || String(err));
-        }
-      };
-      recCreateBtn.addEventListener('click', async () => {
-        recStatusP.textContent = '正在创建工作区恢复点…';
-        try {
-          await rpc('recovery.create', {});
-          recStatusP.textContent = '工作区恢复点已创建。';
-          await loadRecovery();
-        } catch (err) {
-          if (err.auth) { handleError(err); return; }
-          recStatusP.textContent = '创建恢复点失败：' + (err.message || String(err));
-        }
-      });
-      recRefreshBtn.addEventListener('click', loadRecovery);
-      recCard.append(recStatusP, recCreateRow, recResultBox, recPointsBox);
-      loadRecovery();
-
-      body.append(topActions, statusP, artContainer, recCard);
-    } else if (panelId === 'plannotator') {
-      const planInfoCard = el('div', 'item-card');
-      planInfoCard.append(el('strong', '', '权威共享计划状态 (session.plan)'));
-      const reviewedSessionId = panelSessionId();
-      const planFactP = el('p', 'small muted', '正在读取共享版本事实…');
-      const planSteps = el('div', 'item-list');
-      const reloadPlanBtn = el('button', 'secondary', '重新读取计划并清空意见');
-      reloadPlanBtn.type = 'button';
-      planInfoCard.append(planFactP, planSteps, reloadPlanBtn);
-
-      const form = el('form', 'item-card');
-      form.append(el('strong', '', '提交版本绑定批注'));
-
-      const decisionId = `plann-dec-${opened.instance_id}`;
-      const decisionLabel = el('label', 'small', '决策类型');
-      decisionLabel.htmlFor = decisionId;
-      const decisionSelect = el('select');
-      decisionSelect.id = decisionId;
-      for (const [val, label] of [
-        ['approve', '批准继续 (approve)'],
-        ['deny_with_feedback', '拒绝并反馈 (deny_with_feedback)'],
-        ['approve_with_notes', '带意见批准 (approve_with_notes)']
-      ]) {
-        const opt = el('option', '', label);
-        opt.value = val;
-        decisionSelect.append(opt);
-      }
-      decisionSelect.value = 'approve';
-
-      const summaryId = `plann-sum-${opened.instance_id}`;
-      const summaryLabel = el('label', 'small', '批注摘要');
-      summaryLabel.htmlFor = summaryId;
-      const summaryInput = el('input');
-      summaryInput.id = summaryId;
-      summaryInput.placeholder = '批注摘要 (如 架构设计确认)';
-      summaryInput.value = '计划审查确认';
-
-      const feedbackId = `plann-fb-${opened.instance_id}`;
-      const feedbackLabel = el('label', 'small', '审查意见');
-      feedbackLabel.htmlFor = feedbackId;
-      const feedbackInput = el('textarea');
-      feedbackInput.id = feedbackId;
-      feedbackInput.placeholder = '输入针对该计划版本的审查反馈意见…';
-      feedbackInput.rows = 2;
-      feedbackInput.value = '审查通过，允许继续执行';
-
-      const submitBtn = el('button', '', '提交版本绑定批注');
-      submitBtn.type = 'submit';
-      submitBtn.disabled = true;
-      const submitStatus = el('p', 'small muted', '');
-
-      form.append(
-        decisionLabel, decisionSelect,
-        summaryLabel, summaryInput,
-        feedbackLabel, feedbackInput,
-        submitBtn, submitStatus
-      );
-
-      let currentPlan = null;
-      const loadPlanAndFeedback = async () => {
-        const targetSessionId = panelSessionId();
-        const generation = selectionGeneration;
-        const login = loginGeneration;
-        try {
-          const plan = await rpc('session.plan', { session_id: targetSessionId });
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          currentPlan = plan;
-          planSteps.replaceChildren();
-          if (currentPlan && currentPlan.task_id) {
-            validatePlanFeedback(currentPlan, { session_id: targetSessionId, decision: 'approve' });
-            planFactP.textContent = `关联任务: ${currentPlan.task_id} · 共享版本: v${currentPlan.version} · 内容摘要: ${currentPlan.content_sha256}`;
-            for (const step of array(currentPlan.steps)) {
-              planSteps.append(el('p', 'small', `[${step.status}] ${step.text}`));
-            }
-            submitBtn.disabled = false;
-          } else {
-            planFactP.textContent = '当前会话暂无排队或执行中的计划（需在会话中生成计划后方可绑定版本批注）。';
-            submitBtn.disabled = true;
-          }
-        } catch (err) {
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          planFactP.textContent = '读取计划状态失败：' + (err.message || String(err));
-          submitBtn.disabled = true;
-        }
-        await loadFeedback();
-      };
-
-      reloadPlanBtn.addEventListener('click', async () => {
-        currentPlan = null;
-        submitBtn.disabled = true;
-        decisionSelect.value = 'approve';
-        summaryInput.value = '';
-        feedbackInput.value = '';
-        submitStatus.textContent = '意见已清空，请审阅重新读取的计划。';
-        await loadPlanAndFeedback();
-      });
-
-      form.addEventListener('submit', async event => {
-        event.preventDefault();
-        if (submitBtn.disabled || !currentPlan) return;
-        submitBtn.disabled = true;
-        submitStatus.textContent = '正在提交批注…';
-        try {
-          const payload = validatePlanFeedback(currentPlan, {
-            session_id: panelSessionId(),
-            decision: decisionSelect.value,
-            summary: summaryInput.value.trim() || '计划审查批注',
-            comments: [{
-              comment_id: `c-${Date.now()}`,
-              body: feedbackInput.value.trim() || '审查意见',
-              created_at_ms: Date.now(),
-            }],
-          });
-          payload.actor = 'webui-user';
-          const res = await rpc('plannotator.submit', payload);
-          submitStatus.textContent = `批注已提交！ID: ${res?.feedback_id || 'ok'}，已绑定版本 v${res?.target?.file?.version || currentPlan.version}。后续执行会再次核对计划版本。`;
-          await loadFeedback();
-        } catch (err) {
-          submitStatus.textContent = '提交批注失败：' + (err.message || String(err)) + '。意见已保留；重新审阅前不会自动改绑版本。';
-        }
-      });
-
-      const listContainer = el('div', 'item-list');
-      const loadFeedback = async () => {
-        const targetSessionId = panelSessionId();
-        const generation = selectionGeneration;
-        const login = loginGeneration;
-        try {
-          const items = await rpc('plannotator.list', { session_id: targetSessionId });
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          listContainer.replaceChildren();
-          if (!array(items).length) {
-            listContainer.textContent = '当前会话暂无批注记录。';
-            return;
-          }
-          for (const fb of items) {
-            const card = el('div', 'item-card');
-            const h = el('div', 'control-row');
-            h.append(el('strong', '', fb.target?.target_id || fb.target || 'target'));
-            h.append(el('span', `badge ${fb.decision || ''}`, fb.decision || 'apply'));
-            const verInfo = fb.target?.file ? `${fb.target.file.path} (v${fb.target.file.version})` : '';
-            card.append(h, el('p', 'small', fb.summary || ''), el('span', 'small muted', verInfo));
-            listContainer.append(card);
-          }
-        } catch (err) {
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          listContainer.textContent = '读取批注失败：' + (err.message || String(err));
-        }
-      };
-
-      loadPlanAndFeedback();
-      body.append(planInfoCard, form, el('label', 'small', '已保存批注记录'), listContainer);
-    } else if (panelId === 'tasks') {
-      const refreshBtn = el('button', 'secondary', '刷新任务与子 Agent Fleet');
-      refreshBtn.type = 'button';
-      const statusP = el('p', 'small muted', '');
-      const contentBox = el('div', 'item-list');
-      contentBox.textContent = '正在读取任务队列与子 Agent…';
-
-      const loadTasksAndFleet = async () => {
-        const targetSessionId = panelSessionId();
-        const generation = selectionGeneration;
-        const login = loginGeneration;
-        contentBox.textContent = '正在读取数据…';
-        try {
-          let tasks = null;
-          let tasksError = null;
-          try {
-            tasks = await rpc('session.tasks', { session_id: targetSessionId });
-          } catch (err) {
-            if (err.auth) { handleError(err); return; }
-            tasksError = err;
-          }
-
-          let plan = null;
-          let planError = null;
-          try {
-            plan = await rpc('session.plan', { session_id: targetSessionId });
-          } catch (err) {
-            if (err.auth) { handleError(err); return; }
-            planError = err;
-          }
-
-          let fleet = null;
-          let fleetError = null;
-          try {
-            fleet = await rpc('runtime.fleet', { parent_session_id: targetSessionId });
-          } catch (err) {
-            if (err.auth) { handleError(err); return; }
-            fleetError = err;
-          }
-
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-
-          contentBox.replaceChildren();
-
-          if (planError) {
-            const planBox = el('div', 'item-card');
-            planBox.append(el('strong', '', '当前计划 (读取失败)'));
-            planBox.append(el('p', 'small error', `读取计划失败：${errorText(planError)}`));
-            contentBox.append(planBox);
-          } else if (plan?.steps && Array.isArray(plan.steps)) {
-            const planBox = el('div', 'item-card');
-            planBox.append(el('strong', '', `当前计划 (v${plan.version || 1}) · 任务: ${plan.task_id || 'unknown'}`));
-            for (const step of plan.steps) {
-              const stepP = el('p', 'small', `[${step.status || 'pending'}] ${step.text || step.id}`);
-              planBox.append(stepP);
-            }
-            contentBox.append(planBox);
-          }
-
-          if (tasksError) {
-            const tasksCard = el('div', 'item-card');
-            tasksCard.append(el('strong', '', '会话任务队列 (读取失败)'));
-            tasksCard.append(el('p', 'small error', `读取任务队列失败：${errorText(tasksError)}`));
-            contentBox.append(tasksCard);
-          } else {
-            const taskItems = array(tasks);
-            const tasksCard = el('div', 'item-card');
-            tasksCard.append(el('strong', '', `会话任务队列 (${taskItems.length})`));
-            if (!taskItems.length) {
-              tasksCard.append(el('p', 'small muted', '当前会话暂无排队任务。'));
-            } else {
-              for (const t of taskItems) {
-                const tRow = el('div', 'control-row');
-                tRow.append(el('strong', '', t.id || 'task'));
-                tRow.append(el('span', 'badge', t.state || 'queued'));
-                tRow.append(el('span', 'small muted', clip(t.input?.text || '', 60)));
-                tasksCard.append(tRow);
-              }
-            }
-            contentBox.append(tasksCard);
-          }
-
-          if (fleetError) {
-            const fleetCard = el('div', 'item-card');
-            fleetCard.append(el('strong', '', '子 Agent 舰队管理 (FleetView · 读取失败)'));
-            fleetCard.append(el('p', 'small error', `读取子 Agent 舰队失败：${errorText(fleetError)}`));
-            contentBox.append(fleetCard);
-          } else {
-            const members = array(fleet?.members);
-            const fleetCard = el('div', 'item-card');
-            fleetCard.append(el('strong', '', `子 Agent 舰队管理 (FleetView · ${members.length} 个实例)`));
-            if (!members.length) {
-              fleetCard.append(el('p', 'small muted', '当前会话暂无派生的子 Agent。'));
-            } else {
-              for (const m of members) {
-                const mCard = el('div', 'item-card');
-                const mh = el('div', 'control-row');
-                mh.append(el('strong', '', m.label || m.child_task_id));
-                mh.append(el('span', `badge ${m.state || ''}`, m.state || 'running'));
-                mh.append(el('span', 'small muted', `深度: ${m.depth} · 模式: ${m.mode || 'foreground'}${m.detached ? ' (分离)' : ''}`));
-                mCard.append(mh);
-
-                if (m.error) {
-                  mCard.append(el('p', 'small error', `错误: ${m.error}`));
-                }
-
-                if (m.state === 'running' || m.state === 'Running') {
-                  const ctrlRow = el('div', 'control-row');
-                  const stopBtn = el('button', 'secondary', '停止子 Agent');
-                  stopBtn.type = 'button';
-                  stopBtn.addEventListener('click', async () => {
-                    statusP.textContent = `正在停止子任务 ${m.child_task_id}…`;
-                    try {
-                      await rpc('runtime.fleet.stop', { child_task_id: m.child_task_id });
-                      statusP.textContent = `子任务 ${m.child_task_id} 已发送停止信号。`;
-                      await loadTasksAndFleet();
-                    } catch (err) {
-                      if (err.auth) { handleError(err); return; }
-                      statusP.textContent = '停止子任务失败：' + (err.message || String(err));
-                    }
-                  });
-
-                  const steerInput = el('input');
-                  steerInput.type = 'text';
-                  steerInput.placeholder = '输入引导指令 (steer)…';
-                  const steerBtn = el('button', 'quiet', '发送引导');
-                  steerBtn.type = 'button';
-                  steerBtn.addEventListener('click', async () => {
-                    const text = steerInput.value.trim();
-                    if (!text) return;
-                    statusP.textContent = '正在向子任务发送引导指令…';
-                    try {
-                      await rpc('runtime.fleet.steer', { child_task_id: m.child_task_id, text });
-                      statusP.textContent = '已向子任务发送引导指令。';
-                      steerInput.value = '';
-                    } catch (err) {
-                      if (err.auth) { handleError(err); return; }
-                      statusP.textContent = '发送引导失败：' + (err.message || String(err));
-                    }
-                  });
-
-                  ctrlRow.append(stopBtn, steerInput, steerBtn);
-                  mCard.append(ctrlRow);
-                }
-
-                fleetCard.append(mCard);
-              }
-            }
-            contentBox.append(fleetCard);
-          }
-
-          const workCard = el('div', 'item-card');
-          workCard.append(el('strong', '', '跨工作区工作项管理 (WorkItems · work.*)'));
-          const workNotice = el('p', 'small muted', '');
-          const createRow = el('div', 'control-row');
-          const workTitleInput = el('input');
-          workTitleInput.type = 'text';
-          workTitleInput.placeholder = '新工作项标题…';
-          const workGoalInput = el('input');
-          workGoalInput.type = 'text';
-          workGoalInput.placeholder = '目标说明（可选）';
-          const workCreateBtn = el('button', 'secondary', '创建工作项');
-          workCreateBtn.type = 'button';
-          createRow.append(workTitleInput, workGoalInput, workCreateBtn);
-          const workListBox = el('div', 'item-list');
-          workCard.append(createRow, workNotice, workListBox);
-
-          try {
-            const workItems = await rpc('work.list', {});
-            const items = array(workItems);
-            if (!items.length) {
-              workListBox.append(el('p', 'small muted', '暂无工作项。'));
-            } else {
-              for (const w of items) {
-                const wCard = el('div', 'item-card');
-                const wh = el('div', 'control-row');
-                wh.append(el('strong', '', w.title || w.work_id));
-                wh.append(el('span', 'badge', w.lifecycle || w.status || 'open'));
-                wh.append(el('span', 'small muted', `ID: ${clip(w.work_id || '', 20)}`));
-                wCard.append(wh);
-                if (w.goal) wCard.append(el('p', 'small', w.goal));
-                const wActions = el('div', 'control-row');
-                for (const [act, label] of [['pause', '暂停'], ['resume', '继续'], ['stop', '停止']]) {
-                  const btn = el('button', 'quiet', label);
-                  btn.type = 'button';
-                  btn.addEventListener('click', async () => {
-                    workNotice.textContent = `正在对工作项 ${w.work_id} 执行${label}…`;
-                    try {
-                      await rpc(`work.${act}`, { work_id: w.work_id });
-                      workNotice.textContent = `工作项 ${w.work_id} 已${label}。`;
-                      await loadTasksAndFleet();
-                    } catch (err) {
-                      if (err.auth) { handleError(err); return; }
-                      workNotice.textContent = `${label}失败：` + (err.message || String(err));
-                    }
-                  });
-                  wActions.append(btn);
-                }
-                wCard.append(wActions);
-                workListBox.append(wCard);
-              }
-            }
-          } catch (err) {
-            if (err.auth) { handleError(err); return; }
-            workListBox.append(el('p', 'small muted', `当前工作区未启用主会话 WorkItem 或读取失败：${err.message || String(err)}`));
-          }
-
-          workCreateBtn.addEventListener('click', async () => {
-            const title = workTitleInput.value.trim();
-            if (!title) return;
-            const workId = `work-${Date.now()}`;
-            workNotice.textContent = '正在创建工作项…';
-            try {
-              await rpc('work.create', {
-                spec: {
-                  work_id: workId,
-                  owner_main_session_id: targetSessionId,
-                  title,
-                  goal: workGoalInput.value.trim() || title,
-                  acceptance_criteria: [],
-                },
-              });
-              workTitleInput.value = '';
-              workGoalInput.value = '';
-              workNotice.textContent = `已创建工作项 ${workId}。`;
-              await loadTasksAndFleet();
-            } catch (err) {
-              if (err.auth) { handleError(err); return; }
-              workNotice.textContent = '创建工作项失败：' + (err.message || String(err));
-            }
-          });
-          contentBox.append(workCard);
-        } catch (err) {
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          if (err.auth) { handleError(err); return; }
-          contentBox.textContent = '读取任务与 Fleet 失败：' + (err.message || String(err));
-        }
-      };
-
-      refreshBtn.addEventListener('click', loadTasksAndFleet);
-      loadTasksAndFleet();
-      body.append(refreshBtn, statusP, contentBox);
-    } else if (panelId === 'usage') {
-      const usageBtn = el('button', 'secondary', '刷新用量与上下文');
-      usageBtn.type = 'button';
-      const usageOutput = el('div', 'item-card');
-      usageOutput.textContent = '正在读取会话统计…';
-
-      const loadUsage = async () => {
-        const targetSessionId = panelSessionId();
-        const generation = selectionGeneration;
-        const login = loginGeneration;
-        try {
-          const stats = await rpc('session.context_overview', { session_id: targetSessionId });
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          usageOutput.replaceChildren();
-
-          const tokens = stats.tokens || {};
-          const cost = stats.cost || {};
-          const cache = stats.cache || {};
-
-          const pTokens = el('p', 'small', `Tokens 总量: ${tokens.total_tokens || 0} (输入: ${tokens.input || 0}, 输出: ${tokens.output || 0}, 推理: ${tokens.reasoning || 0})`);
-          const pCache = el('p', 'small', `缓存读取: ${cache.cache_read || tokens.cache_read || 0}, 缓存写入: ${cache.cache_write || tokens.cache_write || 0}, 命中率: ${cache.hit_rate != null ? (cache.hit_rate * 100).toFixed(1) + '%' : '0.0%'}`);
-          const remaining = stats.ledger_remaining_tokens;
-          const pLedger = el('p', 'small', `账本结算: ${stats.ledger_settled_tokens || 0}, 预留: ${stats.ledger_reserved_tokens || 0}, 未知计费: ${stats.ledger_charged_unknown_tokens || 0}, 剩余: ${remaining == null ? '不限' : remaining}${stats.usage_unknown ? ' [用量未知]' : ''}`);
-          const pCost = el('p', 'small', `费用结算状态: ${cost.status || 'unknown'}${cost.amount ? ` (${cost.amount} ${cost.currency || 'USD'})` : ''}`);
-          const pRounds = el('p', 'small', `请求次数: ${stats.request_count || 0}, 对话轮次: ${stats.turn_count || 0}`);
-
-          usageOutput.append(pTokens, pCache, pLedger, pCost, pRounds);
-
-          const comp = array(stats.composition);
-          if (comp.length) {
-            const compCard = el('div', 'item-card');
-            compCard.append(el('strong', '', 'Token 构成分析'));
-            for (const c of comp) {
-              compCard.append(el('p', 'small', `${c.kind}: ${c.tokens}`));
-            }
-            usageOutput.append(compCard);
-          }
-
-          const evo = array(stats.evolution);
-          if (evo.length) {
-            const evoCard = el('div', 'item-card');
-            evoCard.append(el('strong', '', `上下文演变过程 (${evo.length} 轮)`));
-            for (const step of evo) {
-              evoCard.append(el('p', 'small muted', `[轮次 ${step.turn}] 输入: ${step.usage?.input || 0}, 输出: ${step.usage?.output || 0}, 增量: ${step.usage?.total_tokens || 0}`));
-            }
-            usageOutput.append(evoCard);
-          }
-        } catch (err) {
-          if (login !== loginGeneration || generation !== selectionGeneration || targetSessionId !== panelSessionId()) {
-            return;
-          }
-          if (err.auth) { handleError(err); return; }
-          usageOutput.textContent = '读取用量失败：' + (err.message || String(err));
-        }
-      };
-
-      usageBtn.addEventListener('click', loadUsage);
-      loadUsage();
-
-      const memCard = el('div', 'item-card');
-      memCard.append(el('strong', '', '记忆管理 (memory.*)'));
-      const memStatusP = el('p', 'small muted', '正在读取记忆状态…');
-      const memRefreshBtn = el('button', 'quiet', '刷新记忆条目');
-      memRefreshBtn.type = 'button';
-      const memForgetRow = el('div', 'control-row');
-      const memStartInput = el('input');
-      memStartInput.type = 'number';
-      memStartInput.min = '1';
-      memStartInput.placeholder = '起始事件游标';
-      const memEndInput = el('input');
-      memEndInput.type = 'number';
-      memEndInput.min = '1';
-      memEndInput.placeholder = '结束事件游标';
-      const memReasonInput = el('input');
-      memReasonInput.type = 'text';
-      memReasonInput.placeholder = '遗忘原因（如：用户要求忘掉）';
-      const memForgetBtn = el('button', 'secondary', '按范围忘掉');
-      memForgetBtn.type = 'button';
-      memForgetRow.append(memStartInput, memEndInput, memReasonInput, memForgetBtn);
-      const memListBox = el('div', 'item-list');
-
-      const loadMemory = async () => {
-        const login = loginGeneration;
-        try {
-          const st = await rpc('memory.status', {});
-          if (login !== loginGeneration) return;
-          const visibleCount = typeof st?.active === 'number' ? st.active : (typeof st?.visible_entries === 'number' ? st.visible_entries : (typeof st?.entries === 'number' ? st.entries : '暂不可用'));
-          const forgottenCount = Array.isArray(st?.forgotten_ranges)
-            ? st.forgotten_ranges.length
-            : (typeof st?.forgotten_ranges === 'number' ? st.forgotten_ranges : '暂不可用');
-          const writerFailureNote = st?.writer_failures > 0
-            ? ` · 后台写入失败：${st.writer_failures} 次${st.last_writer_error ? `（${clip(st.last_writer_error, 120)}）` : ''}`
-            : '';
-          memStatusP.textContent = `可见条目：${visibleCount} · 遗忘范围：${forgottenCount}${writerFailureNote}`;
-          const entries = await rpc('memory.entries', {});
-          if (login !== loginGeneration) return;
-          memListBox.replaceChildren();
-          const list = array(entries);
-          if (!list.length) {
-            memListBox.append(el('p', 'small muted', '当前暂无已保存的记忆条目。'));
-          } else {
-            for (const entry of list) {
-              const eCard = el('div', 'item-card');
-              const entryId = entry.entry_id || entry.key || entry.id || '';
-              const entryKind = entry.kind || entry.category || 'memory';
-              eCard.append(
-                el('strong', '', `[${entryKind}] ${entryId}`),
-                el('p', 'small', entry.body || entry.value || entry.content || recordText(entry)),
-              );
-              const logIds = array(entry.source_log_ids);
-              const sources = array(entry.sources);
-              if (logIds.length || sources.length) {
-                const forgetEntryBtn = el('button', 'quiet', '忘掉此来源');
-                forgetEntryBtn.type = 'button';
-                forgetEntryBtn.addEventListener('click', async () => {
-                  try {
-                    if (logIds.length) {
-                      for (const logId of logIds) {
-                        const sep = String(logId).lastIndexOf(':');
-                        const srcSession = sep > 0 ? String(logId).slice(0, sep) : panelSessionId();
-                        const cursor = sep > 0 ? Number(String(logId).slice(sep + 1)) || 1 : 1;
-                        await rpc('memory.forget', {
-                          session_id: srcSession,
-                          start_cursor: cursor,
-                          end_cursor: cursor,
-                          reason: `忘掉记忆 ${entryId}`,
-                        });
-                      }
-                    } else {
-                      const s0 = sources[0];
-                      await rpc('memory.forget', {
-                        session_id: s0.session_id || panelSessionId(),
-                        start_cursor: s0.start_cursor || 1,
-                        end_cursor: s0.end_cursor || s0.start_cursor || 1,
-                        reason: `忘掉记忆 ${entryId}`,
-                      });
-                    }
-                    memStatusP.textContent = '已登记遗忘范围，后续上下文不再使用该记忆。';
-                    await loadMemory();
-                  } catch (err) {
-                    if (err.auth) { handleError(err); return; }
-                    memStatusP.textContent = '遗忘操作失败：' + (err.message || String(err));
-                  }
-                });
-                eCard.append(forgetEntryBtn);
-              }
-              memListBox.append(eCard);
-            }
-          }
-        } catch (err) {
-          if (err.auth) { handleError(err); return; }
-          memStatusP.textContent = `当前工作区未启用主会话记忆或读取失败：${err.message || String(err)}`;
-        }
-      };
-
-      memForgetBtn.addEventListener('click', async () => {
-        const startCursor = Number(memStartInput.value);
-        const endCursor = Number(memEndInput.value || memStartInput.value);
-        if (!Number.isSafeInteger(startCursor) || startCursor < 1 || !Number.isSafeInteger(endCursor) || endCursor < startCursor) {
-          memStatusP.textContent = '请填写有效的起止事件游标（正整数）。';
-          return;
-        }
-        try {
-          await rpc('memory.forget', {
-            session_id: panelSessionId(),
-            start_cursor: startCursor,
-            end_cursor: endCursor,
-            reason: memReasonInput.value.trim() || '用户界面手动忘掉',
-          });
-          memStartInput.value = '';
-          memEndInput.value = '';
-          memReasonInput.value = '';
-          memStatusP.textContent = '已登记遗忘范围，原事件日志保留，后续不再注入。';
-          await loadMemory();
-        } catch (err) {
-          if (err.auth) { handleError(err); return; }
-          memStatusP.textContent = '按范围忘掉失败：' + (err.message || String(err));
-        }
-      });
-      memRefreshBtn.addEventListener('click', loadMemory);
-      memCard.append(memStatusP, memRefreshBtn, memForgetRow, memListBox);
-      loadMemory();
-
-      body.append(usageBtn, usageOutput, memCard);
-    }
-
-    container.append(body);
-  }
-
-  async function syncPanelsForSession(sessionId, generation = selectionGeneration, login = loginGeneration) {
-    if (!connected) return;
-    try {
-      const list = await panelsApi('panels.list_open', { session_id: sessionId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
-      openedPanelsSession = sessionId;
-      renderOpenedPanels();
-    } catch (error) {
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      handleError(error);
-    }
-  }
-
-  async function refreshPanels() {
-    if (!connected) return;
-    const login = loginGeneration;
-    const generation = selectionGeneration;
-    const sessionId = panelSessionId();
-    ui['panel-sidebar-status'].textContent = '正在读取面板目录…';
-    try {
-      const catalog = await panelsApi('panels.catalog');
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      panelCatalog = catalog;
-      renderPanelGuide(ui['panel-sidebar-guide'], catalog?.sidebar, 'sidebar');
-      renderPanelGuide(ui['panel-bottom-guide'], catalog?.bottom, 'bottom');
-      const ids = array(catalog?.sidebar).map(panel => panel.id).concat(array(catalog?.bottom).map(panel => panel.id));
-      ui['panel-sidebar-status'].textContent = ids.length ? `已注册 ${[...new Set(ids)].length} 个面板` : '暂无已注册面板';
-      const list = await panelsApi('panels.list_open', { session_id: sessionId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
-      openedPanelsSession = sessionId;
-      renderOpenedPanels();
-    } catch (error) {
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      ui['panel-sidebar-status'].textContent = errorText(error);
-      if (error.auth) disconnect(error.message);
-    }
-  }
-
-  async function openRegisteredPanel(panelId, zone) {
-    const login = loginGeneration;
-    const generation = selectionGeneration;
-    const sessionId = panelSessionId();
-    report(null);
-    try {
-      const params = { session_id: sessionId, panel_id: panelId, zone, activate: true };
-      if (panelId === 'files') params.path = 'README.md';
-      await panelsApi('panels.open', params);
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      const list = await panelsApi('panels.list_open', { session_id: sessionId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
-      openedPanelsSession = sessionId;
-      renderOpenedPanels();
-    } catch (error) {
-      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
-    }
-  }
-
-  async function activateOpenedPanel(instanceId) {
-    const login = loginGeneration;
-    const generation = selectionGeneration;
-    const sessionId = panelSessionId();
-    try {
-      await panelsApi('panels.activate', { session_id: sessionId, instance_id: instanceId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      const list = await panelsApi('panels.list_open', { session_id: sessionId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
-      openedPanelsSession = sessionId;
-      renderOpenedPanels();
-    } catch (error) {
-      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
-    }
-  }
-
-  async function closeOpenedPanel(instanceId) {
-    const login = loginGeneration;
-    const generation = selectionGeneration;
-    const sessionId = panelSessionId();
-    try {
-      await panelsApi('panels.close', { session_id: sessionId, instance_id: instanceId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      const list = await panelsApi('panels.list_open', { session_id: sessionId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
-      openedPanelsSession = sessionId;
-      renderOpenedPanels();
-    } catch (error) {
-      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
-    }
-  }
-
-  async function interactOpenedPanel(instanceId, kind, path) {
-    const login = loginGeneration;
-    const generation = selectionGeneration;
-    const sessionId = panelSessionId();
-    try {
-      const params = { session_id: sessionId, instance_id: instanceId, kind };
-      if (path) params.path = path;
-      await panelsApi('panels.interact', params);
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      const list = await panelsApi('panels.list_open', { session_id: sessionId });
-      if (login !== loginGeneration || generation !== selectionGeneration || sessionId !== panelSessionId()) return;
-      openedPanels = array(list).map(p => ({ ...p, session_id: sessionId }));
-      openedPanelsSession = sessionId;
-      renderOpenedPanels();
-    } catch (error) {
-      if (login === loginGeneration && generation === selectionGeneration && sessionId === panelSessionId()) handleError(error);
-    }
-  }
-
   function disconnect(reason = '') {
     settings.reset();
     loginGeneration++;
@@ -1805,22 +587,10 @@ function boot() {
     ui['connection-status'].textContent = '尚未连接';
     ui['password'].value = '';
     ui['messages'].replaceChildren();
-    ui['event-log'].replaceChildren();
     ui['live-text'].textContent = '';
     ui['session-list'].replaceChildren();
-    ui['session-picker'].open = true;
     setPromptValue('');
     ui['fork-dialog'].close();
-    if ($('settings-dialog')?.open) $('settings-dialog').close();
-    panelCatalog = null;
-    openedPanels = [];
-    openedPanelsSession = null;
-    ui['panel-sidebar-guide'].replaceChildren();
-    ui['panel-sidebar-open'].replaceChildren();
-    ui['panel-bottom-guide'].replaceChildren();
-    ui['panel-bottom-open'].replaceChildren();
-    ui['panel-sidebar-status'].textContent = '连接后显示已注册侧栏面板。';
-    ui['panel-bottom'].hidden = true;
     ui['login-button'].focus();
   }
 
@@ -1848,7 +618,8 @@ function boot() {
       const button = el('button', 'session-item');
       button.type = 'button';
       button.setAttribute('aria-current', String(session.id === selected));
-      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', `${stateLabel(session, views.get(session.id), runtimeApprovalMode)} · ${clip(session.id, 20)}`));
+      button.dataset.sessionId = session.id;
+      button.append(el('strong', '', clip(session.label || '未命名会话', 160)), el('span', '', stateLabel(session, views.get(session.id), runtimeApprovalMode)));
       button.addEventListener('click', () => selectSession(session.id));
       fragment.append(button);
     }
@@ -1899,10 +670,6 @@ function boot() {
     clearTimeout(timer);
     selected = id;
     sessionWorkspaces.set(id, workspaceId);
-    openedPanels = [];
-    openedPanelsSession = id;
-    renderOpenedPanels();
-    syncPanelsForSession(id, generation, login);
     if (!views.has(id)) rememberView(createView(id));
     ui['poll-status'].textContent = '正在读取会话…';
     setPromptValue('');
@@ -1925,7 +692,6 @@ function boot() {
         report(auxError);
         ui['poll-status'].textContent = `部分状态暂不可用：${errorText(auxError)}`;
       }
-      if (window.matchMedia('(max-width: 640px)').matches) ui['session-picker'].open = false;
       schedulePoll(0, generation);
     } catch (error) {
       if (login !== loginGeneration || generation !== selectionGeneration) return;
@@ -1940,15 +706,15 @@ function boot() {
     const view = activeView();
     const snapshot = view?.snapshot;
     ui['session-title'].textContent = clip(snapshot?.label || (selected ? '正在读取会话…' : '选择或创建会话'), 160);
-    ui['session-picker-label'].textContent = clip(snapshot?.label || '选择或新建', 60);
     ui['session-state'].textContent = snapshot ? stateLabel(snapshot, view, runtimeApprovalMode) : '等待选择';
     const attention = snapshot && (frozen(snapshot, view) || view?.writes.some(write => write.phase === 'uncertain') || !['idle', 'running', 'awaiting_approval'].includes(stateName(snapshot)));
     ui['blocked-text'].textContent = attention ? sessionBlocked(snapshot, view) : '';
     ui['blocked-notice'].hidden = !attention;
     ui['open-fork'].hidden = !snapshot || !frozen(snapshot, view);
     ui['open-fork'].disabled = !canFork(view);
+    ui.conversation.dataset.cursor = String(view?.cursor ?? 0);
+    ui.conversation.dataset.eventCursors = array(view?.events).map(record => record.cursor).join(',');
     renderMessages(view);
-    renderEvents(view);
     renderComposer();
   }
 
@@ -1958,7 +724,7 @@ function boot() {
     const pendingApprovals = array(view?.snapshot?.pending_approvals).slice(0, 30);
     if (!messages.length && !pendingApprovals.length) {
       const empty = el('div', 'empty');
-      empty.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '继续一段对话'), el('p', '', view?.snapshot ? '输入任务，Runtime 会在这里保留对话和工具记录。' : '从左侧选择已有会话，或创建新会话。'));
+      empty.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '开始对话'), el('p', '', view?.snapshot ? '在下面说你要做的事。' : '左边选一段已有的，或新建一段。'));
       fragment.append(empty);
     }
     const expanded = new Set(view?.expandedRecords ?? []);
@@ -2035,18 +801,6 @@ function boot() {
     ui['history-note'].textContent = total > MAX_MESSAGES ? '显示最近的对话，完整记录保存在本机。' : (messages.length ? `${messages.length} 条消息` : '');
     ui['live-text'].textContent = view?.liveText ?? '';
     ui['live-section'].hidden = !view?.liveText;
-  }
-
-  function renderEvents(view) {
-    const events = array(view?.events);
-    const fragment = document.createDocumentFragment();
-    for (const record of events) {
-      const details = el('details');
-      details.append(el('summary', '', `#${record.cursor} · ${clip(record.event?.type ?? record.event?.kind ?? '事件', 100)}`), el('pre', '', recordText(record.event)));
-      fragment.append(details);
-    }
-    ui['event-log'].replaceChildren(fragment);
-    ui['event-count'].textContent = `${events.length} · 游标 ${view?.cursor ?? 0}`;
   }
 
   function renderComposer() {
@@ -2162,8 +916,7 @@ function boot() {
       // Commit and render successfully consumed events before a later snapshot
       // request can fail. Reconnection then starts at exactly this cursor.
       rememberView(view);
-      renderEvents(view);
-      ui['live-text'].textContent = view.liveText;
+        ui['live-text'].textContent = view.liveText;
       ui['live-section'].hidden = !view.liveText;
       const terminalCursor = terminalReadCursor(view);
       if (terminalCursor !== null) {
@@ -2285,7 +1038,7 @@ function boot() {
     if (ui['login-button'].disabled) return;
     ui['password'].value = '';
     ui['login-button'].disabled = true;
-    ui['login-button'].textContent = '连接中…';
+    ui['login-button'].textContent = '进入中…';
     ui['login-error'].textContent = '';
     const login = ++loginGeneration;
     try {
@@ -2302,8 +1055,6 @@ function boot() {
       report(null);
       renderView();
       await refreshWorkspaceCatalog();
-      await refreshOptionalTools();
-      await refreshPanels();
       await refreshSessions();
       if (login === loginGeneration && sessions.length) await selectSession(sessions[0].id);
       else ui['session-label'].focus();
@@ -2312,7 +1063,7 @@ function boot() {
       disconnect(errorText(error));
     } finally {
       ui['login-button'].disabled = false;
-      ui['login-button'].textContent = '连接';
+      ui['login-button'].textContent = '进入';
     }
   }
   ui['login-form'].addEventListener('submit', async event => {
@@ -2354,6 +1105,7 @@ function boot() {
     try {
       const catalog = await rpc('settings.workspaces.list');
       if (!Array.isArray(catalog?.workspaces)) throw new Error('当前 Client 未提供工作区目录。');
+      mainWorkspaceId = catalog.workspaces.find(workspace => workspace.main_session)?.id || null;
       const active = await rpc('settings.workspace');
       const current = catalog.workspaces.find(workspace => workspace.path === active?.workspace);
       if (!current) throw new Error('当前工作区不在 Client 的登记目录中。');
@@ -2365,26 +1117,8 @@ function boot() {
       }
       picker.value = workspaceId;
       $('switch-workspace').disabled = workspaceBusy;
-      status.textContent = '所有工作区都通过唯一 Client 打开。新目录使用 cayw init --workspace DIR 登记后刷新；切换不停止旧任务。';
-    } catch (error) { $('switch-workspace').disabled = true; status.textContent = `工作区目录不可用，请确认唯一 Client 正在运行。${error.message || String(error)}`; }
-  }
-  async function refreshOptionalTools() {
-    const container = $('optional-tools-status');
-    try {
-      const tools = await rpc('settings.tools');
-      if (!object(tools?.editor) || !object(tools?.trace) || !object(tools?.pi)) throw new Error('宿主未提供可选工具状态；连接外部服务前请先确认已安装并启动。');
-      toolAvailability = tools; container.replaceChildren(el('p', '', tools.note || '请在 CAYW 源码根目录运行安装命令，并单独启动外部服务。'));
-      for (const [name, label] of [['editor','可视化编辑器'],['trace','Trace 调试'],['pi','Pi 兼容']]) {
-        const item = tools[name]; const state = !item.installed ? '未安装 / 未编译' : name === 'pi' ? (item.enabled ? '已启用' : '未启用') : '已安装，需单独启动并连接服务';
-        container.append(el('p', '', `${label}：${state}`), el('pre', '', `${item.install}\n${item.start}`));
-        const button = $('wb-' + name);
-        if (button) { button.disabled = !item.installed; button.textContent = `${label}（${item.installed ? '需连接' : '未安装'}）`; button.title = `${state}。${item.install}；${item.start}`; }
-      }
-    } catch (error) {
-      toolAvailability = {};
-      for (const name of ['editor','trace']) { const button = $('wb-' + name); if (button) { button.disabled = true; button.textContent = `${name === 'editor' ? '可视化编辑器' : 'Trace 调试'}（状态未确认）`; } }
-      container.textContent = `可选工具状态未确认，请确认服务与界面版本一致；安装与启动说明见本地工作流文档。${error.message || String(error)}`;
-    }
+      status.textContent = '';
+    } catch (error) { $('switch-workspace').disabled = true; status.textContent = `工作区列表没读到。${error.message || String(error)}`; }
   }
   async function switchWorkspace() {
     if (workspaceBusy || !connected) return;
@@ -2392,7 +1126,7 @@ function boot() {
     workspaceBusy = true; $('switch-workspace').disabled = true;
     const login = loginGeneration;
     const status = $('workspace-switch-status');
-    status.textContent = '正在通过唯一 Client 打开工作区；原工作区任务继续运行…';
+    status.textContent = '正在打开…';
     try {
       const target = await rpc('settings.workspaces.open', {id:$('workspace-choice').value});
       if (login !== loginGeneration) return;
@@ -2403,24 +1137,20 @@ function boot() {
         settings.reset();
         workspaceId = target.id;
         ++selectionGeneration; ++listGeneration; clearTimeout(timer);
-        selected = null; sessions = []; openedPanels = []; openedPanelsSession = null;
-        ui['fork-dialog'].close(); setPromptValue(''); ui['session-picker'].open = true;
-        report(null); renderSessionList(); renderView(); renderOpenedPanels();
-        await refreshPanels(); await refreshSessions();
+        selected = null; sessions = [];
+        ui['fork-dialog'].close(); setPromptValue('');        report(null); renderSessionList(); renderView();
+await refreshSessions();
         if (sessions.length) await selectSession(sessions[0].id);
       }
       $('workspace-choice').value = target.id;
       window.history?.replaceState(null, '', `#workspace=${target.id}`);
-      await refreshOptionalTools();
-      status.textContent = `当前：${target.path}。${target.reused ? '已复用 Client 内现有 Runtime。' : '已由唯一 Client 打开 Runtime。'}旧工作区任务继续运行。`;
+      status.textContent = target.path;
     } catch (error) { status.textContent = errorText(error); }
     finally { workspaceBusy = false; $('switch-workspace').disabled = false; }
   }
   $('switch-workspace').addEventListener('click', switchWorkspace);
   $('refresh-workspaces').addEventListener('click', refreshWorkspaceCatalog);
-  $('refresh-optional-tools').addEventListener('click', refreshOptionalTools);
 
-  settings = mountSettings(rpc) || settings;
   ui['logout'].addEventListener('click', async () => {
     settings.reset();
     try {
@@ -2430,7 +1160,6 @@ function boot() {
     } catch (error) { report(error); }
   });
   ui['refresh-sessions'].addEventListener('click', refreshSessions);
-  ui['refresh-panels'].addEventListener('click', refreshPanels);
   ui['create-form'].addEventListener('submit', async event => {
     event.preventDefault();
     if (ui['create-button'].disabled || !ui['session-label'].value.trim()) return;
@@ -2441,15 +1170,12 @@ function boot() {
     report(null);
     try {
       const params = { label: ui['session-label'].value.trim() };
-      const deviceVal = ui['session-device']?.value?.trim();
-      if (deviceVal && deviceVal !== 'local') params.device_id = deviceVal;
       const snapshot = await rpc('session.create', params);
       sessionWorkspaces.set(snapshot.id, scope);
       if (login !== loginGeneration || scope !== workspaceId) return;
       const view = applySnapshot(createView(snapshot.id), snapshot, true);
       rememberView(view);
       ui['session-label'].value = '';
-      if (ui['session-device']) ui['session-device'].value = '';
       updateSessionSummary(snapshot);
       await selectSession(snapshot.id);
     } catch (error) {
@@ -2565,14 +1291,14 @@ function boot() {
     } catch (error) { if (login === loginGeneration) handleError(error); }
     finally {
       ui['cancel-button'].dataset.pending = 'false';
-      ui['cancel-button'].textContent = '停止运行';
+      ui['cancel-button'].textContent = '停止';
       renderComposer();
     }
   });
 
   ui['open-fork'].addEventListener('click', () => {
     if (!canFork(activeView())) return;
-    ui['fork-label'].value = `${activeView()?.snapshot?.label ?? '会话'} · 普通聊天`.slice(0, 160);
+    ui['fork-label'].value = `${activeView()?.snapshot?.label ?? '对话'} · 继续`.slice(0, 160);
     ui['fork-confirm'].checked = false;
     ui['fork-error'].textContent = '';
     ui['fork-dialog'].showModal();
@@ -2590,7 +1316,7 @@ function boot() {
       const snapshot = await writeRpc(id, 'session.fork', { session_id: id, label: ui['fork-label'].value.trim(), confirm: true, mode: 'chat' });
       // Validate the operation receipt before clearing its source lock. A
       // malformed success may already have created a session and cannot retry.
-      if (typeof snapshot?.id !== 'string' || !snapshot.id || snapshot.id === id) throw new RpcError('invalid_response', '新会话结果不完整，请由宿主核对；不要再次 Fork。', true);
+      if (typeof snapshot?.id !== 'string' || !snapshot.id || snapshot.id === id) throw new RpcError('invalid_response', '新对话结果不完整。不要再另开一次。', true);
       const forkView = applySnapshot(createView(snapshot.id), snapshot, true);
       const source = views.get(id);
       if (source && login === loginGeneration) rememberView({ ...source, writes: source.writes.filter(write => write.method !== 'session.fork') });
@@ -2609,277 +1335,13 @@ function boot() {
       }
     } finally {
       ui['fork-button'].disabled = false;
-      ui['fork-button'].textContent = '确认 Fork';
+      ui['fork-button'].textContent = '另开';
     }
   });
-
-  ui['refresh-capabilities'].addEventListener('click', async () => {
-    const login = loginGeneration;
-    ui['refresh-capabilities'].disabled = true;
-    ui['capability-content'].textContent = '正在读取…';
-    try {
-      const capabilities = await rpc('capabilities.list');
-      if (login === loginGeneration) ui['capability-content'].textContent = recordText(capabilities);
-    } catch (error) {
-      if (login === loginGeneration) {
-        ui['capability-content'].textContent = errorText(error);
-        if (error.auth) disconnect(error.message);
-      }
-    } finally { ui['refresh-capabilities'].disabled = false; }
-  });
-
-  const setupWbButton = (btnId, panelId, zone = 'sidebar') => {
-    const button = ui[btnId];
-    if (!button) return;
-    button.addEventListener('click', async () => {
-      const currentSession = panelSessionId();
-      if (openedPanelsSession !== currentSession) {
-        openedPanels = [];
-        openedPanelsSession = currentSession;
-        renderOpenedPanels();
-      }
-      const existing = openedPanels.find(p => p.panel_id === panelId && (!p.session_id || p.session_id === currentSession));
-      if (existing) {
-        await activateOpenedPanel(existing.instance_id);
-      } else {
-        await openRegisteredPanel(panelId, zone);
-      }
-    });
-  };
-  setupWbButton('wb-tasks', 'tasks', 'sidebar');
-  setupWbButton('wb-work', 'tasks', 'sidebar');
-  setupWbButton('wb-usage', 'usage', 'sidebar');
-  setupWbButton('wb-memory', 'usage', 'sidebar');
-  setupWbButton('wb-artifacts', 'artifacts', 'sidebar');
-  setupWbButton('wb-recovery', 'artifacts', 'sidebar');
-  setupWbButton('wb-plannotator', 'plannotator', 'sidebar');
-  setupWbButton('wb-editor', 'editor', 'sidebar');
-  setupWbButton('wb-trace', 'trace', 'sidebar');
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && connected && selected) schedulePoll(0);
   });
   window.addEventListener('online', () => { if (connected && selected) schedulePoll(0); });
   window.addEventListener('pagehide', () => { ui.password.value = ''; for (const controller of controllers) controller.abort(); });
-}
-
-// Host settings share the existing authenticated RPC and its cancellation/error
-// handling. Neither credential values nor plugin code are stored by the browser.
-function mountSettings(rpc) {
-  const $ = id => document.getElementById(id);
-  const open = $('open-settings');
-  if (!open) return;
-  const dialog = $('settings-dialog');
-  let busy = false;
-  let generation = 0;
-  const status = text => { $('settings-status').textContent = text; };
-  const button = (text, handler) => {
-    const current = generation;
-    const node = document.createElement('button'); node.type = 'button'; node.textContent = text;
-    node.addEventListener('click', () => { if (current === generation) return action(handler); }); return node;
-  };
-  async function action(handler) {
-    if (busy) return;
-    const current = generation;
-    busy = true; dialog.setAttribute('aria-busy', 'true'); status('处理中…');
-    try { await handler(current); if (current === generation) status('已完成。'); }
-    catch (error) { if (current === generation) status(error.message || String(error)); }
-    finally { if (current === generation) { busy = false; dialog.removeAttribute('aria-busy'); } }
-  }
-  let accountRevision = null;
-  let accountCanManage = false;
-  let accountBusy = false;
-  const clearAccountPasswords = () => { $('account-password').value = ''; $('account-confirm').value = ''; };
-  function accountControls() {
-    for (const id of ['account-username','account-password','account-confirm','save-account']) $(id).disabled = !accountCanManage || accountBusy;
-  }
-  function showAccount(state) {
-    accountRevision = state.revision ?? null; accountCanManage = state.can_manage === true;
-    if (!$('account-username').value || !accountBusy) $('account-username').value = state.username || '';
-    $('account-settings-status').textContent = state.message || '账号状态已读取。';
-    renderLanNotice(state.lan_active === true && state.login_required !== true);
-    accountControls();
-  }
-  async function refreshAccount(current = generation) {
-    try {
-      const response = await fetch('/api/settings/account', {credentials:'same-origin',cache:'no-store'});
-      const state = await response.json();
-      if (current !== generation) return;
-      if (!response.ok) throw new Error(state.error?.message || '无法读取账号状态');
-      showAccount(state);
-    } catch (error) { if (current === generation) { accountCanManage = false; accountControls(); $('account-settings-status').textContent = error.message || '账号状态未确认，请刷新重试。'; } }
-  }
-  $('account-settings-form').addEventListener('submit', async event => {
-    event.preventDefault(); if (accountBusy || !accountCanManage) return;
-    const current = generation;
-    const values = {username:$('account-username').value,password:$('account-password').value,confirm_password:$('account-confirm').value,expected_revision:accountRevision};
-    clearAccountPasswords();
-    if (values.password !== values.confirm_password) { $('account-settings-status').textContent = '两次密码不一致，未保存。'; return; }
-    accountBusy = true; accountControls(); $('account-settings-status').textContent = '正在保存账号…';
-    try {
-      const response = await fetch('/api/settings/account', {method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});
-      const state = await response.json();
-      if (current !== generation) return;
-      if (!response.ok) { if (state.error?.outcome_unknown) accountCanManage = false; throw new Error(state.error?.message || '保存未完成，请刷新账号状态核对。'); }
-      showAccount(state);
-      // The server's current status distinguishes immediate LAN activation
-      // from a local-only gateway saving an account for its next LAN launch.
-    } catch (error) { if (current === generation) { const unconfirmed = error instanceof TypeError || error instanceof SyntaxError; if (unconfirmed) accountCanManage = false; $('account-settings-status').textContent = unconfirmed ? '保存回执未确认，请刷新账号状态核对；不会自动重试。' : error.message; } }
-    finally { if (current === generation) { accountBusy = false; accountControls(); clearAccountPasswords(); } }
-  });
-  $('refresh-account').addEventListener('click', () => { if (!accountBusy) refreshAccount(); });
-  const modelForm = $('model-settings-form');
-  let editingModel = null;
-  let modelNames = new Set();
-  function credentialControls() {
-    const fields = modelForm.elements;
-    if (!fields) return;
-    const replacing = fields.credential.value === 'replace';
-    fields.api_key.disabled = !replacing; fields.api_key.required = replacing;
-    if (!replacing) fields.api_key.value = '';
-    const endpointChanged = editingModel?.authentication === 'plain_file' && ['service','api','base_url','api_version'].some(key => fields[key].value !== editingModel[key]);
-    $('model-credential-status').textContent = fields.credential.value === 'keep'
-      ? endpointChanged ? '服务或接口地址已更改，请选择设置 / 更换密钥并重新输入，或明确移除认证。' : '保存时保留已有认证，不需要输入原密钥。'
-      : replacing ? '请输入用于当前服务地址的新密钥。' : '保存后不使用认证；已有密钥将被移除。';
-  }
-  function resetModelForm() {
-    editingModel = null;
-    if (!modelForm.elements) return;
-    modelForm.reset();
-    modelForm.elements.name.readOnly = false;
-    modelForm.elements.api_key.value = '';
-    modelForm.elements.credential.value = 'remove';
-    $('keep-model-credential').disabled = true;
-    serviceOptions(modelForm.elements.service.value, true);
-    credentialControls();
-  }
-  function clearSettings() {
-    ++generation; busy = false; accountBusy = false; accountCanManage = false; accountRevision = null;
-    dialog.removeAttribute('aria-busy'); clearAccountPasswords(); accountControls(); resetModelForm();
-    modelNames.clear(); $('model-profiles').replaceChildren(); $('plugin-profiles').replaceChildren();
-    $('settings-workspace').textContent = ''; status('');
-  }
-  function reset() {
-    clearSettings();
-    if (dialog.open) dialog.close();
-  }
-  dialog.addEventListener('close', clearSettings);
-  // Clear immediately on Escape as the native close event is queued.
-  dialog.addEventListener('cancel', clearSettings);
-  window.addEventListener('pagehide', reset);
-  const serviceDefaults = {
-    openai: ['https://api.openai.com/v1', ['chat_completions', 'responses']],
-    anthropic: ['https://api.anthropic.com/v1', ['messages']],
-    gemini: ['https://generativelanguage.googleapis.com/v1beta', ['stream_generate_content', 'generate_content']],
-    magpie: ['http://127.0.0.1:3425/v1', ['chat_completions', 'responses', 'messages', 'stream_generate_content', 'generate_content']],
-  };
-  function serviceOptions(service, defaults) {
-    const [base, apis] = serviceDefaults[service];
-    modelForm.elements.api.replaceChildren(...apis.map(api => { const option = document.createElement('option'); option.value = api; option.textContent = api; return option; }));
-    if (defaults) { modelForm.elements.base_url.value = base; modelForm.elements.api_key.value = ''; apiVersion(); }
-    credentialControls();
-  }
-  function apiVersion() {
-    const api = modelForm.elements.api.value;
-    modelForm.elements.api_version.value = api === 'messages' ? '2023-06-01' : api.includes('generate_content') ? 'v1beta' : 'v1';
-    if (modelForm.elements.service.value === 'magpie' && /^http:\/\/127\.0\.0\.1:3425\/v1(?:beta)?$/.test(modelForm.elements.base_url.value)) modelForm.elements.base_url.value = api.includes('generate_content') ? 'http://127.0.0.1:3425/v1beta' : 'http://127.0.0.1:3425/v1';
-    credentialControls();
-  }
-  if (modelForm.elements) {
-    modelForm.elements.service.addEventListener('change', () => serviceOptions(modelForm.elements.service.value, true));
-    modelForm.elements.api.addEventListener('change', () => { modelForm.elements.api_key.value = ''; apiVersion(); });
-    modelForm.elements.credential.addEventListener('change', credentialControls);
-    for (const key of ['base_url','api_version']) modelForm.elements[key].addEventListener('input', () => { modelForm.elements.api_key.value = ''; credentialControls(); });
-  }
-  $('new-model-profile').addEventListener('click', () => { if (!busy) resetModelForm(); });
-
-  async function refresh(current = generation) {
-    if (current !== generation) return;
-    await refreshAccount(current);
-    if (current !== generation) return;
-    const workspace = await rpc('settings.workspace');
-    if (current !== generation) return;
-    $('settings-workspace').textContent = `当前目录：${workspace.workspace}${workspace.offline ? ' · 离线演示' : ''}\n已登记工作区：${(workspace.known_workspaces || []).join('、')}`;
-    const models = await rpc('settings.models.list');
-    if (current !== generation) return;
-    modelNames = new Set(Object.keys(models.models || {}));
-    const modelList = $('model-profiles'); modelList.replaceChildren();
-    const selected = document.createElement('p'); selected.textContent = `当前：${models.health.provider} / ${models.health.model}`; modelList.append(selected);
-    for (const [name, model] of Object.entries(models.models || {})) {
-      const row = document.createElement('div'); const label = document.createElement('p');
-      label.textContent = `${name} · ${model.id}${models.selected === name ? ' · 已保存选择' : ''}`; row.append(label);
-      row.append(button('编辑', async () => {
-        modelForm.reset();
-        modelForm.elements.name.value = name;
-        modelForm.elements.name.readOnly = true;
-        serviceOptions(model.service, false);
-        modelForm.elements.api_key.value = '';
-        for (const [key, value] of Object.entries(model)) {
-          if (key !== 'api_key' && modelForm.elements[key]) modelForm.elements[key].value = value ?? '';
-        }
-        editingModel = { ...model };
-        modelForm.elements.credential.value = 'keep'; $('keep-model-credential').disabled = false;
-        credentialControls();
-      }));
-      const use = button('使用', async current => { await rpc('settings.models.use', {name}); await refresh(current); }); use.disabled = models.offline; row.append(use);
-      const remove = button('删除', async current => { await rpc('settings.models.remove', {name}); if (current === generation && modelForm.elements.name.value === name) resetModelForm(); await refresh(current); }); remove.disabled = models.selected === name; row.append(remove); modelList.append(row);
-    }
-    const list = $('plugin-profiles'); list.replaceChildren();
-    try {
-      const plugins = await rpc('settings.plugins.list');
-      if (current !== generation) return;
-      for (const plugin of plugins.entries || []) {
-        const row = document.createElement('div'); const label = document.createElement('p');
-        label.textContent = `${plugin.name} ${plugin.descriptor.manifest.version} · ${plugin.available ? '可用' : plugin.enabled ? '异常' : '已停用'}${plugin.last_error ? ' · ' + plugin.last_error : ''}`; row.append(label);
-        const detail = document.createElement('pre'); detail.textContent = JSON.stringify({ ...plugin.descriptor, executable_sha256: plugin.executable_sha256 }, null, 2); row.append(detail);
-        row.append(button('编辑登记', async () => { $('plugin-settings-form').elements.name.value = plugin.name; $('plugin-settings-form').elements.descriptor.value = JSON.stringify(plugin.descriptor, null, 2); }));
-        const loaded = plugin.enabled || plugin.available;
-        row.append(button(loaded ? '停用' : '启用', async current => {
-          const approve = $('plugin-process-approval');
-          if (!loaded && !approve.checked) throw new Error('请先审阅插件并勾选本地进程执行批准。');
-          await rpc(`settings.plugins.${loaded ? 'disable' : 'enable'}`, { name: plugin.name, ...(!loaded ? {approve_process:true} : {}) });
-          if (current === generation) approve.checked = false; await refresh(current);
-        }));
-        row.append(button('卸载登记', async current => { await rpc('settings.plugins.remove', {name:plugin.name}); await refresh(current); })); list.append(row);
-      }
-    } catch (error) { if (current === generation) { const message = document.createElement('p'); message.textContent = error.message || String(error); list.append(message); } }
-  }
-  open.addEventListener('click', () => { $('plugin-process-approval').checked = false; dialog.showModal(); action(refresh); });
-  $('close-settings').addEventListener('click', reset);
-  $('refresh-settings').addEventListener('click', () => action(refresh));
-  modelForm.addEventListener('submit', event => {
-    event.preventDefault(); action(async current => {
-      const values = Object.fromEntries(new FormData(modelForm)); const name = values.name; delete values.name;
-      if (!editingModel && modelNames.has(name)) throw new Error('此方案名称已存在，请点击编辑后明确选择认证方式。');
-      const credential = values.credential; delete values.credential;
-      values.max_output_tokens = Number(values.max_output_tokens);
-      if (typeof values.context_window === 'string') {
-        const cw = values.context_window.trim();
-        if (cw) values.context_window = Number(cw);
-        else if (editingModel?.context_window != null) values.context_window = null;
-        else delete values.context_window;
-      }
-      if (typeof values.tokenizer === 'string') {
-        const tok = values.tokenizer.trim();
-        if (tok) values.tokenizer = tok;
-        else if (editingModel?.tokenizer != null) values.tokenizer = null;
-        else delete values.tokenizer;
-      }
-      if (credential !== 'replace') delete values.api_key;
-      if (credential === 'replace' && !values.api_key?.trim()) throw new Error('请输入新密钥，或选择保留 / 移除认证。');
-      if (credential === 'keep' && editingModel?.authentication === 'plain_file' && ['service','api','base_url','api_version'].some(key => values[key] !== editingModel[key])) throw new Error('服务或接口地址已更改，请重新输入密钥或明确移除认证。');
-      // Do not leave secrets in the DOM while a request or its refresh is pending.
-      modelForm.elements.api_key.value = '';
-      await rpc('settings.models.put', {name, model:values, credential});
-      if (current !== generation) return;
-      resetModelForm(); await refresh(current);
-    });
-  });
-  $('plugin-settings-form').addEventListener('submit', event => {
-    event.preventDefault(); action(async current => {
-      const form = $('plugin-settings-form'); const name = form.elements.name.value.trim();
-      await rpc(`settings.plugins.${name ? 'update' : 'install'}`, { ...(name ? {name} : {}), descriptor:JSON.parse(form.elements.descriptor.value) }); await refresh(current);
-    });
-  });
-  return { reset };
 }
